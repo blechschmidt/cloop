@@ -1103,7 +1103,11 @@ plainly:
   path never becomes a path the device is asked to open.
 - **The directory is kept.** The name is deterministic and the agent does not
   wipe it, so a repository cloned by one task is still there for the next. This
-  is the one kind for which `WorkspaceKind.KeepsWorkDir()` is true.
+  is the one kind for which `WorkspaceKind.KeepsWorkDir()` is true. What is
+  *not* kept is the previous dispatch's `.cloop/state.db`: writing the seed
+  removes it, so the run loads the plan as the hub has it now. Merely being
+  newer than it was not enough — `cloop run` opens the project database before
+  it compares the two — and a task reset on the hub stayed failed on the device.
 - **The seed is mandatory, not best-effort.** On a `git` workspace `.cloop/` may
   already be committed in the fetched repository, so a seedless executor merely
   degrades. Here nothing is fetched, so a seedless executor would start the

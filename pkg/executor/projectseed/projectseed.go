@@ -23,11 +23,12 @@
 //     populated project. The import path is the one every legacy project on
 //     disk has exercised for a year, rather than a second deserializer written
 //     for this feature and tested only by this feature.
-//   - It fixes a second bug for free. A reused workspace directory on an edge
-//     device keeps the *previous* dispatch's state.db, so the next run read
-//     stale state and reported "all tasks complete" without running anything.
-//     A freshly written state.json is newer than that database, which is
-//     migration trigger 2 — the stale state is replaced rather than believed.
+//   - It is also the cure for a reused workspace. A workspace kept on an edge
+//     device holds the *previous* dispatch's state.db, and a run that read it
+//     reported "all tasks complete", or a reset task still failed, without
+//     running anything. Write removes that database, so state.Load has nothing
+//     to prefer over the seed; see staleDatabaseFiles for why being newer than
+//     it was not enough.
 //
 // # What is deliberately not in a seed
 //
@@ -171,8 +172,17 @@ func Write(dir string, seed []byte) error {
 	}
 
 	target := filepath.Join(dir, seedDir)
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		return fmt.Errorf("projectseed: create %s: %w", target, err)
+	if err := ensureRealDir(target); err != nil {
+		return err
+	}
+
+	// The seed is the project as the hub knows it at dispatch, and it is what
+	// the harness must load. A database an earlier dispatch left in a kept
+	// workspace is that dispatch's copy — a task the hub has since reset still
+	// failed in it, a plan the operator has since edited still unedited — and
+	// it has to go rather than be left to compete. See staleDatabaseFiles.
+	if err := removeStaleDatabase(target); err != nil {
+		return err
 	}
 
 	// Written through a temp file in the same directory and renamed, for the
@@ -203,6 +213,74 @@ func Write(dir string, seed []byte) error {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("projectseed: install %s: %w", path, err)
+	}
+	return nil
+}
+
+// staleDatabaseFiles are what a previous dispatch's `cloop run` leaves in
+// `.cloop/`: the database and SQLite's companion files.
+//
+// # Why they are removed rather than outdated
+//
+// The seed was meant to win through state.Load's own freshness rule — a
+// state.json newer than state.db is re-migrated — and the package comment used
+// to say it did. It did not survive contact with a real device (Task 20337):
+// `cloop run` opens and writes the project database from PersistentPreRunE,
+// before state.Load compares anything, so the database was always a few
+// milliseconds newer than the seed written just before the harness started.
+// The stale copy won every time. On the sgx edge device a task that had failed
+// once stayed failed on every later dispatch — "No runnable tasks left (1
+// failed)" — while the hub, having reset it, showed it pending: the operator
+// could not retry it from the dashboard at all.
+//
+// A freshness race cannot be fixed by winning it harder. With no database
+// present, state.Load migrates from the seed unconditionally: trigger 1 if
+// nothing has recreated the database yet, trigger 3 ("a database with no
+// project state in it") if PersistentPreRunE got there first.
+//
+// Nothing of value goes with them. The hub holds the plan, and the transcript
+// of every run was streamed to it as the run happened; the device's copy is a
+// cache of both that the next run would only have to disagree with.
+var staleDatabaseFiles = []string{"state.db", "state.db-wal", "state.db-shm", "state.db-journal"}
+
+// removeStaleDatabase deletes staleDatabaseFiles from dir, which the caller has
+// already made a real directory. A symbolic link among them is removed as a
+// link — os.Remove does not follow it — so nothing outside dir is touched.
+func removeStaleDatabase(dir string) error {
+	for _, name := range staleDatabaseFiles {
+		p := filepath.Join(dir, name)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("projectseed: remove the previous dispatch's %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// ensureRealDir makes target a directory, replacing a symbolic link that stands
+// in its place.
+//
+// The workspace a seed lands in may be one the previous dispatch's workload
+// could write to — an executor-owned workspace is kept between dispatches, and
+// a container sees it through a bind mount — and everything after this writes
+// and deletes by name inside target. Left as a symlink, `.cloop` would aim
+// those operations wherever the workload pointed it, on the device's own
+// filesystem and outside the directory the agent confined the workload to.
+// Removing the link removes only the link.
+func ensureRealDir(target string) error {
+	if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(target); err != nil {
+			return fmt.Errorf("projectseed: replace the symbolic link at %s: %w", target, err)
+		}
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		return fmt.Errorf("projectseed: create %s: %w", target, err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return fmt.Errorf("projectseed: inspect %s: %w", target, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("projectseed: %s is not a directory", target)
 	}
 	return nil
 }

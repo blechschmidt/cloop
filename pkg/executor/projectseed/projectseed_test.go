@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // sampleState is a project with the fields a sandbox actually runs on, plus
@@ -114,17 +115,24 @@ func TestSeedRoundTripsThroughStateLoad(t *testing.T) {
 	}
 }
 
-// TestWriteSupersedesAStaleDatabase covers the reused-workspace bug the seed
-// fixes as a side effect. An edge device that keeps its work directory between
-// dispatches still holds the previous run's state.db; without the seed winning,
-// the second dispatch reads stale state and reports every task already
-// complete without running anything.
+// TestWriteSupersedesAStaleDatabase covers a workspace an edge device keeps
+// between dispatches: it still holds the previous run's state.db, and the seed
+// has to win over it.
+//
+// It reproduces the order a real device produces (Task 20337) rather than an
+// idealised one. The seed is written, and then `cloop run`'s startup opens and
+// writes the project database — executor reconciliation in PersistentPreRunE —
+// before state.Load compares anything. The previous version of this test aged
+// the database an hour into the past instead, which is the one ordering the
+// device never produces, and so it passed while the stale database won on every
+// real dispatch: a task that failed once stayed failed however often the hub
+// reset it.
 func TestWriteSupersedesAStaleDatabase(t *testing.T) {
 	sandbox := t.TempDir()
 
 	stale := sampleState(t)
 	stale.Goal = "the previous dispatch"
-	stale.Plan.Tasks = []*pm.Task{{ID: 1, Title: "already done", Status: pm.TaskDone}}
+	stale.Plan.Tasks = []*pm.Task{{ID: 1, Title: "failed last time", Status: pm.TaskFailed}}
 	staleSeed, err := Build(stale)
 	if err != nil {
 		t.Fatalf("Build stale: %v", err)
@@ -136,18 +144,9 @@ func TestWriteSupersedesAStaleDatabase(t *testing.T) {
 		t.Fatalf("load stale: %v", err)
 	}
 
-	// The migration's freshness test is mtime-based and this test can run well
-	// inside one filesystem timestamp tick, so make the database
-	// unambiguously older rather than sleeping.
-	db := filepath.Join(sandbox, ".cloop", "state.db")
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(db, old, old); err != nil {
-		t.Fatalf("age the database: %v", err)
-	}
-
 	fresh := sampleState(t)
 	fresh.Goal = "the new dispatch"
-	fresh.Plan.Tasks = []*pm.Task{{ID: 1, Title: "actually pending", Status: pm.TaskPending}}
+	fresh.Plan.Tasks = []*pm.Task{{ID: 1, Title: "reset on the hub", Status: pm.TaskPending}}
 	freshSeed, err := Build(fresh)
 	if err != nil {
 		t.Fatalf("Build fresh: %v", err)
@@ -156,15 +155,103 @@ func TestWriteSupersedesAStaleDatabase(t *testing.T) {
 		t.Fatalf("Write fresh: %v", err)
 	}
 
+	// What `cloop run` does before it loads anything: open the project
+	// database. Its mtime is then pushed past the seed's explicitly, because
+	// "a few milliseconds later" is what the device produces and a test that
+	// relied on the clock to reproduce it would pass by luck on a coarse
+	// filesystem.
+	db := filepath.Join(sandbox, ".cloop", "state.db")
+	sdb, err := statedb.Open(db)
+	if err != nil {
+		t.Fatalf("open the project database as cloop run's startup does: %v", err)
+	}
+	if err := sdb.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(db, later, later); err != nil {
+		t.Fatalf("touch the database after the seed: %v", err)
+	}
+
 	got, err := state.Load(sandbox)
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
 	if got.Goal != "the new dispatch" {
-		t.Errorf("Goal = %q; the stale database won over a newer seed", got.Goal)
+		t.Errorf("Goal = %q; the previous dispatch's database won over the seed", got.Goal)
 	}
 	if got.Plan == nil || len(got.Plan.Tasks) != 1 || got.Plan.Tasks[0].Status != pm.TaskPending {
-		t.Errorf("stale plan survived: %+v", got.Plan)
+		t.Errorf("stale plan survived: %+v — a task reset on the hub stays failed on the device",
+			got.Plan)
+	}
+}
+
+// TestWriteRemovesOnlyTheDatabase: the database goes, and nothing else in
+// `.cloop/` does — a kept workspace's other contents (artifacts, caches) are
+// the reason it is kept.
+func TestWriteRemovesOnlyTheDatabase(t *testing.T) {
+	sandbox := t.TempDir()
+	dir := filepath.Join(sandbox, ".cloop")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range append([]string{"keep.txt"}, staleDatabaseFiles...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed, err := Build(sampleState(t))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := Write(sandbox, seed); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	for _, name := range staleDatabaseFiles {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived the seed (err=%v)", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
+		t.Errorf("an unrelated file in .cloop/ was removed: %v", err)
+	}
+}
+
+// TestWriteDoesNotFollowAPlantedSymlink: a kept workspace was writable by the
+// previous workload. Had it replaced `.cloop` with a link to another project's
+// state directory, following the link would delete that project's database —
+// a sandbox reaching out of its confinement through the agent.
+func TestWriteDoesNotFollowAPlantedSymlink(t *testing.T) {
+	sandbox := t.TempDir()
+	victim := t.TempDir()
+	victimDB := filepath.Join(victim, "state.db")
+	if err := os.WriteFile(victimDB, []byte("someone else's project"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(sandbox, ".cloop")); err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := Build(sampleState(t))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := Write(sandbox, seed); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got, err := os.ReadFile(victimDB); err != nil || string(got) != "someone else's project" {
+		t.Fatalf("the link's target was modified: content %q, err %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(victim, SeedFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the seed was written through the link into %s", victim)
+	}
+	info, err := os.Lstat(filepath.Join(sandbox, ".cloop"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf(".cloop should now be a real directory: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(sandbox, ".cloop", SeedFileName)); err != nil {
+		t.Errorf("the seed did not land in the workspace: %v", err)
 	}
 }
 
