@@ -35,10 +35,12 @@ package agent
 //
 //   - the agent's own PATH gains these directories, which is what makes
 //     LookPath in Detect true and what a nil Spec.Env inherits; and
-//   - a Spec carrying an *explicit* environment gets them prepended to its
-//     PATH, because cmd.Env replaces rather than adds and a leased credential
-//     always produces an explicit environment (see withRunnableEnv in
-//     pkg/executor/localprocess).
+//   - a host-mode Spec carrying an *explicit* environment gets them in its
+//     PATH — prepended to the PATH it names, or in front of this process's own
+//     PATH when it names none — because cmd.Env replaces rather than adds and
+//     a leased credential always produces an explicit environment (see
+//     withRunnableEnv in pkg/executor/localprocess, and withHarnessPath below
+//     for the half of this Task 20336 got wrong).
 //
 // Miss either and the bug is back for half the projects on the fleet — the
 // half distinguished by whether they hold a secret grant, which is not a
@@ -49,6 +51,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 )
 
 // nativeHarnessSubdirs are the per-user directories a harness installer writes
@@ -130,7 +134,9 @@ func EnsureHarnessPath() []string {
 	return added
 }
 
-// withHarnessPath returns env with dirs prepended to its PATH entry.
+// withHarnessPath returns the environment a payload run on this device's host
+// starts with, so that it resolves programs — the harness above all — exactly
+// as a payload that inherited this process's environment would.
 //
 // A nil env is returned unchanged, and that is the correct answer rather than
 // an omission: nil means "inherit this process's environment", and this
@@ -138,8 +144,31 @@ func EnsureHarnessPath() []string {
 // full inherited environment here just to edit one variable would convert an
 // inheriting Spec into an explicit one and hand the payload every variable the
 // agent holds — the agent's enrollment credential among them.
-func withHarnessPath(env []string, dirs []string) []string {
-	if len(env) == 0 || len(dirs) == 0 {
+//
+// An explicit env that names a PATH gets dirs prepended to it. One that names
+// none — which is exactly what a leased credential produces, since pkg/ui
+// composes the lease over a nil base — gets inherited, this process's own PATH,
+// with dirs in front. That is the PATH the same payload would have had without
+// the grant, and anything else makes a secret grant change which programs a
+// payload can find.
+//
+// Task 20336 left that second case to localprocess.withRunnableEnv's floor,
+// reasoning that a PATH of only the harness directories would have no /bin in
+// it. The floor does have /bin, but it is a fixed system list, so a harness
+// the official installer put in ~/.local/bin was never on it: the run of a
+// project holding a grant failed with `exec: "claude": executable file not
+// found in $PATH` on the device the harness had just been installed on, while
+// the same project without the grant found it (Task 20337). Only PATH is
+// taken from this process — never the rest of its environment, for the reason
+// given above.
+//
+// inherited falls back to the floor localprocess would have used, so an agent
+// started with no PATH at all still gets a runnable one.
+//
+// For host-mode payloads only: a container's PATH is the image's, which names
+// directories inside the image, and this device's home directory is not one.
+func withHarnessPath(env []string, dirs []string, inherited string) []string {
+	if len(env) == 0 {
 		return env
 	}
 	out := make([]string, len(env))
@@ -149,18 +178,16 @@ func withHarnessPath(env []string, dirs []string) []string {
 		if !ok {
 			continue
 		}
-		add := missingDirs(value, dirs)
-		if len(add) == 0 {
-			return out
+		if add := missingDirs(value, dirs); len(add) > 0 {
+			out[i] = "PATH=" + prependDirs(value, add)
 		}
-		out[i] = "PATH=" + prependDirs(value, add)
 		return out
 	}
-	// An explicit environment with no PATH at all. Left alone on purpose:
-	// localprocess.withRunnableEnv inserts its default PATH for exactly this
-	// case, and adding a PATH here would pre-empt that and leave the payload
-	// with the harness directories and nothing else — no /bin, no /usr/bin.
-	return out
+	base := strings.TrimSpace(inherited)
+	if base == "" {
+		base = localprocess.DefaultPath
+	}
+	return append(out, "PATH="+prependDirs(base, missingDirs(base, dirs)))
 }
 
 // missingDirs returns the entries of dirs that are not already in the
@@ -192,6 +219,12 @@ func missingDirs(path string, dirs []string) []string {
 // packaging attempt. That is the same precedence a login shell would give it,
 // which is the behaviour an operator predicts.
 func prependDirs(path string, dirs []string) string {
+	if len(dirs) == 0 {
+		// Not "" + sep + path: an empty PATH entry means the current
+		// directory, so a payload would run whatever its working tree names
+		// "git" or "claude" ahead of the real one.
+		return path
+	}
 	sep := string(os.PathListSeparator)
 	joined := strings.Join(dirs, sep)
 	if strings.TrimSpace(path) == "" {

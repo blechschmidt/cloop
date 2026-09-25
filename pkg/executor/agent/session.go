@@ -574,7 +574,13 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// harness would resolve for a project with no secret grant (nil Env, so it
 	// inherits) and fail to resolve for a project that holds one, which is not
 	// a distinction anyone would think to test against. See harnesspath.go.
-	spec.Env = withHarnessPath(spec.Env, NativeHarnessDirs())
+	//
+	// Host mode only. A container starts from its image's PATH, which names
+	// directories inside the image; this device's are meaningless there, and a
+	// PATH set here would replace the image's rather than extend it.
+	if payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer {
+		spec.Env = withHarnessPath(spec.Env, NativeHarnessDirs(), os.Getenv("PATH"))
+	}
 
 	// Place the lease's credential files first, because everything below
 	// depends on where they actually landed.

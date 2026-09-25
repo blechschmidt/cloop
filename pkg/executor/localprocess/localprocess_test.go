@@ -978,8 +978,8 @@ func TestStartGivesAnExplicitEnvironmentAPath(t *testing.T) {
 		t.Fatalf("Start with an explicit environment: %v", err)
 	}
 	out := drainOutput(t, ex, h.ID)
-	if !strings.Contains(out, "path="+defaultPath) {
-		t.Errorf("workload saw %q, want PATH to fall back to %q", out, defaultPath)
+	if !strings.Contains(out, "path="+DefaultPath) {
+		t.Errorf("workload saw %q, want PATH to fall back to %q", out, DefaultPath)
 	}
 	if !strings.Contains(out, "home="+dir) {
 		t.Errorf("workload saw %q, want HOME to default to its own working directory", out)

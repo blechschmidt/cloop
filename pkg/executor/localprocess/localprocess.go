@@ -1064,11 +1064,14 @@ func newHandleID() string {
 	return "h-" + hex.EncodeToString(b[:])
 }
 
-// defaultPath is the PATH a workload gets when its Spec named none. The
+// DefaultPath is the PATH a workload gets when its Spec named none. The
 // entries are the ones a POSIX system puts there; nothing about this machine's
 // own configuration is copied in, because the point is to name programs that
 // exist rather than to share the parent's environment.
-const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+//
+// Exported for the remote agent, which floors a host-mode payload's PATH itself
+// (it has harness directories to add) and falls back to this same list.
+const DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // withRunnableEnv returns env with the two variables a process needs in order
 // to run anything at all, added only where env did not already say.
@@ -1113,7 +1116,7 @@ func withRunnableEnv(env []string, workDir string) []string {
 	// and which executorstore persists.
 	out := make([]string, 0, len(env)+2)
 	if !hasPath {
-		out = append(out, "PATH="+defaultPath)
+		out = append(out, "PATH="+DefaultPath)
 	}
 	if !hasHome && workDir != "" {
 		out = append(out, "HOME="+workDir)
