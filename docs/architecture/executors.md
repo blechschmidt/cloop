@@ -1082,10 +1082,21 @@ exactly four answers to "where does the code come from":
 `executor` exists because demanding a git remote was demanding the wrong thing
 of a legitimate project shape — and the common one for this product. A project
 here is a *unit of work*; its code is whichever repositories have been
-[granted](../guides/secrets.md) to it, which the harness clones for itself
-through the [git proxy](../git-interception-proxy.md) once it is running. Such a
-project's own directory holds `.cloop/` and little else, and there is nothing
-useful to fetch from it.
+[granted](../guides/secrets.md) to it, which the harness clones for itself once
+it is running — authenticating with the credential helper its lease installs,
+or through the [git proxy](../git-interception-proxy.md) where the hub runs one.
+Such a project's own directory holds `.cloop/` and little else, and there is
+nothing useful to fetch from it.
+
+The harness is told which repositories those are. A GitHub lease announces its
+allowlist and access level in `CLOOP_GITHUB_REPO_ALLOWLIST` and
+`CLOOP_GITHUB_PERMISSIONS`, and `cloop run` turns them into a *Repository
+access* section of the task prompt: the repositories, whether a push will be
+accepted, how to clone them, and that work committed but not pushed stays on
+the device. Without it an agent asked to "commit it to the repo" finds no
+repository in its working directory, runs `git init` there, and reports a
+commit nobody will ever see — which is what the first end-to-end run on a real
+edge device did (Task 20337).
 
 Before this, the hub refused those dispatches outright, telling the operator to
 `git remote add origin …` and push a directory with no source in it.

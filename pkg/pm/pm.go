@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -681,6 +682,13 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 		}
 		b.WriteString("\n")
 	}
+
+	// Which repositories this run may reach, when a grant gave it any. Read
+	// from the lease's own announcement in the environment: a project whose
+	// code lives only in granted repositories has none of it checked out, and
+	// an agent that is not told they exist works on an empty directory
+	// instead (Task 20337). See repoaccess.go.
+	b.WriteString(RepositoryAccessSection(os.Getenv))
 
 	// Inject project context if provided
 	if len(ctx) > 0 && ctx[0] != nil {
