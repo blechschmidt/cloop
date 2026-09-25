@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,6 +218,13 @@ func TestOnlyClaudeIsInstallable(t *testing.T) {
 			"downloads.claude.ai, so the vendor's domain has to be declared or the real "+
 			"installer is refused on every device", spec.OriginSuffix)
 	}
+	// Pinned for the same reason as ScriptURL: it is fetched and executed on
+	// every device the entry point turns away. It is the URL ScriptURL was
+	// observed to redirect to, fetched directly.
+	wantMirrors := []string{"https://downloads.claude.ai/claude-code-releases/bootstrap.sh"}
+	if !slices.Equal(spec.MirrorURLs, wantMirrors) {
+		t.Errorf("claude MirrorURLs = %q, want %q", spec.MirrorURLs, wantMirrors)
+	}
 }
 
 // TestEveryInstallerIsHTTPS is the invariant fetchInstallScript's no-downgrade
@@ -226,14 +235,250 @@ func TestOnlyClaudeIsInstallable(t *testing.T) {
 // an http entry added here would silently turn the check off for that harness.
 func TestEveryInstallerIsHTTPS(t *testing.T) {
 	for name, spec := range officialHarnessInstallers {
-		if !strings.HasPrefix(spec.ScriptURL, "https://") {
-			t.Errorf("%s installer URL %q is not HTTPS; the response is piped into a shell",
-				name, spec.ScriptURL)
+		for _, src := range spec.sources() {
+			if !strings.HasPrefix(src, "https://") {
+				t.Errorf("%s installer URL %q is not HTTPS; the response is piped into a shell",
+					name, src)
+			}
 		}
 		if spec.OriginSuffix != "" && !strings.HasPrefix(spec.OriginSuffix, ".") {
 			t.Errorf("%s OriginSuffix %q must start with a dot, or it is matched as a bare "+
 				"substring and admits a lookalike domain", name, spec.OriginSuffix)
 		}
+		// A mirror outside the vendor's domain would be a second vendor that
+		// nobody reviewed, reached by the fallback on exactly the devices whose
+		// view of the first one is least trustworthy.
+		entry, err := url.Parse(spec.ScriptURL)
+		if err != nil {
+			t.Fatalf("%s ScriptURL %q: %v", name, spec.ScriptURL, err)
+		}
+		for _, mirror := range spec.MirrorURLs {
+			u, err := url.Parse(mirror)
+			if err != nil {
+				t.Errorf("%s mirror %q is unparseable: %v", name, mirror, err)
+				continue
+			}
+			if !withinOrigin(u.Hostname(), entry.Hostname(), spec.OriginSuffix) {
+				t.Errorf("%s mirror %q is outside the vendor's domain %q", name, mirror,
+					spec.OriginSuffix)
+			}
+		}
+	}
+}
+
+// scriptedFetcher makes installScriptFetcher answer from a table keyed by URL
+// and records the order in which URLs were asked for. A URL missing from the
+// table fails the test: it means the device fetched from somewhere the
+// installer table does not name.
+func scriptedFetcher(t *testing.T, answers map[string]func() (string, error)) *[]string {
+	t.Helper()
+	var asked []string
+	prev := installScriptFetcher
+	installScriptFetcher = func(_ context.Context, rawURL, _ string) (string, error) {
+		asked = append(asked, rawURL)
+		answer, ok := answers[rawURL]
+		if !ok {
+			t.Errorf("fetched %q, which the installer table does not list", rawURL)
+			return "", errors.New("unexpected URL")
+		}
+		return answer()
+	}
+	t.Cleanup(func() { installScriptFetcher = prev })
+	return &asked
+}
+
+// TestInstallFallsBackToAMirrorWhenTheEntryPointTurnsTheDeviceAway is the
+// device that found the gap (Task 20337): an Alibaba Cloud VM that the
+// claude.ai website answered with a Cloudflare challenge on every attempt,
+// while downloads.claude.ai — where that URL redirects, and where the script
+// fetches the binary from — served it without complaint.
+func TestInstallFallsBackToAMirrorWhenTheEntryPointTurnsTheDeviceAway(t *testing.T) {
+	installerSandbox(t)
+	spec := officialHarnessInstallers["claude"]
+	if len(spec.MirrorURLs) == 0 {
+		t.Fatal("the claude entry has no mirror to fall back to")
+	}
+	asked := scriptedFetcher(t, map[string]func() (string, error){
+		spec.ScriptURL: func() (string, error) {
+			return "", errors.New("the server answered HTTP 403 with a Cloudflare bot challenge")
+		},
+		spec.MirrorURLs[0]: func() (string, error) { return installsClaudeScript, nil },
+	})
+
+	a := &Agent{}
+	out := a.installHarness(context.Background(), remote.InstallHarnessPayload{Harness: "claude"})
+
+	if !out.Installed {
+		t.Fatalf("Installed = false after the mirror served the script; Reason = %q", out.Reason)
+	}
+	want := []string{spec.ScriptURL, spec.MirrorURLs[0]}
+	if !slices.Equal(*asked, want) {
+		t.Errorf("fetched %q, want the documented entry point first and then the mirror %q",
+			*asked, want)
+	}
+}
+
+// TestTheEntryPointIsTriedFirst keeps the mirror a fallback. The documented URL
+// is the one the vendor answers for; a device that can reach it should get the
+// script from there, not from wherever it happened to redirect last month.
+func TestTheEntryPointIsTriedFirst(t *testing.T) {
+	installerSandbox(t)
+	spec := officialHarnessInstallers["claude"]
+	answers := map[string]func() (string, error){
+		spec.ScriptURL: func() (string, error) { return installsClaudeScript, nil },
+	}
+	for _, m := range spec.MirrorURLs {
+		answers[m] = func() (string, error) {
+			t.Error("fetched a mirror although the documented entry point served the script")
+			return installsClaudeScript, nil
+		}
+	}
+	asked := scriptedFetcher(t, answers)
+
+	a := &Agent{}
+	out := a.installHarness(context.Background(), remote.InstallHarnessPayload{Harness: "claude"})
+
+	if !out.Installed {
+		t.Fatalf("Installed = false; Reason = %q", out.Reason)
+	}
+	if len(*asked) != 1 || (*asked)[0] != spec.ScriptURL {
+		t.Errorf("fetched %q, want only %q", *asked, spec.ScriptURL)
+	}
+}
+
+// TestASafetyRefusalIsNotRoutedAround: a redirect off the vendor's domain is
+// evidence of interference, not a host being down. Trying the next source would
+// let whoever is interfering keep trying too; the install stops and says why.
+func TestASafetyRefusalIsNotRoutedAround(t *testing.T) {
+	installerSandbox(t)
+	spec := officialHarnessInstallers["claude"]
+	answers := map[string]func() (string, error){
+		spec.ScriptURL: func() (string, error) {
+			return "", fmt.Errorf("%w: it redirected from claude.ai to evil.example",
+				errInstallSourceRefused)
+		},
+	}
+	for _, m := range spec.MirrorURLs {
+		answers[m] = func() (string, error) {
+			t.Error("fetched a mirror after a safety refusal")
+			return installsClaudeScript, nil
+		}
+	}
+	scriptedFetcher(t, answers)
+
+	a := &Agent{}
+	out := a.installHarness(context.Background(), remote.InstallHarnessPayload{Harness: "claude"})
+
+	if out.Installed {
+		t.Fatal("Installed = true after the entry point was refused on a safety rule")
+	}
+	if !strings.Contains(out.Reason, "evil.example") {
+		t.Errorf("Reason should carry the refusal; got %q", out.Reason)
+	}
+}
+
+// TestEverySourceTriedIsReported: when nothing serves the script, the reason
+// names each source and what it answered, so the operator can tell a device
+// that reaches nothing from one the entry point alone turned away.
+func TestEverySourceTriedIsReported(t *testing.T) {
+	installerSandbox(t)
+	spec := officialHarnessInstallers["claude"]
+	answers := map[string]func() (string, error){
+		spec.ScriptURL: func() (string, error) { return "", errors.New("the server answered HTTP 403") },
+	}
+	for _, m := range spec.MirrorURLs {
+		answers[m] = func() (string, error) { return "", errors.New("the server answered HTTP 404") }
+	}
+	scriptedFetcher(t, answers)
+
+	a := &Agent{}
+	out := a.installHarness(context.Background(), remote.InstallHarnessPayload{Harness: "claude"})
+
+	if out.Installed {
+		t.Fatal("Installed = true although no source served the script")
+	}
+	for _, want := range append(spec.sources(), "HTTP 403", "HTTP 404") {
+		if !strings.Contains(out.Reason, want) {
+			t.Errorf("Reason should mention %q; got %q", want, out.Reason)
+		}
+	}
+}
+
+// TestFetchNamesABotChallenge: a bare "HTTP 403" sends an operator looking for
+// a permissions problem on their side. The response says what it is, so the
+// error does too.
+func TestFetchNamesABotChallenge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// The header Cloudflare sets on a challenge it served, exactly as the
+		// claude.ai edge sent it to the device that found this.
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<!DOCTYPE html><title>Just a moment...</title>"))
+	}))
+	defer srv.Close()
+
+	_, err := fetchInstallScript(context.Background(), srv.URL, "")
+	if err == nil {
+		t.Fatal("a challenge page was accepted as an install script")
+	}
+	if !strings.Contains(err.Error(), "challenge") || !strings.Contains(err.Error(), "403") {
+		t.Errorf("error should name the challenge and the status; got %v", err)
+	}
+	if errors.Is(err, errInstallSourceRefused) {
+		t.Error("a challenge is the source being unavailable to this device, not a safety " +
+			"refusal; marking it refused would stop the fallback that fixes it")
+	}
+}
+
+// TestFetchSeparatesRefusalsFromUnavailability pins which failures end an
+// install and which move on to the next source.
+func TestFetchSeparatesRefusalsFromUnavailability(t *testing.T) {
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer notFound.Close()
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer empty.Close()
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := strings.Repeat("A", 64<<10)
+		for written := 0; written <= maxInstallScriptBytes; written += len(chunk) {
+			if _, err := w.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}))
+	defer huge.Close()
+	offOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// localhost versus 127.0.0.1: two hostnames for one listener, so the
+		// redirect is really followed and the origin check is what fires.
+		http.Redirect(w, r, strings.Replace(notFound.URL, "127.0.0.1", "localhost", 1),
+			http.StatusFound)
+	}))
+	defer offOrigin.Close()
+
+	for _, tc := range []struct {
+		name    string
+		url     string
+		refused bool
+	}{
+		{"not found", notFound.URL, false},
+		{"empty body", empty.URL, false},
+		{"oversized body", huge.URL, true},
+		{"redirect off the vendor's origin", offOrigin.URL, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchInstallScript(context.Background(), tc.url, "")
+			if err == nil {
+				t.Fatal("fetch succeeded")
+			}
+			if got := errors.Is(err, errInstallSourceRefused); got != tc.refused {
+				t.Errorf("errors.Is(err, errInstallSourceRefused) = %v, want %v (err: %v)",
+					got, tc.refused, err)
+			}
+		})
 	}
 }
 

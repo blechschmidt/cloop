@@ -975,7 +975,16 @@ to an installer, compiled into the agent binary, and the only entry is:
 
 | Harness  | Installer                                                       |
 | -------- | --------------------------------------------------------------- |
-| `claude` | `https://claude.ai/install.sh` (Anthropic's documented install)  |
+| `claude` | `https://claude.ai/install.sh` (Anthropic's documented install), then `https://downloads.claude.ai/claude-code-releases/bootstrap.sh` |
+
+The second URL is where the first redirects to, fetched directly. It is tried
+only when the documented one does not serve the script: the claude.ai website
+answers many datacenter networks with a Cloudflare bot challenge (HTTP 403),
+while the download host — which the script fetches the binary from anyway —
+does not. A cloud VM enrolled as an executor is exactly such a machine. A
+source refused on a safety rule (a redirect off `claude.ai`, a downgrade to
+plaintext, an oversized body) is not retried elsewhere; the install stops and
+says why.
 
 So a hub that has been taken over can ask a device to install Claude Code from
 Anthropic, and can ask for nothing else — there is nothing else to ask for. The

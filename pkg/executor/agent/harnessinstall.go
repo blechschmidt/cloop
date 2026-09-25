@@ -80,6 +80,25 @@ type harnessInstaller struct {
 	// vendor does not control — while surviving the vendor moving assets
 	// between their own hosts, which they evidently do.
 	OriginSuffix string
+	// MirrorURLs are other official locations of the same script, tried in
+	// order when ScriptURL does not serve it. Constants like ScriptURL, and
+	// each must itself lie inside OriginSuffix, which TestEveryInstallerIsHTTPS
+	// holds.
+	//
+	// They exist because a vendor's documented entry point and the place its
+	// bytes live are often different hosts behind different edges, and the
+	// entry point is the one more likely to turn a machine away. Found on a
+	// real edge device (Task 20337): an Alibaba Cloud VM in Jakarta got HTTP
+	// 403 from https://claude.ai/install.sh on every attempt — the claude.ai
+	// website puts a Cloudflare bot challenge in front of datacenter address
+	// ranges — while downloads.claude.ai, which that URL redirects to and which
+	// the script itself downloads the binary from, answered 200. An executor is
+	// very often exactly such a machine, so an installer that only knew the
+	// entry point failed on the devices that need it most.
+	//
+	// A mirror is tried only when a source is *unavailable*. A source that was
+	// refused on a safety rule stops the install; see errInstallSourceRefused.
+	MirrorURLs []string
 	// Binary is the command the install is expected to put on PATH, which is
 	// what the post-install probe looks for. Named separately from the table
 	// key because they are only incidentally equal today.
@@ -109,9 +128,20 @@ var officialHarnessInstallers = map[string]harnessInstaller{
 		ScriptURL: "https://claude.ai/install.sh",
 		// Observed to redirect to downloads.claude.ai; see OriginSuffix.
 		OriginSuffix: ".claude.ai",
-		Binary:       "claude",
-		VersionArgs:  []string{"--version"},
+		// Where ScriptURL redirects to, fetched directly. It is the same
+		// script served by the host the script downloads the binary from, so
+		// a device that can use the install at all can reach it; see
+		// MirrorURLs for the device that could not reach ScriptURL.
+		MirrorURLs:  []string{"https://downloads.claude.ai/claude-code-releases/bootstrap.sh"},
+		Binary:      "claude",
+		VersionArgs: []string{"--version"},
 	},
+}
+
+// sources lists where the installer may be fetched from, in the order to try
+// them: the documented entry point first, then its mirrors.
+func (h harnessInstaller) sources() []string {
+	return append([]string{h.ScriptURL}, h.MirrorURLs...)
 }
 
 const (
@@ -139,6 +169,19 @@ const (
 // ErrNoOfficialInstaller reports that a harness has no entry in the table
 // above, and so cannot be installed on request.
 var ErrNoOfficialInstaller = errors.New("agent: no official installer for this harness")
+
+// errInstallSourceRefused marks a fetch that a safety rule stopped — a
+// downgrade to plaintext, a redirect off the vendor's domain, a body larger
+// than any installer — as opposed to a source that simply did not serve the
+// script.
+//
+// The distinction decides whether the next source is tried. Unavailability is
+// a property of one host and says nothing about the others, so falling through
+// to a mirror is the right answer to it. A safety refusal is evidence that
+// something between the device and the vendor is interfering, and routing
+// around it would turn a refusal into a retry an attacker gets to keep
+// playing; it ends the install and is reported as it is.
+var errInstallSourceRefused = errors.New("refused")
 
 // installScriptFetcher retrieves an install script. Indirected through a
 // variable so tests can serve their own script without reaching the network;
@@ -225,7 +268,7 @@ func (a *Agent) installHarness(
 	a.logf("harness install: fetching the official %s installer from %s (%s)",
 		p.Harness, spec.ScriptURL, reason)
 
-	script, err := installScriptFetcher(ctx, spec.ScriptURL, spec.OriginSuffix)
+	script, err := a.fetchFirstAvailable(ctx, spec)
 	if err != nil {
 		out.Reason = fmt.Sprintf("fetching the official %s installer: %v", p.Harness, err)
 		return out
@@ -258,6 +301,34 @@ func (a *Agent) installHarness(
 	out.Version = a.harnessVersion(ctx, path, spec.VersionArgs)
 	a.logf("harness install: installed %s at %s (%s)", p.Harness, path, displayOrUnknown(out.Version))
 	return out
+}
+
+// fetchFirstAvailable fetches the installer from the first of spec's sources
+// that serves it.
+//
+// On failure the error names every source tried and what each answered, in
+// order — the only way an operator can tell "this device cannot reach the
+// vendor at all" from "the entry point turned it away and the mirror was fine
+// until yesterday".
+func (a *Agent) fetchFirstAvailable(ctx context.Context, spec harnessInstaller) (string, error) {
+	sources := spec.sources()
+	attempts := make([]string, 0, len(sources))
+	for i, src := range sources {
+		if i > 0 {
+			a.logf("harness install: %s; trying %s", attempts[len(attempts)-1], src)
+		}
+		script, err := installScriptFetcher(ctx, src, spec.OriginSuffix)
+		if err == nil {
+			return script, nil
+		}
+		attempts = append(attempts, fmt.Sprintf("%s: %v", src, err))
+		if errors.Is(err, errInstallSourceRefused) || ctx.Err() != nil {
+			// A safety refusal is final (see errInstallSourceRefused), and a
+			// cancelled dispatch has nobody left to install for.
+			break
+		}
+	}
+	return "", errors.New(strings.Join(attempts, "; "))
 }
 
 // runInstallScript writes the script to a private file and runs it.
@@ -344,17 +415,26 @@ func fetchInstallScript(ctx context.Context, rawURL, originSuffix string) (strin
 		// be tested in production is a check nobody tests.
 		if want.Scheme == "https" && final.Scheme != "https" {
 			return "", fmt.Errorf(
-				"it redirected from https to %s; refusing to run a script fetched over a "+
-					"connection that could have been rewritten in transit", final.Scheme)
+				"%w: it redirected from https to %s; refusing to run a script fetched over a "+
+					"connection that could have been rewritten in transit",
+				errInstallSourceRefused, final.Scheme)
 		}
 		if !withinOrigin(final.Hostname(), want.Hostname(), originSuffix) {
 			return "", fmt.Errorf(
-				"it redirected from %s to %s, which is outside %s; refusing to run a script "+
-					"from an origin the vendor does not control",
-				want.Hostname(), final.Hostname(), originSuffix)
+				"%w: it redirected from %s to %s, which is outside %s; refusing to run a "+
+					"script from an origin the vendor does not control",
+				errInstallSourceRefused, want.Hostname(), final.Hostname(), originSuffix)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
+		if isBotChallenge(resp) {
+			// Said outright because the bare status reads as "forbidden" — a
+			// permissions problem to go looking for — when what happened is
+			// that the site's edge screened this network and wanted a browser.
+			return "", fmt.Errorf("the server answered HTTP %d with a Cloudflare bot challenge "+
+				"(the site is screening this device's network, as it commonly does for "+
+				"datacenter address ranges)", resp.StatusCode)
+		}
 		return "", fmt.Errorf("the server answered HTTP %d", resp.StatusCode)
 	}
 
@@ -365,13 +445,21 @@ func fetchInstallScript(ctx context.Context, rawURL, originSuffix string) (strin
 		return "", err
 	}
 	if len(body) > maxInstallScriptBytes {
-		return "", fmt.Errorf("the script is larger than %d bytes, which no real installer is",
-			maxInstallScriptBytes)
+		return "", fmt.Errorf("%w: the script is larger than %d bytes, which no real installer is",
+			errInstallSourceRefused, maxInstallScriptBytes)
 	}
 	if len(body) == 0 {
 		return "", errors.New("the server returned an empty script")
 	}
 	return string(body), nil
+}
+
+// isBotChallenge reports whether a refusal came from a Cloudflare bot check
+// rather than from the application behind it. Cloudflare marks a challenge it
+// served with `cf-mitigated: challenge`, which is documented for exactly this:
+// telling a challenge apart from an origin's own 403.
+func isBotChallenge(resp *http.Response) bool {
+	return strings.EqualFold(strings.TrimSpace(resp.Header.Get("Cf-Mitigated")), "challenge")
 }
 
 // withinOrigin reports whether a redirect landed somewhere the vendor controls:
