@@ -324,6 +324,14 @@ func projectSeedFor(workDir string) ([]byte, error) {
 				"from here, so a run dispatched now would find no project to work on", err),
 		}
 	}
+	// A seed carries the project's state and never its config.yaml, which can
+	// hold API keys. The provider and model are the two config choices a run
+	// cannot do without, so the ones the hub resolves — the same resolution
+	// that picked the harness this dispatch prepares for — are written into the
+	// state the device reads. `cloop run` there has no config to prefer, and
+	// honours them (Task 20339).
+	st.Provider = resolveProviderName(workDir)
+	st.Model = resolveProjectModel(workDir, st.Provider, st)
 	seed, err := projectseed.Build(st)
 	if err != nil {
 		return nil, &workspaceSourceError{

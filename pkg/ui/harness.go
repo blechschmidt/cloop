@@ -67,6 +67,32 @@ func resolveProviderName(workDir string) string {
 	return claudecode.ProviderName
 }
 
+// resolveProjectModel applies buildProjectProvider's model precedence for
+// providerName: the per-provider model in the project's config, then the model
+// in its state.
+func resolveProjectModel(workDir, providerName string, st *state.ProjectState) string {
+	if cfg, err := config.Load(workDir); err == nil {
+		var m string
+		switch providerName {
+		case "anthropic":
+			m = cfg.Anthropic.Model
+		case "openai":
+			m = cfg.OpenAI.Model
+		case "ollama":
+			m = cfg.Ollama.Model
+		case claudecode.ProviderName:
+			m = cfg.ClaudeCode.Model
+		}
+		if m = strings.TrimSpace(m); m != "" {
+			return m
+		}
+	}
+	if st != nil {
+		return st.Model
+	}
+	return ""
+}
+
 // harnessForProvider maps a provider name to the CLI it drives.
 //
 // A switch with one case, on purpose. claudecode is the only provider in the

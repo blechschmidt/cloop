@@ -989,3 +989,21 @@ func TestValidateNumeric_RejectsBadAuditRetention(t *testing.T) {
 		t.Fatalf("ValidateNumeric rejected 0 (keep everything): %v", err)
 	}
 }
+
+// TestExplicit: only a config file or its database mirror is a choice; the
+// defaults Load returns for an empty directory are not (Task 20339).
+func TestExplicit(t *testing.T) {
+	dir := t.TempDir()
+	if Explicit(dir) {
+		t.Fatal("an empty directory has no configuration of its own")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ConfigPath(dir), []byte("provider: mock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !Explicit(dir) {
+		t.Error("a config.yaml is configuration")
+	}
+}

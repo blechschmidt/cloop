@@ -2528,6 +2528,24 @@ func loadFromSQLite(workdir string) string {
 	return blob
 }
 
+// Explicit reports whether workdir has configuration of its own — a
+// .cloop/config.yaml, or the SQLite mirror Load falls back to — as opposed to
+// only the built-in defaults Load returns for a directory with neither.
+//
+// It exists for the decision where a default and a choice must not be
+// confused: which provider and model `cloop run` uses. Default() names
+// claudecode and a model per provider, and for a project that chose otherwise
+// a default must not outrank the choice recorded in its state. The case is not
+// hypothetical: a project seeded onto a remote executor arrives with its state
+// and deliberately without its config, which can hold API keys, so every run
+// there used to be a claudecode run whatever the project said (Task 20339).
+func Explicit(workdir string) bool {
+	if _, err := os.Stat(ConfigPath(workdir)); err == nil {
+		return true
+	}
+	return loadFromSQLite(workdir) != ""
+}
+
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
 // Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 // ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER,

@@ -1454,6 +1454,17 @@ which is cleared: it is the path `Save` writes back through, so a seed carrying
 the hub's absolute path would aim the sandbox's writes at a directory on another
 machine. The far side re-derives it from wherever it is migrating.
 
+**What a seed carries instead of the config.** `.cloop/config.yaml` never
+travels — it can hold API keys, and credentials reach a sandbox only through
+[grants](../guides/secrets.md). Two of its choices a run cannot do without, so
+the hub resolves the provider and model exactly as it does when it picks the
+harness to prepare (config, then state, then the default) and writes them into
+the seed's state. On the far side `cloop run` finds no configuration of its own,
+and in that one case the project's recorded choice outranks `Default()`'s —
+before Task 20339 it did not, and every seeded run was a `claudecode` run
+whatever the project had chosen. A flag, `CLOOP_PROVIDER`, a profile or a real
+config file still win, exactly as before.
+
 **The payload names no destination.** Nothing inside a seed influences where it
 lands; the receiving side always writes `<workspace>/.cloop/state.json` inside
 the directory it has already confined. A seed that carried its own path would be

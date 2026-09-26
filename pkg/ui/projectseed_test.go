@@ -194,3 +194,35 @@ func TestApplyWorkspaceSeedsNoTreelessWorkload(t *testing.T) {
 		t.Error("an unscoped workload was given a project seed")
 	}
 }
+
+// TestSeedCarriesTheProviderTheHubResolved: a seed carries state and never
+// config.yaml (which can hold API keys), so a provider chosen in config would
+// be lost on the device — where Default()'s claudecode used to take over and
+// fail on a machine with no `claude` (Task 20339). The hub writes the provider
+// and model it resolved into the seed's state instead.
+func TestSeedCarriesTheProviderTheHubResolved(t *testing.T) {
+	dir := seedFixture(t, "the hub's goal")
+	cfg := "provider: openai\nopenai:\n    model: gpt-configured\n"
+	if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := projectSeedFor(dir)
+	if err != nil {
+		t.Fatalf("projectSeedFor: %v", err)
+	}
+	sandbox := t.TempDir()
+	if err := projectseed.Write(sandbox, seed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := state.Load(sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "openai" || got.Model != "gpt-configured" {
+		t.Errorf("seed carries provider %q model %q, want the hub's openai/gpt-configured", got.Provider, got.Model)
+	}
+	if strings.Contains(string(seed), "api_key") {
+		t.Error("the seed must not carry configuration, which can hold API keys")
+	}
+}

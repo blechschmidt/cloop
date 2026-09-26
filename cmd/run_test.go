@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/state"
 )
 
 func TestApplyEnvOverrides_Provider(t *testing.T) {
@@ -135,4 +137,57 @@ func TestAutoSelectProvider_FallbackClaudeCode(t *testing.T) {
 	if got != "claudecode" {
 		t.Errorf("expected claudecode fallback, got %q", got)
 	}
+}
+
+// TestPreferProjectChoice covers the one directory where Default() must not
+// outrank a project's recorded provider: one with no configuration of its own,
+// which is what every project seeded onto a remote executor is (Task 20339).
+func TestPreferProjectChoice(t *testing.T) {
+	st := &state.ProjectState{Provider: "mock", Model: "the-projects-model"}
+
+	t.Run("no config: the project's choice wins", func(t *testing.T) {
+		t.Setenv("CLOOP_PROVIDER", "")
+		cfg := config.Default()
+		keep := preferProjectChoice(cfg, st, t.TempDir(), "", "")
+		if cfg.Provider != "mock" || !keep {
+			t.Errorf("provider = %q, keepStateModel = %v; want mock and true", cfg.Provider, keep)
+		}
+	})
+	t.Run("a config file is a choice and still wins", func(t *testing.T) {
+		t.Setenv("CLOOP_PROVIDER", "")
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"), []byte("provider: claudecode\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Default()
+		if keep := preferProjectChoice(cfg, st, dir, "", ""); keep || cfg.Provider != "claudecode" {
+			t.Errorf("provider = %q, keep = %v; an explicit config must keep winning", cfg.Provider, keep)
+		}
+	})
+	t.Run("flag, env and profile still win", func(t *testing.T) {
+		for name, call := range map[string]func(*config.Config) bool{
+			"flag":    func(c *config.Config) bool { return preferProjectChoice(c, st, t.TempDir(), "openai", "") },
+			"profile": func(c *config.Config) bool { return preferProjectChoice(c, st, t.TempDir(), "", "work") },
+		} {
+			cfg := config.Default()
+			if keep := call(cfg); keep || cfg.Provider != "claudecode" {
+				t.Errorf("%s: provider = %q, keep = %v", name, cfg.Provider, keep)
+			}
+		}
+		t.Setenv("CLOOP_PROVIDER", "anthropic")
+		cfg := config.Default()
+		if keep := preferProjectChoice(cfg, st, t.TempDir(), "", ""); keep {
+			t.Error("CLOOP_PROVIDER must keep winning")
+		}
+	})
+	t.Run("a project that chose nothing keeps the defaults", func(t *testing.T) {
+		t.Setenv("CLOOP_PROVIDER", "")
+		cfg := config.Default()
+		if keep := preferProjectChoice(cfg, &state.ProjectState{}, t.TempDir(), "", ""); keep || cfg.Provider != "claudecode" {
+			t.Errorf("provider = %q, keep = %v", cfg.Provider, keep)
+		}
+	})
 }

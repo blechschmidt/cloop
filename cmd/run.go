@@ -179,6 +179,10 @@ Press Ctrl+C to pause gracefully.`,
 			runProvider = "mock"
 		}
 
+		// In a directory with no configuration of its own, cfg is Default(),
+		// and its provider and models are defaults rather than choices.
+		keepStateModel := preferProjectChoice(cfg, projectState, workdir, runProvider, activeProfileName)
+
 		// Determine provider (flag > env > config > state > auto-detect > claudecode)
 		providerName := runProvider
 		if providerName == "" {
@@ -217,8 +221,10 @@ Press Ctrl+C to pause gracefully.`,
 			},
 		}
 
-		// Apply per-provider model defaults from config if not overridden by flag
-		if model == "" {
+		// Apply per-provider model defaults from config if not overridden by
+		// flag — unless those are only Default()'s and the project named its
+		// own, which the orchestrator reads from state when this stays empty.
+		if model == "" && !keepStateModel {
 			switch providerName {
 			case "anthropic":
 				model = cfg.Anthropic.Model
@@ -572,6 +578,30 @@ func autoSelectProvider() string {
 		return "openai"
 	}
 	return "claudecode"
+}
+
+// preferProjectChoice lets a project's recorded provider and model outrank the
+// built-in defaults in a directory that has no configuration of its own, and
+// reports whether the project's model should stand.
+//
+// That directory is not an odd corner: it is every project seeded onto a remote
+// executor, which is sent its state and never its config (a config can hold API
+// keys). Before this, Default()'s claudecode outranked the provider recorded in
+// the state, so a project on a device ran claudecode whatever it had chosen —
+// and failed with "claude: executable file not found" on a device that, for
+// the provider it had actually chosen, needed nothing installed (Task 20339).
+//
+// Anything explicit still wins, exactly as before: a --provider flag,
+// CLOOP_PROVIDER, an active profile, or a config file or its database mirror.
+func preferProjectChoice(cfg *config.Config, st *state.ProjectState, workdir, flagProvider, profileName string) (keepStateModel bool) {
+	if st == nil || flagProvider != "" || profileName != "" || os.Getenv("CLOOP_PROVIDER") != "" ||
+		config.Explicit(workdir) {
+		return false
+	}
+	if p := strings.TrimSpace(st.Provider); p != "" {
+		cfg.Provider = p
+	}
+	return strings.TrimSpace(st.Model) != ""
 }
 
 // applyEnvOverrides applies CLOOP_* environment variables onto the config.
