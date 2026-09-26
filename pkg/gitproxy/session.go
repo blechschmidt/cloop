@@ -361,7 +361,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		TaskID:    req.TaskID,
 		Actor:     req.Actor,
 		At:        now,
-		Detail:    fmt.Sprintf("allow %s until %s", strings.Join(pol.AllowedRefs, ","), s.ExpiresAt.UTC().Format(time.RFC3339)),
+		Detail:    fmt.Sprintf("allow %s until %s", pol.RefSummary(), s.ExpiresAt.UTC().Format(time.RFC3339)),
 	})
 
 	// A pinned session hands back the one remote URL the sandbox clones. A

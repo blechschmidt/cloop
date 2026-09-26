@@ -81,9 +81,19 @@ var AllDenyReasons = []DenyReason{
 type RefDenial struct {
 	Reason  DenyReason
 	Message string
+	// Ref, when set, is the ref the refusal is about. Error names it, so the
+	// error is self-contained wherever it is logged; Decision.Reason leaves it
+	// out, because git's status line already prints it and the reason is cut
+	// to one short line (see Decide).
+	Ref string
 }
 
-func (e *RefDenial) Error() string { return ErrRefDenied.Error() + ": " + e.Message }
+func (e *RefDenial) Error() string {
+	if e.Ref != "" {
+		return ErrRefDenied.Error() + ": " + e.Ref + " is " + e.Message
+	}
+	return ErrRefDenied.Error() + ": " + e.Message
+}
 
 // Unwrap keeps errors.Is(err, ErrRefDenied) true for every existing caller.
 func (e *RefDenial) Unwrap() error { return ErrRefDenied }
@@ -146,6 +156,22 @@ type Policy struct {
 
 	// MaxPackBytes caps the request body. 0 means DefaultMaxPackBytes.
 	MaxPackBytes int64 `json:"max_pack_bytes,omitempty"`
+
+	// RestrictRefs is a second allowlist that a ref must *also* match. Empty
+	// means no second restriction, so only AllowedRefs applies.
+	//
+	// It exists so that one party can narrow another's allowlist without
+	// either rewriting it. The hub's configured allowlist is AllowedRefs, the
+	// ceiling; a grant that says "this project may push to feature/* only"
+	// arrives here, and a ref has to clear both. The alternative, computing
+	// one list that is the intersection of the two, is not possible in
+	// general: the intersection of two sets of globs is not always a third
+	// set of globs. Two lists that both have to match are always exact.
+	//
+	// Patterns take the same syntax and normalisation as AllowedRefs. Unlike
+	// AllowedRefs, an empty list gets no default. Silence here means "the
+	// grant added nothing", not "fall back to the write-back namespace".
+	RestrictRefs []string `json:"restrict_refs,omitempty"`
 }
 
 // DefaultMaxPackBytes bounds one pushed pack.
@@ -163,8 +189,8 @@ const DefaultMaxPackBytes int64 = 2 << 30 // 2 GiB
 // invitation to substitute WriteBackPolicy would silently widen a policy
 // somebody wrote to be narrow.
 func (p Policy) IsZero() bool {
-	return len(p.AllowedRefs) == 0 && !p.AllowCreate && !p.AllowUpdate &&
-		!p.AllowDelete && !p.AllowFetch
+	return len(p.AllowedRefs) == 0 && len(p.RestrictRefs) == 0 && !p.AllowCreate &&
+		!p.AllowUpdate && !p.AllowDelete && !p.AllowFetch
 }
 
 // WriteBackPolicy returns the policy the executor write-back path needs: create
@@ -205,12 +231,42 @@ func (p *Policy) Normalize() {
 		out = append(out, pat)
 	}
 	p.AllowedRefs = out
+	p.RestrictRefs = normalizeRefPatterns(p.RestrictRefs)
 	if p.MaxCommands <= 0 {
 		p.MaxCommands = DefaultMaxCommands
 	}
 	if p.MaxPackBytes <= 0 {
 		p.MaxPackBytes = DefaultMaxPackBytes
 	}
+}
+
+// normalizeRefPatterns canonicalises a RestrictRefs list: every pattern
+// normalised, duplicates and blanks dropped, and a fresh slice returned for the
+// reason Normalize gives.
+//
+// One case is not simply dropped. A list that named something and normalises
+// to nothing, because every entry was blank, would read as "no restriction".
+// That is the widest reading of a field whose only job is to narrow. So it
+// becomes a single empty pattern instead, which Validate refuses: a restriction
+// nobody can read fails the session rather than being lifted.
+func normalizeRefPatterns(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		pat := normalizeRefPattern(raw)
+		if pat == "" || seen[pat] {
+			continue
+		}
+		seen[pat] = true
+		out = append(out, pat)
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
 }
 
 // normalizeRefPattern trims a pattern and gives a bare branch name its
@@ -243,6 +299,15 @@ func (p Policy) Validate() error {
 	for _, pat := range p.AllowedRefs {
 		if err := validateRefPattern(pat); err != nil {
 			return fmt.Errorf("ref pattern %q: %w", pat, err)
+		}
+	}
+	if len(p.RestrictRefs) > MaxRefPatterns {
+		return fmt.Errorf("policy restricts to %d ref patterns, at most %d are allowed",
+			len(p.RestrictRefs), MaxRefPatterns)
+	}
+	for _, pat := range p.RestrictRefs {
+		if err := validateRefPattern(pat); err != nil {
+			return fmt.Errorf("restricting ref pattern %q: %w", pat, err)
 		}
 	}
 	return nil
@@ -278,9 +343,31 @@ func validateRefPattern(pat string) error {
 	return nil
 }
 
-// AllowsRef reports whether any pattern admits the ref name.
+// AllowsRef reports whether the ref name clears both allowlists: some pattern
+// in AllowedRefs admits it and, when RestrictRefs names anything, some pattern
+// there admits it too.
 func (p Policy) AllowsRef(ref string) bool {
-	for _, pat := range p.AllowedRefs {
+	return matchAnyRefPattern(p.AllowedRefs, ref) &&
+		(len(p.RestrictRefs) == 0 || matchAnyRefPattern(p.RestrictRefs, ref))
+}
+
+// Restricted reports whether a second allowlist narrows this policy.
+func (p Policy) Restricted() bool { return len(p.RestrictRefs) > 0 }
+
+// RefSummary renders the allowlist as one line for audit rows and the
+// summaries shown to an operator: the ceiling, then the narrowing when there
+// is one.
+func (p Policy) RefSummary() string {
+	s := strings.Join(p.AllowedRefs, ",")
+	if p.Restricted() {
+		s += " narrowed to " + strings.Join(p.RestrictRefs, ",")
+	}
+	return s
+}
+
+// matchAnyRefPattern reports whether any pattern admits the ref.
+func matchAnyRefPattern(pats []string, ref string) bool {
+	for _, pat := range pats {
 		if matchRefPattern(pat, ref) {
 			return true
 		}
@@ -307,11 +394,25 @@ func matchRefPattern(pat, ref string) bool {
 // ref it is not allowed to touch learns the same thing either way, but an
 // operator reading the audit trail wants "main is not in the allowlist" rather
 // than "delete is not permitted", because the first names the real problem.
+//
+// The name refusals carry the ref separately from their prose (RefDenial.Ref),
+// so the reason git shows next to the ref does not repeat it. That reason is
+// cut to one short line for git's status report (see elide), and a long branch
+// name restated inside it pushed the one part the reader needs — the refs that
+// would have been accepted — past the cut (found in Task 20340's live run).
 func (p Policy) Decide(u RefUpdate) error {
-	if !p.AllowsRef(u.Ref) {
-		return &RefDenial{Reason: DenyRefNotAllowed, Message: fmt.Sprintf(
-			"%s is not in this session's branch allowlist (%s)",
-			u.Ref, strings.Join(p.AllowedRefs, ", "))}
+	if !matchAnyRefPattern(p.AllowedRefs, u.Ref) {
+		return &RefDenial{Reason: DenyRefNotAllowed, Ref: u.Ref, Message: fmt.Sprintf(
+			"not in this session's branch allowlist (%s)", strings.Join(p.AllowedRefs, ", "))}
+	}
+	// The same reason code as the ceiling's refusal, deliberately: to a
+	// metric, both are "the sandbox tried a ref it may not touch". The prose
+	// is what differs, because the remedy does. A ref outside the hub's
+	// allowlist is an operator's decision; one outside the grant's is the
+	// project's, and whoever reads the refusal needs to know which to ask.
+	if p.Restricted() && !matchAnyRefPattern(p.RestrictRefs, u.Ref) {
+		return &RefDenial{Reason: DenyRefNotAllowed, Ref: u.Ref, Message: fmt.Sprintf(
+			"outside the branches this session's grant may push to (%s)", strings.Join(p.RestrictRefs, ", "))}
 	}
 	switch {
 	case u.IsDelete() && !p.AllowDelete:
@@ -336,11 +437,20 @@ func (d Decision) Allowed() bool { return d.Err == nil }
 // Reason renders the refusal as a single line fit for git's status report,
 // which is newline-delimited and would otherwise be split by a multi-line
 // message into a status line and garbage.
+//
+// The ref itself is left out when the refusal carries it separately: every
+// caller renders the reason beside the ref already.
 func (d Decision) Reason() string {
 	if d.Err == nil {
 		return ""
 	}
-	msg := strings.TrimPrefix(d.Err.Error(), ErrRefDenied.Error()+": ")
+	var msg string
+	var denial *RefDenial
+	if errors.As(d.Err, &denial) && denial.Ref != "" {
+		msg = denial.Message
+	} else {
+		msg = strings.TrimPrefix(d.Err.Error(), ErrRefDenied.Error()+": ")
+	}
 	msg = strings.Join(strings.Fields(msg), " ")
 	return elide(msg)
 }
