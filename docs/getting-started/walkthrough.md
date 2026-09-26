@@ -169,8 +169,12 @@ grant — [why](../security/claude-code-identity.md#isolating-executors-do-not-g
 granted to it with that key. Without it the first task stops with *Not logged
 in*. Repositories work the same way, with one default to watch: the project's
 **Repositories** panel assigns *Read only* unless you pick *Read and write*,
-which is enough to clone and not to push. The harness is told which
-repositories it holds and whether it may push, and clones them itself.
+which is enough to clone and not to push. *Read and write* can be limited to
+particular branches — `cloop/*`, say, to keep the agent off `main` — which the
+hub's git proxy enforces; on a hub without one, a GitHub App assignment with
+branches is delivered read-only instead ([why](../guides/secrets.md#limiting-pushes-to-particular-branches)).
+The harness is told which repositories it holds, whether it may push, and to
+which branches, and clones them itself.
 
 Note what the Grants list says when it is empty: *"No grants — the project
 starts able to reach nothing."* There is no allow-everything default anywhere in

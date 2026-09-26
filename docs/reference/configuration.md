@@ -777,6 +777,14 @@ executors:
   process shares the hub's network namespace.
 - **A session lasts `session_minutes` from dispatch, not for the run.** A run
   that outlives it fails its push.
+- **`allowed_refs` is the ceiling for every grant.** A GitHub grant can narrow
+  it to particular branches (`--branches`, or **Push to branches** in the
+  dashboard) but never widen it, so a hub that wants projects to push to
+  branches of their own choosing sets it wider — `["refs/heads/**"]` — and lets
+  each grant say which. It is also the only thing that can enforce a grant's
+  branch list: with no proxy, such a grant is delivered read-only (`github_app`)
+  or not at all (`github_pat`). See
+  [limiting pushes to particular branches](../guides/secrets.md#limiting-pushes-to-particular-branches).
 - Every decision lands in the hash-chained audit log as
   `gitproxy.push_denied`, `gitproxy.push_allowed`, `gitproxy.session_minted`,
   `gitproxy.session_closed`, `gitproxy.fetch` and `gitproxy.rejected`. Alert on

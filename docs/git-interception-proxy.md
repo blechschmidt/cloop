@@ -202,6 +202,42 @@ would only push the same decision somewhere less visible. `MaxRefPatterns` (256)
 bounds the list, because matching every pattern against every ref in every push
 is work an attacker would otherwise choose the size of.
 
+### Narrowing by grant: `RestrictRefs`
+
+`RestrictRefs` is a second list of patterns, written and normalised exactly like
+`AllowedRefs`, that a ref must **also** match. It is how a grant narrows the
+hub's allowlist without either party rewriting the other's: the operator's
+`allowed_refs` stays the ceiling in `AllowedRefs`, and a grant's branch list —
+`cloop secret grant --branches`, or **Push to branches** on a project's
+Repository Access panel (Task 20340) — arrives as `RestrictRefs`.
+
+| `AllowedRefs` (hub) | `RestrictRefs` (grant) | `refs/heads/main` | `refs/heads/cloop/fix-1` | `refs/heads/feature/x` |
+| --- | --- | --- | --- | --- |
+| `refs/heads/cloop/**` | — | refused | allowed | refused |
+| `refs/heads/cloop/**` | `feature/*` | refused | refused | refused — the hub never allowed it |
+| `refs/heads/**` | `feature/*` | refused | refused | allowed |
+| `refs/heads/**` | `cloop/*`, `main` | allowed | allowed | refused |
+
+Two lists that both have to match, rather than one list that is their
+intersection, because the intersection of two sets of globs is not in general a
+third set of globs — `refs/heads/cloop/**` against `refs/heads/*-hotfix` has no
+exact glob form, and an approximation would be wrong in one direction or the
+other. Two lists are always exact.
+
+Unlike `AllowedRefs`, an empty `RestrictRefs` gets no default: silence means
+"the grant added nothing". The one case that is not silence is refused: a list
+that named something and normalises to nothing — every entry blank — becomes a
+pattern `Validate()` rejects, so a restriction nobody can read fails the session
+instead of being lifted. `RestrictRefs` makes a policy non-zero, so `Mint` never
+swaps a narrowing-only policy for `WriteBackPolicy()`.
+
+Both halves of a session are narrowed this way: the lease a sandbox receives
+(`pkg/ui` `guardPolicy`, which also drops create and update from a grant that
+cannot push and never grants a delete), and the workspace session cloop's own
+provisioning and write-back use (`pkg/executor/gitproxycreds`, from the branch
+list the grant's credential carries). A read-only session carries no
+restriction, since there is no push for one to narrow.
+
 ### Directions
 
 A ref update is a create, an update or a delete, determined by which side is the
@@ -274,6 +310,17 @@ every command and reports whether all passed; the refusal text of each is
 carried on a `Decision` and rendered as a single line, since git's status report
 is newline-delimited and a multi-line message would be split into a status line
 and garbage.
+
+The name check is the ceiling, then the grant, and the two refusals are worded
+apart because their remedies are: a ref outside `AllowedRefs` is
+`not in this session's branch allowlist (…)` — an operator's decision — and one
+inside it but outside `RestrictRefs` is
+`outside the branches this session's grant may push to (…)` — the project's.
+Both carry the reason code `ref_not_allowed`, so the metric does not split. The
+reason git prints does not repeat the ref, which the status line already shows
+beside it; it lists the patterns that would have been accepted, and a long
+branch name repeated inside it used to push that list past the one-line cut
+(`RefDenial.Error()` still names the ref, for anything that logs it bare).
 
 Before policy runs at all, each parsed command must survive `ValidateRefName` —
 git's own naming rules, applied here because the proxy forwards this string to a

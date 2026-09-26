@@ -121,7 +121,7 @@ What it checks, and what each one catches that nothing else does:
 | `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
 | `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
 | `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
-| `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it |
+| `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it — and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
 | `egress` | whether the broker is on, whether the advertised address is one a sandbox could use, a bounded dial of it, and the trap of an `internal: true` filter with no broker to proxy through |
 | `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
 | `config` | drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |

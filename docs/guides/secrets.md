@@ -157,6 +157,15 @@ typed from memory. Pick **Read only** or **Read and write** — which expand to
 `contents:read` and to `contents:write` plus `pull_requests:write`, and to
 nothing else — and the grant is created against `project:<path>`.
 
+**Read and write** also reveals **Push to branches**: leave it empty to let the
+project push wherever the hub allows, or list the branches it may push to —
+`cloop/*`, `feature/**` — to keep it off everything else, the default branch
+included. The line under the field says, before you save, whether this hub can
+enforce that; see [Limiting pushes to particular
+branches](#limiting-pushes-to-particular-branches). Each assignment's row shows
+its branches and what they amount to here, and **Edit** changes the access level
+or the branches of an existing assignment in place.
+
 This is the same broker call `cloop secret grant` makes, so a grant created
 either way shows up in both places, and `cloop hub audit list` records it
 identically.
@@ -238,6 +247,8 @@ env:    GIT_CONFIG_GLOBAL=<lease dir>/gitconfig
         CLOOP_GIT_PROXY_SESSION=<session id>
         CLOOP_GIT_PROXY_MODE=read-only
         CLOOP_GITHUB_REPO_ALLOWLIST=myorg/*
+        CLOOP_GIT_PUSH_REFS=refs/heads/cloop/**     # read-write sessions only
+        CLOOP_GITHUB_PUSH_BRANCHES=cloop/*           # when the grant lists branches
 ```
 
 There is no `github-token`. The allowlist moves from a script the workload can
@@ -327,11 +338,90 @@ Two consequences worth knowing before you pick this kind:
 [The security model](../security/model.md#github_pat-versus-github_app) has the
 side-by-side comparison and says when a PAT is still the right answer.
 
-The [git interception proxy](../git-interception-proxy.md) does **not** change
-any of this. It brokers the one repository cloop itself clones and pushes back
-to, on the [workspace-provisioning path](#granting-a-pat-for-workspace-provisioning);
-a PAT granted to the task is delivered into the sandbox as above whether or not
-a proxy is configured.
+With the [git interception proxy](../git-interception-proxy.md) on, an App
+token is held by the hub exactly as a PAT is: the sandbox gets a proxy session,
+and the token GitHub minted never enters it.
+
+### Limiting pushes to particular branches
+
+A grant that authorises a push can say where pushes may go:
+
+```console
+$ cloop secret grant deploy-app --to project:/srv/app \
+    --repos acme/tool --permissions contents:write \
+    --branches 'cloop/*,feature/**'
+✓ granted deploy-app to project:/srv/app
+  grant:       grant_558134c7fcbb6d2823b00574
+  constraints: repos=acme/tool perms=contents:write branches=cloop/*|feature/**
+  expires:     2026-09-27T20:51:49Z (in 24h0m0s)
+```
+
+The project may now push `cloop/fix-42` and `feature/login/v2`, and nothing else
+— not `main`, not `develop`, not a tag. The same list is the **Push to
+branches** field on a project's Repository Access panel, and on the Secrets
+panel's grant and access-request dialogs. `cloop hub grant request --branches`
+asks for one.
+
+**Patterns** name branches, with or without `refs/heads/`. `*` and `?` stay
+within one path segment, so `cloop/*` covers `cloop/fix-42` but not
+`cloop/fix-42/retry`; a trailing `/**` covers any depth below its prefix, and
+`**` alone is every branch. Letters, digits, `-`, `_`, `.` and `/` are
+accepted, together with git's own rules on what a branch name may not contain,
+and up to 32 patterns. A list on a grant that cannot push — `contents:read`, or
+a PAT grant with no `--permissions` — is refused, since it would describe a
+permission that does not exist.
+
+**Only the git proxy can enforce this.** Git's credential protocol never tells a
+credential which branch a push is for, so nothing that holds the token — a
+helper script, the sandbox, the workload — can keep it off `main`. The proxy
+can, because it reads every command a push carries before it forwards any of
+them. So what a branch list amounts to depends on the hub, and the dashboard
+shows which on every row:
+
+| This hub | `github_app` grant with branches | `github_pat` grant with branches |
+| --- | --- | --- |
+| Runs the git proxy | Enforced: a push outside the list is refused by the proxy, outside the sandbox, and audited as `gitproxy.push_denied` | Same |
+| Has `executors.git_proxy` enabled, but the proxy is not running | Not delivered — the lease fails closed, as every GitHub lease does on such a hub | Same |
+| Has no git proxy | Delivered **read-only**: the installation token is minted with every permission capped at read, and GitHub refuses the push | **Not delivered**: a PAT cannot be narrowed after the fact, and delivering it would hand over a push to every branch it reaches |
+
+In none of these cases is a credential that could push anywhere delivered with
+the list attached. The lease's audit row says which happened —
+`read-only: write withheld, …` in its summary, or a denial naming
+`executors.git_proxy` — and so does the dry run:
+
+```console
+$ cloop secret lease --project /srv/app
+✗ deploy-pat (grant_f375eb24fcfb5a445d66ebb5) not delivered
+    reason:      secretbroker: branch allowlist cannot be enforced without the git proxy: grant grant_f375eb24fcfb5a445d66ebb5 limits pushes to branches cloop/*, which only cloop's git proxy can enforce, and this hub runs none; a github_pat cannot be narrowed to read-only instead, so it is not delivered — enable executors.git_proxy, or grant without a branch allowlist
+```
+
+**Where the proxy runs, its own list is the ceiling.** `executors.git_proxy.allowed_refs`
+— `refs/heads/cloop/**` unless the operator widened it — is checked first, and a
+grant's branches narrow within it; a branch has to be in both. On a hub that
+kept the default, a grant listing `main` gains nothing, and the panel names the
+ceiling under the field so the two lists can be read together. An operator who
+wants projects to push to their own choice of branches widens `allowed_refs`
+(for example to `refs/heads/**`) and lets each grant say which.
+
+**The agent is told.** The lease announces the grant's list in
+`CLOOP_GITHUB_PUSH_BRANCHES` and the hub's in `CLOOP_GIT_PUSH_REFS`, and the
+task prompt turns them into an instruction: which branches it may push to, that
+anything else — the default branch included — will be refused, and an example
+branch name that fits. A read-only delivery announces why in
+`CLOOP_GITHUB_WRITE_WITHHELD`, and the agent is told to finish the rest of the
+work and report the push it could not make rather than retry it.
+
+**Editing** an assignment's access or branches from the panel files a new grant
+and revokes the old one, both audited — grants are immutable — and keeps the old
+grant's expiry. A run in progress loses the old access at once and receives the
+new at its next lease renewal.
+
+**Every hub that leases from the control plane has to understand the list.** A
+branch list is stored in the grant's constraints, and a cloop binary older than
+the feature reads those without it — as a grant that may push anywhere. Keep
+older hubs off a shared control plane, or away from projects whose grants carry
+branches, until they are upgraded. Edge agents are unaffected: they receive a
+lease's materials, never a grant's constraints.
 
 ---
 

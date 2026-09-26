@@ -2566,6 +2566,12 @@ not installed.
 | End to end: a real `git push` to `refs/heads/main` is refused, git reports it, no `push_allowed` is emitted, and the upstream ref does not move — and the identical push lands once `main` is added to the allowlist, so what stopped it was the policy and nothing else | `pkg/gitproxy: TestPushToProtectedBranchIsRefused` |
 | End to end: a delete of an *allowed* ref is still refused, and a fetch without `AllowFetch` is refused | `pkg/gitproxy: TestDeleteOfAllowedRefIsRefused`, `TestFetchRequiresAllowFetch` |
 | End to end: a session past its TTL cannot push, whatever its policy said | `pkg/gitproxy: TestExpiredSessionIsRefused` |
+| A grant's branch list narrows the hub's allowlist and never widens it: a ref must match both lists, a blank list fails closed rather than lifting the restriction, and each refusal names the list that excluded the ref | `pkg/gitproxy: TestRestrictRefsIntersectsWithTheCeiling`, `TestRestrictRefsNeverWidensByNormalisingAway`, `TestDecideNamesWhichListRefused` |
+| End to end: a real `git push` to a branch inside the hub's allowlist but outside the grant's branches is refused, and one inside both lands | `pkg/gitproxy: TestPushOutsideAGrantsBranchesIsRefused` |
+| Both halves of a session carry the grant's branches — the lease's (`guardPolicy`) and the workspace's (`gitproxycreds`) — without narrowing the hub's shared policy for the next session | `pkg/ui: TestGuardMintsASessionNarrowedToTheGrantsBranches`, `pkg/executor/gitproxycreds: TestTheSessionIsNarrowedToTheGrantsBranches` |
+| Where no proxy guards a branch-restricted grant, its push is withheld, never delivered unrestricted: an App token is minted read-only, a PAT is not delivered, and a write token minted for a guard that then declines is destroyed at GitHub | `pkg/secretbroker: TestUnguardedAppWithBranchesIsMintedReadOnly`, `TestUnguardedPATWithBranchesIsNotDelivered`, `TestDecliningGuardDestroysAWriteTokenMintedForBranches` |
+| The dashboard's verdict on a branch list matches what the broker will do on this hub | `pkg/ui: TestBranchEnforcementTellsTheTruthAboutThisHub` |
+| Live, opt-in: a grant assigned through the panel's endpoint, leased and materialised as a dispatch does, pushes through the proxy to a real GitHub repository — outside its branches refused, inside them landed, the installation token nowhere in the sandbox | `pkg/ui: TestLiveBranchRestrictionThroughTheGitProxy` |
 
 ### Result write-back — `writeback_bundle_test.go`
 
