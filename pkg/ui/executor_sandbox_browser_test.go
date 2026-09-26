@@ -27,6 +27,7 @@ package ui
 // source of red builds on one that does not.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"os/exec"
@@ -116,7 +117,15 @@ func TestExecutorSandboxPanel_InBrowser(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/sandbox_browser.js"),
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/sandbox_browser.js"),
 		chrome, ts.URL, sandboxPanelExecutorID)
 	out, err := cmd.Output()
 	if err != nil {

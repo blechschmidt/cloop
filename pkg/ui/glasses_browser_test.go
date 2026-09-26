@@ -27,6 +27,7 @@ package ui
 // builds on one that does not.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -209,7 +210,11 @@ func runGlassesBrowser() glassesBrowserRun {
 	if err != nil {
 		return glassesBrowserRun{fatal: "resolving the driver: " + err.Error()}
 	}
-	cmd := exec.Command(node, abs, chrome, srv.URL)
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, abs, chrome, srv.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

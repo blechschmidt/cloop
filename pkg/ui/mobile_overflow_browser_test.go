@@ -11,6 +11,7 @@ package ui
 // Skips when Chrome or node is unavailable, like the other browser gates here.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -225,7 +227,15 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 		"a goal long enough that it has to be truncated rather than widen the card"))
 	ts := newTestServer(t, primary, others)
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/mobile_overflow_browser.js"), chrome, ts.URL)
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/mobile_overflow_browser.js"), chrome, ts.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

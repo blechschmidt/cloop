@@ -23,6 +23,7 @@ package ui
 // of red builds on one that does not. See testdata/ptt_browser.js.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // chromeCandidates are the install locations this project's boxes actually use,
@@ -157,7 +159,15 @@ func TestDictate_PushToTalkInBrowser(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/ptt_browser.js"), chrome, srv.URL)
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/ptt_browser.js"), chrome, srv.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

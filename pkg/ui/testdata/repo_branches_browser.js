@@ -80,33 +80,42 @@ async function launchChrome() {
   let stderr = '';
   proc.stderr.on('data', d => { stderr += d.toString(); });
 
-  const portFile = path.join(dir, 'DevToolsActivePort');
-  let port = 0;
-  for (let i = 0; i < 200 && !port; i++) {
-    await sleep(50);
-    if (proc.exitCode !== null) throw new Error('chrome exited: ' + stderr);
-    try {
-      const txt = fs.readFileSync(portFile, 'utf8').split('\n');
-      if (txt[0] && txt[0].trim()) port = Number(txt[0].trim());
-    } catch (e) { /* not written yet */ }
+  // A launch that fails after the spawn must take Chrome with it. Left
+  // running, it holds this process's stderr pipe open, node never exits,
+  // and the Go test waiting on node hangs until the package timeout — the
+  // 20-minute CI hang Task 20340 traced to a Chrome slow to report its port.
+  try {
+    const portFile = path.join(dir, 'DevToolsActivePort');
+    let port = 0;
+    for (let i = 0; i < 600 && !port; i++) {
+      await sleep(50);
+      if (proc.exitCode !== null) throw new Error('chrome exited: ' + stderr);
+      try {
+        const txt = fs.readFileSync(portFile, 'utf8').split('\n');
+        if (txt[0] && txt[0].trim()) port = Number(txt[0].trim());
+      } catch (e) { /* not written yet */ }
+    }
+    if (!port) throw new Error('chrome never reported a debugging port within 30s: ' + stderr);
+
+    // Both steps are bounded: a Chrome that accepts the connection and never
+    // answers would otherwise hang this driver, and the test waiting on it, with
+    // nothing to say why.
+    const list = await (await fetch('http://127.0.0.1:' + port + '/json/list',
+      {signal: AbortSignal.timeout(15000)})).json();
+    const page = list.find(t => t.type === 'page');
+    if (!page) throw new Error('no page target');
+
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((res, rej) => {
+      const timer = setTimeout(() => rej(new Error('cdp connect timed out')), 15000);
+      ws.addEventListener('open', () => { clearTimeout(timer); res(); }, {once: true});
+      ws.addEventListener('error', () => { clearTimeout(timer); rej(new Error('cdp connect failed')); }, {once: true});
+    });
+    return {cdp: new CDP(ws), proc, dir};
+  } catch (e) {
+    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    throw e;
   }
-  if (!port) throw new Error('chrome never reported a debugging port: ' + stderr);
-
-  // Both steps are bounded: a Chrome that accepts the connection and never
-  // answers would otherwise hang this driver, and the test waiting on it, with
-  // nothing to say why.
-  const list = await (await fetch('http://127.0.0.1:' + port + '/json/list',
-    {signal: AbortSignal.timeout(15000)})).json();
-  const page = list.find(t => t.type === 'page');
-  if (!page) throw new Error('no page target');
-
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    const timer = setTimeout(() => rej(new Error('cdp connect timed out')), 15000);
-    ws.addEventListener('open', () => { clearTimeout(timer); res(); }, {once: true});
-    ws.addEventListener('error', () => { clearTimeout(timer); rej(new Error('cdp connect failed')); }, {once: true});
-  });
-  return {cdp: new CDP(ws), proc, dir};
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

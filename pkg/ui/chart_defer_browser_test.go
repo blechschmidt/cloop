@@ -13,11 +13,13 @@ package ui
 // Skips when Chrome or node is unavailable, like the other browser gates here.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 // chartsExpectedForBareProject is how many of the five Analytics canvases draw
@@ -97,7 +99,15 @@ func TestChartLibrary_DeferredLoadInBrowser(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/chart_defer_browser.js"), chrome, srv.URL)
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/chart_defer_browser.js"), chrome, srv.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

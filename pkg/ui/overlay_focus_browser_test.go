@@ -17,11 +17,13 @@ package ui
 // arrangement applied to push-to-talk.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 type overlayActive struct {
@@ -127,7 +129,15 @@ func TestOverlay_FocusContainmentInBrowser(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/overlay_browser.js"), chrome, srv.URL)
+	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
+
+	// and every pkg/ui test after it, until the package timeout (Task 20340).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/overlay_browser.js"), chrome, srv.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

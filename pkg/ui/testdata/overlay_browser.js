@@ -120,27 +120,37 @@ async function launchChrome() {
   let stderr = '';
   proc.stderr.on('data', d => { stderr += d.toString(); });
 
-  const portFile = path.join(dir, 'DevToolsActivePort');
-  let port = 0;
-  for (let i = 0; i < 200 && !port; i++) {
-    await sleep(50);
-    if (proc.exitCode !== null) throw new Error('chrome exited: ' + stderr);
-    try {
-      const txt = fs.readFileSync(portFile, 'utf8').split('\n');
-      if (txt[0] && txt[0].trim()) port = Number(txt[0].trim());
-    } catch (e) { /* not written yet */ }
+  // A launch that fails after the spawn must take Chrome with it. Left
+  // running, it holds this process's stderr pipe open, node never exits,
+  // and the Go test waiting on node hangs until the package timeout — the
+  // 20-minute CI hang Task 20340 traced to a Chrome slow to report its port.
+  try {
+    const portFile = path.join(dir, 'DevToolsActivePort');
+    let port = 0;
+    for (let i = 0; i < 600 && !port; i++) {
+      await sleep(50);
+      if (proc.exitCode !== null) throw new Error('chrome exited: ' + stderr);
+      try {
+        const txt = fs.readFileSync(portFile, 'utf8').split('\n');
+        if (txt[0] && txt[0].trim()) port = Number(txt[0].trim());
+      } catch (e) { /* not written yet */ }
+    }
+    if (!port) throw new Error('chrome never reported a debugging port within 30s: ' + stderr);
+    return {proc, port, dir};
+  } catch (e) {
+    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    throw e;
   }
-  if (!port) throw new Error('chrome never reported a debugging port: ' + stderr);
-  return {proc, port, dir};
 }
 
 async function connect(port) {
-  const res = await fetch('http://127.0.0.1:' + port + '/json/list');
+  const res = await fetch('http://127.0.0.1:' + port + '/json/list', {signal: AbortSignal.timeout(15000)});
   const targets = await res.json();
   const page = targets.find(t => t.type === 'page');
   if (!page) throw new Error('no page target');
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((ok, bad) => {
+    setTimeout(() => bad(new Error('cdp connect timed out')), 15000).unref();
     ws.addEventListener('open', ok, {once: true});
     ws.addEventListener('error', () => bad(new Error('CDP socket failed')), {once: true});
   });
