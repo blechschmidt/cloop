@@ -7,6 +7,7 @@ package ui
 // Like the other browser gates it skips when Chrome or node is missing.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -108,7 +110,13 @@ func TestRepositoryBranchRestriction_InBrowser(t *testing.T) {
 		t.Fatalf("seed assignment = %d", resp.StatusCode)
 	}
 
-	cmd := exec.Command(node, mustAbs(t, "testdata/repo_branches_browser.js"), chrome, ts.URL)
+	// Bounded, unlike an exec.Command: a Chrome that stalls before answering
+	// the driver would otherwise hold this test — and every pkg/ui test after
+	// it — until the package's own timeout, which is how one hung browser on a
+	// CI runner turned into a 20-minute timeout hiding the whole suite.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, mustAbs(t, "testdata/repo_branches_browser.js"), chrome, ts.URL)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

@@ -92,14 +92,19 @@ async function launchChrome() {
   }
   if (!port) throw new Error('chrome never reported a debugging port: ' + stderr);
 
-  const list = await (await fetch('http://127.0.0.1:' + port + '/json/list')).json();
+  // Both steps are bounded: a Chrome that accepts the connection and never
+  // answers would otherwise hang this driver, and the test waiting on it, with
+  // nothing to say why.
+  const list = await (await fetch('http://127.0.0.1:' + port + '/json/list',
+    {signal: AbortSignal.timeout(15000)})).json();
   const page = list.find(t => t.type === 'page');
   if (!page) throw new Error('no page target');
 
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => {
-    ws.addEventListener('open', res, {once: true});
-    ws.addEventListener('error', () => rej(new Error('cdp connect failed')), {once: true});
+    const timer = setTimeout(() => rej(new Error('cdp connect timed out')), 15000);
+    ws.addEventListener('open', () => { clearTimeout(timer); res(); }, {once: true});
+    ws.addEventListener('error', () => { clearTimeout(timer); rej(new Error('cdp connect failed')); }, {once: true});
   });
   return {cdp: new CDP(ws), proc, dir};
 }
