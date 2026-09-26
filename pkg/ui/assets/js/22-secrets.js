@@ -238,6 +238,16 @@ function _secConstraintCell(g) {
   };
   add('repos', _secChips(c.repos));
   add('perms', _secChips(c.permissions));
+  // A branch list is only as real as the git proxy behind it (Task 20340), so
+  // the row says what it amounts to on this hub rather than just listing it.
+  const brNote = {
+    proxy: ['ok', 'enforced by the git proxy'],
+    read_only: ['warn', 'no git proxy: delivered read-only'],
+    not_delivered: ['warn', 'no git proxy: not delivered'],
+    unavailable: ['warn', 'git proxy down: not delivered']
+  }[g.branch_enforcement];
+  add('branches', c.branches && c.branches.length ? _secChips(c.branches) + (brNote
+    ? ' <span class="sec-chip ' + brNote[0] + '">' + brNote[1] + '</span>' : '') : '');
   add('contexts', _secChips(c.contexts));
   add('namespaces', _secChips(c.namespaces));
   // Verbs are the one dimension whose empty value is not "unset" but a policy
@@ -659,8 +669,8 @@ const SEC_KIND_FIELDSET = {
 // request, and there is nothing to ask for because nothing was sealed. It stays
 // handled inline in submitGrant.
 const SEC_KIND_CONSTRAINTS = {
-  github_pat:   [['repos','Repos'], ['permissions','Permissions']],
-  github_app:   [['repos','Repos'], ['permissions','Permissions']],
+  github_pat:   [['repos','Repos'], ['permissions','Permissions'], ['branches','Branches']],
+  github_app:   [['repos','Repos'], ['permissions','Permissions'], ['branches','Branches']],
   kubeconfig:   [['contexts','Contexts'], ['namespaces','Namespaces']],
   registry:     [['registries','Registries']],
   env:          [['env_keys','EnvKeys']],
@@ -710,7 +720,7 @@ const SEC_GRANT_KINDS = {
 window.openGrantModal = function() {
   const err = document.getElementById('grantError');
   if (err) err.style.display = 'none';
-  ['grantRepos','grantPermissions','grantContexts','grantNamespaces','grantVerbs','grantHosts',
+  ['grantRepos','grantPermissions','grantBranches','grantContexts','grantNamespaces','grantVerbs','grantHosts',
    'grantCIDRs','grantPorts','grantMethods','grantMaxUp','grantMaxDown','grantSessionTTL',
    'grantRegistries','grantEnvKeys','grantProxyHosts','grantScope','grantSubject',
    'grantLocalRepos','grantDevices','grantInterfaces'].forEach(id => {
@@ -1146,7 +1156,7 @@ window.openRequestModal = function() {
     // only be drawn once the list has arrived.
     onRequestSecretChange();
   });
-  ['requestSubject','requestScope','requestJustification','requestRepos','requestPermissions',
+  ['requestSubject','requestScope','requestJustification','requestRepos','requestPermissions','requestBranches',
    'requestContexts','requestNamespaces','requestRegistries','requestEnvKeys','requestProxyHosts',
    'requestLocalRepos','requestDevices','requestInterfaces'].forEach(id => {
     const el = document.getElementById(id);

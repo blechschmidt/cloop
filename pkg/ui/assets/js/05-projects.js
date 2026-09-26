@@ -766,8 +766,8 @@ var _npAccess = {executors: [], secrets: [], byID: {}, brokerNote: ''};
 // ("writable applies to local_repo grants, not …"), and hiding the repository
 // box for a local_repo would guarantee one.
 var _NP_GRANT_FIELDS = {
-  github_pat:   ['repos', 'permissions'],
-  github_app:   ['repos', 'permissions'],
+  github_pat:   ['repos', 'permissions', 'branches'],
+  github_app:   ['repos', 'permissions', 'branches'],
   kubeconfig:   ['contexts', 'namespaces'],
   local_repo:   ['repos', 'writable'],
   registry:     ['registries'],
@@ -780,6 +780,7 @@ var _NP_GRANT_FIELDS = {
 var _NP_FIELD_META = {
   repos:       {label: 'Repositories',     ph: 'api, shared-*'},
   permissions: {label: 'Permissions',      ph: 'contents:read, pull_requests:write'},
+  branches:    {label: 'Push to branches',  ph: 'optional, needs contents:write — cloop/*'},
   contexts:    {label: 'Contexts',         ph: 'prod, staging'},
   namespaces:  {label: 'Namespaces',       ph: 'default, team-a'},
   registries:  {label: 'Registries',       ph: 'ghcr.io, docker.io'},
@@ -966,6 +967,7 @@ function _npAddGrantRow() {
   var pairs = _npEl('div', 'form-row');
   pairs.appendChild(_npFieldGroup('repos'));
   pairs.appendChild(_npFieldGroup('permissions'));
+  pairs.appendChild(_npFieldGroup('branches'));
   row.appendChild(pairs);
   var pairs2 = _npEl('div', 'form-row');
   pairs2.appendChild(_npFieldGroup('contexts'));

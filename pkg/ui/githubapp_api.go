@@ -210,15 +210,26 @@ func (s *Server) handleGitHubAppRepositories(w http.ResponseWriter, r *http.Requ
 
 // projectRepoAssignment is one live grant of repositories to a project.
 type projectRepoAssignment struct {
-	GrantID    string    `json:"grant_id"`
-	SecretID   string    `json:"secret_id"`
-	SecretName string    `json:"secret_name"`
-	Kind       string    `json:"kind"`
-	Repos      []string  `json:"repos"`
-	Access     string    `json:"access"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	CreatedAt  time.Time `json:"created_at"`
-	CreatedBy  string    `json:"created_by,omitempty"`
+	GrantID    string   `json:"grant_id"`
+	SecretID   string   `json:"secret_id"`
+	SecretName string   `json:"secret_name"`
+	Kind       string   `json:"kind"`
+	Repos      []string `json:"repos"`
+	Access     string   `json:"access"`
+	// Branches is the grant's branch allowlist for pushes (Task 20340), as
+	// branch names. Empty means pushes are limited only by the hub's policy.
+	Branches []string `json:"branches,omitempty"`
+	// BranchEnforcement says what the list amounts to on this hub — enforced
+	// by the git proxy, or the grant's push withheld because nothing here can
+	// enforce it. See branchEnforcement. Empty when there is no list.
+	BranchEnforcement string `json:"branch_enforcement,omitempty"`
+	// Replaceable reports that this grant is issued to this project itself,
+	// so the panel may edit it in place. A wildcard grant that merely reaches
+	// the project is shown but is not this project's to change.
+	Replaceable bool      `json:"replaceable,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	CreatedBy   string    `json:"created_by,omitempty"`
 }
 
 // githubAppChoice is a stored App a caller may assign repositories from.
@@ -321,15 +332,18 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		assignments = append(assignments, projectRepoAssignment{
-			GrantID:    g.ID,
-			SecretID:   g.SecretID,
-			SecretName: sec.Name,
-			Kind:       string(sec.Kind),
-			Repos:      g.Constraints.Repos,
-			Access:     repoAccessLabel(g.Constraints),
-			ExpiresAt:  g.ExpiresAt,
-			CreatedAt:  g.CreatedAt,
-			CreatedBy:  g.CreatedBy,
+			GrantID:           g.ID,
+			SecretID:          g.SecretID,
+			SecretName:        sec.Name,
+			Kind:              string(sec.Kind),
+			Repos:             g.Constraints.Repos,
+			Access:            repoAccessLabel(g.Constraints),
+			Branches:          g.Constraints.BranchNames(),
+			BranchEnforcement: branchEnforcement(sec.Kind, g.Constraints),
+			Replaceable:       grantIssuedToProject(g, entry.Path),
+			ExpiresAt:         g.ExpiresAt,
+			CreatedAt:         g.CreatedAt,
+			CreatedBy:         g.CreatedBy,
 		})
 	}
 
@@ -337,7 +351,19 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 		"project":     entry.Name,
 		"apps":        apps,
 		"assignments": assignments,
+		// Whether a branch allowlist typed into this panel will be enforced,
+		// and inside which ceiling — asked before the grant exists, because
+		// that is when the answer changes what someone chooses.
+		"git_proxy": gitProxyStatus(),
 	})
+}
+
+// grantIssuedToProject reports whether g names exactly this project as its
+// subject, which is what makes it the project's own to revoke or replace. A
+// wildcard grant also reaches the project, and withdrawing it from here would
+// cut off every other project it reaches too.
+func grantIssuedToProject(g secretbroker.Grant, projectPath string) bool {
+	return g.Subject.Type == secretbroker.SubjectProject && g.Subject.Value == projectPath
 }
 
 // assignRepositoriesRequest is what the assignment panel posts.
@@ -346,6 +372,14 @@ type assignRepositoriesRequest struct {
 	Repos      []string `json:"repos"`
 	Access     string   `json:"access"`
 	TTLMinutes int      `json:"ttl_minutes,omitempty"`
+	// Branches limits where a write assignment may push (Task 20340). Only
+	// meaningful with access "write"; the broker refuses it otherwise.
+	Branches []string `json:"branches,omitempty"`
+	// Replaces names a grant of this project's that the new one supersedes —
+	// how the panel edits an assignment. Grants are immutable by design, so
+	// an edit is a new grant plus the revocation of the old one, both
+	// audited; see handleProjectRepositoriesAssign.
+	Replaces string `json:"replaces,omitempty"`
 }
 
 // handleProjectRepositoriesAssign serves POST /api/projects/{idx}/repositories.
@@ -386,6 +420,15 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 		return
 	}
+	branches := cleanList(req.Branches)
+	if len(branches) > 0 && !(secretbroker.Constraints{Permissions: perms}).AllowsPermission("contents:write") {
+		// The broker refuses this too, but in the CLI's vocabulary. Said here
+		// in the panel's, since the fix is a choice in this form.
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
+			"a branch restriction limits where pushes may go, so it needs \"Read and write\" access — "+
+				"choose that, or clear the branches"))
+		return
+	}
 
 	bs, ok := s.openBrokersOr(w)
 	if !ok {
@@ -394,6 +437,32 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 	defer bs.close()
 	if !bs.requireSecretBroker(w) {
 		return
+	}
+
+	// An edit: find the grant being replaced before anything is created, so a
+	// replacement that cannot happen leaves nothing behind.
+	var (
+		replaced *secretbroker.Grant
+		ttl      = time.Duration(req.TTLMinutes) * time.Minute
+		noExpiry bool
+	)
+	if ref := strings.TrimSpace(req.Replaces); ref != "" {
+		old, ok := s.replaceableGrant(w, r, bs, entry.Path, ref)
+		if !ok {
+			return
+		}
+		replaced = old
+		// An edit changes what the grant allows, not how long it lasts. A
+		// panel that reset the lifetime on every branch tweak would let a
+		// grant outlive the expiry it was given by being edited before it.
+		if req.TTLMinutes == 0 {
+			switch {
+			case old.ExpiresAt.IsZero():
+				noExpiry = true
+			case old.ExpiresAt.After(time.Now()):
+				ttl = time.Until(old.ExpiresAt)
+			}
+		}
 	}
 
 	grant, err := bs.secret.Grant(r.Context(), secretbroker.GrantRequest{
@@ -411,8 +480,9 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 			Type:  secretbroker.SubjectProject,
 			Value: entry.Path,
 		},
-		Constraints: secretbroker.Constraints{Repos: repos, Permissions: perms},
-		TTL:         time.Duration(req.TTLMinutes) * time.Minute,
+		Constraints: secretbroker.Constraints{Repos: repos, Permissions: perms, Branches: branches},
+		TTL:         ttl,
+		NoExpiry:    noExpiry,
 		Actor:       s.auditActor(r),
 	})
 	if err != nil {
@@ -420,17 +490,88 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 		return
 	}
 
+	if replaced != nil {
+		// The old grant goes only once the new one exists, so an edit never
+		// leaves the project with no access in between. It must go, though: a
+		// project holding both would be leased both, and the looser of the two
+		// is the one git would end up using. So a revocation that fails takes
+		// the new grant back out rather than leave the pair standing.
+		if err := bs.secret.Revoke(r.Context(), replaced.ID, s.auditActor(r)); err != nil {
+			if rerr := bs.secret.Revoke(r.Context(), grant.ID, s.auditActor(r)); rerr != nil {
+				apierror.WriteError(w, apierror.New(apierror.CodeInternal, fmt.Sprintf(
+					"replaced grant %s could not be revoked (%v), and neither could its replacement %s "+
+						"(%v): revoke both from the Secrets panel", replaced.ID, err, grant.ID, rerr)))
+				return
+			}
+			writeBrokerError(w, err, "revoke the grant being replaced")
+			return
+		}
+		s.broadcastAuditAppend(string(secretbroker.ActionRevoke))
+		s.broadcastSecretsUpdate("grant_revoked", replaced.ID)
+	}
+
 	s.broadcastAuditAppend(string(secretbroker.ActionGrant))
 	s.broadcastSecretsUpdate("grant_created", grant.ID)
+	var kind secretbroker.Kind
+	var name string
+	if sec, derr := bs.secret.DescribeSecret(grant.SecretID); derr == nil {
+		kind, name = sec.Kind, sec.Name
+	}
 	jsonOK(w, projectRepoAssignment{
-		GrantID:   grant.ID,
-		SecretID:  grant.SecretID,
-		Repos:     grant.Constraints.Repos,
-		Access:    repoAccessLabel(grant.Constraints),
-		ExpiresAt: grant.ExpiresAt,
-		CreatedAt: grant.CreatedAt,
-		CreatedBy: grant.CreatedBy,
+		GrantID:           grant.ID,
+		SecretID:          grant.SecretID,
+		SecretName:        name,
+		Kind:              string(kind),
+		Repos:             grant.Constraints.Repos,
+		Access:            repoAccessLabel(grant.Constraints),
+		Branches:          grant.Constraints.BranchNames(),
+		BranchEnforcement: branchEnforcement(kind, grant.Constraints),
+		Replaceable:       true,
+		ExpiresAt:         grant.ExpiresAt,
+		CreatedAt:         grant.CreatedAt,
+		CreatedBy:         grant.CreatedBy,
 	})
+}
+
+// replaceableGrant resolves the grant an edit supersedes, writing the refusal
+// itself when there is none this caller may replace.
+//
+// Replacing withdraws a grant, so it takes the right to revoke as well as the
+// right to grant — checked against this project's scope, as the route checks
+// the latter. And only a grant issued to this project exactly, for the reason
+// handleProjectRepositoriesRevoke gives: a wildcard grant that reaches the
+// project is not the project's to withdraw.
+func (s *Server) replaceableGrant(w http.ResponseWriter, r *http.Request, bs *brokerSet, projectPath, ref string) (*secretbroker.Grant, bool) {
+	scope, scopeOK := s.projectScopeFromIdx(r)
+	if !scopeOK || !s.permissionsFor(r, scope).Allows(authz.PermSecretRevoke) {
+		apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
+			"editing an assignment revokes the grant it replaces, which needs secret.revoke on this project"))
+		return nil, false
+	}
+	grants, err := bs.secret.ListGrants(secretbroker.GrantFilter{})
+	if err != nil {
+		writeBrokerError(w, err, "list grants")
+		return nil, false
+	}
+	for i := range grants {
+		if grants[i].ID != ref {
+			continue
+		}
+		g := grants[i]
+		if !grantIssuedToProject(g, projectPath) {
+			apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
+				fmt.Sprintf("grant %s is not scoped to this project; change it from the Secrets panel", ref)))
+			return nil, false
+		}
+		if !g.RevokedAt.IsZero() {
+			apierror.WriteError(w, apierror.New(apierror.CodeConflict,
+				fmt.Sprintf("grant %s was already revoked; assign the repositories afresh", ref)))
+			return nil, false
+		}
+		return &g, true
+	}
+	apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such grant"))
+	return nil, false
 }
 
 // handleProjectRepositoriesRevoke serves DELETE /api/projects/{idx}/repositories.

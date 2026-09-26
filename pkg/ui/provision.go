@@ -89,12 +89,14 @@ type projectGrantRequest struct {
 	// others. ValidateFor is what decides which — see handleGrantCreate.
 	Repos       []string `json:"repos"`
 	Permissions []string `json:"permissions"`
-	Namespaces  []string `json:"namespaces"`
-	Contexts    []string `json:"contexts"`
-	Hosts       []string `json:"hosts"`
-	Registries  []string `json:"registries"`
-	EnvKeys     []string `json:"env_keys"`
-	Writable    bool     `json:"writable"`
+	// Branches narrows where a GitHub grant may push (Task 20340).
+	Branches   []string `json:"branches"`
+	Namespaces []string `json:"namespaces"`
+	Contexts   []string `json:"contexts"`
+	Hosts      []string `json:"hosts"`
+	Registries []string `json:"registries"`
+	EnvKeys    []string `json:"env_keys"`
+	Writable   bool     `json:"writable"`
 }
 
 // requested reports whether the caller asked for anything at all here, so an
@@ -202,6 +204,7 @@ func (g projectGrantRequest) constraints() secretbroker.Constraints {
 	return secretbroker.Constraints{
 		Repos:       cleanList(g.Repos),
 		Permissions: cleanList(g.Permissions),
+		Branches:    cleanList(g.Branches),
 		Namespaces:  cleanList(g.Namespaces),
 		Contexts:    cleanList(g.Contexts),
 		Hosts:       cleanList(g.Hosts),

@@ -112,6 +112,7 @@ func TestProjectGrantConstraintsMapAllDimensions(t *testing.T) {
 	g := projectGrantRequest{
 		Repos:       []string{" api ", ""},
 		Permissions: []string{"contents:read"},
+		Branches:    []string{" cloop/* "},
 		Namespaces:  []string{"default"},
 		Contexts:    []string{"prod"},
 		Hosts:       []string{"example.com"},
@@ -131,7 +132,7 @@ func TestProjectGrantConstraintsMapAllDimensions(t *testing.T) {
 		t.Error("Writable did not survive the mapping")
 	}
 	for name, got := range map[string][]string{
-		"Permissions": c.Permissions, "Namespaces": c.Namespaces, "Contexts": c.Contexts,
+		"Permissions": c.Permissions, "Branches": c.Branches, "Namespaces": c.Namespaces, "Contexts": c.Contexts,
 		"Hosts": c.Hosts, "Registries": c.Registries, "EnvKeys": c.EnvKeys,
 	} {
 		if len(got) != 1 {

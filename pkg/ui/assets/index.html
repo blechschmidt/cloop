@@ -2809,6 +2809,14 @@
           with the narrowest scopes GitHub offers as well.
         </div>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="grantBranches">Branches a push may target (optional)</label>
+        <input class="form-input" id="grantBranches" placeholder="cloop/*, feature/**">
+        <div class="sec-hint" style="margin-top:6px">
+          Needs <code>contents:write</code>. Enforced only by the git proxy; on a hub without one the grant is
+          delivered read-only (App) or not at all (PAT).
+        </div>
+      </div>
     </div>
 
     <!-- kubeconfig -->
@@ -3039,6 +3047,10 @@
           <label class="form-label" for="requestPermissions">Permission subset</label>
           <input class="form-input" id="requestPermissions" placeholder="contents:read">
         </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="requestBranches">Branches a push may target (optional)</label>
+        <input class="form-input" id="requestBranches" placeholder="cloop/*">
       </div>
       <div class="sec-hint">
         Comma-separated <code>owner/repo</code> globs; <code>*</code> does not cross the slash. A repository

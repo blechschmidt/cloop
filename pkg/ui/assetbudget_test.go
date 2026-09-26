@@ -172,7 +172,37 @@ import (
 // The new slack is 244 B, the same order as the 225 B, 230 B and 239 B above.
 // This raise does not reopen the room any of them closed, and the deferral
 // refactor named there is still the next frontend task.
-const eagerWireBudgetBytes = 274_000
+//
+// Raised to 279,300 B by Task 20340, which lets a project's write access to a
+// GitHub repository be limited to particular branches. Two amounts, and only
+// one of them is this task's:
+//
+//   - 2,781 B was already over the ceiling before it started. Task 20331 (the
+//     executor auto-update controls, 2,749 B) and Task 20335 (the Claude 5
+//     model entries, 276 B) grew the set past 274,000 B without raising it, so
+//     this test had been red on main since 397e718 — measured at 6971ffa,
+//     397e718 and b8ea005 in turn. Absorbing it here restores a green gate
+//     rather than endorsing growth nobody justified; those bytes are recorded
+//     so the next reader can see where they came from.
+//   - 2,279 B is this task's: the branch field, its enforcement hint and the
+//     inline editor on the Repository Access panel (32-githubapp.js), the
+//     branch field in the Secrets grant and access-request dialogs, and the
+//     one in the new-project dialog. The shipped comments were trimmed first
+//     (320 B); the rest is markup and the user-facing text that says whether
+//     a restriction is enforced on this hub, which is the point of the panel.
+//
+// Deferral does not apply for the reason given for Task 20326: the panel is on
+// a project's Overview tab and renders with it.
+//
+// One measurement worth leaving for whoever builds the deferral path: 36% of the
+// bundle's wire bytes are whole-line `//` comments. Stripping them at bundle
+// time — which needs a lexer that knows when a line starts inside a template
+// literal, since 114 backticks appear in the fragments — took the JS from
+// 203,938 B to 130,775 B gzipped when measured on this tree. That is more than
+// every raise recorded above put together.
+//
+// The new slack is 240 B, the same order as those above.
+const eagerWireBudgetBytes = 279_300
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

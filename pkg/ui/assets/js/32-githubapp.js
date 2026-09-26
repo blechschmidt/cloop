@@ -25,6 +25,8 @@ const ghAppState = {
   assignments: [],     // this project's live grants
   repos: [],           // inventory of the app selected in the assign form
   reposFor: '',        // which app id `repos` belongs to
+  gitProxy: null,      // can this hub enforce a branch restriction (Task 20340)
+  editing: '',         // grant id whose access row is open for editing
 };
 
 // ---------------------------------------------------------------------------
@@ -202,9 +204,80 @@ window.loadProjectRepositories = function() {
       }
       ghAppState.apps = d.apps || [];
       ghAppState.assignments = d.assignments || [];
+      ghAppState.gitProxy = d.git_proxy || null;
       ghAppRenderAssignments();
     }).catch(() => {});
 };
+
+// Branch restrictions (Task 20340). Only the git proxy can enforce one, so the
+// panel says what it amounts to on this hub. Rationale: githubapp_branches_test.go.
+
+// ghAppBranchList splits on commas or whitespace; a branch name holds neither.
+function ghAppBranchList(raw) {
+  return String(raw || '').split(/[\s,]+/).filter(v => v !== '');
+}
+
+function ghAppBranchHint() {
+  const gp = ghAppState.gitProxy || {};
+  if (gp.running) {
+    const refs = (gp.push_refs || []).map(r => r.replace(/^refs\/heads\//, ''));
+    const all = refs.indexOf('**') >= 0 || (gp.push_refs || []).indexOf('refs/**') >= 0;
+    return '&#128274; cloop\'s git proxy refuses a push to any other branch, outside the sandbox. ' +
+      '<code>*</code> stays within one path segment; a trailing <code>/**</code> covers any depth. ' +
+      'Leave empty to allow ' + (all ? 'every branch.' :
+        'every branch this hub allows: ' + refs.map(r => '<code>' + esc(r) + '</code>').join(', ') +
+        ' — a branch listed here must fall inside that too.');
+  }
+  if (gp.required) {
+    return '<span style="color:var(--yellow)">&#9888; The git proxy is configured but not running, ' +
+      'so no GitHub access is delivered from this hub until it is.</span>';
+  }
+  return '<span style="color:var(--yellow)">&#9888; This hub runs no git proxy, and nothing else can ' +
+    'hold a push to particular branches. With branches set, a GitHub App grant is delivered ' +
+    '<strong>read-only</strong> and a personal token not at all, until an admin enables ' +
+    '<code>executors.git_proxy</code>.</span>';
+}
+
+function ghAppBranchCell(a) {
+  if (a.access !== 'write') return '';
+  const br = a.branches || [];
+  let html = '<div style="font-size:11px;margin-top:4px">' + (br.length
+    ? 'branches: ' + br.map(b => '<code>' + esc(b) + '</code>').join(' ')
+    : '<span style="color:var(--muted)">any branch the hub allows</span>') + '</div>';
+  const note = {
+    proxy: ['ok', '&#128274; enforced by the git proxy'],
+    read_only: ['warn', '&#9888; read-only here: no git proxy to enforce branches'],
+    not_delivered: ['warn', '&#9888; not delivered: no git proxy to enforce branches'],
+    unavailable: ['warn', '&#9888; not delivered: git proxy configured but down'],
+  }[a.branch_enforcement];
+  if (note) {
+    html += '<div style="font-size:11px;margin-top:2px;color:var(--' +
+      (note[0] === 'ok' ? 'green' : 'yellow') + ')">' + note[1] + '</div>';
+  }
+  return html;
+}
+
+// ghAppEditRow edits one assignment; saving replaces its grant (grants are immutable).
+function ghAppEditRow(a) {
+  const write = a.access === 'write';
+  return '<tr class="gh-edit-row"><td colspan="5" style="background:var(--hover-bg)">' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<select class="input gh-edit-access" style="max-width:150px">' +
+        '<option value="read"' + (write ? '' : ' selected') + '>Read only</option>' +
+        '<option value="write"' + (write ? ' selected' : '') + '>Read and write</option>' +
+      '</select>' +
+      '<input class="input gh-edit-branches" style="flex:1;min-width:200px' + (write ? '' : ';display:none') +
+        '" placeholder="Push to branches — e.g. cloop/*, feature/**" value="' +
+        esc((a.branches || []).join(', ')) + '">' +
+      '<button class="btn btn-sm btn-primary" data-gh-edit-save="' + esc(a.grant_id) + '">Save</button>' +
+      '<button class="btn btn-sm" data-gh-edit-cancel="1">Cancel</button>' +
+    '</div>' +
+    '<div class="gh-branch-hint" style="font-size:11px;color:var(--muted);margin-top:6px' +
+      (write ? '' : ';display:none') + '">' + ghAppBranchHint() + '</div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-top:4px">Saving replaces the grant: ' +
+      'a run in progress loses the old access at once and receives the new at its next lease.</div>' +
+    '</td></tr>';
+}
 
 function ghAppRenderAssignments() {
   const body = document.getElementById('projectReposBody');
@@ -230,13 +303,18 @@ function ghAppRenderAssignments() {
         const revoke = canGrant
           ? '<button class="btn btn-sm btn-danger" data-gh-revoke="' + esc(a.grant_id) + '">Revoke</button>'
           : '';
+        // A wildcard grant reaching this project is edited where it was made.
+        const edit = canGrant && a.replaceable
+          ? '<button class="btn btn-sm" data-gh-edit="' + esc(a.grant_id) + '">Edit</button> '
+          : '';
         return '<tr><td>' + repos + '</td>' +
           '<td><span class="badge ' + (a.access === 'write' ? 'running' : 'complete') +
-            '" style="font-size:10px">' + esc(a.access) + '</span></td>' +
+            '" style="font-size:10px">' + esc(a.access) + '</span>' + ghAppBranchCell(a) + '</td>' +
           '<td>' + esc(a.secret_name) + ' <span style="font-size:10px;color:var(--muted)">' +
             esc(a.kind) + '</span></td>' +
           '<td style="font-size:11px">' + exp + '</td>' +
-          '<td style="text-align:right">' + revoke + '</td></tr>';
+          '<td style="text-align:right;white-space:nowrap">' + edit + revoke + '</td></tr>' +
+          (ghAppState.editing === a.grant_id ? ghAppEditRow(a) : '');
       }).join('') +
       '</tbody></table>';
   }
@@ -259,6 +337,12 @@ function ghAppRenderAssignments() {
             '<option value="write">Read and write</option>' +
           '</select>' +
           '<button class="btn btn-sm" id="ghAssignLoad">List repositories</button>' +
+        '</div>' +
+        '<div id="ghAssignBranchGroup" style="display:none;margin-top:8px">' +
+          '<input id="ghAssignBranches" class="input" style="width:100%" ' +
+            'placeholder="Push to branches (optional) — e.g. cloop/*, feature/**">' +
+          '<div class="gh-branch-hint" style="font-size:11px;color:var(--muted);margin-top:4px">' +
+            ghAppBranchHint() + '</div>' +
         '</div>' +
         '<div id="ghAssignRepos" style="margin-top:10px"></div>' +
       '</div>';
@@ -317,13 +401,37 @@ function ghAppSubmitAssignment() {
     .filter(c => c.checked).map(c => c.value);
   if (!repos.length) { toast('Tick at least one repository', 'error'); return; }
 
+  const access = (acc && acc.value) || 'read';
+  const branches = access === 'write'
+    ? ghAppBranchList((document.getElementById('ghAssignBranches') || {}).value) : [];
   apiMethod('POST', '/api/projects/' + ghAppProjectIdx() + '/repositories', {
     secret: sel.value,
     repos: repos,
-    access: (acc && acc.value) || 'read',
+    access: access,
+    branches: branches,
   }).then(d => {
     if (!d || d.error) { toast((d && d.error) || 'could not assign', 'error'); return; }
     toast('Granted ' + repos.length + ' repositor' + (repos.length === 1 ? 'y' : 'ies'), 'success');
+    loadProjectRepositories();
+  }).catch(e => toast(String(e && e.message ? e.message : e), 'error'));
+}
+
+function ghAppSaveEdit(grantID, row) {
+  const a = ghAppState.assignments.find(x => x.grant_id === grantID);
+  if (!a || !row) return;
+  const access = (row.querySelector('.gh-edit-access') || {}).value || a.access;
+  const branches = access === 'write'
+    ? ghAppBranchList((row.querySelector('.gh-edit-branches') || {}).value) : [];
+  apiMethod('POST', '/api/projects/' + ghAppProjectIdx() + '/repositories', {
+    secret: a.secret_id,
+    repos: a.repos,
+    access: access,
+    branches: branches,
+    replaces: grantID,
+  }).then(d => {
+    if (!d || d.error) { toast((d && d.error) || 'could not change access', 'error'); return; }
+    ghAppState.editing = '';
+    toast('Access updated', 'success');
     loadProjectRepositories();
   }).catch(e => toast(String(e && e.message ? e.message : e), 'error'));
 }
@@ -357,4 +465,30 @@ document.addEventListener('click', function(ev) {
 
   if (t.closest('#ghAssignLoad')) { ghAppLoadRepos(); return; }
   if (t.closest('#ghAssignSubmit')) { ghAppSubmitAssignment(); return; }
+
+  const edit = t.closest('[data-gh-edit]');
+  if (edit) { ghAppState.editing = edit.getAttribute('data-gh-edit'); ghAppRenderAssignments(); return; }
+  if (t.closest('[data-gh-edit-cancel]')) { ghAppState.editing = ''; ghAppRenderAssignments(); return; }
+  const save = t.closest('[data-gh-edit-save]');
+  if (save) { ghAppSaveEdit(save.getAttribute('data-gh-edit-save'), save.closest('tr')); return; }
+});
+
+// The access level shows or hides its branch field; change, so keyboards work too.
+document.addEventListener('change', function(ev) {
+  const t = ev.target;
+  if (!t || !t.closest) return;
+  const write = t.value === 'write';
+  if (t.id === 'ghAssignAccess') {
+    const g = document.getElementById('ghAssignBranchGroup');
+    if (g) g.style.display = write ? '' : 'none';
+    return;
+  }
+  if (t.classList && t.classList.contains('gh-edit-access')) {
+    const row = t.closest('tr');
+    if (!row) return;
+    const input = row.querySelector('.gh-edit-branches');
+    const hint = row.querySelector('.gh-branch-hint');
+    if (input) input.style.display = write ? '' : 'none';
+    if (hint) hint.style.display = write ? '' : 'none';
+  }
 });
