@@ -429,6 +429,12 @@ type GitCredential struct {
 	// ExpiresAt is the lease deadline, so a driver can refuse to start a
 	// provisioning step whose credential will expire mid-fetch.
 	ExpiresAt time.Time
+	// Branches is the authorising grant's branch allowlist, when it has one:
+	// branch-name globs every push made with this credential must match
+	// (Task 20340). Not secret, and not enforceable by anything that holds
+	// the credential — a git proxy between the holder and the forge is what
+	// applies it (see pkg/executor/gitproxycreds).
+	Branches []string
 }
 
 // Empty reports whether there is no credential to deliver.

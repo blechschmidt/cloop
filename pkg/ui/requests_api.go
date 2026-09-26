@@ -133,12 +133,14 @@ type createRequestBody struct {
 	Repos       []string `json:"repos,omitempty"`
 	Devices     []string `json:"devices,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
-	Namespaces  []string `json:"namespaces,omitempty"`
-	Contexts    []string `json:"contexts,omitempty"`
-	Hosts       []string `json:"hosts,omitempty"`
-	Registries  []string `json:"registries,omitempty"`
-	EnvKeys     []string `json:"env_keys,omitempty"`
-	Writable    bool     `json:"writable,omitempty"`
+	// Branches asks for a push limited to these branches (Task 20340).
+	Branches   []string `json:"branches,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+	Contexts   []string `json:"contexts,omitempty"`
+	Hosts      []string `json:"hosts,omitempty"`
+	Registries []string `json:"registries,omitempty"`
+	EnvKeys    []string `json:"env_keys,omitempty"`
+	Writable   bool     `json:"writable,omitempty"`
 }
 
 // decideRequestBody is POST /api/grant-requests/{id}/{approve,deny}.
@@ -272,6 +274,7 @@ func (s *Server) handleGrantRequestCreate(w http.ResponseWriter, r *http.Request
 			Repos:       cleanList(body.Repos),
 			Devices:     cleanList(body.Devices),
 			Permissions: cleanList(body.Permissions),
+			Branches:    cleanList(body.Branches),
 			Namespaces:  cleanList(body.Namespaces),
 			Contexts:    cleanList(body.Contexts),
 			Hosts:       cleanList(body.Hosts),

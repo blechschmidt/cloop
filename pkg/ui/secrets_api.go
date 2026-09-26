@@ -194,6 +194,13 @@ type grantView struct {
 	// difference between a bounded credential and a broad one. A user who
 	// stored a personal token has a right to know which hub they are on.
 	Enforcement string `json:"enforcement,omitempty"`
+
+	// BranchEnforcement is the same question for a GitHub grant's branch
+	// allowlist (Task 20340), which only the git proxy can enforce: "proxy",
+	// or what the broker does instead on a hub without one — "read_only",
+	// "not_delivered", or "unavailable" when a configured proxy is down. See
+	// branchEnforcement. Empty for a grant with no branch list.
+	BranchEnforcement string `json:"branch_enforcement,omitempty"`
 }
 
 // grantConstraintsView carries every constraint dimension either broker
@@ -203,8 +210,10 @@ type grantConstraintsView struct {
 	Repos       []string `json:"repos,omitempty"`
 	Devices     []string `json:"devices,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
-	Namespaces  []string `json:"namespaces,omitempty"`
-	Contexts    []string `json:"contexts,omitempty"`
+	// Branches is a GitHub grant's branch allowlist for pushes.
+	Branches   []string `json:"branches,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+	Contexts   []string `json:"contexts,omitempty"`
 	// Verbs is the kubeconfig RBAC verb allowlist, exactly as the grant
 	// stores it — empty when the operator said nothing, which is a different
 	// fact from "read-only" and is why ReadOnly is sent beside it.
@@ -837,6 +846,7 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 			Repos:       g.Constraints.Repos,
 			Devices:     g.Constraints.Devices,
 			Permissions: g.Constraints.Permissions,
+			Branches:    g.Constraints.BranchNames(),
 			Namespaces:  g.Constraints.Namespaces,
 			Contexts:    g.Constraints.Contexts,
 			Verbs:       g.Constraints.Verbs,
@@ -845,12 +855,13 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 			EnvKeys:     g.Constraints.EnvKeys,
 			Writable:    g.Constraints.Writable,
 		},
-		Enforcement:      grantEnforcement(sec.Kind),
-		CreatedAt:        g.CreatedAt,
-		CreatedBy:        g.CreatedBy,
-		Status:           status,
-		Active:           active,
-		RemainingSeconds: remaining,
+		Enforcement:       grantEnforcement(sec.Kind),
+		BranchEnforcement: branchEnforcement(sec.Kind, g.Constraints),
+		CreatedAt:         g.CreatedAt,
+		CreatedBy:         g.CreatedBy,
+		Status:            status,
+		Active:            active,
+		RemainingSeconds:  remaining,
 	}
 	// Only for kubeconfig. KubeReadOnly answers true for every other kind too —
 	// they carry no verbs, so the read-only set is trivially what they resolve
@@ -926,8 +937,11 @@ type createGrantRequest struct {
 	Repos       []string `json:"repos"`
 	Devices     []string `json:"devices"`
 	Permissions []string `json:"permissions"`
-	Namespaces  []string `json:"namespaces"`
-	Contexts    []string `json:"contexts"`
+	// Branches limits where a GitHub grant may push. The broker refuses it on
+	// a grant that cannot push, and on every other kind.
+	Branches   []string `json:"branches"`
+	Namespaces []string `json:"namespaces"`
+	Contexts   []string `json:"contexts"`
 	// Verbs is the kubeconfig RBAC verb allowlist. Absent means read-only —
 	// get, list and watch — so a panel that omits the field grants the safe
 	// reading rather than an unconstrained one. The broker rejects it on any
@@ -1021,6 +1035,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 			Repos:       cleanList(req.Repos),
 			Devices:     cleanList(req.Devices),
 			Permissions: cleanList(req.Permissions),
+			Branches:    cleanList(req.Branches),
 			Namespaces:  cleanList(req.Namespaces),
 			Contexts:    cleanList(req.Contexts),
 			Verbs:       cleanList(req.Verbs),

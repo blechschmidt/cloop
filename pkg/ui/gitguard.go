@@ -73,7 +73,7 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 			"grant %s carries no repository allowlist", req.GrantID)
 	}
 
-	policy, readOnly := guardPolicy(g.svc.policy, req.Permissions)
+	policy, readOnly := guardPolicy(g.svc.policy, req.Permissions, req.Branches)
 
 	// The actor is the credential's owner when there is one. A personal PAT
 	// spent on a project should name the person in the proxy's audit rows,
@@ -107,8 +107,13 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 
 	cred := m.Credential()
 	mode := "read-write"
+	var pushRefs []string
 	if readOnly {
 		mode = "read-only"
+	} else {
+		// The session's own normalised copy, so what the workload is told is
+		// exactly what the proxy will compare its push against.
+		pushRefs = append([]string(nil), m.Session.Policy.AllowedRefs...)
 	}
 	return secretbroker.GitGuardResult{
 		BaseURL:   g.svc.baseURL,
@@ -117,8 +122,9 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		ExpiresAt: m.Session.ExpiresAt,
 		SessionID: m.Session.ID,
 		ReadOnly:  readOnly,
+		PushRefs:  pushRefs,
 		Summary: fmt.Sprintf("%s via git proxy, repos %s, refs %s",
-			mode, strings.Join(req.Repos, "|"), strings.Join(policy.AllowedRefs, "|")),
+			mode, strings.Join(req.Repos, "|"), m.Session.Policy.RefSummary()),
 	}, nil
 }
 
@@ -138,7 +144,13 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 // Delete is never granted regardless of the permission set. A write-back has
 // no reason to remove a ref, and "contents:write" is far too coarse a thing to
 // read as permission to destroy a branch in someone's personal repository.
-func guardPolicy(base gitproxy.Policy, permissions []string) (gitproxy.Policy, bool) {
+//
+// A grant's branch allowlist narrows where the remaining writes may land
+// (Task 20340). It becomes the policy's RestrictRefs rather than its
+// AllowedRefs, so the operator's allowlist stays the ceiling: a ref has to be
+// admitted by both, and a grant that names main on a hub restricted to
+// refs/heads/cloop/** gains nothing by it.
+func guardPolicy(base gitproxy.Policy, permissions, branches []string) (gitproxy.Policy, bool) {
 	c := secretbroker.Constraints{Permissions: permissions}
 	mayWrite := c.AllowsPermission("contents:write")
 
@@ -168,7 +180,24 @@ func guardPolicy(base gitproxy.Policy, permissions []string) (gitproxy.Policy, b
 	}
 	// Otherwise create/update stay as the operator configured them: the grant
 	// authorises writing, and how far is the hub's policy to say.
-	return pol, !pol.AllowCreate && !pol.AllowUpdate
+	readOnly := !pol.AllowCreate && !pol.AllowUpdate
+
+	// Replaced, never appended to: the base is the hub's policy, which has no
+	// restriction of its own, and a fresh slice for the aliasing reason above.
+	// A read-only session gets none, because there is no push for it to
+	// narrow — and ValidateFor refuses a branch list on a grant that cannot
+	// push, so a read-only grant carrying one should not exist anyway.
+	pol.RestrictRefs = nil
+	if !readOnly && len(branches) > 0 {
+		pol.RestrictRefs = secretbroker.Constraints{Branches: branches}.BranchRefPatterns()
+		if len(pol.RestrictRefs) == 0 {
+			// Every entry was blank. A list that named something but narrows
+			// to nothing must not read as "no restriction"; Normalize turns
+			// this into a pattern Validate refuses, failing the mint closed.
+			pol.RestrictRefs = []string{""}
+		}
+	}
+	return pol, readOnly
 }
 
 // attachGitGuard points a broker at the running proxy, if there is one.
@@ -268,6 +297,88 @@ func grantEnforcement(kind secretbroker.Kind) string {
 	default:
 		return ""
 	}
+}
+
+// What becomes of a grant's branch allowlist on this hub (Task 20340). See
+// branchEnforcement.
+const (
+	// branchesByProxy: the git proxy holds the token and refuses a push to any
+	// branch outside the list, outside the sandbox.
+	branchesByProxy = "proxy"
+	// branchesProxyDown: the config asks for a proxy that is not running, so
+	// the grant's GitHub lease fails rather than deliver the token unguarded.
+	branchesProxyDown = "unavailable"
+	// branchesReadOnly: no proxy on this hub, so a github_app grant is minted
+	// read-only — GitHub enforces that — and its push is withheld.
+	branchesReadOnly = "read_only"
+	// branchesNotDelivered: no proxy on this hub, and a github_pat cannot be
+	// narrowed to read-only, so the grant is not delivered at all.
+	branchesNotDelivered = "not_delivered"
+)
+
+// branchEnforcement reports what a grant's branch allowlist amounts to on this
+// hub, or "" for a grant that has none.
+//
+// It exists because the list is the one GitHub constraint that nothing but the
+// proxy can enforce, so the same grant means three different things on three
+// hubs: an enforced boundary, a read-only credential, or no credential at all.
+// A row that showed "branches: feature/*" identically in all three cases would
+// be claiming the first while delivering one of the others. The rule mirrors
+// the broker's (secretbroker.githubMaterial and githubAppMaterial) and the
+// attachment attachGitGuard makes, and gitguard_test.go holds them together.
+func branchEnforcement(kind secretbroker.Kind, c secretbroker.Constraints) string {
+	if !c.RestrictsBranches() {
+		return ""
+	}
+	switch {
+	case activeGitProxy() != nil:
+		return branchesByProxy
+	case gitProxyRequired.Load():
+		return branchesProxyDown
+	case kind == secretbroker.KindGitHubApp:
+		return branchesReadOnly
+	case kind == secretbroker.KindGitHubPAT:
+		return branchesNotDelivered
+	}
+	return ""
+}
+
+// gitProxyStatusView is what a panel that offers a branch allowlist needs to
+// know before anyone types one: whether this hub can enforce it, and inside
+// which ceiling.
+type gitProxyStatusView struct {
+	// Running: the proxy is up, so a branch allowlist is enforced.
+	Running bool `json:"running"`
+	// Required: the config asks for one. With Running false this is a hub
+	// whose proxy failed to start, and GitHub leases fail closed.
+	Required bool `json:"required"`
+	// PushRefs is the hub's own allowlist for pushes, as full ref patterns. A
+	// grant's branches only narrow within it. Empty when no proxy runs.
+	PushRefs []string `json:"push_refs,omitempty"`
+}
+
+// gitProxyStatus reports the running proxy's state for the dashboard.
+//
+// The ceiling is the running proxy's, not the config file's: a panel that
+// quoted the file would be describing a policy this process may not have
+// loaded. No listen address, certificate path or session count — none of that
+// helps someone choose a branch, and all of it is reconnaissance.
+func gitProxyStatus() gitProxyStatusView {
+	v := gitProxyStatusView{Required: gitProxyRequired.Load()}
+	if svc := activeGitProxy(); svc != nil {
+		v.Running = true
+		pol := svc.policy
+		if pol.IsZero() {
+			// guardPolicy's own fallback, so the panel names the ceiling the
+			// guard will actually apply.
+			pol = gitproxy.WriteBackPolicy()
+		}
+		pol.Normalize()
+		if pol.AllowCreate || pol.AllowUpdate {
+			v.PushRefs = append([]string(nil), pol.AllowedRefs...)
+		}
+	}
+	return v
 }
 
 // unavailableGitGuard is what a hub that asked for a proxy and has not got one

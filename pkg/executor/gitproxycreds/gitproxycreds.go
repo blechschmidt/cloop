@@ -124,7 +124,22 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		return executor.WorkspaceAccess{}, noop, errors.New("gitproxycreds: source is not configured")
 	}
 
-	access, release, err := s.Inner.ForWorkspace(ctx, projectID, w)
+	// Leased as proxied when the inner source can be told so: this decorator
+	// is about to keep the credential on the hub, which is what lets a grant
+	// limited to certain branches keep its push (the broker withholds it from
+	// a credential headed anywhere else). An inner source that cannot be told
+	// is leased the ordinary way — the safe default, since it can only mean a
+	// push withheld that did not need to be.
+	var (
+		access  executor.WorkspaceAccess
+		release func()
+		err     error
+	)
+	if held, ok := s.Inner.(HeldSource); ok {
+		access, release, err = held.ForProxiedWorkspace(ctx, projectID, w)
+	} else {
+		access, release, err = s.Inner.ForWorkspace(ctx, projectID, w)
+	}
 	if release == nil {
 		release = noop
 	}
@@ -144,6 +159,15 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		return access, release, nil
 	}
 
+	// The grant's own branch list narrows the hub's policy for this session
+	// (Task 20340): the hub's allowlist stays the ceiling, and a push has to
+	// match both. A grant with no list leaves the policy exactly as configured.
+	pol := s.Policy
+	pol.RestrictRefs = nil
+	if len(access.Credential.Branches) > 0 {
+		pol.RestrictRefs = append([]string(nil), access.Credential.Branches...)
+	}
+
 	m, err := s.Registry.Mint(gitproxy.MintRequest{
 		Upstream: w.Repo,
 		Credential: gitproxy.Credential{
@@ -152,7 +176,7 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			GrantID:  access.Credential.GrantID,
 			LeaseID:  access.Credential.LeaseID,
 		},
-		Policy:    s.Policy,
+		Policy:    pol,
 		TTL:       s.TTL,
 		ProjectID: projectID,
 		// No TaskID. ForWorkspace is not told one, and filling the field with
@@ -188,9 +212,25 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			// now actually bounds the sandbox: before interception the sandbox
 			// held the PAT and its access ended never, whatever the lease said.
 			ExpiresAt: m.Session.ExpiresAt,
+			// Passed on for anything downstream that reports it. The session
+			// above is what enforces it.
+			Branches: access.Credential.Branches,
 		},
 		Repo: m.RepoURL,
 	}, release, nil
+}
+
+// HeldSource is implemented by an inner source that can lease a credential
+// knowing a git proxy, not the executor, will hold it. gitcreds.BrokerSource
+// does; see its ForProxiedWorkspace for what that changes.
+//
+// Discovered by type assertion rather than added to
+// executor.WorkspaceCredentialSource, because only this decorator has anything
+// to say through it and every other implementation — the fakes in driver
+// tests included — would otherwise have to grow a method that means nothing
+// to them.
+type HeldSource interface {
+	ForProxiedWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error)
 }
 
 // Static assertion: a signature change on the interface must fail here rather

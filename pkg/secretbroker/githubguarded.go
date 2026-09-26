@@ -234,6 +234,27 @@ func deliverGuardedGitHub(mat Material, res GitGuardResult) (Material, error) {
 		mat.Env["CLOOP_GIT_PROXY_MODE"] = "read-only"
 	} else {
 		mat.Env["CLOOP_GIT_PROXY_MODE"] = "read-write"
+		// Where a push will be accepted, so the workload can put its work on a
+		// branch the proxy admits instead of learning the policy one refused
+		// push at a time: the hub's allowlist, and the grant's own branch list
+		// that narrows it (Task 20340). Patterns, not credentials.
+		if len(res.PushRefs) > 0 {
+			mat.Env[GitPushRefsEnvKey] = strings.Join(res.PushRefs, ",")
+		}
+		if b := mat.Constraints.BranchNames(); len(b) > 0 {
+			mat.Env[GitHubPushBranchesEnvKey] = strings.Join(b, ",")
+		}
 	}
 	return mat, nil
 }
+
+// The variables a guarded lease uses to say where a push will be accepted.
+// Exported for pkg/pm, which renders them into the agent's prompt.
+const (
+	// GitPushRefsEnvKey is the hub's own ref allowlist for pushes, as full ref
+	// patterns: "refs/heads/cloop/**" on a hub that kept the default.
+	GitPushRefsEnvKey = "CLOOP_GIT_PUSH_REFS"
+	// GitHubPushBranchesEnvKey is the grant's branch allowlist, as branch
+	// names ("feature/*"), when it has one. A push must match both lists.
+	GitHubPushBranchesEnvKey = "CLOOP_GITHUB_PUSH_BRANCHES"
+)

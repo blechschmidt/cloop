@@ -33,7 +33,19 @@ const (
 	envRepoPerms     = "CLOOP_GITHUB_PERMISSIONS"
 	envGitProxyURL   = "CLOOP_GIT_PROXY_URL"
 	envGitProxyMode  = "CLOOP_GIT_PROXY_MODE"
+
+	// Where a push will be accepted, and why one will not be (Task 20340):
+	// secretbroker.GitHubPushBranchesEnvKey, GitPushRefsEnvKey and
+	// GitHubWriteWithheldEnvKey. repoaccess_test.go holds the two spellings
+	// together.
+	envPushBranches  = "CLOOP_GITHUB_PUSH_BRANCHES"
+	envPushRefs      = "CLOOP_GIT_PUSH_REFS"
+	envWriteWithheld = "CLOOP_GITHUB_WRITE_WITHHELD"
 )
+
+// maxAnnouncedBranches bounds the branch patterns rendered into a prompt, for
+// the reason maxAnnouncedRepos does. A grant carries at most 32.
+const maxAnnouncedBranches = 32
 
 // maxAnnouncedRepos bounds the list rendered into a prompt. An allowlist is
 // operator-authored and normally a handful of entries; the bound is for the one
@@ -54,6 +66,13 @@ func RepositoryAccessSection(getenv func(string) string) string {
 	}
 	proxied := strings.TrimSpace(getenv(envGitProxyURL)) != ""
 	mode := repoAccess(getenv(envRepoPerms), getenv(envGitProxyMode))
+	// A grant whose push was withheld is read-only, whatever its permission
+	// list said when it was written: the broker minted the credential without
+	// the write, and the agent is about to be told why.
+	withheld := strings.TrimSpace(getenv(envWriteWithheld))
+	if withheld != "" {
+		mode = accessRead
+	}
 
 	access := "access as granted"
 	switch mode {
@@ -96,6 +115,13 @@ func RepositoryAccessSection(getenv func(string) string) string {
 		"store a token, and do not change the remote URL.\n")
 
 	if mode == accessRead {
+		if withheld != "" {
+			fmt.Fprintf(&b, "Pushing is withheld on this hub: %s. You can clone and fetch, but a push will "+
+				"be refused. If the task needs a push, do everything else, then end with TASK_FAILED and say "+
+				"that the push was withheld because the grant's branch restriction cannot be enforced here.\n\n",
+				withheld)
+			return b.String()
+		}
 		b.WriteString("This grant is read-only: you can clone and fetch, but a push will be refused. If the " +
 			"task needs a push, do everything else, then end with TASK_FAILED and say that write " +
 			"access to the repository is missing.\n\n")
@@ -103,13 +129,104 @@ func RepositoryAccessSection(getenv func(string) string) string {
 	}
 	b.WriteString("Work that is committed but not pushed stays on this machine, where nobody will see " +
 		"it: to deliver a change, commit it in the clone and push it to that clone's origin.")
-	if proxied {
+
+	branches := splitRepoList(getenv(envPushBranches))
+	ceiling := splitRepoList(getenv(envPushRefs))
+	switch {
+	case len(branches) > 0:
+		writeBranchRule(&b, branches, ceiling, proxied)
+	case proxied && len(ceiling) > 0 && !coversEveryBranch(ceiling):
+		fmt.Fprintf(&b, " Pushes pass through cloop's git proxy, which accepts only branches matching %s. "+
+			"Commit on a branch that matches — for example `%s` — push that branch, and name it in "+
+			"your summary.", codeList(branchNames(ceiling), maxAnnouncedBranches), exampleBranch(branchNames(ceiling)))
+	case proxied && len(ceiling) == 0:
+		// A hub from before the proxy announced its policy: the advice that was
+		// right for its default.
 		b.WriteString(" Pushes pass through cloop's git proxy, which enforces a branch policy; if " +
 			"it refuses a push to the branch you chose, push to a new branch under `cloop/` " +
 			"(for example `cloop/<short-description>`) and say so in your summary.")
 	}
 	b.WriteString("\n\n")
 	return b.String()
+}
+
+// writeBranchRule renders the grant's branch restriction (Task 20340).
+//
+// Told up front, because the alternative is an agent that does the work,
+// commits to the default branch, and discovers the rule as a refused push at
+// the very end — which is where the restriction was invented, on a test
+// project whose agent pushed straight to main.
+func writeBranchRule(b *strings.Builder, branches, ceiling []string, proxied bool) {
+	fmt.Fprintf(b, " Pushes are limited to branches matching %s (`*` stays within one path segment; "+
+		"a trailing `/**` covers any depth). A push to any other branch is refused, so unless the "+
+		"repository's default branch is in that list, do not push to it: commit on a branch that "+
+		"matches — for example `%s` — push that branch, and name it in your summary.",
+		codeList(branches, maxAnnouncedBranches), exampleBranch(branches))
+	if len(ceiling) > 0 && !coversEveryBranch(ceiling) {
+		fmt.Fprintf(b, " This hub also limits pushes to %s, and a branch has to satisfy both.",
+			codeList(branchNames(ceiling), maxAnnouncedBranches))
+	}
+	if proxied {
+		b.WriteString(" cloop's git proxy enforces this outside the sandbox.")
+	}
+}
+
+// branchNames strips the refs/heads/ prefix from ref patterns, which is the form
+// a branch is named in everywhere an agent reads one. Other namespaces, which a
+// hub's allowlist can name, keep their full form.
+func branchNames(refs []string) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, strings.TrimPrefix(r, "refs/heads/"))
+	}
+	return out
+}
+
+// coversEveryBranch reports whether a hub's allowlist admits every branch, in
+// which case repeating it would only be noise.
+func coversEveryBranch(refs []string) bool {
+	for _, r := range refs {
+		switch r {
+		case "refs/**", "refs/heads/**":
+			return true
+		}
+	}
+	return false
+}
+
+// exampleBranch turns the first usable pattern into a branch name an agent can
+// adapt: wildcards become a placeholder, a literal branch stays as it is.
+func exampleBranch(patterns []string) string {
+	for _, p := range patterns {
+		p = strings.TrimPrefix(strings.TrimSpace(p), "refs/heads/")
+		if p == "" || strings.HasPrefix(p, "refs/") {
+			continue
+		}
+		if p == "**" {
+			return "cloop/<short-description>"
+		}
+		p = strings.TrimSuffix(p, "**") // "feature/**" → "feature/"
+		p = strings.ReplaceAll(p, "*", "<short-description>")
+		p = strings.ReplaceAll(p, "?", "x")
+		if strings.HasSuffix(p, "/") {
+			p += "<short-description>"
+		}
+		return p
+	}
+	return "cloop/<short-description>"
+}
+
+// codeList renders patterns as a comma-separated list of code spans, bounded.
+func codeList(items []string, max int) string {
+	var parts []string
+	for i, it := range items {
+		if i == max {
+			parts = append(parts, fmt.Sprintf("and %d more", len(items)-max))
+			break
+		}
+		parts = append(parts, "`"+it+"`")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // accessMode is what the lease says the workload may do to its repositories.

@@ -551,6 +551,21 @@ type Requester struct {
 	// Empty for every non-dispatch caller — a CLI lease, a UI inspection — and
 	// an empty run id simply leaves the field off the row.
 	RunID string
+	// GitHubProxied says the caller will hand any GitHub credential in this
+	// lease to cloop's git proxy itself, and never to a workload — which is
+	// what workspace provisioning does when the hub runs a proxy
+	// (pkg/executor/gitproxycreds). Like RunID it is never matched against.
+	//
+	// It matters to exactly one decision: whether a grant limited to certain
+	// branches may be delivered with its push intact. Without a proxy in the
+	// path the broker withholds that push (Task 20340), because nothing else
+	// can hold a push to the list; with one, the proxy does, and withholding
+	// would break the very pushes the grant authorises.
+	//
+	// Set it only when it is true of every material the lease will carry. A
+	// caller that set it and then materialised the lease into a sandbox would
+	// be delivering a push the grant restricted, unrestricted.
+	GitHubProxied bool
 }
 
 // Wildcard reports whether this subject selects an open-ended set of

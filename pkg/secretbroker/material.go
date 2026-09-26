@@ -63,10 +63,11 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		// label the proxy session it mints; they are carried on the Material
 		// rather than passed down every deliver* function because every one of
 		// them would have to grow the parameter to reach the one that uses it.
-		projectID:  req.ProjectID,
-		executorID: req.ExecutorID,
-		actor:      actor,
-		owner:      s.Owner,
+		projectID:   req.ProjectID,
+		executorID:  req.ExecutorID,
+		actor:       actor,
+		owner:       s.Owner,
+		heldByProxy: req.GitHubProxied,
 	}
 
 	switch s.Kind {
@@ -158,6 +159,7 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 			Token:       token,
 			Repos:       mat.Constraints.Repos,
 			Permissions: mat.Constraints.Permissions,
+			Branches:    mat.Constraints.Branches,
 			SecretName:  mat.SecretName,
 			SecretID:    mat.SecretID,
 			GrantID:     mat.GrantID,
@@ -190,6 +192,21 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 			return mat, nil
 		}
 		// Declined, not failed: the hub has no proxy running and said so.
+	}
+
+	// Unguarded from here on, so the token itself is about to enter the
+	// sandbox. A PAT is whatever its owner minted — GitHub offers no way to
+	// narrow one after the fact — so a grant that limits its pushes to certain
+	// branches cannot be honoured by delivering it: git's credential protocol
+	// never says which ref a push is for, and nothing in the sandbox can hold
+	// the line. The App kind can fall back to a read-only token; this one has
+	// no such token to fall back to.
+	if mat.Constraints.RestrictsBranches() && !mat.heldByProxy {
+		return Material{}, wrapf(ErrBranchesUnenforced,
+			"grant %s limits pushes to branches %s, which only cloop's git proxy can enforce, and "+
+				"this hub runs none; a github_pat cannot be narrowed to read-only instead, so it is "+
+				"not delivered — enable executors.git_proxy, or grant without a branch allowlist",
+			mat.GrantID, strings.Join(mat.Constraints.BranchNames(), ", "))
 	}
 
 	mat, err := deliverGitHubToken(mat, token)
@@ -235,6 +252,28 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			"github_app grant %s carries no repository allowlist", mat.GrantID)
 	}
 
+	// A branch allowlist is only ever enforced by the git proxy, so with no
+	// guard on this broker the grant cannot have the push it names — git's
+	// credential protocol never says which ref a push is for, and a token in
+	// the sandbox pushes wherever GitHub lets it. Unlike a PAT, an App token
+	// can be minted narrower than the grant, and GitHub then enforces it, so
+	// the write is withheld rather than the whole grant: the workload can
+	// still clone and read, and is told why its push will be refused.
+	//
+	// Decided before minting rather than after, so that a token which could
+	// push is never created for a lease that must not have one.
+	withheld := ""
+	if mat.Constraints.RestrictsBranches() && !githubPushGuarded(b, mat) {
+		withheld = fmt.Sprintf("this grant limits pushes to branches %s, which only cloop's git "+
+			"proxy can enforce, and this hub runs none",
+			strings.Join(mat.Constraints.BranchNames(), ", "))
+		ro, rerr := readOnlyGitHubConstraints(mat.Constraints)
+		if rerr != nil {
+			return Material{}, rerr
+		}
+		mat.Constraints = ro
+	}
+
 	res, err := b.appMinter.mint(ctx, cred, mat.Constraints)
 	if err != nil {
 		return Material{}, err
@@ -260,6 +299,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			Token:       res.token.Token,
 			Repos:       mat.Constraints.Repos,
 			Permissions: mat.Constraints.Permissions,
+			Branches:    mat.Constraints.Branches,
 			SecretName:  mat.SecretName,
 			SecretID:    mat.SecretID,
 			GrantID:     mat.GrantID,
@@ -302,7 +342,17 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 				res.token.ExpiresAt.UTC().Format(time.RFC3339))
 			return mat, nil
 		}
-		// Declined, not failed: this hub runs no proxy. Fall through.
+		// Declined, not failed: this hub runs no proxy. Fall through — unless
+		// the token was minted able to push on the understanding that a proxy
+		// would hold it to the grant's branches. That understanding just failed,
+		// and a token that can push to every branch is exactly what the grant
+		// ruled out, so it is destroyed rather than delivered.
+		if mat.Constraints.RestrictsBranches() && !mat.heldByProxy {
+			b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
+			return Material{}, wrapf(ErrBranchesUnenforced,
+				"grant %s limits pushes to branches %s and the git guard declined to hold its token",
+				mat.GrantID, strings.Join(mat.Constraints.BranchNames(), ", "))
+		}
 	}
 
 	mat, err = deliverGitHubToken(mat, res.token.Token)
@@ -318,7 +368,65 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 
 	mat.Summary = fmt.Sprintf("github app installation %d token for %s, expires %s",
 		cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339))
+	if withheld != "" {
+		// Said to the workload, so that an agent asked to push reports the
+		// reason instead of retrying a refusal it cannot understand, and to the
+		// audit row, so that "why could this run not push" has its answer next
+		// to the lease that caused it. Neither is a credential.
+		mat.Env[GitHubWriteWithheldEnvKey] = withheld
+		mat.Summary += " (read-only: write withheld, " + withheld + ")"
+	}
 	return mat, nil
+}
+
+// githubPushGuarded reports whether a GitHub credential leased for mat will
+// reach git only through the git proxy — so a branch allowlist on its grant
+// is enforced — rather than as a token in a workload's hands.
+//
+// Two ways that is true: this broker has a guard that takes custody of the
+// token (the lease a sandbox receives), or the caller said it hands the token
+// to the proxy itself (workspace provisioning through gitproxycreds). A guard
+// that is attached but unavailable counts: it fails the lease outright, which
+// is stricter than anything withholding could do.
+func githubPushGuarded(b *Broker, mat Material) bool {
+	return mat.heldByProxy || (b != nil && b.GitGuard != nil)
+}
+
+// GitHubWriteWithheldEnvKey carries, into a workload's environment, the reason
+// a GitHub grant that authorises pushes was delivered read-only. Present only
+// when that happened. Exported for pkg/pm, which tells the agent.
+const GitHubWriteWithheldEnvKey = "CLOOP_GITHUB_WRITE_WITHHELD"
+
+// readOnlyGitHubConstraints returns c with every GitHub permission capped at
+// read, for a grant whose write authority cannot be delivered.
+//
+// Capped rather than replaced: the grant still reads what it was granted to
+// read — pull requests, issues, whatever it listed — and loses only the power
+// to change anything. A wildcard is not a list of scopes that can be capped
+// one by one, so it becomes contents:read, the one read an App grant always
+// carries. The branch list goes too, since without a push it restricts
+// nothing, and a read-only grant carrying one is what ValidateFor refuses.
+func readOnlyGitHubConstraints(c Constraints) (Constraints, error) {
+	perms, err := GitHubAppPermissions(c)
+	if err != nil {
+		return Constraints{}, err
+	}
+	out := c
+	out.Branches = nil
+	if perms == nil { // "*"
+		out.Permissions = []string{"contents:read"}
+		return out, nil
+	}
+	scopes := make([]string, 0, len(perms))
+	for scope := range perms {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	out.Permissions = make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		out.Permissions = append(out.Permissions, scope+":read")
+	}
+	return out, nil
 }
 
 // deliverGitHubToken lays a GitHub token out for an executor: the token file,

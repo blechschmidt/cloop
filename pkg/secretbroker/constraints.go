@@ -25,6 +25,23 @@ type Constraints struct {
 	// GitHub call sites via AllowsPermission; GitHub cannot narrow an
 	// already-issued PAT server-side.
 	Permissions []string `json:"permissions,omitempty"`
+	// Branches narrows where a github_pat or github_app grant may push:
+	// branch-name globs such as "cloop/*", "feature/**" or "develop". Empty
+	// means the grant adds no branch restriction of its own, and the hub's git
+	// proxy policy (executors.git_proxy.allowed_refs) is the only limit.
+	//
+	// Only a grant that authorises a push may carry one — a branch list on a
+	// read-only grant restricts nothing and would read as though it did — and
+	// it restricts branches only: a push of a tag, or of any other ref, is
+	// outside every branch list.
+	//
+	// Nothing inside a sandbox can enforce this, because git's credential
+	// protocol never says which ref a push is for. The git proxy can, since it
+	// reads every pushed command before forwarding it; see pkg/gitproxy
+	// Policy.RestrictRefs. Where no proxy guards the grant, the broker withholds
+	// the grant's write authority rather than deliver a credential that would
+	// ignore the list: see RestrictsBranches.
+	Branches []string `json:"branches,omitempty"`
 	// Namespaces is the Kubernetes namespace allowlist for kubeconfig.
 	Namespaces []string `json:"namespaces,omitempty"`
 	// Contexts is the kubeconfig context allowlist. The delivered
@@ -142,6 +159,100 @@ func validatePatterns(field string, ps []string) error {
 	return nil
 }
 
+// MaxBranchPatterns bounds a grant's branch allowlist. A handful is the real
+// shape; the bound exists because the proxy matches every pushed ref against
+// every pattern, and a caller should not get to choose how large that is.
+const MaxBranchPatterns = 32
+
+// branchRefPrefix is the namespace a branch allowlist lives in.
+const branchRefPrefix = "refs/heads/"
+
+// validateBranchPattern checks one entry of a branch allowlist.
+//
+// The rules are git's own branch-naming rules applied to a glob, plus the
+// matching semantics pkg/gitproxy enforces with — so a pattern that is accepted
+// here is one the proxy reads the way the operator meant, and one git could
+// actually push to:
+//
+//   - a narrower charset than git allows. Branch names with other characters
+//     exist, but this list is rendered into environment variables, prompts and
+//     comma-separated form fields, and a comma or a quote in a pattern would
+//     turn one entry into two in some of those places.
+//   - no empty, dot-leading or ".lock"-suffixed component, no "..", and no
+//     leading "-": the forms git refuses, so a pattern built from them could
+//     never match a branch that exists.
+//   - "**" only as a whole final component. pkg/gitproxy gives "/**" its "any
+//     depth" meaning only at the end; anywhere else path.Match would read it as
+//     two single-level stars, which is not what anyone typing it means.
+//
+// A "refs/heads/" prefix is accepted and means the same thing as its absence;
+// any other ref namespace is refused, because the field is a *branch* list and
+// a tag pattern in it would be a restriction the operator never sees rendered
+// as one.
+func validateBranchPattern(raw string) error {
+	p := strings.TrimSpace(raw)
+	switch {
+	case p == "":
+		return fmt.Errorf("%w: branches contains an empty pattern", ErrInvalidConstraint)
+	case len(p) > 200:
+		return fmt.Errorf("%w: branch pattern %q exceeds 200 characters", ErrInvalidConstraint, p)
+	}
+	name := strings.TrimPrefix(p, branchRefPrefix)
+	if strings.HasPrefix(name, "refs/") {
+		return fmt.Errorf("%w: branch pattern %q names a ref outside refs/heads/ — this list restricts "+
+			"branches only", ErrInvalidConstraint, p)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.', r == '/', r == '*', r == '?':
+		default:
+			return fmt.Errorf("%w: branch pattern %q contains %q; use letters, digits, '-', '_', '.', "+
+				"'/', and the wildcards '*' and '?'", ErrInvalidConstraint, p, string(r))
+		}
+	}
+	if strings.Contains(name, "..") || strings.HasSuffix(name, ".") {
+		return fmt.Errorf("%w: branch pattern %q contains \"..\" or ends with \".\", which git forbids "+
+			"in a branch name", ErrInvalidConstraint, p)
+	}
+	comps := strings.Split(name, "/")
+	for i, c := range comps {
+		switch {
+		case c == "":
+			return fmt.Errorf("%w: branch pattern %q has an empty path component", ErrInvalidConstraint, p)
+		case strings.HasPrefix(c, "."), strings.HasSuffix(c, ".lock"):
+			return fmt.Errorf("%w: branch pattern %q has a component git forbids (leading \".\" or "+
+				"\".lock\" suffix)", ErrInvalidConstraint, p)
+		case i == 0 && strings.HasPrefix(c, "-"):
+			return fmt.Errorf("%w: branch pattern %q starts with \"-\", which git forbids", ErrInvalidConstraint, p)
+		case strings.Contains(c, "**") && (c != "**" || i != len(comps)-1):
+			return fmt.Errorf("%w: branch pattern %q uses \"**\" inside a name; it is only meaningful as the "+
+				"whole last component (\"release/**\" is every branch below release/)", ErrInvalidConstraint, p)
+		}
+	}
+	// path.Match is the last word on the rest of the syntax, applied the way
+	// pkg/gitproxy applies it: with a trailing "/**" set aside.
+	probe := strings.TrimSuffix(branchRefPrefix+name, "/**")
+	if _, err := path.Match(probe, "refs/heads/probe"); err != nil {
+		return fmt.Errorf("%w: branch pattern %q is malformed: %v", ErrInvalidConstraint, p, err)
+	}
+	return nil
+}
+
+// validateBranches applies validateBranchPattern to a whole list and bounds it.
+func validateBranches(ps []string) error {
+	if len(ps) > MaxBranchPatterns {
+		return fmt.Errorf("%w: %d branch patterns, at most %d are allowed",
+			ErrInvalidConstraint, len(ps), MaxBranchPatterns)
+	}
+	for _, p := range ps {
+		if err := validateBranchPattern(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ValidateFor checks that these constraints are well-formed *and* that they
 // actually gate the given kind. A github_pat grant with no repo allowlist is
 // rejected here: there is no safe default for "which repositories may this
@@ -176,12 +287,30 @@ func (c Constraints) ValidateFor(kind Kind) error {
 			return err
 		}
 	}
+	if err := validateBranches(c.Branches); err != nil {
+		return err
+	}
 
 	switch kind {
 	case KindGitHubPAT, KindGitHubApp:
 		if len(c.Repos) == 0 {
 			return fmt.Errorf(
 				"%w: a %s grant needs a repository allowlist (--repos org/*, or --repos '*' to allow all)",
+				ErrInvalidConstraint, kind)
+		}
+		// A branch list says where a push may go, so on a grant that
+		// authorises no push it would describe a permission that does not
+		// exist. Refused rather than ignored: an operator who wrote one
+		// believes they granted something, and the place to find out
+		// otherwise is here, not in a sandbox that cannot push.
+		//
+		// The test is the one the git guard applies to decide whether a
+		// session may push at all, so the two cannot disagree about what
+		// "authorises a push" means.
+		if len(c.Branches) > 0 && !c.AllowsPermission("contents:write") {
+			return fmt.Errorf(
+				"%w: a branch allowlist limits where a grant may push, and this %s grant authorises "+
+					"no push — add contents:write to --permissions, or drop --branches",
 				ErrInvalidConstraint, kind)
 		}
 		if kind == KindGitHubApp {
@@ -262,7 +391,61 @@ func (c Constraints) ValidateFor(kind Kind) error {
 			"%w: a verb allowlist applies to kubeconfig grants, not %s",
 			ErrInvalidConstraint, kind)
 	}
+	if len(c.Branches) > 0 && kind != KindGitHubPAT && kind != KindGitHubApp {
+		return fmt.Errorf(
+			"%w: a branch allowlist applies to github_pat and github_app grants, not %s",
+			ErrInvalidConstraint, kind)
+	}
 	return nil
+}
+
+// RestrictsBranches reports whether this grant's pushes are limited to a
+// branch allowlist.
+//
+// It is the question every delivery path has to answer before handing over a
+// credential that can write, because the answer decides whether the credential
+// may leave the hub at all. A restricted grant is only ever honoured through
+// the git proxy; where there is none, the broker withholds the write rather
+// than deliver a credential that would ignore the list.
+func (c Constraints) RestrictsBranches() bool {
+	return len(c.Branches) > 0 && c.AllowsPermission("contents:write")
+}
+
+// BranchRefPatterns renders the branch allowlist as full ref patterns, the form
+// pkg/gitproxy matches pushed refs against: "cloop/*" becomes
+// "refs/heads/cloop/*", and an entry already written with the prefix is kept
+// as it is.
+func (c Constraints) BranchRefPatterns() []string {
+	if len(c.Branches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.Branches))
+	for _, b := range c.Branches {
+		b = strings.TrimSpace(b)
+		if b == "" {
+			continue
+		}
+		if !strings.HasPrefix(b, branchRefPrefix) {
+			b = branchRefPrefix + b
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// BranchNames is the allowlist without the refs/heads/ prefix, the form a
+// person types and reads.
+func (c Constraints) BranchNames() []string {
+	if len(c.Branches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.Branches))
+	for _, b := range c.Branches {
+		if b = strings.TrimPrefix(strings.TrimSpace(b), branchRefPrefix); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // kubeVerbOrder is the RBAC verb set, in the order an operator reads it.
@@ -667,6 +850,7 @@ func (c Constraints) Summary() string {
 	}
 	add("repos", c.Repos)
 	add("perms", c.Permissions)
+	add("branches", c.Branches)
 	add("ns", c.Namespaces)
 	add("ctx", c.Contexts)
 	add("verbs", c.Verbs)

@@ -3,6 +3,7 @@ package gitproxycreds
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -321,7 +322,7 @@ func TestForWorkspaceFailsClosedWhenTheSessionCannotBeMinted(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ForWorkspace succeeded with an unmintable upstream: %+v", access)
 	}
-	if access != (executor.WorkspaceAccess{}) {
+	if !zeroAccess(access) {
 		t.Fatalf("ForWorkspace returned %+v alongside an error, want the zero access", access)
 	}
 	assertNoPAT(t, access)
@@ -364,7 +365,7 @@ func TestForWorkspaceFailsClosedOnAnUnmintablePolicyOrTTL(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ForWorkspace succeeded with an over-long TTL: %+v", access)
 	}
-	if access != (executor.WorkspaceAccess{}) {
+	if !zeroAccess(access) {
 		t.Fatalf("ForWorkspace returned %+v alongside an error", access)
 	}
 	assertNoPAT(t, access)
@@ -389,7 +390,7 @@ func TestForWorkspaceReturnsAnUnconfiguredSourceAsAnError(t *testing.T) {
 			if err == nil {
 				t.Fatal("ForWorkspace succeeded on an unconfigured source")
 			}
-			if access != (executor.WorkspaceAccess{}) {
+			if !zeroAccess(access) {
 				t.Fatalf("ForWorkspace returned %+v alongside an error", access)
 			}
 			if release == nil {
@@ -435,7 +436,7 @@ func TestInnerErrorIsReturnedUnchanged(t *testing.T) {
 	if !errors.Is(err, executor.ErrWorkspaceGrantMissing) {
 		t.Fatalf("errors.Is(err, ErrWorkspaceGrantMissing) = false for %v", err)
 	}
-	if access != (executor.WorkspaceAccess{}) {
+	if !zeroAccess(access) {
 		t.Fatalf("ForWorkspace returned %+v alongside an error", access)
 	}
 	if len(reg.Sessions()) != 0 {
@@ -487,7 +488,7 @@ func TestPublicRepoIsPassedThroughWithoutASession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForWorkspace = %v", err)
 	}
-	if access != (executor.WorkspaceAccess{}) {
+	if !zeroAccess(access) {
 		t.Fatalf("ForWorkspace = %+v, want the inner access untouched", access)
 	}
 	if access.Repo != "" {
@@ -635,4 +636,11 @@ func assertNoPAT(t *testing.T, access executor.WorkspaceAccess) {
 			t.Fatalf("the forge PAT reached the sandbox through Secrets() = %q", s)
 		}
 	}
+}
+
+// zeroAccess reports whether a is the zero WorkspaceAccess. A helper rather
+// than ==, since GitCredential carries a slice (its grant's branch list) and so
+// is not comparable.
+func zeroAccess(a executor.WorkspaceAccess) bool {
+	return reflect.DeepEqual(a, executor.WorkspaceAccess{})
 }

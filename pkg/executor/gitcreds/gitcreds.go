@@ -67,6 +67,23 @@ func New(broker *secretbroker.Broker, executorID, actor string) (*BrokerSource, 
 // are different fixes and an operator who is told the wrong one will go looking
 // in the wrong place.
 func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
+	return s.forWorkspace(ctx, projectID, w, false)
+}
+
+// ForProxiedWorkspace is ForWorkspace for a caller that will hand the
+// credential to cloop's git proxy rather than to the executor — the
+// gitproxycreds decorator, which looks for this method.
+//
+// The difference is one fact told to the broker (Requester.GitHubProxied): a
+// grant limited to certain branches keeps its push, because the proxy is what
+// holds the push to the list. Leased through plain ForWorkspace the same grant
+// is delivered without its push, since the credential is headed somewhere
+// nothing can.
+func (s *BrokerSource) ForProxiedWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
+	return s.forWorkspace(ctx, projectID, w, true)
+}
+
+func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w executor.Workspace, proxied bool) (executor.WorkspaceAccess, func(), error) {
 	noop := func() {}
 	if s == nil || s.Broker == nil {
 		return executor.WorkspaceAccess{}, noop, errors.New("gitcreds: no broker configured")
@@ -97,8 +114,9 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 	}
 
 	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID: s.ExecutorID,
-		ProjectID:  projectID,
+		ExecutorID:    s.ExecutorID,
+		ProjectID:     projectID,
+		GitHubProxied: proxied,
 	}, s.Actor)
 	if err != nil {
 		return executor.WorkspaceAccess{}, noop, fmt.Errorf("gitcreds: lease for %s: %w", projectID, err)
@@ -127,6 +145,11 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 				GrantID:    mat.GrantID,
 				SecretName: mat.SecretName,
 				ExpiresAt:  lease.ExpiresAt,
+				// Carried for the proxy that applies it. Only a grant that
+				// can push has one to carry: the broker drops the list from a
+				// grant whose push it withheld, and a read-only grant never
+				// had one.
+				Branches: mat.Constraints.BranchNames(),
 			},
 		}, release, nil
 	}

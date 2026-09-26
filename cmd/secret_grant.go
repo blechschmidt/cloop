@@ -32,6 +32,7 @@ var (
 	grantDevicesFlag    []string
 	grantInterfacesFlag []string
 	grantPermsFlag      []string
+	grantBranchesFlag   []string
 	grantNamespacesFlag []string
 	grantContextsFlag   []string
 	grantVerbsFlag      []string
@@ -57,6 +58,13 @@ var (
 // The returned close function must be called. It closes the database, not
 // the broker: leases hold no persistent resources, by design.
 func openBroker() (*secretbroker.Broker, func(), error) {
+	return openBrokerObserved(nil)
+}
+
+// openBrokerObserved is openBroker with an extra auditor that sees every event
+// before it is recorded — how `secret lease` shows the reasons a grant was not
+// delivered, which otherwise reach only the audit trail.
+func openBrokerObserved(observe secretbroker.Auditor) (*secretbroker.Broker, func(), error) {
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, nil, fmt.Errorf("secret: resolve working directory: %w", err)
@@ -70,7 +78,15 @@ func openBroker() (*secretbroker.Broker, func(), error) {
 		_ = db.Close()
 		return nil, nil, err
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	var auditor secretbroker.Auditor = secretstore.NewAuditor(db)
+	if observe != nil {
+		recorder := auditor
+		auditor = secretbroker.AuditorFunc(func(ev secretbroker.Event) {
+			observe.Audit(ev)
+			recorder.Audit(ev)
+		})
+	}
+	broker, err := secretbroker.New(store, secretbroker.WithAuditor(auditor))
 	if err != nil {
 		_ = db.Close()
 		return nil, nil, err
@@ -289,7 +305,20 @@ Verbs are the one kubeconfig constraint the delivered credential cannot carry
 they cannot be enforced by rewriting the document. They are enforced outside
 the sandbox by the Kubernetes access monitor, executors.kube_guard. With that
 monitor off, the verbs on a grant are recorded and audited but not enforced at
-all, and the cluster's own RBAC is the only limit on what the credential does.`,
+all, and the cluster's own RBAC is the only limit on what the credential does.
+
+A github grant that authorises a push can be limited to certain branches:
+
+  cloop secret grant deploy-app --to project:/srv/app --repos acme/api \
+      --permissions contents:write --branches 'cloop/*,feature/**'
+
+"*" matches within one path segment and a trailing "/**" matches any depth, so
+the grant above may push cloop/fix-42 and feature/a/b but not main. Only
+cloop's git proxy (executors.git_proxy) can enforce this, since git never tells
+a credential which branch a push is for. On a hub without one, a github_app
+grant with --branches is delivered read-only and a github_pat grant is not
+delivered at all — never with an unrestricted push. Where the proxy runs, its
+own allowed_refs is the ceiling and --branches narrows within it.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -321,6 +350,7 @@ all, and the cluster's own RBAC is the only limit on what the credential does.`,
 				Devices:     grantDevicesFlag,
 				Interfaces:  grantInterfacesFlag,
 				Permissions: grantPermsFlag,
+				Branches:    grantBranchesFlag,
 				Namespaces:  grantNamespacesFlag,
 				Contexts:    grantContextsFlag,
 				Verbs:       grantVerbsFlag,
@@ -559,7 +589,17 @@ denial reasons, never payloads.
 			projectID, _ = os.Getwd()
 		}
 
-		broker, closeFn, err := openBroker()
+		// Every grant aimed at this subject that the broker refused, with its
+		// reason. A lease leaves them out, and "no grants match" is the wrong
+		// answer for a grant that matched and was withheld — a branch-restricted
+		// PAT on a hub with no git proxy, an expired grant, a mint GitHub
+		// refused.
+		var denied []secretbroker.Event
+		broker, closeFn, err := openBrokerObserved(secretbroker.AuditorFunc(func(ev secretbroker.Event) {
+			if ev.Action == secretbroker.ActionLease && ev.Decision == secretbroker.DecisionDeny && ev.GrantID != "" {
+				denied = append(denied, ev)
+			}
+		}))
 		if err != nil {
 			return err
 		}
@@ -573,8 +613,14 @@ denial reasons, never payloads.
 		// server-side record so this dry run cannot be renewed.
 		defer broker.Release(lease.ID)
 
+		for _, ev := range denied {
+			color.New(color.FgYellow).Printf("✗ %s (%s) not delivered\n", ev.SecretName, ev.GrantID)
+			fmt.Printf("    reason:      %s\n", ev.Reason)
+		}
 		if lease.Empty() {
-			color.New(color.Faint).Printf("No grants match executor=%q project=%q\n", executorID, projectID)
+			if len(denied) == 0 {
+				color.New(color.Faint).Printf("No grants match executor=%q project=%q\n", executorID, projectID)
+			}
 			return nil
 		}
 		color.Green("%d material(s), lease expires %s", len(lease.Materials), lease.ExpiresAt.Format(time.RFC3339))
@@ -632,6 +678,9 @@ func init() {
 		"make a local_repo or host_device grant read-write (default read-only)")
 	secretGrantCmd.Flags().StringSliceVar(&grantPermsFlag, "permissions", nil,
 		"github permission set (e.g. contents:read,pull_requests:write)")
+	secretGrantCmd.Flags().StringSliceVar(&grantBranchesFlag, "branches", nil,
+		"github: branches a push may target (e.g. 'cloop/*,feature/**'); needs a write permission, "+
+			"enforced by the git proxy")
 	secretGrantCmd.Flags().StringSliceVar(&grantNamespacesFlag, "namespaces", nil,
 		"kubernetes namespace allowlist")
 	secretGrantCmd.Flags().StringSliceVar(&grantContextsFlag, "contexts", nil,

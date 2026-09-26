@@ -89,6 +89,10 @@ type GitGuardRequest struct {
 	// translates it into what the proxy will allow — most importantly whether
 	// the sandbox may push at all.
 	Permissions []string
+	// Branches is the grant's branch allowlist, as the grant stores it. The
+	// guard narrows the session's ref policy to it, within the hub's own
+	// allowlist. Empty means the grant adds no branch restriction.
+	Branches []string
 
 	// Labels. None is secret; all are audit bookkeeping.
 	SecretName string
@@ -123,6 +127,11 @@ type GitGuardResult struct {
 	// unable to push. Surfaced so the lease's own summary can say so without
 	// re-deriving the rule the guard already applied.
 	ReadOnly bool
+	// PushRefs is the hub's own ref allowlist for pushes — the ceiling the
+	// grant's Branches narrow, as full ref patterns. Announced to the workload
+	// so it can choose a branch the proxy will accept, rather than learn the
+	// policy one refused push at a time. Empty when the session cannot push.
+	PushRefs []string
 }
 
 // Guarded reports whether the result actually carries a substitute credential.

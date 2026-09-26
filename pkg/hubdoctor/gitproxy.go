@@ -24,11 +24,100 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
+
+// checkBranchRestrictedGrants reports GitHub grants whose branch allowlist this
+// hub cannot enforce (Task 20340).
+//
+// A grant can limit its pushes to particular branches, and only the git proxy
+// can hold a push to that list. On a hub without one the broker withholds the
+// push instead — an App token is minted read-only, a PAT is not delivered — so
+// the grant's holder finds out as a refused push or a missing credential, in a
+// run, long after whoever wrote the list has moved on. Nothing about that is an
+// error anywhere else, which is why it is a finding here.
+//
+// Read-only over the store's own listing: grants and secret kinds are not
+// sealed, so this needs neither the sealing key nor a broker, and it reports
+// nothing rather than a second storage failure when the database will not open.
+func checkBranchRestrictedGrants(dir string, cfg *config.Config, add addFn) {
+	if cfg.Executors.GitProxy.Enabled {
+		return
+	}
+	apps, pats := branchRestrictedGrants(dir)
+	if apps+pats == 0 {
+		return
+	}
+	var parts []string
+	if apps > 0 {
+		parts = append(parts, fmt.Sprintf("%d github_app grant(s) are delivered read-only", apps))
+	}
+	if pats > 0 {
+		parts = append(parts, fmt.Sprintf("%d github_pat grant(s) are not delivered at all", pats))
+	}
+	add(Finding{
+		Check:    "gitproxy.branch_grants",
+		Title:    "Branch-restricted GitHub grants",
+		Severity: SeverityWarn,
+		Message: fmt.Sprintf("%d active grant(s) limit pushes to particular branches, which only the "+
+			"git proxy can enforce, and it is disabled: %s", apps+pats, strings.Join(parts, "; ")),
+		Remediation: "Enable executors.git_proxy so the branch lists are enforced on the push, or " +
+			"re-grant without --branches if an unrestricted push is what was meant. See " +
+			"docs/guides/secrets.md#limiting-pushes-to-particular-branches",
+		Details: map[string]any{"github_app": apps, "github_pat": pats},
+	})
+}
+
+// branchRestrictedGrants counts the active GitHub grants that carry a branch
+// allowlist, by kind. Zeros when there is no database to read.
+func branchRestrictedGrants(dir string) (apps, pats int) {
+	dbPath := filepath.Join(dir, ".cloop", "state.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return 0, 0
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return 0, 0
+	}
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return 0, 0
+	}
+	secrets, err := store.ListSecrets()
+	if err != nil {
+		return 0, 0
+	}
+	kinds := make(map[string]secretbroker.Kind, len(secrets))
+	for _, s := range secrets {
+		kinds[s.ID] = s.Kind
+	}
+	grants, err := store.ListGrants()
+	if err != nil {
+		return 0, 0
+	}
+	now := time.Now()
+	for _, g := range grants {
+		if !g.Active(now) || !g.Constraints.RestrictsBranches() {
+			continue
+		}
+		switch kinds[g.SecretID] {
+		case secretbroker.KindGitHubApp:
+			apps++
+		case secretbroker.KindGitHubPAT:
+			pats++
+		}
+	}
+	return apps, pats
+}
 
 // checkGitProxy reports whether git pushes from sandboxes are brokered.
 func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add addFn) {

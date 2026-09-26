@@ -65,6 +65,7 @@ var (
 	hubGrantDevicesFlag    []string
 	hubGrantInterfacesFlag []string
 	hubGrantPermsFlag      []string
+	hubGrantBranchesFlag   []string
 	hubGrantNamespacesFlag []string
 	hubGrantContextsFlag   []string
 	hubGrantHostsFlag      []string
@@ -197,6 +198,7 @@ approver has to decide against.`,
 				Devices:     hubGrantDevicesFlag,
 				Interfaces:  hubGrantInterfacesFlag,
 				Permissions: hubGrantPermsFlag,
+				Branches:    hubGrantBranchesFlag,
 				Namespaces:  hubGrantNamespacesFlag,
 				Contexts:    hubGrantContextsFlag,
 				Hosts:       hubGrantHostsFlag,
@@ -556,6 +558,7 @@ func init() {
 	rf.StringVar(&hubGrantScopeFlag, "scope", "", "operator-facing label for grouping; carries no authority")
 	rf.StringSliceVar(&hubGrantReposFlag, "repos", nil, "github: allowed repositories")
 	rf.StringSliceVar(&hubGrantPermsFlag, "permissions", nil, "github: allowed permissions")
+	rf.StringSliceVar(&hubGrantBranchesFlag, "branches", nil, "github: branches a push may target")
 	rf.StringSliceVar(&hubGrantNamespacesFlag, "namespaces", nil, "kubeconfig: allowed namespaces")
 	rf.StringSliceVar(&hubGrantContextsFlag, "contexts", nil, "kubeconfig: allowed contexts")
 	rf.StringSliceVar(&hubGrantHostsFlag, "hosts", nil, "egress_proxy: allowed hosts")

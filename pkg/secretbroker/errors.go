@@ -162,4 +162,12 @@ var (
 	// it to whoever runs next — the one outcome personal ownership is meant
 	// to prevent.
 	ErrPersonalWildcard = errors.New("secretbroker: a personal secret cannot be granted to a wildcard subject")
+
+	// ErrBranchesUnenforced: a grant limits its pushes to a branch allowlist,
+	// no git proxy guards it on this hub, and its credential cannot be
+	// narrowed to read-only instead (Task 20340). A denial rather than a
+	// fallback: delivering the credential would hand over a push to every
+	// branch it can reach, which is exactly what the allowlist was written to
+	// rule out.
+	ErrBranchesUnenforced = errors.New("secretbroker: branch allowlist cannot be enforced without the git proxy")
 )

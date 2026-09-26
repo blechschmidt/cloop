@@ -1,12 +1,16 @@
 package hubdoctor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // gitProxyTLS writes a readable cert/key pair and returns their paths. The
@@ -168,4 +172,77 @@ func TestGitProxyAllowDeleteWarns(t *testing.T) {
 	}
 	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
 	wantSeverity(t, only(t, got, "gitproxy.allow_delete"), SeverityWarn)
+}
+
+// seedBranchGrants mints one github_app and one github_pat secret and grants
+// each with a branch allowlist, plus an unrestricted grant that must not be
+// counted, into dir's control plane.
+func seedBranchGrants(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("CLOOP_SECRET_KEY", "hubdoctor-branch-grants")
+	mustInitStateDB(t, dir)
+	db, err := statedb.Open(filepath.Join(dir, ".cloop", "state.db"))
+	if err != nil {
+		t.Fatalf("statedb.Open: %v", err)
+	}
+	defer db.Close()
+	store, err := secretstore.New(db)
+	if err != nil {
+		t.Fatalf("secretstore.New: %v", err)
+	}
+	b, err := secretbroker.New(store)
+	if err != nil {
+		t.Fatalf("secretbroker.New: %v", err)
+	}
+	ctx := context.Background()
+	pat, err := b.Mint(ctx, secretbroker.MintRequest{Name: "pat", Kind: secretbroker.KindGitHubPAT,
+		Payload: []byte("ghp_hubdoctorBranchGrantToken00000000")})
+	if err != nil {
+		t.Fatalf("mint pat: %v", err)
+	}
+	subject := secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "/srv/app"}
+	for _, c := range []secretbroker.Constraints{
+		{Repos: []string{"acme/api"}, Permissions: []string{"contents:write"}, Branches: []string{"cloop/*"}},
+		{Repos: []string{"acme/api"}, Permissions: []string{"contents:write"}}, // no list: not counted
+	} {
+		if _, err := b.Grant(ctx, secretbroker.GrantRequest{SecretRef: pat.ID, Subject: subject,
+			Constraints: c}); err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+	}
+}
+
+// TestBranchRestrictedGrantsWithoutAProxyWarn: a branch list the hub cannot
+// enforce is delivered as something less than it says, and nothing else
+// reports it.
+func TestBranchRestrictedGrantsWithoutAProxyWarn(t *testing.T) {
+	dir := t.TempDir()
+	seedBranchGrants(t, dir)
+
+	got := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})
+	f := only(t, got, "gitproxy.branch_grants")
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Message, "1 active grant(s)") || !strings.Contains(f.Message, "not delivered") {
+		t.Errorf("message does not count the grant or say what happens to it: %q", f.Message)
+	}
+	if !strings.Contains(f.Remediation, "executors.git_proxy") {
+		t.Errorf("remediation does not name the setting: %q", f.Remediation)
+	}
+
+	// With the proxy on, the lists are enforced and there is nothing to say.
+	cert, key := gitProxyTLS(t)
+	cfg := hostOnlyConfig()
+	cfg.Executors.GitProxy = config.GitProxyConfig{Enabled: true, CertFile: cert, KeyFile: key,
+		AdvertiseURL: "https://hub.internal:8443"}
+	if fs := findingsFor(t, dir, cfg, Options{Offline: true})["gitproxy.branch_grants"]; len(fs) != 0 {
+		t.Errorf("warned about branch lists the running proxy enforces: %+v", fs)
+	}
+}
+
+func TestNoBranchRestrictedGrantsIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	mustInitStateDB(t, dir)
+	if fs := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})["gitproxy.branch_grants"]; len(fs) != 0 {
+		t.Errorf("reported branch grants on a hub that has none: %+v", fs)
+	}
 }

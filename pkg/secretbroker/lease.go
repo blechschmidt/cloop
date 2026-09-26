@@ -92,6 +92,12 @@ type Material struct {
 	executorID string
 	actor      string
 	owner      string
+
+	// heldByProxy is Requester.GitHubProxied: the caller routes this
+	// material's GitHub credential through the git proxy itself. Unlike the
+	// labels above it is consulted — by the GitHub deliveries, to decide
+	// whether a branch-restricted grant keeps its push. See githubPushGuarded.
+	heldByProxy bool
 }
 
 // File is one credential file to place in the lease directory.

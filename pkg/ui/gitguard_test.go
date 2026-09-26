@@ -36,7 +36,7 @@ func TestGuardPolicyNarrowsByPermission(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pol, readOnly := guardPolicy(base, tc.permissions)
+			pol, readOnly := guardPolicy(base, tc.permissions, nil)
 			gotWrite := pol.AllowCreate || pol.AllowUpdate
 			if gotWrite != tc.wantWrite {
 				t.Errorf("write allowed = %v, want %v (policy %+v)", gotWrite, tc.wantWrite, pol)
@@ -62,7 +62,7 @@ func TestGuardPolicyNarrowsByPermission(t *testing.T) {
 func TestGuardPolicyCannotWidenTheOperatorsCeiling(t *testing.T) {
 	// An operator who allows only fetch.
 	readOnlyHub := gitproxy.Policy{AllowedRefs: []string{"refs/heads/cloop/**"}, AllowFetch: true}
-	pol, readOnly := guardPolicy(readOnlyHub, []string{"contents:write", "*"})
+	pol, readOnly := guardPolicy(readOnlyHub, []string{"contents:write", "*"}, nil)
 	if pol.AllowCreate || pol.AllowUpdate || pol.AllowDelete {
 		t.Errorf("a grant widened a read-only hub policy: %+v", pol)
 	}
@@ -75,7 +75,7 @@ func TestGuardPolicyCannotWidenTheOperatorsCeiling(t *testing.T) {
 		AllowedRefs: []string{"refs/heads/sandbox/**"},
 		AllowCreate: true,
 	}
-	pol, _ = guardPolicy(narrow, []string{"*"})
+	pol, _ = guardPolicy(narrow, []string{"*"}, nil)
 	if len(pol.AllowedRefs) != 1 || pol.AllowedRefs[0] != "refs/heads/sandbox/**" {
 		t.Errorf("AllowedRefs = %v, want the operator's namespace", pol.AllowedRefs)
 	}
@@ -94,7 +94,7 @@ func TestGuardPolicyCannotWidenTheOperatorsCeiling(t *testing.T) {
 // there is no ceiling to inherit: a zero base is not a narrow policy somebody
 // wrote, it is the absence of one, so a usable default is chosen instead.
 func TestGuardPolicyDefaultsWhenNothingIsConfigured(t *testing.T) {
-	pol, readOnly := guardPolicy(gitproxy.Policy{}, []string{"contents:write"})
+	pol, readOnly := guardPolicy(gitproxy.Policy{}, []string{"contents:write"}, nil)
 	if !pol.AllowFetch {
 		t.Error("the default policy cannot read, which makes a PAT grant useless")
 	}
@@ -123,7 +123,7 @@ func TestGuardPolicyDoesNotMutateItsInput(t *testing.T) {
 	base.AllowFetch = true
 	before := append([]string(nil), base.AllowedRefs...)
 
-	pol, _ := guardPolicy(base, nil) // read-only: the most aggressive narrowing
+	pol, _ := guardPolicy(base, nil, nil) // read-only: the most aggressive narrowing
 	pol.AllowedRefs[0] = "refs/heads/mutated/**"
 
 	if !base.AllowCreate || !base.AllowUpdate {
