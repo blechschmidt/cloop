@@ -210,6 +210,18 @@ type workload struct {
 	// revocation and the wrong one for "this run ended, wipe what it was given".
 	// Nil when the lease delivered no files, which is most workloads.
 	secrets *placedSecrets
+	// seed is the project the control plane sent with this workload, kept so
+	// the run's changes can be measured against it once the harness exits
+	// (Task 20339). Nil for an unseeded workload, which has nothing to return.
+	seed []byte
+	// projectResult is the read-back of the finished run, taken once and kept
+	// until it has been delivered: a reconnect re-sends the same reading rather
+	// than a second one of a directory the next dispatch may be about to reuse.
+	projectResult *remote.ProjectResultPayload
+	// projectReturned records that the project result reached the control
+	// plane — or that this session's hub is too old to take one — so neither
+	// a reconnect nor the output pump sends it twice.
+	projectReturned bool
 }
 
 // setSecrets records the credential files placed for this workload.

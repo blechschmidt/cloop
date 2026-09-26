@@ -664,6 +664,13 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		})
 		return
 	}
+	if len(payload.ProjectSeed) > 0 {
+		// Kept to measure the run's changes against once it exits, and paired
+		// with a placement record so the run knows which executor it is on.
+		// See projectresult.go.
+		wl.recordSeed(payload.ProjectSeed)
+		a.recordPlacement(wl, spec.WorkDir, spec)
+	}
 
 	// Remember how to give the work back, before the Spec is rewritten below
 	// and before the harness is allowed to touch the tree. Both orderings are
@@ -869,6 +876,9 @@ func (a *Agent) pumpOutput(wl *workload) {
 	// handle whose consumer had already returned empty-handed.
 	if sess := a.currentSession(); sess != nil {
 		a.flush(ctx, sess, wl)
+		// What the run changed in its project, then its work product — both
+		// before the status, for the same reason. See projectresult.go.
+		a.returnProjectState(ctx, wl, sess)
 		a.performWriteBack(ctx, wl, sess)
 	}
 
@@ -919,6 +929,7 @@ func (a *Agent) flushAll(ctx context.Context, sess *deviceSession) {
 		// the tree twice; what it does cover is the case the pump could not —
 		// the harness exited, there was no session to report on, and the plan
 		// has been waiting here since.
+		a.returnProjectState(ctx, wl, sess)
 		a.performWriteBack(ctx, wl, sess)
 		a.deliverFinal(ctx, sess, wl)
 	}

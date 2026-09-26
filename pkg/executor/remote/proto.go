@@ -148,7 +148,18 @@ const (
 	// any frame here: a pre-v12 agent simply keeps the Task 20332 behaviour of
 	// refusing a harness it does not have, so the hub skips the attempt rather
 	// than failing on it. See MinHarnessInstallVersion in installproto.go.
-	ProtocolVersion = 12
+	//
+	// v13 adds the project_result frame (see TypeProjectResult): after a
+	// seeded workload exits, the device reads back what the run changed —
+	// the tasks it finished or created, its steps, journal and cost rows — and
+	// sends it for the hub to merge into its own copy of the project (Task
+	// 20339). v10 carried the project out and nothing carried it back, so a run
+	// could finish its task on a device while the dashboard, which renders the
+	// hub's database, kept showing it pending — and the next start ran it
+	// again. Gated on the *sending* side: an older hub has no case for the
+	// frame and would answer it with a protocol error, so an agent sends it
+	// only on a session that negotiated v13. See MinProjectResultVersion.
+	ProtocolVersion = 13
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -264,6 +275,18 @@ const (
 	// MinSecretFilesVersion: a v9 agent still runs everything that needs no
 	// seed, and every executor that shares the hub's filesystem needs none.
 	MinProjectSeedVersion = 10
+	// MinProjectResultVersion is the first version whose agents send a seeded
+	// run's changes back in a project_result frame (Task 20339).
+	//
+	// Not a placement rule, and deliberately so. An older agent runs a seeded
+	// project correctly; what it cannot do is report the outcome, and refusing
+	// it placement would turn "the dashboard is stale after a remote run" into
+	// "remote runs are impossible until every device upgrades". The hub instead
+	// records, on the project's journal, that the executor is too old to say
+	// how the run went, and names the upgrade. The rule that *is* enforced runs
+	// the other way: an agent must not send the frame to a hub below this
+	// version, which has no handler for it.
+	MinProjectResultVersion = 13
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -290,6 +313,10 @@ func SupportsSecretFiles(version int) bool { return version >= MinSecretFilesVer
 // SupportsProjectSeed reports whether an agent speaking this protocol version
 // places the hub's `.cloop/` project state into the workspace it provisioned.
 func SupportsProjectSeed(version int) bool { return version >= MinProjectSeedVersion }
+
+// SupportsProjectResult reports whether a session at this protocol version can
+// carry a seeded run's changes back in a project_result frame.
+func SupportsProjectResult(version int) bool { return version >= MinProjectResultVersion }
 
 // SupportsSandboxMode reports whether an agent speaking this protocol version
 // reads StartPayload.Sandbox and selects its driver from it, rather than always
@@ -452,6 +479,23 @@ const (
 	// rather than of a flag both sides have to agree about.
 	TypeResult FrameType = "result"
 
+	// TypeProjectResult (agent → control plane) carries what a seeded run
+	// changed in its project — tasks finished or created, steps, journal
+	// events, cost rows — or the device's reason for having nothing to send.
+	// Added in protocol v13, and sent only on a v13 session.
+	//
+	// It travels in the same slot as the write-back and for the same reason:
+	// after the workload has exited, so the database it read is final, and
+	// before the terminal TypeStatus, because that frame closes the hub's log
+	// stream and the hub settles the run the moment the stream closes. A
+	// result arriving later would land on a run the hub had already recorded
+	// as having changed nothing.
+	//
+	// One frame rather than chunks: the document holds only what the run
+	// changed, and the device shrinks it to fit (dropping step output first)
+	// rather than splitting it. See executor.MaxProjectResultBytes.
+	TypeProjectResult FrameType = "project_result"
+
 	// TypeRevoke (control plane → agent) takes one secret lease back from a
 	// running task. Added in protocol v2.
 	TypeRevoke FrameType = "revoke"
@@ -557,7 +601,8 @@ func (f Frame) Validate() error {
 	// turns a confusing downstream "unknown handle \"\"" into a protocol
 	// error naming the frame that was malformed.
 	switch f.Type {
-	case TypeStart, TypeStarted, TypeSignal, TypeLogChunk, TypeLogAck, TypeStatus, TypeStatusReq:
+	case TypeStart, TypeStarted, TypeSignal, TypeLogChunk, TypeLogAck, TypeStatus, TypeStatusReq,
+		TypeProjectResult:
 		if strings.TrimSpace(f.Handle) == "" {
 			return fmt.Errorf("%w: %s frame has no handle", ErrProtocol, f.Type)
 		}
@@ -756,6 +801,11 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// carry the bytes is decided in Executor.Capabilities, which knows the
 		// protocol version.
 		SupportsProjectSeed: true,
+		// True for the same reason and with the same narrowing: reading back a
+		// directory the agent itself provisioned needs no tool, only a build
+		// that knows the frame and a session that can carry it — decided in
+		// Executor.Capabilities, where the protocol version is known.
+		ReturnsProjectState: true,
 		MaxConcurrent:       c.MaxConcurrent,
 		Platform:            c.OS,
 		Arch:                c.Arch,
@@ -1235,6 +1285,43 @@ type ResultPayload struct {
 	// It never contains bundle bytes — those arrived as chunks — for the same
 	// reason executor.Status does not: this struct is logged and persisted.
 	Result executor.WriteBackResult `json:"result"`
+}
+
+// ProjectResultPayload carries a seeded run's changes back to the hub (v13).
+type ProjectResultPayload struct {
+	// Data is the compressed result document pkg/executor/projectseed builds
+	// and decodes. The hub parses it; this layer only bounds it.
+	Data []byte `json:"data,omitempty"`
+	// Err is the device's reason for sending no document — the workload
+	// removed its project, the database was written by a newer cloop than the
+	// agent's. Carried rather than dropped so the hub's journal can say why a
+	// run came back without results instead of only that it did.
+	Err string `json:"error,omitempty"`
+}
+
+// maxProjectResultErrBytes bounds ProjectResultPayload.Err.
+const maxProjectResultErrBytes = 4 << 10
+
+// DecodeProjectResult decodes a project_result frame, refusing one no
+// well-behaved agent could have sent.
+func DecodeProjectResult(f Frame) (ProjectResultPayload, error) {
+	var p ProjectResultPayload
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	switch {
+	case len(p.Data) == 0 && strings.TrimSpace(p.Err) == "":
+		return p, fmt.Errorf("%w: project result carries neither a document nor a reason", ErrProtocol)
+	case len(p.Data) > 0 && p.Err != "":
+		return p, fmt.Errorf("%w: project result carries both a document and an error", ErrProtocol)
+	case len(p.Data) > executor.MaxProjectResultBytes:
+		return p, fmt.Errorf("%w: project result is %d bytes, over the %d-byte ceiling",
+			ErrProtocol, len(p.Data), executor.MaxProjectResultBytes)
+	case len(p.Err) > maxProjectResultErrBytes:
+		return p, fmt.Errorf("%w: project result error is %d bytes, over %d",
+			ErrProtocol, len(p.Err), maxProjectResultErrBytes)
+	}
+	return p, nil
 }
 
 // The revocation vocabulary is defined in pkg/executor and aliased here.

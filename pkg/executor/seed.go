@@ -47,7 +47,10 @@ package executor
 // A wire format that legitimately needs the bytes opts in explicitly; see
 // remote.StartPayload.ProjectSeed.
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // MaxProjectSeedBytes bounds one seed as it travels — compressed.
 //
@@ -57,6 +60,17 @@ import "fmt"
 // unbounded field here would be an unbounded allocation on a remote frame and
 // an unbounded write on an edge device's disk.
 const MaxProjectSeedBytes = 4 << 20 // 4 MiB compressed
+
+// MaxProjectResultBytes bounds what an executor sends back after a seeded run —
+// compressed (Task 20339).
+//
+// A result is the run's changes, not the project: the tasks it touched, the
+// steps, events and cost rows it recorded. One finished task is a few hundred
+// bytes. The ceiling is set by the transport rather than by the content — a
+// remote frame carries at most remote.MaxFrameBytes, and JSON encodes these
+// bytes as base64 — so a device that produced more drops step output first,
+// and says what it dropped, rather than sending a frame the hub must refuse.
+const MaxProjectResultBytes = 640 << 10 // 640 KiB compressed
 
 // ValidateProjectSeed checks what every holder of a Spec can check: that the
 // payload is bounded and, if present, actually compressed.
@@ -78,3 +92,37 @@ func ValidateProjectSeed(seed []byte) error {
 	}
 	return nil
 }
+
+// ProjectResult is what an executor brought back from a seeded run (Task
+// 20339): the compressed document pkg/executor/projectseed decodes and merges,
+// or the device's reason for having none.
+type ProjectResult struct {
+	// Data is the compressed result document. Empty when Err is set.
+	Data []byte
+	// Err is the executor's own account of why it could not read the run back
+	// — the workload removed its project, the database was written by a newer
+	// cloop than the device's. Operator-facing.
+	Err string
+	// Redact removes the credentials the hub leased to the workload from a
+	// string. The hub applies it to everything it takes from Data rather than
+	// trusting the device to have scrubbed: a result is written by the party a
+	// redaction exists to protect against. Never nil.
+	Redact func(string) string
+}
+
+// ProjectResultFetcher is implemented by drivers whose Capabilities report
+// ReturnsProjectState.
+type ProjectResultFetcher interface {
+	// ProjectResult returns what the device sent back for handleID, once: the
+	// result is released to the caller and forgotten, because merging the same
+	// run twice would count its spend twice. It returns
+	// ErrProjectResultUnavailable when nothing arrived.
+	//
+	// Call it after the handle's output stream has closed. A device sends the
+	// result before the terminal status, and the terminal status is what
+	// closes the stream, so by then everything that is coming has come.
+	ProjectResult(handleID string) (ProjectResult, error)
+}
+
+// ErrProjectResultUnavailable reports that no result arrived for a handle.
+var ErrProjectResultUnavailable = errors.New("executor: no project result was received")

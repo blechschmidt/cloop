@@ -1119,6 +1119,8 @@ plainly:
   removes it, so the run loads the plan as the hub has it now. Merely being
   newer than it was not enough — `cloop run` opens the project database before
   it compares the two — and a task reset on the hub stayed failed on the device.
+  Nothing is lost by removing it: the run that wrote it sent its outcome back
+  when it ended ([below](#the-project-comes-back-task-20339)).
 - **The seed is mandatory, not best-effort.** On a `git` workspace `.cloop/` may
   already be committed in the fetched repository, so a seedless executor merely
   degrades. Here nothing is fetched, so a seedless executor would start the
@@ -1488,6 +1490,101 @@ a `cloop workspace provision` init container, and delivering the seed to it
 needs a projected volume that does not exist yet — so for now a Kubernetes
 executor still requires `.cloop/` committed to the repository, and says so on
 the project's journal rather than failing mutely.
+
+---
+
+## The project comes back (Task 20339)
+
+A seed carries the project *out*. For a long time nothing carried it back, and
+the consequence was the one an operator reported: start the project on the sgx
+device, watch the transcript end with *All tasks complete*, and find the task
+still pending on the dashboard — "immediate completion although there is one
+remaining task". The run had done the work. It had recorded the outcome in its
+own copy of the project, on the device; the dashboard renders the hub's copy,
+which nothing ever updated. Starting it again ran the task again, and the agent
+found its own work already pushed and skipped it.
+
+So when a seeded workload exits, the device reads back what the run changed and
+sends it, and the hub merges that into its own copy before it settles the run.
+
+| | |
+| --- | --- |
+| Built by | `projectseed.Harvest`, on the device, from the workspace's `.cloop/state.db` |
+| Merged by | `projectseed.Merge` / `Apply`, on the hub, from `runEnded` |
+| Wire | `project_result` frame, protocol **v13**, sent before the terminal status |
+| Capability | `returns_project_state` |
+| Ceilings | 640 KiB compressed, 16 MiB inflated; step output shrinks first |
+| Journal | one `project_result` row per seeded run, whatever happened |
+
+**What travels is the change, not the project.** The device compares the run's
+database with the seed it was sent and returns every task whose record differs
+— with both versions — every task the run created, and the run's steps, journal
+events and cost rows. The last three are new by construction: a seed carries
+none, and the previous dispatch's database was removed before the run began. A
+500-task plan in which one task finished returns one task.
+
+**The device reads the database, not the run's say-so.** A run killed half way
+reports nothing, but the tasks it finished before it died are in its database,
+and those are exactly the work that would otherwise be lost. The read is
+confined like everything else the agent does in a workspace: exactly
+`<workspace>/.cloop/state.db`, never through `active_session`, `session.json` or
+a legacy `state.json` the workload could plant, and never through a symbolic
+link.
+
+**Ordering is the write-back's.** After the harness exits, because only then is
+the database final; before the terminal status, because that frame closes the
+hub's log stream and `runEnded` settles the run the moment it closes. A reading
+that could not be delivered is kept and re-sent after the next reconnect.
+
+**The hub's copy is the authority.** The result is a report from the least
+trusted party in the system about work done out of the hub's sight, and the
+hub's copy may have moved on meanwhile. So the merge takes the run's word only
+where the run is the one that knows:
+
+- A task's **outcome** — status, summary, timings, counters, notes — is taken
+  as a unit, and only while the hub's outcome for that task is still the one it
+  sent. A task the operator reset, skipped or finished by hand while the run was
+  out keeps the operator's outcome, and the journal row says so.
+- Everything else about a task the hub already has — title, description,
+  priority, dependencies, condition, schedule, approval — is never read from a
+  result.
+- A task deleted on the hub while the run was out stays deleted. One whose ID
+  now names a different task — the hub reuses IDs, which is exactly what the
+  operator above had done before the run — is left alone.
+- A task the run created is added, renumbered if the hub has since used its ID,
+  with only what a plan entry needs. A condition is a shell command, a
+  recurrence a schedule, an approval an authorisation; none of them survives.
+- **Where the run executed is the hub's to say.** Tasks are stamped with the
+  executor, isolation and run id of the hub's own dispatch. The device writes a
+  placement record beside the seed so its run no longer believes it ran as a
+  bare local process — which is what every remote task's notes used to claim —
+  but the hub does not rely on it.
+- **Spend is billed to whoever the hub billed the dispatch to**, priced from the
+  hub's table where it knows the model, and recorded through the ledger so it
+  reaches the global budget exactly as a run on the hub would.
+- Free text is scrubbed of the credentials the hub leased to the run, on the
+  hub, with the same set that scrubs the live log.
+
+**A run that ends mid-task is recovered, not believed.** Its result says the
+task is in progress and the project running; both are merged, and dead-run
+recovery — which `runEnded` runs straight afterwards — requeues the task and
+pauses the project with the executor's account of how the run ended. A run that
+finished the plan it was sent while the hub's plan grew is paused as *idle*
+rather than marked complete.
+
+**This one degrades rather than refuses, like the seed.** A v10–v12 agent runs a
+seeded project correctly and cannot report the outcome. Refusing it placement
+would turn a stale dashboard into no remote runs at all until every device
+upgraded, so instead the project's journal gets a `project_result` row naming
+the executor and the upgrade. The rule that is enforced runs the other way: an
+agent never sends the frame on a session below v13, because an older hub has no
+handler for it.
+
+**Not yet covered.** A hub that restarts while a remote run is in flight no
+longer holds the dispatch record the merge needs, and does not merge that run's
+result. Helper subcommands dispatched to a device (`cloop reset` from the
+dashboard) are not merged either: they are not runs, and a reset expressed as a
+diff would not reset anything the diff cannot name.
 
 ---
 

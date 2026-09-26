@@ -59,6 +59,10 @@ type handleState struct {
 	// writeBack is the in-flight assembly of this workload's work product.
 	// Nil until the device sends its first result frame; see writeback.go.
 	writeBack *writeBackState
+	// projectResult is what the device sent back of a seeded run, held until
+	// the hub collects it. Nil until a project_result frame arrives; see
+	// projectresult.go.
+	projectResult *projectResultState
 }
 
 // snapshotStatus returns the last known status under lock.
@@ -362,6 +366,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// has nowhere to put the plan.
 		if !SupportsProjectSeed(sess.Version()) {
 			caps.SupportsProjectSeed = false
+		}
+		// And the return half: a device that places the seed but speaks no
+		// frame to send the run's changes back in. Not a placement input —
+		// the hub reads it after a run, to say on the project's journal why
+		// nothing came back.
+		if !SupportsProjectResult(sess.Version()) {
+			caps.ReturnsProjectState = false
 		}
 	}
 	return caps

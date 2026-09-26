@@ -355,6 +355,42 @@ func LoadFromDir(dir string) (*ProjectState, error) {
 	return s, nil
 }
 
+// LoadDatabase reads the project state held in exactly the database file at
+// dbPath, and nothing else.
+//
+// Load and LoadFromDir both decide *which* database to read from files in the
+// project directory — an active_session pointer, a session.json marker, a
+// legacy state.json that may be migrated over the database first. That is
+// right for a project the caller owns. It is wrong for one a sandboxed
+// workload has just finished writing to, which is the one caller this exists
+// for (pkg/executor/projectseed's Harvest): every one of those files is the
+// workload's to plant, and following them would let it choose what the device
+// reports — or, through a legacy file newer than the database, overwrite the
+// run's results with a stale plan before they were read.
+//
+// A missing file is reported as statedb.ErrProjectNotFound so callers can
+// tell "the run left no database" from "the database is unreadable".
+func LoadDatabase(dbPath string) (*ProjectState, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, statedb.UserErrorf(statedb.ErrProjectNotFound, "no project database at %s", dbPath)
+		}
+		return nil, err
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	raw, err := db.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	s := fromRaw(raw)
+	s.PMMode = true
+	return s, nil
+}
+
 // Save writes the project state to the SQLite store, first merging any tasks
 // that were added externally while this state object was in memory. This is the
 // standard save path used by the orchestrator.

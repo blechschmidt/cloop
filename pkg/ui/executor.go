@@ -32,8 +32,10 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -372,6 +374,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	runID := artifact.NewRunID()
 
 	base := uiSpec(workDir, argv, labels)
+	// The run id rides the Spec as well as the lease rows, so an executor that
+	// writes its own placement record beside a project seed stamps the run's
+	// tasks with the id the hub's audit trail joins on (Task 20339).
+	base.Labels[executor.LabelRunID] = runID
 	// argv[0] is this hub's own binary, by an absolute path only this host
 	// has. Translated before anything else shapes the spec so that every step
 	// below — the audit rows, the persisted handle, the labels a remote agent
@@ -482,6 +488,21 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
+	if len(spec.ProjectSeed) > 0 {
+		// The project went out as a copy, so its outcome has to come back:
+		// remember what runEnded will need to merge it (run_result.go).
+		payer := identity
+		if payer == "" {
+			payer = cost.IdentityLocal
+		}
+		rememberSeededDispatch(ex, handle.ID, projectseed.Provenance{
+			ExecutorID:   ex.ID(),
+			ExecutorKind: ex.Kind(),
+			Isolation:    string(ex.Capabilities().Isolation),
+			RunID:        runID,
+			Identity:     payer,
+		})
+	}
 
 	// Record the dispatch so the supervisor can fail it over if this executor
 	// dies holding it. Best-effort: a session that cannot be recorded yields

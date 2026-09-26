@@ -188,6 +188,12 @@ func deadRunPauseReason(v runVerdict) pausereason.Reason {
 // projectExecuting whether anything is still running the project, and a flag
 // left standing would answer yes about the very run being settled.
 func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string) {
+	// First: a run on an executor that does not share this filesystem kept
+	// its outcomes in its own copy of the project, and everything below reads
+	// this hub's. Merging it before recovery means a task the run left in
+	// progress is recovered from the run's own account rather than from a plan
+	// that never heard it started (Task 20339).
+	s.collectRunResult(workDir, ex, handleID)
 	verdict := workloadVerdict(ex, handleID)
 	s.untrackRun(workDir)
 	s.reconcileDeadRun(workDir, verdict)

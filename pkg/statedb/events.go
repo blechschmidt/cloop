@@ -96,6 +96,18 @@ const (
 	// have been sent one. One row naming the executor and the upgrade is the
 	// difference between that and an hour spent debugging an intact project.
 	EventProjectSeed EventType = "project_seed"
+
+	// EventProjectResult records what a run on an isolating executor sent back
+	// of the project — which tasks it finished, what it added, what the hub
+	// kept of its own instead — or why nothing came back (Task 20339).
+	//
+	// It is project_seed's other half. The seed is how the plan reaches a
+	// device that cannot read the hub's database; this is how the run's
+	// outcome returns to the database the dashboard renders. Without a row
+	// here, a remote run that did its work and a remote run whose results were
+	// lost look the same afterwards: a transcript ending "All tasks complete"
+	// beside a plan whose tasks are all still pending.
+	EventProjectResult EventType = "project_result"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

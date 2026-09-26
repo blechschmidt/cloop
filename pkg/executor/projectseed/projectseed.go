@@ -43,6 +43,14 @@
 // sandbox's writes at a directory on another machine. It is cleared here and
 // re-derived on the far side by migrateFromJSON, which fills an empty WorkDir
 // with the directory it is migrating in.
+//
+// # The way back
+//
+// A seed is a copy, and a run writes its outcomes into the copy. result.go and
+// merge.go are the return half (Task 20339): the device reads back what the run
+// changed once the workload exits, and the hub folds it into its own project.
+// Without them a run could finish its task on a device while the dashboard —
+// which renders the hub's database — showed it pending forever.
 package projectseed
 
 import (
@@ -238,9 +246,14 @@ func Write(dir string, seed []byte) error {
 // nothing has recreated the database yet, trigger 3 ("a database with no
 // project state in it") if PersistentPreRunE got there first.
 //
-// Nothing of value goes with them. The hub holds the plan, and the transcript
-// of every run was streamed to it as the run happened; the device's copy is a
-// cache of both that the next run would only have to disagree with.
+// Nothing of value goes with them, but only because of result.go. This
+// comment used to say the hub already held everything the database did — the
+// plan, and every transcript as it streamed. It held the transcripts; it did
+// not hold the *outcomes*, which lived only here, and deleting them at the next
+// dispatch was the end of a run whose finished tasks the dashboard still showed
+// pending (Task 20339). The run that wrote this database now sends what it
+// changed back before its workload reports its final status, so by the time the
+// next seed lands the hub has it.
 var staleDatabaseFiles = []string{"state.db", "state.db-wal", "state.db-shm", "state.db-journal"}
 
 // removeStaleDatabase deletes staleDatabaseFiles from dir, which the caller has

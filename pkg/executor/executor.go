@@ -175,6 +175,18 @@ type Capabilities struct {
 	// than at the dispatch, which is not. A capability makes that a refusal at
 	// placement time instead.
 	SupportsProjectSeed bool `json:"supports_project_seed"`
+	// ReturnsProjectState reports whether this driver brings a seeded run's
+	// changes back — the tasks it finished or created, the steps, events and
+	// cost rows it recorded — for the hub to merge into its own copy of the
+	// project (Task 20339). See ProjectResultFetcher.
+	//
+	// It is SupportsProjectSeed's other half, and separate from it because a
+	// driver can have one without the other: a v10–v12 remote agent places the
+	// seed and returns nothing, which is exactly the gap that let a run finish
+	// its task on a device while the dashboard kept showing it pending. The
+	// hub reads this to tell "the run came back with no changes" from "this
+	// executor cannot report any", and to say which in the project's journal.
+	ReturnsProjectState bool `json:"returns_project_state"`
 	// SupportsWriteBack reports whether this driver can return the files a
 	// workload changed (Spec.WriteBack).
 	//
@@ -341,7 +353,7 @@ type Spec struct {
 	Env []string `json:"env,omitempty"`
 	// Labels carry routing and bookkeeping metadata (project path, task ID,
 	// requesting user). Drivers may surface them for observability; they
-	// never affect execution.
+	// never affect execution. See LabelRunID for the one a driver reads.
 	Labels map[string]string `json:"labels,omitempty"`
 	// ResourceLimits bounds the workload where the driver supports it.
 	ResourceLimits ResourceLimits `json:"resource_limits,omitempty"`
@@ -885,6 +897,13 @@ func (sig Signal) Valid() bool {
 	}
 	return false
 }
+
+// LabelRunID is the Spec label carrying the execution id the hub minted for a
+// dispatch (Task 20282). A remote agent copies it into the placement record it
+// writes beside a project seed, so the run on the device stamps its tasks with
+// the same id the hub's lease rows carry (Task 20339). Bookkeeping only, like
+// every label: nothing about how the workload runs depends on it.
+const LabelRunID = "run_id"
 
 // Executor is a pluggable execution backend.
 //

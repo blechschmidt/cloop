@@ -270,6 +270,15 @@ running step's output as it arrives. Both are pushed rather than polled, over a
 WebSocket, so they are current without a refresh; behind a proxy that blocks the
 upgrade the page falls back to server-sent events and keeps working.
 
+**A run on a device reports back when it ends.** The plan on the dashboard is
+the hub's own; a run on an enrolled device works on a copy sent with it, so while
+it runs, Live Output streams from the device and the task list stays where it
+was. When the run ends the device sends back what changed — the tasks it
+finished or added, its steps, events and spend — and Event History gains a
+*project_result* row saying what came back. A task you changed on the hub while
+the run was out keeps your change, and the row says that too. An agent too old
+to report back gets a row naming the upgrade; **Upgrade** on its card is the fix.
+
 When every task is done, an idle plan stops there. With **Evolve Mode** on, the
 agent proposes new work instead — and that work arrives as tasks you can read
 and reject, not as more transcript. [How cloop works](concepts.md#auto-evolve)

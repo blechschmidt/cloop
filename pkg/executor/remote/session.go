@@ -421,6 +421,23 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		s.deliver(f)
 		return false
 
+	case TypeProjectResult:
+		payload, err := DecodeProjectResult(f)
+		if err != nil {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if err := s.ex.applyProjectResult(f.Handle, payload); err != nil {
+			code := CodeProtocol
+			if errors.Is(err, executor.ErrHandleNotFound) {
+				code = CodeUnknownHandle
+			}
+			writeError(ctx, s.conn, f.ID, code, err.Error())
+			return false
+		}
+		s.trackHandle(f.Handle)
+		return false
+
 	case TypeStatus:
 		payload, err := DecodeStatus(f)
 		if err != nil {
