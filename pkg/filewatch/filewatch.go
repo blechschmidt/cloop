@@ -41,7 +41,11 @@ type ChangeEvent struct {
 
 // Run starts the file watcher. It blocks until ctx is cancelled.
 // onTrigger is called after each debounced batch of changes once the state
-// has been updated (relevant tasks reset to pending).
+// has been updated (relevant tasks reset to pending). Batches are applied one
+// at a time, so onTrigger never runs concurrently with itself; changes that
+// arrive while a batch is being applied make up the next one. Once ctx is
+// cancelled no further batch starts, and Run returns as soon as the one in
+// flight, if any, has finished: onTrigger is never called after Run returns.
 func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 	if len(cfg.Globs) == 0 {
 		return fmt.Errorf("no glob patterns specified")
@@ -76,33 +80,59 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 		len(dirs), strings.Join(cfg.Globs, ", "))
 	dim.Printf("  debounce: %s — press Ctrl+C to stop\n\n", cfg.Debounce)
 
-	// pending accumulates changed files until the debounce timer fires.
-	// time.AfterFunc invokes fireTrigger on its own goroutine, which races
-	// the main select loop's writes — pendingMu serializes both sides.
-	var pendingMu sync.Mutex
+	// Changes are applied in batches. The select loop below collects changed
+	// files in pending, which only it touches, and re-arms the debounce timer
+	// on every one; when the timer fires they move to ready and the trigger
+	// worker is kicked to apply them.
+	//
+	// A single worker applies batches one at a time. A batch is a full state
+	// load-modify-save followed by onTrigger, which may take minutes — `cloop
+	// watch --auto-run` runs a whole `cloop run --pm` in it, the daemon an
+	// orchestrator cycle — so debounce windows keep expiring while one is
+	// applied. When every expired window started a goroutine of its own, a
+	// burst of changes applied that many batches at once: their saves raced
+	// (Save rewrites every task it loaded, so a batch that loaded before
+	// another saved could put back what that one had reset), onTrigger ran
+	// concurrently with itself, and shutdown had to wait for the whole backlog,
+	// which went on saving state and calling onTrigger long after ctx was
+	// cancelled. Batches that become ready while one is applied now merge in
+	// ready and are applied together once it returns.
+	//
+	// Cancellation drops every batch that has not started — the one still in
+	// its debounce window, as it always did, and the ready one — so shutdown
+	// waits only for the batch in flight, if any.
 	pending := map[string]struct{}{}
-	var debounceTimer *time.Timer
-	var fireWG sync.WaitGroup
+	var readyMu sync.Mutex
+	ready := map[string]struct{}{}
+	kick := make(chan struct{}, 1)
+
+	// debounce fires once cfg.Debounce has passed without a matching change.
+	// The first change creates it and every later one re-arms it. This loop
+	// is its channel's only reader, and with the Go 1.23 timer semantics this
+	// module's go directive selects, Reset discards an expiry that has not
+	// been received yet, so no stale fire gets through.
+	var debounce *time.Timer
+	var debounceC <-chan time.Time // nil, so never ready, until the first change
 
 	fireTrigger := func() {
-		defer fireWG.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "[watch] panic in trigger goroutine: %v\n%s\n", r, debug.Stack())
 			}
 		}()
 
-		pendingMu.Lock()
-		if len(pending) == 0 {
-			pendingMu.Unlock()
+		readyMu.Lock()
+		if len(ready) == 0 {
+			// The previous batch took this kick's files along with its own.
+			readyMu.Unlock()
 			return
 		}
-		files := make([]string, 0, len(pending))
-		for f := range pending {
+		files := make([]string, 0, len(ready))
+		for f := range ready {
 			files = append(files, f)
 		}
-		pending = make(map[string]struct{})
-		pendingMu.Unlock()
+		ready = make(map[string]struct{})
+		readyMu.Unlock()
 
 		evt, err := applyReEvaluation(cfg.WorkDir, files)
 		if err != nil {
@@ -112,27 +142,32 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 		onTrigger(evt)
 	}
 
-	// scheduleFire (re)arms the debounce timer. Only called from the main
-	// select loop, so reads/writes of debounceTimer don't need synchronization.
-	// fireWG balances each pending Add against either fireTrigger's Done
-	// (timer fired) or our manual Done after a successful Stop (cancelled).
-	scheduleFire := func() {
-		if debounceTimer != nil {
-			if debounceTimer.Stop() {
-				fireWG.Done()
+	workCtx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for {
+			select {
+			case <-workCtx.Done():
+				return
+			case <-kick:
 			}
+			// select picks at random among ready cases: a kick that arrived
+			// together with the cancellation must not start a batch.
+			if workCtx.Err() != nil {
+				return
+			}
+			fireTrigger()
 		}
-		fireWG.Add(1)
-		debounceTimer = time.AfterFunc(cfg.Debounce, fireTrigger)
-	}
+	}()
 
 	shutdown := func() {
-		if debounceTimer != nil {
-			if debounceTimer.Stop() {
-				fireWG.Done()
-			}
+		if debounce != nil {
+			debounce.Stop()
 		}
-		fireWG.Wait()
+		stopWork()
+		<-workerDone
 	}
 
 	for {
@@ -140,6 +175,20 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 		case <-ctx.Done():
 			shutdown()
 			return nil
+
+		case <-debounceC:
+			readyMu.Lock()
+			for f := range pending {
+				ready[f] = struct{}{}
+			}
+			readyMu.Unlock()
+			pending = make(map[string]struct{})
+			select {
+			case kick <- struct{}{}:
+			default:
+				// A kick is already queued; the batch it starts takes these
+				// files too.
+			}
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
@@ -168,11 +217,13 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 				continue
 			}
 
-			pendingMu.Lock()
 			pending[rel] = struct{}{}
-			pendingMu.Unlock()
-
-			scheduleFire()
+			if debounce == nil {
+				debounce = time.NewTimer(cfg.Debounce)
+				debounceC = debounce.C
+			} else {
+				debounce.Reset(cfg.Debounce)
+			}
 		}
 	}
 }

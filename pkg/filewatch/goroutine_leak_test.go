@@ -5,16 +5,14 @@ package filewatch
 // Run spawns:
 //  1. fsnotify watcher's internal event/error goroutines (cleaned up by
 //     watcher.Close in the deferred call).
-//  2. time.AfterFunc-fired fireTrigger goroutines (one per debounced batch).
-//     Each Add to fireWG must net to exactly one Done — either via Stop()
-//     returning true (cancelled before fire) or via fireTrigger's
-//     defer-wg.Done (fired). shutdown() drains fireWG.Wait before Run
-//     returns so all in-flight triggers have completed.
+//  2. One trigger worker, which applies the debounced batches one at a time.
+//     shutdown() cancels it and waits for it to exit before Run returns, so
+//     the batch it had in flight, if any, has completed.
 //
-// A regression in any of those (a missed wg.Done in the Stop branch, a
-// fireTrigger that panicked before reaching its defer recover, a watcher
-// close path that orphaned its inner goroutines) would scale linearly with
-// the number of Run() invocations.
+// A regression in any of those (a return path that skipped shutdown, a
+// worker that could miss its stop signal, a watcher close path that orphaned
+// its inner goroutines) would scale linearly with the number of Run()
+// invocations.
 //
 // This test mirrors the pattern in pkg/orchestrator/goroutine_leak_test.go
 // and pkg/bench/goroutine_leak_test.go: run N happy-path lifecycles, then
@@ -107,8 +105,9 @@ func runOneLifecycle(t *testing.T, fireEvents bool) int32 {
 				t.Fatalf("write: %v", err)
 			}
 		}
-		// Wait long enough for the debounce timer to fire and fireTrigger
-		// to run to completion before we cancel.
+		// Wait long enough for the debounce timer to fire and the worker to
+		// start the batch before we cancel; shutdown lets a started batch
+		// finish.
 		time.Sleep(80 * time.Millisecond)
 	}
 
@@ -127,9 +126,10 @@ func runOneLifecycle(t *testing.T, fireEvents bool) int32 {
 
 // TestRun_NoGoroutineLeak_NoEvents runs N start/cancel cycles with no file
 // events. Catches regressions where the fsnotify watcher's inner goroutines
-// outlive the deferred Close, or where shutdown() fails to balance a
-// pending fireWG.Add. With no events, scheduleFire is never called so the
-// dominant accounting target is the fsnotify watcher lifecycle.
+// outlive the deferred Close, or where the trigger worker — started whether
+// or not a change ever arrives — outlives Run. With no events the debounce
+// timer is never armed, so the dominant accounting target is the fsnotify
+// watcher lifecycle.
 func TestRun_NoGoroutineLeak_NoEvents(t *testing.T) {
 	// Warm up: one cycle so any one-time fsnotify init doesn't pollute the
 	// baseline.
@@ -152,10 +152,9 @@ func TestRun_NoGoroutineLeak_NoEvents(t *testing.T) {
 
 // TestRun_NoGoroutineLeak_WithEvents runs N start/cancel cycles where each
 // cycle fires the debounce timer at least once, exercising the
-// fireWG.Add → fireTrigger → fireWG.Done accounting path. A regression
-// where fireTrigger panicked before reaching its defer wg.Done, or where
-// scheduleFire's Stop()-returns-true branch double-counted, would leak one
-// goroutine per cycle and trip the slack threshold.
+// debounce → ready → worker path. A regression where a cycle that applied a
+// batch left the worker behind once Run returned would leak one goroutine per
+// cycle and trip the slack threshold.
 func TestRun_NoGoroutineLeak_WithEvents(t *testing.T) {
 	// Warm up.
 	if got := runOneLifecycle(t, true); got == 0 {

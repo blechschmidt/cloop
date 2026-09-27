@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -105,11 +106,17 @@ func assertContains(t *testing.T, ids []int, id int, msg string) {
 	t.Errorf("%s: ID %d not found in %v", msg, id, ids)
 }
 
-// TestRun_NoRaceOnConcurrentEvents exercises the debounce/pending logic under a
-// flood of file changes. Before the pendingMu fix, the main select loop wrote
-// to the `pending` map while the time.AfterFunc-spawned trigger goroutine
-// iterated and deleted from it — `go test -race` fatals with
-// "concurrent map iteration and map write" or reports a data race.
+// TestRun_NoRaceOnConcurrentEvents exercises the debounce/batch hand-off under
+// a flood of file changes: the select loop moves each expired window's files
+// into the ready batch while the trigger worker takes and clears it. Before
+// that map was guarded (it was then shared with a time.AfterFunc goroutine),
+// `go test -race` fataled with "concurrent map iteration and map write" or
+// reported a data race.
+//
+// A flood like this one also used to leave a trigger goroutine applying its
+// batch for every window that had expired, and shutdown waited for all of
+// them after cancel: 2-2.5s on a lightly loaded machine, over 3s on a loaded
+// CI runner.
 func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -179,6 +186,8 @@ func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	cancel()
 
+	// After cancel Run finishes at most the batch it has in flight — one
+	// state load and save — and starts no other.
 	select {
 	case err := <-runDone:
 		if err != nil {
@@ -190,5 +199,104 @@ func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
 
 	if atomic.LoadInt32(&triggerCount) == 0 {
 		t.Error("expected at least one trigger to fire from file changes")
+	}
+}
+
+// TestRun_OneBatchAtATimeAndNoneAfterCancel pins the order Run applies
+// batches in. It holds the first batch inside onTrigger while more changes
+// arrive behind it, then cancels: a correct Run waits for the held batch and
+// applies nothing else, so onTrigger runs exactly once. When every expired
+// debounce window got a goroutine of its own, the batches behind the held one
+// were applied alongside it and, once cancelled, after it.
+//
+// The sleeps below only give a regression time to show itself; however a
+// loaded machine stretches or starves them, a correct Run passes.
+func TestRun_OneBatchAtATimeAndNoneAfterCancel(t *testing.T) {
+	tmpDir := t.TempDir()
+	s, err := state.Init(tmpDir, "test", 10)
+	if err != nil {
+		t.Fatalf("state.Init: %v", err)
+	}
+	s.PMMode = true
+	s.Plan = &pm.Plan{Goal: "test", Tasks: []*pm.Task{{ID: 1, Title: "fix file", Status: pm.TaskFailed}}}
+	if err := s.Save(); err != nil {
+		t.Fatalf("state.Save: %v", err)
+	}
+	subDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(subDir, name), []byte("package src"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("seed.go")
+
+	cfg := Config{WorkDir: tmpDir, Globs: []string{"src/**/*.go"}, Debounce: 5 * time.Millisecond}
+
+	var calls atomic.Int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHeld) // a failed assertion must not leave Run blocked in onTrigger
+	onTrigger := func(ChangeEvent) {
+		if calls.Add(1) == 1 {
+			entered <- struct{}{}
+		}
+		<-release
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, cfg, onTrigger)
+	}()
+
+	// fsnotify has no readiness signal, and a change made before Run has
+	// added its watches is never seen: keep changing a file until the first
+	// batch is being applied. Probing far slower than the debounce keeps the
+	// probe from being a flood of its own. 10s only turns a Run that never
+	// applies anything into a failure instead of a hang.
+	noBatch := time.After(10 * time.Second)
+	for held := false; !held; {
+		write("probe.go")
+		select {
+		case <-entered:
+			held = true
+		case <-time.After(100 * time.Millisecond):
+		case <-noBatch:
+			t.Fatal("no batch reached onTrigger within 10s of the first change")
+		}
+	}
+
+	// More changes behind the held batch. Their debounce windows expire while
+	// it is still being applied, so they must wait for it.
+	for i := 0; i < 10; i++ {
+		write(fmt.Sprintf("file%d.go", i))
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+	select {
+	case <-runDone:
+		t.Fatal("Run returned while a batch was still being applied")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseHeld()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second): // hang guard: nothing is left to wait for
+		t.Fatal("Run did not return after the batch in flight finished")
+	}
+
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("onTrigger ran %d times, want 1: the changes queued behind the batch in flight must be dropped at cancel, not applied alongside or after it", n)
 	}
 }
