@@ -928,8 +928,13 @@ func TestCI_SettingsExposeAPastableSnippetAndNoCredential(t *testing.T) {
 	if !view.Enabled || !view.UpstreamReady {
 		t.Errorf("view = %+v, want enabled and ready", view)
 	}
+	// The last two are what tests/ciworkflow found missing (Task 20353): a
+	// step that does not fail on a refused exchange, and an agent step on a
+	// model the default allowlist refuses. That suite runs the snippet; these
+	// pins keep an edit from dropping either without running it.
 	for _, want := range []string{"id-token: write", "ACTIONS_ID_TOKEN_REQUEST_URL",
-		"/api/ci/token", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "add-mask"} {
+		"/api/ci/token", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "add-mask",
+		"set -euo pipefail", "--model sonnet"} {
 		if !strings.Contains(view.Snippet, want) {
 			t.Errorf("the workflow snippet omits %q:\n%s", want, view.Snippet)
 		}

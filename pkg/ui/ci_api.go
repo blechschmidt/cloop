@@ -929,6 +929,23 @@ func (s *Server) handleCISettingsSave(w http.ResponseWriter, r *http.Request) {
 // hub's URL and its audience — are exactly the two an operator gets wrong, and
 // a snippet they can copy is the difference between the feature working on the
 // first try and a support conversation about 401s.
+//
+// The federation step fails on every way federation can fail (Task 20353). A
+// step run with GitHub's default `bash -e` ignores a failing curl on the left of
+// a pipe, and `jq -r` prints "null" for a field an error body does not have, so
+// the first version of this snippet turned a refused exchange — or a job
+// without `id-token: write` — into a green step that exported
+// ANTHROPIC_BASE_URL=null, and the job failed at the agent step with Claude
+// Code's "Invalid URL", which names neither cause. Values are also assigned
+// before they are echoed, because a command substitution inside echo's
+// arguments cannot fail the step.
+//
+// The agent step names its model because Claude Code's own default moves
+// between releases, and `npx -y` always runs the newest: 2.1.81 asked for
+// claude-sonnet-4-6, which the hub's default allowlist admits, and 2.1.282 asks
+// for claude-opus-5-5, which the relay refuses on the first call.
+// tests/ciworkflow runs this snippet, verbatim, on a played runner against a
+// real hub and a real Claude Code.
 func ciWorkflowSnippet(baseURL, audience string) string {
 	hub := strings.TrimSuffix(baseURL, ciMountPath)
 	return `permissions:
@@ -939,16 +956,24 @@ steps:
   - uses: actions/checkout@v5
   - name: Federate with cloop
     run: |
-      ID_TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=` + audience + `" | jq -r .value)
-      RESP=$(curl -sS -X POST ` + hub + `/api/ci/token \
+      set -euo pipefail
+      : "${ACTIONS_ID_TOKEN_REQUEST_URL:?the job needs permissions: id-token: write}"
+      ID_TOKEN=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=` + audience + `" | jq -er .value)
+      RESP=$(curl -sS --fail-with-body -X POST ` + hub + `/api/ci/token \
         -H 'content-type: application/json' \
-        -d "{\"token\":\"$ID_TOKEN\"}")
-      echo "ANTHROPIC_BASE_URL=$(echo "$RESP" | jq -r .base_url)" >> "$GITHUB_ENV"
-      echo "::add-mask::$(echo "$RESP" | jq -r .token)"
-      echo "ANTHROPIC_AUTH_TOKEN=$(echo "$RESP" | jq -r .token)" >> "$GITHUB_ENV"
+        -d "{\"token\":\"$ID_TOKEN\"}") || {
+        echo "::error::cloop issued no session: $(jq -r '.error | .message? // .' <<<"$RESP" 2>/dev/null)"
+        exit 1
+      }
+      TOKEN=$(jq -er .token <<<"$RESP")
+      BASE_URL=$(jq -er .base_url <<<"$RESP")
+      echo "::add-mask::$TOKEN"
+      echo "ANTHROPIC_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"
+      echo "ANTHROPIC_AUTH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
   - name: Run the agent
-    run: npx -y @anthropic-ai/claude-code -p "review the diff and fix any bug you find"`
+    # a model the rule admits: Claude Code's own default can be one the allowlist refuses
+    run: npx -y @anthropic-ai/claude-code --model sonnet -p "review the diff and fix any bug you find"`
 }
 
 // ---------------------------------------------------------------------------

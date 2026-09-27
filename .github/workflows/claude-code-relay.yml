@@ -1,0 +1,84 @@
+name: Claude Code through the CI relay
+
+# Does the GitHub Actions workflow in docs/guides/ci-pipelines.md work with the
+# Claude Code that its `npx -y @anthropic-ai/claude-code` step fetches today?
+#
+# tests/ciworkflow answers that on a played runner against a real hub, and the
+# Build and Test job runs it on every push — but that job has no Claude Code,
+# so there the agent step is a stand-in that proves the relay's API path and
+# not the harness. The harness is the part that moves without a commit. The
+# published step runs whichever release is newest, and between Claude Code
+# 2.1.81 and 2.1.282 its default model changed from claude-sonnet-4-6, which
+# the hub's default allowlist admits, to claude-opus-5-5, which it refuses
+# (Task 20353). Nothing in this repository changed, and the published workflow
+# stopped working.
+#
+# Hence a clock, as for the released installer: a scheduled failure here means
+# "update the published workflow or the relay", not "fix your diff". It also
+# runs on a change to the relay, the exchange, the published snippet or the
+# suite itself, where the question is the ordinary one about a diff.
+on:
+  schedule:
+    # 06:30 UTC daily, after the released-installer check.
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+  # Kept in sync between push and pull_request by hand: GitHub Actions does not
+  # support YAML anchors in workflow files.
+  push:
+    branches: [main]
+    paths:
+      - "pkg/ciauth/**"
+      - "pkg/claudeproxy/**"
+      - "pkg/ui/ci.go"
+      - "pkg/ui/ci_api.go"
+      - "tests/ciworkflow/**"
+      - "docs/guides/ci-pipelines.md"
+      - ".github/workflows/claude-code-relay.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "pkg/ciauth/**"
+      - "pkg/claudeproxy/**"
+      - "pkg/ui/ci.go"
+      - "pkg/ui/ci_api.go"
+      - "tests/ciworkflow/**"
+      - "docs/guides/ci-pipelines.md"
+      - ".github/workflows/claude-code-relay.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  published-workflow:
+    name: The published workflow runs with the newest Claude Code
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fetch the Claude Code the published workflow would run
+        # The same package and the same release `npx -y` resolves, installed
+        # into a prefix of its own so the suite can be pointed at it by path.
+        # No setup-node: the published workflow has none either, so the
+        # runner image's Node is part of what is being checked.
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/claude-code" @anthropic-ai/claude-code
+          "$RUNNER_TEMP/claude-code/node_modules/.bin/claude" --version
+
+      - name: Run the published workflow against a hub
+        # REQUIRE turns the suite's stand-in fallback into a failure, so this
+        # job cannot pass without the real harness having run.
+        run: |
+          set -euo pipefail
+          export CLOOP_CIWORKFLOW_CLAUDE="$RUNNER_TEMP/claude-code/node_modules/.bin/claude"
+          export CLOOP_CIWORKFLOW_REQUIRE_CLAUDE=1
+          go test ./tests/ciworkflow/ -count=1 -v -timeout 15m

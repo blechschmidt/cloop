@@ -277,24 +277,49 @@ steps:
   - uses: actions/checkout@v5
   - name: Federate with cloop
     run: |
-      ID_TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=cloop" | jq -r .value)
-      RESP=$(curl -sS -X POST https://cloop.example.com/api/ci/token \
+      set -euo pipefail
+      : "${ACTIONS_ID_TOKEN_REQUEST_URL:?the job needs permissions: id-token: write}"
+      ID_TOKEN=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=cloop" | jq -er .value)
+      RESP=$(curl -sS --fail-with-body -X POST https://cloop.example.com/api/ci/token \
         -H 'content-type: application/json' \
-        -d "{\"token\":\"$ID_TOKEN\"}")
-      echo "ANTHROPIC_BASE_URL=$(echo "$RESP" | jq -r .base_url)" >> "$GITHUB_ENV"
-      echo "::add-mask::$(echo "$RESP" | jq -r .token)"
-      echo "ANTHROPIC_AUTH_TOKEN=$(echo "$RESP" | jq -r .token)" >> "$GITHUB_ENV"
+        -d "{\"token\":\"$ID_TOKEN\"}") || {
+        echo "::error::cloop issued no session: $(jq -r '.error | .message? // .' <<<"$RESP" 2>/dev/null)"
+        exit 1
+      }
+      TOKEN=$(jq -er .token <<<"$RESP")
+      BASE_URL=$(jq -er .base_url <<<"$RESP")
+      echo "::add-mask::$TOKEN"
+      echo "ANTHROPIC_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"
+      echo "ANTHROPIC_AUTH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
   - name: Run the agent
-    run: npx -y @anthropic-ai/claude-code -p "review the diff and fix any bug you find"
+    # a model the rule admits: Claude Code's own default can be one the allowlist refuses
+    run: npx -y @anthropic-ai/claude-code --model sonnet -p "review the diff and fix any bug you find"
 ```
 
 `permissions: id-token: write` is the line people forget. Without it
-`$ACTIONS_ID_TOKEN_REQUEST_URL` is unset and the step fails before it reaches
-the hub.
+`$ACTIONS_ID_TOKEN_REQUEST_URL` is unset, and the step stops on its second line,
+before it reaches the hub, with a message that names the missing permission.
+
+The step fails, rather than carrying on, whenever federation does. A `run:`
+step without a `shell:` runs under `bash -e`, which ignores a failed `curl` on
+the left of a pipe, and `jq -r` prints `null` for a field an error body does
+not have. Without `set -euo pipefail`, `curl -f` and `jq -e`, a refused
+exchange exports `ANTHROPIC_BASE_URL=null`, the step goes green, and the job
+fails one step later with Claude Code's `Invalid URL` — which names neither the
+allowlist nor the permission. With them, the job stops at the exchange and
+shows the hub's one-sentence reason.
 
 The `::add-mask::` matters: it stops the session token appearing in the job log
 if a later step echoes the environment.
+
+`--model sonnet` matters too. Without it Claude Code picks its own default, and
+that changes between releases: 2.1.81 asks for `claude-sonnet-4-6`, while
+2.1.282 asks for `claude-opus-5-5`, which the hub's default allowlist (Sonnet
+and Haiku, see [Turning it on](#turning-it-on)) refuses on the agent's first
+call. `npx -y` runs whichever release is newest, so a job that relies on the
+default can break with nothing changed on either side. Name a model your rule
+admits — to let a pipeline use Opus, list it in the rule's `models`.
 
 Nothing about the harness needs to know it is not talking to Anthropic. Claude
 Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`; the SDKs read
@@ -305,6 +330,11 @@ credential header.
 after the step that requested it, so one recovered from a debug log would
 otherwise be replayable for the rest of its life. Exchange it once; ask the
 forge for a fresh one if you need another.
+
+This workflow is run end to end by `tests/ciworkflow`: a shell plays the
+GitHub runner and a stand-in plays GitHub's token service, while the hub and
+Claude Code are real. The test takes the snippet from the Settings panel and
+fails if this page publishes different text.
 
 ## What a session may do
 
@@ -365,6 +395,13 @@ attempt with the claims the token actually carried. The common causes:
 The *undecidable rules* line is the one worth knowing about. From the
 pipeline's side it looks identical to "no rule matched", and an operator who
 cannot tell them apart will rewrite a rule that was nearly right.
+
+In the job log, an exchange refusal is the federation step's
+`cloop issued no session:` line, carrying the hub's one sentence. A relay refusal
+is whatever the harness makes of it, and Claude Code makes it misleading: it
+prints a relay `403` as `Failed to authenticate. API Error: 403 …`. Read
+past the prefix — `model "…" is not permitted for this pipeline` is the
+allowlist, not a bad credential.
 
 ## Threat model
 
