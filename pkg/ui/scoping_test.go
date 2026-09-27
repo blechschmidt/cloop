@@ -297,6 +297,48 @@ func TestGlobalScopeStreamJoinsNoProjectRoom(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(-1)
 
+	// It must not be in the primary project's room, or every later broadcast
+	// would reach it too.
+	//
+	// Asserted first, while this connection is certain to be open. The read
+	// loop below ends on its deadline, and nhooyr's Read closes the connection
+	// when its context expires (Conn.timeoutLoop) — so by the time that loop
+	// returns, the server's drain goroutine is already unregistering this
+	// client. Checked after the loop, as it used to be, membership was a race
+	// against that teardown: the waiter saw the client only if it reached the
+	// map before the server noticed the close, and waiting longer could not
+	// help, because once the client was gone it was gone for good. That is
+	// why this failed about one run in three under -race, alone as well as in
+	// the full suite.
+	//
+	// Waited for rather than sampled: websocket.Dial returns once the HTTP
+	// handshake completes, and registration happens after it, on the
+	// handler's goroutine. With the connection held open that registration
+	// persists until this test closes it, so the wait cannot miss it.
+	//
+	// The wait is for membership of *any* room, not of the global one, so a
+	// regression that joins the wrong room still reports as "joined the
+	// primary project's room" immediately instead of timing out here and
+	// reporting the much vaguer "joined no room at all".
+	if got := waitForHubClients(srv, 1, 10*time.Second); got != 1 {
+		t.Fatalf("the landing stream never registered as a hub client (got %d)", got)
+	}
+	srv.hubMu.Lock()
+	inPrimary := len(srv.hubClients[dirA])
+	inGlobal := len(srv.hubClients[hubRoomGlobal])
+	srv.hubMu.Unlock()
+	if inPrimary != 0 {
+		t.Errorf("a scope=global stream joined the primary project's hub room "+
+			"(%d client(s)); it must join the fleet-wide room instead", inPrimary)
+	}
+	if inGlobal == 0 {
+		t.Error("a scope=global stream joined no room at all — it would miss the " +
+			"fleet-wide broadcasts (projects, executor_update, audit_append) it exists to receive")
+	}
+
+	// Then what it was sent. handleWS registers the client before it writes
+	// the connect burst, and the socket buffers whatever arrives while the
+	// rooms are checked, so reading second loses none of it.
 	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer readCancel()
 	for {
@@ -318,36 +360,6 @@ func TestGlobalScopeStreamJoinsNoProjectRoom(t *testing.T) {
 				"what let another project's state arrive under the next selection: %s",
 				msg.Type, data)
 		}
-	}
-
-	// And it must not be in the primary project's room, or every later
-	// broadcast would reach it too.
-	//
-	// Waited for rather than sampled. The read loop above ends on a deadline,
-	// not on the handler having finished joining: websocket.Dial returns once
-	// the HTTP handshake completes and registration happens after it, on
-	// another goroutine. Reading the map straight afterwards asserted on
-	// whatever the scheduler had got to, which is why this failed about one
-	// full-suite run in three under -race while passing every time alone.
-	//
-	// The wait is for membership of *any* room, not of the global one, so a
-	// regression that joins the wrong room still reports as "joined the
-	// primary project's room" immediately instead of timing out here and
-	// reporting the much vaguer "joined no room at all".
-	if got := waitForHubClients(srv, 1, 10*time.Second); got != 1 {
-		t.Fatalf("the landing stream never registered as a hub client (got %d)", got)
-	}
-	srv.hubMu.Lock()
-	inPrimary := len(srv.hubClients[dirA])
-	inGlobal := len(srv.hubClients[hubRoomGlobal])
-	srv.hubMu.Unlock()
-	if inPrimary != 0 {
-		t.Errorf("a scope=global stream joined the primary project's hub room "+
-			"(%d client(s)); it must join the fleet-wide room instead", inPrimary)
-	}
-	if inGlobal == 0 {
-		t.Error("a scope=global stream joined no room at all — it would miss the " +
-			"fleet-wide broadcasts (projects, executor_update, audit_append) it exists to receive")
 	}
 }
 
