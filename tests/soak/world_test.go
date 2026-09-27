@@ -17,6 +17,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -24,14 +25,32 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
-// harnessPath is where the stand-in workload lives inside the sandbox image.
+// harnessPath is where the stand-in workload lives inside the sandbox image:
+// on PATH, under the name every real sandbox image gives cloop.
 //
-// The hub dispatches its own executable as argv[0] (Server.selfExe), so the
-// image has to carry something at a path the hub can name. Overriding
-// Server.SelfExe to this fixed path is what lets the suite substitute a
-// predictable workload for the agent harness without teaching the hub about
-// tests.
-const harnessPath = "/opt/cloop-soak/harness"
+// The hub never names a path inside a sandbox. It dispatches its own binary as
+// argv[0], and executor.DeviceArgv rewrites that to the bare
+// executor.HarnessProgram for every executor that isolates from the host — the
+// container executor included — for the image's own PATH to resolve. So the
+// stand-in is found exactly the way a published image's cloop is, which is
+// what lets the suite substitute a predictable workload for the agent harness
+// without teaching the hub about tests.
+//
+// It was a private path the hub was pointed at through Server.SelfExe until
+// Task 20332 made argv[0] bare. From then on every warm-up dispatch failed at
+// exec with `"cloop": executable file not found`, and the job stayed red for
+// six days on an image that no longer matched how the hub dispatches.
+var harnessPath = filepath.Join("/usr/local/bin", executor.HarnessProgram)
+
+// hubSelfExe is what the hub is told its own binary is.
+//
+// Nothing exists at it, on this host or in the image, on purpose. Dispatch to
+// the container executor does not need it to — argv[0] is rewritten on the way
+// out, as above — and anything that did try to exec it on the host would
+// otherwise run whatever the default resolves to: this suite's own test
+// binary, or a real cloop installed at harnessPath on a developer's machine.
+// Failing at exec is the answer that cannot be mistaken for a working hub.
+const hubSelfExe = "/nonexistent/cloop-soak/hub-self"
 
 // canaryFile is the per-project file the workload reads its canary out of,
 // relative to the project directory.
@@ -89,9 +108,13 @@ done
 // ensureImage builds the sandbox image the soak dispatches into, and returns
 // its reference.
 //
-// The tag is derived from the script's own digest, so a change to the workload
+// The tag is derived from the digest of the script and the Dockerfile
+// together, so a change to either the workload or where the image puts it
 // produces a new image rather than silently reusing a stale one, and an
-// unchanged workload costs a layer-cache hit instead of a rebuild.
+// unchanged image costs a layer-cache hit instead of a rebuild. The script
+// alone was not enough: when harnessPath moved, a machine that had built the
+// old image kept dispatching into it, harness still at the old path, under an
+// unchanged tag.
 func ensureImage(t *testing.T, runtime string) string {
 	t.Helper()
 	if override := strings.TrimSpace(os.Getenv(imageEnv)); override != "" {
@@ -100,7 +123,12 @@ func ensureImage(t *testing.T, runtime string) string {
 	}
 
 	script := buildHarnessScript()
-	sum := sha256.Sum256([]byte(script))
+	dockerfile := fmt.Sprintf(`FROM %s
+RUN mkdir -p %s
+COPY harness %s
+RUN chmod 0755 %s
+`, baseImage(), filepath.Dir(harnessPath), harnessPath, harnessPath)
+	sum := sha256.Sum256([]byte(dockerfile + "\x00" + script))
 	tag := "localhost/cloop-soak:" + hex.EncodeToString(sum[:])[:16]
 
 	// Already built? An `image inspect` is a local store read; on a repeat run
@@ -121,11 +149,6 @@ func ensureImage(t *testing.T, runtime string) string {
 	if err := os.WriteFile(filepath.Join(ctxDir, "harness"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write harness: %v", err)
 	}
-	dockerfile := fmt.Sprintf(`FROM %s
-RUN mkdir -p %s
-COPY harness %s
-RUN chmod 0755 %s
-`, baseImage(), filepath.Dir(harnessPath), harnessPath, harnessPath)
 	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
@@ -245,7 +268,7 @@ func newWorld(t *testing.T) *world {
 	// happen before anything binds a project to it.
 	w.srv = ui.New(w.hubDir, 0, "")
 	w.srv.Projects = w.projectPaths()
-	w.srv.SelfExe = harnessPath
+	w.srv.SelfExe = hubSelfExe
 
 	// Raise the per-IP WebSocket cap, which defaults to 8 and which this suite
 	// trips at three tenants (each opening one stream per project plus a
