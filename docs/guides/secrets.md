@@ -219,6 +219,19 @@ inspected as text.
 The result: `git clone`, `git push` and `gh` inside `myorg/*` work normally, and
 the same commands against `otherorg/private` fail to authenticate.
 
+**Several GitHub grants on one project** — read access to a library and write
+access to the project's own repository, say — are delivered together. Each grant
+after the first gets its own `github-token-2`, `git-credential-cloop-2` and so on
+(`git-proxy-credential-2` behind the proxy), and the one `gitconfig` installs every
+helper in turn. Git asks each helper and takes the first answer, and each answers
+only for its own grant's repositories, so every repository is authenticated by the
+grant that names it; a grant whose allowlist is a wildcard is asked after the ones
+that name repositories outright. `CLOOP_GITHUB_REPO_ALLOWLIST` lists every grant's
+repositories, while a permission list, a proxy mode or a branch rule is announced
+only when every grant agrees on it. Until Task 20349 two grants wrote their files
+at the same paths, and a project holding them could not run on any executor that
+receives files (`secret_files[N] repeats path …/github-token`).
+
 ### The helper's limit, and what removes it
 
 Be precise about what the paragraph above buys, because it is less than it

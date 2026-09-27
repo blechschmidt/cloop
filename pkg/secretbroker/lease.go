@@ -385,7 +385,14 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 	envMap := make(map[string]string)
 	sensitive := make(map[string]struct{})
 
-	for _, mat := range l.Materials {
+	// Several GitHub grants would otherwise render the same files at the same
+	// paths; see githubmulti.go.
+	materials, err := coalesceGitHub(l.Materials)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, err
+	}
+
+	for _, mat := range materials {
 		binding := LeaseBinding{
 			GrantID:    mat.GrantID,
 			SecretID:   mat.SecretID,
@@ -465,6 +472,8 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		sort.Strings(binding.EnvKeys)
 		bindings = append(bindings, binding)
 	}
+
+	mergeGitHubEnv(envMap, orderedGitMaterials(l.Materials))
 
 	// CLOOP_LEASE_DIR lets a workload find its own credential directory
 	// without having to be told out of band.

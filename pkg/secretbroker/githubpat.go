@@ -52,22 +52,19 @@ const proxyCredentialName = "git-proxy-credential"
 // path.Match, where it does not. Without that guard "org/*" would mean two
 // different things in the two matchers, and the shell's would be the wider.
 func buildGitCredentialHelper(patterns []string) (string, error) {
-	cases := make([]string, 0, len(patterns))
-	allowAll := false
-	for _, p := range patterns {
-		if err := validatePattern("repos", p); err != nil {
-			return "", err
-		}
-		lowered := strings.ToLower(strings.TrimSuffix(strings.Trim(p, "/"), ".git"))
-		if lowered == "*" || lowered == "*/*" {
-			allowAll = true
-		}
-		cases = append(cases, lowered)
+	return buildGitCredentialHelperFor(patterns, tokenFileName)
+}
+
+// buildGitCredentialHelperFor is buildGitCredentialHelper reading the token
+// from tokenFile, so several GitHub grants can share one lease directory, each
+// helper releasing its own token (githubmulti.go).
+func buildGitCredentialHelperFor(patterns []string, tokenFile string) (string, error) {
+	cases, err := repoFilterCases(patterns)
+	if err != nil {
+		return "", err
 	}
-	if allowAll {
-		// Collapse to a single pattern that the single-slash guard above
-		// still constrains to owner/name.
-		cases = []string{"*/*"}
+	if !validLeaseFileToken(tokenFile) {
+		return "", wrapf(ErrInvalidSecret, "unsafe credential file name %q", tokenFile)
 	}
 
 	var b strings.Builder
@@ -90,6 +87,41 @@ func buildGitCredentialHelper(patterns []string) (string, error) {
 	// Only https to the real github.com. Anything else gets silence.
 	b.WriteString("[ \"$proto\" = https ] || exit 0\n")
 	b.WriteString("[ \"$host\" = " + githubHost + " ] || exit 0\n")
+	writeRepoFilter(&b, cases)
+	b.WriteString("[ -r \"$dir/" + tokenFile + "\" ] || exit 0\n")
+	b.WriteString("printf 'username=x-access-token\\n'\n")
+	b.WriteString("printf 'password=%s\\n' \"$(cat \"$dir/" + tokenFile + "\")\"\n")
+	return b.String(), nil
+}
+
+// repoFilterCases validates an allowlist and renders it as the alternatives of
+// a shell `case` pattern, lowercased, with a wildcard allowlist collapsed to
+// the one pattern the single-slash guard in writeRepoFilter still constrains.
+func repoFilterCases(patterns []string) ([]string, error) {
+	cases := make([]string, 0, len(patterns))
+	allowAll := false
+	for _, p := range patterns {
+		if err := validatePattern("repos", p); err != nil {
+			return nil, err
+		}
+		lowered := strings.ToLower(strings.TrimSuffix(strings.Trim(p, "/"), ".git"))
+		if lowered == "*" || lowered == "*/*" {
+			allowAll = true
+		}
+		cases = append(cases, lowered)
+	}
+	if allowAll {
+		// Collapse to a single pattern that the single-slash guard above
+		// still constrains to owner/name.
+		cases = []string{"*/*"}
+	}
+	return cases, nil
+}
+
+// writeRepoFilter renders the helper lines that stay silent unless git's
+// request names a repository inside cases. It reads $reqpath, which the helper
+// has already parsed from git's request.
+func writeRepoFilter(b *strings.Builder, cases []string) {
 	b.WriteString("[ -n \"$reqpath\" ] || exit 0\n")
 	// Normalise: strip a leading slash and a .git suffix, then lowercase.
 	// If tr is missing the comparison stays cased and simply fails to
@@ -108,10 +140,22 @@ func buildGitCredentialHelper(patterns []string) (string, error) {
 	b.WriteString("  " + strings.Join(cases, "|") + ") ;;\n")
 	b.WriteString("  *) exit 0 ;;\n")
 	b.WriteString("esac\n")
-	b.WriteString("[ -r \"$dir/" + tokenFileName + "\" ] || exit 0\n")
-	b.WriteString("printf 'username=x-access-token\\n'\n")
-	b.WriteString("printf 'password=%s\\n' \"$(cat \"$dir/" + tokenFileName + "\")\"\n")
-	return b.String(), nil
+}
+
+// validLeaseFileToken reports whether name is safe to write into a generated
+// shell script and gitconfig as a bare lease-directory file name.
+func validLeaseFileToken(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return name != "." && name != ".."
 }
 
 // buildGitConfig returns a git configuration file that installs the helper

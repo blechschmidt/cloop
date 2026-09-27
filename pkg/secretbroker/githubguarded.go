@@ -66,6 +66,31 @@ func buildProxyGitConfig(baseURL string) (string, error) {
 // itself. Silence for unknown hosts keeps git's own "could not read
 // Username" as the outcome, which is the message that leads somewhere.
 func buildProxyCredentialHelper(baseURL string) (string, error) {
+	return buildProxyCredentialHelperFor(baseURL, proxyCredentialName, nil)
+}
+
+// buildProxyCredentialHelperFor is buildProxyCredentialHelper reading the
+// session credential from credFile and, when patterns is non-empty, answering
+// only for repositories inside them.
+//
+// The filter exists for a lease holding several guarded GitHub grants
+// (githubmulti.go). Their sessions share the proxy's host, so a helper that
+// answered for the host alone would hand every repository the first grant's
+// session, and the proxy would refuse the ones only a later grant covers. A
+// lone grant gets no filter, as before: its session answering for any
+// repository is what lets the proxy's own refusal ("session is scoped to …")
+// reach the workload, which explains itself where git's silence would not.
+func buildProxyCredentialHelperFor(baseURL, credFile string, patterns []string) (string, error) {
+	if !validLeaseFileToken(credFile) {
+		return "", wrapf(ErrInvalidSecret, "unsafe credential file name %q", credFile)
+	}
+	var cases []string
+	if len(patterns) > 0 {
+		var err error
+		if cases, err = repoFilterCases(patterns); err != nil {
+			return "", err
+		}
+	}
 	base, err := normalizeProxyBase(baseURL)
 	if err != nil {
 		return "", err
@@ -90,19 +115,29 @@ func buildProxyCredentialHelper(baseURL string) (string, error) {
 	b.WriteString("set -u\n")
 	b.WriteString("[ \"${1:-}\" = get ] || exit 0\n")
 	b.WriteString("dir=$(dirname \"$0\")\n")
-	b.WriteString("proto=; host=\n")
+	if len(cases) == 0 {
+		b.WriteString("proto=; host=\n")
+	} else {
+		b.WriteString("proto=; host=; reqpath=\n")
+	}
 	b.WriteString("while IFS='=' read -r key value; do\n")
 	b.WriteString("  case \"$key\" in\n")
 	b.WriteString("    protocol) proto=$value ;;\n")
 	b.WriteString("    host) host=$value ;;\n")
+	if len(cases) > 0 {
+		b.WriteString("    path) reqpath=$value ;;\n")
+	}
 	b.WriteString("  esac\n")
 	b.WriteString("done\n")
 	b.WriteString("[ \"$proto\" = https ] || exit 0\n")
 	b.WriteString("[ \"$host\" = " + host + " ] || exit 0\n")
-	b.WriteString("[ -r \"$dir/" + proxyCredentialName + "\" ] || exit 0\n")
+	if len(cases) > 0 {
+		writeRepoFilter(&b, cases)
+	}
+	b.WriteString("[ -r \"$dir/" + credFile + "\" ] || exit 0\n")
 	// The file already holds git's own key=value lines, so the helper emits it
 	// verbatim rather than reassembling a credential it would have to quote.
-	b.WriteString("cat \"$dir/" + proxyCredentialName + "\"\n")
+	b.WriteString("cat \"$dir/" + credFile + "\"\n")
 	return b.String(), nil
 }
 
