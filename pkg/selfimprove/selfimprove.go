@@ -351,7 +351,9 @@ func buildSourceTree(root string) string {
 		if err != nil || d.IsDir() {
 			if d != nil && d.IsDir() {
 				name := d.Name()
-				if name == "vendor" || name == ".git" || name == "node_modules" || name == "testdata" {
+				// .cloop holds control state and feature worktrees — full copies
+				// of this tree that would crowd the 200-file listing.
+				if name == "vendor" || name == ".git" || name == "node_modules" || name == "testdata" || name == ".cloop" {
 					return filepath.SkipDir
 				}
 			}

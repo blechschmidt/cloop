@@ -8,6 +8,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"fmt"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"io"
 	"os"
 	"path/filepath"
@@ -169,6 +170,9 @@ func Restore(workDir, id string) error {
 		if e.Name() == snapshotsDir {
 			continue // preserve existing snapshots
 		}
+		if e.Name() == feature.DirName {
+			continue // feature worktrees are live work, not project state (Task 20341)
+		}
 		if err := os.RemoveAll(filepath.Join(dst, e.Name())); err != nil {
 			return fmt.Errorf("remove %s: %w", e.Name(), err)
 		}
@@ -292,6 +296,13 @@ func writeArchive(destPath, srcDir, excludeDir string) error {
 		if absPath == absExclude {
 			return filepath.SkipDir
 		}
+		// And the feature worktrees (Task 20341): each is a full source
+		// checkout with a .cloop of its own — not this project's control
+		// state, and restoring it from an archive would put back files git
+		// no longer tracks as that worktree.
+		if absPath == filepath.Join(absSrc, feature.DirName) {
+			return filepath.SkipDir
+		}
 
 		// Compute the in-archive name relative to srcDir's parent, prefixed
 		// with ".cloop/".
@@ -398,8 +409,11 @@ func copyDir(src, dst string) error {
 			return err
 		}
 
-		// Skip snapshots/ if somehow present in the archive.
-		if rel == snapshotsDir || strings.HasPrefix(rel, snapshotsDir+string(os.PathSeparator)) {
+		// Skip snapshots/ if somehow present in the archive, and features/,
+		// which archives written before Task 20341 contain and which must
+		// not be copied over the live worktrees.
+		if rel == snapshotsDir || strings.HasPrefix(rel, snapshotsDir+string(os.PathSeparator)) ||
+			rel == feature.DirName || strings.HasPrefix(rel, feature.DirName+string(os.PathSeparator)) {
 			if fi.IsDir() {
 				return filepath.SkipDir
 			}

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 117 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 120 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -77,10 +77,10 @@ whichever one happened to be opened.
 | Home | Meaning | Actions |
 | --- | --- | --- |
 | `control-plane` | the hub's own state.db | 105 |
-| `project` | the project's .cloop/state.db | 10 |
+| `project` | the project's .cloop/state.db | 13 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
-Recorded in the project's .cloop/state.db: `config.set`, `run.cap_paused`, `run.cap_resumed`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.status`, `task.upsert`.
+Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.cap_paused`, `run.cap_resumed`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.status`, `task.upsert`.
 
 Recorded in whichever chain the decision was scoped to: `authz.denied`, `authz.granted`.
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-117 actions in 33 families. Every action is listed: this section is the whole
+120 actions in 34 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (14) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (14) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -129,6 +129,23 @@ Payload keys:
 
 - `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
 - `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone.
+
+### feature.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `feature.create` | `feature` | project | stable | A feature — a git worktree of the project with its own task list — is created. |
+| `feature.pr_open` | `feature` | project | stable | A feature's branch is pushed and a pull request for it is opened or updated. |
+| `feature.remove` | `feature` | project | stable | A feature's worktree, and with it its task list and history, is removed. |
+
+Payload keys:
+
+- `feature.create` — `slug`, `branch`, `base`, `path`, `auto_evolve`, `innovate`, `tasks`
+- `feature.pr_open` — `slug`, `number`, `url`, `base`, `existing`, `automatic`
+- `feature.remove` — `slug`, `branch`, `branch_deleted`, `force`
+
+- `feature.create` — Filed in the parent project's trail, not the feature's: the feature's own trail starts with its first run, and "which features did this project have" is a question about the parent.
+- `feature.pr_open` — automatic is true when the hub opened it on its own because the feature completed with auto-PR set, so a pull request nobody clicked for is still attributable.
 
 ### step.*
 

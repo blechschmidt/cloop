@@ -208,8 +208,12 @@ func (r *Registry) Unbind(projectPath string) {
 // Binding returns the executor ID bound to projectPath and whether one
 // exists, consulting the in-memory map first and then the persistent
 // lookup.
+//
+// The path is first mapped through PolicyProjectPath, so a feature worktree
+// resolves to its parent project's binding and can never land somewhere the
+// parent was pinned away from.
 func (r *Registry) Binding(projectPath string) (string, bool) {
-	key := canonicalProjectKey(projectPath)
+	key := canonicalProjectKey(PolicyProjectPath(projectPath))
 	r.mu.RLock()
 	id, ok := r.bindings[key]
 	lookup := r.lookup

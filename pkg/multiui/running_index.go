@@ -2,6 +2,8 @@ package multiui
 
 import (
 	"path/filepath"
+
+	"github.com/blechschmidt/cloop/pkg/feature"
 )
 
 // RunningDirs is a snapshot of where every "cloop run" process on this host is
@@ -23,6 +25,10 @@ type RunningDirs struct {
 	// run counts for a project when it executes in the project directory or
 	// anywhere below it, because a parallel task running in
 	// .cloop/worktrees/task-42 still belongs to that project.
+	//
+	// The walk up stops at a feature worktree's root, for the same reason
+	// dirScopeMatch excludes that subtree: a feature's run is the feature's,
+	// not its parent's (Task 20341).
 	dirs map[string]struct{}
 }
 
@@ -31,25 +37,32 @@ type RunningDirs struct {
 // hosts, restricted containers), matching cloopRunPIDs.
 func ScanRunningDirs() RunningDirs {
 	var ix RunningDirs
-	forEachCloopRun(func(_ int, cwd string) {
-		if ix.dirs == nil {
-			ix.dirs = make(map[string]struct{}, 16)
-		}
-		for d := filepath.Clean(cwd); ; {
-			if _, seen := ix.dirs[d]; seen {
-				// Another run already contributed this directory, so every
-				// remaining ancestor is recorded too.
-				break
-			}
-			ix.dirs[d] = struct{}{}
-			parent := filepath.Dir(d)
-			if parent == d {
-				break // reached the root
-			}
-			d = parent
-		}
-	})
+	forEachCloopRun(func(_ int, cwd string) { ix.add(cwd) })
 	return ix
+}
+
+// add records one run's working directory and the ancestors it counts for.
+func (r *RunningDirs) add(cwd string) {
+	if r.dirs == nil {
+		r.dirs = make(map[string]struct{}, 16)
+	}
+	for d := filepath.Clean(cwd); ; {
+		if _, seen := r.dirs[d]; seen {
+			// Another run already contributed this directory, so every
+			// remaining ancestor is recorded too — or, if it is a feature
+			// root, deliberately is not.
+			return
+		}
+		r.dirs[d] = struct{}{}
+		if _, _, isFeature := feature.ParentOf(d); isFeature {
+			return // the feature's own run; its parent is not running
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return // reached the root
+		}
+		d = parent
+	}
 }
 
 // Any reports whether any cloop run process was found at all. A hub whose

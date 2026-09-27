@@ -108,6 +108,17 @@ const (
 	// lost look the same afterwards: a transcript ending "All tasks complete"
 	// beside a plan whose tasks are all still pending.
 	EventProjectResult EventType = "project_result"
+
+	// EventFeatureCreated and EventFeatureRemoved record, on a project's own
+	// journal, a feature of it being created or removed (Task 20341). They are
+	// the parent's rows because the feature's own journal begins with its
+	// creation and ends — deleted along with its worktree — at its removal.
+	EventFeatureCreated EventType = "feature_created"
+	EventFeatureRemoved EventType = "feature_removed"
+
+	// EventFeaturePR records a feature's pull request being opened or updated,
+	// on the feature's journal and its parent's.
+	EventFeaturePR EventType = "feature_pr"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

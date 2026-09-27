@@ -92,13 +92,14 @@ func SetProjectCeilingLookup(fn func(projectPath string) (ResourceCeiling, bool)
 	projectCeilingLookup.Store(&fn)
 }
 
-// ProjectResourceCeiling returns the ceiling recorded for projectPath.
+// ProjectResourceCeiling returns the ceiling recorded for projectPath — for a
+// feature worktree, its parent project's (see PolicyProjectPath).
 func ProjectResourceCeiling(projectPath string) (ResourceCeiling, bool) {
 	p := projectCeilingLookup.Load()
 	if p == nil || projectPath == "" {
 		return ResourceCeiling{}, false
 	}
-	return (*p)(projectPath)
+	return (*p)(PolicyProjectPath(projectPath))
 }
 
 // executorCeilingLookup resolves one executor's own ceiling.

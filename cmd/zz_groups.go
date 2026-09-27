@@ -90,6 +90,8 @@ var rootCommandGroups = map[string]string{
 	"watch":  groupCore,
 	"reset":  groupCore,
 	"clean":  groupCore,
+	// Parallel features are a way of running the core loop, several at once.
+	"feature": groupCore,
 
 	// Plan and tasks — everything that shapes or displays the task plan.
 	"task":       groupPlan,

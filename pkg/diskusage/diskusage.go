@@ -20,6 +20,7 @@ package diskusage
 
 import (
 	"fmt"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"os"
 	"path/filepath"
 	"sort"
@@ -163,6 +164,14 @@ func MeasureFiles(workDir string) (*Usage, error) {
 	}
 
 	for _, e := range entries {
+		// Feature worktrees (Task 20341) are source checkouts, each a project
+		// of its own with its own .cloop measured on its own; counting them
+		// here would report every feature's tree as this project's control
+		// state, and send an operator to `cloop compact` for bytes it cannot
+		// touch.
+		if e.Name() == feature.DirName && e.IsDir() {
+			continue
+		}
 		path := filepath.Join(dir, e.Name())
 		ent := Entry{Name: e.Name(), IsDir: e.IsDir()}
 		if e.IsDir() {

@@ -54,6 +54,9 @@ const (
 	EventResourceCeiling   = statedb.EventResourceCeiling
 	EventProjectSeed       = statedb.EventProjectSeed
 	EventProjectResult     = statedb.EventProjectResult
+	EventFeatureCreated    = statedb.EventFeatureCreated
+	EventFeatureRemoved    = statedb.EventFeatureRemoved
+	EventFeaturePR         = statedb.EventFeaturePR
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

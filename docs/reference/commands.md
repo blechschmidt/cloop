@@ -262,6 +262,87 @@ Reset progress but keep the goal and configuration.
 
 Remove `.cloop/` directory entirely.
 
+A project with [features](../guides/features.md) keeps their worktrees under
+`.cloop/features/`, and each can hold uncommitted work. `clean` refuses while
+any exist; `cloop clean --force` removes them through git first (their
+branches are kept), then the rest of `.cloop/`.
+
+---
+
+## Parallel features
+
+Several lines of work on one repository at once, each a git worktree on its
+own branch with its own task list and run settings. The
+[features guide](../guides/features.md) explains the model; these are the
+commands.
+
+### `cloop feature new <name>`
+
+Create a feature: a worktree at `.cloop/features/<slug>` on a new branch
+`cloop/feature/<slug>`, cut from the base branch, with its own `.cloop/`
+seeded from the project's provider, model, effort and instructions.
+
+```bash
+cloop feature new "Dark mode" --description "Add a dark theme and a toggle"
+cloop feature new login --task "Add a login form" --task "Hash passwords" --auto-pr
+cloop feature new "Search" --auto-evolve --innovate --parallel --max-parallel 3
+cloop feature new hotfix --base release-2.1
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--description` | The feature's goal (default: the name). Its first run plans tasks from it unless `--task` gave some. |
+| `--task` | An initial task, in order; repeatable. |
+| `--base` | Branch to cut from and propose into (default: the remote's default branch, else `main`/`master`). |
+| `--auto-evolve`, `--innovate` | The feature's own evolve settings, independent of the project's. |
+| `--parallel`, `--max-parallel` | Run the feature's independent tasks concurrently. |
+| `--auto-pr` | Have the dashboard open the pull request when the plan completes. |
+| `--json` | Machine-readable result (used by the dashboard). |
+
+The project directory must be the top of its git repository. A feature cannot
+have features.
+
+### `cloop feature list`
+
+The project's features: status, task progress, commits ahead of and behind the
+base (`+3 -1`, with `*N` for uncommitted changes), and the pull request.
+`--no-git` skips the git status. Run inside a feature, it lists its siblings.
+
+### `cloop feature remove <name>`
+
+Remove the feature's worktree — and with it its task list and history. Refused
+while a run is in progress, or while the worktree has uncommitted changes.
+
+```bash
+cloop feature remove dark-mode                  # branch kept
+cloop feature remove dark-mode --delete-branch  # deleted only if merged
+cloop feature remove dark-mode --force --delete-branch  # discard and delete regardless
+```
+
+### `cloop feature pr [name]`
+
+Push the feature's branch and open a GitHub pull request into its base. Run
+again while the pull request is open, it pushes new commits and reports the
+existing one; after a merge with nothing new committed, it reports the merge.
+
+```bash
+cloop feature pr dark-mode
+cloop feature pr dark-mode --draft --title "Dark mode (WIP)"
+cd .cloop/features/dark-mode && cloop feature pr   # the feature you are in
+```
+
+The API token is taken from `--token`, `GITHUB_TOKEN`, `GH_TOKEN`,
+`github.token` in the feature's config, git's credential helpers for the
+repository, `gh auth token`, then `CLOOP_GITHUB_TOKEN` — in that order, so the
+hub's own token, which it passes in that variable, never displaces a project's.
+`--api-url` (or `CLOOP_GITHUB_API_URL`) points it at GitHub Enterprise; a token
+from the environment or a config file is only sent to github.com or that host.
+
+### `cloop feature pr-status [name]`
+
+Re-read the pull request from GitHub and record whether it is open, closed or
+merged.
+
 ---
 
 ## Product Manager Mode

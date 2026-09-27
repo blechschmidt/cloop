@@ -117,6 +117,39 @@ var registry = []Entry{
 			"so \"who restarted this project\" stays answerable from the trail alone.",
 	},
 
+	// ── feature ────────────────────────────────────────────────────────────
+	{
+		Action:    ActionFeatureCreate,
+		Home:      HomeProject,
+		Entity:    "feature",
+		Trigger:   "A feature — a git worktree of the project with its own task list — is created.",
+		Payload:   []string{"slug", "branch", "base", "path", "auto_evolve", "innovate", "tasks"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Filed in the parent project's trail, not the feature's: the feature's own trail " +
+			"starts with its first run, and \"which features did this project have\" is a question about the parent.",
+	},
+	{
+		Action:    ActionFeatureRemove,
+		Home:      HomeProject,
+		Entity:    "feature",
+		Trigger:   "A feature's worktree, and with it its task list and history, is removed.",
+		Payload:   []string{"slug", "branch", "branch_deleted", "force"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionFeaturePROpen,
+		Home:      HomeProject,
+		Entity:    "feature",
+		Trigger:   "A feature's branch is pushed and a pull request for it is opened or updated.",
+		Payload:   []string{"slug", "number", "url", "base", "existing", "automatic"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "automatic is true when the hub opened it on its own because the feature completed " +
+			"with auto-PR set, so a pull request nobody clicked for is still attributable.",
+	},
+
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,

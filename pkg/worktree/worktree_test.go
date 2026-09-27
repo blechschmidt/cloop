@@ -189,3 +189,20 @@ func TestCreate_RecreatesStaleWorktree(t *testing.T) {
 		t.Errorf("re-Created worktree is dirty: dirty=%v err=%v", dirty, err)
 	}
 }
+
+// TestBranchNameInAFeature: a feature's plan numbers its tasks from 1 like
+// its project's, in the same repository, so its task branches must not share
+// the project's names (Task 20341).
+func TestBranchNameInAFeature(t *testing.T) {
+	task := &pm.Task{ID: 1, Title: "Add tests"}
+	if got := branchNameIn("/srv/app", task); got != "cloop/task-1-add-tests" {
+		t.Errorf("project branch = %s", got)
+	}
+	got := branchNameIn("/srv/app/.cloop/features/login", task)
+	if got != "cloop/feature-task/login/1-add-tests" {
+		t.Errorf("feature branch = %s", got)
+	}
+	if cloopBranchRe.MatchString(got) {
+		t.Error("a feature's task branch matches the project's task-branch pattern, so the project's cleanup would claim it")
+	}
+}

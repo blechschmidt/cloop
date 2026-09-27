@@ -34,6 +34,16 @@ const (
 	// window rolled over, with no human involved.
 	ActionRunCapResumed Action = "run.cap_resumed"
 
+	// ── feature ────────────────────────────────────────────────────────────
+
+	// ActionFeatureCreate records a feature worktree being created.
+	ActionFeatureCreate Action = "feature.create"
+	// ActionFeatureRemove records a feature worktree being removed.
+	ActionFeatureRemove Action = "feature.remove"
+	// ActionFeaturePROpen records a feature's pull request being opened or
+	// updated.
+	ActionFeaturePROpen Action = "feature.pr_open"
+
 	// ── step ───────────────────────────────────────────────────────────────
 
 	// ActionStepAppend records one execution step's transcript.

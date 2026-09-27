@@ -15,6 +15,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -31,10 +32,27 @@ import (
 // (last-writer-wins instead of partial-data-wins).
 var registryMu sync.Mutex
 
-// IsCloopRunningInDir returns true if a "cloop run" process has its working
-// directory set to dir. It reads /proc/*/cwd symlinks (Linux only).
+// IsCloopRunningInDir returns true if a "cloop run" process is executing in
+// the project at dir. It reads /proc/*/cwd symlinks (Linux only).
+//
+// A feature worktree below dir (.cloop/features/<slug>) is a project of its
+// own and does not count — see dirScopeMatch. IsCloopRunningUnder is the
+// variant for the one question where it must: "may this directory tree be
+// deleted?".
 func IsCloopRunningInDir(dir string) bool {
 	return len(CloopRunPIDsInDir(dir)) > 0
+}
+
+// IsCloopRunningUnder reports whether any "cloop run" process is executing in
+// dir or anywhere below it, feature worktrees included. It answers whether
+// removing the directory tree would pull a working directory out from under a
+// live run — which is a question about the tree, not about the project.
+func IsCloopRunningUnder(dir string) bool {
+	dir = canonicalDir(dir)
+	prefix := dir + string(os.PathSeparator)
+	return len(cloopRunPIDs(func(cwd string) bool {
+		return cwd == dir || strings.HasPrefix(cwd, prefix)
+	})) > 0
 }
 
 // CloopRunPIDsInDir returns the PIDs of all "cloop run" processes whose
@@ -58,11 +76,32 @@ func CloopRunPIDsInDir(dir string) []int {
 // for the project must reach those too. dir is symlink-resolved because
 // /proc/PID/cwd is always the kernel-canonical path, so a registry entry
 // reached via a symlink would otherwise never compare equal (Task 20153).
+//
+// The one subtree that does not count is a feature worktree
+// (.cloop/features/<slug>, Task 20341). A feature is a project of its own
+// with its own run, and treating it as part of its parent would make the
+// parent's Stop button kill every feature's run, report the parent as running
+// whenever any feature is, and refuse to start the parent while a feature
+// works — the opposite of developing features in parallel.
 func dirScopeMatch(dir string) func(cwd string) bool {
 	dir = canonicalDir(dir)
-	prefix := dir + string(os.PathSeparator)
+	sep := string(os.PathSeparator)
+	prefix := dir + sep
+	featuresPrefix := filepath.Join(dir, feature.ControlDir, feature.DirName) + sep
 	return func(cwd string) bool {
-		return cwd == dir || strings.HasPrefix(cwd, prefix)
+		if cwd == dir {
+			return true
+		}
+		if !strings.HasPrefix(cwd, prefix) {
+			return false
+		}
+		if rest, ok := strings.CutPrefix(cwd, featuresPrefix); ok {
+			slug, _, _ := strings.Cut(rest, sep)
+			if feature.ValidSlug(slug) == nil {
+				return false
+			}
+		}
+		return true
 	}
 }
 
@@ -246,7 +285,18 @@ type ProjectEntry struct {
 	// same project, and so the settings panel can offer it back. Owner
 	// governs who may see a project at all; this governs who wants to.
 	HiddenFor []string `json:"hidden_for,omitempty"`
+
+	// Parent is set on an entry that is a feature of another project (Task
+	// 20341): the parent project's path. Feature entries are never stored in
+	// the registry — the dashboard discovers them under each project's
+	// .cloop/features — so this field is only ever set in memory.
+	Parent string `json:"parent,omitempty"`
+	// Feature is the feature's slug when Parent is set.
+	Feature string `json:"feature,omitempty"`
 }
+
+// IsFeature reports whether the entry is a feature of another project.
+func (e ProjectEntry) IsFeature() bool { return e.Parent != "" }
 
 // HiddenForViewer reports whether viewer has hidden this project. Comparison
 // is case-insensitive to match the Owner rule, since both hold email-derived
@@ -658,6 +708,57 @@ type ProjectStatus struct {
 	// in it — a hidden project at index 2 would silently shift every
 	// project after it onto a neighbour's tasks, runs and deletes.
 	Hidden bool `json:"hidden,omitempty"`
+
+	// Parent is the parent project's path when this project is a feature of
+	// it, and Feature describes the feature (Task 20341). The dashboard nests
+	// features under their parent with these; everything else about a feature
+	// — its tasks, its run, its options — is an ordinary project status.
+	Parent  string         `json:"parent,omitempty"`
+	Feature *FeatureStatus `json:"feature,omitempty"`
+
+	// HasGit reports that a (non-feature) project is the top of a git
+	// repository — the precondition for creating features of it, which the
+	// dashboard checks before offering the button.
+	HasGit bool `json:"has_git,omitempty"`
+}
+
+// FeatureStatus is what the dashboard shows about a feature beyond its
+// project status: which branch it is, what it will be proposed into, and the
+// pull request once there is one.
+type FeatureStatus struct {
+	Slug      string      `json:"slug"`
+	Title     string      `json:"title"`
+	Branch    string      `json:"branch"`
+	Base      string      `json:"base"`
+	CreatedAt time.Time   `json:"created_at"`
+	CreatedBy string      `json:"created_by,omitempty"`
+	AutoPR    bool        `json:"auto_pr,omitempty"`
+	PR        *feature.PR `json:"pr,omitempty"`
+	// AutoEvolve and Innovate are the feature's own run settings, shown on
+	// its row in the parent's Features panel so the parallel lines of work
+	// can be told apart at a glance.
+	AutoEvolve bool `json:"auto_evolve,omitempty"`
+	Innovate   bool `json:"innovate,omitempty"`
+}
+
+// featureStatusFor reads a feature entry's record into a FeatureStatus. A
+// record that cannot be read yields a minimal status from the entry, so the
+// feature still nests under its parent rather than surfacing as a stray
+// top-level project.
+func featureStatusFor(entry ProjectEntry) *FeatureStatus {
+	fs := &FeatureStatus{Slug: entry.Feature, Title: entry.Feature, Branch: feature.BranchName(entry.Feature)}
+	m, err := feature.LoadMeta(entry.Path)
+	if err != nil {
+		return fs
+	}
+	fs.Title = m.Title
+	fs.Branch = m.Branch
+	fs.Base = m.Base
+	fs.CreatedAt = m.CreatedAt
+	fs.CreatedBy = m.CreatedBy
+	fs.AutoPR = m.AutoPR
+	fs.PR = m.PR
+	return fs
 }
 
 // GetStatus loads the state for the project at path and returns a ProjectStatus.
@@ -677,6 +778,12 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 		Name:   entry.Name,
 		Path:   entry.Path,
 		Health: HealthUnknown,
+	}
+	if entry.IsFeature() {
+		ps.Parent = entry.Parent
+		ps.Feature = featureStatusFor(entry)
+	} else if _, err := os.Stat(filepath.Join(entry.Path, ".git")); err == nil {
+		ps.HasGit = true
 	}
 	// Lite-load: this function only reads metadata, plan task counts, the
 	// step total, and the timestamp of the most recent step. Decoding every
@@ -721,6 +828,10 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	}
 	ps.PMMode = st.PMMode
 	ps.LastActivity = st.UpdatedAt
+	if ps.Feature != nil {
+		ps.Feature.AutoEvolve = st.AutoEvolve
+		ps.Feature.Innovate = st.InnovateMode
+	}
 
 	if st.Plan != nil {
 		for _, t := range st.Plan.Tasks {
@@ -818,7 +929,11 @@ func Aggregate(statuses []ProjectStatus) AggregateStats {
 		if s.Hidden {
 			continue
 		}
-		a.TotalProjects++
+		// A feature is part of its project, not another project: its tasks
+		// and its run count, the headline project count does not.
+		if s.Parent == "" {
+			a.TotalProjects++
+		}
 		if s.Health == HealthRunning {
 			a.ActiveRuns++
 		}

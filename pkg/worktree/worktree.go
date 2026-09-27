@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -37,6 +38,25 @@ func taskSlug(title string) string {
 // BranchName returns the branch name used for a task worktree.
 func BranchName(task *pm.Task) string {
 	return fmt.Sprintf("cloop/task-%d-%s", task.ID, taskSlug(task.Title))
+}
+
+// branchNameIn returns the branch for task's worktree when the plan runs in
+// repoDir.
+//
+// A feature (Task 20341) is a worktree of the same repository as its project,
+// with a plan whose task IDs start at 1 like its project's — so BranchName
+// would give feature A's task 1 and the project's task 1 the same branch, and
+// whichever ran second would reset the other's kept work onto its own HEAD.
+// A feature's task branches get a namespace of their own instead: under
+// cloop/ (the git proxy's write-back allowlist), clear of the feature's own
+// cloop/feature/<slug> — a ref and a directory of the same name cannot
+// coexist — and outside the task-branch pattern the project's worktree
+// cleanup matches, which would otherwise attribute them to its own tasks.
+func branchNameIn(repoDir string, task *pm.Task) string {
+	if _, slug, ok := feature.ParentOf(repoDir); ok {
+		return fmt.Sprintf("cloop/feature-task/%s/%d-%s", slug, task.ID, taskSlug(task.Title))
+	}
+	return BranchName(task)
 }
 
 // Path returns the absolute path to the worktree directory for a task.
@@ -86,7 +106,7 @@ func Create(repoDir string, task *pm.Task) (*Worktree, error) {
 		return nil, fmt.Errorf("worktree: determine current branch: %w", err)
 	}
 	wtPath := Path(repoDir, task)
-	branch := BranchName(task)
+	branch := branchNameIn(repoDir, task)
 
 	// If a worktree already exists at this path (from a crashed prior run or a
 	// stale entry in .git/worktrees), tear it down before re-creating.
