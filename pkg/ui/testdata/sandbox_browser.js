@@ -40,6 +40,28 @@ const EXEC_ID = process.argv[4];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// WAIT_MS bounds each wait for the page to reach a state; it is how long to
+// keep looking before giving up, not a pause a healthy run sits out. Every
+// round trip this panel makes opens the control-plane database, which under
+// -race on a 4-core box with the CPU saturated takes seconds rather than the
+// milliseconds a quiet machine needs. 30s leaves ample margin over that, and
+// the handful of waits a run makes stay inside the 4-minute bound the Go side
+// puts on this driver even if every one of them expires.
+const WAIT_MS = 30000;
+
+// waitFor polls a page expression until it is truthy or WAIT_MS passes, and
+// reports which. The fixed sleeps it replaces were sized on a quiet machine:
+// under load the panel's own requests land after the sleep has expired, and
+// the driver then typed into a form that was about to be overwritten.
+async function waitFor(cdp, expr) {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    if (await cdp.eval(expr)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(50);
+  }
+}
+
 // ── a minimal CDP client ────────────────────────────────────────────────────
 //
 // The same shape as ptt_browser.js's. Duplicated rather than shared because
@@ -206,22 +228,38 @@ async function openPanel(cdp) {
   if (idx < 0) throw new Error('executor ' + EXEC_ID + ' is not in /api/executors');
 
   await cdp.eval(`window.loadExecutors && window.loadExecutors()`);
-  // Give the panel's own fetch of /api/executors time to populate execData, so
-  // the index the driver resolved refers to the same list the page holds.
-  for (let i = 0; i < 100; i++) {
-    await sleep(50);
-    const ok = await cdp.eval(
-      `(() => { try { window.openExecutorSandbox(${idx}); } catch (e) { return false; }
-         const o = document.getElementById('executor-sandbox-overlay');
-         return !!o && o.style.display !== 'none'; })()`);
-    if (ok) return;
-  }
-  throw new Error('the sandbox overlay never opened');
+  // Retried until the panel's own fetch of /api/executors has populated
+  // execData, so the index the driver resolved refers to the same list the
+  // page holds: until then openExecutorSandbox finds no executor at that index
+  // and returns without opening anything.
+  const opened = await waitFor(cdp,
+    `(() => { try { window.openExecutorSandbox(${idx}); } catch (e) { return false; }
+       const o = document.getElementById('executor-sandbox-overlay');
+       return !!o && o.style.display !== 'none'; })()`);
+  if (!opened) throw new Error('the sandbox overlay never opened');
+
+  // The dialog opens on a cleared form and fills it when its GET answers. A
+  // user sees the form arrive; this waits for the same thing, because anything
+  // set before then is overwritten by the fill. That is what the fixed sleep
+  // here used to lose to: on a loaded machine the GET answered after the
+  // driver had already chosen container mode, the fill put the stored mode
+  // back, and the container fields hid again — failing a gate whose panel
+  // worked.
+  //
+  // The engine list is the observable: the cleared form offers only
+  // "Auto-detect", and the fill appends every engine the backend accepts. A GET
+  // that fails fills nothing and says so in the warning line instead.
+  const answered = await waitFor(cdp, `(() => {
+    const engine = document.getElementById('execSandboxEngine');
+    const warn = document.getElementById('execSandboxWarn');
+    return (!!engine && engine.options.length > 1)
+      || (!!warn && warn.style.display !== 'none' && warn.textContent !== '');
+  })()`);
+  if (!answered) throw new Error('the sandbox form was never filled from its GET');
 }
 
 async function closePanel(cdp) {
   await cdp.eval(`window.closeExecutorSandbox && window.closeExecutorSandbox()`);
-  await sleep(50);
 }
 
 async function fetchJSON(cdp, url) {
@@ -237,18 +275,18 @@ const results = {};
 
 async function scenarioContainerFieldsAppearWithTheMode(cdp) {
   await openPanel(cdp);
-  await sleep(150); // the panel's GET fills the form
 
   const hiddenAtFirst = !(await cdp.eval(visibleExpr('execSandboxContainerFields')));
 
+  // No wait after a selection: dispatchEvent runs the change handler before it
+  // returns, and visibleExpr asks for layout, which the browser computes on
+  // demand from the style the handler just set.
   await cdp.eval(setSelectExpr('execSandboxMode', 'container'));
-  await sleep(50);
   const shownForContainer = await cdp.eval(visibleExpr('execSandboxContainerFields'));
   const runtimeTypable = await cdp.eval(visibleExpr('execSandboxRuntime'));
   const engineTypable = await cdp.eval(visibleExpr('execSandboxEngine'));
 
   await cdp.eval(setSelectExpr('execSandboxMode', 'host'));
-  await sleep(50);
   const hiddenForHost = !(await cdp.eval(visibleExpr('execSandboxContainerFields')));
 
   results.container_fields_follow_the_mode = {
@@ -263,10 +301,8 @@ async function scenarioContainerFieldsAppearWithTheMode(cdp) {
 
 async function scenarioSaveContainerMode(cdp) {
   await openPanel(cdp);
-  await sleep(150);
 
   await cdp.eval(setSelectExpr('execSandboxMode', 'container'));
-  await sleep(50);
   // podman is offered because the backend allowlists it, whether or not this
   // device reported it — see the engine hint in the panel.
   const engineSet = await cdp.eval(setSelectExpr('execSandboxEngine', 'podman'));
@@ -274,15 +310,11 @@ async function scenarioSaveContainerMode(cdp) {
   const imageSet = await cdp.eval(setInputExpr('execSandboxImage', 'ghcr.io/acme/sandbox:v3'));
 
   await cdp.eval(`window.saveExecutorSandbox()`);
-  // The save closes the dialog and reloads the fleet; both are async.
-  let closed = false;
-  for (let i = 0; i < 100; i++) {
-    await sleep(50);
-    closed = await cdp.eval(
-      `(() => { const o = document.getElementById('executor-sandbox-overlay');
-         return !o || o.style.display === 'none'; })()`);
-    if (closed) break;
-  }
+  // The save closes the dialog once the PUT has answered, and reloads the
+  // fleet; both are async.
+  const closed = await waitFor(cdp,
+    `(() => { const o = document.getElementById('executor-sandbox-overlay');
+       return !o || o.style.display === 'none'; })()`);
 
   // The real question: what does the hub now say? Read it back through the API
   // rather than off the screen, because the screen is what we just typed.
@@ -304,7 +336,6 @@ async function scenarioSaveContainerMode(cdp) {
 
 async function scenarioReopenShowsWhatWasSaved(cdp) {
   await openPanel(cdp);
-  await sleep(200);
   results.reopen_shows_saved_values = {
     mode: await cdp.eval(`(document.getElementById('execSandboxMode')||{}).value || ''`),
     engine: await cdp.eval(`(document.getElementById('execSandboxEngine')||{}).value || ''`),
@@ -319,14 +350,19 @@ async function scenarioReopenShowsWhatWasSaved(cdp) {
 
 async function scenarioRejectedRuntimeKeepsTheStoredValue(cdp) {
   await openPanel(cdp);
-  await sleep(200);
   await cdp.eval(setSelectExpr('execSandboxMode', 'container'));
-  await sleep(50);
   // A path, which the backend refuses: it would turn "name a runtime" into
   // "name a binary the engine runs as root".
   await cdp.eval(setInputExpr('execSandboxRuntime', '/tmp/evil'));
+  // Wait for the refusal to have been handled before looking, or "the dialog
+  // is still open" is true only because the PUT has not answered yet. The
+  // page reports a refused save as an error toast; the toast is cleared first
+  // so the one waited for is this save's, not a leftover from an earlier one.
+  await cdp.eval(`(() => { const t = document.getElementById('toast');
+    if (t) { t.className = ''; t.textContent = ''; } })()`);
   await cdp.eval(`window.saveExecutorSandbox()`);
-  await sleep(400);
+  await waitFor(cdp, `(() => { const t = document.getElementById('toast');
+    return !!t && t.classList.contains('err') && t.textContent !== ''; })()`);
 
   const after = await fetchJSON(cdp, '/api/executors/' + encodeURIComponent(EXEC_ID) + '/sandbox');
   results.rejected_runtime_changes_nothing = {
