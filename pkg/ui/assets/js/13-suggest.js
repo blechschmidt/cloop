@@ -1,6 +1,15 @@
 // ── Suggest ──────────────────────────────────────────────────────────────────
 
+// The panel brainstorms loose ideas or, when the user has typed a request,
+// has the AI break that request into the tasks of a plan (Task 20342). Both
+// arrive as the same cards. A plan's cards say which step they are and which
+// steps they follow, and the server wires those dependencies as they are
+// added — in whatever order, and through any the user skips (suggest.Ledger).
 let currentSuggestions = [];
+let suggestGen   = 0;     // generation the cards came from; echoed back on add
+let suggestShown = 0;     // generation whose outcome has been announced
+let suggestPlan  = false; // the cards are a plan's tasks rather than ideas
+let suggestBusy  = false; // an add is in flight
 
 window.toggleSuggestPanel = function() {
   const panel = document.getElementById('suggestPanel');
@@ -10,23 +19,36 @@ window.toggleSuggestPanel = function() {
   btn.textContent = isHidden ? 'Hide suggestions' : 'Brainstorm ideas';
 };
 
+// syncSuggestMode relabels the count for what Generate will do: with a
+// request typed it is the plan's length, and left blank the AI decides it;
+// without one it is how many ideas to brainstorm.
+window.syncSuggestMode = function() {
+  const plan = !!document.getElementById('suggestInput').value.trim();
+  document.getElementById('suggestCountLabel').textContent = plan ? 'Tasks in plan:' : 'Ideas to generate:';
+  document.getElementById('suggestCount').placeholder = plan ? 'auto' : '5';
+};
+
 window.runSuggest = function() {
-  const count = parseInt(document.getElementById('suggestCount').value)||5;
+  const path  = selectedProjectPath;
+  const input = document.getElementById('suggestInput').value.trim();
+  const count = Math.max(0, parseInt(document.getElementById('suggestCount').value) || 0);
   document.getElementById('suggestBtn').disabled = true;
   document.getElementById('suggestStatusLine').style.display = '';
   document.getElementById('suggestSpinner').style.display    = '';
-  document.getElementById('suggestStatusText').textContent   = 'Generating '+count+' ideas with AI...';
-  document.getElementById('suggestList').innerHTML           = '';
-  document.getElementById('suggestSummary').style.display    = 'none';
-  document.getElementById('suggestAddAllBtn').style.display  = 'none';
-  document.getElementById('suggestClearBtn').style.display   = 'none';
+  document.getElementById('suggestStatusText').textContent   = input
+    ? 'Planning '+(count ? count+' ' : '')+'tasks with AI...'
+    : 'Generating '+(count || 5)+' ideas with AI...';
+  clearSuggestions();
 
   // Server pushes 'suggest_status' WS events on completion; no client polling.
-  api(pUrl('/api/suggest/generate'), {count}).then(d => {
-    if (!d.ok) {
+  // A reply that lands after the user has moved to another project belongs to
+  // the project it was sent from, and must not touch the panel now on screen.
+  // The same goes for adds below.
+  api(pUrl('/api/suggest/generate'), {count, input}).then(d => {
+    if (!d.ok && path === selectedProjectPath) {
       _suggestFail('Error: '+(d.error||'failed'));
     }
-  }).catch(() => _suggestFail('Request failed'));
+  }).catch(() => { if (path === selectedProjectPath) _suggestFail('Request failed'); });
 };
 
 // applySuggestStatus is called from the WebSocket 'suggest_status' event
@@ -34,40 +56,52 @@ window.runSuggest = function() {
 // or errors so the client never has to poll /api/suggest/status.
 function applySuggestStatus(d) {
   if (!d) return;
+  const btn = document.getElementById('suggestBtn');
   if (d.running) {
-    document.getElementById('suggestBtn').disabled = true;
+    // A generation started elsewhere (another tab, or before a reload) says
+    // so; one started here keeps the more specific line runSuggest wrote.
+    if (!btn.disabled) document.getElementById('suggestStatusText').textContent = 'Running... (this may take a minute)';
+    btn.disabled = true;
     document.getElementById('suggestStatusLine').style.display = '';
     document.getElementById('suggestSpinner').style.display    = '';
-    document.getElementById('suggestStatusText').textContent   = 'Running... (this may take a minute)';
+    clearSuggestions();
     return;
   }
 
-  document.getElementById('suggestBtn').disabled = false;
+  btn.disabled = false;
   document.getElementById('suggestSpinner').style.display = 'none';
+
+  // A generation's outcome is announced once. The server re-sends the same
+  // generation whenever one of its cards is added, here or in another tab;
+  // those updates only drop what was added, so they neither toast again nor
+  // bring back cards this page skipped.
+  const fresh = d.gen !== suggestShown;
+  suggestShown = suggestGen = d.gen || 0;
 
   if (d.error) {
     document.getElementById('suggestStatusText').textContent = 'Error: '+d.error;
-    toast('Suggest failed: '+d.error, 'err');
+    if (fresh) toast('Suggest failed: '+d.error, 'err');
     return;
   }
 
   if (!d.done) return;
 
   document.getElementById('suggestStatusLine').style.display = 'none';
-  currentSuggestions = (d.suggestions || []).slice();
-  if (d.summary) {
-    const sum = document.getElementById('suggestSummary');
-    sum.textContent = d.summary;
-    sum.style.display = '';
+  const pending = d.suggestions || [];
+  if (!fresh) {
+    const ids = new Set(pending.map(sg => sg.id));
+    currentSuggestions = currentSuggestions.filter(sg => ids.has(sg.id));
+    renderSuggestions();
+    return;
   }
+  suggestPlan = !!d.request;
+  currentSuggestions = pending.slice();
+  const sum = document.getElementById('suggestSummary');
+  sum.textContent = d.summary || '';
+  sum.style.display = d.summary ? '' : 'none';
   renderSuggestions();
-  if (currentSuggestions.length > 0) {
-    document.getElementById('suggestAddAllBtn').style.display = '';
-    document.getElementById('suggestClearBtn').style.display  = '';
-    toast('Generated '+currentSuggestions.length+' ideas — review below', 'ok');
-  } else {
-    toast('No suggestions returned', 'err');
-  }
+  const n = currentSuggestions.length, what = suggestPlan ? 'task' : 'idea';
+  toast(n ? (suggestPlan ? 'Planned ' : 'Generated ')+n+' '+what+(n===1?'':'s')+' — review below' : 'No '+what+'s proposed', n ? 'ok' : 'err');
 }
 
 function _suggestFail(msg) {
@@ -80,16 +114,22 @@ function _suggestFail(msg) {
 function renderSuggestions() {
   const wrap = document.getElementById('suggestList');
   const badge = document.getElementById('suggestCountBadge');
-  if (!currentSuggestions || currentSuggestions.length === 0) {
+  const n = currentSuggestions.length;
+  document.getElementById('suggestAddAllBtn').style.display = n ? '' : 'none';
+  document.getElementById('suggestClearBtn').style.display  = n ? '' : 'none';
+  if (!n) {
     wrap.innerHTML = '';
     badge.textContent = '';
+    // The summary describes cards; with none left it describes nothing.
+    document.getElementById('suggestSummary').style.display = 'none';
     return;
   }
-  badge.textContent = '· '+currentSuggestions.length+' idea'+(currentSuggestions.length===1?'':'s')+' to review';
+  badge.textContent = '· '+n+' '+(suggestPlan ? 'task' : 'idea')+(n===1?'':'s')+' to review';
   const cards = currentSuggestions.map((sg, i) => {
     const cat    = (sg.category || '').toLowerCase();
     const eff    = (sg.effort   || '').toUpperCase();
-    const title  = esc(sg.title || '(untitled)');
+    const after  = (sg.depends_on || []).join(', ');
+    const title  = (suggestPlan ? 'Step '+esc(sg.id)+' · ' : '')+esc(sg.title || '(untitled)');
     const desc   = esc(sg.description || '');
     const why    = esc(sg.rationale   || '');
     return ''+
@@ -97,6 +137,7 @@ function renderSuggestions() {
         '<div class="suggest-card-head">'+
           '<div class="suggest-card-title">'+title+'</div>'+
           '<div class="suggest-card-tags">'+
+            (after ? '<span class="suggest-tag suggest-tag-dep">after '+esc(after)+'</span>' : '')+
             (cat ? '<span class="suggest-tag suggest-tag-cat">'+esc(cat)+'</span>' : '')+
             (eff ? '<span class="suggest-tag suggest-tag-eff">'+esc(eff)+'</span>' : '')+
           '</div>'+
@@ -112,54 +153,57 @@ function renderSuggestions() {
   wrap.innerHTML = cards.join('');
 }
 
+// _suggestAdd accepts proposals by ID. The server holds the generation, so it
+// adds exactly what it proposed and, for a plan, what each step follows.
+function _suggestAdd(sgs) {
+  if (suggestBusy || !sgs.length) return;
+  suggestBusy = true;
+  const path = selectedProjectPath;
+  api(pUrl('/api/suggest/add'), {gen: suggestGen, ids: sgs.map(sg => sg.id)}).then(d => {
+    if (!d.ok) { toast(d.error||'Add failed', 'err'); return; }
+    if (path !== selectedProjectPath) return;
+    const ids = new Set(sgs.map(sg => sg.id));
+    currentSuggestions = currentSuggestions.filter(sg => !ids.has(sg.id));
+    renderSuggestions();
+    // Rows appear now rather than on the state_diff the server also sends.
+    try { applyStateDiff({tasks_added: d.tasks || []}); } catch(_) {}
+    const n = (d.added || []).length;
+    toast(sgs.length === 1 && n === 1 ? 'Added "'+sgs[0].title+'" as task' : 'Added '+n+' task'+(n===1?'':'s'), 'ok');
+  }).catch(() => toast('Request failed', 'err')).finally(() => { suggestBusy = false; });
+}
+
 window.acceptSuggestion = function(idx) {
   const sg = currentSuggestions[idx];
-  if (!sg) return;
-  api(pUrl('/api/suggest/add'), {suggestions:[sg]}).then(d => {
-    if (!d.ok) { toast(d.error||'Add failed', 'err'); return; }
-    currentSuggestions.splice(idx, 1);
-    renderSuggestions();
-    if (currentSuggestions.length === 0) {
-      document.getElementById('suggestAddAllBtn').style.display = 'none';
-      document.getElementById('suggestClearBtn').style.display  = 'none';
-    }
-    refreshState();
-    toast('Added "'+sg.title+'" as task', 'ok');
-  }).catch(() => toast('Request failed', 'err'));
+  if (sg) _suggestAdd([sg]);
 };
 
 window.rejectSuggestion = function(idx) {
   if (!currentSuggestions[idx]) return;
   currentSuggestions.splice(idx, 1);
   renderSuggestions();
-  if (currentSuggestions.length === 0) {
-    document.getElementById('suggestAddAllBtn').style.display = 'none';
-    document.getElementById('suggestClearBtn').style.display  = 'none';
-  }
 };
 
 window.addAllSuggestions = function() {
-  if (!currentSuggestions.length) return;
-  const all = currentSuggestions.slice();
-  api(pUrl('/api/suggest/add'), {suggestions: all}).then(d => {
-    if (!d.ok) { toast(d.error||'Add failed', 'err'); return; }
-    const n = (d.added || []).length;
-    currentSuggestions = [];
-    renderSuggestions();
-    document.getElementById('suggestAddAllBtn').style.display = 'none';
-    document.getElementById('suggestClearBtn').style.display  = 'none';
-    refreshState();
-    toast('Added '+n+' suggestion'+(n===1?'':'s')+' as tasks', 'ok');
-  }).catch(() => toast('Request failed', 'err'));
+  _suggestAdd(currentSuggestions.slice());
 };
 
 window.clearSuggestions = function() {
   currentSuggestions = [];
   renderSuggestions();
-  document.getElementById('suggestSummary').style.display   = 'none';
-  document.getElementById('suggestAddAllBtn').style.display = 'none';
-  document.getElementById('suggestClearBtn').style.display  = 'none';
 };
+
+// resetSuggestPanel forgets the panel when the user leaves a project: its
+// cards belong to that project, and accepting them under another would put
+// them in the wrong plan. The next project's own job, if it has one, arrives
+// on that project's stream.
+function resetSuggestPanel() {
+  clearSuggestions();
+  suggestGen = suggestShown = 0;
+  document.getElementById('suggestInput').value = '';
+  document.getElementById('suggestBtn').disabled = false;
+  document.getElementById('suggestStatusLine').style.display = 'none';
+  syncSuggestMode();
+}
 
 // ── Decompose (AI splits one task into a plan of sub-tasks) ──────────────────
 

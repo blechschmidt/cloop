@@ -1047,6 +1047,7 @@
   .suggest-tag { font-size:10px; padding:2px 8px; border-radius:10px; text-transform:uppercase; letter-spacing:0.4px; font-weight:600; }
   .suggest-tag-cat { background:rgba(88,166,255,0.15); color:#58a6ff; }
   .suggest-tag-eff { background:rgba(163,113,247,0.15); color:#a371f7; }
+  .suggest-tag-dep { background:var(--hover-bg); color:var(--muted); }
   .suggest-card-desc, .suggest-card-why { font-size:12.5px; line-height:1.55; margin-top:4px; color:var(--text); }
   .suggest-card-why { color:var(--muted); }
   .suggest-card-label { font-weight:600; color:var(--muted); margin-right:4px; }

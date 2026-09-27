@@ -231,7 +231,10 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		// executor_policy_api.go holds handleExecutorLimits and
 		// handleExecutorAudience, both prefix-less for the same reason
 		// (Task 20310).
-		"\n" + executorPolicyAPISource
+		"\n" + executorPolicyAPISource +
+		// suggest_api.go holds the suggestions panel's handlers, prefix-less
+		// since before the route table existed (moved there by Task 20342).
+		"\n" + suggestAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -298,6 +301,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"executors_api.go", executorsAPISource},
 		{"executor_sandbox_api.go", executorSandboxAPISource},
 		{"executor_policy_api.go", executorPolicyAPISource},
+		{"suggest_api.go", suggestAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {
 		if loc := re.FindStringIndex(src.body); loc != nil {

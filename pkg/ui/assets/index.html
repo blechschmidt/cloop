@@ -545,10 +545,12 @@
         </div>
         <div id="suggestPanel" style="display:none">
           <div class="card" style="margin-bottom:12px">
-            <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal. Review each one — add what you like, skip the rest, or accept them all.</p>
+            <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal — or describe what you want, and have it broken down into a plan of tasks. Review each one — add what you like, skip the rest, or accept them all.</p>
+            <textarea class="form-textarea" id="suggestInput" rows="2" maxlength="8000" style="margin-bottom:10px" aria-label="What to plan"
+                      placeholder="Optional: describe what you want done to get a plan of tasks. Leave empty to brainstorm ideas." oninput="syncSuggestMode()"></textarea>
             <div class="suggest-controls">
-              <label class="form-label" style="margin:0;white-space:nowrap">Ideas to generate:</label>
-              <input class="form-input" id="suggestCount" type="number" min="1" max="20" value="5" style="width:70px">
+              <label class="form-label" id="suggestCountLabel" for="suggestCount" style="margin:0;white-space:nowrap">Ideas to generate:</label>
+              <input class="form-input" id="suggestCount" type="number" min="1" max="20" placeholder="5" style="width:70px">
               <button class="btn primary" id="suggestBtn" data-perm="task.mutate" onclick="runSuggest()">
                 <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
                 Generate

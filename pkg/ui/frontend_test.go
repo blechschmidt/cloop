@@ -191,6 +191,14 @@ var requestsAPISource string
 //go:embed ci_api.go
 var ciAPISource string
 
+// suggestAPISource is pkg/ui/suggest_api.go (Task 20342): the suggestions
+// panel's three handlers, all registered without a method prefix — so the
+// authz scan reads their bodies to learn the verbs — and the per-project
+// `suggest_status` broadcast.
+//
+//go:embed suggest_api.go
+var suggestAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -216,7 +224,8 @@ func allUISources() string {
 		"\n" + requestsAPISource +
 		"\n" + ciAPISource +
 		"\n" + executorSandboxAPISource +
-		"\n" + executorPolicyAPISource
+		"\n" + executorPolicyAPISource +
+		"\n" + suggestAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

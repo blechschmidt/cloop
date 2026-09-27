@@ -31,7 +31,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
-	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/decompose"
@@ -53,7 +52,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
-	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/taskreplay"
 	"github.com/blechschmidt/cloop/pkg/timeline"
@@ -575,17 +573,12 @@ type Server struct {
 	runHandleMu sync.Mutex
 	runHandles  map[string]dispatchedRun
 
-	// Suggest background job state. Suggestions are generated and held for the
-	// user to review individually; clients add either selected ones or all.
-	// suggestWorkDir remembers which project the active job was launched from
-	// so completion can be broadcast to that project's WS clients.
-	suggestMu          sync.Mutex
-	suggestRunning     bool
-	suggestDone        bool
-	suggestErr         string
-	suggestSummary     string
-	suggestSuggestions []*suggest.Suggestion
-	suggestWorkDir     string
+	// Suggest jobs, one per project and keyed by workDir: each project's
+	// latest brainstorm or plan, held while its proposals are reviewed. See
+	// suggest_api.go.
+	suggestMu   sync.Mutex
+	suggestJobs map[string]*suggestJob
+	suggestGen  int // numbers generations hub-wide; see suggestJob.gen
 
 	// Multi-project state cache
 	projMu sync.RWMutex
@@ -1947,42 +1940,6 @@ func (s *Server) broadcastRunState(workDir string, running, force bool) {
 	s.mu.Unlock()
 }
 
-// broadcastSuggestStatus pushes the current suggest job status to all
-// WebSocket clients connected to workDir. Replaces the /api/suggest/status
-// polling client used to do.
-func (s *Server) broadcastSuggestStatus(workDir string) {
-	s.suggestMu.Lock()
-	payload := map[string]interface{}{
-		"running":     s.suggestRunning,
-		"done":        s.suggestDone,
-		"error":       s.suggestErr,
-		"summary":     s.suggestSummary,
-		"suggestions": append([]*suggest.Suggestion(nil), s.suggestSuggestions...),
-	}
-	s.suggestMu.Unlock()
-
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	if workDir == "" {
-		return
-	}
-	s.broadcastToProject(workDir, wsMessage{Type: "suggest_status", Data: raw})
-
-	// Mirror to this project's SSE clients (fallback path). The payload
-	// carries generated suggestion text for one plan, so it is scoped the
-	// same way as the WebSocket line above (Task 20189).
-	s.mu.Lock()
-	for c := range s.clients {
-		if c.workDir != workDir {
-			continue
-		}
-		s.sendSSEOrLag(c, sseEvent{Event: "suggest_status", Data: string(raw)})
-	}
-	s.mu.Unlock()
-}
-
 // broadcastLog ships one chunk of workDir's live harness output to that
 // project's subscribers — WebSocket and SSE — and records it for replay.
 //
@@ -3009,24 +2966,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.runStates[workDir] = running
 		s.runStateMu.Unlock()
 
-		// Send initial suggest status if a job for this project is in flight or
-		// has results to display, so the suggestions panel can hydrate without
+		// Send initial suggest status if this project has a job in flight or
+		// results to display, so the suggestions panel can hydrate without
 		// polling /api/suggest/status.
-		s.suggestMu.Lock()
-		matches := s.suggestWorkDir == workDir && (s.suggestRunning || s.suggestDone)
-		payload := map[string]interface{}{
-			"running":     s.suggestRunning,
-			"done":        s.suggestDone,
-			"error":       s.suggestErr,
-			"summary":     s.suggestSummary,
-			"suggestions": append([]*suggest.Suggestion(nil), s.suggestSuggestions...),
-		}
-		s.suggestMu.Unlock()
-		if matches {
-			if raw, err := json.Marshal(payload); err == nil {
-				if msg, err := json.Marshal(wsMessage{Type: "suggest_status", Data: raw}); err == nil {
-					_ = wsWrite(ctx, conn, msg)
-				}
+		if raw, ok := s.suggestStatusJSON(workDir); ok {
+			if msg, err := json.Marshal(wsMessage{Type: "suggest_status", Data: raw}); err == nil {
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 	}
@@ -4687,259 +4632,6 @@ func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
 		"running": running,
 		"lines":   lines,
 	})
-}
-
-// handleSuggestGenerate runs `cloop suggest --json` in the background, parses
-// the resulting suggestions, and stores them for review. Clients then call
-// /api/suggest/status to retrieve them.
-func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var req struct {
-		Count int `json:"count"`
-	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.Count <= 0 {
-		req.Count = 5
-	}
-	if req.Count > 20 {
-		req.Count = 20
-	}
-
-	suggestWorkDir := s.resolveWorkDir(r)
-
-	s.suggestMu.Lock()
-	if s.suggestRunning {
-		s.suggestMu.Unlock()
-		jsonErr(w, "suggest already running", http.StatusConflict)
-		return
-	}
-	s.suggestRunning = true
-	s.suggestDone = false
-	s.suggestErr = ""
-	s.suggestSummary = ""
-	s.suggestSuggestions = nil
-	s.suggestWorkDir = suggestWorkDir
-	s.suggestMu.Unlock()
-	s.broadcastSuggestStatus(suggestWorkDir)
-
-	exe := s.selfExe()
-	// Resolved here rather than inside the goroutine: brainstorming spends the
-	// caller's Claude tokens, and r must not outlive this handler.
-	claudeEnv := s.claudeEnvResolver(r)
-
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				fmt.Fprintf(os.Stderr, "ui: suggest goroutine panic recovered: %v\n", rec)
-				// Recover the running flag so the user can retry.
-				s.suggestMu.Lock()
-				s.suggestRunning = false
-				s.suggestDone = true
-				s.suggestErr = fmt.Sprintf("internal panic: %v", rec)
-				s.suggestMu.Unlock()
-				s.broadcastSuggestStatus(suggestWorkDir)
-			}
-		}()
-		// Hard timeout: nothing else cancels this background goroutine, and a
-		// hung sub-binary would otherwise leave suggestRunning=true forever
-		// (every subsequent /api/suggest/start returns 409 Conflict until the
-		// UI server is restarted).
-		out, runErr := runCloopSubcommandFor(context.Background(), exe, suggestWorkDir, suggestSubprocessTimeout, claudeEnv,
-			"suggest", "--json", "--count", strconv.Itoa(req.Count))
-
-		s.suggestMu.Lock()
-		s.suggestRunning = false
-		s.suggestDone = true
-
-		if runErr != nil {
-			msg := strings.TrimSpace(string(out))
-			if msg == "" {
-				msg = runErr.Error()
-			}
-			s.suggestErr = msg
-			s.suggestMu.Unlock()
-			s.broadcastSuggestStatus(suggestWorkDir)
-			return
-		}
-
-		// Not json.Unmarshal(out): out is stdout and stderr merged by the
-		// executor, so the payload has to be located in it rather than
-		// assumed to be all of it. See pkg/clijson (Task 20325).
-		var result suggest.Result
-		if err := clijson.Unmarshal(out, &result); err != nil {
-			s.suggestErr = "could not parse suggestions: " + err.Error()
-			s.suggestMu.Unlock()
-			s.broadcastSuggestStatus(suggestWorkDir)
-			return
-		}
-		s.suggestSummary = result.Summary
-		s.suggestSuggestions = result.Suggestions
-		s.suggestMu.Unlock()
-		s.broadcastSuggestStatus(suggestWorkDir)
-	}()
-
-	jsonOK(w, map[string]interface{}{"ok": true, "count": req.Count})
-}
-
-// handleSuggestStatus returns the current suggest job status and any generated suggestions.
-func (s *Server) handleSuggestStatus(w http.ResponseWriter, r *http.Request) {
-	s.suggestMu.Lock()
-	running := s.suggestRunning
-	done := s.suggestDone
-	errMsg := s.suggestErr
-	summary := s.suggestSummary
-	suggestions := append([]*suggest.Suggestion(nil), s.suggestSuggestions...)
-	s.suggestMu.Unlock()
-
-	jsonOK(w, map[string]interface{}{
-		"running":     running,
-		"done":        done,
-		"error":       errMsg,
-		"summary":     summary,
-		"suggestions": suggestions,
-	})
-}
-
-// handleSuggestAdd injects one or more reviewed suggestions into the plan as PM tasks.
-// Accepts either a list of suggestion IDs (referring to the most recent generation)
-// or a list of full suggestion objects.
-func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var req struct {
-		IDs         []int                 `json:"ids"`
-		Suggestions []*suggest.Suggestion `json:"suggestions"`
-	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
-		return
-	}
-
-	picked := req.Suggestions
-	if len(picked) == 0 && len(req.IDs) > 0 {
-		s.suggestMu.Lock()
-		idx := make(map[int]*suggest.Suggestion, len(s.suggestSuggestions))
-		for _, sg := range s.suggestSuggestions {
-			idx[sg.ID] = sg
-		}
-		for _, id := range req.IDs {
-			if sg, ok := idx[id]; ok {
-				picked = append(picked, sg)
-			}
-		}
-		s.suggestMu.Unlock()
-	}
-
-	if len(picked) == 0 {
-		jsonErr(w, "no suggestions to add", http.StatusBadRequest)
-		return
-	}
-
-	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
-	if err != nil {
-		jsonErr(w, "no project found — run cloop init first", http.StatusNotFound)
-		return
-	}
-	if ps.Plan == nil {
-		ps.Plan = pm.NewPlan(ps.Goal)
-	}
-	if !ps.PMMode {
-		ps.PMMode = true
-	}
-
-	maxID := 0
-	for _, t := range ps.Plan.Tasks {
-		if t.ID > maxID {
-			maxID = t.ID
-		}
-	}
-
-	added := make([]int, 0, len(picked))
-	for _, sg := range picked {
-		if sg == nil || strings.TrimSpace(sg.Title) == "" {
-			continue
-		}
-		maxID++
-		task := &pm.Task{
-			ID:          maxID,
-			Title:       sg.Title,
-			Description: sg.Description,
-			Priority:    suggestEffortToPriorityUI(sg.Effort),
-			Status:      pm.TaskPending,
-			Role:        suggestCategoryToRoleUI(sg.Category),
-		}
-		ps.Plan.Tasks = append(ps.Plan.Tasks, task)
-		added = append(added, task.ID)
-	}
-
-	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Drop accepted suggestions from the in-memory list.
-	if len(added) > 0 {
-		acceptedTitles := make(map[string]bool, len(picked))
-		for _, sg := range picked {
-			if sg != nil {
-				acceptedTitles[sg.Title] = true
-			}
-		}
-		s.suggestMu.Lock()
-		remaining := s.suggestSuggestions[:0]
-		for _, sg := range s.suggestSuggestions {
-			if !acceptedTitles[sg.Title] {
-				remaining = append(remaining, sg)
-			}
-		}
-		s.suggestSuggestions = remaining
-		s.suggestMu.Unlock()
-	}
-
-	s.broadcastStateDiff(workDir, ps)
-
-	jsonOK(w, map[string]interface{}{
-		"ok":    true,
-		"added": added,
-	})
-}
-
-// suggestCategoryToRoleUI mirrors cmd/suggest_cmd.go:suggestCategoryToRole.
-func suggestCategoryToRoleUI(c suggest.Category) pm.AgentRole {
-	switch c {
-	case suggest.CategoryFeature, suggest.CategoryPerformance, suggest.CategoryIntegration:
-		return pm.RoleBackend
-	case suggest.CategoryUX:
-		return pm.RoleFrontend
-	case suggest.CategorySecurity:
-		return pm.RoleSecurity
-	case suggest.CategoryDX:
-		return pm.RoleDevOps
-	case suggest.CategoryDocs:
-		return pm.RoleDocs
-	default:
-		return ""
-	}
-}
-
-// suggestEffortToPriorityUI mirrors cmd/suggest_cmd.go:suggestEffortToPriority.
-func suggestEffortToPriorityUI(e suggest.Effort) int {
-	switch e {
-	case suggest.EffortXS, suggest.EffortS:
-		return 3
-	case suggest.EffortM:
-		return 4
-	case suggest.EffortL, suggest.EffortXL:
-		return 5
-	default:
-		return 4
-	}
 }
 
 // handleInit initializes a new cloop project.

@@ -134,6 +134,9 @@ function clearProjectScopedPanels() {
   // cannot say whether it is running, and offering the wrong half of the pair
   // is worse than offering neither. render() puts it back.
   setTasksRunBarVisible(false);
+
+  // AI suggestions are one project's proposals (Task 20342).
+  try { resetSuggestPanel(); } catch(_) {}
 }
 
 // ── Deferred chart library (Task 20289) ─────────────────────────────────────
