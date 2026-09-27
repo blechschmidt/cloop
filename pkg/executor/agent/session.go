@@ -107,11 +107,23 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	// stale offset before the rewind lands: the control plane would record a
 	// phantom gap, then discard the correctly-rewound resend as duplicate,
 	// silently losing the bytes in between and reordering the log.
-	a.applyResume(ctx, sess, welcome)
+	refused := a.applyResume(ctx, sess, welcome)
 
 	a.mu.Lock()
 	a.sess = sess
 	a.mu.Unlock()
+
+	// Stop what the control plane refused only now that the session is
+	// published, and that order is load-bearing too. A stopped workload still
+	// has two things to say — what it prints on its way out, and how it ended —
+	// and its output pump delivers both to whatever currentSession() returns.
+	// Signalled before the publish, a workload that exits promptly on SIGTERM
+	// finished while there was no session at all; stopDisowned had already
+	// forgotten it, so flushAll below never saw it either, and its tail and its
+	// exit were dropped. The kill happened and nothing could show it had.
+	for _, r := range refused {
+		a.stopDisowned(ctx, r.handleID, r.reason)
+	}
 
 	// Flush again now that output can actually reach the wire: anything a
 	// workload produced during the rewind above was buffered, not sent.
@@ -293,8 +305,16 @@ func (a *Agent) resumeOffers() []remote.ResumeHandle {
 	return out
 }
 
-// applyResume restarts the streams the control plane still wants and stops the
-// workloads it has disowned.
+// resumeRefusal is a workload the control plane will not take back, and the
+// reason to log when it is stopped.
+type resumeRefusal struct {
+	handleID string
+	reason   string
+}
+
+// applyResume restarts the streams the control plane still wants and returns
+// the workloads it has disowned, which runOnce stops once the new session is
+// published (see there for why not before).
 //
 // Stopping, not merely abandoning, and that is the fix for the worst failure
 // this protocol had. This function used to answer a refusal by calling forget:
@@ -320,7 +340,7 @@ func (a *Agent) resumeOffers() []remote.ResumeHandle {
 // An entry that is present with an action this build does not recognise resumes
 // rather than dies: see ResumeAck.Effective for why the unknown-dialect case
 // has to fail towards keeping the work.
-func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.WelcomePayload) {
+func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.WelcomePayload) []resumeRefusal {
 	acks := make(map[string]remote.ResumeAck, len(w.ResumeAccepted))
 	for _, ack := range w.ResumeAccepted {
 		acks[ack.HandleID] = ack
@@ -333,19 +353,20 @@ func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.W
 	}
 	a.mu.Unlock()
 
+	var refused []resumeRefusal
 	for _, wl := range current {
 		ack, ok := acks[wl.handleID]
 		switch {
 		case !ok:
-			a.stopDisowned(ctx, wl.handleID,
-				"the control plane did not acknowledge this workload on reconnect, so it is no "+
-					"longer tracked there")
+			refused = append(refused, resumeRefusal{wl.handleID,
+				"the control plane did not acknowledge this workload on reconnect, so it is no " +
+					"longer tracked there"})
 		case ack.Effective() == remote.ResumeTerminate:
 			reason := strings.TrimSpace(ack.Reason)
 			if reason == "" {
 				reason = "the control plane asked for this workload to be terminated on reconnect"
 			}
-			a.stopDisowned(ctx, wl.handleID, reason)
+			refused = append(refused, resumeRefusal{wl.handleID, reason})
 		default:
 			wl.sendMu.Lock()
 			wl.sentOffset = ack.FromOffset
@@ -353,6 +374,7 @@ func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.W
 			a.flush(ctx, sess, wl)
 		}
 	}
+	return refused
 }
 
 // stopDisowned terminates a workload the control plane is no longer tracking
