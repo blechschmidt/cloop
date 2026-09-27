@@ -9,8 +9,10 @@ package statedb
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -133,6 +135,80 @@ func TestVerifyAuditChainAcceptsAnIntactChain(t *testing.T) {
 	}
 	if report.BreakAtID != 0 || report.ExpectedHash != "" || report.ActualHash != "" {
 		t.Errorf("clean report should carry no break details, got %+v", report)
+	}
+}
+
+// TestAuditAppendsFromTwoHandlesAreAllKept: two handles on one database append
+// at once, as the control plane's git proxy, its lease brokers and the hub
+// itself do. Every row must land, and the chain they form must verify.
+//
+// About half of them used to fail with "database is locked (517)" —
+// SQLITE_BUSY_SNAPSHOT. An append reads the chain tip and then inserts, and a
+// commit by the other handle in between leaves that read stale, which
+// busy_timeout cannot wait out. On a live hub it dropped every git proxy
+// session_closed row (Task 20346).
+func TestAuditAppendsFromTwoHandlesAreAllKept(t *testing.T) {
+	prev := auditEnabled
+	SetAuditEnabled(true)
+	t.Cleanup(func() { SetAuditEnabled(prev) })
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	handles := make([]*DB, 2)
+	for i := range handles {
+		db, err := Open(path)
+		if err != nil {
+			t.Fatalf("open handle %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		handles[i] = db
+	}
+
+	const perHandle = 100
+	errs := make(chan error, len(handles)*perHandle)
+	var wg sync.WaitGroup
+	for i, db := range handles {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < perHandle; n++ {
+				if err := db.AppendAuditEvent(&AuditEvent{
+					EventType: "test.concurrent_append", EntityType: "handle",
+					EntityID: fmt.Sprintf("%d-%d", i, n), Payload: `{}`,
+				}); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	failed := 0
+	var first error
+	for err := range errs {
+		if first == nil {
+			first = err
+		}
+		failed++
+	}
+	if failed > 0 {
+		t.Fatalf("%d of %d concurrent appends were dropped; first: %v",
+			failed, len(handles)*perHandle, first)
+	}
+
+	_, total, err := handles[0].ListAuditEvents(AuditFilter{EventType: "test.concurrent_append"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != len(handles)*perHandle {
+		t.Errorf("%d rows stored, want %d", total, len(handles)*perHandle)
+	}
+	report, err := handles[1].VerifyAuditChain()
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !report.OK {
+		t.Fatalf("the chain two handles wrote does not verify: %s", report.Reason)
 	}
 }
 

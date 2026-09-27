@@ -152,8 +152,34 @@ func normalizeAuditEvents(evs []*AuditEvent) error {
 	return nil
 }
 
+// auditAppendAttempts bounds how many times appendAuditEvents runs its
+// transaction before giving up on a database another connection keeps busy.
+const auditAppendAttempts = 10
+
+// auditRetryDelay is how long appendAuditEvents waits before attempt n (n >= 1):
+// doubling from 5ms, capped at 250ms, about a second across all the retries.
+func auditRetryDelay(n int) time.Duration {
+	d := 5 * time.Millisecond << (n - 1)
+	if d > 250*time.Millisecond || d <= 0 {
+		d = 250 * time.Millisecond
+	}
+	return d
+}
+
 // appendAuditEvents is the shared writer. Callers have already normalised and
 // validated every element.
+//
+// It retries a transaction that SQLite refused as locked. The append reads the
+// chain tip and then inserts, so it is a read transaction upgraded to a write,
+// and in WAL mode that upgrade fails at once with SQLITE_BUSY_SNAPSHOT when
+// another connection committed after the read began: busy_timeout does not
+// apply, because no amount of waiting makes a stale snapshot current. d.mu
+// only orders appends on this handle, and the control plane has several — the
+// git proxy's, each lease's broker, the hub's own — so an event appended while
+// another was writing was dropped. On a hub finishing a run, that was every
+// git proxy session_closed row. Running the whole transaction again reads a
+// fresh tip, which is the only correct recovery: the new row must link to the
+// row that is actually last.
 func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 	// Before the lock, and deliberately not fatal: a mis-routed event still
 	// gets written. See assertAuditHome for why recording it in the wrong
@@ -163,6 +189,22 @@ func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	var err error
+	for attempt := 0; attempt < auditAppendAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(auditRetryDelay(attempt))
+		}
+		err = d.appendAuditEventsOnce(evs)
+		if err == nil || !errors.Is(err, ErrDBLocked) {
+			return err
+		}
+	}
+	return err
+}
+
+// appendAuditEventsOnce is one attempt at appendAuditEvents' transaction.
+// Callers hold d.mu.
+func (d *DB) appendAuditEventsOnce(evs []*AuditEvent) error {
 	tx, err := d.conn.Begin()
 	if err != nil {
 		return fmt.Errorf("statedb audit: begin: %w", classifyDriverErr(err))
