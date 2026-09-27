@@ -62,6 +62,16 @@ const (
 	// attempt will meet again. Pausing names it; retrying every minute would
 	// burn the plan against it.
 	AbortNetwork AbortClass = "network_unreachable"
+	// AbortUnfinishedTurn is an agent that ended its turn while waiting on
+	// work it had started — "the suite is still running; I'll commit when it
+	// reports" — and did not finish when given the turn back (Task 20349). In
+	// a non-interactive run nothing reports back: ending the turn ended the
+	// task. Promoting that to done is how finished-looking tasks left their
+	// work uncommitted in the tree for the next task to trip over.
+	//
+	// Retryable: the next attempt starts from the tree this one left, and the
+	// run's consecutive-abort ceiling stops a task that never finishes.
+	AbortUnfinishedTurn AbortClass = "unfinished_turn"
 )
 
 // Retryable reports whether waiting is likely to make the next attempt
@@ -382,6 +392,16 @@ func artifactSize(workDir, artifactPath string) int64 {
 func decideUnsignalled(workDir, artifactPath, output string, diff bool) (Abort, bool) {
 	if ab, ok := ClassifyAbort(output); ok {
 		return ab, true
+	}
+	// Before the evidence rule, because an unfinished turn usually *has*
+	// evidence: the diff it has not committed yet, and a summary that says so.
+	if ev, ok := unfinishedTurnEvidence(output); ok {
+		return Abort{
+			Class: AbortUnfinishedTurn,
+			Reason: "the agent ended its turn waiting on work it had started, and did not finish " +
+				"when given the turn back",
+			Evidence: ev,
+		}, true
 	}
 
 	size := artifactSize(workDir, artifactPath)

@@ -2160,8 +2160,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// Tag the call context with the active task so the provider
 				// audit log (Task 20105 / Task 20123) can correlate the row.
 				auditCtx := provideraudit.WithTaskContext(taskExecCtx, task.ID, task.Title)
-				result, err := safeComplete(auditCtx, taskProvider, prompt, opts)
+				// completeTask hands the turn back when the agent ends it
+				// waiting on its own work (Task 20349); see unfinished.go.
+				result, continued, err := completeTask(auditCtx, taskProvider, prompt, opts)
 				taskExecSpan.End()
+				if continued > 0 {
+					pm.AddAnnotation(task, "cloop", continuedTurnNote(continued))
+				}
 				if liveFile != nil {
 					if err == nil && !wasStreamed() {
 						// Non-streaming provider: write full output so watchers can read it.
@@ -3286,6 +3291,9 @@ type taskResult struct {
 	bufferedOut string
 	timedOut    bool   // true when the task's per-task budget was exceeded
 	partialOut  string // partial output captured before timeout
+	// continued is how many times the agent's turn was handed back because
+	// it ended waiting on its own work (Task 20349).
+	continued int
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
@@ -3855,7 +3863,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				o.watchdog.Register(t.ID, tTaskCancel)
 				// Tag context for the audit log so the call lands against this task.
 				tAuditCtx := provideraudit.WithTaskContext(tTaskCtx, t.ID, t.Title)
-				result, err := safeComplete(tAuditCtx, taskProvider, prompt, opts)
+				result, continued, err := completeTask(tAuditCtx, taskProvider, prompt, opts)
 				// Write live artifact for parallel task (non-streaming).
 				if err == nil {
 					if lf, lfErr := artifact.OpenLiveArtifact(o.config.WorkDir, t.ID); lfErr == nil {
@@ -3865,7 +3873,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
-				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
+				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut, continued: continued}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 
@@ -4052,6 +4060,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.TotalOutputTokens += result.OutputTokens
 			parallelReplayStep := s.CurrentStep
 			s.AddStep(stepResult)
+			if res.continued > 0 {
+				pm.AddAnnotation(task, "cloop", continuedTurnNote(res.continued))
+			}
 			mu.Unlock()
 			if err := replay.Append(o.config.WorkDir, replay.Entry{
 				Ts:        time.Now(),

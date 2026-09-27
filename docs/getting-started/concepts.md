@@ -50,7 +50,7 @@ flowchart TD
     L -- "Approved / n/a" --> M["Execute task<br/>via AI provider"]
     M --> N{"Signal in the<br/>last 5 lines?"}
     N -- TASK_DONE --> O["Mark done"]
-    N -- "no signal at all" --> O
+    N -- "no signal, but a diff or artifact<br/>(a waiting turn is handed back first)" --> O
     N -- TASK_SKIPPED --> K
     N -- TASK_FAILED --> P{"Auto-heal<br/>attempts left?<br/>(sequential only)"}
     P -- Yes --> Q["Diagnose the failure,<br/>switch prompt variant,<br/>mutate the prompt"]
@@ -224,6 +224,18 @@ the rest of the plan against the same wall.
 An unsignalled output that reads as a *question* is re-prompted (twice) to
 decide for itself, and failed if that does not resolve, rather than laundered
 into "done". The parallel loop skips the re-prompt and fails it immediately.
+
+An unsignalled output that says the agent is **waiting** — "the suite is still
+running; I'll commit once it reports", "my monitor is armed" — gets its turn
+handed back, up to twice, in both loops. The agent behaved as it would in an
+interactive session, where the harness wakes it when the job finishes; a cloop
+run is not one, the harness stops what it left running, and nothing reports
+back. With the `claudecode` provider the turn is resumed in the same
+conversation (`--resume`), so the agent still knows what it was waiting for;
+other providers are re-prompted with their previous answer. A turn that still
+ends waiting is an `unfinished_turn` abort — back to `pending`, not `done` —
+because the work it describes was never finished, and was often left
+uncommitted (`pkg/orchestrator/unfinished.go`).
 
 One rule overrides even an explicit `TASK_DONE`. If the agent left processes
 running — a build, a test suite, a training job — cloop waits for them, and a

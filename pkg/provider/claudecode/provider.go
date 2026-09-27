@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/procgroup"
@@ -168,7 +171,41 @@ func buildArgs(opts provider.Options) []string {
 	if opts.Effort != "" && provider.ValidEffort(opts.Effort) {
 		args = append(args, "--effort", opts.Effort)
 	}
+	// Continuing a conversation this provider started (Task 20349). Only a
+	// well-formed UUID is passed on: the value becomes an argument, and one
+	// beginning with "-" would be read as a flag.
+	if id := resumableSession(opts.ResumeSession); id != "" {
+		args = append(args, "--resume", id)
+	}
 	return args
+}
+
+// resumableSession returns id when it is a session id the CLI can resume, and
+// "" otherwise.
+func resumableSession(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
+}
+
+// sessionIDUnsupported is set once the CLI has rejected --session-id, so later
+// calls stop asking for one. A CLI too old to know the flag answers every call
+// that passes it with "unknown option", which would fail every task.
+var sessionIDUnsupported atomic.Bool
+
+// rejectedSessionIDFlag reports whether a failed run was the CLI refusing the
+// --session-id flag itself.
+func rejectedSessionIDFlag(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "--session-id") &&
+		(strings.Contains(lower, "unknown option") || strings.Contains(lower, "unknown argument") ||
+			strings.Contains(lower, "unrecognized option"))
 }
 
 // Complete runs the CLI once and, if the API rejected our credentials,
@@ -231,6 +268,19 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 // snapshot that is never itself refreshed).
 func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Options, tokenOverride string) (*provider.Result, error) {
 	args := buildArgs(opts)
+
+	// Every conversation gets a known id, so a caller can continue it: a task
+	// whose agent ended its turn while waiting on its own background work is
+	// handed the turn back in the same conversation rather than in a fresh one
+	// that has forgotten what it was doing (Task 20349). A resumed call keeps
+	// the id it resumed.
+	sessionID := resumableSession(opts.ResumeSession)
+	askedSessionID := false
+	if sessionID == "" && !sessionIDUnsupported.Load() {
+		sessionID = uuid.NewString()
+		args = append(args, "--session-id", sessionID)
+		askedSessionID = true
+	}
 
 	timeout := opts.Timeout
 	if timeout > 0 {
@@ -327,6 +377,12 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 		if !ok {
 			return nil, fmt.Errorf("claude CLI error: %w", err)
 		}
+		if askedSessionID && rejectedSessionIDFlag(output) {
+			// A CLI that predates --session-id. Stop asking, and run this call
+			// again without it: the conversation simply cannot be resumed.
+			sessionIDUnsupported.Store(true)
+			return p.runCLI(ctx, prompt, opts, tokenOverride)
+		}
 		// Distinguish fatal auth/API errors from benign non-zero exits.
 		// Without this, the orchestrator records the auth-failure message as a
 		// normal step output and re-runs forever (observed: 1500+ consecutive
@@ -350,6 +406,7 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 		Provider:   ProviderName,
 		Model:      opts.Model,
 		Background: background,
+		SessionID:  sessionID,
 	}, nil
 }
 

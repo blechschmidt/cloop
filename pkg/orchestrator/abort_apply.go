@@ -94,8 +94,14 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 	task.CompletedAt = nil
 	task.ActualMinutes = 0
 
-	note := fmt.Sprintf("Task aborted before completion (%s): %s. Reset to pending — it never ran, so it is not done.",
-		ab.Class, ab.Reason)
+	outcome := "it never ran, so it is not done"
+	if ab.Class == AbortUnfinishedTurn {
+		// It did run — it stopped before the end, which is a different thing
+		// to tell the person reading the task.
+		outcome = "it stopped before finishing, so it is not done; the next attempt starts from the tree it left"
+	}
+	note := fmt.Sprintf("Task aborted before completion (%s): %s. Reset to pending — %s.",
+		ab.Class, ab.Reason, outcome)
 	if !ab.RetryAfter.IsZero() {
 		note += fmt.Sprintf(" Retry scheduled after %s.", ab.RetryAfter.UTC().Format(time.RFC1123))
 	}

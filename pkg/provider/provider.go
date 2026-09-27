@@ -52,6 +52,14 @@ type Options struct {
 	// provider default. Currently honored by claudecode (passed as the claude
 	// CLI's --effort flag); other providers ignore it.
 	Effort string
+
+	// ResumeSession asks a provider that keeps a conversation to continue the
+	// one a previous Result.SessionID named instead of starting a new one; the
+	// prompt is then the next message in it. Providers that keep none ignore
+	// it. Honoured by claudecode (the CLI's --resume), which is how a task
+	// whose agent ended its turn mid-work is given the turn back with its
+	// context intact (Task 20349).
+	ResumeSession string
 }
 
 // EffortLevels are the valid reasoning-effort levels accepted by
@@ -94,6 +102,10 @@ type Result struct {
 	// started. Callers that gate other work on this one must treat that as
 	// incomplete rather than as success.
 	Background *BackgroundActivity
+
+	// SessionID names the conversation this call ran in, for a provider that
+	// can continue it through Options.ResumeSession. Empty when it cannot.
+	SessionID string
 }
 
 // BackgroundActivity describes processes an agent harness left running when it
