@@ -73,32 +73,6 @@
       </svg>
     </button>
 
-    <div class="tab-nav" id="tabNav">
-      <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
-      <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
-      <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
-      <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
-      <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
-      <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
-      <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
-      <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
-      <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
-      <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
-      <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
-      <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
-      <button class="tab-btn"        onclick="switchTab('replay')"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
-      <button class="tab-btn"        onclick="switchTab('provider-calls')" id="tbtn-provider-calls" title="Live provider HTTP call inspector: prompts, responses, headers, replay (per-project)">Provider Calls</button>
-      <span class="tab-divider" aria-hidden="true"></span>
-      <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
-      <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
-      <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
-      <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
-      <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
-      <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
-      <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide onclick="switchTab('quotas')" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
-      <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="tbtn-telemetry" title="What the browser and display-glasses front ends actually did: gestures, view changes, requests and errors, as an ordered trail per page load (global, admin only)">Telemetry</button>
-      <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
-    </div>
     <div class="spacer"></div>
     <button class="help-toggle-btn" id="helpToggleBtn" onclick="openHelpModal()" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">
       <span aria-hidden="true">?</span>
@@ -116,6 +90,36 @@
       <span aria-hidden="true">&#8998;</span>
     </button>
     <div class="updated-at" id="updatedAt"></div>
+    <div class="tab-nav" id="tabNav">
+      <div class="tab-group">
+        <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
+        <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
+        <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+        <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
+        <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
+        <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
+        <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
+        <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
+        <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
+        <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
+        <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
+        <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
+        <button class="tab-btn"        onclick="switchTab('replay')"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
+        <button class="tab-btn"        onclick="switchTab('provider-calls')" id="tbtn-provider-calls" title="Live provider HTTP call inspector: prompts, responses, headers, replay (per-project)">Provider Calls</button>
+        <span class="tab-divider" aria-hidden="true"></span>
+      </div>
+      <div class="tab-group">
+        <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
+        <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
+        <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
+        <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
+        <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
+        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
+        <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide onclick="switchTab('quotas')" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
+        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="tbtn-telemetry" title="What the browser and display-glasses front ends actually did: gestures, view changes, requests and errors, as an ordered trail per page load (global, admin only)">Telemetry</button>
+        <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
+      </div>
+    </div>
   </header>
 
   <!-- ── Presence bar ── -->

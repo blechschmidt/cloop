@@ -278,6 +278,52 @@ const LAST_ITEM_HITTABLE = `(() => {
   };
 })()`;
 
+// The header's navigation strip at a desktop width (Task 20351). Task 20349
+// stopped twenty-odd tabs widening the whole page by making the strip scroll
+// inside the header — which put a scrollbar under the tabs at every desktop
+// width, 1920px included. The strip now wraps instead, so the questions are:
+// does it overflow its own box (a scrollbar, or tabs clipped past its edge),
+// can every tab be clicked, and is it still the header's last row?
+//
+// hidden is the browser's own hit test at each tab's centre, which is what a
+// pointer would land on: a tab scrolled or clipped out of view fails it.
+// stranded is a group label ending one row while its first tab starts the
+// next — the Global label did that at 1280px when the strip wrapped greedily.
+// below is any other header control laid out level with or under the strip,
+// the extra header row the old layout spent on two buttons.
+const TAB_STRIP = `(() => {
+  const n = document.getElementById('tabNav');
+  if (!n) return {present: false};
+  const nr = n.getBoundingClientRect();
+  const hittable = el => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
+  };
+  const midY = el => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+  const tabs = [...n.querySelectorAll('.tab-btn')].filter(b => b.getClientRects().length);
+  const stranded = [];
+  for (const label of n.querySelectorAll('.tab-section-label')) {
+    let t = label.nextElementSibling;
+    while (t && !(t.classList.contains('tab-btn') && t.getClientRects().length)) t = t.nextElementSibling;
+    if (t && Math.abs(midY(t) - midY(label)) > 8) stranded.push(label.textContent.trim());
+  }
+  const below = [...n.parentElement.children]
+    .filter(c => c !== n && c.getClientRects().length && c.getBoundingClientRect().top >= nr.top - 1)
+    .map(c => c.id || c.className);
+  return {
+    present: true,
+    tabs: tabs.length,
+    right: Math.round(nr.right),
+    scroll_width: n.scrollWidth,
+    client_width: n.clientWidth,
+    scrollbar_px: n.offsetHeight - n.clientHeight,
+    hidden: tabs.filter(b => !hittable(b)).map(b => b.textContent.trim()),
+    stranded,
+    below,
+  };
+})()`;
+
 // The grid on the Projects tab. Cards are what a phone user scrolls through,
 // and a single unbroken name — a path-like slug with no spaces — is the
 // input that makes one refuse to shrink.
@@ -436,19 +482,6 @@ const cardsExpr = expW => `(() => {
       widest: await cdp.eval(widestExpr(1280)),
       dropdown: await cdp.eval(dropdownExpr(1280, 900)),
       last_item: await cdp.eval(LAST_ITEM_HITTABLE),
-      // The navigation strip: whether it stays inside the viewport, and
-      // whether the tabs past its edge can be scrolled to.
-      tab_nav: await cdp.eval(`(() => {
-        const n = document.getElementById('tabNav');
-        if (!n) return {present: false};
-        return {
-          present: true,
-          right: Math.round(n.getBoundingClientRect().right),
-          scroll_width: n.scrollWidth,
-          client_width: n.clientWidth,
-          overflow_x: getComputedStyle(n).overflowX,
-        };
-      })()`),
       // Where the panel sits relative to the button it belongs to. On desktop
       // the two left edges line up; under the mobile rules they do not,
       // because the panel spans the screen instead.
@@ -464,6 +497,30 @@ const cardsExpr = expW => `(() => {
         };
       })()`),
     };
+
+    // ── 5b. The navigation strip at desktop widths ─────────────────────────
+    // 1280px is a common laptop, where the strip needs two rows; 1920px is
+    // the screen the scrollbar was reported on. Both with the dropdown shut
+    // and the page at the top: the open panel hangs over the strip, and the
+    // hit test would find it rather than the tab underneath.
+    await cdp.eval(`(() => {
+      const d = document.getElementById('projSelectorDropdown');
+      if (d) d.classList.remove('open');
+      window.scrollTo(0, 0);
+    })()`);
+    out.tab_strip = [];
+    for (const w of [1280, 1920]) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: w, height: 900, deviceScaleFactor: 1, mobile: false,
+      });
+      await settled(cdp);
+      out.tab_strip.push({
+        width: w,
+        page: await cdp.eval(pageExpr(w)),
+        strip: await cdp.eval(TAB_STRIP),
+      });
+    }
+
     // ── 6. The hidden-projects dialog ──────────────────────────────────────
     // The third place the roster is drawn, and the one with no truncation of
     // any kind on the name. Measured at the narrowest viewport. The fleet has

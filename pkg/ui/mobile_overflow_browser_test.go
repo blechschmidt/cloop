@@ -213,19 +213,31 @@ type mobileOverflowResults struct {
 		Page     overflowPage     `json:"page"`
 		Dropdown overflowDropdown `json:"dropdown"`
 		LastItem overflowLastItem `json:"last_item"`
-		TabNav   struct {
-			Present     bool   `json:"present"`
-			Right       int    `json:"right"`
-			ScrollWidth int    `json:"scroll_width"`
-			ClientWidth int    `json:"client_width"`
-			OverflowX   string `json:"overflow_x"`
-		} `json:"tab_nav"`
 		Anchored *struct {
 			ButtonLeft   int `json:"button_left"`
 			DropdownLeft int `json:"dropdown_left"`
 			Delta        int `json:"delta"`
 		} `json:"anchored"`
 	} `json:"desktop"`
+
+	TabStrip []struct {
+		Width int          `json:"width"`
+		Page  overflowPage `json:"page"`
+		Strip tabStrip     `json:"strip"`
+	} `json:"tab_strip"`
+}
+
+// tabStrip is TAB_STRIP in testdata/mobile_overflow_browser.js.
+type tabStrip struct {
+	Present     bool     `json:"present"`
+	Tabs        int      `json:"tabs"`
+	Right       int      `json:"right"`
+	ScrollWidth int      `json:"scroll_width"`
+	ClientWidth int      `json:"client_width"`
+	ScrollbarPx int      `json:"scrollbar_px"`
+	Hidden      []string `json:"hidden"`
+	Stranded    []string `json:"stranded"`
+	Below       []string `json:"below"`
 }
 
 // TestMobileLongProjectList_DoesNotOverflow is the whole gate; the subtests
@@ -528,27 +540,57 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 	})
 
 	t.Run("desktop does not scroll sideways", func(t *testing.T) {
-		// The navigation strip is twenty-odd tabs, ~1890px laid out, and was
-		// only made scrollable between 480px and 768px — so at every desktop
-		// width the whole page scrolled sideways, by ~650px at 1280px. The
-		// strip now scrolls within the header instead (Task 20349).
+		// The navigation strip is twenty-odd tabs, and was only made
+		// scrollable between 480px and 768px — so at every desktop width the
+		// whole page scrolled sideways, by ~650px at 1280px (Task 20349).
 		p := got.Desktop.Page
 		if p.OverflowPx > 1 {
 			t.Errorf("at %dpx the document is %dpx wider than the viewport, so the page "+
 				"scrolls sideways", p.ClientWidth, p.OverflowPx)
 		}
-		n := got.Desktop.TabNav
-		if !n.Present {
-			t.Fatal("the driver found no #tabNav at 1280px, so nothing here was measured")
+	})
+
+	t.Run("desktop shows every tab without a scrollbar", func(t *testing.T) {
+		// Task 20349 fixed the page overflow by letting the strip scroll inside
+		// the header, which drew a scrollbar under the tabs at every desktop
+		// width, the reporter's 1920px screen included (Task 20351). The strip
+		// wraps instead: into a row per group when it does not fit on one.
+		if len(got.TabStrip) == 0 {
+			t.Fatal("the driver measured the tab strip at no desktop width")
 		}
-		if n.Right > p.ClientWidth+1 {
-			t.Errorf("#tabNav ends at %dpx, past the %dpx viewport", n.Right, p.ClientWidth)
-		}
-		// Contained is only half of it: the last tab must still be reachable,
-		// which for a strip wider than the header means the strip scrolls.
-		if n.ScrollWidth > n.ClientWidth+1 && n.OverflowX != "auto" && n.OverflowX != "scroll" {
-			t.Errorf("#tabNav holds %dpx of tabs in %dpx but does not scroll (overflow-x:%s), "+
-				"so the tabs past its edge cannot be reached", n.ScrollWidth, n.ClientWidth, n.OverflowX)
+		for _, m := range got.TabStrip {
+			s, p := m.Strip, m.Page
+			if !s.Present || s.Tabs == 0 {
+				t.Fatalf("at %dpx the driver found no #tabNav or no tabs in it, so nothing "+
+					"here was measured", m.Width)
+			}
+			if p.OverflowPx > 1 {
+				t.Errorf("at %dpx the document is %dpx wider than the viewport, so the page "+
+					"scrolls sideways", m.Width, p.OverflowPx)
+			}
+			if s.Right > p.ClientWidth+1 {
+				t.Errorf("at %dpx #tabNav ends at %dpx, past the %dpx viewport",
+					m.Width, s.Right, p.ClientWidth)
+			}
+			if s.ScrollWidth > s.ClientWidth+1 || s.ScrollbarPx > 0 {
+				t.Errorf("at %dpx #tabNav holds %dpx of tabs in %dpx and draws a %dpx "+
+					"scrollbar: the strip overflows its own box instead of wrapping",
+					m.Width, s.ScrollWidth, s.ClientWidth, s.ScrollbarPx)
+			}
+			if len(s.Hidden) > 0 {
+				t.Errorf("at %dpx %d of %d tabs cannot be clicked where they are drawn: %s",
+					m.Width, len(s.Hidden), s.Tabs, strings.Join(s.Hidden, ", "))
+			}
+			if len(s.Stranded) > 0 {
+				t.Errorf("at %dpx the %s label ends one row of the strip while its tabs "+
+					"start the next: the strip wraps mid-group rather than between groups",
+					m.Width, strings.Join(s.Stranded, " and "))
+			}
+			if len(s.Below) > 0 {
+				t.Errorf("at %dpx header controls sit level with or below the tab strip "+
+					"(%s): the strip is no longer the header's last row, and the "+
+					"header grows a row for them", m.Width, strings.Join(s.Below, ", "))
+			}
 		}
 	})
 
