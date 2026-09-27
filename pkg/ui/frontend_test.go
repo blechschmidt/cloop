@@ -673,6 +673,28 @@ func extractRegisteredRoutes(src string) map[string]struct{} {
 	return out
 }
 
+// liveRouteTablePaths returns the path of every route the server actually
+// registers, read from routeTable() itself rather than from source text.
+//
+// The source scan above only sees routes written as literals in server.go and
+// routes.go. routeTable() also splices in feature tables kept beside their
+// handlers — executorUpgradeRoutes, iconRoutes — and a scan of two files
+// cannot see those, so a frontend call to a route that works reported as a 404
+// in waiting: /api/fleet/autoupdate did, on every CI run from Task 20331 on.
+// The table is what registerRoutes walks, so reading it answers "is this
+// served?" the way the mux will.
+func liveRouteTablePaths() map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, rs := range (&Server{}).routeTable() {
+		pattern := rs.Pattern
+		if i := strings.IndexByte(pattern, ' '); i >= 0 {
+			pattern = strings.TrimSpace(pattern[i+1:]) // "GET /api/x" → "/api/x"
+		}
+		out[pattern] = struct{}{}
+	}
+	return out
+}
+
 // extractFrontendAPICalls returns the set of `/api/...` URL paths the frontend
 // JS references via api(), fetch(), pUrl(), new EventSource, or new
 // WebSocket. Templated portions (`'/api/tasks/' + id`) are normalised to a
@@ -731,6 +753,9 @@ func routeMatches(call, route string) bool {
 // sub-paths the regex can't catch.
 func TestDashboard_APIEndpoints_AllRegistered(t *testing.T) {
 	routes := extractRegisteredRoutes(readServerSource(t))
+	for r := range liveRouteTablePaths() {
+		routes[r] = struct{}{}
+	}
 	calls := extractFrontendAPICalls(dashboardSource)
 	if len(calls) == 0 {
 		t.Fatal("no /api/… call sites found in the front end — dashboardSource " +
