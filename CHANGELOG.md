@@ -10,18 +10,20 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
-## [0.0.3] - 2026-09-27
+## [0.0.4] - 2026-09-27
 
 The first release that ships 0.0.2's installer fix. 0.0.2 was tagged on
 2026-09-17 to publish unversioned asset names and never reached GitHub
 Releases: its publish step failed partway through the uploads, the tag stayed
 behind with no release, and `releases/latest/download` kept serving 0.0.1's
 versioned names — so every device the installer was pointed at still got a
-`404`. What 0.0.2 was cut for is released here for the first time: unversioned
-`cloop_<os>_<arch>.tar.gz` assets that `latest/download` resolves, each with the
-Sigstore bundle the installer and `cloop upgrade` verify its provenance against
-(0.0.1 published none), linux/arm builds, and a daily check that the published
-release still installs — see 0.0.2 in `CHANGELOG.md` for the detail.
+`404`. 0.0.3, tagged to publish it, stopped earlier still: its binaries did not
+build for 32-bit linux/arm. What 0.0.2 was cut for is released here for the
+first time: unversioned `cloop_<os>_<arch>.tar.gz` assets that
+`latest/download` resolves, each with the Sigstore bundle the installer and
+`cloop upgrade` verify its provenance against (0.0.1 published none), linux/arm
+builds, and a daily check that the published release still installs — see 0.0.2
+in `CHANGELOG.md` for the detail.
 
 ### Added
 
@@ -59,6 +61,11 @@ release still installs — see 0.0.2 in `CHANGELOG.md` for the detail.
 
 ### Fixed
 
+- **cloop builds for 32-bit ARM again.** A token ceiling of `1<<40` did not fit
+  in an `int` on linux/arm, the armv7 build the installer serves to Raspberry
+  Pi-class devices, so nothing since 2026-09-26 compiled there. CI now builds
+  the release binary for every published platform on every push, so a tag is no
+  longer the first build to try one.
 - **A release publishes, or can be resumed.** The release job now creates the
   release as a draft, uploads one asset at a time with retries, and marks it
   latest only once every asset is there. 0.0.2 was lost to a single upload
@@ -99,10 +106,17 @@ release still installs — see 0.0.2 in `CHANGELOG.md` for the detail.
   DATA frames, which the hub's metrics collectors can reach. OpenTelemetry
   moves to 1.44.0 with it.
 
+## [0.0.3] - 2026-09-27
+
+_Tagged, never published as a binary release: the release build failed on
+linux/arm before anything was uploaded. Its container images were published
+(`ghcr.io/blechschmidt/cloop` and `cloop-harness` at `v0.0.3`). Its changes
+were released in 0.0.4._
+
 ## [0.0.2] - 2026-09-17
 
 _Tagged, never published: the release job failed while uploading. Its changes
-were released in 0.0.3._
+were released in 0.0.4._
 
 This release exists to publish the installer fix below, which was written
 against 0.0.1 and then never shipped. The repository was corrected; no release
@@ -208,6 +222,7 @@ is now installable as a versioned binary rather than only from source.
   stable, and upgrades between 0.0.x releases may require configuration
   changes.
 
-[0.0.3]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.3
+[0.0.4]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.4
+[0.0.3]: https://github.com/blechschmidt/cloop/tree/v0.0.3
 [0.0.2]: https://github.com/blechschmidt/cloop/tree/v0.0.2
 [0.0.1]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.1
