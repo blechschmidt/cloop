@@ -140,6 +140,12 @@ type Rule struct {
 	// NetworkPolicy annotation and in an operator's terminal. It is part of
 	// the output, not a debugging aid.
 	Reason string
+	// Denied marks a drop an operator wrote into a deny list, as opposed to
+	// one from the hard-block set. Evaluation does not care — a drop is a
+	// drop — but the NetworkPolicy renderer does: it has no deny rule, so it
+	// must carve every denied range out of every allow that covers it, and
+	// it can only do that for the ranges it can tell apart.
+	Denied bool
 }
 
 // String renders the rule as a single readable line.
@@ -269,6 +275,18 @@ type Input struct {
 	// something a caller does on purpose, in a line a reviewer can see.
 	AllowAllPorts bool
 
+	// DenyCIDRs are address ranges the sandbox may never reach, whatever else
+	// the authorisation allows (Task 20345).
+	//
+	// An allowlist alone cannot say "the Internet, except this provider's
+	// ranges" or "10.0.0.0/8, except the payroll subnet", and both are things
+	// operators ask for. The entries compile to drops placed ahead of every
+	// allow — a grant, the broker, a resolver, the public Internet — so a
+	// denied range wins over any allow that happens to cover it. Deny can only
+	// ever take reach away, which is why it needs no port list and matches
+	// every transport: a range that is off limits is off limits over ICMP too.
+	DenyCIDRs []netip.Prefix
+
 	// HostPatterns is the L7 allowlist this policy could not enforce. It is
 	// used only to write an accurate warning.
 	HostPatterns []string
@@ -280,23 +298,29 @@ type Input struct {
 // left to a renderer:
 //
 //  1. sandbox-local loopback, so a harness that binds 127.0.0.1 works;
-//  2. allows for explicitly granted CIDRs, ahead of the drops they waive;
-//  3. allows for the broker and for resolvers, which are infrastructure;
-//  4. drops for the block set;
-//  5. the public-Internet allow, if the caller asked for one;
-//  6. the implicit final drop.
+//  2. drops for the operator's deny list, ahead of every allow below;
+//  3. allows for explicitly granted CIDRs, ahead of the drops they waive;
+//  4. allows for the broker and for resolvers, which are infrastructure;
+//  5. drops for the block set;
+//  6. the public-Internet allow, if the caller asked for one;
+//  7. the implicit final drop.
 //
-// Steps 2 and 4 are the waiver rule from egressbroker.CheckAddr expressed as
+// Steps 3 and 5 are the waiver rule from egressbroker.CheckAddr expressed as
 // ordering: a granted 10.8.0.0/24 is allowed on its ports before 10.0.0.0/8
 // is dropped, so the grant buys that prefix and those ports and nothing else.
-// Putting the Internet allow last rather than first is what keeps step 4
-// meaningful.
+// Putting the Internet allow last rather than first is what keeps step 5
+// meaningful, and putting the deny list first is what makes a denied range
+// unreachable however an allow below happens to be written.
 func Compile(in Input) (Policy, error) {
 	ports, err := normalizePorts(in.AllowPorts)
 	if err != nil {
 		return Policy{}, err
 	}
 	cidrs, err := normalizePrefixes(in.AllowCIDRs)
+	if err != nil {
+		return Policy{}, err
+	}
+	denies, err := normalizePrefixes(in.DenyCIDRs)
 	if err != nil {
 		return Policy{}, err
 	}
@@ -338,7 +362,21 @@ func Compile(in Input) (Policy, error) {
 		Reason:  "sandbox-local loopback",
 	})
 
-	// 2. Granted CIDRs, ahead of the drops they waive.
+	// 2. The deny list, ahead of every allow. A /0 is accepted here, unlike
+	// in the allow list: denying everything is a strange policy but a narrow
+	// one, and refusing it would be refusing an operator permission to
+	// take reach away.
+	for _, d := range denies {
+		p.Rules = append(p.Rules, Rule{
+			Verdict: VerdictDrop,
+			Prefix:  d,
+			Proto:   ProtoAny,
+			Reason:  "operator deny list",
+			Denied:  true,
+		})
+	}
+
+	// 3. Granted CIDRs, ahead of the drops they waive.
 	for _, c := range cidrs {
 		// A /0 is not a waiver, it is the removal of the block set: placed
 		// ahead of the drops it would allow the metadata service, and the
@@ -366,7 +404,7 @@ func Compile(in Input) (Policy, error) {
 		})
 	}
 
-	// 3. Infrastructure the sandbox cannot function without. Both are
+	// 4. Infrastructure the sandbox cannot function without. Both are
 	// pinned to a single address and port: "the broker" is one endpoint,
 	// not a subnet, and widening either to a prefix would hand back the
 	// lateral movement the filter exists to prevent.
@@ -387,7 +425,7 @@ func Compile(in Input) (Policy, error) {
 		)
 	}
 
-	// 4. The block set. ProtoAny, because an exfiltration channel over
+	// 5. The block set. ProtoAny, because an exfiltration channel over
 	// ICMP or SCTP is still an exfiltration channel.
 	for _, b := range BlockedPrefixes() {
 		p.Rules = append(p.Rules, Rule{
@@ -398,7 +436,7 @@ func Compile(in Input) (Policy, error) {
 		})
 	}
 
-	// 5. The public Internet, last, so every drop above still bites.
+	// 6. The public Internet, last, so every drop above still bites.
 	if in.AllowPublicInternet {
 		p.Rules = append(p.Rules,
 			Rule{Verdict: VerdictAllow, Prefix: netip.MustParsePrefix("0.0.0.0/0"), Ports: ports, Proto: ProtoTCP, Reason: "public Internet"},
@@ -426,7 +464,43 @@ func Compile(in Input) (Policy, error) {
 			"no resolver is allowed, so DNS will fail: name lookups leave the sandbox on UDP/53 and this "+
 				"policy drops them. Pass the sandbox's resolvers, or use the broker, which resolves on its behalf.")
 	}
+	p.Warnings = append(p.Warnings, shadowWarnings(denies, cidrs, brokers, resolvers)...)
 	return p, nil
+}
+
+// shadowWarnings names the allows a deny list makes dead.
+//
+// A deny wins over every allow by construction, so an allowed prefix, broker
+// or resolver inside a denied range is not an error — the operator may be
+// narrowing a shared rule set on purpose — but it is almost never what anyone
+// meant, and the failure it produces is the least legible kind: a resolver
+// that times out reads as "DNS is broken", not as "you denied your resolver".
+func shadowWarnings(denies, cidrs []netip.Prefix, brokers, resolvers []netip.AddrPort) []string {
+	var out []string
+	covering := func(p netip.Prefix) (netip.Prefix, bool) {
+		for _, d := range denies {
+			if d.Addr().Is4() == p.Addr().Is4() && d.Bits() <= p.Bits() && d.Contains(p.Addr()) {
+				return d, true
+			}
+		}
+		return netip.Prefix{}, false
+	}
+	for _, c := range cidrs {
+		if d, ok := covering(c); ok {
+			out = append(out, fmt.Sprintf("allowed range %s is inside denied range %s, so it is unreachable", c, d))
+		}
+	}
+	for _, b := range brokers {
+		if d, ok := covering(netip.PrefixFrom(b.Addr(), b.Addr().BitLen())); ok {
+			out = append(out, fmt.Sprintf("egress broker %s is inside denied range %s, so the sandbox cannot reach it", b, d))
+		}
+	}
+	for _, r := range resolvers {
+		if d, ok := covering(netip.PrefixFrom(r.Addr(), r.Addr().BitLen())); ok {
+			out = append(out, fmt.Sprintf("resolver %s is inside denied range %s, so DNS through it will fail", r, d))
+		}
+	}
+	return out
 }
 
 func modeFor(hasBroker, hasDestinations bool) Mode {

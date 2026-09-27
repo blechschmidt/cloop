@@ -178,18 +178,29 @@ func RenderNetworkPolicy(p Policy, opts NetworkPolicyOptions) (*NetworkPolicy, e
 	var groups []*group
 	index := map[string]*group{}
 
+	// The operator's deny list (Task 20345). A NetworkPolicy has no deny rule
+	// and its peers are unioned, so a denied range has to be carved out of
+	// every allow that covers it — and an allow a deny covers entirely has to
+	// disappear, because an ipBlock whose except is its own cidr is invalid.
+	denied := deniedPrefixes(p)
+
 	for _, r := range p.Rules {
 		if r.Verdict != VerdictAllow || r.Scope != ScopeWire {
 			continue
 		}
+		if coveredBy(r.Prefix, denied) {
+			continue
+		}
 		block := &IPBlock{CIDR: r.Prefix.String()}
+		var except []string
 		if r.Prefix.Bits() == 0 {
 			if r.Prefix.Addr().Is4() {
-				block.Except = excepts.v4
+				except = append(except, excepts.v4...)
 			} else {
-				block.Except = excepts.v6
+				except = append(except, excepts.v6...)
 			}
 		}
+		block.Except = mergeExcepts(except, r.Prefix, denied)
 		key := portKey(r.Proto, r.Ports)
 		g, ok := index[key]
 		if !ok {
@@ -284,5 +295,74 @@ func renderPorts(proto Proto, ports []uint16) []NetworkPolicyPort {
 			out = append(out, NetworkPolicyPort{Protocol: name, Port: &v})
 		}
 	}
+	return out
+}
+
+// deniedPrefixes collects the operator's deny list from a compiled policy.
+func deniedPrefixes(p Policy) []netip.Prefix {
+	var out []netip.Prefix
+	for _, r := range p.Rules {
+		if r.Denied && r.Verdict == VerdictDrop {
+			out = append(out, r.Prefix)
+		}
+	}
+	return out
+}
+
+// coveredBy reports whether some denied prefix contains all of p.
+//
+// CIDR prefixes either nest or are disjoint, so "contains the first address
+// and is no longer than p" is the whole test.
+func coveredBy(p netip.Prefix, denied []netip.Prefix) bool {
+	for _, d := range denied {
+		if d.Addr().Is4() == p.Addr().Is4() && d.Bits() <= p.Bits() && d.Contains(p.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeExcepts adds the denied prefixes that lie strictly inside block to an
+// except list.
+//
+// A denied prefix already nested inside an existing except is left out: the
+// API server would accept it, but an except list is the part of a
+// NetworkPolicy people read to find out what a sandbox cannot reach, and a
+// reader should not have to work out that 10.5.0.0/16 is already inside
+// 10.0.0.0/8. The existing entries are returned exactly as given, so a policy
+// with no deny list renders byte-for-byte as it did before deny lists existed.
+func mergeExcepts(except []string, block netip.Prefix, denied []netip.Prefix) []string {
+	var existing []netip.Prefix
+	for _, s := range except {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			existing = append(existing, p)
+		}
+	}
+	nestedIn := func(p netip.Prefix, set []netip.Prefix) bool {
+		for _, q := range set {
+			if q.Addr().Is4() == p.Addr().Is4() && q.Bits() <= p.Bits() && q.Contains(p.Addr()) {
+				return true
+			}
+		}
+		return false
+	}
+	var added []netip.Prefix
+	for _, d := range denied {
+		if d.Addr().Is4() != block.Addr().Is4() || d.Bits() <= block.Bits() || !block.Contains(d.Addr()) {
+			continue
+		}
+		if nestedIn(d, existing) || nestedIn(d, added) {
+			continue
+		}
+		added = append(added, d)
+	}
+	if len(added) == 0 {
+		return except
+	}
+	out := append([]string(nil), except...)
+	for _, d := range added {
+		out = append(out, d.String())
+	}
+	sort.Strings(out)
 	return out
 }
