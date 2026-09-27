@@ -213,6 +213,13 @@ type mobileOverflowResults struct {
 		Page     overflowPage     `json:"page"`
 		Dropdown overflowDropdown `json:"dropdown"`
 		LastItem overflowLastItem `json:"last_item"`
+		TabNav   struct {
+			Present     bool   `json:"present"`
+			Right       int    `json:"right"`
+			ScrollWidth int    `json:"scroll_width"`
+			ClientWidth int    `json:"client_width"`
+			OverflowX   string `json:"overflow_x"`
+		} `json:"tab_nav"`
 		Anchored *struct {
 			ButtonLeft   int `json:"button_left"`
 			DropdownLeft int `json:"dropdown_left"`
@@ -514,17 +521,34 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 		if !got.Desktop.LastItem.Reachable {
 			t.Errorf("at 1280px the last project cannot be clicked (%s)", got.Desktop.LastItem.Why)
 		}
-		// Deliberately no document-width assertion at this viewport. The
-		// desktop page does overflow — by ~650px at 1280px — but the offender
-		// is #tabNav, the twenty-odd-tab navigation strip, which lays out at
-		// ~1890px and is only made scrollable between 480px and 768px. That
-		// predates this change (measured on the parent commit), has nothing to
-		// do with the project list, and is its own fix; asserting on it here
-		// would fail this gate for an unrelated reason and quietly widen the
-		// task. The dropdown checks above are what this change can break.
 		if d.RightOverflowPx > 1 {
 			t.Errorf("at 1280px the dropdown itself reaches %dpx past the right edge",
 				d.RightOverflowPx)
+		}
+	})
+
+	t.Run("desktop does not scroll sideways", func(t *testing.T) {
+		// The navigation strip is twenty-odd tabs, ~1890px laid out, and was
+		// only made scrollable between 480px and 768px — so at every desktop
+		// width the whole page scrolled sideways, by ~650px at 1280px. The
+		// strip now scrolls within the header instead (Task 20349).
+		p := got.Desktop.Page
+		if p.OverflowPx > 1 {
+			t.Errorf("at %dpx the document is %dpx wider than the viewport, so the page "+
+				"scrolls sideways", p.ClientWidth, p.OverflowPx)
+		}
+		n := got.Desktop.TabNav
+		if !n.Present {
+			t.Fatal("the driver found no #tabNav at 1280px, so nothing here was measured")
+		}
+		if n.Right > p.ClientWidth+1 {
+			t.Errorf("#tabNav ends at %dpx, past the %dpx viewport", n.Right, p.ClientWidth)
+		}
+		// Contained is only half of it: the last tab must still be reachable,
+		// which for a strip wider than the header means the strip scrolls.
+		if n.ScrollWidth > n.ClientWidth+1 && n.OverflowX != "auto" && n.OverflowX != "scroll" {
+			t.Errorf("#tabNav holds %dpx of tabs in %dpx but does not scroll (overflow-x:%s), "+
+				"so the tabs past its edge cannot be reached", n.ScrollWidth, n.ClientWidth, n.OverflowX)
 		}
 	})
 

@@ -436,6 +436,19 @@ const cardsExpr = expW => `(() => {
       widest: await cdp.eval(widestExpr(1280)),
       dropdown: await cdp.eval(dropdownExpr(1280, 900)),
       last_item: await cdp.eval(LAST_ITEM_HITTABLE),
+      // The navigation strip: whether it stays inside the viewport, and
+      // whether the tabs past its edge can be scrolled to.
+      tab_nav: await cdp.eval(`(() => {
+        const n = document.getElementById('tabNav');
+        if (!n) return {present: false};
+        return {
+          present: true,
+          right: Math.round(n.getBoundingClientRect().right),
+          scroll_width: n.scrollWidth,
+          client_width: n.clientWidth,
+          overflow_x: getComputedStyle(n).overflowX,
+        };
+      })()`),
       // Where the panel sits relative to the button it belongs to. On desktop
       // the two left edges line up; under the mobile rules they do not,
       // because the panel spans the screen instead.

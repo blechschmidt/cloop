@@ -208,7 +208,7 @@
   }
 
   /* ── Tabs ── */
-  .tab-nav { display: flex; gap: 2px; align-items: center; }
+  .tab-nav { display: flex; gap: 2px; align-items: center; min-width: 0; max-width: 100%; overflow-x: auto; padding: 2px 0; }
   .tab-btn {
     padding: 6px 14px;
     background: none;
