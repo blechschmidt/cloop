@@ -72,6 +72,45 @@ func rememberSeededDispatch(ex executor.Executor, handleID string, prov projects
 	}
 }
 
+// isSeededDispatch reports whether handleID on ex was sent the project and has
+// not been settled yet, without forgetting it.
+func isSeededDispatch(ex executor.Executor, handleID string) bool {
+	if ex == nil || handleID == "" {
+		return false
+	}
+	seededMu.Lock()
+	defer seededMu.Unlock()
+	_, ok := seeded[seededKey(ex.ID(), handleID)]
+	return ok
+}
+
+// overlaySeededRunStatus reports a seeded run that is in flight as running
+// (Task 20349).
+//
+// A run on an executor that does not share this filesystem works on a copy of
+// the project and brings its state back only when it ends (collectRunResult).
+// Until then the hub's state.db still holds the previous run's status, so every
+// reader of /api/state and of the state broadcasts saw a finished project while
+// a device was working through it. The live flag and the tracked handle are the
+// hub's own knowledge that the run is under way, and the wire state says so.
+//
+// Only a seeded run: a run on this filesystem writes its own status, and
+// overriding it would misreport one that is already pausing or finishing.
+func (s *Server) overlaySeededRunStatus(workDir string, ps *state.ProjectState) {
+	if ps == nil || workDir == "" || ps.Status == "running" || ps.Status == "evolving" {
+		return
+	}
+	if !s.liveLogRunningFor(workDir) {
+		return
+	}
+	run, ok := s.trackedRun(workDir)
+	if !ok || !isSeededDispatch(run.ex, run.handleID) {
+		return
+	}
+	ps.Status = "running"
+	ps.PauseReason = nil
+}
+
 // takeSeededDispatch returns and forgets the record for handleID on ex.
 func takeSeededDispatch(ex executor.Executor, handleID string) (seededDispatch, bool) {
 	key := seededKey(ex.ID(), handleID)

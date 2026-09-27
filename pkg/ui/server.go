@@ -1711,6 +1711,7 @@ func (s *Server) watchState(ctx context.Context) {
 			if err != nil {
 				return
 			}
+			s.overlaySeededRunStatus(s.WorkDir, ps)
 			data, err := marshalStateForWire(ps)
 			if err != nil {
 				return
@@ -1767,6 +1768,12 @@ func (s *Server) broadcastStateDiff(workDir string, curr *state.ProjectState) {
 	if curr == nil {
 		return
 	}
+	// A seeded run in flight reads as running here, as on /api/state (Task
+	// 20349). On a copy: callers hand in state they may go on to save, and the
+	// overlay describes this hub's view of the run, not the project's record.
+	view := *curr
+	s.overlaySeededRunStatus(workDir, &view)
+	curr = &view
 	cache := s.ensureDiffCache()
 	prev := cache.swap(workDir, curr)
 	diff := computeStateDiff(prev, curr)
@@ -2245,6 +2252,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.overlaySeededRunStatus(workDir, ps)
+
 	// Marshal without the multi-MiB Steps slice (Task 20125). The browser
 	// reads only steps_count here; the paginated /api/steps and
 	// /api/event-history endpoints supply the actual rows.
@@ -2558,6 +2567,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// same mistake the replay below was fixed for in Task 20189, one line
 		// apart.
 		if ps, err := state.LoadLite(c.workDir); err == nil {
+			s.overlaySeededRunStatus(c.workDir, ps)
 			if data, err := marshalStateForWire(ps); err == nil {
 				if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
 					return
@@ -2933,6 +2943,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		// marshalStateForWire'd, so Steps are dropped before going on the wire
 		// (Task 20125).
 		if ps, err := state.LoadLite(workDir); err == nil {
+			s.overlaySeededRunStatus(workDir, ps)
 			if raw, err := marshalStateForWire(ps); err == nil {
 				if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 					_ = wsWrite(ctx, conn, msg)
