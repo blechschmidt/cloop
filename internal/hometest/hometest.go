@@ -53,7 +53,15 @@ var redirectedVars = []string{"HOME", "USERPROFILE"}
 //
 // XDG_CONFIG_HOME is not consulted by cloop today and is cleared for the same
 // reason, so that adding a lookup for it later cannot silently reopen the hole.
-var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME"}
+//
+// CLAUDE_CONFIG_DIR and CLAUDE_CODE_OAUTH_TOKEN override HOME for the Claude
+// Code credential: the first names the directory ~/.claude would otherwise be,
+// the second outranks any file at all. An agent that runs this suite — as every
+// cloop task on a hub does — has both set to its own live login, so
+// pkg/ratelimit and pkg/provider/claudecode read that login instead of their
+// fixtures and failed on every commit, for a reason that was never the change
+// under test (Task 20349). A test that wants either sets it with t.Setenv.
+var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 // Isolate points every per-user state path at a fresh temporary directory for
 // the lifetime of the whole test binary, runs m, and removes the directory.

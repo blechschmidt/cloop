@@ -20,6 +20,11 @@ func TestIsolateRedirectsHomeAndClearsOverrides(t *testing.T) {
 	// An inherited override is the interesting precondition: a developer with
 	// CLOOP_HOME exported in their shell must not thereby escape the sandbox.
 	t.Setenv(EnvRoot, "/definitely/not/a/sandbox")
+	// And an agent's own Claude login, which is what every cloop task running
+	// this suite carries (Task 20349): either would point a credential-reading
+	// test at a live account instead of its fixture.
+	t.Setenv("CLAUDE_CONFIG_DIR", "/definitely/not/a/sandbox/.claude")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-not-a-real-token")
 
 	restore, cleanup, err := isolate()
 	if err != nil {
@@ -54,6 +59,9 @@ func TestIsolateRedirectsHomeAndClearsOverrides(t *testing.T) {
 	}
 	if got := os.Getenv(EnvRoot); got != "/definitely/not/a/sandbox" {
 		t.Errorf("after restore, %s = %q, want the inherited value back", EnvRoot, got)
+	}
+	if got := os.Getenv("CLAUDE_CONFIG_DIR"); got != "/definitely/not/a/sandbox/.claude" {
+		t.Errorf("after restore, CLAUDE_CONFIG_DIR = %q, want the inherited value back", got)
 	}
 
 	cleanup()
