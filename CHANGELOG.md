@@ -10,6 +10,19 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-09-27
+
+The first release that ships 0.0.2's installer fix. 0.0.2 was tagged on
+2026-09-17 to publish unversioned asset names and never reached GitHub
+Releases: its publish step failed partway through the uploads, the tag stayed
+behind with no release, and `releases/latest/download` kept serving 0.0.1's
+versioned names — so every device the installer was pointed at still got a
+`404`. What 0.0.2 was cut for is released here for the first time: unversioned
+`cloop_<os>_<arch>.tar.gz` assets that `latest/download` resolves, each with the
+Sigstore bundle the installer and `cloop upgrade` verify its provenance against
+(0.0.1 published none), linux/arm builds, and a daily check that the published
+release still installs — see 0.0.2 in `CHANGELOG.md` for the detail.
+
 ### Added
 
 - **Parallel features.** `cloop feature new` — and **+ New feature** on a
@@ -37,8 +50,52 @@ schema and the hub's HTTP API may change in any release.
 - `cloop clean` refuses while the project has features unless `--force`, which
   removes them through git first; snapshots neither archive feature worktrees
   nor touch them on restore; disk-usage reports no longer count them.
+- **`cloop watch` applies one batch of changes at a time.** Every debounce
+  window used to start a batch of its own, so a burst of edits applied several
+  at once: their state saves raced — one could put back a task another had just
+  reset — `--auto-run` ran `cloop run --pm` concurrently with itself, and
+  stopping the watcher waited for the whole backlog. Changes that arrive while
+  a batch is applied now make up the next one, and nothing starts after Ctrl+C.
+
+### Fixed
+
+- **A release publishes, or can be resumed.** The release job now creates the
+  release as a draft, uploads one asset at a time with retries, and marks it
+  latest only once every asset is there. 0.0.2 was lost to a single upload
+  error from GitHub with all twelve uploads running at once.
+- **A terminal on an edge device no longer loses a short command's output.**
+  A command that printed and exited at once — `pwd`, `echo` — sent its output
+  and its close back to back, and the hub closed the session before relaying
+  the output, so `cloop task attach` showed an empty transcript. The device
+  also reaped such a command twice, a data race, and could hold one of its
+  terminal slots for a session that had already ended; an attach the device
+  refused left a goroutine behind on the hub.
+- **A workload stopped on reconnect reports how it ended.** When the control
+  plane refuses to take a workload back after a reconnect, the device stops it
+  — but it used to signal it before the new session was ready, so a workload
+  that died promptly had nowhere to send its last output or its exit status.
+- **An exit reported as the link drops is kept.** The device counted a
+  workload's final status as delivered before writing it, so a status written
+  to a closing session was lost, and the control plane later read a clean exit
+  as a lost workload. It is now delivered on the next session.
+- **A revocation is sent to a reconnecting device once.** One recorded as the
+  device reconnected could be sent twice, and the reply to the first could be
+  taken by the second, reporting a reachable device as unreachable.
+- **`cloop chaos suite` gives every fault its full window.** Windows were
+  measured from when the suite was built, so the last faults ran with a
+  fraction of theirs — the SQLite one with under half a second of its two —
+  and a slow disk reported them degraded.
+
+### Security
+
+- **gRPC 1.83.2** for GO-2026-6348, heap exhaustion through fragmented HTTP/2
+  DATA frames, which the hub's metrics collectors can reach. OpenTelemetry
+  moves to 1.44.0 with it.
 
 ## [0.0.2] - 2026-09-17
+
+_Tagged, never published: the release job failed while uploading. Its changes
+were released in 0.0.3._
 
 This release exists to publish the installer fix below, which was written
 against 0.0.1 and then never shipped. The repository was corrected; no release
@@ -144,5 +201,6 @@ is now installable as a versioned binary rather than only from source.
   stable, and upgrades between 0.0.x releases may require configuration
   changes.
 
-[0.0.2]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.2
+[0.0.3]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.3
+[0.0.2]: https://github.com/blechschmidt/cloop/tree/v0.0.2
 [0.0.1]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.1
