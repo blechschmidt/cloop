@@ -14,12 +14,16 @@
 //   * Pointer capture, pointercancel and touch-action are the browser's, not
 //     the page's.
 //   * getUserMedia/MediaRecorder are real here. Chrome's fake capture device
-//     emits a 440 Hz tone, so listenForSound's analyser sees genuine samples
-//     and the empty-clip guard is exercised rather than stubbed past.
+//     plays a 440 Hz tone (see toneWAV), so listenForSound's analyser sees
+//     genuine samples and the empty-clip guard is exercised rather than
+//     stubbed past.
 //
 // Chrome is launched with a fake microphone and auto-granted permission, so no
-// prompt appears and getUserMedia resolves in milliseconds — the same timing a
-// user gets on every hold after the first.
+// prompt appears and getUserMedia resolves in milliseconds on a quiet machine —
+// the same timing a user gets on every hold after the first. Nothing below
+// relies on that, though: under a loaded CI run the same call takes hundreds of
+// milliseconds, so every step waits for what the page shows (the button going
+// live, the session ending) rather than for a fixed time. See holdAndSpeak.
 //
 // Usage: node ptt_browser.js <chrome-binary> <base-url>
 // Prints one JSON document on stdout: {scenario: {...}, ...}.
@@ -34,9 +38,43 @@ const path = require('path');
 const CHROME = process.argv[2];
 const BASE = process.argv[3];
 
-const MIN_HOLD_MS = 400;   // must match DICTATE_MIN_HOLD_MS in 15-voice.js
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// SPEAK_MS is how long a hold that is meant to be transcribed keeps talking
+// once the microphone is live: the input to those scenarios, not a wait for
+// anything. The length of the old fixed hold, now counted from the moment the
+// page says it is listening rather than from the press. The page's level check
+// (listenForSound) polls every 100ms and, with toneWAV as the microphone, hears
+// it on the first poll, so this is seven polls' worth of speech.
+const SPEAK_MS = 700;
+
+// MID_HOLD_MS is when, into a hold, the mid-hold scenario looks at the button:
+// comfortably past the 400ms below which a release is treated as a stray tap
+// (DICTATE_MIN_HOLD_MS in 15-voice.js), so what it sees is a hold in progress.
+const MID_HOLD_MS = 500;
+
+// WAIT_MS bounds each wait for the page to reach a state; it is how long to
+// keep looking before reporting what is there, never a pause a healthy run sits
+// out. The slowest thing waited on is the first getUserMedia of a page's life,
+// which opens the capture device and has taken over a second on a loaded box.
+// 30s is far beyond that, and the waits a run makes stay inside the 4-minute
+// bound the Go side puts on this driver even if several of them expire.
+const WAIT_MS = 30000;
+
+// waitFor polls a page expression until it is truthy or WAIT_MS passes, and
+// reports which. It never throws on the deadline: every condition waited on is
+// also what a scenario then reads, so a state that never arrives shows up in
+// the Go test's assertion with the value that was there instead.
+async function waitFor(cdp, expr) {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    try {
+      if (await cdp.eval(expr)) return true;
+    } catch (_) { /* mid-navigation: no context to evaluate in yet */ }
+    if (Date.now() >= deadline) return false;
+    await sleep(25);
+  }
+}
 
 // ── a minimal CDP client ────────────────────────────────────────────────────
 
@@ -81,8 +119,39 @@ class CDP {
   }
 }
 
+// toneWAV is the microphone: one second of a 440 Hz sine, 16-bit mono PCM,
+// which Chrome loops for as long as a capture runs.
+//
+// Without it the fake capture device plays short periodic beeps instead, the
+// first of them about half a second into each capture: measured, the page's
+// 100ms level poll first heard a capture 597-610ms after it started, across
+// sixteen holds. A hold shorter than that is, to the page, a silent clip, which
+// it rightly refuses to upload ("No sound was recorded"). The old fixed 700ms
+// hold cleared that by 700ms minus however long getUserMedia took, which on a
+// loaded CI runner was not always anything: the transcript never came, and the
+// failure read as a gesture bug (Task 20344). With this file the first poll
+// hears it (~100ms, same measurement). A continuous tone is what this driver
+// always assumed the microphone produced.
+function toneWAV() {
+  const rate = 48000, n = rate;
+  const wav = Buffer.alloc(44 + n * 2);
+  wav.write('RIFF', 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write('WAVE', 8);
+  wav.write('fmt ', 12); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);          // PCM, mono
+  wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate * 2, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);         // 16-bit
+  wav.write('data', 36); wav.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) {
+    wav.writeInt16LE(Math.round(Math.sin(2 * Math.PI * 440 * i / rate) * 0.5 * 32767), 44 + i * 2);
+  }
+  return wav;
+}
+
 async function launchChrome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloop-ptt-'));
+  // In the profile directory, so the cleanup that removes one removes both.
+  const tone = path.join(dir, 'tone.wav');
+  fs.writeFileSync(tone, toneWAV());
   const proc = spawn(CHROME, [
     '--headless=new',
     '--remote-debugging-port=0',
@@ -94,10 +163,12 @@ async function launchChrome() {
     '--no-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu',
-    // The two flags that make this test possible: a synthetic microphone, and
-    // permission granted without a prompt.
+    // The flags that make this test possible: a synthetic microphone, playing
+    // a tone rather than the default beep (see toneWAV), and permission
+    // granted without a prompt.
     '--use-fake-ui-for-media-stream',
     '--use-fake-device-for-media-stream',
+    '--use-file-for-fake-audio-capture=' + tone,
     '--autoplay-policy=no-user-gesture-required',
     'about:blank',
   ], {stdio: ['ignore', 'ignore', 'pipe']});
@@ -169,16 +240,36 @@ async function boot(cdp) {
   // The dictate button is hidden until GET /api/dictate answers, and it lives
   // on the Tasks tab.
   await cdp.eval("window.switchTab && window.switchTab('tasks')");
-  for (let i = 0; i < 100; i++) {
-    const vis = await cdp.eval(`(() => {
-      const b = document.getElementById('dictateTaskBtn');
-      return !!(b && b.style.display !== 'none' && b.getClientRects().length);
-    })()`);
-    if (vis) return;
-    await sleep(50);
-  }
-  throw new Error('dictate button never became visible');
+  const visible = await waitFor(cdp, `(() => {
+    const b = document.getElementById('dictateTaskBtn');
+    return !!(b && b.style.display !== 'none' && b.getClientRects().length);
+  })()`);
+  if (!visible) throw new Error('dictate button never became visible');
+  // The label the button returns to between sessions. Read once, here, where
+  // nothing has pressed it yet; every "has this session ended" check below
+  // compares against it.
+  idleLabel = (await state(cdp)).label;
 }
+
+// idleLabel is what the button says at rest ("Hold to talk" on this device).
+let idleLabel = '';
+
+// The button's own account of a session, from what it paints (15-voice.js):
+// pressed, it says "Starting…" until the microphone is live; live, it carries
+// .recording; after the release it is disabled while "Transcribing…"; and only
+// when the session is over, whichever way it ended, does it go back to idle.
+const LIVE = `document.getElementById('dictateTaskBtn').classList.contains('recording')`;
+const idleExpr = () => `(() => {
+  const b = document.getElementById('dictateTaskBtn');
+  return !b.classList.contains('recording') && !b.disabled
+    && (b.textContent || '').trim() === ${JSON.stringify(idleLabel)};
+})()`;
+
+// sessionOver waits for the button to be back at rest, which is the page
+// saying it has finished with the last gesture: uploaded and filled the title,
+// or discarded the clip and said why. A touch press repaints the button
+// synchronously, so right after one it is never already at rest by accident.
+const sessionOver = cdp => waitFor(cdp, idleExpr());
 
 // warmUp performs one hold whose result is thrown away.
 //
@@ -189,9 +280,14 @@ async function boot(cdp) {
 // which pins it), but it is not the condition the gesture scenarios are about.
 // Running it once here puts the page in the state a user is in from their
 // second hold onwards, which is every hold but one.
+//
+// Waited out rather than slept through. The warm-up's getUserMedia is exactly
+// the slow one, and a fixed pause that it outlasted left the first scenario's
+// press landing on a session still starting — which the button reads as "this
+// press ends it", so the scenario's hold produced nothing at all.
 async function warmUp(cdp) {
   await touchHold(cdp, 800);
-  await sleep(1500);
+  await sessionOver(cdp);
   await cdp.eval("(() => { const t = document.getElementById('newTaskTitle'); if (t) t.value = ''; })()");
 }
 
@@ -203,11 +299,47 @@ async function centre(cdp) {
   })()`);
 }
 
+// touchHold presses for ms and lets go, whatever the page is doing meanwhile.
+// That is the right gesture for the holds that are meant to fail — a stray tap,
+// a release before the microphone is live — and the wrong one for a hold that
+// is meant to be heard; see holdAndSpeak.
+//
+// The two events are stamped ms apart (touchStamps), because the page measures
+// a hold between the events' own timestamps, not by when it gets to handle
+// them. Without the stamps the gesture's length would be however long this
+// process took to send the release, and a loaded machine that stalls it for a
+// few hundred milliseconds turns a 120ms tap into a hold.
 async function touchHold(cdp, ms) {
   const p = await centre(cdp);
   const pt = [{x: p.x, y: p.y, radiusX: 12, radiusY: 12, force: 1, id: 1}];
-  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt});
+  const [down, up] = touchStamps(ms);
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt, timestamp: down});
   await sleep(ms);
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: [], timestamp: up});
+}
+
+// touchStamps returns CDP event timestamps (seconds since the epoch) for a
+// press starting now and lasting ms.
+function touchStamps(ms) {
+  const down = Date.now() / 1000;
+  return [down, down + ms / 1000];
+}
+
+// holdAndSpeak is a hold as a person makes one: press, wait for the button to
+// say the microphone is live, talk for SPEAK_MS, let go.
+//
+// The button withholds "Release to send" until getUserMedia has resolved,
+// precisely so nobody starts talking into a microphone that is not open yet
+// (15-voice.js). A fixed-length hold ignores that signal, so the amount of it
+// that was actually recorded shrank by however long getUserMedia took — and
+// under load that was enough to leave a silent clip, no upload and an empty
+// title (Task 20344).
+async function holdAndSpeak(cdp) {
+  const p = await centre(cdp);
+  const pt = [{x: p.x, y: p.y, radiusX: 12, radiusY: 12, force: 1, id: 1}];
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt});
+  await waitFor(cdp, LIVE);
+  await sleep(SPEAK_MS);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
 }
 
@@ -242,11 +374,6 @@ async function reset(cdp) {
   await cdp.eval("(() => { const t = document.getElementById('newTaskTitle'); if (t) t.value = ''; })()");
 }
 
-// settle waits for the transcribe round trip and the repaint that follows it.
-async function settle(cdp, ms) {
-  await sleep(ms || 900);
-}
-
 
 // Matches both speech routes: the dashboard posts to /api/transcribe and the
 // glasses link to /api/glasses/transcribe, which is not a superstring of it.
@@ -270,8 +397,8 @@ async function main() {
     //    title field, and — the part a shim cannot check — the synthesised
     //    click that follows touchend must not start a second recording.
     await reset(cdp);
-    await touchHold(cdp, 700);
-    await settle(cdp);
+    await holdAndSpeak(cdp);
+    await sessionOver(cdp);
     {
       const s = await state(cdp);
       out.hold_transcribes_then_stops = {
@@ -298,7 +425,7 @@ async function main() {
     //    back to the button rather than to their OS sound settings.
     await reset(cdp);
     await touchHold(cdp, 120);
-    await settle(cdp);
+    await sessionOver(cdp);
     {
       const s = await state(cdp);
       out.short_tap_sends_nothing = {
@@ -311,15 +438,21 @@ async function main() {
 
     // 3. Mid-hold state: while the finger is down the button must show it is
     //    listening, and must still be enabled so the release can reach it.
+    //
+    //    Read once the microphone is live and MID_HOLD_MS into the hold,
+    //    whichever is later: before the microphone is live the button says
+    //    "Starting…" by design, and a fixed instant could land on either side.
     await reset(cdp);
     {
       const p = await centre(cdp);
       const pt = [{x: p.x, y: p.y, radiusX: 12, radiusY: 12, force: 1, id: 1}];
+      const pressed = Date.now();
       await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt});
-      await sleep(500);
+      await waitFor(cdp, LIVE);
+      await sleep(Math.max(0, MID_HOLD_MS - (Date.now() - pressed)));
       const mid = await state(cdp);
       await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-      await settle(cdp);
+      await sessionOver(cdp);
       out.mid_hold_shows_listening = {
         recording_during: mid.recording,
         disabled_during: mid.disabled,
@@ -331,12 +464,16 @@ async function main() {
     // 4. A mouse keeps the toggle it always had: one click starts, a second
     //    stops. Holding a mouse button means nothing, so push-to-talk must not
     //    be imposed on it — and a hybrid laptop has both pointers at once.
+    //
+    //    A click paints nothing until the microphone is live, so the first
+    //    read waits for that and then talks for SPEAK_MS, as a hold does.
     await reset(cdp);
     await mouseClick(cdp);
-    await sleep(900);   // long enough for the analyser to see the fake device's tone
+    await waitFor(cdp, LIVE);
+    await sleep(SPEAK_MS);
     const afterFirst = await state(cdp);
     await mouseClick(cdp);
-    await settle(cdp);
+    await sessionOver(cdp);
     const afterSecond = await state(cdp);
     out.mouse_click_still_toggles = {
       recording_after_first_click: afterFirst.recording,
@@ -349,10 +486,10 @@ async function main() {
     //    this is what fails if a release leaves pointer capture, the
     //    suppression flag or the recorder in a stale state.
     await reset(cdp);
-    await touchHold(cdp, 700);
-    await settle(cdp);
-    await touchHold(cdp, 700);
-    await settle(cdp);
+    await holdAndSpeak(cdp);
+    await sessionOver(cdp);
+    await holdAndSpeak(cdp);
+    await sessionOver(cdp);
     {
       const s = await state(cdp);
       out.consecutive_holds_both_work = {
@@ -382,7 +519,14 @@ async function main() {
         () => real(c).then(s => { window.__ptt_tracks.push(...s.getTracks()); res(s); }), 1200));
     })()`);
     await touchHold(cdp, 500);
-    await settle(cdp, 2500);
+    // Over when the button is back at rest — the delayed getUserMedia has
+    // resolved and the session was dropped — and then once the stream it
+    // handed over has been stopped. The page stops the tracks in the
+    // recorder's onstop, which fires after the button is repainted, so the
+    // count is waited on rather than sampled; a leak still reads as live here
+    // once the wait expires.
+    await sessionOver(cdp);
+    await waitFor(cdp, 'window.__liveTracks() === 0');
     {
       const s = await state(cdp);
       out.slow_microphone_recovers = {
@@ -407,24 +551,19 @@ async function main() {
     // walk needs. Clicking through the DOM is fine for navigation: the gesture
     // under test is dispatched as real touch input below.
     await cdp.send('Page.navigate', {url: BASE + '/glasses'});
-    await sleep(1200);
 
-    const waitFor = async (expr, what) => {
-      for (let i = 0; i < 120; i++) {
-        if (await cdp.eval(expr)) return;
-        await sleep(50);
-      }
-      throw new Error('timed out waiting for ' + what);
+    const mustReach = async (expr, what) => {
+      if (!(await waitFor(cdp, expr))) throw new Error('timed out waiting for ' + what);
     };
 
     // openTasks fires on a row carrying data-idx; openAdd on #add.
-    await waitFor("!!document.querySelector('#list [data-idx]')", 'the glasses project list');
+    await mustReach("!!document.querySelector('#list [data-idx]')", 'the glasses project list');
     await cdp.eval("document.querySelector('#list [data-idx]').click()");
-    await waitFor("(() => { const b = document.getElementById('add'); return !!b && b.classList.contains('on'); })()",
-                  'the glasses "+ Add task" button');
+    await mustReach("(() => { const b = document.getElementById('add'); return !!b && b.classList.contains('on'); })()",
+                    'the glasses "+ Add task" button');
     await cdp.eval("document.getElementById('add').click()");
     const onAddScreen = "(() => { const b = document.getElementById('dictate'); return !!b && b.classList.contains('on'); })()";
-    await waitFor(onAddScreen, 'the glasses dictate button');
+    await mustReach(onAddScreen, 'the glasses dictate button');
 
     // A completed hold lands on the confirmation screen, which is where the
     // wearer approves a transcript they cannot edit. #back runs goBack, which
@@ -432,8 +571,21 @@ async function main() {
     const backToAdd = async () => {
       if (await cdp.eval(onAddScreen)) return;
       await cdp.eval("document.getElementById('back').click()");
-      await waitFor(onAddScreen, 'the glasses Add screen');
+      await mustReach(onAddScreen, 'the glasses Add screen');
     };
+
+    // The same session states as the dashboard's button, painted by this
+    // page's own copy (glasses.html): "Starting…", then .rec while live, then
+    // disabled while "Transcribing…", then back to its resting label — or, for
+    // a transcript, on to the confirmation screen, which hides the button.
+    const gIdleLabel = await cdp.eval("(document.getElementById('dictate').textContent || '').trim()");
+    const gLive = "document.getElementById('dictate').classList.contains('rec')";
+    const gOver = `(() => {
+      if ((document.getElementById('title').textContent || '').trim() === 'Add this task?') return true;
+      const b = document.getElementById('dictate');
+      return !b.classList.contains('rec') && !b.disabled
+        && (b.textContent || '').trim() === ${JSON.stringify(gIdleLabel)};
+    })()`;
 
     const gCentre = `(() => {
       const r = document.getElementById('dictate').getBoundingClientRect();
@@ -454,23 +606,34 @@ async function main() {
         touchAction: getComputedStyle(b).touchAction,
       };
     })()`;
+    // gHold is touchHold's counterpart and gHoldAndSpeak holdAndSpeak's, for
+    // the same reasons.
     const gHold = async ms => {
       const p = await cdp.eval(gCentre);
       const pt = [{x: p.x, y: p.y, radiusX: 12, radiusY: 12, force: 1, id: 1}];
-      await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt});
+      const [down, up] = touchStamps(ms);
+      await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt, timestamp: down});
       await sleep(ms);
+      await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: [], timestamp: up});
+    };
+    const gHoldAndSpeak = async () => {
+      const p = await cdp.eval(gCentre);
+      const pt = [{x: p.x, y: p.y, radiusX: 12, radiusY: 12, force: 1, id: 1}];
+      await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pt});
+      await waitFor(cdp, gLive);
+      await sleep(SPEAK_MS);
       await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
     };
 
     // The microphone is cold again after the navigation, so warm it the same
     // way the dashboard run does before measuring anything.
     await gHold(800);
-    await sleep(1800);
+    await waitFor(cdp, gOver);
     await backToAdd();
 
     requests = [];
-    await gHold(700);
-    await settle(cdp, 1400);
+    await gHoldAndSpeak();
+    await waitFor(cdp, gOver);
     {
       const s = await cdp.eval(gState);
       out.glasses_hold_transcribes = {
@@ -484,7 +647,7 @@ async function main() {
     await backToAdd();
     requests = [];
     await gHold(120);
-    await settle(cdp, 1200);
+    await waitFor(cdp, gOver);
     {
       const s = await cdp.eval(gState);
       out.glasses_tap_sends_nothing = {

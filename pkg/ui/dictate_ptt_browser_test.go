@@ -211,7 +211,7 @@ func TestDictate_PushToTalkInBrowser(t *testing.T) {
 	t.Run("a hold transcribes and then stops", func(t *testing.T) {
 		r := got["hold_transcribes_then_stops"]
 		if r.Title != pttTranscript {
-			t.Errorf("task title after a 700ms hold = %q, want %q", r.Title, pttTranscript)
+			t.Errorf("task title after a hold spoken into a live microphone = %q, want %q", r.Title, pttTranscript)
 		}
 		if r.Transcribes != 1 {
 			t.Errorf("hold produced %d transcribe requests, want exactly 1", r.Transcribes)
