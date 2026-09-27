@@ -185,23 +185,22 @@ func TestStaticAssets_ServedPageIsFullyAssembled(t *testing.T) {
 
 	// The bundle the page loads must contain every fragment. A fragment that
 	// silently dropped out would take its whole panel with it.
+	//
+	// Whole fragments, comments stripped the way the server strips them
+	// (jsstrip.go): the served script carries no comment to look for, and a
+	// fragment that is present in full is a stronger claim than one line of it.
 	allJS := strings.Join(js, "\n")
 	for _, f := range bundleFiles {
 		src, err := assetFS.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		// First non-blank line is the fragment's section banner comment.
-		var marker string
-		for _, line := range strings.Split(string(src), "\n") {
-			if strings.TrimSpace(line) != "" {
-				marker = line
-				break
-			}
+		want, err := stripJSLineComments(string(src))
+		if err != nil {
+			t.Fatalf("strip %s: %v", f, err)
 		}
-		if marker != "" && !strings.Contains(allJS, marker) {
-			t.Errorf("fragment %s is not present in the JS the page loads "+
-				"(looked for its opening line %q)", f, marker)
+		if !strings.Contains(allJS, want) {
+			t.Errorf("fragment %s is not present, whole, in the JS the page loads", f)
 		}
 	}
 }
@@ -627,6 +626,8 @@ func TestStaticAssets_BundleParses(t *testing.T) {
 	a := loadAssets()
 	for _, src := range []struct{ name, js string }{
 		{"bundle", a.bundle},
+		// What actually goes over the wire, comments stripped (jsstrip.go).
+		{"served bundle", a.served},
 		{"errboundary.js", a.boundary},
 	} {
 		path := filepath.Join(t.TempDir(), "check.js")

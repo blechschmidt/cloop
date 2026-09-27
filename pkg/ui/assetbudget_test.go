@@ -202,7 +202,24 @@ import (
 // every raise recorded above put together.
 //
 // The new slack is 240 B, the same order as those above.
-const eagerWireBudgetBytes = 279_300
+//
+// Lowered to 217_100 B by Task 20341, which built that stripper. The served
+// bundle now drops every whole-line `//` comment (jsstrip.go): 2,832 lines,
+// 210,309 B → 137,367 B wire for app.js, with the line count preserved so
+// browser stack traces still point at the concatenated source. The same task
+// added the parallel-features UI (the Features panel, the feature banner and
+// three dialogs: 6,929 B wire before stripping — 5,619 B of script, 954 B of
+// markup, 356 B of style), so the measured set went from 279,060 B to
+// 213,047 B.
+//
+// It is lowered rather than left, because a ceiling 66 KB above the page stops
+// gating anything — the drift check below exists to say so. The new figure is
+// the measurement plus ~2%, the margin the Task 20308 note settled on.
+//
+// The stripper refuses rather than guesses (see its file comment), and when it
+// refuses the bundle ships with its comments — which this test would then
+// report as a 72 KB regression. TestServedBundleIsStripped says why first.
+const eagerWireBudgetBytes = 217_100
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

@@ -36,6 +36,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,8 +182,12 @@ type assetSet struct {
 
 	// The individual sources, kept so tests can assert over the whole front
 	// end the way they used to assert over the dashboardHTML constant.
-	css         string
-	bundle      string
+	css    string
+	bundle string
+	// served is the bundle as it goes over the wire: bundle with its
+	// whole-line comments removed (jsstrip.go), or bundle itself if the
+	// stripper declined.
+	served      string
 	boundary    string
 	indexTmpl   string
 	glassesTmpl string
@@ -219,11 +224,21 @@ func buildAssets() *assetSet {
 
 	glassesTmpl := read("assets/glasses.html")
 
+	// Comments are for maintainers, not for every browser that paints the
+	// dashboard; they were over a third of its script's wire bytes. The
+	// stripper refuses anything it cannot prove unchanged, and then the bundle
+	// ships as written — see jsstrip.go.
+	served, stripErr := stripJSLineComments(bundle.String())
+	if stripErr != nil {
+		fmt.Fprintf(os.Stderr, "ui: serving the dashboard script with its comments: %v\n", stripErr)
+	}
+
 	set := &assetSet{
 		byPath:      map[string]*staticAsset{},
 		icons:       buildIcons(),
 		css:         string(css),
 		bundle:      bundle.String(),
+		served:      served,
 		boundary:    string(boundary),
 		indexTmpl:   string(indexTmpl),
 		glassesTmpl: string(glassesTmpl),
@@ -238,7 +253,7 @@ func buildAssets() *assetSet {
 		body  []byte
 	}{
 		{"app.css", "app", "css", "text/css; charset=utf-8", css},
-		{"app.js", "app", "js", jsContentType, bundle.Bytes()},
+		{"app.js", "app", "js", jsContentType, []byte(served)},
 		{"errboundary.js", "errboundary", "js", jsContentType, boundary},
 		{"chart.js", "chart", "js", jsContentType, chart},
 	}
