@@ -12,19 +12,26 @@ package multiui
 // have to move together.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
 // startFakeRun spawns a process that looks like `cloop run` with its working
-// directory set to cwd, and waits for /proc to publish its symlinks. It returns
-// the PID.
+// directory set to cwd, and waits until the /proc scan can see it as one. It
+// returns the PID.
+//
+// The process is a copy of this test binary named root/bin/cloop, which
+// TestMain turns into a sleep. A symlink would not do: /proc/PID/exe resolves
+// it back to the real binary, defeating the basename check the matcher relies
+// on.
 func startFakeRun(t *testing.T, root, cwd string) int {
 	t.Helper()
 	selfBin, err := os.Executable()
@@ -55,15 +62,59 @@ func startFakeRun(t *testing.T, root, cwd string) int {
 	})
 
 	pid := cmd.Process.Pid
-	deadline := time.Now().Add(2 * time.Second)
+	proc := "/proc/" + strconv.Itoa(pid)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd"); err == nil {
+		// Ready when the scanner's own inputs identify a cloop run, not when
+		// the first of them can be read: waiting on cwd alone, a CI run on
+		// 15f55c9 scanned a fake it then could not see, and nothing said why.
+		exe, _ := os.Readlink(proc + "/exe")
+		cmdline, _ := os.ReadFile(proc + "/cmdline")
+		dir, err := os.Readlink(proc + "/cwd")
+		if err == nil && cloopRunMatch(exe, splitCmdline(cmdline), dir, matchAnyDir) {
 			return pid
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("/proc never published cwd for pid %d", pid)
+	t.Fatalf("fake cloop pid %d never became visible as a cloop run: %s", pid, describeProc(pid))
 	return 0
+}
+
+// describeProc reports what /proc shows for pid: the fields the scanner reads,
+// and whether the process is still alive — so a failure says whether a fake
+// run was never visible or had died, and of what.
+func describeProc(pid int) string {
+	proc := "/proc/" + strconv.Itoa(pid)
+	exe, exeErr := os.Readlink(proc + "/exe")
+	cmdline, _ := os.ReadFile(proc + "/cmdline")
+	cwd, cwdErr := os.Readlink(proc + "/cwd")
+	desc := fmt.Sprintf("exe=%q (err %v), argv=%q, cwd=%q (err %v)",
+		exe, exeErr, splitCmdline(cmdline), cwd, cwdErr)
+
+	stat, err := os.ReadFile(proc + "/stat")
+	if err != nil {
+		return desc + fmt.Sprintf(", stat unreadable: %v", err)
+	}
+	// The command name may contain spaces and parentheses; the fields after
+	// its closing parenthesis start at field 3, the state.
+	s := string(stat)
+	fields := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	if len(fields) == 0 {
+		return desc
+	}
+	desc += ", state " + fields[0]
+	// Field 52 is the status a waiter will collect from a zombie.
+	if fields[0] == "Z" && len(fields) > 49 {
+		if code, err := strconv.Atoi(fields[49]); err == nil {
+			switch ws := syscall.WaitStatus(code); {
+			case ws.Signaled():
+				desc += " (killed by " + ws.Signal().String() + ")"
+			case ws.Exited():
+				desc += fmt.Sprintf(" (exited with status %d)", ws.ExitStatus())
+			}
+		}
+	}
+	return desc
 }
 
 // TestScanRunningDirsMatchesPerProjectWalk is the equivalence assertion, run
@@ -96,7 +147,8 @@ func TestScanRunningDirsMatchesPerProjectWalk(t *testing.T) {
 
 	ix := ScanRunningDirs()
 	if !ix.Any() {
-		t.Fatalf("ScanRunningDirs found no runs while pid %d is running in %s", pid, worktree)
+		t.Fatalf("ScanRunningDirs found no runs while pid %d is running in %s; /proc shows %s",
+			pid, worktree, describeProc(pid))
 	}
 
 	for _, dir := range []string{project, sibling, worktree, linked, root} {

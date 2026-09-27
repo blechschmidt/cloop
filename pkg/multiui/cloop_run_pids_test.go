@@ -3,11 +3,8 @@ package multiui
 import (
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -244,52 +241,17 @@ func TestCloopRunPIDsInDir_LiveProc(t *testing.T) {
 		t.Skipf("/proc not accessible: %v", err)
 	}
 
-	// Copy the test binary itself into a file named "cloop" so
-	// /proc/PID/exe shows .../bin/cloop. We re-exec with fakeCloopEnv set
-	// so TestMain knows to act as the sleep shim instead of running the
-	// suite. A symlink would not work — the kernel resolves symlinks in
-	// /proc/PID/exe back to the real binary, defeating the basename check.
-	selfBin, err := os.Executable()
-	if err != nil {
-		t.Skipf("os.Executable: %v", err)
-	}
 	tmp := t.TempDir()
 	cwdDir := filepath.Join(tmp, "project")
 	otherDir := filepath.Join(tmp, "other")
-	binDir := filepath.Join(tmp, "bin")
-	for _, d := range []string{cwdDir, otherDir, binDir} {
+	for _, d := range []string{cwdDir, otherDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	fakeCloop := filepath.Join(binDir, "cloop")
-	if err := copyExecutable(selfBin, fakeCloop); err != nil {
-		t.Skipf("cannot stage fake cloop binary (skipping live-proc test): %v", err)
-	}
 
-	// Spawn ./cloop run — argv contains "run" and the cwd is cwdDir.
-	cmd := exec.Command(fakeCloop, "run")
-	cmd.Dir = cwdDir
-	cmd.Env = append(os.Environ(), fakeCloopEnv+"=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake cloop: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
-
-	pid := cmd.Process.Pid
-
-	// Poll until /proc publishes the symlinks (usually instant; bound to 2s).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd"); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// `cloop run` — argv contains "run" and the cwd is cwdDir.
+	pid := startFakeRun(t, tmp, cwdDir)
 
 	scoped := CloopRunPIDsInDir(cwdDir)
 	if !containsPID(scoped, pid) {
