@@ -53,6 +53,12 @@ func TestClassifyAbort(t *testing.T) {
 		{"expired oauth", "OAuth token has expired. Please run /login again.", true, AbortAuth},
 		{"401", "request failed: 401 Unauthorized", true, AbortAuth},
 
+		// --- The provider was unreachable (Task 20345: a sandbox whose DNS
+		// failed returned exactly this, and it was recorded as done). ---
+		{"claude cli cannot reach the api", "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)", true, AbortNetwork},
+		{"claude cli connection error", "API Error: Connection error.", true, AbortNetwork},
+		{"bare resolver error", "getaddrinfo EAI_AGAIN api.anthropic.com", true, AbortNetwork},
+
 		// --- Harness never started. ---
 		{"binary missing", "claude: command not found", true, AbortHarnessRefusal},
 		{"exec lookup failed", `exec: "claude": executable file not found in $PATH`, true, AbortHarnessRefusal},
@@ -352,5 +358,27 @@ func TestRepoChanged(t *testing.T) {
 	}
 	if !repoChanged("abc", "def") {
 		t.Error("differing fingerprints are a change")
+	}
+}
+
+// TestClassifyAbort_NetworkPausesTheRun: an unreachable provider is not waited
+// out on a one-minute loop — by the time the harness says so it has retried,
+// and inside a sandbox the cause is almost always a firewall or a resolver.
+func TestClassifyAbort_NetworkPausesTheRun(t *testing.T) {
+	ab, ok := ClassifyAbort("API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)")
+	if !ok || ab.Class != AbortNetwork {
+		t.Fatalf("ClassifyAbort = %+v, %v", ab, ok)
+	}
+	if ab.Class.Retryable() {
+		t.Error("an unreachable provider is retried every minute rather than paused")
+	}
+	if _, pause := abortWait(ab, time.Now(), time.Hour, time.Minute); !pause {
+		t.Error("abortWait does not pause the run")
+	}
+	// A long transcript that merely ends on a resolver error code is work, not
+	// an abort: EAI_AGAIN is whole-response only.
+	long := strings.Repeat("Fixed the resolver fallback in pkg/net.\n", 80) + "The old code surfaced EAI_AGAIN here."
+	if ab, ok := ClassifyAbort(long); ok {
+		t.Errorf("a transcript about DNS was classified as %+v", ab)
 	}
 }

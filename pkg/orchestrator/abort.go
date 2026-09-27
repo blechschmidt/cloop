@@ -50,6 +50,18 @@ const (
 	// AbortNoEvidence is a run that left no diff and no artifact behind and
 	// never signalled TASK_DONE — nothing to show it did anything.
 	AbortNoEvidence AbortClass = "no_evidence"
+	// AbortNetwork is a harness that could not reach its provider at all —
+	// "API Error: Can't reach the API server — check your internet or DNS
+	// (EAI_AGAIN)". Found in Task 20345: a sandbox whose DNS could not
+	// resolve returned exactly that, and the error text, being non-empty,
+	// counted as an artifact and promoted the task to done.
+	//
+	// Not retryable. By the time the harness prints this it has already
+	// retried, and a sandbox that cannot reach the provider is almost always
+	// a configuration fault — a firewall, a resolver, a proxy — that the next
+	// attempt will meet again. Pausing names it; retrying every minute would
+	// burn the plan against it.
+	AbortNetwork AbortClass = "network_unreachable"
 )
 
 // Retryable reports whether waiting is likely to make the next attempt
@@ -57,7 +69,7 @@ const (
 // should stop rather than burn the remaining tasks against the same wall.
 func (c AbortClass) Retryable() bool {
 	switch c {
-	case AbortQuotaExceeded, AbortAuth, AbortHarnessRefusal:
+	case AbortQuotaExceeded, AbortAuth, AbortHarnessRefusal, AbortNetwork:
 		return false
 	default:
 		return true
@@ -147,6 +159,13 @@ var abortPatterns = []abortPattern{
 	{class: AbortAuth, needle: "invalid_api_key", reason: "provider rejected the API key"},
 	{class: AbortAuth, needle: "401 unauthorized", reason: "provider returned 401 Unauthorized"},
 	{class: AbortAuth, needle: "403 forbidden", reason: "provider returned 403 Forbidden"},
+
+	// --- The provider could not be reached at all. ---
+	{class: AbortNetwork, needle: "can't reach the api server", reason: "the harness could not reach the provider's API — check the sandbox's network, firewall and DNS"},
+	{class: AbortNetwork, needle: "api error: connection error", reason: "the harness lost its connection to the provider's API"},
+	// Whole responses only: a transcript about DNS may well end on the
+	// resolver's error code without being one.
+	{class: AbortNetwork, needle: "eai_again", reason: "the harness could not resolve the provider's API host (DNS)", wholeOnly: true},
 
 	// --- Harness refused to start. ---
 	{class: AbortHarnessRefusal, needle: "cannot be used with root/sudo", reason: "harness refused to run under root/sudo", wholeOnly: true},
