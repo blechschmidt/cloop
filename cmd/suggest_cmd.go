@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ var (
 	suggestProvider string
 	suggestModel    string
 	suggestCount    int
+	suggestInput    string
 	suggestYes      bool
 	suggestDryRun   bool
 	suggestJSON     bool
@@ -30,7 +32,7 @@ var (
 
 var suggestCmd = &cobra.Command{
 	Use:   "suggest",
-	Short: "AI brainstorms feature ideas; accept/reject interactively to add as tasks",
+	Short: "AI brainstorms feature ideas, or plans a request; accept/reject interactively to add as tasks",
 	Long: `Suggest generates N AI-brainstormed feature ideas tailored to your project.
 Each idea is presented interactively — accept it to add it as a PM task,
 or reject it to skip.
@@ -38,14 +40,38 @@ or reject it to skip.
 The AI considers your project goal, codebase structure, recent activity,
 and existing tasks to generate relevant, non-duplicate suggestions.
 
+With --input, it plans a request instead: the request is broken into the
+ordered tasks of a plan, each naming the earlier tasks it depends on.
+--count then sets how many tasks the plan has; leave it out and the plan is
+as long as the request needs. Accepted tasks join the end of the run queue
+in plan order, and keep their dependencies on each other — through any task
+you reject.
+
 Examples:
   cloop suggest                          # brainstorm 5 ideas (default)
   cloop suggest --count 10               # brainstorm 10 ideas
+  cloop suggest --input "add OAuth login"             # plan it in as many tasks as it needs
+  cloop suggest --input "add OAuth login" --count 4   # plan it in exactly 4 tasks
   cloop suggest --yes                    # auto-accept all suggestions
   cloop suggest --dry-run                # show suggestions without prompting
   cloop suggest --provider anthropic     # use a specific provider`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
+
+		request, err := suggest.CleanRequest(suggestInput)
+		if err != nil {
+			return fmt.Errorf("--input: %w", err)
+		}
+		planMode := request != ""
+		count := suggestCount
+		switch {
+		case count < 0:
+			return fmt.Errorf("--count must not be negative")
+		case planMode && count > suggest.MaxCount:
+			return fmt.Errorf("--count: a plan has at most %d tasks", suggest.MaxCount)
+		case !planMode && count == 0:
+			count = suggest.DefaultCount
+		}
 
 		s, err := state.Load(workdir)
 		if err != nil {
@@ -97,6 +123,9 @@ Examples:
 			OpenAIAPIKey:     cfg.OpenAI.APIKey,
 			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
 			OllamaBaseURL:    cfg.Ollama.BaseURL,
+			// The mock provider scripts its answers per project; without
+			// this, and without WorkDir below, it could find none.
+			MockResponsesFile: cfg.Mock.ResponsesFile,
 		}
 		prov, err := provider.Build(provCfg)
 		if err != nil {
@@ -122,18 +151,26 @@ Examples:
 			existingTasks = tb.String()
 		}
 
-		prompt := suggest.BuildPrompt(
-			s.Goal,
-			s.Instructions,
-			projCtx.FileTree,
-			projCtx.RecentLog,
-			memStr,
-			existingTasks,
-			suggestCount,
-		)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		// A plan writes a self-contained description for every task, up to
+		// twenty of them, so it gets longer than a brainstorm does.
+		timeout := 3 * time.Minute
+		if planMode {
+			timeout = 5 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+
+		opts := provider.Options{Model: model, Timeout: timeout, WorkDir: workdir}
+		generate := func() (*suggest.Result, error) {
+			if planMode {
+				prompt := suggest.BuildPlanPrompt(s.Goal, s.Instructions, projCtx.FileTree,
+					projCtx.RecentLog, memStr, existingTasks, request, count)
+				return suggest.GeneratePlan(ctx, prov, prompt, opts, request, count)
+			}
+			prompt := suggest.BuildPrompt(s.Goal, s.Instructions, projCtx.FileTree,
+				projCtx.RecentLog, memStr, existingTasks, count)
+			return suggest.Generate(ctx, prov, prompt, opts)
+		}
 
 		if suggestJSON {
 			// Machine-readable mode for the Web UI: no decoration, no state
@@ -142,7 +179,7 @@ Examples:
 			// stdout and stderr into one stream — so a diagnostic from any
 			// package that happens to run during startup would otherwise be
 			// parsed as the result. See pkg/clijson (Task 20325).
-			result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
+			result, err := generate()
 			if err != nil {
 				return fmt.Errorf("suggestion generation failed: %w", err)
 			}
@@ -156,10 +193,22 @@ Examples:
 		warnColor := color.New(color.FgYellow)
 		labelColor := color.New(color.FgMagenta)
 
-		headerColor.Printf("\nBrainstorming %d feature ideas with %s...\n\n", suggestCount, prov.Name())
-		dimColor.Printf("Goal: %s\n\n", truncate(s.Goal, 80))
+		noun := "idea"
+		switch {
+		case !planMode:
+			headerColor.Printf("\nBrainstorming %d feature ideas with %s...\n\n", count, prov.Name())
+			dimColor.Printf("Goal: %s\n\n", truncate(s.Goal, 80))
+		case count > 0:
+			noun = "task"
+			headerColor.Printf("\nPlanning %d tasks with %s...\n\n", count, prov.Name())
+			dimColor.Printf("Request: %s\n\n", truncate(request, 80))
+		default:
+			noun = "task"
+			headerColor.Printf("\nPlanning tasks with %s...\n\n", prov.Name())
+			dimColor.Printf("Request: %s\n\n", truncate(request, 80))
+		}
 
-		result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
+		result, err := generate()
 		if err != nil {
 			return fmt.Errorf("suggestion generation failed: %w", err)
 		}
@@ -171,7 +220,11 @@ Examples:
 
 		sep := strings.Repeat("─", 70)
 		fmt.Println(sep)
-		headerColor.Printf("  %d Feature Ideas\n", len(result.Suggestions))
+		if planMode {
+			headerColor.Printf("  A Plan of %d Tasks\n", len(result.Suggestions))
+		} else {
+			headerColor.Printf("  %d Feature Ideas\n", len(result.Suggestions))
+		}
 		if result.Summary != "" {
 			dimColor.Printf("  %s\n", result.Summary)
 		}
@@ -202,7 +255,7 @@ Examples:
 
 			// Prompt user
 			for {
-				fmt.Printf("  Accept this idea? [y/n/q] ")
+				fmt.Printf("  Accept this %s? [y/n/q] ", noun)
 				line, err := reader.ReadString('\n')
 				if err != nil {
 					// stdin closed (non-interactive); skip remaining
@@ -233,45 +286,31 @@ Examples:
 			return nil
 		}
 
-		// Inject accepted suggestions as PM tasks
+		// Inject accepted suggestions as PM tasks. For a plan the ledger also
+		// wires each task to the accepted tasks it depends on, looking through
+		// any that were rejected.
 		if !s.PMMode {
 			s.PMMode = true
 		}
 		if s.Plan == nil {
 			s.Plan = pm.NewPlan(s.Goal)
 		}
-
-		maxID := 0
-		for _, t := range s.Plan.Tasks {
-			if t.ID > maxID {
-				maxID = t.ID
-			}
-		}
-
-		for _, sg := range accepted {
-			maxID++
-			role := suggestCategoryToRole(sg.Category)
-			task := &pm.Task{
-				ID:          maxID,
-				Title:       sg.Title,
-				Description: sg.Description,
-				Priority:    suggestEffortToPriority(sg.Effort),
-				Status:      pm.TaskPending,
-				Role:        role,
-			}
-			s.Plan.Tasks = append(s.Plan.Tasks, task)
-		}
+		added := suggest.NewLedger(result).Apply(s.Plan, accepted)
 
 		if err := s.Save(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
 
 		fmt.Println(sep)
-		goodColor.Printf("  Added %d idea(s) as PM tasks. Run 'cloop run --pm' to execute them.\n\n", len(accepted))
+		goodColor.Printf("  Added %d %s(s) as PM tasks. Run 'cloop run --pm' to execute them.\n\n", len(added), noun)
 
 		// Show what was added
-		for _, sg := range accepted {
-			dimColor.Printf("  + [%s] %s\n", suggest.EffortLabel(sg.Effort), sg.Title)
+		for _, t := range added {
+			after := ""
+			if len(t.DependsOn) > 0 {
+				after = fmt.Sprintf("  (after %s)", joinTaskIDs(t.DependsOn))
+			}
+			dimColor.Printf("  + #%d %s%s\n", t.ID, t.Title, after)
 		}
 		fmt.Println()
 
@@ -279,7 +318,17 @@ Examples:
 	},
 }
 
-// printSuggestion renders a single suggestion in terminal format.
+// joinTaskIDs renders task IDs as "#3, #4".
+func joinTaskIDs(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("#%d", id)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// printSuggestion renders a single suggestion in terminal format. A plan's
+// tasks also say which earlier tasks they come after.
 func printSuggestion(n int, sg *suggest.Suggestion, boldColor, dimColor, labelColor *color.Color) {
 	boldColor.Printf("  %d. %s", n, sg.Title)
 	labelColor.Printf("  [%s | %s]\n", suggest.CategoryLabel(sg.Category), suggest.EffortLabel(sg.Effort))
@@ -289,50 +338,21 @@ func printSuggestion(n int, sg *suggest.Suggestion, boldColor, dimColor, labelCo
 	if sg.Rationale != "" {
 		dimColor.Printf("     Why:  %s\n", sg.Rationale)
 	}
+	if len(sg.DependsOn) > 0 {
+		steps := make([]string, len(sg.DependsOn))
+		for i, d := range sg.DependsOn {
+			steps[i] = strconv.Itoa(d)
+		}
+		dimColor.Printf("     After: %s\n", strings.Join(steps, ", "))
+	}
 	fmt.Println()
-}
-
-// suggestCategoryToRole maps a suggestion category to the best PM agent role.
-func suggestCategoryToRole(c suggest.Category) pm.AgentRole {
-	switch c {
-	case suggest.CategoryFeature:
-		return pm.RoleBackend
-	case suggest.CategoryUX:
-		return pm.RoleFrontend
-	case suggest.CategoryPerformance:
-		return pm.RoleBackend
-	case suggest.CategorySecurity:
-		return pm.RoleSecurity
-	case suggest.CategoryDX:
-		return pm.RoleDevOps
-	case suggest.CategoryIntegration:
-		return pm.RoleBackend
-	case suggest.CategoryDocs:
-		return pm.RoleDocs
-	default:
-		return ""
-	}
-}
-
-// suggestEffortToPriority converts effort to a PM task priority (1=highest).
-// Smaller efforts get slightly higher priority to keep things moving.
-func suggestEffortToPriority(e suggest.Effort) int {
-	switch e {
-	case suggest.EffortXS, suggest.EffortS:
-		return 3
-	case suggest.EffortM:
-		return 4
-	case suggest.EffortL, suggest.EffortXL:
-		return 5
-	default:
-		return 4
-	}
 }
 
 func init() {
 	suggestCmd.Flags().StringVar(&suggestProvider, "provider", "", "Provider to use (claudecode, anthropic, openai, ollama)")
 	suggestCmd.Flags().StringVar(&suggestModel, "model", "", "Model to use")
-	suggestCmd.Flags().IntVar(&suggestCount, "count", 5, "Number of feature ideas to generate")
+	suggestCmd.Flags().IntVar(&suggestCount, "count", 0, "Number of ideas to brainstorm (default 5); with --input, number of tasks in the plan (default: as many as the request needs)")
+	suggestCmd.Flags().StringVar(&suggestInput, "input", "", "A request to break into a plan of tasks, instead of brainstorming ideas")
 	suggestCmd.Flags().BoolVar(&suggestYes, "yes", false, "Auto-accept all suggestions")
 	suggestCmd.Flags().BoolVar(&suggestDryRun, "dry-run", false, "Show suggestions without prompting or adding tasks")
 	suggestCmd.Flags().BoolVar(&suggestJSON, "json", false, "Output suggestions as JSON to stdout (no interactive prompt, no state mutation)")

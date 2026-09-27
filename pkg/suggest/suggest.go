@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -37,7 +36,7 @@ const (
 	EffortXL Effort = "xl" // > 1 week
 )
 
-// Suggestion is a single AI-brainstormed feature idea.
+// Suggestion is a single AI-brainstormed feature idea, or one task of a plan.
 type Suggestion struct {
 	ID          int      `json:"id"`
 	Title       string   `json:"title"`
@@ -45,12 +44,18 @@ type Suggestion struct {
 	Rationale   string   `json:"rationale"`
 	Category    Category `json:"category"`
 	Effort      Effort   `json:"effort"`
+	// DependsOn names the earlier tasks of the same plan, by ID, that must be
+	// finished before this one can start. Always empty for brainstormed ideas.
+	DependsOn []int `json:"depends_on,omitempty"`
 }
 
 // Result holds all AI-generated suggestions and an optional summary.
 type Result struct {
 	Suggestions []*Suggestion `json:"suggestions"`
 	Summary     string        `json:"summary"`
+	// Request is what the user asked to have planned. Non-empty means the
+	// suggestions are the tasks of one plan, in order, rather than loose ideas.
+	Request string `json:"request,omitempty"`
 }
 
 // BuildPrompt constructs the prompt for generating feature suggestions.
@@ -124,12 +129,11 @@ func Parse(output string) (*Result, error) {
 	return &result, nil
 }
 
-// Generate calls the provider to brainstorm feature suggestions.
-func Generate(ctx context.Context, p provider.Provider, prompt, model string, timeout time.Duration) (*Result, error) {
-	result, err := p.Complete(ctx, prompt, provider.Options{
-		Model:   model,
-		Timeout: timeout,
-	})
+// Generate calls the provider to brainstorm feature suggestions. opts should
+// carry the project's WorkDir: it is where a harness provider runs and where
+// the mock provider finds its scripted responses.
+func Generate(ctx context.Context, p provider.Provider, prompt string, opts provider.Options) (*Result, error) {
+	result, err := p.Complete(ctx, prompt, opts)
 	if err != nil {
 		return nil, fmt.Errorf("suggest: %w", err)
 	}
