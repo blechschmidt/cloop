@@ -80,7 +80,63 @@ func newScriptedAgent(t *testing.T, credPath, root string) (*Agent, <-chan *cont
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	reapOnCleanup(t, a)
 	return a, conns
+}
+
+// workloadDeathBound caps how long reapOnCleanup waits for a SIGKILLed
+// workload's output stream to close. A backstop rather than a budget: once
+// SIGKILL has landed, all that remains is the reaper noticing and at most one
+// `sleep 0.05` child of the test workloads exiting, which is milliseconds even
+// on a loaded runner. Running past it means some process the workload started
+// is still alive and holding its output pipe — the leak reapOnCleanup exists to
+// catch — so it fails the test instead of hanging cleanup until -timeout.
+const workloadDeathBound = 30 * time.Second
+
+// reapOnCleanup makes sure no process the agent started outlives the test.
+//
+// The agent does not stop its workloads when Run returns, and must not: they
+// outlive the connection by design, and on a device the service unit
+// (KillMode=mixed) is what takes them down with a stopped agent. A test has no
+// unit around it. A workload still running when a test ended — the resume
+// tests keep one alive on purpose — was reparented to init when the test binary
+// exited, and ran forever: the SIGTERM-trapping loop these tests use forks
+// `sleep` twenty times a second, and a development box that ran this suite
+// for six days had collected 130 of them.
+//
+// So every handle the agent's host driver still has is killed and then waited
+// for. Its output stream closes only once the process has been reaped and
+// nothing it spawned still holds the pipe, which is what "dead" has to mean
+// here: a shell killed out from under a long `sleep` would otherwise leave the
+// sleep behind. A test workload that parks in a long-running command therefore
+// execs it, so the kill reaches the process that holds the pipe.
+func reapOnCleanup(t *testing.T, a *Agent) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, id := range a.local.Handles() {
+			lines, err := a.local.Stream(ctx, id)
+			if err != nil {
+				continue
+			}
+			// A no-op for a handle that has already finished, whose stream is
+			// then closed as soon as its backlog has been read.
+			_ = a.local.Signal(ctx, id, executor.SignalKill)
+			gone := make(chan struct{})
+			go func() {
+				defer close(gone)
+				for range lines {
+				}
+			}()
+			select {
+			case <-gone:
+			case <-time.After(workloadDeathBound):
+				st, _ := a.local.Status(ctx, id)
+				t.Errorf("workload %s (pid %d) still has a live process holding its output %s after "+
+					"SIGKILL; a test must not leave a process running when it ends", id, st.PID, workloadDeathBound)
+			}
+		}
+	})
 }
 
 // openGate releases a workload blocked on `read x < fifo`: opening the write
@@ -229,7 +285,7 @@ func TestAgentReconnectsAndResumesFromOffset(t *testing.T) {
 		Spec: executor.Spec{
 			// Relative: the agent provisions it beneath its root.
 			WorkDir: "proj",
-			Argv:    []string{"/bin/sh", "-c", "printf 'AAAABBBB'; sleep 30"},
+			Argv:    []string{"/bin/sh", "-c", "printf 'AAAABBBB'; exec sleep 30"},
 		},
 	})
 	if err != nil {
@@ -563,6 +619,7 @@ func TestAgentEnforcesConcurrencyCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	reapOnCleanup(t, a)
 	if got := a.Capabilities().MaxConcurrent; got != 1 {
 		t.Fatalf("advertised MaxConcurrent = %d, want 1", got)
 	}
@@ -577,7 +634,7 @@ func TestAgentEnforcesConcurrencyCeiling(t *testing.T) {
 	sleeper := func(id string) remote.Frame {
 		f, err := remote.NewFrame(remote.TypeStart, "req-"+id, id, remote.StartPayload{
 			HandleID: id,
-			Spec:     executor.Spec{WorkDir: "proj", Argv: []string{"/bin/sh", "-c", "sleep 30"}},
+			Spec:     executor.Spec{WorkDir: "proj", Argv: []string{"/bin/sh", "-c", "exec sleep 30"}},
 		})
 		if err != nil {
 			t.Fatalf("build start: %v", err)
