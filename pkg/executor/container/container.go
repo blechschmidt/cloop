@@ -1716,11 +1716,14 @@ const ReapedRunningSuffix = " (running)"
 //
 // It collects two populations, and they are deliberately not symmetric.
 //
-// Exited containers are removed immediately and across every executor id,
-// exactly as they always have been. An exited container holds a name and a
-// writable layer and nothing else, so the worst case of removing one that
-// belongs to a peer control plane is that peer losing a `docker logs` it had
-// not read yet.
+// Exited containers are removed across every executor id: an exited container
+// holds a name and a writable layer and nothing else. This executor's own
+// untracked ones go at once. Another executor's go only once they have been
+// exited for OrphanGracePeriod, because a peer that is alive reaps its
+// container moments after it exits — with a `wait` that fails once the
+// container is gone, so removing it first turned the peer's clean exit into a
+// failed run, "could not be waited on" (Task 20349). The old reading of the
+// worst case, a peer losing some unread `docker logs`, was wrong.
 //
 // Running containers are the case that actually costs something — before Task
 // 20191 they were never touched at all, so a hub killed mid-run left a sandbox
@@ -1745,21 +1748,37 @@ func (e *Executor) ReapOrphans(ctx context.Context) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout,
-		"ps", "--all", "--filter", "label="+LabelManaged+"=true",
-		"--filter", "status=exited", "--format", "{{.Names}}")
+	exited, err := e.listExited(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("container: list orphans: %w", err)
+		return nil, err
 	}
-	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("container: list orphans failed: %s", firstLine(res.Stderr))
+	own, err := e.listExited(ctx, "label="+LabelExecutor+"="+e.id)
+	if err != nil {
+		return nil, err
+	}
+	ownNames := make(map[string]struct{}, len(own))
+	for _, name := range own {
+		ownNames[name] = struct{}{}
 	}
 
 	live := e.liveContainerNames()
+	now := time.Now()
+	grace := e.orphanGracePeriod()
 	var removed []string
-	for _, name := range strings.Fields(res.Stdout) {
+	for _, name := range exited {
 		if _, tracked := live[name]; tracked {
 			continue
+		}
+		if _, mine := ownNames[name]; !mine {
+			finished, ferr := e.exitedAt(ctx, name)
+			if ferr != nil {
+				// Skip, never guess — the same rule as the running sweep.
+				fmt.Fprintf(os.Stderr, "container: not reaping %s: %v\n", name, ferr)
+				continue
+			}
+			if !shouldReapPeersExited(now, finished, grace) {
+				continue
+			}
 		}
 		if e.removeContainer(ctx, name) {
 			removed = append(removed, name)
@@ -1911,6 +1930,48 @@ func shouldReapRunningOrphan(now, containerStart time.Time, grace time.Duration,
 		return false
 	}
 	return now.Sub(containerStart) >= grace
+}
+
+// shouldReapPeersExited decides whether an exited container another executor
+// created has been abandoned: exited for at least grace. Unknown and future
+// exit times are refused for the reasons shouldReapRunningOrphan gives.
+func shouldReapPeersExited(now, finishedAt time.Time, grace time.Duration) bool {
+	if grace <= 0 || finishedAt.IsZero() || finishedAt.After(now) {
+		return false
+	}
+	return now.Sub(finishedAt) >= grace
+}
+
+// listExited returns the names of the exited cloop-managed containers matching
+// the extra filters.
+func (e *Executor) listExited(ctx context.Context, filters ...string) ([]string, error) {
+	args := []string{"ps", "--all", "--filter", "label=" + LabelManaged + "=true",
+		"--filter", "status=exited"}
+	for _, f := range filters {
+		args = append(args, "--filter", f)
+	}
+	args = append(args, "--format", "{{.Names}}")
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, args...)
+	if err != nil {
+		return nil, fmt.Errorf("container: list orphans: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("container: list orphans failed: %s", firstLine(res.Stderr))
+	}
+	return strings.Fields(res.Stdout), nil
+}
+
+// exitedAt returns when a container exited, as its runtime recorded it.
+func (e *Executor) exitedAt(ctx context.Context, name string) (time.Time, error) {
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout,
+		"inspect", "--format", "{{.State.FinishedAt}}", name)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("inspect: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return time.Time{}, fmt.Errorf("inspect: %s", firstLine(res.Stderr))
+	}
+	return parseRuntimeTime(strings.TrimSpace(res.Stdout))
 }
 
 // runtimeTimeLayouts are the timestamp formats the runtime CLIs emit.

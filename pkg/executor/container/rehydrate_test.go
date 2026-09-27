@@ -783,3 +783,67 @@ func TestRehydrateWithoutADeadlineArmsNoTimer(t *testing.T) {
 		t.Fatal("a zero deadline must arm no kill timer")
 	}
 }
+
+// TestShouldReapPeersExited is the age rule for another executor's exited
+// container.
+func TestShouldReapPeersExited(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	const grace = 10 * time.Minute
+	cases := []struct {
+		name     string
+		finished time.Time
+		grace    time.Duration
+		want     bool
+	}{
+		{"exited long ago is abandoned", now.Add(-time.Hour), grace, true},
+		{"exactly at the grace period is old enough", now.Add(-grace), grace, true},
+		{"just exited is its owner's to reap", now.Add(-time.Second), grace, false},
+		{"an unknown exit time is never guessed", time.Time{}, grace, false},
+		{"an exit in the future means disagreeing clocks", now.Add(time.Minute), grace, false},
+		{"a zero grace period reaps nothing", now.Add(-time.Hour), 0, false},
+	}
+	for _, c := range cases {
+		if got := shouldReapPeersExited(now, c.finished, c.grace); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestReapOrphansLeavesAPeersFreshlyExitedContainer: the sweep removes this
+// executor's untracked exited containers and a peer's long-exited one, but
+// not a peer's container that has only just exited — the peer is about to
+// `wait` on it, and removing it first made the peer record a clean exit as a
+// failed run (Task 20349).
+func TestReapOrphansLeavesAPeersFreshlyExitedContainer(t *testing.T) {
+	removedDir := t.TempDir()
+	fresh := time.Now().UTC().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	stale := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	rt := stubRuntime(t, `ps)
+  case "$*" in
+    *status=running*) exit 0 ;;
+    *`+LabelExecutor+`=exec-a*) echo own-exited ;;
+    *) printf 'own-exited\npeer-fresh\npeer-stale\n' ;;
+  esac ;;
+inspect)
+  for last; do :; done
+  case "$last" in
+    peer-fresh) echo "`+fresh+`" ;;
+    peer-stale) echo "`+stale+`" ;;
+    *) echo "no such container" >&2; exit 1 ;;
+  esac ;;
+rm)
+  for last; do :; done
+  touch "`+removedDir+`/$last" ;;`)
+	e := storeExecutor(t, "exec-a", rt, nil)
+
+	removed, err := e.ReapOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("ReapOrphans: %v", err)
+	}
+	if got, want := strings.Join(removed, ","), "own-exited,peer-stale"; got != want {
+		t.Errorf("removed %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(removedDir, "peer-fresh")); err == nil {
+		t.Error("the peer's just-exited container was removed before the peer could reap it")
+	}
+}
