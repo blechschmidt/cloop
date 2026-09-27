@@ -73,6 +73,20 @@ const secretFilesPrefix = "cloop-lease-"
 // own, and no other workload shares either.
 const secretFileMode int32 = 0o400
 
+// secretExecFileMode is the per-file mode for a lease file that has to be
+// executed — the credential helper a GitHub lease's gitconfig runs by path.
+//
+// defaultMode alone left `git-credential-cloop` without an execute bit, so git
+// could not run it and obtained no credential from a GitHub lease in a Pod,
+// guarded or not (Task 20349). The execute bit has to be the *group's*: the
+// harness runs as a non-root UID that owns nothing in the volume and reaches
+// its files through fsGroup, so an owner-only 0500 would still be refused.
+// 0550 lands as 0550 after the kubelet ORs in fsGroup's read bits — read and
+// execute for the workload's group, nothing for anyone else, and still no
+// write for anybody, which is what keeps the helper from being rewritten into
+// one that answers for repositories the grant excluded.
+const secretExecFileMode int32 = 0o550
+
 // secretFilesState is one run's credential-file bookkeeping.
 //
 // Like workspaceState it holds no credential — only the name of the Secret that
@@ -275,12 +289,19 @@ func secretFileVolumes(secretName string, files []executor.SecretFile) ([]volume
 	// belongs to exactly one volume and the plan is what says which.
 	for i, f := range files {
 		d := plan.dirIndex[i]
-		vols[d].Secret.Items = append(vols[d].Secret.Items, keyToPath{
+		item := keyToPath{
 			Key: plan.keys[i],
 			// The bare name, which is what the workload's environment points
 			// at. Everything the prefix bought is unwound here.
 			Path: strings.TrimSpace(f.Name),
-		})
+		}
+		if f.FileMode()&0o111 != 0 {
+			// A file the lease asked to be executable is one something runs by
+			// path, and the volume's 0400 would leave it unrunnable.
+			exec := secretExecFileMode
+			item.Mode = &exec
+		}
+		vols[d].Secret.Items = append(vols[d].Secret.Items, item)
 	}
 	return vols, mounts, nil
 }

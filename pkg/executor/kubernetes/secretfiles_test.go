@@ -141,6 +141,71 @@ func TestBuildPod_SecretFilesKeepDirectoriesApart(t *testing.T) {
 	}
 }
 
+// TestBuildPod_CredentialHelperIsExecutable pins Task 20349's fix for the
+// helper a GitHub lease's gitconfig runs by path. With only the volume's
+// defaultMode (0400, 0440 after fsGroup) it landed without an execute bit, so
+// git could not run it and no GitHub lease authenticated inside a Pod.
+//
+// The bit has to be the group's: the harness is a non-root UID that reaches
+// the volume's files through fsGroup, never as their owner. And nothing
+// else may widen — a token file must stay read-only, and nothing may be
+// writable, or the helper could be rewritten to answer for other repositories.
+func TestBuildPod_CredentialHelperIsExecutable(t *testing.T) {
+	req := baseRequest()
+	req.SecretFilesSecretName = "cloop-lease-k-abc123"
+	req.SecretFiles = []executor.SecretFile{
+		{Dir: leaseDir, Name: "gitconfig", Mode: 0o600, Content: []byte("[credential]\n")},
+		{Dir: leaseDir, Name: "git-credential-cloop", Mode: 0o700, Content: []byte("#!/bin/sh\n")},
+		{Dir: leaseDir, Name: "github-token", Content: []byte(fakeLeaseToken)},
+	}
+
+	p, err := buildPod(req)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	vols := secretFileVolumesOf(p)
+	if len(vols) != 1 {
+		t.Fatalf("got %d lease volumes, want 1: %+v", len(vols), vols)
+	}
+	modes := map[string]*int32{}
+	for _, it := range vols[0].Secret.Items {
+		modes[it.Path] = it.Mode
+	}
+	helper := modes["git-credential-cloop"]
+	if helper == nil {
+		t.Fatalf("the credential helper has no per-file mode, so it lands as %#o — "+
+			"readable, not executable, and git obtains no credential", secretFileMode)
+	}
+	if *helper&0o010 == 0 {
+		t.Errorf("helper mode %#o has no group execute bit; the harness reaches the file "+
+			"through fsGroup, not as its owner", *helper)
+	}
+	if *helper&0o222 != 0 {
+		t.Errorf("helper mode %#o is writable; a rewritable helper answers for "+
+			"repositories the grant excluded", *helper)
+	}
+	if *helper&0o007 != 0 {
+		t.Errorf("helper mode %#o grants others access; the Pod's group is the only reader", *helper)
+	}
+	for _, name := range []string{"gitconfig", "github-token"} {
+		if m := modes[name]; m != nil {
+			t.Errorf("%s carries its own mode %#o; only an executable file needs one, "+
+				"everything else keeps the volume's %#o", name, *m, secretFileMode)
+		}
+	}
+
+	// And the wire form: the field is "mode", which is the name the API
+	// server reads. A tag typo would be dropped silently and the Pod would
+	// come up exactly as broken as before.
+	raw, err := json.Marshal(vols[0].Secret.Items)
+	if err != nil {
+		t.Fatalf("marshal items: %v", err)
+	}
+	if want := `"path":"git-credential-cloop","mode":360`; !strings.Contains(string(raw), want) {
+		t.Errorf("items marshal as %s; want the helper's entry to carry %s", raw, want)
+	}
+}
+
 // --- Start ------------------------------------------------------------
 
 // TestStart_SecretFilesTravelInASecretAndAreProjected is the delivery test: the

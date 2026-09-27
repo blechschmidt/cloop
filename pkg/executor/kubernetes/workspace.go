@@ -17,22 +17,28 @@ package kubernetes
 // A brokered token is short-lived by design, and this file's job is to keep the
 // *copy* it makes at least as short-lived:
 //
-//	lease ──► Secret created ──► lease released ──► init container runs
-//	                                                       │
-//	                              Secret deleted ◄──────────┘
+//	lease ──► Secret created ──► init container runs
+//	                                     │
+//	    lease released ◄── Secret deleted ◄┘
 //
-// The lease is released as soon as the Secret exists, not when the fetch
-// finishes. By that point the cluster holds the material and the broker's lease
-// no longer controls anything: releasing later would not make the copy in etcd
-// any less available, it would only keep the broker believing a credential is
-// out on loan for the length of a run. Releasing here also means the whole
-// credential-handling path is one function with a `defer release()` in it,
-// which is a stronger guarantee than remembering to release on nine branches.
+// The lease lives exactly as long as the Secret. It used to be released as soon
+// as the Secret existed, on the reasoning that the broker's lease no longer
+// controlled the copy in etcd — true for a PAT, whose release is bookkeeping,
+// and false for a GitHub App, whose release destroys the installation token at
+// GitHub. The init container then presented a token that was already dead, so
+// every github_app workspace fetch in a Pod failed, with or without a git proxy
+// (Task 20349). Now the release is parked on the workspace state when the
+// create succeeds and taken by discardWorkspaceSecret, which runs it once
+// whether or not the delete itself succeeds; every path that never creates the
+// Secret releases through pendingSecret.abandon or the create's own failure.
 //
 // The Secret is deleted when the init container terminates — success or
 // failure, seen through initContainerStatuses in the watch the driver already
 // runs — and again, unconditionally, when the workload reaches a terminal state
-// or when Start fails at any point after the Secret was created.
+// or when Start fails at any point after the Secret was created. The one
+// exception is a push write-back: its harness container reads the same Secret
+// after the work is done, so a successful fetch leaves it (and its lease) for
+// the workload's end.
 //
 // # Who deletes it when this process does not
 //
@@ -117,6 +123,37 @@ type workspaceState struct {
 	// compliance trail that double-counts.
 	deleted bool
 	ended   bool
+	// release gives the broker lease back. It is parked here once the Secret
+	// holding its credential exists, and taken — so it runs exactly once — by
+	// discardWorkspaceSecret, when that Secret goes. See the file comment for
+	// why the lease has to live as long as the copy it was made into.
+	release func()
+	// keepForHarness is set when the harness container reads the Secret too:
+	// a push write-back authenticates with the same credential after the run,
+	// so the Secret cannot go when the init container finishes.
+	keepForHarness bool
+}
+
+// parkRelease stores the lease's release until the Secret is discarded.
+func (s *workspaceState) parkRelease(release func()) {
+	if s == nil || release == nil {
+		return
+	}
+	s.mu.Lock()
+	s.release = release
+	s.mu.Unlock()
+}
+
+// takeRelease returns the parked release, at most once.
+func (s *workspaceState) takeRelease() func() {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.release
+	s.release = nil
+	return r
 }
 
 // secret returns the Secret name the Pod must reference, or "" when there is
@@ -218,9 +255,8 @@ func (p *pendingSecret) abandon() {
 // asked for nothing and there is nothing to undo.
 //
 // The Secret is *not* created here — see pendingSecret. The returned closure
-// creates it, and is also what releases the broker lease, so the documented
-// lease lifetime is unchanged: released as soon as the cluster holds the
-// material, not when the fetch finishes.
+// creates it and parks the broker lease's release on the state, so the lease
+// comes back when the Secret goes (see the file comment), never before.
 //
 // A *executor.WorkspaceGrantError from the credential source is returned
 // unchanged. It is the one error in this package a caller is expected to type-
@@ -241,6 +277,9 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		routed:      spec.Workspace,
 		projectPath: projectPath,
 		startedAt:   e.opts.now(),
+		// The same condition buildPod uses to give the harness the Secret's
+		// env (see workspaceCredentialEnv's callers).
+		keepForHarness: spec.WriteBack.Mode == executor.WriteBackPush,
 	}
 	e.auditWorkspace(st, executor.WorkspaceProvisionStart, "")
 
@@ -337,7 +376,14 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		// The bare token under the env var's own name, so the init container's
 		// secretKeyRef needs no mapping table. See EnvWorkspaceToken for why
 		// this is the token and not a rendered Authorization header.
-		StringData: map[string]string{EnvWorkspaceToken: cred.Password},
+		//
+		// The username travels beside it: with a git proxy interposed it is the
+		// session id, which the proxy looks the session up by, and a Pod that
+		// presented the forge convention instead was refused every fetch.
+		StringData: map[string]string{
+			EnvWorkspaceToken: cred.Password,
+			EnvWorkspaceUser:  workspaceUser(cred),
+		},
 	}
 
 	// Everything below runs after the Pod exists. cred, obj and release are
@@ -345,11 +391,6 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 	// so closing over it adds no exposure, and keeping it out of a struct field
 	// means there is no lifetime to reason about beyond this closure's own.
 	create := func(ctx context.Context, owner ownerReference, owned bool) error {
-		// Released as soon as the cluster holds the material — unchanged by the
-		// move, because the release travelled here with the create it was
-		// always paired with. See the file comment.
-		defer release()
-
 		if owned {
 			obj.Metadata.OwnerReferences = []ownerReference{owner}
 		}
@@ -376,15 +417,34 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 				st.secretName = name
 				st.mu.Unlock()
 			}
+			// The run is not going to start, so the lease comes back now. For a
+			// GitHub App that also destroys the token at GitHub, which is what
+			// a Secret that landed unseen should be holding: a dead one.
+			release()
 			return e.failWorkspace(st, cred, explainSecretFailure(namespace, name, err))
 		}
 
 		st.mu.Lock()
 		st.secretName = name
 		st.mu.Unlock()
+		// Held until the Secret goes, not released here. Releasing a GitHub
+		// App lease destroys its installation token at GitHub, and the init
+		// container had not presented it yet: every github_app workspace fetch
+		// in a Pod used to meet a token that was already dead (Task 20349).
+		st.parkRelease(release)
 		return nil
 	}
 	return st, &pendingSecret{create: create, release: release}, nil
+}
+
+// workspaceUser is the basic-auth username the Pod presents with cred: the
+// credential's own, which a git proxy session sets to its id, or the forge
+// convention when the source left it empty.
+func workspaceUser(cred executor.GitCredential) string {
+	if u := strings.TrimSpace(cred.Username); u != "" {
+		return u
+	}
+	return defaultWorkspaceUser
 }
 
 // failWorkspace closes out a failed provisioning: one end event, with the
@@ -460,6 +520,13 @@ func (e *Executor) discardWorkspaceSecret(st *workspaceState, cli *client, errMs
 	st.mu.Unlock()
 
 	e.auditWorkspace(st, executor.WorkspaceProvisionEnd, errMsg)
+	// The lease goes back with the Secret, whether or not the delete below
+	// succeeds: a Secret this driver failed to delete is reaped with its Pod,
+	// and until then it is better holding a credential the broker has
+	// retired — for a GitHub App, one GitHub has already destroyed.
+	if release := st.takeRelease(); release != nil {
+		defer release()
+	}
 	if name == "" || already || cli == nil {
 		return
 	}
@@ -498,7 +565,28 @@ func (e *Executor) observeWorkspace(rec *record, p *pod) {
 		errMsg = workspaceFailureMessage(t)
 		rec.bus.Emit(fmt.Sprintf("[cloop] workspace provisioning failed: %s\n", errMsg))
 	}
+	if errMsg == "" && st.harnessNeedsSecret() {
+		// A push write-back reads the same Secret from the harness container,
+		// after the work is done — deleting it here would leave the kubelet
+		// unable to start that container, and releasing its lease would
+		// destroy a GitHub App token the push still has to present. The
+		// provisioning span still ends now, because the fetch did; the Secret
+		// and the lease go when the workload finishes (finish).
+		e.auditWorkspace(st, executor.WorkspaceProvisionEnd, "")
+		return
+	}
 	e.discardWorkspaceSecret(st, rec.client(), errMsg)
+}
+
+// harnessNeedsSecret reports whether the harness container reads the workspace
+// Secret too. Nil-safe.
+func (s *workspaceState) harnessNeedsSecret() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keepForHarness
 }
 
 // workspaceFailureMessage renders a failed provisioning step.

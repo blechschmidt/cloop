@@ -159,10 +159,11 @@ const (
 	// of code for every driver. Delivering a pre-rendered header would mean a
 	// second renderer that could drift from the first.
 	EnvWorkspaceToken = "CLOOP_WORKSPACE_TOKEN"
-	// EnvWorkspaceUser carries the basic-auth username. It is a plain value,
-	// because it is not a secret: for a GitHub PAT it is the fixed literal
-	// "x-access-token", and hiding a constant would only make the Pod harder
-	// to debug for no gain.
+	// EnvWorkspaceUser carries the basic-auth username. For a forge token it
+	// is the literal "x-access-token"; with a git proxy interposed it is the
+	// proxy session's id, which is how the proxy finds the session. Neither is
+	// secret, but whenever there is a credential the value comes from the same
+	// per-run Secret as the token, so the pair is never split across objects.
 	EnvWorkspaceUser = "CLOOP_WORKSPACE_USER"
 
 	// defaultWorkspaceUser matches secretbroker.GitHubUsername. It is
@@ -429,6 +430,9 @@ type secretSource struct {
 type keyToPath struct {
 	Key  string `json:"key"`
 	Path string `json:"path"`
+	// Mode overrides the volume's defaultMode for this one file. Set only for
+	// a file that has to be executed; see secretExecFileMode.
+	Mode *int32 `json:"mode,omitempty"`
 }
 
 type container struct {
@@ -1055,22 +1059,38 @@ func workspaceCommand(argv []string) string {
 // same host with the same grant. The credential itself never appears in the
 // object this file builds — only a secretKeyRef — which is a property asserted
 // directly against the marshalled JSON in workspace_test.go.
+//
+// The username comes from the Secret too, whenever there is one (Task 20349).
+// It used to be the fixed literal "x-access-token", which is right for a forge
+// token and wrong for a git proxy session: the proxy looks a session up by its
+// basic-auth username, which is the session id, so with the proxy on every
+// private workspace fetch on Kubernetes was refused with a 401. The session id
+// is not a secret, but it is half of a credential pair, and carrying the pair in
+// one object keeps the Pod spec free of either half.
 func workspaceCredentialEnv(req podRequest) ([]envVar, error) {
-	env := []envVar{{Name: EnvWorkspaceUser, Value: defaultWorkspaceUser}}
 	name := strings.TrimSpace(req.WorkspaceSecretName)
 	if name == "" {
-		return env, nil
+		return []envVar{{Name: EnvWorkspaceUser, Value: defaultWorkspaceUser}}, nil
 	}
 	if err := validateDNSSubdomain(name, "workspace secret"); err != nil {
 		return nil, fmt.Errorf("%w: %v", executor.ErrInvalidSpec, err)
 	}
-	return append(env, envVar{
-		Name: EnvWorkspaceToken,
-		ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
-			Name: name,
-			Key:  EnvWorkspaceToken,
-		}},
-	}), nil
+	return []envVar{
+		{
+			Name: EnvWorkspaceUser,
+			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+				Name: name,
+				Key:  EnvWorkspaceUser,
+			}},
+		},
+		{
+			Name: EnvWorkspaceToken,
+			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+				Name: name,
+				Key:  EnvWorkspaceToken,
+			}},
+		},
+	}, nil
 }
 
 // buildWriteBackArgv returns the harness container's command, wrapped when the

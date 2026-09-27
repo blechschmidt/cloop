@@ -639,14 +639,195 @@ func TestStart_WorkspaceSecretDeliversTheCredential(t *testing.T) {
 		t.Errorf("the created Pod contains the token: %s", raw)
 	}
 
-	// The broker lease is released as soon as the material is in the cluster,
-	// not held for the length of the run.
+	// The broker lease is held while the Secret exists (Task 20349). Releasing
+	// a GitHub App lease destroys its token at GitHub, and the init container
+	// has not presented it yet.
 	calls, released := src.counts()
 	if calls != 1 {
 		t.Errorf("ForWorkspace called %d times, want 1", calls)
 	}
-	if released != 1 {
-		t.Errorf("workspace lease released %d times, want 1 — the cluster holds the material now", released)
+	if released != 0 {
+		t.Errorf("workspace lease released %d times while its Secret still exists — a GitHub "+
+			"App token would be dead before the init container presents it", released)
+	}
+
+	// And it comes back with the Secret, once the fetch is done.
+	api.finishInitContainer(name, 0, "Completed")
+	api.waitSecretsEmpty(t, 3*time.Second)
+	waitWorkspaceReleased(t, src, 1, 3*time.Second)
+}
+
+// waitWorkspaceReleased polls the fake source until it has seen want releases.
+func waitWorkspaceReleased(t *testing.T, src *fakeWorkspaceSource, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		_, released := src.counts()
+		if released == want {
+			return
+		}
+		if released > want {
+			t.Fatalf("workspace lease released %d times, want exactly %d", released, want)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workspace lease released %d times after %s, want %d", released, within, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestStart_WorkspaceLeaseOutlivesTheSecretForAPushWriteBack: a push write-back
+// authenticates from the harness container with the same Secret after the work
+// is done. Deleting it when the init container finished would leave the kubelet
+// unable to start the harness, and releasing its lease would destroy the GitHub
+// App token the push has to present — so both wait for the workload's end.
+func TestStart_WorkspaceLeaseOutlivesTheSecretForAPushWriteBack(t *testing.T) {
+	// The provisioning end row is emitted by the same observation that used to
+	// delete the Secret, so waiting for it proves the watcher has acted before
+	// the absence of a delete is asserted.
+	ended := make(chan struct{}, 1)
+	executor.SetWorkspaceAuditor(func(ev executor.WorkspaceEvent) {
+		if ev.Phase == executor.WorkspaceProvisionEnd {
+			select {
+			case ended <- struct{}{}:
+			default:
+			}
+		}
+	})
+	t.Cleanup(func() { executor.SetWorkspaceAuditor(nil) })
+
+	src := workingSource()
+	ex, api, _ := newTestExecutor(t, func(o *Options) { o.Workspace = src })
+
+	spec := workspaceSpec()
+	// A write-back measures the returned changes against an exact commit.
+	spec.Workspace.Ref = strings.Repeat("a", 40)
+	spec.WriteBack = executor.WriteBack{Mode: executor.WriteBackPush, Branch: "cloop/task-1"}
+	handle, err := ex.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	name := api.onlyPodName(t)
+
+	api.finishInitContainer(name, 0, "Completed")
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the finished init container was never observed: no provisioning end row")
+	}
+	if got := api.secretNames(); len(got) != 1 {
+		t.Fatalf("the workspace Secret went when the fetch finished (%v); the push write-back "+
+			"still reads it from the harness container", got)
+	}
+	if _, released := src.counts(); released != 0 {
+		t.Fatalf("workspace lease released %d times before the push write-back ran", released)
+	}
+
+	api.run(name)
+	api.terminate(name, 0, "Completed")
+	waitStatus(t, ex, handle.ID, 5*time.Second)
+	api.waitSecretsEmpty(t, 3*time.Second)
+	waitWorkspaceReleased(t, src, 1, 3*time.Second)
+}
+
+// TestStart_WorkspaceLeaseIsReleasedWhenTheSecretCreateFails: a create the API
+// server refused means the run will not start, so the lease comes back at once
+// rather than waiting for a Secret that does not exist.
+func TestStart_WorkspaceLeaseIsReleasedWhenTheSecretCreateFails(t *testing.T) {
+	src := workingSource()
+	ex, api, _ := newTestExecutor(t, func(o *Options) { o.Workspace = src })
+	api.failAlways("POST /secrets", apiFailure{Code: 403, Reason: "Forbidden", Message: "secrets is forbidden"})
+
+	if _, err := ex.Start(context.Background(), workspaceSpec()); err == nil {
+		t.Fatal("Start succeeded although its credential Secret could not be created")
+	}
+	waitWorkspaceReleased(t, src, 1, 3*time.Second)
+}
+
+// TestStart_WorkspaceSecretCarriesTheSessionUsername pins Task 20349's fix for
+// a routed workspace. Behind the git proxy the credential's username is the
+// session id, and the proxy finds the session by it; the Pod used to present
+// the forge convention "x-access-token" whatever the source said, so every
+// private fetch through the proxy was refused with a 401.
+func TestStart_WorkspaceSecretCarriesTheSessionUsername(t *testing.T) {
+	const sessionID = "gps-5f0c2a9e41d7"
+	src := workingSource()
+	src.cred.Username = sessionID
+	src.repo = "https://proxy.internal:8443/acme/widgets"
+	ex, api, _ := newTestExecutor(t, func(o *Options) { o.Workspace = src })
+
+	handle, err := ex.Start(context.Background(), workspaceSpec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	secretName := workspaceSecretName(handle.ID)
+	api.mu.Lock()
+	sec := api.secrets[secretName]
+	api.mu.Unlock()
+	if sec == nil {
+		t.Fatalf("no Secret named %q; got %v", secretName, api.secretNames())
+	}
+	if got := sec.StringData[EnvWorkspaceUser]; got != sessionID {
+		t.Errorf("Secret carries username %q, want the session id %q — the proxy looks the "+
+			"session up by it", got, sessionID)
+	}
+	if got := sec.StringData[EnvWorkspaceToken]; got != fakeWorkspaceToken {
+		t.Errorf("Secret carries token %q, want the credential's password", got)
+	}
+
+	name := api.onlyPodName(t)
+	api.mu.Lock()
+	pod := *api.pods[name]
+	api.mu.Unlock()
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected the workspace init container, got %d", len(pod.Spec.InitContainers))
+	}
+	var user *envVar
+	for i, ev := range pod.Spec.InitContainers[0].Env {
+		if ev.Name == EnvWorkspaceUser {
+			user = &pod.Spec.InitContainers[0].Env[i]
+		}
+	}
+	if user == nil {
+		t.Fatalf("the init container sets no %s", EnvWorkspaceUser)
+	}
+	if user.Value != "" {
+		t.Errorf("%s is the literal %q; it must come from the run's Secret, which holds the "+
+			"session id", EnvWorkspaceUser, user.Value)
+	}
+	if user.ValueFrom == nil || user.ValueFrom.SecretKeyRef == nil ||
+		user.ValueFrom.SecretKeyRef.Name != secretName ||
+		user.ValueFrom.SecretKeyRef.Key != EnvWorkspaceUser {
+		t.Errorf("%s = %+v, want a secretKeyRef to %s/%s", EnvWorkspaceUser, user.ValueFrom,
+			secretName, EnvWorkspaceUser)
+	}
+	// And the fetch aims at the proxy, with the session id nowhere in the Pod
+	// object itself.
+	raw, _ := json.Marshal(pod)
+	if strings.Contains(string(raw), sessionID) {
+		t.Errorf("the Pod object names the session id; the credential pair belongs in the Secret: %s", raw)
+	}
+}
+
+// TestStart_WorkspaceSecretDefaultsTheForgeUsername: a source that leaves the
+// username empty still authenticates the way a forge token always has.
+func TestStart_WorkspaceSecretDefaultsTheForgeUsername(t *testing.T) {
+	src := workingSource()
+	src.cred.Username = ""
+	ex, api, _ := newTestExecutor(t, func(o *Options) { o.Workspace = src })
+
+	handle, err := ex.Start(context.Background(), workspaceSpec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	api.mu.Lock()
+	sec := api.secrets[workspaceSecretName(handle.ID)]
+	api.mu.Unlock()
+	if sec == nil {
+		t.Fatal("no workspace Secret was created")
+	}
+	if got := sec.StringData[EnvWorkspaceUser]; got != defaultWorkspaceUser {
+		t.Errorf("Secret carries username %q, want the forge convention %q", got, defaultWorkspaceUser)
 	}
 }
 
