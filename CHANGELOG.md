@@ -20,7 +20,8 @@ schema and the hub's HTTP API may change in any release.
   sandbox to everyone and one holding its hardware security module to the few
   people allowed near it. Press **Virtual** on a device's card in the Executors
   tab: the dialog shows the device's USB devices (vendor, product, serial, node;
-  **Refresh** re-reads them from the device) to pick from. API:
+  **Refresh** re-reads them from the device) to pick from. The Settings tab lists
+  every enrolled device's USB hardware, each with a way into that dialog. API:
   `/api/executors/{device}/virtuals` and `/api/executors/{id}/virtual`; audit
   action `executor.virtual`. See `docs/guides/virtual-executors.md`.
 - **Executor protocol v14.** Agents report their USB inventory (read from sysfs,

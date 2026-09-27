@@ -57,7 +57,9 @@ engine holds a stronger privilege than this through the engine's socket.
 
 ## Creating one
 
-In the **Executors** tab, press **Virtual** on the device's card. The dialog shows:
+The **Settings** tab's **USB devices** section lists the USB hardware every
+enrolled device reported; **Expose…** beside one opens that device's dialog. From
+the **Executors** tab, press **Virtual** on the device's card. The dialog shows:
 
 - the device's **USB devices**, as it reported them — vendor and product IDs,
   serial, the node under `/dev/bus/usb`, and the node's mode and group when the

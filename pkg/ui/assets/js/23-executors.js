@@ -950,6 +950,29 @@ window.deleteExecutorVirtual = function() {
   }).catch(e => toast(_execDetailErrText(e) || 'Failed to delete', 'err'));
 };
 
+// loadUSBSettings lists, in the Settings tab, the USB hardware every enrolled
+// device reported (Task 20345). Expose opens that device's virtual-executor
+// dialog, where a sandbox is given the device. The index is into the same
+// /api/executors list the Executors panel renders, in the same order.
+window.loadUSBSettings = function() {
+  const el = document.getElementById('usbList');
+  if (!el) return;
+  api('/api/executors').then(d => {
+    const rows = [];
+    ((d && d.executors) || []).forEach((ex, i) => ((ex.agent_capabilities || {}).usb_devices || [])
+      .filter(u => u.class !== '09').forEach(u => rows.push('<div class="exec-chips"><span class="exec-chip">'
+        + esc(ex.name || ex.id) + '</span>' + esc(((u.manufacturer || '') + ' ' + (u.product || '')).trim())
+        + ' <code>' + esc(u.vendor_id + ':' + u.product_id) + '</code>' + esc(u.serial ? ' serial ' + u.serial : '')
+        + ' <button class="btn" style="padding:2px 8px;font-size:11px" onclick="exposeUSBDevice(' + i + ')">Expose…</button></div>')));
+    el.innerHTML = rows.join('') || '<span class="form-hint">No enrolled device reported USB hardware.</span>';
+  }).catch(() => { el.textContent = ''; });
+};
+
+window.exposeUSBDevice = function(i) {
+  switchTab('executors');
+  loadExecutors().then(() => openExecutorVirtual(i));
+};
+
 // _execDetailErrText pulls a sentence out of whatever the failure arrived as:
 // a structured API error body, a bare string, or a rejected promise.
 function _execDetailErrText(e) {

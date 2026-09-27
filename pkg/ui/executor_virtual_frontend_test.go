@@ -72,6 +72,16 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 		t.Error("the dialog offers a USB hub, whose node passes nothing through")
 	}
 
+	settings := res["settings"].HTML
+	for _, want := range []string{"Yubico YubiHSM", "1050:0030", "serial 0031650425", "exposeUSBDevice(0)"} {
+		if !strings.Contains(settings, want) {
+			t.Errorf("the Settings USB list lacks %q: %s", want, settings)
+		}
+	}
+	if strings.Contains(settings, "1d6b") {
+		t.Error("the Settings USB list offers a root hub")
+	}
+
 	var body struct {
 		Name string `json:"name"`
 		Spec struct {

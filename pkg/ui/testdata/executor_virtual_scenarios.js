@@ -16,6 +16,11 @@ const DEVICE = {
   id: 'sgx-dev', name: 'sgx', kind: 'remote', status: 'online', registered: true, enrolled: true,
   isolation: 'remote', sched_state: 'ready', schedulable: true, virtual_count: 1,
   capabilities: {supports_stream: true},
+  agent_capabilities: {usb_devices: [
+    {port: 'usb1', class: '09', vendor_id: '1d6b', product_id: '0002', node: '/dev/bus/usb/001/001'},
+    {port: '1-1', vendor_id: '1050', product_id: '0030', manufacturer: 'Yubico', product: 'YubiHSM',
+      serial: '0031650425', node: '/dev/bus/usb/001/002'},
+  ]},
 };
 const VIRTUAL = {
   id: 'vx-abcdefghij', name: 'HSM sandbox', kind: 'virtual', status: 'online', registered: true,
@@ -69,6 +74,14 @@ const scenarios = {
     window.openExecutorVirtual(0);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
+  },
+  // The Settings tab lists every device's USB hardware, hubs excluded, with a
+  // way into that device's dialog.
+  async settings() {
+    await boot();
+    window.loadUSBSettings();
+    await globalThis.__settle(4);
+    return {html: el('usbList').innerHTML};
   },
   // Ticking the YubiHSM and filling the firewall posts the spec the backend
   // expects.

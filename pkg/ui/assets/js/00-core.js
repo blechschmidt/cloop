@@ -263,7 +263,7 @@ window.switchTab = function(name) {
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
-    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadCIPanel(); loadGitHubApps(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
+    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadCIPanel(); loadGitHubApps(); loadUSBSettings(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
     if (name === 'overview') loadProjectRepositories();
     if (name === 'tasks'  && appState) renderTasks(appState);

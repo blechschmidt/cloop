@@ -1352,6 +1352,12 @@
           </div>
         </div>
 
+        <div class="settings-section" data-global-perm="executor.manage" data-perm-hide>
+          <h3>USB devices</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Hardware attached to enrolled devices. Expose one to a sandbox through a virtual executor of its device.</p>
+          <div id="usbList"></div>
+        </div>
+
         <!--
           CI/CD pipeline federation (Task 20278). Hub-wide, and gated on
           secret.grant rather than config.write: a rule here decides which
