@@ -81,7 +81,7 @@ func detachableLogf(t *testing.T) func(string, ...any) {
 
 // newLoopback enrolls an agent against a live control plane and waits for it
 // to connect.
-func newLoopback(t *testing.T) *loopback {
+func newLoopback(t *testing.T, configure ...func(*agent.Config)) *loopback {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the loopback test runs POSIX shell commands")
@@ -118,13 +118,17 @@ func newLoopback(t *testing.T) *loopback {
 	}
 
 	credPath := filepath.Join(t.TempDir(), "agent.json")
-	a, err := agent.New(agent.Config{
+	cfg := agent.Config{
 		Server:         "ws" + strings.TrimPrefix(srv.URL, "http"),
 		Token:          token,
 		CredentialPath: credPath,
 		WorkDirRoot:    root,
 		Logf:           func(format string, args ...any) { logf("agent: "+format, args...) },
-	})
+	}
+	for _, c := range configure {
+		c(&cfg)
+	}
+	a, err := agent.New(cfg)
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}

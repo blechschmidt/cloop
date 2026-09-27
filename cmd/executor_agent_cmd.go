@@ -342,6 +342,7 @@ or when the control plane revokes its credential.`,
 			Pin:               pin,
 			RootCAFile:        caFile,
 			InsecureTransport: insecure,
+			HostProbes:        true,
 			Logf: func(format string, args ...any) {
 				dim.Fprintf(os.Stderr, "[agent] "+format+"\n", args...)
 			},

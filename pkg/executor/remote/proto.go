@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"strings"
 	"time"
 
@@ -159,7 +160,17 @@ const (
 	// again. Gated on the *sending* side: an older hub has no case for the
 	// frame and would answer it with a protocol error, so an agent sends it
 	// only on a session that negotiated v13. See MinProjectResultVersion.
-	ProtocolVersion = 13
+	//
+	// v14 adds virtual executors (Task 20345). The hello carries the device's
+	// USB inventory, whether it can install a host-side packet filter, and the
+	// OCI runtimes its engine has registered; the start frame gains a Virtual
+	// section naming the sub-executor, its IP firewall and the devices its
+	// sandbox is given; and an inventory frame pair lets the hub re-read the
+	// hardware without waiting for a reconnect. Gated on the *hub* side: a
+	// pre-v14 agent ignores the Virtual section like any unknown key and would
+	// start the sandbox unfiltered and without its hardware, so the hub refuses
+	// such a dispatch instead. See MinVirtualExecutorVersion.
+	ProtocolVersion = 14
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -287,6 +298,19 @@ const (
 	// the other way: an agent must not send the frame to a hub below this
 	// version, which has no handler for it.
 	MinProjectResultVersion = 13
+	// MinVirtualExecutorVersion is the first version whose agents honour
+	// StartPayload.Virtual — a sub-executor's firewall and device list — and
+	// report the inventory those are chosen from (Task 20345).
+	//
+	// A placement rule, and one with the quietest failure of any here. An
+	// older agent handed a Virtual section ignores it and starts the sandbox
+	// from the plain Sandbox settings: same engine, same runtime, a working
+	// run — with no firewall on its bridge and none of the hardware it was
+	// configured with. So the hub refuses to send one, and only a virtual
+	// executor that asks for a firewall or a device needs it: one that only
+	// picks an engine and a runtime is fully described by Sandbox, which v8
+	// agents already obey.
+	MinVirtualExecutorVersion = 14
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -317,6 +341,10 @@ func SupportsProjectSeed(version int) bool { return version >= MinProjectSeedVer
 // SupportsProjectResult reports whether a session at this protocol version can
 // carry a seeded run's changes back in a project_result frame.
 func SupportsProjectResult(version int) bool { return version >= MinProjectResultVersion }
+
+// SupportsVirtualExecutor reports whether an agent speaking this protocol
+// version applies StartPayload.Virtual and reports its hardware inventory.
+func SupportsVirtualExecutor(version int) bool { return version >= MinVirtualExecutorVersion }
 
 // SupportsSandboxMode reports whether an agent speaking this protocol version
 // reads StartPayload.Sandbox and selects its driver from it, rather than always
@@ -716,6 +744,27 @@ type AgentCapabilities struct {
 	// still serve a kernel-isolated sandbox under runsc, and KernelIsolated is
 	// never narrowed by it.
 	Virtualization bool `json:"virtualization,omitempty"`
+	// USBDevices is the USB hardware attached to the device, as the kernel
+	// enumerates it (Task 20345). It is what an admin chooses from when giving
+	// a virtual executor's sandboxes a device, and it is a snapshot: the hub
+	// re-reads it on demand with an inventory frame, and a selection is
+	// resolved against the device's own live view at every dispatch.
+	USBDevices []executor.USBDevice `json:"usb_devices,omitempty"`
+	// PacketFilter reports that the agent can install a host-side IP filter
+	// on a sandbox bridge — nft(8) is present and the agent holds
+	// CAP_NET_ADMIN. PacketFilterIssue says why not when it cannot.
+	//
+	// A virtual executor with a firewall is refused on a device that reports
+	// false, because the only alternative is a sandbox whose firewall exists
+	// in the control plane's database and nowhere on the machine. Below v14
+	// the field is absent, which the hub reads as "cannot" — there is no
+	// firewall-capable agent older than the field.
+	PacketFilter      bool   `json:"packet_filter,omitempty"`
+	PacketFilterIssue string `json:"packet_filter_issue,omitempty"`
+	// OCIRuntimes are the low-level runtimes the device's container engine
+	// has registered ("runc", "runsc", "kata"), so the dashboard can offer
+	// them instead of asking an admin to type a name the device may not know.
+	OCIRuntimes []string `json:"oci_runtimes,omitempty"`
 	// Labels are free-form selectors (region, site, gpu) set by the operator.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -1010,7 +1059,52 @@ type StartPayload struct {
 	// Spec describes one workload, and this describes the executor every
 	// workload on that device gets.
 	Sandbox executor.SandboxSettings `json:"sandbox,omitempty"`
+	// Virtual is set when the workload was dispatched through a virtual
+	// executor with a firewall or a device list (Task 20345, protocol v14).
+	// Sandbox above then carries that executor's engine, runtime, image and
+	// network rather than the device's own.
+	//
+	// Nil for every other dispatch, and for a virtual executor that only
+	// picks an engine and a runtime: those are fully described by Sandbox,
+	// which is also what keeps such a virtual executor usable on a v8 agent.
+	Virtual *VirtualStart `json:"virtual,omitempty"`
 }
+
+// VirtualStart is the part of a virtual executor's configuration only the
+// device can apply: the firewall it installs on the sandbox bridge and the
+// hardware it resolves from its own sysfs.
+type VirtualStart struct {
+	// ID is the virtual executor's ID. The device keys the sandbox bridge and
+	// its nftables table by it, so two virtual executors on one machine get
+	// two firewalls rather than whichever was installed last.
+	ID string `json:"id"`
+	// Name is the operator-facing label, for the device's own log.
+	Name string `json:"name,omitempty"`
+	// Firewall is the IP policy for the sandbox bridge. Nil means none.
+	Firewall *executor.FirewallRules `json:"firewall,omitempty"`
+	// Devices are resolved against the device's live USB inventory at start.
+	Devices []executor.DeviceSelector `json:"devices,omitempty"`
+}
+
+// Validate checks a VirtualStart as received. The device re-validates for the
+// reason it re-validates Sandbox: an engine name becomes a program it runs and
+// a device path becomes hardware it hands out, so "the sender checked" is not
+// a property the receiving side may rely on.
+func (v VirtualStart) Validate(sandbox executor.SandboxSettings) error {
+	if !virtualIDPattern.MatchString(v.ID) {
+		return fmt.Errorf("%w: virtual executor id %q is malformed", ErrProtocol, v.ID)
+	}
+	spec := executor.VirtualSpec{Sandbox: sandbox, Firewall: v.Firewall, Devices: v.Devices}
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// virtualIDPattern bounds a virtual executor ID as it travels to a device,
+// where it becomes part of a network name, an nftables table and a container
+// label.
+var virtualIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
 
 // SecretFile is one credential file, with the bytes, on its way to a device.
 //
@@ -1410,6 +1504,7 @@ const (
 func DecodeHello(f Frame) (HelloPayload, error) {
 	var p HelloPayload
 	err := decodePayload(f, &p)
+	p.Capabilities.USBDevices = CleanUSBInventory(p.Capabilities.USBDevices)
 	return p, err
 }
 

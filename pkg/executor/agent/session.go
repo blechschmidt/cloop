@@ -498,6 +498,12 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// loop that is meant to keep serving right up until it does.
 			go a.handleUpgrade(ctx, sess, frame)
 
+		case remote.TypeInventoryReq:
+			// Its own goroutine: detection reads sysfs and asks the container
+			// engine for its runtimes, and the frame loop carries every other
+			// handle's traffic (Task 20345).
+			go a.handleInventoryReq(ctx, sess, frame)
+
 		case remote.TypeInstallHarness:
 			// Its own goroutine, and for this frame that is not optional. The
 			// hub sends it from inside a dispatch and blocks on the reply, so
@@ -727,7 +733,16 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// made, because a container mounts that tree rather than creating it — and
 	// before anything is launched, so a device that cannot provide the
 	// configured containment has not started a harness by the time it says so.
-	runner, err := a.drivers.driverFor(payload.Sandbox, a.local)
+	//
+	// A virtual executor's dispatch (Task 20345) resolves its hardware from this
+	// device's live sysfs first, because the groups its device nodes need are
+	// part of the driver it is started by.
+	var runner payloadDriver
+	if payload.Virtual != nil {
+		runner, err = a.virtualRunner(payload, &spec, handleID)
+	} else {
+		runner, err = a.drivers.driverFor(payload.Sandbox, a.local)
+	}
 	if err != nil {
 		a.forget(handleID)
 		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{

@@ -92,6 +92,16 @@ type Config struct {
 	// Dial overrides connection establishment, so tests can drive the agent
 	// over an in-memory pipe instead of a real socket.
 	Dial func(ctx context.Context, server, token string) (remote.Conn, error)
+	// HostProbes turns on the capability probes that run programs — nft(8)
+	// for the packet filter, the container engine for its OCI runtimes (Task
+	// 20345). The CLI sets it; tests leave it off, so building a hello does
+	// not shell out to whatever tooling the test machine happens to have.
+	HostProbes bool
+	// SysfsRoot and DevRoot override where USB hardware is read from and
+	// where device nodes are stat'ed. Tests point them at fixture trees; empty
+	// means /sys and /dev.
+	SysfsRoot string
+	DevRoot   string
 }
 
 func (c Config) now() time.Time {
@@ -435,11 +445,18 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 	// the argument for why the fix has to be to the process environment.
 	EnsureHarnessPath()
 
-	return Detect(DetectOptions{
+	opts := DetectOptions{
 		WorkDirRoot:   a.root,
 		MaxConcurrent: a.cfg.MaxConcurrent,
 		Labels:        a.cfg.Labels,
-	})
+		SysfsRoot:     a.cfg.SysfsRoot,
+		DevRoot:       a.cfg.DevRoot,
+	}
+	if a.cfg.HostProbes {
+		opts.ProbePacketFilter = probePacketFilter
+		opts.ProbeOCIRuntimes = probeOCIRuntimes
+	}
+	return Detect(opts)
 }
 
 // Run connects and serves until ctx is cancelled or the control plane refuses

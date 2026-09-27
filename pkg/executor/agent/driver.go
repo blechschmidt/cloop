@@ -106,6 +106,10 @@ func keyFor(s executor.SandboxSettings) driverKey {
 type driverCache struct {
 	mu      sync.Mutex
 	drivers map[driverKey]payloadDriver
+	// virtual holds the drivers built for virtual executors (Task 20345),
+	// keyed by virtualDriverKey. Separate from drivers because the key is not
+	// the sandbox settings alone: see virtual.go.
+	virtual map[string]payloadDriver
 }
 
 func newDriverCache() *driverCache {

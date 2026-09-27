@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -49,6 +50,19 @@ type DetectOptions struct {
 	// detectVirtualization. Tests point it at a temp file; empty means
 	// KVMDevice.
 	KVMDevice string
+	// SysfsRoot and DevRoot override where the USB inventory is read from
+	// (Task 20345). Tests point them at fixture trees; empty means /sys and
+	// /dev.
+	SysfsRoot string
+	DevRoot   string
+	// ProbePacketFilter reports whether a host-side packet filter can be
+	// installed, and why not. Nil skips the probe and reports none, which is
+	// what every caller but the agent itself wants: the probe runs nft(8).
+	ProbePacketFilter func() (bool, string)
+	// ProbeOCIRuntimes lists the OCI runtimes a container engine has
+	// registered. Nil skips it, for the same reason: the probe runs the
+	// engine.
+	ProbeOCIRuntimes func(engine string) []string
 }
 
 // KVMDevice is the device QEMU opens to use hardware virtualization. Its
@@ -107,6 +121,27 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 		if _, err := lookPath(h); err == nil {
 			caps.Harnesses = append(caps.Harnesses, h)
 		}
+	}
+
+	// The hardware and network controls a virtual executor is built from
+	// (Task 20345). Reported by every agent, not only one that has been
+	// configured for them, because the admin choosing a device for a sandbox
+	// has to see what is attached before anything references it.
+	caps.USBDevices = scanUSB(opts.SysfsRoot, opts.DevRoot)
+	if opts.ProbePacketFilter != nil {
+		caps.PacketFilter, caps.PacketFilterIssue = opts.ProbePacketFilter()
+	}
+	if opts.ProbeOCIRuntimes != nil {
+		seen := map[string]bool{}
+		for _, engine := range caps.ContainerRuntimes {
+			for _, rt := range opts.ProbeOCIRuntimes(engine) {
+				if !seen[rt] {
+					seen[rt] = true
+					caps.OCIRuntimes = append(caps.OCIRuntimes, rt)
+				}
+			}
+		}
+		sort.Strings(caps.OCIRuntimes)
 	}
 	return caps
 }

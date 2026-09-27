@@ -42,6 +42,10 @@ type handleState struct {
 	id        string
 	startedAt time.Time
 	bus       *logbus.Bus
+	// virtualID is the virtual executor this workload was dispatched through,
+	// empty for a dispatch to the device itself (Task 20345). Written once at
+	// start, before the handle is published, and read-only thereafter.
+	virtualID string
 
 	mu     sync.Mutex
 	status executor.Status
@@ -278,6 +282,14 @@ func (e *Executor) AgentCapabilities() AgentCapabilities {
 // ErrAgentUnreachable, not vanish from placement behind "no executor can
 // provision a workspace".
 func (e *Executor) Capabilities() executor.Capabilities {
+	sandbox, sandboxErr := e.opts.sandboxSettings()
+	return e.capabilitiesFor(sandbox, sandboxErr)
+}
+
+// capabilitiesFor is Capabilities with the sandbox settings supplied by the
+// caller: the device's own for a direct dispatch, a virtual executor's for one
+// of its sub-executors (Task 20345).
+func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr error) executor.Capabilities {
 	caps := e.AgentCapabilities().Executor()
 	// What the admin configured, which for two of these is the only thing that
 	// can answer the question at all. Whether a payload on this device sits
@@ -293,7 +305,6 @@ func (e *Executor) Capabilities() executor.Capabilities {
 	// virtualized, not kernel-isolated" — a placement that requires either is
 	// refused, which is the conservative outcome. The dispatch path does not
 	// share this fallback: see Start, where the same read failing is fatal.
-	sandbox, sandboxErr := e.opts.sandboxSettings()
 	if sandboxErr == nil {
 		caps.Virtualized = sandbox.IsVirtualized()
 		caps.KernelIsolated = sandbox.IsKernelIsolated()
@@ -440,7 +451,29 @@ func (e *Executor) setStatus(status string) {
 // outcome from a defer: provisioning is bracketed by two rows and the second
 // one has to say whether the dispatch it describes worked, from whichever of
 // this function's several exits was taken.
-func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle executor.Handle, err error) {
+func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Handle, error) {
+	return e.start(ctx, spec, nil)
+}
+
+// VirtualDispatch is a start routed through a virtual executor: the sandbox
+// configuration comes from it rather than from the device's own row.
+type VirtualDispatch struct {
+	// ID and Name identify the virtual executor.
+	ID   string
+	Name string
+	// Spec is its configuration, already normalized.
+	Spec executor.VirtualSpec
+}
+
+// needsAgent reports whether the dispatch carries anything only a v14 agent
+// can apply. A virtual executor that only picks an engine and a runtime is
+// fully described by the plain Sandbox settings.
+func (v *VirtualDispatch) needsAgent() bool {
+	return v != nil && (v.Spec.Firewall != nil || len(v.Spec.Devices) > 0)
+}
+
+// start is Start, optionally through a virtual executor.
+func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *VirtualDispatch) (handle executor.Handle, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -525,11 +558,20 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	// able to decide it either — silently, in the weaker direction, on a hub too
 	// unhealthy to report it.
 	sandbox, sandboxErr := e.opts.sandboxSettings()
+	if virtual != nil {
+		// A virtual executor's own configuration replaces the device's row
+		// entirely. It was normalized and validated by the virtual executor on
+		// this very dispatch; see Virtual.Start.
+		sandbox, sandboxErr = virtual.Spec.Sandbox.Normalize(), nil
+	}
 	if sandboxErr != nil {
 		return executor.Handle{}, fmt.Errorf(
 			"%w: agent %s (%s): %w — refusing to dispatch rather than run the payload on the "+
 				"device's host without knowing whether that is what the operator configured",
 			ErrSandboxModeUnavailable, e.id, e.name, sandboxErr)
+	}
+	if err := e.checkVirtual(sess, virtual); err != nil {
+		return executor.Handle{}, err
 	}
 
 	// And the same placement rule as the three above, for the same reason and
@@ -623,6 +665,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	hs := &handleState{
 		id:        handleID,
 		startedAt: now,
+		virtualID: virtualIDOf(virtual),
 		// Output arrives from a device the hub does not control, so the hub
 		// redacts what it sent there rather than trusting the agent to have
 		// done it. The agent scrubs too — this is the half that holds when
@@ -696,6 +739,17 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	})
 
 	payload := StartPayload{Spec: spec, HandleID: handleID, Sandbox: sandbox}
+	if virtual.needsAgent() {
+		// Only when the device has to apply something: see needsAgent. The
+		// version gate in checkVirtual has already refused a session that
+		// would ignore this.
+		payload.Virtual = &VirtualStart{
+			ID:       virtual.ID,
+			Name:     virtual.Name,
+			Firewall: virtual.Spec.Firewall,
+			Devices:  virtual.Spec.Devices,
+		}
+	}
 	// Route the *shipped* copy of the workspace, not the one persisted and
 	// audited above. When a git proxy is interposed the device must fetch and
 	// push through it, while the durable record should keep naming the real
