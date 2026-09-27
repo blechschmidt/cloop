@@ -14,6 +14,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -56,6 +59,40 @@ func namedProjectDir(t *testing.T, name, goal string) string {
 		t.Fatalf("state.Init(%s): %v", dir, err)
 	}
 	return dir
+}
+
+// pauseForUsageCap marks the project in dir as paused on a subscription cap
+// that lifts in an hour, with detail as the reason's wording.
+func pauseForUsageCap(t *testing.T, dir, detail string) {
+	t.Helper()
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	ps.SetPaused(pausereason.NewUntil(pausereason.CodeUsageCap, detail, time.Now().Add(time.Hour)))
+	if err := ps.Save(); err != nil {
+		t.Fatalf("save %s: %v", dir, err)
+	}
+}
+
+// hideProjectAt hides the project at path for this hub's (anonymous) viewer,
+// addressing it by its index in /api/projects as the dashboard does.
+func hideProjectAt(t *testing.T, ts *httptest.Server, path string) {
+	t.Helper()
+	idx := -1
+	for i, p := range getProjects(t, nil, ts.URL).Projects {
+		if p.Path == path {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("%s is not in /api/projects, so it cannot be hidden", path)
+	}
+	resp := postHidden(t, nil, ts.URL, idx, true)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("hiding %s: POST /api/projects/%d/hidden = %d", path, idx, resp.StatusCode)
+	}
 }
 
 type overflowPage struct {
@@ -213,7 +250,16 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 	// shrink and drags the card wider than the screen. A name with spaces
 	// wraps on its own and would prove nothing.
 	primary := setupProjectDir(t, "primary goal", nil)
-	others := make([]string, 0, mobileProjectCount-1)
+	// One project is paused, for the reason a subscription cap gives, so the
+	// grid draws a .proj-pause row: it carries its own max-width and is one of
+	// the widths under test. Stored in the project's state rather than patched
+	// into the page. The driver used to patch its cached roster and re-render,
+	// and any /api/projects response landing afterwards — the Projects tab's
+	// own fetch takes seconds under a loaded -race run — redrew the grid
+	// without it (Task 20344).
+	pauseForUsageCap(t, primary,
+		"weekly subscription cap reached at 98% of the five-hour window")
+	others := make([]string, 0, mobileProjectCount)
 	for i := 1; i < mobileProjectCount-1; i++ {
 		goal := fmt.Sprintf("goal for project %d — long enough to need truncating on a narrow screen", i)
 		others = append(others, setupProjectDir(t, goal, nil))
@@ -225,7 +271,23 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 	others = append(others, namedProjectDir(t,
 		"internal_platform_observability_ingest_pipeline_rollout_2026",
 		"a goal long enough that it has to be truncated rather than widen the card"))
+	// And one more that this viewer has hidden, for the hidden-projects
+	// dialog, with a name just as unbreakable. It is a project of its own, not
+	// one of the mobileProjectCount above: hidden projects leave the grid and
+	// the dropdown, so hiding one of those would change the very list every
+	// other scenario measures.
+	hidden := namedProjectDir(t,
+		"internal_platform_observability_ingest_pipeline_archive_2019",
+		"a goal for a project this viewer no longer wants to see")
+	others = append(others, hidden)
 	ts := newTestServer(t, primary, others)
+
+	// Hidden through the API the dialog's own Unhide button reverses, before
+	// the browser starts, so every roster the page ever receives already says
+	// so. The driver used to set the flag on its cached copy instead, which
+	// the next roster to arrive silently undid; in CI that left the dialog
+	// empty (Task 20344).
+	hideProjectAt(t, ts, hidden)
 
 	// Bounded: a driver whose Chrome stalls would otherwise hold this test,
 
@@ -479,8 +541,8 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 			t.Fatal("there is no hidden-projects list node, so nothing here was measured")
 		}
 		if r.Count == 0 {
-			t.Fatal("no hidden project rendered; the driver's hide never took effect " +
-				"and a clean result below would be vacuous")
+			t.Fatal("no hidden project rendered in the dialog, though the fleet has one " +
+				"hidden; a clean result below would be vacuous")
 		}
 		if r.WorstOverflowPx > 1 {
 			t.Errorf("at %dpx a hidden project's name overflows its own box by %dpx "+

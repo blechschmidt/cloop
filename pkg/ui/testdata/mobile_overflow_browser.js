@@ -22,6 +22,15 @@ const BASE = process.argv[3];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// WAIT_MS bounds each wait for a condition below; it is how long to keep
+// looking before reporting what is there, never a pause a healthy run sits out.
+// The slowest condition is the roster itself: /api/projects opens every
+// project's database in series and took ~9s for this fleet under -race on a
+// 4-core box with the CPU saturated. 30s is over three times that, and the five
+// waits together stay well inside the 4-minute bound the Go side puts on this
+// driver, so even a run where all of them expire still reports its own output.
+const WAIT_MS = 30000;
+
 class CDP {
   constructor(ws) {
     this.ws = ws;
@@ -117,6 +126,35 @@ async function connect(port) {
   });
   return new CDP(ws);
 }
+
+// waitFor polls a page expression until it is truthy or WAIT_MS passes, and
+// says which. It does not throw: everything waited on here is also measured,
+// and the Go test's assertion on that measurement explains a failure far
+// better than "timed out" would.
+//
+// This replaces fixed sleeps, which raced the dashboard's own requests: under
+// load the roster lands seconds after a sleep sized on a quiet machine expires.
+async function waitFor(cdp, expr) {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    try {
+      if (await cdp.eval(expr)) return true;
+    } catch (_) { /* mid-navigation: no context to evaluate in yet */ }
+    if (Date.now() >= deadline) return false;
+    await sleep(50);
+  }
+}
+
+// settled resolves once the page has rendered two frames since it was called.
+// It stands where fixed sleeps used to, after each change a scenario makes
+// before measuring — a viewport override, a dropdown opened by a click — so the
+// numbers describe a frame the user would actually have been shown, including
+// the page-scale a mobile viewport settles on, rather than whatever state a
+// sleep sized on a quiet machine happened to catch. Two frames rather than one
+// because a requestAnimationFrame callback runs *before* its own frame is
+// laid out and painted.
+const settled = cdp => cdp.eval(
+  'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
 
 // Does the document scroll sideways? A phone has no horizontal scrollbar to
 // drag, so anything past the right edge is simply unreachable — and the whole
@@ -306,20 +344,10 @@ const cardsExpr = expW => `(() => {
     });
 
     await cdp.send('Page.navigate', {url: BASE + '/'});
-    for (let i = 0; i < 100; i++) {
-      await sleep(100);
-      const ready = await cdp.eval(
-        `document.readyState === 'complete' && typeof window.switchTab === 'function'`);
-      if (ready) break;
-    }
-    // The roster arrives over HTTP; wait for the grid to actually carry cards
-    // rather than racing first paint.
-    for (let i = 0; i < 100; i++) {
-      const n = await cdp.eval(
-        `(document.querySelectorAll('#projSelectorDropdown .proj-selector-item')||[]).length`);
-      if (n > 0) break;
-      await sleep(100);
-    }
+    await waitFor(cdp, `document.readyState === 'complete' && typeof window.switchTab === 'function'`);
+    // The roster arrives over HTTP; wait for the dropdown to actually carry
+    // rows rather than racing first paint.
+    await waitFor(cdp, `document.querySelectorAll('#projSelectorDropdown .proj-selector-item').length > 0`);
 
     out.multi_project = await cdp.eval(`!!document.getElementById('projSelectorWrap').classList.contains('visible')`);
 
@@ -331,33 +359,19 @@ const cardsExpr = expW => `(() => {
     };
 
     // ── 2. The projects grid ───────────────────────────────────────────────
-    await cdp.eval(`switchTab('projects')`);
-    await sleep(300);
-    // One project reports as paused. The status arrives from the server in a
-    // real deployment, but the question here is what the CSS does with the
-    // .proj-pause row it produces — so the cached payload is patched and the
-    // page's own renderer re-run over it, which lays out exactly the markup
-    // and stylesheet a paused project would hit.
+    // One project in the fleet is paused (the Go side stores it that way), so
+    // the grid draws its .proj-pause row, which carries a fixed max-width of
+    // its own. Waited for down to that row: the tab re-requests the roster,
+    // and on a loaded machine the cards land seconds after the switch.
     //
-    // Re-rendered through toggleCompletedProjects rather than by calling the
-    // renderer directly: the whole front end is one IIFE, so renderProjects is
-    // not reachable from here, and that toggle is the exposed entry point that
-    // redraws the grid from cache. Twice, so the flag it flips ends where it
-    // started and the grid is not left filtered.
-    await cdp.eval(`(() => {
-      const d = window._lastProjectsData;
-      if (!d || !d.projects || !d.projects.length) return false;
-      d.projects[0].status = 'paused';
-      d.projects[0].pause_reason = {
-        code: 'usage_cap',
-        detail: 'weekly subscription cap reached at 98% of the five-hour window',
-        resumes_at: new Date(Date.now() + 3600e3).toISOString(),
-      };
-      window.toggleCompletedProjects();
-      window.toggleCompletedProjects();
-      return true;
-    })()`);
-    await sleep(150);
+    // The pause used to be patched into the page's cached roster at this
+    // point and the grid redrawn from it. The request switchTab had just made
+    // was still in flight, so when it landed it redrew the grid without the
+    // pause — sometimes before this measurement, sometimes before step 4's.
+    await cdp.eval(`switchTab('projects')`);
+    await waitFor(cdp, `!!document.querySelector('#projList .proj-card')
+      && !!document.querySelector('#projList .proj-pause')`);
+    await settled(cdp);
     out.grid = {
       page: await cdp.eval(pageExpr(390)),
       widest: await cdp.eval(widestExpr(390)),
@@ -366,7 +380,7 @@ const cardsExpr = expW => `(() => {
 
     // ── 3. The header dropdown, open ───────────────────────────────────────
     await cdp.eval(`document.getElementById('projSelectorBtn').click()`);
-    await sleep(200);
+    await settled(cdp);
     out.open = {
       page: await cdp.eval(pageExpr(390)),
       dropdown: await cdp.eval(dropdownExpr(390, 844)),
@@ -385,7 +399,7 @@ const cardsExpr = expW => `(() => {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 320, height: 568, deviceScaleFactor: 2, mobile: true,
     });
-    await sleep(400);
+    await settled(cdp);
     out.narrow = {
       page: await cdp.eval(pageExpr(320)),
       widest: await cdp.eval(widestExpr(320)),
@@ -393,7 +407,7 @@ const cardsExpr = expW => `(() => {
     };
 
     await cdp.eval(`document.getElementById('projSelectorBtn').click()`);
-    await sleep(200);
+    await settled(cdp);
     out.narrow_open = {
       page: await cdp.eval(pageExpr(320)),
       dropdown: await cdp.eval(dropdownExpr(320, 568)),
@@ -414,9 +428,9 @@ const cardsExpr = expW => `(() => {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
     });
-    await sleep(400);
+    await settled(cdp);
     await cdp.eval(`document.getElementById('projSelectorBtn').click()`);
-    await sleep(200);
+    await settled(cdp);
     out.desktop = {
       page: await cdp.eval(pageExpr(1280)),
       widest: await cdp.eval(widestExpr(1280)),
@@ -439,9 +453,16 @@ const cardsExpr = expW => `(() => {
     };
     // ── 6. The hidden-projects dialog ──────────────────────────────────────
     // The third place the roster is drawn, and the one with no truncation of
-    // any kind on the name. Measured last and at the narrowest viewport,
-    // because hiding a project changes the grid and the dropdown and would
-    // invalidate every scenario above.
+    // any kind on the name. Measured at the narrowest viewport. The fleet has
+    // one project hidden from the start — the Go side hides it through the API
+    // before this driver runs — with a long unbroken name of its own; it is
+    // not one of the projects the scenarios above lay out, because hiding one
+    // of those would change the lists they measure.
+    //
+    // It used to be hidden here, by setting the flag on the page's cached
+    // roster. Every roster that arrived afterwards — a request still in flight
+    // from step 2, or a 'projects' broadcast — replaced that cache without the
+    // flag, and the dialog opened empty. That is how this failed in CI.
     //
     // Reached through the Settings button rather than by reading the panel:
     // since Task 20328 the rows only exist while #hiddenproj-overlay is open,
@@ -454,22 +475,18 @@ const cardsExpr = expW => `(() => {
       const d = document.getElementById('projSelectorDropdown');
       if (d) d.classList.remove('open');
       window.scrollTo(0, 0);
-      const pd = window._lastProjectsData;
-      if (!pd || !pd.projects) return false;
-      // The long unbroken name is the one this is about; hide that one.
-      const target = pd.projects.find(p => /_/.test(p.name)) || pd.projects[pd.projects.length - 1];
-      target.hidden = true;
-      window.toggleCompletedProjects();
-      window.toggleCompletedProjects();
-      return true;
     })()`);
     await cdp.eval(`switchTab('settings')`);
-    await sleep(400);
-    // Clicked, not called: this also proves the button is enabled and its
+    // The button counts hidden projects off the same cached roster the dialog
+    // fills from, so its being enabled is the page saying it holds the hidden
+    // one. Clicked, not called: this also proves the button is enabled and its
     // onclick resolves, in a real browser. A disabled button or an unexported
-    // handler leaves the list empty and fails the count assertion below.
+    // handler leaves the list empty and fails the count assertion.
+    await waitFor(cdp, `(() => { const b = document.getElementById('hiddenProjectsBtn');
+      return !!b && !b.disabled; })()`);
     await cdp.eval(`document.getElementById('hiddenProjectsBtn').click()`);
-    await sleep(200);
+    await waitFor(cdp, `document.querySelectorAll('#hiddenProjectsList .hidden-proj-name').length > 0`);
+    await settled(cdp);
     out.hidden_list = {
       page: await cdp.eval(pageExpr(320)),
       widest: await cdp.eval(widestExpr(320)),
