@@ -100,7 +100,6 @@ let dictateAudioCtx = null;
 let dictateHeldPointer = null;
 let dictateHoldStart = 0;
 let dictateSuppressClick = false;
-let dictateCancel = false;          // onstop should discard rather than upload
 let dictateAbortPending = false;    // released before the recorder went live
 let dictateAbortMsg = '';
 
@@ -330,11 +329,6 @@ async function startTaskDictation() {
     stream.getTracks().forEach(t => t.stop());
     closeDictateAudioCtx();
     dictateActive = false;
-    // Discarded on purpose — a tap too short to be speech, or a hold that ran
-    // out before the microphone was live. cancelTaskDictation has already said
-    // so and repainted the button; uploading here would send a clip we know is
-    // empty and answer it with a misleading "check the microphone".
-    if (dictateCancel) { dictateCancel = false; return; }
     if (!dictateHeardSound) {
       setDictateState('idle', dictateIdleLabel());
       toast('No sound was recorded — check the microphone', 'err');
@@ -366,16 +360,26 @@ function stopTaskDictation() {
 }
 
 // End a session without uploading it, and leave the button usable. Every path
-// here is one where we already know the clip is not speech, so the recorder is
-// stopped purely to release the microphone.
+// here is one where we already know the clip is not speech — a tap too short to
+// be speech, or a hold that ran out before the microphone was live — so the
+// recorder is stopped purely to release the microphone, and uploading would
+// send a clip we know is empty and answer it with a misleading "check the
+// microphone".
+//
+// The recorder's handlers are detached before it is stopped, as abandonDictation
+// in glasses.html does, and the microphone is released here rather than in
+// onstop. The stop event is asynchronous: this used to leave a flag for onstop
+// to honour, and a press landing before the event fired started the next
+// session and reset the flag — so the discarded clip was uploaded after all,
+// and its reply repainted the new, live session as idle (Task 20344).
 function cancelTaskDictation(msg) {
-  dictateCancel = true;
-  if (dictateRecorder && dictateRecorder.state !== 'inactive') {
-    dictateRecorder.stop();   // onstop releases the tracks and honours dictateCancel
-  } else {
-    dictateCancel = false;
-    closeDictateAudioCtx();
+  const rec = dictateRecorder;
+  if (rec && rec.state !== 'inactive') {
+    rec.ondataavailable = rec.onstop = null;
+    rec.stop();
+    rec.stream.getTracks().forEach(t => t.stop());
   }
+  closeDictateAudioCtx();
   dictateActive = false;
   endDictateHold();
   setDictateState('idle', dictateIdleLabel());
@@ -422,7 +426,7 @@ function dictatePointerDown(e, key) {
   dictateSuppressClick = true;
 
   if (dictateActive || dictateStarting) {   // already listening: this press ends it
-    releaseDictateHold();
+    releaseDictateHold(e.timeStamp);
     return;
   }
 
@@ -430,9 +434,8 @@ function dictatePointerDown(e, key) {
   // Before any painting: setDictateState below resolves the button through
   // dictateTarget, so getting this wrong would light up the other microphone.
   dictateTarget = key;
-  dictateHoldStart = Date.now();
+  dictateHoldStart = e.timeStamp;
   dictateHeldPointer = e.pointerId;
-  dictateCancel = false;
   dictateAbortPending = false;
   // Capture, so a fingertip that drifts off the button still delivers its
   // pointerup here. Without it the release lands on whatever is underneath and
@@ -444,14 +447,19 @@ function dictatePointerDown(e, key) {
   startTaskDictation();
 }
 
-function releaseDictateHold() {
+// at is the releasing event's timeStamp. A hold is measured between the two
+// events' own timestamps — when the finger went down and came up — not by the
+// clock when each handler got to run: a release delivered late by a busy main
+// thread would otherwise stretch a stray tap past DICTATE_MIN_HOLD_MS and upload
+// it (Task 20344).
+function releaseDictateHold(at) {
   // A zero start means this session did not come from a hold — it was started
   // by a click or a keypress and is only being *ended* by this touch. There is
   // no hold to be too short, and a real recording is waiting: measure nothing
   // and send it, or a tablet user who started with the keyboard loses what they
   // just said.
   const fromHold = dictateHoldStart !== 0;
-  const held = fromHold ? Date.now() - dictateHoldStart : 0;
+  const held = fromHold ? at - dictateHoldStart : 0;
 
   if (dictateActive) {
     if (fromHold && held < DICTATE_MIN_HOLD_MS) {
@@ -482,7 +490,7 @@ function releaseDictateHold() {
 function dictatePointerUp(e) {
   if (dictateHeldPointer === null) return;
   if (e && e.pointerId !== undefined && e.pointerId !== dictateHeldPointer) return;
-  releaseDictateHold();
+  releaseDictateHold(e ? e.timeStamp : performance.now());
 }
 
 // Wired once, on the button, rather than per render: the buttons are never

@@ -1524,11 +1524,11 @@ el('dictate').addEventListener('pointerdown', function(ev) {
   if (b.disabled) { return; }
   if (ev.pointerType === 'mouse') { mic.suppressClick = false; return; }
   mic.suppressClick = true;
-  if (mic.rec || mic.starting) { releaseHold(); return; }
+  if (mic.rec || mic.starting) { releaseHold(ev.timeStamp); return; }
 
   ev.preventDefault();
   mic.held = ev.pointerId;
-  mic.holdStart = Date.now();
+  mic.holdStart = ev.timeStamp;
   mic.abort = false;
   // Capture, so a fingertip that slides off the button still ends the hold
   // here rather than leaving the microphone running.
@@ -1546,12 +1546,15 @@ function endHold() {
   mic.holdStart = 0;
 }
 
-function releaseHold() {
+// at is the releasing event's timeStamp: a hold is measured between the two
+// events' own timestamps, as releaseDictateHold does in 15-voice.js, so a
+// release a busy page gets to late cannot stretch a stray tap into speech.
+function releaseHold(at) {
   // A zero start means this session did not come from a hold — a pinch or a
   // click began it and this touch only ends it. There is no hold to be too
   // short, and a real recording is waiting to be sent.
   var fromHold = mic.holdStart !== 0;
-  var held = fromHold ? Date.now() - mic.holdStart : 0;
+  var held = fromHold ? at - mic.holdStart : 0;
 
   if (mic.rec) {
     if (fromHold && held < MIN_HOLD_MS) {
@@ -1587,7 +1590,7 @@ function releaseHold() {
 function onDictatePointerUp(ev) {
   if (mic.held === null || mic.held === undefined) { return; }
   if (ev && ev.pointerId !== undefined && ev.pointerId !== mic.held) { return; }
-  releaseHold();
+  releaseHold(ev ? ev.timeStamp : performance.now());
 }
 
 el('dictate').addEventListener('pointerup', onDictatePointerUp);
