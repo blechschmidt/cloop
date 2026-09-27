@@ -56,8 +56,32 @@ type attachProc struct {
 	pty   *ptyshell.Session // nil when running on pipes
 	stdin io.WriteCloser    // nil for a read-only session
 
+	// waitOnce reaps a pipe-backed command; a pty-backed one is reaped through
+	// its ptyshell.Session, which gives the same guarantee. See wait.
+	waitOnce sync.Once
+	waitErr  error
+
 	closeOnce sync.Once
 	done      chan struct{}
+}
+
+// wait reaps the command and reports how it ended.
+//
+// Two goroutines need the process reaped, and exec.Cmd.Wait may run only once.
+// The output pump waits to learn the exit code it reports to the control plane.
+// stop waits in the background so a session ended by the operator or by a
+// dropped link leaves no zombie — and, on pipes, because Wait is what closes
+// this side of them, which unblocks a pump still reading output that a
+// surviving grandchild holds open. Both come through here, so whichever asks
+// second shares the first one's reap. They used to call Cmd.Wait each, which
+// the race detector caught every time an operator closed a terminal whose
+// command was exiting anyway.
+func (p *attachProc) wait() error {
+	if p.pty != nil {
+		return p.pty.Wait()
+	}
+	p.waitOnce.Do(func() { p.waitErr = p.cmd.Wait() })
+	return p.waitErr
 }
 
 // attachTable is the agent's registry of live terminals.
@@ -112,12 +136,14 @@ func (p *attachProc) stop() {
 			_ = p.stdin.Close()
 		}
 		if p.pty != nil {
+			// Hangs up, kills, and reaps through the Session's own Wait — the
+			// one the pump shares.
 			_ = p.pty.Close()
 			return
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
 			_ = p.cmd.Process.Kill()
-			go func(c *exec.Cmd) { _ = c.Wait() }(p.cmd)
+			go func() { _ = p.wait() }()
 		}
 	})
 }
@@ -158,6 +184,7 @@ func (a *Agent) handleAttachOpen(ctx context.Context, sess *deviceSession, frame
 
 	proc := &attachProc{id: payload.SessionID, handleID: frame.Handle, cmd: cmd, done: make(chan struct{})}
 
+	var out io.Reader
 	gotTTY := false
 	if payload.TTY && payload.Stdin && ptyshell.Supported() {
 		// A pty only earns its complexity when the operator can type. A
@@ -168,16 +195,22 @@ func (a *Agent) handleAttachOpen(ctx context.Context, sess *deviceSession, frame
 			return
 		}
 		proc.pty, proc.stdin, gotTTY = ps, nopWriteCloser{ps.Master}, true
-		a.pumpAttach(sess, proc, ps.Master, wl.redactor())
+		out = ps.Master
 	} else {
-		out, perr := a.startPipeAttach(proc, payload)
+		pipeOut, perr := a.startPipeAttach(proc, payload)
 		if perr != nil {
 			a.replyError(ctx, sess, frame.ID, remote.CodeProtocol, perr.Error())
 			return
 		}
-		a.pumpAttach(sess, proc, out, wl.redactor())
+		out = pipeOut
 	}
 
+	// Registered and answered before the pump starts, not after. The pump ends
+	// by removing the session from the table, and a command that exits at once
+	// — `pwd`, `echo` — used to get there before the add below had run: the
+	// late add then held one of this device's few slots for a terminal that no
+	// longer existed, until the link dropped. Starting the pump last also puts
+	// the answer on the wire ahead of the session's first output and its close.
 	if !a.attaches.add(proc) {
 		proc.stop()
 		a.replyError(ctx, sess, frame.ID, remote.CodeProtocol,
@@ -188,6 +221,7 @@ func (a *Agent) handleAttachOpen(ctx context.Context, sess *deviceSession, frame
 		SessionID: payload.SessionID,
 		TTY:       gotTTY,
 	})
+	a.pumpAttach(sess, proc, out, wl.redactor())
 }
 
 // startPipeAttach wires a non-pty session and starts it.
@@ -256,7 +290,7 @@ func (a *Agent) pumpAttach(sess *deviceSession, proc *attachProc, out io.Reader,
 		}
 		exitCode := -1
 		if proc.cmd != nil {
-			if werr := proc.cmd.Wait(); werr != nil {
+			if werr := proc.wait(); werr != nil {
 				var ee *exec.ExitError
 				if errors.As(werr, &ee) {
 					exitCode = ee.ExitCode()

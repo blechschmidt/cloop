@@ -28,6 +28,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 // ErrUnsupported means this platform has no pty implementation here. Callers
@@ -39,8 +40,29 @@ var ErrUnsupported = errors.New("ptyshell: pseudo-terminal not supported on this
 type Session struct {
 	// Master is the pty master. Close it to hang up the terminal.
 	Master *os.File
-	// Cmd is the running command, for Wait and Process.Kill.
+	// Cmd is the running command, for Process.Kill. Reap it with Session.Wait,
+	// never Cmd.Wait: Close reaps in the background, and exec.Cmd.Wait may run
+	// only once — a second call races the first on the Cmd's own fields.
 	Cmd *exec.Cmd
+
+	waitOnce sync.Once
+	waitErr  error
+}
+
+// Wait waits for the command to exit and returns what Cmd.Wait reported.
+//
+// Any number of callers may ask, from any goroutine and alongside Close: the
+// command is reaped exactly once and every caller gets that one result. That is
+// what makes it safe for an owner that wants the exit code to wait while Close,
+// which must reap so an abandoned session leaves no zombie, does the same. Both
+// calling Cmd.Wait was a data race inside os/exec, reported under -race every
+// time an operator closed a terminal whose command was exiting anyway.
+func (s *Session) Wait() error {
+	if s == nil || s.Cmd == nil {
+		return nil
+	}
+	s.waitOnce.Do(func() { s.waitErr = s.Cmd.Wait() })
+	return s.waitErr
 }
 
 // Resize reports new terminal geometry to the command.
@@ -78,8 +100,9 @@ func (s *Session) Close() error {
 		_ = s.Cmd.Process.Kill()
 		// Reap, so the child does not linger as a zombie for the life of the
 		// hub. The exit status is uninteresting — the caller asked for the
-		// session to end and it has.
-		go func(c *exec.Cmd) { _ = c.Wait() }(s.Cmd)
+		// session to end and it has. Through Wait, so a caller already waiting
+		// for the exit code shares this reap instead of racing it.
+		go func() { _ = s.Wait() }()
 	}
 	return err
 }
