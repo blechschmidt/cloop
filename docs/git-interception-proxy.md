@@ -15,9 +15,15 @@ The proxy runs **inside the hub process** and is **off by default**. An
 unconfigured hub behaves exactly as [the hole it closes](#the-hole-it-closes)
 describes: the forge credential is delivered into the sandbox and the branch
 rule is a convention. Setting `executors.git_proxy.enabled: true` turns it on,
-and from then on every git workspace the hub provisions — Kubernetes Pods and
-enrolled edge devices alike — clones and pushes through it. See
+and from then on two kinds of git traffic go through it: every git workspace the
+hub provisions — Kubernetes Pods and enrolled edge devices alike — and every
+GitHub grant a sandbox's own git uses, whose token the hub now keeps. See
 [operating it](#operating-it).
+
+This page is the reference for what the proxy decides. How it is wired into the
+hub, the two paths a sandbox reaches it by, what each executor backend does to
+put a sandbox on them, and where that integration is still incomplete are in
+[git proxy architecture](architecture/git-proxy.md).
 
 - [The hole it closes](#the-hole-it-closes)
 - [The inversion](#the-inversion)
@@ -47,7 +53,8 @@ when the result arrives. Both checks are real, and neither is a boundary:
   looks at it; what the hub can still refuse is merging it, not the push.
 
 The credential is the reason the checks cannot be more than that. In push mode
-the hub leases a `github_pat` and delivers it **into** the sandbox — carefully,
+the hub leases a GitHub credential (a `github_pat`, or an installation token
+minted from a `github_app`) and delivers it **into** the sandbox — carefully,
 as a URL-scoped `http.<origin>.extraHeader` on one git child, never on disk and
 never in an argv (see
 [Workspace provisioning](security/model.md#workspace-provisioning)) — because
@@ -489,10 +496,14 @@ reset to the default at load rather than silently narrowed.
 
 ### A session's life is its TTL, not the run's
 
-**Nothing closes a session when a run ends.** The credential source mints at
-dispatch and hands the sandbox its token; `ForWorkspace` is not told when the
-workload finished, and a session closed at the moment the credential was
-delivered would refuse the write-back it exists to authorise — the sandbox
+This is about the *workspace* session — the one cloop's own fetch and write-back
+use. A session minted for a GitHub lease ends with its lease; see
+[closing and reaping](#closing-and-reaping).
+
+**Nothing closes a workspace session when a run ends.** The credential source
+mints at dispatch and hands the sandbox its token; `ForWorkspace` is not told
+when the workload finished, and a session closed at the moment the credential
+was delivered would refuse the write-back it exists to authorise — the sandbox
 fetches at the *start* of a run and pushes at the *end*.
 
 The consequence is a real operational limit, and it is worth stating plainly: **a
@@ -520,8 +531,9 @@ not the reaper has swept it. Revoking the underlying grant with
 `cloop secret revoke` stops the *next* dispatch from minting anything; it does
 not reach a session already minted.
 
-**A guarded `github_pat` session is the exception**: it is closed when the
-lease that created it is released. Wiping the lease directory removes the
+**A guarded GitHub session is the exception** — the scoped session a
+`github_pat` or `github_app` lease mints: it is closed when the lease that
+created it is released. Wiping the lease directory removes the
 session token from the sandbox, but a workload that copied it out first would
 otherwise keep PAT-backed access to the whole allowlist until the TTL ran out —
 up to an hour by default, outliving both the task and any revocation the
@@ -529,6 +541,13 @@ operator performed. The session id rides in the material's environment as
 `CLOOP_GIT_PROXY_SESSION` (it is not secret; the token is in a separate 0600
 file), which is how `secretLease.Close` finds the sessions to end without the
 broker having to learn what a proxy session is.
+
+A lease is released when its workload ends, when an operator revokes it — and
+when it lapses. A run's lease is issued once, at dispatch, for at most 15 minutes,
+nothing renews it, and the lease janitor sweeps a lapsed one within a minute. So
+in practice a guarded session lasts no more than about 16 minutes, whatever
+`session_minutes` says: a workload that pushes later than that is refused. See
+[how long a session lives](architecture/git-proxy.md#how-long-a-session-lives).
 
 `Registry.ReapExpired()` drops sessions past their TTL and returns how many
 went. `Authenticate` already refuses an expired session, so this is hygiene
@@ -762,10 +781,17 @@ which is frequently not where the hub sees itself:
 | inside docker on the hub's host | `https://host.docker.internal:8443` |
 | inside podman on the hub's host | `https://host.containers.internal:8443` |
 
-The first two rows are the ones that usually matter, because they are the only
-two drivers that provision a git workspace at all. The container forms are here
-for the case where the *agent* is itself containerised on the hub's host — the
-`container` driver never clones, so it never reaches the proxy.
+The first two rows are the only two drivers that provision a git workspace, so
+they are the ones cloop's own fetch uses. They are not the only sandboxes that
+reach the proxy: every sandbox holding a GitHub grant sends its *own* git there,
+including a `container` sandbox on the hub's host — which never clones a
+workspace, but clones whatever its workload asks for — and a container on an
+edge device, whose route out is the device's container network and firewall
+rather than the device's. That is what the container rows are for. And a route
+has to exist: the `container` driver's default network is `none`, and nothing
+cloop renders — no firewall, egress filter or `NetworkPolicy` — admits the
+proxy's address on its own. See
+[the network between sandbox and proxy](architecture/git-proxy.md#the-network-between-sandbox-and-proxy).
 
 It must be `https`, must name a host, and must carry no path, query, fragment or
 embedded credentials. The port is the one the sandbox reaches, which is the
@@ -812,11 +838,28 @@ Every git-provisioning driver is routed, which is both of them: the Kubernetes
 driver through `reconcile.Options.WrapWorkspaceSource`, and the remote agent
 through the hub's per-executor credential factory. The `container` and
 `localprocess` drivers bind the operator's own checkout and never clone, so there
-is nothing on them to intercept.
+is no workspace on them to intercept — though their workloads' own git is, on the
+lease path below. Only `cloop ui` does this wiring: `cloop serve` does not, and on
+Kubernetes the routed fetch does not yet authenticate to the proxy. Both are in
+[where the integration is incomplete](architecture/git-proxy.md#where-the-integration-is-incomplete).
 
 The PAT itself is a `secretbroker` lease like any other — the change is where it
 is *used*, not where it comes from. See
 [GitHub repositories and PATs](guides/secrets.md#github-repositories-and-pats).
+
+### What a GitHub lease does
+
+The workspace is cloop's git. The workload's git — whatever the agent clones and
+pushes — reaches the proxy by a second path, through the secret broker rather
+than a driver. When a lease includes a `github_pat` or `github_app` grant, the
+broker hands the token to a `secretbroker.GitGuard`, which the hub implements on
+this proxy: it mints a [scoped session](#scoped-sessions-an-allowlist-instead-of-one-repository)
+over the grant's repository allowlist, under the hub's policy narrowed by the
+grant's permissions and branches, and the sandbox receives a session credential,
+a credential helper and a gitconfig that rewrites `https://github.com/` to the
+proxy. That session is closed when the lease is released. What the files contain,
+and which credential each kind of hub delivers instead, are in
+[git proxy architecture](architecture/git-proxy.md#what-the-sandbox-holds).
 
 ---
 
@@ -892,7 +935,8 @@ question is only what a leak is worth.
 
 | Leaked | Worth |
 | --- | --- |
-| **Session token** | Exactly the policy, for the remaining TTL: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy — plus the read of that one repository, since the hub's policy sets `AllowFetch` so the clone can go through the proxy as well. No deletes. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
+| **Workspace session token** | Exactly the policy, for the remaining TTL: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy — plus the read of that one repository, since the hub's policy sets `AllowFetch` so the clone can go through the proxy as well. No deletes. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
+| **Guarded-lease session token** | The grant's repository allowlist rather than one repository, through **one** proxy, until the lease is released: reads, plus — only if the grant carries `contents:write` — pushes inside both the hub's allowlist and the grant's branches. Never a delete. Still nothing against `github.com` directly. |
 | **PAT delivered into the sandbox** — what an un-configured hub still does | Every repository the token is scoped to, every ref in them, in every direction, from anywhere on the Internet, until someone notices and revokes it. |
 
 Some sharper points:
@@ -928,6 +972,9 @@ Some sharper points:
 
 ## See also
 
+- [Git proxy architecture](architecture/git-proxy.md) — how the proxy is wired
+  into the hub, the workspace and lease paths into it, each executor's part, what
+  a sandbox holds, and where the integration is incomplete
 - [Security model](security/model.md) — the trust boundaries, the workspace
   credential's path, and the guarantee → test table
 - [Threat model](security/threat-model.md) — STRIDE per boundary, with the

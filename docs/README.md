@@ -46,6 +46,16 @@ Six pages in order, indexed at
   — the `--internal` network, the host-side nftables ruleset, the per-Pod
   `NetworkPolicy` and why the filter is installed before the workload — and the
   outbound agent enrollment flow for NAT'd edge devices.
+- **[Git proxy architecture](architecture/git-proxy.md)** — how the git
+  interception proxy (under Security, below) is put together inside the hub and
+  how every kind of sandbox reaches it: why the process that mints a
+  session must be the one that serves it, the two paths through it — cloop's own
+  workspace fetch on a pinned session, the workload's git on a scoped session
+  its GitHub lease rewrites to the proxy — what each executor backend
+  contributes, the files and variables a sandbox holds, which credential each
+  kind of hub delivers, the network a sandbox needs, how long a session really
+  lives, and the places the integration is
+  [still incomplete](architecture/git-proxy.md#where-the-integration-is-incomplete).
 - **[Kubernetes access monitor](architecture/kubernetes-access.md)** — how a
   sandbox is allowed to read one namespace of a cluster and nothing else,
   without ever holding a credential that could reach the rest of it: why a

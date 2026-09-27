@@ -362,7 +362,13 @@ back for a human.
 This is the boundary a sandbox pushes through, so its denial counter is a
 security signal and not only an operational one. `reason` is
 `ref_not_allowed`, `delete_denied`, `create_denied`, `update_denied`,
-`no_write`, `too_many_commands` or `push_cert`.
+`no_write`, `too_many_commands` or `push_cert`. `no_write` is part of the
+vocabulary but no code path produces it today: a session that may not push is
+refused before any command is parsed — at the receive-pack advertisement, or at
+the push itself when a client skips discovery — so that refusal is a
+`gitproxy.rejected` audit row and appears in neither counter. The
+counters see pushes only — fetches, sessions, and requests for a repository
+outside a session's scope are in the audit trail and nowhere here.
 
 `cloop_gitproxy_anonymous_requests_total` counts requests that presented no
 credential at all. They are not written to the audit trail: nearly all of them

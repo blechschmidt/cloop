@@ -1323,7 +1323,10 @@ only the *shipped* Spec: the persisted and audited copy keeps naming the real
 repository, because an operator reading a run row wants `github.com/acme/tool`,
 not a proxy URL whose session died with the run. `container` and `localprocess`
 never reach this path at all — they bind the operator's own checkout and provision
-nothing.
+nothing. Their workloads' own git still reaches the proxy, through a GitHub lease
+rather than a workspace; [git proxy architecture](git-proxy.md) covers both
+paths, what each backend contributes to them, and one gap on this one — the
+Kubernetes init container does not yet authenticate to the proxy.
 
 A workspace whose fetch nobody can authorise fails with a typed
 `*executor.WorkspaceGrantError` that names the repository, the grant and the

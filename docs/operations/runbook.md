@@ -574,24 +574,45 @@ operational part.
 5. **Run one task on the executor** and check the audit trail for the session and
    the fetch: `cloop audit-log list --entity gitproxy --since 1h`.
 
-Two failure lines matter, and both mean the boundary is not in effect:
-`ui: git interception proxy NOT started: …` (the whole hub is unprotected — every
-dispatch after it hands out the PAT) and `ui: executor <id> is NOT routed through
-the git proxy: …` (one executor is). The hub deliberately still boots, so these
-are worth alerting on rather than relying on a failed start. A third,
-`ui: git proxy decisions will go to stderr, not the audit trail: …`, is smaller:
-the proxy still refuses what it should, the evidence just is not in the database.
+Two failure lines matter, and both mean GitHub access has stopped rather than
+been opened up. After `ui: git interception proxy NOT started: …` every git
+workspace that needs a credential is refused with `ErrWorkspaceUnavailable`, and
+every GitHub grant is left out of the leases it would have been part of instead
+of being handed to the sandbox; `ui: executor <id> is NOT routed through the git
+proxy: …` does the same to one executor's workspaces. The hub deliberately still
+boots, so these are worth alerting on rather than relying on a failed start. A
+third, `ui: git proxy decisions will go to stderr, not the audit trail: …`, is
+smaller: the proxy still refuses what it should, the evidence just is not in the
+database.
+
+The failure to watch hardest for prints no `ui:` line at all. A section with
+`enabled: true` that the configuration loader cannot use — no `cert_file` or
+`key_file`, an unusable `listen_addr` or `advertise_url` — is switched off at
+load with a `warning: config executors.git_proxy.…` line, and the hub then runs
+exactly as one with no proxy: credentials are delivered into sandboxes as
+before. After enabling the section, the `ui: git interception proxy on …` line
+from step 4 is the proof, and its absence is the alarm. See
+[how it fails](../architecture/git-proxy.md#how-it-fails).
 
 ### Session lifetime is not run lifetime
 
-A session lives for `session_minutes` (60 by default, 720 maximum) from
-*dispatch*, and nothing closes it when the run ends. **A run that outlives its
-session fails its push** with an authentication error from git and a
-`gitproxy.rejected` row. Set the TTL against the longest run the hub is expected
-to finish, not the median one.
+A **workspace** session — the one cloop's own fetch and write-back use — lives
+for `session_minutes` (60 by default, 720 maximum) from *dispatch*, and nothing
+closes it when the run ends. **A run that outlives its session fails its push**
+with an authentication error from git and a `gitproxy.rejected` row. Set the TTL
+against the longest run the hub is expected to finish, not the median one.
 
-There is no command that ends one session early. Sessions live in the hub's
-memory, so a hub restart closes every live one — recorded as
+A session minted for a GitHub **lease** — the one the workload's own git uses —
+ends with its lease instead: when the run ends, when the lease is revoked from
+the Secrets panel or `POST /api/leases/{id}/revoke`, and when the lease lapses.
+The last is the one that bites. A run's lease is issued for at most 15 minutes,
+nothing renews it, and the janitor sweeps it within a minute of lapsing, closing
+the session — so a workload that pushes more than about a quarter of an hour into
+its run is refused, whatever `session_minutes` says. See
+[how long a session lives](../architecture/git-proxy.md#how-long-a-session-lives).
+
+There is no command that ends one workspace session early. Sessions live in the
+hub's memory, so a hub restart closes every live one — recorded as
 `gitproxy.session_closed` with the reason *"the hub is shutting down"* — and
 short of that a session expires on its own TTL, which is enforced at
 authentication whether or not the five-minute reaper has swept it. That is the

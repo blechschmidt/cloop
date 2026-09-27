@@ -504,10 +504,15 @@ certificate, which for a self-signed hub certificate means installing the CA in
 the sandbox image. Both are covered in
 [operating it](../git-interception-proxy.md#operating-it).
 
-**It does not cover the section above.** A `github_pat` granted for the *task* is
-still delivered into the sandbox as a credential helper — that grant exists so
-the workload can reach repositories, and the proxy brokers exactly one:
-the project's own. The two are separate paths and separate decisions.
+**The grant for the task goes through it too, by a separate path.** A GitHub
+grant made so the *workload* can reach repositories is not delivered as a token
+either on such a hub: the lease hands the token to the proxy and the sandbox gets
+a session scoped to that grant's allowlist, as
+[the helper's limit](#the-helpers-limit-and-what-removes-it) describes. The two
+grants remain separate decisions — this one authorises cloop's own fetch of the
+project's repository, that one whatever the workload's git does — and each mints
+its own session. See
+[two paths into one proxy](../architecture/git-proxy.md#two-paths-into-one-proxy).
 
 ### When it is missing
 
