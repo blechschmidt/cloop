@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -224,8 +225,19 @@ func TestStopWithTimeout_EscalatesToSIGKILL(t *testing.T) {
 	dir := t.TempDir()
 
 	// Trap SIGTERM and keep sleeping; only SIGKILL will reap this.
-	script := `trap '' TERM; while true; do sleep 1; done`
+	//
+	// The script says when the trap is in place, and the test waits to hear
+	// it. Until the shell has run `trap`, SIGTERM still has its default
+	// action, so a SIGTERM that lands first kills the shell outright — a
+	// graceful exit that StopWithTimeout correctly reports as success. On a
+	// loaded CI runner the signal won that race often enough to fail this
+	// test 0.1s in with "expected escalation error, got nil".
+	script := `trap '' TERM; echo trapped; while true; do sleep 1; done`
 	cmd := exec.Command("sh", "-c", script)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("spawning trap script: %v", err)
 	}
@@ -237,7 +249,22 @@ func TestStopWithTimeout_EscalatesToSIGKILL(t *testing.T) {
 	defer func() {
 		_ = cmd.Process.Kill()
 		<-waited
+		_ = stdout.Close() // never cmd.Wait()ed, so nothing else closes it
 	}()
+
+	trapped := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(stdout).ReadString('\n')
+		trapped <- line
+	}()
+	select {
+	case line := <-trapped:
+		if strings.TrimSpace(line) != "trapped" {
+			t.Fatalf("trap script said %q before installing its trap, want \"trapped\"", line)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("trap script never reported installing its SIGTERM trap")
+	}
 
 	if err := WritePID(dir, cmd.Process.Pid); err != nil {
 		t.Fatalf("WritePID: %v", err)
@@ -245,7 +272,7 @@ func TestStopWithTimeout_EscalatesToSIGKILL(t *testing.T) {
 
 	// Use a short grace so the test isn't slow.
 	start := time.Now()
-	err := StopWithTimeout(dir, 300*time.Millisecond)
+	err = StopWithTimeout(dir, 300*time.Millisecond)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("StopWithTimeout: expected escalation error, got nil")
