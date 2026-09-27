@@ -109,6 +109,9 @@ func (s *Server) connectionDenied(user *oidcauth.Identity, token *apitoken.Token
 	if !s.runtimeBindingsExist() {
 		return nil
 	}
+	// A feature's stream is judged as its project, like every other
+	// decision about it (features.go): a deny on the project must close it.
+	workDir = policyProjectPath(workDir)
 	scope := authz.Scope{Project: s.projectNameForPath(workDir), ProjectPath: workDir}
 	if user != nil {
 		if b := s.Authz.DeniedBy(subjectFromIdentity(user), scope); b != nil {

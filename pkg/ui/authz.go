@@ -379,7 +379,16 @@ func (s *Server) permissionsFor(r *http.Request, scope authz.Scope) authz.Decisi
 // project is identified by both its registry name and its filesystem path so
 // operators may bind either in config.
 func (s *Server) projectScope(r *http.Request) authz.Scope {
-	path := s.resolveWorkDir(r)
+	return s.workDirScope(s.resolveWorkDir(r))
+}
+
+// workDirScope is the scope a request on project directory dir is authorized
+// in.
+func (s *Server) workDirScope(dir string) authz.Scope {
+	// A feature is authorized as its parent project (features.go): a role on
+	// a project is a role on all of its work, and a feature has no bindings of
+	// its own for a role to have been granted on.
+	path := policyProjectPath(dir)
 	return authz.Scope{
 		Project:     s.projectNameForPath(path),
 		ProjectPath: path,

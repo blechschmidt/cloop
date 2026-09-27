@@ -419,9 +419,20 @@ func filterEntriesForToken(tok *apitoken.Token, entries []multiui.ProjectEntry) 
 	if tok == nil || len(tok.ProjectScope) == 0 {
 		return entries
 	}
+	// A feature is in scope when its parent is (features.go): a token scoped
+	// to a project is scoped to all of that project's work. Features are
+	// listed after every project, so the parents are decided first.
+	allowed := make(map[string]bool, len(entries))
 	visible := entries[:0:0]
 	for _, e := range entries {
-		if tok.AllowsProject(e.Name, e.Path) {
+		ok := false
+		if e.IsFeature() {
+			ok = allowed[e.Parent]
+		} else {
+			ok = tok.AllowsProject(e.Name, e.Path)
+			allowed[e.Path] = ok
+		}
+		if ok {
 			visible = append(visible, e)
 		}
 	}
@@ -493,9 +504,19 @@ func entriesHaveHidden(entries []multiui.ProjectEntry) bool {
 // leaked from whichever one was forgotten.
 func (s *Server) filterStatusesForRecipient(user *oidcauth.Identity, tok *apitoken.Token, entries []multiui.ProjectEntry, statuses []multiui.ProjectStatus) ([]multiui.ProjectStatus, multiui.AggregateStats) {
 	if tok != nil && len(tok.ProjectScope) > 0 {
+		// Features follow their parent into or out of scope, as in
+		// filterEntriesForToken; they are listed after every project.
+		allowed := make(map[string]bool, len(statuses))
 		scoped := make([]multiui.ProjectStatus, 0, len(statuses))
 		for _, st := range statuses {
-			if tok.AllowsProject(st.Name, st.Path) {
+			ok := false
+			if st.Parent != "" {
+				ok = allowed[st.Parent]
+			} else {
+				ok = tok.AllowsProject(st.Name, st.Path)
+				allowed[st.Path] = ok
+			}
+			if ok {
 				scoped = append(scoped, st)
 			}
 		}

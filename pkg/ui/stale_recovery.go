@@ -197,6 +197,9 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	verdict := workloadVerdict(ex, handleID)
 	s.untrackRun(workDir)
 	s.reconcileDeadRun(workDir, verdict)
+	// A feature that completed and asked for it gets its pull request now
+	// (Task 20341). A no-op for everything else; the work is backgrounded.
+	s.maybeAutoOpenFeaturePR(workDir)
 }
 
 // workloadVerdict asks the driver how a finished workload ended.

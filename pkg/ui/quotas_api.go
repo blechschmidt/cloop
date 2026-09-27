@@ -386,7 +386,13 @@ func (s *Server) ReconcileQuotas() {
 		if entry.Owner == "" {
 			continue // shared project: owned by the deployment, not a tenant
 		}
-		live.Projects[entry.Owner]++
+		// A feature (Task 20341) carries its project's owner but is part of
+		// that project: it takes no project slot of its own — creating one
+		// never charged one, so counting it here would take a slot that
+		// removing it could never give back. Its run still counts below.
+		if !entry.IsFeature() {
+			live.Projects[entry.Owner]++
+		}
 
 		// A run in flight is attributed to the project's owner. That is the
 		// only attribution derivable after a restart — the identity that

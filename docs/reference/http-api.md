@@ -51,7 +51,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-198 endpoints, by the permission each one requires:
+203 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -60,8 +60,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 12 |
 | `executor.manage` | 19 |
 | `executor.read` | 3 |
-| `project.read` | 47 |
-| `project.write` | 8 |
+| `project.read` | 48 |
+| `project.write` | 12 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
@@ -189,6 +189,11 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/projects/new` | `project.write` | global |
 | DELETE | `/api/projects/{idx}` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/executor` | `executor.manage` | project-index |
+| GET | `/api/projects/{idx}/features` | `project.read` | project-index |
+| POST | `/api/projects/{idx}/features` | `project.write` | project-index |
+| DELETE | `/api/projects/{idx}/features/{slug}` | `project.write` | project-index |
+| POST | `/api/projects/{idx}/features/{slug}/pr` | `project.write` | project-index |
+| POST | `/api/projects/{idx}/features/{slug}/pr/refresh` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
 | GET | `/api/projects/{idx}/repositories` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/repositories` | `secret.grant` | project-index |

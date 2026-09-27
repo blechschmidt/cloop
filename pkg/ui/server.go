@@ -38,6 +38,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/kb"
@@ -903,6 +904,12 @@ func (s *Server) uiRateLimitMiddleware(next http.Handler) http.Handler {
 // list (see visibleProjectEntries), so a user can never address another
 // user's project by index.
 func (s *Server) resolveWorkDir(r *http.Request) string {
+	// The route gate has already resolved and authorized this request's
+	// project; answer with that one rather than resolving the index again
+	// against a list that may have changed since (see pinProject).
+	if p, ok := r.Context().Value(pinnedWorkDirKey{}).(string); ok && p != "" {
+		return p
+	}
 	if idx := r.URL.Query().Get("project_idx"); idx != "" {
 		i, err := strconv.Atoi(idx)
 		if err == nil {
@@ -5514,6 +5521,9 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		if seen[abs] {
 			continue
 		}
+		if _, _, isFeature := feature.ParentOf(abs); isFeature {
+			continue // features are discovered under their parent, below
+		}
 		seen[abs] = true
 		entries = append(entries, multiui.ProjectEntry{
 			Name:      filepath.Base(abs),
@@ -5530,6 +5540,12 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		if seen[abs] {
 			continue
 		}
+		if _, _, isFeature := feature.ParentOf(abs); isFeature {
+			// A feature registered by hand would be listed with an owner of
+			// its own and no parent — a second identity for the same
+			// directory. It is listed once, below, as its parent's.
+			continue
+		}
 		seen[abs] = true
 		name := e.Name
 		if name == "" {
@@ -5538,7 +5554,8 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs, Owner: e.Owner, HiddenFor: e.HiddenFor})
 	}
 
-	return entries
+	// Features last (Task 20341), so creating one never renumbers a project.
+	return appendFeatureEntries(entries, seen)
 }
 
 // cachedProjectView returns the cached project statuses together with the
@@ -5549,6 +5566,22 @@ func (s *Server) cachedProjectView() ([]multiui.ProjectEntry, []multiui.ProjectS
 	s.projMu.RLock()
 	defer s.projMu.RUnlock()
 	return s.projEntries, s.projStatuses
+}
+
+// entrySetChanged reports whether entries lists different projects, or the
+// same ones in a different order, than the statuses currently cached.
+func (s *Server) entrySetChanged(entries []multiui.ProjectEntry) bool {
+	s.projMu.RLock()
+	defer s.projMu.RUnlock()
+	if len(entries) != len(s.projEntries) {
+		return true
+	}
+	for i := range entries {
+		if entries[i].Path != s.projEntries[i].Path || entries[i].Name != s.projEntries[i].Name {
+			return true
+		}
+	}
+	return false
 }
 
 // cachedRunningClaims returns the set of project paths whose *persisted* status
@@ -5609,7 +5642,7 @@ func (s *Server) refreshProjectStatusesUsing(entries []multiui.ProjectEntry, liv
 			if prev, ok := cached[e.Path]; ok {
 				// Entry metadata is authoritative from the registry, not from
 				// whatever it was when the project was last loaded.
-				prev.Name, prev.Path = e.Name, e.Path
+				prev.Name, prev.Path, prev.Parent = e.Name, e.Path, e.Parent
 				prev.Running = running
 				prev.RefreshHealth()
 				statuses = append(statuses, prev)
@@ -5669,7 +5702,9 @@ func stateModTime(dir string) (time.Time, bool) {
 	dbPath := state.StateDBPath(dir)
 	var newest time.Time
 	var found bool
-	for _, path := range []string{dbPath, dbPath + "-wal", state.StatePath(dir)} {
+	// A feature's record changes without its state doing so — a pull request
+	// being opened is the common case — and the dashboard shows it.
+	for _, path := range []string{dbPath, dbPath + "-wal", state.StatePath(dir), feature.MetaPath(dir)} {
 		fi, err := os.Stat(path)
 		if err != nil {
 			continue
@@ -5823,6 +5858,12 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 
 	var changedPaths []string
 	changed := make(map[string]struct{})
+	// A project or feature that disappeared from the list produces no state
+	// change to notice — its files are simply no longer looked at — so the
+	// cached statuses would keep describing it until something else moved.
+	// Features are removed far more often than projects, from the dashboard
+	// and from terminals alike, so the membership itself is compared.
+	listChanged := s.entrySetChanged(entries)
 	for _, e := range entries {
 		if !sw.statDue(e.Path, now, running[e.Path], subscribed) {
 			continue
@@ -5849,7 +5890,7 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			changed[e.Path] = struct{}{}
 		}
 	}
-	if len(changedPaths) > 0 {
+	if len(changedPaths) > 0 || listChanged {
 		s.refreshProjectStatusesUsing(entries, live, changed)
 		s.broadcastProjectsUpdate()
 
@@ -5924,6 +5965,10 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			delete(reconcileAt, e.Path)
 			s.reconcileDeadRun(e.Path, runVerdict{})
 			sw.invalidate(e.Path)
+			// A run started outside this hub — `cloop run` in a terminal —
+			// ends here rather than in runEnded, and a completed feature
+			// that asked for its pull request should get it either way.
+			s.maybeAutoOpenFeaturePR(e.Path)
 		case !claimed:
 			delete(reconcileAt, e.Path)
 		default:
@@ -6462,17 +6507,10 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectRun starts a `cloop run` in the specified project directory.
 func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
-	idx, err := strconv.Atoi(r.PathValue("idx"))
-	if err != nil {
-		jsonErr(w, "invalid project index", http.StatusBadRequest)
+	entry, ok := s.projectAtIdx(w, r)
+	if !ok {
 		return
 	}
-	entries := s.visibleProjectEntries(r)
-	if idx < 0 || idx >= len(entries) {
-		jsonErr(w, "project index out of range", http.StatusBadRequest)
-		return
-	}
-	entry := entries[idx]
 
 	// Same re-entrancy refusal as handleRun (Task 20253): the grid's Run button
 	// is one more view that can be looking at a stale run flag, and a second
@@ -6535,17 +6573,10 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectStop sends SIGINT to `cloop run` processes in the given project directory.
 func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
-	idx, err := strconv.Atoi(r.PathValue("idx"))
-	if err != nil {
-		jsonErr(w, "invalid project index", http.StatusBadRequest)
+	entry, ok := s.projectAtIdx(w, r)
+	if !ok {
 		return
 	}
-	entries := s.visibleProjectEntries(r)
-	if idx < 0 || idx >= len(entries) {
-		jsonErr(w, "project index out of range", http.StatusBadRequest)
-		return
-	}
-	entry := entries[idx]
 	// Project-scoped: only signal cloop run processes whose cwd matches
 	// entry.Path. The pre-fix implementation shelled out to
 	// `pkill -SIGINT -f "cloop run"`, which signalled *every* cloop run on
@@ -6814,17 +6845,18 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 // project itself changes: the preference is stored against the caller's own
 // viewer key and is invisible to every other user.
 func (s *Server) handleProjectHidden(w http.ResponseWriter, r *http.Request) {
-	idx, err := strconv.Atoi(r.PathValue("idx"))
-	if err != nil {
-		jsonErr(w, "invalid project index", http.StatusBadRequest)
+	entry, ok := s.projectAtIdx(w, r)
+	if !ok {
 		return
 	}
-	entries := s.visibleProjectEntries(r)
-	if idx < 0 || idx >= len(entries) {
-		jsonErr(w, "project index out of range", http.StatusBadRequest)
+	// A feature is shown and hidden with its project (Task 20341): it is
+	// listed from the project's directory, never from the registry, so a
+	// preference recorded against its own path would be a registry entry
+	// nothing reads.
+	if entry.IsFeature() {
+		jsonErr(w, "a feature is hidden together with its project — hide the project instead", http.StatusBadRequest)
 		return
 	}
-	entry := entries[idx]
 
 	var req struct {
 		Hidden bool `json:"hidden"`
@@ -6862,17 +6894,20 @@ func (s *Server) handleProjectHidden(w http.ResponseWriter, r *http.Request) {
 //   - a cloop run process is currently executing in the project directory
 //     (the user must stop it first to avoid a half-deleted-mid-run state).
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
-	idx, err := strconv.Atoi(r.PathValue("idx"))
-	if err != nil {
-		jsonErr(w, "invalid project index", http.StatusBadRequest)
+	entry, ok := s.projectAtIdx(w, r)
+	if !ok {
 		return
 	}
-	entries := s.visibleProjectEntries(r)
-	if idx < 0 || idx >= len(entries) {
-		jsonErr(w, "project index out of range", http.StatusBadRequest)
+
+	// A feature is not a registry entry to remove: it is a git worktree whose
+	// removal has to ask git, keep or delete a branch, and refuse to discard
+	// uncommitted work (Task 20341). Unregistering it here would report
+	// success and change nothing, since features are discovered from disk.
+	if entry.IsFeature() {
+		jsonErr(w, "this is a feature of another project — remove it from the project's Features panel "+
+			"(DELETE /api/projects/{parent}/features/"+entry.Feature+")", http.StatusBadRequest)
 		return
 	}
-	entry := entries[idx]
 
 	// Parse delete_root from either query string or JSON body so the same
 	// endpoint serves both URL-style callers and the UI's fetch wrapper.
@@ -6896,9 +6931,13 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Safety: refuse to delete a project with an active cloop run.
-	if multiui.IsCloopRunningInDir(entry.Path) {
-		jsonErr(w, "project has an active cloop run — stop it first", http.StatusConflict)
+	// Safety: refuse to delete a project with an active cloop run — its own,
+	// or one of its features'. The feature half matters for both kinds of
+	// delete: removing the tree pulls the directory out from under a running
+	// feature, and unregistering the project drops its running features from
+	// the dashboard with no way left to stop them.
+	if multiui.IsCloopRunningUnder(entry.Path) {
+		jsonErr(w, "project or one of its features has an active cloop run — stop it first", http.StatusConflict)
 		return
 	}
 
@@ -7027,6 +7066,16 @@ func isSafeProjectRoot(path string) bool {
 	// cleaned absolute path, so "/var" has one segment and "/var/x" two.
 	if len(strings.Split(strings.TrimPrefix(clean, "/"), "/")) < 2 {
 		return false
+	}
+	// Nothing inside a project's control directory is a project root. A
+	// directory under <project>/.cloop/features is a feature, which inherits
+	// its parent's executor, grants and roles (Task 20341) — so creating a
+	// project there would be a way to acquire another project's credentials,
+	// and deleting one would be deleting a worktree behind git's back.
+	for _, part := range strings.Split(clean, "/") {
+		if part == ".cloop" {
+			return false
+		}
 	}
 	return true
 }

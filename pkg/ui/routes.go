@@ -16,6 +16,7 @@ package ui
 // — an explicit, greppable opt-out rather than an omission.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 )
 
 // scopeKind selects how a route's authz.Scope is derived from the request.
@@ -191,15 +193,38 @@ func (s *Server) scopeFor(kind scopeKind, r *http.Request) (authz.Scope, bool) {
 // global run.start could pass the gate for a project they cannot see. gate()
 // therefore refuses the request outright instead.
 func (s *Server) projectScopeFromIdx(r *http.Request) (authz.Scope, bool) {
+	e, ok := s.entryAtIdx(r)
+	if !ok {
+		return authz.Scope{}, false
+	}
+	return s.entryScope(e), true
+}
+
+// entryAtIdx resolves the {idx} path segment against the caller's visible
+// project list. Inside a handler it does not resolve when the index has come
+// to name a project other than the one the gate authorized (see pinProject).
+func (s *Server) entryAtIdx(r *http.Request) (multiui.ProjectEntry, bool) {
 	i, err := strconv.Atoi(strings.TrimSpace(r.PathValue("idx")))
 	if err != nil {
-		return authz.Scope{}, false
+		return multiui.ProjectEntry{}, false
 	}
 	entries := s.visibleProjectEntries(r)
 	if i < 0 || i >= len(entries) {
-		return authz.Scope{}, false
+		return multiui.ProjectEntry{}, false
 	}
-	return authz.Scope{Project: entries[i].Name, ProjectPath: entries[i].Path}, true
+	if pinned, ok := r.Context().Value(pinnedEntryKey{}).(string); ok && pinned != entries[i].Path {
+		return multiui.ProjectEntry{}, false
+	}
+	return entries[i], true
+}
+
+// entryScope is the scope a request on project e is authorized in.
+func (s *Server) entryScope(e multiui.ProjectEntry) authz.Scope {
+	if e.IsFeature() {
+		// Authorized as its parent, like projectScope does for ?project_idx.
+		return authz.Scope{Project: s.projectNameForPath(e.Parent), ProjectPath: e.Parent}
+	}
+	return authz.Scope{Project: e.Name, ProjectPath: e.Path}
 }
 
 // safeMethod reports whether m is read-only by HTTP semantics (RFC 9110 §9.2.1).
@@ -284,7 +309,7 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		if rs.Scope == scopeProject && !s.requireVisibleProject(w, r) {
 			return
 		}
-		scope, ok := s.scopeFor(rs.Scope, r)
+		pinned, scope, ok := s.pinProject(rs.Scope, r)
 		if !ok {
 			// The request names a resource that does not resolve for this
 			// caller. Refuse here rather than evaluating the permission
@@ -296,8 +321,64 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		if !s.require(w, r, perm, scope) {
 			return
 		}
-		rs.Handler(w, r)
+		rs.Handler(w, pinned)
 	}
+}
+
+// Context keys under which the gate records the project it authorized.
+type (
+	pinnedWorkDirKey struct{}
+	pinnedEntryKey   struct{}
+)
+
+// pinProject resolves the project a request names — once — and returns the
+// request carrying that resolution along with the scope it is authorized in.
+//
+// Resolving once is the point. The gate and the handler used to resolve
+// ?project_idx and {idx} separately, against a project list that features
+// (Task 20341) now change often: removing one renumbers every feature after
+// it. A request authorized against one project could then be served on the
+// project that had moved into its index, or — an explicit ?project_idx that no
+// longer resolves falls back to the primary project — on the primary project,
+// under the first one's authority. With the resolution pinned, resolveWorkDir
+// answers with the project that was authorized, and projectAtIdx refuses a
+// request whose index now names a different project.
+func (s *Server) pinProject(kind scopeKind, r *http.Request) (*http.Request, authz.Scope, bool) {
+	switch kind {
+	case scopeProject:
+		dir := s.resolveWorkDir(r)
+		return r.WithContext(context.WithValue(r.Context(), pinnedWorkDirKey{}, dir)), s.workDirScope(dir), true
+	case scopeProjectIdx:
+		e, ok := s.entryAtIdx(r)
+		if !ok {
+			return r, authz.Scope{}, false
+		}
+		return r.WithContext(context.WithValue(r.Context(), pinnedEntryKey{}, e.Path)), s.entryScope(e), true
+	}
+	scope, ok := s.scopeFor(kind, r)
+	return r, scope, ok
+}
+
+// projectAtIdx resolves the {idx} path segment to a project in the caller's
+// list — the one way every /api/projects/{idx}/… handler does — and refuses
+// when the gate authorized a different project for this index a moment ago.
+func (s *Server) projectAtIdx(w http.ResponseWriter, r *http.Request) (multiui.ProjectEntry, bool) {
+	idx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		jsonErr(w, "invalid project index", http.StatusBadRequest)
+		return multiui.ProjectEntry{}, false
+	}
+	entries := s.visibleProjectEntries(r)
+	if idx < 0 || idx >= len(entries) {
+		jsonErr(w, "project index out of range", http.StatusBadRequest)
+		return multiui.ProjectEntry{}, false
+	}
+	e := entries[idx]
+	if pinned, ok := r.Context().Value(pinnedEntryKey{}).(string); ok && pinned != e.Path {
+		jsonErr(w, "the project list changed while this request was being handled — reload and try again", http.StatusConflict)
+		return multiui.ProjectEntry{}, false
+	}
+	return e, true
 }
 
 // registerRoutes wires every route in routeTable onto mux, gated by the
@@ -642,6 +723,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/projects/{idx}/stop", Handler: s.handleProjectStop, Perm: stop, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}", Handler: s.handleProjectDelete, Perm: write, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/hidden", Handler: s.handleProjectHidden, Perm: viewPrefs, Scope: scopeProjectIdx},
+		// Parallel features (Task 20341): git worktrees of the project, each
+		// with its own task list and run settings. Addressed through the
+		// parent project, so each is authorized against it; see
+		// features_api.go. Creating, removing and publishing reshape the
+		// project and push to its forge, so they take project.write.
+		{Pattern: "GET /api/projects/{idx}/features", Handler: s.handleProjectFeatures, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/features", Handler: s.handleProjectFeatureCreate, Perm: write, Scope: scopeProjectIdx},
+		{Pattern: "DELETE /api/projects/{idx}/features/{slug}", Handler: s.handleProjectFeatureDelete, Perm: write, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/features/{slug}/pr", Handler: s.handleProjectFeaturePR, Perm: write, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/features/{slug}/pr/refresh", Handler: s.handleProjectFeaturePRRefresh, Perm: write, Scope: scopeProjectIdx},
 		// Choosing where a project's code runs is a fleet decision, not a
 		// project one.
 		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx},

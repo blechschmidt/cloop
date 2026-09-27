@@ -254,6 +254,11 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// A feature holds its parent's grants, so its answer to "which
+	// repositories can this reach" is the parent's (Task 20341).
+	if entry.Parent != "" {
+		entry.Path = entry.Parent
+	}
 	bs, ok := s.openBrokersOr(w)
 	if !ok {
 		return
@@ -393,6 +398,9 @@ type assignRepositoriesRequest struct {
 func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.projectEntryFromPath(w, r)
 	if !ok {
+		return
+	}
+	if refuseFeatureConfig(w, entry, "repository access") {
 		return
 	}
 	var req assignRepositoriesRequest
@@ -582,6 +590,9 @@ func (s *Server) replaceableGrant(w http.ResponseWriter, r *http.Request, bs *br
 func (s *Server) handleProjectRepositoriesRevoke(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.projectEntryFromPath(w, r)
 	if !ok {
+		return
+	}
+	if refuseFeatureConfig(w, entry, "repository access") {
 		return
 	}
 	grantID := strings.TrimSpace(r.URL.Query().Get("grant"))

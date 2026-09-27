@@ -444,7 +444,7 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 		byID[s.ID] = s
 	}
 
-	requester := secretbroker.Requester{ExecutorID: ex.ID(), ProjectID: workDir}
+	requester := secretbroker.Requester{ExecutorID: ex.ID(), ProjectID: policyProjectPath(workDir)}
 	var excluded string
 	for _, g := range grants {
 		if !g.Subject.Matches(requester) {

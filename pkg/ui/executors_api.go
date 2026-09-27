@@ -33,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1424,6 +1423,9 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if refuseFeatureConfig(w, entry, "executor") {
+		return
+	}
 
 	var req bindExecutorRequest
 	limitJSONBody(w, r, maxJSONBodyBytes)
@@ -1542,20 +1544,13 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 // projectEntryFromPath resolves the {idx} path wildcard shared by the project
 // routes, writing the error response itself when it cannot.
 func (s *Server) projectEntryFromPath(w http.ResponseWriter, r *http.Request) (projectEntry, bool) {
-	idx, err := strconv.Atoi(r.PathValue("idx"))
-	if err != nil {
-		jsonErr(w, "invalid project index", http.StatusBadRequest)
-		return projectEntry{}, false
-	}
 	// Resolved against the *visible* list so a user cannot repoint a project
 	// they cannot see by guessing an index.
-	entries := s.visibleProjectEntries(r)
-	if idx < 0 || idx >= len(entries) {
-		jsonErr(w, "project index out of range", http.StatusBadRequest)
+	e, ok := s.projectAtIdx(w, r)
+	if !ok {
 		return projectEntry{}, false
 	}
-	e := entries[idx]
-	return projectEntry{Name: e.Name, Path: e.Path}, true
+	return projectEntry{Name: e.Name, Path: e.Path, Parent: e.Parent}, true
 }
 
 // projectEntry is the minimal shape the executor handlers need from the
@@ -1563,6 +1558,21 @@ func (s *Server) projectEntryFromPath(w http.ResponseWriter, r *http.Request) (p
 type projectEntry struct {
 	Name string
 	Path string
+	// Parent is set when the project is a feature of another (Task 20341).
+	Parent string
+}
+
+// refuseFeatureConfig answers a request to configure, on a feature, something
+// a feature inherits from its parent — its executor, its repository grants —
+// and reports whether it did. Configuring it on the feature would either do
+// nothing (the parent's value wins) or split one project's policy in two.
+func refuseFeatureConfig(w http.ResponseWriter, e projectEntry, what string) bool {
+	if e.Parent == "" {
+		return false
+	}
+	jsonErr(w, "a feature uses its project's "+what+" — change it on the project ("+
+		filepath.Base(e.Parent)+") instead", http.StatusConflict)
+	return true
 }
 
 // isEmptyBody reports whether a JSON decode failed because there was nothing
@@ -1694,6 +1704,13 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 	// their own, and both are checked before the placement case below because
 	// each names the specific repository and grant rather than the constraint
 	// they would otherwise be flattened into.
+	// A feature asked to run where its worktree cannot work (Task 20341).
+	var featureEx *featureExecutorError
+	if errors.As(err, &featureEx) {
+		writeSandboxDenied(w, "feature_executor_unsupported", featureEx.Error(), featureEx.Remediation(), nil)
+		return
+	}
+
 	var grantMissing *executor.WorkspaceGrantError
 	if errors.As(err, &grantMissing) {
 		writeSandboxDenied(w, "workspace_grant_missing", grantMissing.Error(),

@@ -73,6 +73,10 @@ func controlPlaneDir() string {
 // on the control-plane host unbind it and pin every project to an isolated
 // executor; Resolve then fails closed rather than falling back here.
 func registerBuiltinExecutors() {
+	// A feature worktree resolves its executor and ceiling through its parent
+	// (features.go). Installed here because this is the one function every
+	// dispatch path calls first, including on Servers built as struct literals.
+	installFeaturePolicy()
 	builtinExecutorsOnce.Do(func() {
 		err := localprocess.Ensure(executor.DefaultRegistry)
 		// Under strict mode this refusal is the designed outcome, not a
@@ -365,6 +369,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	if err != nil {
 		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
+	if err := checkFeatureExecutor(workDir, ex); err != nil {
+		return nil, executor.Handle{}, err
+	}
 
 	// Minted before anything is acquired, because the point of a run id is to
 	// be on the *first* record this dispatch writes. The broker's lease rows
@@ -594,6 +601,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
+	}
+	if err := checkFeatureExecutor(workDir, ex); err != nil {
+		return nil, err
 	}
 	var extraEnv []string
 	if envFor != nil {

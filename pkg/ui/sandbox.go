@@ -232,7 +232,7 @@ func (egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
 	if err != nil {
 		return false
 	}
-	requester := secretbroker.Requester{ProjectID: projectPath}
+	requester := secretbroker.Requester{ProjectID: policyProjectPath(projectPath)}
 	now := time.Now()
 	for _, g := range grants {
 		if g.ID != grantID {

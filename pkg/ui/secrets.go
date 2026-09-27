@@ -353,9 +353,12 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 	ctx, cancel := context.WithTimeout(context.Background(), leaseTimeout)
 	defer cancel()
 
+	// A feature holds its parent project's grants (features.go): it is the
+	// same project's code on another branch, and a grant made to the project
+	// is a grant to its work, wherever in the project that work happens.
 	lease, err := broker.LeaseFor(ctx, secretbroker.Requester{
 		ExecutorID: executorID,
-		ProjectID:  workDir,
+		ProjectID:  policyProjectPath(workDir),
 		RunID:      runID,
 	}, "ui")
 	if err != nil {
