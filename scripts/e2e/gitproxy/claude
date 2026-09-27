@@ -1,0 +1,38 @@
+#!/bin/sh
+# Stand-in for the Claude Code CLI in the Task 20346 git proxy e2e image.
+#
+# `cloop run` invokes it exactly as it invokes claude: prompt on stdin, text on
+# stdout. It runs the probe script carried base64-encoded in the task
+# description on a line "E2E-SCRIPT-B64: ...", prints what the probe printed,
+# and signals TASK_DONE, so a run is deterministic and needs no Claude login.
+case " $* " in
+*" --version "* | *" -v "*)
+	echo "0.0.0 (cloop git proxy e2e stand-in)"
+	exit 0
+	;;
+esac
+prompt=$(cat)
+b64=$(printf '%s\n' "$prompt" | sed -n 's/^E2E-SCRIPT-B64: *//p' | head -n 1)
+if [ -z "$b64" ]; then
+	echo "stand-in: the prompt carries no E2E-SCRIPT-B64 line"
+	echo TASK_DONE
+	exit 0
+fi
+dir=${TMPDIR:-/tmp}
+[ -d "$dir" ] && [ -w "$dir" ] || dir=$(pwd)
+f=$(mktemp "$dir/e2e-probe.XXXXXX") || {
+	echo "stand-in: cannot create a temporary file in $dir"
+	echo TASK_FAILED
+	exit 0
+}
+if ! printf '%s' "$b64" | base64 -d >"$f"; then
+	rm -f "$f"
+	echo "stand-in: the embedded script is not valid base64"
+	echo TASK_FAILED
+	exit 0
+fi
+sh "$f" </dev/null 2>&1
+rc=$?
+rm -f "$f"
+echo "stand-in: probe exited $rc"
+echo TASK_DONE
