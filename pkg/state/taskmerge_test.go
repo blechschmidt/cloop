@@ -7,6 +7,7 @@ package state
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -182,6 +183,69 @@ func TestDefinitionFieldsExist(t *testing.T) {
 		if _, ok := ty.FieldByName(name); !ok {
 			t.Errorf("definitionFields names %q, which pm.Task does not have", name)
 		}
+	}
+}
+
+// TestDefinitionFieldsRoundTrip: every field the merge compares survives a save
+// and a load. One that did not would read back as zero, which the merge takes
+// for another process's edit.
+func TestDefinitionFieldsRoundTrip(t *testing.T) {
+	dir := planProject(t)
+	s := mustLoad(t, dir)
+	task := s.Plan.TaskByID(2)
+	tv := reflect.ValueOf(task).Elem()
+	deadline := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, name := range definitionFields {
+		f := tv.FieldByName(name)
+		switch {
+		case f.Kind() == reflect.String:
+			f.SetString("set-" + name)
+		case f.CanInt():
+			f.SetInt(7)
+		case f.Kind() == reflect.Bool:
+			f.SetBool(true)
+		case f.Type() == reflect.TypeOf([]int(nil)):
+			f.Set(reflect.ValueOf([]int{1}))
+		case f.Type() == reflect.TypeOf([]string(nil)):
+			f.Set(reflect.ValueOf([]string{"set-" + name}))
+		case f.Type() == reflect.TypeOf((*time.Time)(nil)):
+			f.Set(reflect.ValueOf(&deadline))
+		default:
+			t.Fatalf("no test value for %s (%s): add one", name, f.Type())
+		}
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	back := reflect.ValueOf(mustLoad(t, dir).Plan.TaskByID(2)).Elem()
+	for _, name := range definitionFields {
+		if !sameFieldValue(back.FieldByName(name), tv.FieldByName(name)) {
+			t.Errorf("%s = %v after a save and a load, want %v: the database does not persist it",
+				name, back.FieldByName(name), tv.FieldByName(name))
+		}
+	}
+}
+
+// TestAFieldTheDatabaseDropsStaysInMemory: a value the running process holds in
+// a field plan_tasks has no column for — the OnSuccess branch of a plan it
+// made, say — is still there after its own save and its next sync, as it was
+// before the merge existed.
+func TestAFieldTheDatabaseDropsStaysInMemory(t *testing.T) {
+	dir := planProject(t)
+	run := mustLoad(t, dir)
+	task := run.Plan.TaskByID(1)
+	task.OnSuccess = []string{"2"}
+	task.Assignee = "alice"
+	if err := run.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	run.SyncFromDisk()
+
+	task = run.Plan.TaskByID(1)
+	if !reflect.DeepEqual(task.OnSuccess, []string{"2"}) || task.Assignee != "alice" {
+		t.Errorf("on_success = %v, assignee = %q after a sync; the run lost its own values",
+			task.OnSuccess, task.Assignee)
 	}
 }
 

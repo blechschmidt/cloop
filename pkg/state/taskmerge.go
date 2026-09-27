@@ -33,12 +33,18 @@ import (
 // definitionFields are the pm.Task fields a person edits, as opposed to the
 // ones the executing run writes. The names must match pm.Task's fields;
 // TestDefinitionFieldsExist pins that.
+//
+// Only fields the database persists belong here. plan_tasks has no column for
+// Assignee, Links, SprintID, StoryPoints, OnSuccess/OnFailure, RetryBudget and
+// a few others, so they read back as zero; the merge would take that zero for
+// another process's edit and clear the value this process holds — the
+// OnSuccess branches of the plan it is running, say — at its first sync after
+// a save. TestDefinitionFieldsRoundTrip pins that every field listed here
+// survives a save and a load; give plan_tasks a column before adding one.
 var definitionFields = []string{
 	"Title", "Description", "Priority", "Role", "DependsOn", "Deadline",
 	"EstimatedMinutes", "Tags", "Condition", "Recurrence", "RequiresApproval",
-	"Approved", "MaxMinutes", "Assignee", "ExternalURL", "Links", "Pinned",
-	"SprintID", "ComplexitySize", "StoryPoints", "OnSuccess", "OnFailure",
-	"RiskScore", "ImpactScore", "RetryBudget", "GitHubIssue",
+	"Approved", "MaxMinutes", "Pinned", "GitHubIssue",
 }
 
 // definitionIndex holds each definition field's index in pm.Task, resolved
