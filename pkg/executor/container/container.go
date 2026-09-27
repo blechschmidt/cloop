@@ -523,8 +523,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// policy allows, so claiming false would misroute placement away
 		// from an executor that can do the work. FilteredEgress below is
 		// the field that says the reach is bounded.
-		NetworkEgress:  e.opts.Network != NetworkNone,
-		FilteredEgress: e.opts.EgressFilter.Enabled,
+		NetworkEgress: e.opts.Network != NetworkNone,
+		//
+		// Never under rootless podman, whose networks live in a network
+		// namespace the invoking user owns: the host's packet filter cannot
+		// see that bridge, so a ruleset installed for it filters nothing. See
+		// installFirewall, which refuses rather than start such a sandbox.
+		FilteredEgress: e.opts.EgressFilter.Enabled && !e.rootless(),
 		// Stated explicitly rather than left to the zero value: a driver that
 		// bind-mounts the host path has already answered the workspace
 		// question, and a reader of this struct should not have to infer that
@@ -570,7 +575,7 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// gating it here would refuse exactly that case. A host without nft(8)
 		// fails at install time with a message naming it, which is the right
 		// place for a missing-tooling error.
-		SupportsEgressScope: true,
+		SupportsEgressScope: !e.rootless(),
 		// A lease's credential files are staged into a directory this driver
 		// creates and binds read-only at the path the workload's environment
 		// names — see secrets.go. SecretFilesFromHostPath stays false, and the
@@ -2186,3 +2191,8 @@ func newHandleID() string {
 	}
 	return "c-" + hex.EncodeToString(b[:])
 }
+
+// rootless reports whether this executor's engine runs containers in a user
+// namespace — rootless podman — which puts every network it creates out of the
+// host packet filter's sight.
+func (e *Executor) rootless() bool { return e.rt.Rootless }

@@ -150,9 +150,12 @@ func TestLoopbackVirtualDeviceMustBeAttached(t *testing.T) {
 // TestIntegration_VirtualExecutorSandbox is the whole feature on a real engine:
 // a virtual executor's firewall is installed on its own bridge before the
 // sandbox joins it, its denylist is in the ruleset, the sandbox resolves through
-// the allowed resolver, and its device node is inside the sandbox.
+// the allowed resolver, and its device node is inside the sandbox. It runs once
+// per installed engine — docker and rootful podman name and report their
+// bridges differently, which is exactly where a host-side filter can silently
+// attach to nothing.
 //
-// Opt-in, and it needs root (for nft), docker and a local alpine image:
+// Opt-in, and it needs root (for nft), an engine and a local alpine image:
 //
 //	CLOOP_AGENT_SANDBOX_E2E=1 go test ./pkg/executor/remote -run TestIntegration_VirtualExecutorSandbox -v
 func TestIntegration_VirtualExecutorSandbox(t *testing.T) {
@@ -162,23 +165,36 @@ func TestIntegration_VirtualExecutorSandbox(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("installing the bridge firewall needs root")
 	}
-	for _, bin := range []string{"docker", "nft"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			t.Skipf("%s is not installed", bin)
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft is not installed")
+	}
+	ran := 0
+	for _, engine := range []string{"docker", "podman"} {
+		if _, err := exec.LookPath(engine); err != nil {
+			continue
 		}
+		if err := exec.Command(engine, "image", "inspect", "alpine:3.20").Run(); err != nil {
+			t.Logf("%s: alpine:3.20 is not in its local image store; skipping it", engine)
+			continue
+		}
+		ran++
+		t.Run(engine, func(t *testing.T) { runVirtualSandbox(t, engine) })
 	}
-	if err := exec.Command("docker", "image", "inspect", "alpine:3.20").Run(); err != nil {
-		t.Skip("alpine:3.20 is not in the local image store")
+	if ran == 0 {
+		t.Skip("no engine with alpine:3.20 in its local store")
 	}
+}
 
+func runVirtualSandbox(t *testing.T, engine string) {
 	lb := newLoopback(t, withSysfs(t.TempDir()), func(c *agent.Config) { c.HostProbes = true })
 	parent := lb.executor(t)
 	if !parent.AgentCapabilities().PacketFilter {
 		t.Fatalf("the agent reports no packet filter: %s", parent.AgentCapabilities().PacketFilterIssue)
 	}
-	const id = "vx-e2e-test"
+	id := "vx-e2e-" + engine
+	table := "cloop_sbx_" + strings.ReplaceAll(id, "-", "_")
 	v := virtualOver(t, parent, id, executor.VirtualSpec{
-		Sandbox: executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: "docker", Image: "alpine:3.20"},
+		Sandbox: executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: engine, Image: "alpine:3.20"},
 		Firewall: &executor.FirewallRules{
 			AllowPublicInternet: true,
 			DenyCIDRs:           []string{"203.0.113.0/24"},
@@ -187,8 +203,8 @@ func TestIntegration_VirtualExecutorSandbox(t *testing.T) {
 		Devices: []executor.DeviceSelector{{Name: "zero", Path: "/dev/zero", Permissions: executor.DeviceRead}},
 	})
 	t.Cleanup(func() {
-		_ = exec.Command("nft", "delete", "table", "inet", "cloop_sbx_"+strings.ReplaceAll(id, "-", "_")).Run()
-		_ = exec.Command("docker", "network", "rm", "cloop-sbx-"+id).Run()
+		_ = exec.Command("nft", "delete", "table", "inet", table).Run()
+		_ = exec.Command(engine, "network", "rm", "cloop-sbx-"+id).Run()
 	})
 
 	work := filepath.Join(lb.root, "p")
@@ -204,7 +220,11 @@ func TestIntegration_VirtualExecutorSandbox(t *testing.T) {
 	defer cancel()
 	res, err := executor.Run(ctx, v, executor.Spec{
 		WorkDir: work,
-		Argv:    []string{"/bin/sh", "-c", "head -c 4 /dev/zero | wc -c; grep nameserver /etc/resolv.conf"},
+		// The wget is aimed into the denylist: TEST-NET-3 is unroutable, so
+		// the attempt fails either way, and what it proves is that the deny
+		// rule on the host counted the sandbox's packet — see below.
+		Argv: []string{"/bin/sh", "-c", "head -c 4 /dev/zero | wc -c; grep -i nameserver /etc/resolv.conf; " +
+			"wget -q -T 2 -O /dev/null http://203.0.113.1/ 2>/dev/null; true"},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v (output %q)", err, res.Output)
@@ -217,11 +237,27 @@ func TestIntegration_VirtualExecutorSandbox(t *testing.T) {
 		t.Errorf("handle executor = %q, want the virtual executor %q", res.Handle.ExecutorID, id)
 	}
 
-	table, err := exec.Command("nft", "list", "table", "inet", "cloop_sbx_"+strings.ReplaceAll(id, "-", "_")).CombinedOutput()
+	ruleset, err := exec.Command("nft", "list", "table", "inet", table).CombinedOutput()
 	if err != nil {
-		t.Fatalf("no ruleset installed for the virtual executor: %v %s", err, table)
+		t.Fatalf("no ruleset installed for the virtual executor: %v %s", err, ruleset)
 	}
-	if !strings.Contains(string(table), "203.0.113.0/24") || !strings.Contains(string(table), "operator deny list") {
-		t.Errorf("the denylist is not in the installed ruleset:\n%s", table)
+	if !strings.Contains(string(ruleset), "203.0.113.0/24") || !strings.Contains(string(ruleset), "operator deny list") {
+		t.Errorf("the denylist is not in the installed ruleset:\n%s", ruleset)
+	}
+	// The ruleset must be attached to the bridge the sandbox actually joined:
+	// a table keyed to an interface name the engine never used loads cleanly
+	// and filters nothing. Whether the interface exists *now* proves nothing —
+	// netavark deletes a podman bridge with its last container — so the proof
+	// is the deny rule's own counter: it saw the sandbox's packet.
+	denied := false
+	for _, line := range strings.Split(string(ruleset), "\n") {
+		if strings.Contains(line, "203.0.113.0/24") && strings.Contains(line, "counter packets") &&
+			!strings.Contains(line, "counter packets 0 ") {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Errorf("the deny rule counted no packets from the sandbox, so the ruleset is not on its "+
+			"bridge:\n%s", ruleset)
 	}
 }

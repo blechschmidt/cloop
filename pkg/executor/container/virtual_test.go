@@ -6,6 +6,7 @@ package container
 // runtimes that cannot open them.
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"strings"
@@ -171,5 +172,23 @@ func TestDevicesRefusedUnderKernelIsolatedRuntimes(t *testing.T) {
 	plain := &Executor{id: "sbx-runc", opts: Options{Network: NetworkNone}}
 	if !plain.Capabilities().SupportsDevices {
 		t.Error("the default runtime stopped advertising devices")
+	}
+}
+
+// TestRootlessEngineCannotFilter: a rootless podman network lives in the user's
+// own network namespace, so a host-side ruleset would match nothing. The driver
+// must neither advertise filtering nor start a filtered sandbox there.
+func TestRootlessEngineCannotFilter(t *testing.T) {
+	ex := &Executor{id: "sbx-rootless", rt: Runtime{Name: RuntimePodman, Rootless: true},
+		opts: Options{Network: NetworkBridge, EgressFilter: EgressFilter{
+			Enabled: true, AllowPublicInternet: true, AllowAllPorts: true, Resolvers: []string{"1.1.1.1"},
+		}}}
+	caps := ex.Capabilities()
+	if caps.FilteredEgress || caps.SupportsEgressScope {
+		t.Errorf("a rootless engine advertises filtering: %+v", caps)
+	}
+	if _, _, err := ex.installFirewall(context.Background(), executor.EgressScopeUnset); err == nil ||
+		!errors.Is(err, executor.ErrUnsupported) || !strings.Contains(err.Error(), "rootless") {
+		t.Fatalf("installFirewall on a rootless engine = %v", err)
 	}
 }

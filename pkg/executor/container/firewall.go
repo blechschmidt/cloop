@@ -479,6 +479,18 @@ func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressSco
 	if !f.Enabled {
 		return e.opts.Network, nil, nil
 	}
+	if e.rootless() {
+		// Rootless podman creates the bridge inside a network namespace the
+		// invoking user owns. The ruleset below would be installed in the
+		// host's namespace, keyed to an interface name that exists only in the
+		// other one — it would load cleanly and match nothing, and the sandbox
+		// would run with unrestricted egress under a firewall that reported
+		// success (Task 20345).
+		return "", nil, fmt.Errorf("%w: executor %s runs %s rootless, and a rootless engine's networks "+
+			"live in a network namespace the host's packet filter cannot see, so an egress filter "+
+			"installed for one would filter nothing; run the engine as root (docker, or podman as "+
+			"root) for a filtered sandbox, or remove the filter", executor.ErrUnsupported, e.id, e.rt.Name)
+	}
 
 	name := networkName(e.id, scope)
 	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
