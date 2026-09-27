@@ -211,7 +211,7 @@ Payload keys:
 - `executor.unbind` — `action`, `project`, `project_path`
 - `executor.uncordon` — `action`, `executor_id`, `state`
 - `executor.upgrade` — `action`, `executor_id`, `requested_version`, `force`, `accepted`, `from_version`, `target_version`, `reason`
-- `executor.virtual` — `action`, `executor_id`, `parent_id`, `name`, `from`, `to`
+- `executor.virtual` — `action`, `executor_id`, `parent_id`, `name`, `from`, `to`, `reason`
 
 - `executor.audience` — `action` is "admit" or "withdraw"; `restricted` is whether the executor is access-controlled *after* the change, and `members` how many principals remain. Withdrawing the last entry sets restricted=false, which widens the executor to the whole fleet — the one edit here that grants rather than revokes.
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.
@@ -219,7 +219,7 @@ Payload keys:
 - `executor.failover` — `placed` distinguishes a successful move from an exhausted one; on failure `to` is empty and `error` says why.
 - `executor.limits` — Records its previous ceiling as well as the new one. A raised cap is the change worth reviewing, and it is invisible in the new value alone. `cleared` is true when the ceiling was removed, which makes the executor uncapped rather than capped at zero.
 - `executor.sandbox` — One of two executor actions that record their previous value: it changes a containment boundary, so `from` is what makes "when did this device stop isolating its workloads" answerable from the trail alone. `cleared` is true when the configuration was removed rather than replaced.
-- `executor.virtual` — `action` is "create", "update" or "delete". `from` and `to` describe the whole configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an added device is visible from this row alone.
+- `executor.virtual` — `action` is "create", "update" or "delete". `from` and `to` describe the whole configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an added device is visible from this row alone. `reason` is set when the deletion was not asked for directly: a device's virtual executors are deleted with it when it is revoked.
 
 ### workspace.*
 

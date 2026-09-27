@@ -1118,6 +1118,10 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	executor.DefaultRegistry.Unregister(id)
+	// Its virtual executors go with it (Task 20345): they dispatch through its
+	// session, so none of them can run anything now, and the device's own card —
+	// the only place they are managed — has just been removed.
+	s.deleteVirtualExecutorsOf(r, db, id)
 	// Credit the slot back to whoever enrolled the device, not to whoever
 	// revoked it (Task 20182): an admin cleaning up a tenant's stale agent
 	// must return the headroom to that tenant. ExecutorRow.EnrolledBy holds

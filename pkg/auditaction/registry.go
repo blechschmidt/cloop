@@ -326,12 +326,13 @@ var registry = []Entry{
 		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "An admin creates, edits or deletes a virtual executor on an enrolled device.",
-		Payload:   []string{"action", "executor_id", "parent_id", "name", "from", "to"},
+		Payload:   []string{"action", "executor_id", "parent_id", "name", "from", "to", "reason"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`action` is \"create\", \"update\" or \"delete\". `from` and `to` describe the whole " +
 			"configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an " +
-			"added device is visible from this row alone.",
+			"added device is visible from this row alone. `reason` is set when the deletion was not asked " +
+			"for directly: a device's virtual executors are deleted with it when it is revoked.",
 	},
 	{
 		Action:    ActionExecutorStateChange,

@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -408,4 +409,46 @@ func nonNil(ss []string) []string {
 		return []string{}
 	}
 	return ss
+}
+
+// deleteVirtualExecutorsOf removes every virtual executor of a device being
+// revoked, each with its own audit row, and returns how many it removed.
+//
+// Deleted rather than left behind as orphans: a virtual executor dispatches
+// through its parent's session and has no life of its own, and the dialog an
+// admin manages them in is opened from the parent's card. An orphan would be a
+// card that fails every dispatch and offers no way to remove it.
+func (s *Server) deleteVirtualExecutorsOf(r *http.Request, db *statedb.DB, parentID string) int {
+	rows, err := db.ListVirtualExecutors()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ui: list virtual executors of revoked device %s: %v\n", parentID, err)
+		return 0
+	}
+	bindings := projectsByExecutor(db)
+	removed := 0
+	for _, v := range rows {
+		if v.ParentID != parentID {
+			continue
+		}
+		if err := db.DeleteVirtualExecutor(v.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "ui: delete virtual executor %s of revoked device %s: %v\n", v.ID, parentID, err)
+			continue
+		}
+		if ex, err := executor.Get(v.ID); err == nil && ex.Kind() == executor.KindVirtual {
+			executor.DefaultRegistry.Unregister(v.ID)
+		}
+		for _, p := range bindings[v.ID] {
+			executor.DefaultRegistry.Unbind(p)
+		}
+		s.auditExecutorAction(r, "virtual", v.ID, map[string]any{
+			"action":    "delete",
+			"parent_id": parentID,
+			"name":      v.Name,
+			"from":      v.Spec.Describe(),
+			"reason":    "its device was revoked",
+		})
+		s.broadcastExecutorUpdate("virtual", v.ID)
+		removed++
+	}
+	return removed
 }

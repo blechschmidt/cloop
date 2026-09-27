@@ -251,3 +251,36 @@ func TestVirtualExecutors_ValidationAtTheBoundary(t *testing.T) {
 		t.Errorf("POST under a non-device = %d, want 404", code)
 	}
 }
+
+// TestVirtualExecutors_GoWithTheirDevice: revoking a device deletes its virtual
+// executors — rows, registrations and bindings — rather than leaving cards that
+// fail every dispatch and can no longer be opened from their parent.
+func TestVirtualExecutors_GoWithTheirDevice(t *testing.T) {
+	dir := setupProjectDir(t, "virtual executor orphan", nil)
+	ts := newTestServer(t, dir, nil)
+	parent := seedDevice(t, dir, "sgx-device-3")
+	code, body := virtualDo(t, ts, http.MethodPost, "/api/executors/"+parent+"/virtuals", hsmRequest("doomed"))
+	if code != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", code, body)
+	}
+	var created virtualExecutorView
+	_ = json.Unmarshal(body, &created)
+	t.Cleanup(func() { executor.DefaultRegistry.Unregister(created.ID) })
+
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := New(dir, 0, "")
+	req := httptest.NewRequest(http.MethodDelete, "/api/executors/"+parent, nil)
+	if n := srv.deleteVirtualExecutorsOf(req, db, parent); n != 1 {
+		t.Fatalf("deleteVirtualExecutorsOf removed %d, want 1", n)
+	}
+	if _, ok, _ := db.VirtualExecutor(created.ID); ok {
+		t.Error("the virtual executor's row survived its device")
+	}
+	if _, err := executor.Get(created.ID); err == nil {
+		t.Error("the virtual executor is still registered after its device was revoked")
+	}
+}
