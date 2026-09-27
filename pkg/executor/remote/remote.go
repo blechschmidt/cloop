@@ -1024,6 +1024,14 @@ func (e *Executor) attach(sess *Session) {
 	// Anything revoked while this agent was offline is owed to it now. Done
 	// on its own goroutine because attach runs on the handshake path, which
 	// must not block on a round trip to the device it is still setting up.
+	//
+	// What is owed is read here, though, not on that goroutine. Read later, it
+	// also caught a revocation recorded after this attach, which its own
+	// RevokeLease call was already delivering on this very session: the device
+	// was sent the frame twice, and a caller's ack could be the one consumed
+	// by the replay while its own request waited out the revoke timeout and
+	// reported the device unreachable.
+	owed := e.revocations.Pending()
 	go func() {
 		defer func() {
 			// A panic here must not take the control plane down with it: the
@@ -1032,7 +1040,7 @@ func (e *Executor) attach(sess *Session) {
 				_ = r
 			}
 		}()
-		e.replayRevocations(sess)
+		e.replayRevocations(sess, owed)
 	}()
 }
 

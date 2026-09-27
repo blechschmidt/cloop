@@ -269,9 +269,9 @@ func (e *Executor) Revocations() []RevokeResult { return e.revocations.Snapshot(
 //
 // It runs in its own goroutine because attach is called from the handshake
 // path, which must not block on a round trip to the device it is still
-// setting up.
-func (e *Executor) replayRevocations(sess *Session) {
-	owed := e.revocations.Pending()
+// setting up. owed is what attach read from the log when the session arrived;
+// see there for why it is not read here.
+func (e *Executor) replayRevocations(sess *Session, owed []RevokeResult) {
 	if len(owed) == 0 {
 		return
 	}
