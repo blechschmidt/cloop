@@ -84,7 +84,32 @@ type PR struct {
 	} `json:"base"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Body      string    `json:"body"`
+	// Merged and MergedAt are only populated by the single-PR endpoint
+	// (GetPR); list endpoints omit them, so a false Merged from ListPRs
+	// means "not reported", not "not merged".
+	Merged   bool       `json:"merged"`
+	MergedAt *time.Time `json:"merged_at"`
 }
+
+// APIError is a non-success answer from the GitHub API. It carries the
+// status so callers can tell "this pull request already exists" (422) from
+// "this token may not do that" (401/403) without matching on message text.
+type APIError struct {
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	body := strings.TrimSpace(e.Body)
+	if len(body) > 512 {
+		body = body[:512] + "…"
+	}
+	return fmt.Sprintf("GitHub API error %d: %s", e.Status, body)
+}
+
+// Unprocessable reports whether the API refused the request as invalid (422)
+// — for a pull request, most often because one already exists for the head.
+func (e *APIError) Unprocessable() bool { return e.Status == 422 }
 
 // PRFile represents a file changed in a pull request.
 type PRFile struct {
@@ -317,13 +342,65 @@ func (c *Client) CreatePR(head, base, title, body string, draft bool) (*PR, erro
 		return nil, err
 	}
 	if status != 201 {
-		return nil, fmt.Errorf("GitHub API error %d: %s", status, string(data))
+		return nil, &APIError{Status: status, Body: string(data)}
 	}
 	var pr PR
 	if err := json.Unmarshal(data, &pr); err != nil {
 		return nil, fmt.Errorf("parsing created PR: %w", err)
 	}
 	return &pr, nil
+}
+
+// GetPR fetches one pull request, including whether it was merged.
+func (c *Client) GetPR(number int) (*PR, error) {
+	data, status, err := c.do("GET", fmt.Sprintf("/pulls/%d", number), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, &APIError{Status: status, Body: string(data)}
+	}
+	var pr PR
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("parsing PR #%d: %w", number, err)
+	}
+	return &pr, nil
+}
+
+// FindPRByHead returns the most recent pull request whose head is branch in
+// the repository's own owner namespace, or nil when there is none. state is
+// "open", "closed" or "all".
+//
+// It exists because creating a pull request for a head that already has an
+// open one is refused (422), and the useful answer to "open a PR for this
+// branch" in that case is the PR that is already open.
+func (c *Client) FindPRByHead(branch, state string) (*PR, error) {
+	owner, _, ok := strings.Cut(c.Repo, "/")
+	if !ok || owner == "" {
+		return nil, fmt.Errorf("repository %q is not owner/name", c.Repo)
+	}
+	params := url.Values{}
+	params.Set("head", owner+":"+branch)
+	if state == "" {
+		state = "open"
+	}
+	params.Set("state", state)
+	params.Set("per_page", "10")
+	data, status, err := c.do("GET", "/pulls?"+params.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, &APIError{Status: status, Body: string(data)}
+	}
+	var prs []PR
+	if err := json.Unmarshal(data, &prs); err != nil {
+		return nil, fmt.Errorf("parsing PRs: %w", err)
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+	return &prs[0], nil
 }
 
 // ListCheckRuns returns CI check runs for a commit SHA.
