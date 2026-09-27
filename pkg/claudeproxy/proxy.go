@@ -348,6 +348,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session,
 	n, copyErr := streamBody(w, resp.Body, meter)
 	sess.bytesDown.Add(n)
 
+	// The spend is known only now, after the body has been relayed, because
+	// it is read out of the body as it passes. The client can already hold
+	// the whole response — every byte of a Content-Length body — so its
+	// arrival does not mean the counters include it. The event below does:
+	// it is emitted on this goroutine after them.
 	u := meter.result()
 	sess.inTok.Add(u.input)
 	sess.outTok.Add(u.output)

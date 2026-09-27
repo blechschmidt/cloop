@@ -86,6 +86,12 @@ type harness struct {
 
 	mu     sync.Mutex
 	events []Event
+
+	// served counts the requests the proxy has returned from. servedMore is
+	// closed, and replaced, whenever it moves, so waitServed can block on it
+	// instead of polling.
+	served     int
+	servedMore chan struct{}
 }
 
 const hubUpstreamKey = "sk-ant-hub-credential-never-leaves"
@@ -93,7 +99,7 @@ const hubUpstreamKey = "sk-ant-hub-credential-never-leaves"
 func newHarness(t *testing.T, mutate ...func(*MintRequest)) *harness {
 	t.Helper()
 	up := newFakeAnthropic(t)
-	h := &harness{t: t, up: up}
+	h := &harness{t: t, up: up, servedMore: make(chan struct{})}
 
 	h.reg = NewRegistry("https://hub.example.com/api/ci/anthropic")
 	h.reg.OnEvent = func(e Event) {
@@ -110,12 +116,47 @@ func newHarness(t *testing.T, mutate ...func(*MintRequest)) *harness {
 		t.Fatalf("New: %v", err)
 	}
 	h.proxy = px
-	h.front = httptest.NewServer(px)
+	h.front = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer h.markServed()
+		px.ServeHTTP(w, r)
+	}))
 	t.Cleanup(h.front.Close)
 
 	m := testMint(t, h.reg, mutate...)
 	h.token, h.sess = m.Token, m.Session
 	return h
+}
+
+func (h *harness) markServed() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.served++
+	close(h.servedMore)
+	h.servedMore = make(chan struct{})
+}
+
+// waitServed blocks until the proxy has returned from n requests.
+//
+// A response in hand does not mean the proxy is finished with it. The relay
+// reads a request's spend out of the body as it passes, so the session's
+// token counters move, and EventRelayAllowed is emitted, only after the last
+// byte has been written — and a client reading a Content-Length body already
+// has every byte of it by then. A test that reads Usage() or the events on
+// the strength of the response alone is racing that bookkeeping.
+//
+// There is no timeout because this adds no new way to hang: it is the wait
+// httptest.Server.Close performs at cleanup, moved ahead of the assertions.
+func (h *harness) waitServed(n int) {
+	h.t.Helper()
+	for {
+		h.mu.Lock()
+		done, more := h.served >= n, h.servedMore
+		h.mu.Unlock()
+		if done {
+			return
+		}
+		<-more
+	}
 }
 
 // do sends a request through the proxy exactly as a pipeline would, with
@@ -369,7 +410,8 @@ func TestE2E_MetersUsageFromABufferedResponse(t *testing.T) {
 	if resp := h.do("POST", "/v1/messages", validBody); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	// Drain so the relay completes before the counters are read.
+	// The relay records the spend after the client already has the body.
+	h.waitServed(1)
 	u := h.sess.Usage()
 	if u.InputTokens != 11 || u.OutputTokens != 7 || u.CacheRead != 3 || u.CacheWrite != 2 {
 		t.Errorf("usage = %+v, want input 11 / output 7 / cacheRead 3 / cacheWrite 2", u)
@@ -442,6 +484,10 @@ func TestE2E_StreamsAndMetersServerSentEvents(t *testing.T) {
 		t.Errorf("the final delta did not reach the client:\n%s", joined)
 	}
 
+	// EOF waits for the proxy here only because this upstream answers
+	// chunked. Had it declared a Content-Length, the relay would pass that on
+	// and the client could reach EOF before the spend was recorded.
+	h.waitServed(1)
 	u := h.sess.Usage()
 	if u.InputTokens != 40 {
 		t.Errorf("InputTokens = %d, want 40", u.InputTokens)
