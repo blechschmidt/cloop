@@ -14,12 +14,15 @@ import (
 // SuiteCase describes one chaos test case. The default suite covers every
 // FaultType in turn; callers can extend or subset it via WithCases.
 type SuiteCase struct {
+	// Fault is injected when the case runs. Until-StartedAt is its window,
+	// which Run measures from the start of the case rather than from when
+	// the case was built; a Fault with no StartedAt keeps Until as given.
 	Fault       Fault
 	Description string
 	// Probe is the function the suite runs against the system under test
 	// while the fault is active. It returns the outcome and a short detail
-	// string. Probes must complete inside Fault.Until or the suite considers
-	// the run "degraded".
+	// string. Probes must complete inside the fault's window or the suite
+	// considers the run "degraded".
 	Probe func(ctx context.Context) (Outcome, string)
 }
 
@@ -151,7 +154,20 @@ func (s *Suite) Run(ctx context.Context) ([]Run, error) {
 
 		// Inject the fault and run the probe with the controller's per-fault
 		// duration as an upper bound — even a hung probe can't outlast it.
+		//
+		// That duration is the case's own window, measured from the start of
+		// the case. Cases arrive with Until already set — DefaultCases stamps
+		// them all when it builds the list — so Until-StartedAt is the length
+		// a case asked for; read as a deadline, Until would be shared with
+		// every case before it. That starved the last one: the
+		// provider-timeout probe spends 1.5s by design, which left sqlite-busy
+		// under half a second of its two, and a loaded runner spent that
+		// opening the database.
+		window := c.Fault.Duration()
 		c.Fault.StartedAt = startedAt
+		if window > 0 {
+			c.Fault.Until = startedAt.Add(window)
+		}
 		if err := s.Controller.Inject(c.Fault); err != nil {
 			r := Run{
 				ID: runID, FaultType: c.Fault.Type, StartedAt: startedAt,

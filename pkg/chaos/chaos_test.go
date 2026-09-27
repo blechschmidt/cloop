@@ -412,6 +412,48 @@ func TestSuiteRunsAllFaults(t *testing.T) {
 	}
 }
 
+// TestSuiteMeasuresEachWindowFromTheCaseStart pins what a case's Until means
+// to Run: the length of the case's window, not a deadline fixed when the case
+// was built. Read as a deadline, every case shared one clock with the cases
+// before it, and the last of DefaultCases got what its predecessors left.
+func TestSuiteMeasuresEachWindowFromTheCaseStart(t *testing.T) {
+	dir := t.TempDir()
+	c := NewController(dir)
+	prev := SetGlobal(c)
+	t.Cleanup(func() { SetGlobal(prev) })
+
+	// Built an hour before the suite runs: its one-minute window, taken
+	// literally, closed long ago.
+	built := time.Now().Add(-time.Hour)
+	var active bool
+	var deadline time.Time
+	s := &Suite{WorkDir: dir, Controller: c, Cases: []SuiteCase{{
+		Fault: Fault{
+			Type: FaultProvider429, Probability: 1.0,
+			StartedAt: built, Until: built.Add(time.Minute),
+		},
+		Probe: func(ctx context.Context) (Outcome, string) {
+			active = c.ShouldInject(FaultProvider429)
+			deadline, _ = ctx.Deadline()
+			return OutcomeRecovered, "probed"
+		},
+	}}}
+	runs, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Suite.Run: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome != OutcomeRecovered {
+		t.Fatalf("runs = %+v, want the one case to run and recover", runs)
+	}
+	if !active {
+		t.Error("the fault was not active while its own probe ran")
+	}
+	if want := runs[0].StartedAt.Add(time.Minute); !deadline.Equal(want) {
+		t.Errorf("probe deadline = %s, want the case start + its one-minute window (%s)",
+			deadline.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}
+
 // TestBusyHolderHoldsWriteLock proves the SQLite chaos primitive actually
 // blocks contending writers — the realistic SQLITE_BUSY scenario the rest of
 // cloop's WAL+busy_timeout work is designed to survive.
