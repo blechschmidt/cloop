@@ -72,6 +72,12 @@ type EgressFilter struct {
 	AllowPublicInternet bool
 	Resolvers           []string
 
+	// DenyCIDRs are ranges the sandbox may never reach, dropped ahead of
+	// every allow (Task 20345). A deny list only ever takes reach away, so
+	// unlike the allow list it needs no port list and no privilege beyond
+	// the one the filter already has.
+	DenyCIDRs []string
+
 	// AllowAllPorts waives the port restriction that accompanies a
 	// destination allow. It is not operator-settable — pkg/config has no key
 	// for it — and exists for the per-project scopes in effectiveFilter,
@@ -153,6 +159,14 @@ func (f EgressFilter) input() (netfilter.Input, error) {
 				"allow_cidrs[%d]: %q is not a CIDR (want a form like 10.0.0.0/8 or 2001:db8::/32)", i, c)
 		}
 		in.AllowCIDRs = append(in.AllowCIDRs, p)
+	}
+	for i, c := range f.DenyCIDRs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(c))
+		if err != nil {
+			return netfilter.Input{}, fmt.Errorf(
+				"deny_cidrs[%d]: %q is not a CIDR (want a form like 10.0.0.0/8 or 2001:db8::/32)", i, c)
+		}
+		in.DenyCIDRs = append(in.DenyCIDRs, p)
 	}
 	for i, p := range f.AllowPorts {
 		if p <= 0 || p > 65535 {
@@ -448,19 +462,28 @@ func validateNetworkName(name string) error {
 // be installed would produce exactly the unrestricted egress the filter was
 // configured to prevent, and it would do it silently — the operator asked for
 // a firewall and would get a working sandbox with no sign that it has none.
-func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressScope) (string, error) {
+//
+// The second return is the resolvers the sandbox should be told to use (Task
+// 20345). A filter that drops private address space also drops the resolver
+// the runtime hands a container by default — on a cloud VM that is usually a
+// provider resolver in CGNAT or link-local space, 100.100.2.136 on the host
+// this was measured on — and the embedded DNS forwarder sends its upstream
+// queries from the container's own namespace, through this filter. Opening
+// the configured resolvers without also pointing the sandbox at them would
+// leave every lookup going somewhere the filter drops.
+func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressScope) (string, []string, error) {
 	f, err := e.effectiveFilter(scope)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !f.Enabled {
-		return e.opts.Network, nil
+		return e.opts.Network, nil, nil
 	}
 
 	name := networkName(e.id, scope)
 	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !f.filtersDirectly() {
 		// --internal alone: the runtime installs no route off the bridge,
@@ -475,26 +498,45 @@ func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressSco
 		// costs one nft call on the common path and closes the case where
 		// the configuration moved and the kernel did not.
 		if err := e.removeFirewall(ctx, scope); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return name, nil
+		return name, nil, nil
 	}
 
 	policy, err := f.Policy()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	applier, err := netfilter.NewApplier()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
 		Table:  firewallTable(e.id, scope),
 		Bridge: bridge,
 	}); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return name, nil
+	return name, sandboxResolvers(f.Resolvers), nil
+}
+
+// sandboxResolvers turns the filter's resolver list into the addresses the
+// runtime's --dns flag takes.
+//
+// Only resolvers on the standard port qualify: --dns names an address and
+// nothing else, so a resolver on :5353 is reachable through the filter but
+// cannot be made the sandbox's default, and naming it anyway would send
+// lookups to port 53 of a host that is not listening there.
+func sandboxResolvers(resolvers []string) []string {
+	var out []string
+	for _, r := range resolvers {
+		ap, err := parseEndpoint(r, 53)
+		if err != nil || ap.Port() != 53 {
+			continue
+		}
+		out = append(out, ap.Addr().String())
+	}
+	return out
 }
 
 // effectiveFilter resolves the executor's configured filter against one
@@ -522,13 +564,31 @@ func (e *Executor) effectiveFilter(scope executor.EgressScope) (EgressFilter, er
 	// Case 1: the executor is unfiltered. The project is narrowing "everything"
 	// down to "public only", which is the plainest form of the request.
 	//
-	// Case 2: the executor already filters direct egress. The project's scope
-	// narrows it further, so the CIDR allow list — the operator's grant of
-	// reach into private space — is dropped and the rest is kept. What survives
-	// is the infrastructure a sandbox cannot work without: the resolvers, and
-	// the broker if one is configured.
+	// Case 2: the executor already filters direct egress *and* lets sandboxes
+	// out to the public Internet. The project's scope narrows it further, so
+	// the CIDR allow list — the operator's grant of reach into private space —
+	// is dropped and the rest is kept. What survives is the infrastructure a
+	// sandbox cannot work without: the resolvers, the broker if one is
+	// configured, and the operator's deny list, which a narrowing must never
+	// shed.
 	//
-	// Case 3 is the one that cannot be honoured, and it is handled below.
+	// Cases 3 and 4 are the ones that cannot be honoured, and they are
+	// handled below.
+	if f.Enabled && f.filtersDirectly() && !f.AllowPublicInternet {
+		// Case 4 (Task 20345): the executor filters direct egress but never
+		// allowed the public Internet — it reaches, say, 10.8.0.0/24 and
+		// nothing else. "The public Internet only" is not a subset of that; it
+		// trades the operator's private grant for every public address, on the
+		// strength of a repo-committed file. Until Task 20345 this case fell
+		// through to case 2 and did exactly that.
+		return EgressFilter{}, fmt.Errorf(
+			"%w: this project requests the %q egress scope, but executor %s's firewall does not "+
+				"allow the public Internet — the scope asks for more reach than the executor "+
+				"grants, not less. Drop capabilities.egress from .cloop/sandbox.yaml to inherit "+
+				"the executor's firewall, or bind the project to an executor whose firewall allows "+
+				"the public Internet",
+			executor.ErrUnsupported, scope, e.id)
+	}
 	if f.Enabled && f.Internal && !f.filtersDirectly() {
 		// Internal means the runtime installs no route off the bridge: the
 		// sandbox's only path out is the egress broker's hostname allowlist.
@@ -561,6 +621,9 @@ func (e *Executor) effectiveFilter(scope executor.EgressScope) (EgressFilter, er
 		HostPatterns: f.HostPatterns,
 		Resolvers:    f.Resolvers,
 		Broker:       f.Broker,
+		// The operator's denylist survives every narrowing: a scope removes
+		// reach, and dropping a deny would add some back.
+		DenyCIDRs: f.DenyCIDRs,
 	}
 	if len(out.Resolvers) == 0 {
 		// DNS is the failure this check exists to prevent, and it is invisible

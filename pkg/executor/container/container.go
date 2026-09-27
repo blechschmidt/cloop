@@ -193,6 +193,13 @@ type Options struct {
 	// ruleset on their bridge would firewall them too.
 	EgressFilter EgressFilter
 
+	// GroupAdd are supplementary group IDs every sandbox's user is given
+	// (--group-add), numeric and never 0 (Task 20345). They are how a device
+	// node that a udev rule assigned to a dedicated group becomes openable by
+	// an unprivileged sandbox without loosening the node's own mode; a
+	// virtual executor sets them from its device list.
+	GroupAdd []string
+
 	// HandleStore persists handle identity so this executor can reattach to
 	// its own containers after the control plane restarts (Task 20191). See
 	// rehydrate.go for what reattachment can and cannot rebuild.
@@ -256,6 +263,11 @@ func (o Options) Normalize() (Options, error) {
 		o.OrphanGracePeriod = DefaultOrphanGracePeriod
 	}
 	o.OCIRuntime = strings.TrimSpace(o.OCIRuntime)
+	for _, g := range o.GroupAdd {
+		if n, err := strconv.Atoi(strings.TrimSpace(g)); err != nil || n <= 0 {
+			return o, fmt.Errorf("container: group_add %q must be a positive numeric group ID", g)
+		}
+	}
 	if err := ValidateImageRef(o.Image); err != nil {
 		return o, err
 	}
@@ -535,7 +547,14 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// expose. Whether the *hardware* is present is a different question,
 		// answered by Preflight rather than here — this field says the driver
 		// honours the field, not that /dev/ttyUSB0 exists.
-		SupportsDevices: true,
+		//
+		// Except under a runtime that serves /dev from a kernel of its own.
+		// Measured on a gVisor host (Task 20345): the node is created in the
+		// sandbox and every open of it fails with ENXIO, and Kata can only give
+		// a guest a device through VFIO. Advertising the field there produced a
+		// sandbox that started, looked configured, and could not touch the
+		// hardware it existed for.
+		SupportsDevices: !executor.IsKernelIsolatedRuntime(e.opts.OCIRuntime),
 		// Interfaces are a narrower claim than devices and cannot be made
 		// unconditionally: the move needs ip(8), CAP_NET_ADMIN on the host,
 		// and a runtime whose kernel will observe a link that arrives after
@@ -643,11 +662,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// passed on so the network and the table are keyed by the pair; see
 	// networkName.
 	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter()) && req.Network != NetworkNone {
-		network, ferr := e.installFirewall(ctx, spec.EgressScope)
+		network, dns, ferr := e.installFirewall(ctx, spec.EgressScope)
 		if ferr != nil {
 			return executor.Handle{}, ferr
 		}
 		req.Network = network
+		req.DNS = dns
 	}
 
 	// Resolve the image last, because it is the only step that can be slow:
@@ -1082,6 +1102,16 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		if err := executor.ValidateDevices(spec.Devices); err != nil {
 			return runRequest{}, err
 		}
+		// The same refusal Capabilities advertises, enforced where the flag is
+		// rendered: a Spec reaches this driver through placement, persistence
+		// and a remote agent, and not every path consults the capability.
+		if executor.IsKernelIsolatedRuntime(e.opts.OCIRuntime) {
+			return runRequest{}, fmt.Errorf("%w: the %s executor runs sandboxes under %q, which serves "+
+				"device files from its own kernel, so the %s it was asked to pass through could not be "+
+				"opened inside the sandbox; use the engine's default runtime for hardware access",
+				executor.ErrUnsupported, e.id, e.opts.OCIRuntime,
+				strings.Join(executor.DeviceNames(spec.Devices), ", "))
+		}
 		// Copied rather than aliased. The Spec outlives this request and is
 		// persisted by executorstore, so a driver that mutated the slice would
 		// be rewriting the record of what was dispatched.
@@ -1169,6 +1199,7 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	} else {
 		req.User = e.sandboxUser(workDir)
 	}
+	req.GroupAdd = append([]string(nil), e.opts.GroupAdd...)
 
 	// Environment: names into argv, values into the runtime CLI's own
 	// environment. A nil Spec.Env forwards nothing (see the package doc).

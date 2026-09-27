@@ -24,6 +24,7 @@ package container
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,6 +149,16 @@ type runRequest struct {
 	Network string
 	// AddHosts pins name→address resolution as "host:ip" entries.
 	AddHosts []string
+	// DNS are the resolvers the sandbox is told to use (--dns), as address
+	// literals. Set only when an egress filter opened exactly these; see
+	// installFirewall for why the two have to travel together.
+	DNS []string
+
+	// GroupAdd are supplementary group IDs for the workload's user
+	// (--group-add), numeric and never 0. They exist so a device node owned by
+	// a dedicated group — the udev convention for USB hardware — can be
+	// opened by an unprivileged sandbox without widening the node itself.
+	GroupAdd []string
 
 	// Devices are host device nodes to expose, already validated by
 	// executor.ValidateDevices. They are rendered as --device and are the
@@ -298,6 +309,28 @@ func buildRunArgs(req runRequest) (builtCommand, error) {
 			return builtCommand{}, err
 		}
 		args = append(args, "--add-host", h)
+	}
+	if len(req.DNS) > 0 && network == NetworkNone {
+		// Both runtimes refuse --dns alongside --network=none, and a sandbox
+		// with no interfaces has nothing to resolve through anyway.
+		req.DNS = nil
+	}
+	for _, d := range req.DNS {
+		a, err := netip.ParseAddr(strings.TrimSpace(d))
+		if err != nil {
+			return builtCommand{}, fmt.Errorf("container: dns %q is not an address literal", d)
+		}
+		args = append(args, "--dns", a.String())
+	}
+	for _, g := range req.GroupAdd {
+		n, err := strconv.Atoi(strings.TrimSpace(g))
+		if err != nil || n <= 0 {
+			// Root's group is refused here as well as where the value was
+			// chosen: GID 0 inside a rootful sandbox is GID 0 on the host for
+			// every file a bind mount exposes.
+			return builtCommand{}, fmt.Errorf("container: --group-add %q must be a positive numeric group ID", g)
+		}
+		args = append(args, "--group-add", strconv.Itoa(n))
 	}
 
 	// --- Devices ------------------------------------------------------

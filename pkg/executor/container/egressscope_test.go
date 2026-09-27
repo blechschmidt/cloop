@@ -103,12 +103,18 @@ func TestEgressScopePublicAllowsEveryPort(t *testing.T) {
 // rests on: a scope removes reach and never adds it. An executor configured to
 // let sandboxes into 10.0.0.0/8 must not let a scoped project in there just
 // because the executor's policy says so.
+//
+// The executor here also allows the public Internet. Before Task 20345 the
+// fixture did not, and the test passed while the scope handed a project the
+// whole public Internet on an executor that had only ever granted 10.0.0.0/8 —
+// see TestEgressScopePublicRefusedWhenTheExecutorHasNoInternet.
 func TestEgressScopeNarrowsAnOperatorsCIDRGrant(t *testing.T) {
 	ex := scopedExecutor(t, EgressFilter{
-		Enabled:    true,
-		AllowCIDRs: []string{"10.0.0.0/8"},
-		AllowPorts: []int{443},
-		Resolvers:  []string{"10.0.0.53:53"},
+		Enabled:             true,
+		AllowCIDRs:          []string{"10.0.0.0/8"},
+		AllowPublicInternet: true,
+		AllowPorts:          []int{443},
+		Resolvers:           []string{"10.0.0.53:53"},
 	})
 
 	// Without a scope the executor's own grant stands — the control, without
