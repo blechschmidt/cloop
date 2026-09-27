@@ -2,15 +2,14 @@ package orchestrator
 
 // Goroutine-leak regression test for the runPMParallel fan-out path.
 //
-// runPMParallel spawns one goroutine per ready task plus one wg.Wait
-// closer goroutine per round. On the happy path each worker exits when
-// its provider's Complete call returns, the closer's wg.Wait unblocks
-// and it close()s waitDone, the outer select's `<-waitDone` returns,
-// and the round proceeds to result processing. A regression that left
-// any of these goroutines pinned (e.g. a missed wg.Done after a new
-// branch, a closer that blocked on a never-receiving channel, a
-// per-task ctx whose cancel wasn't deferred) would scale linearly with
-// the number of orchestrator invocations.
+// runPMParallel spawns one goroutine per ready task per round. On the
+// happy path each worker exits once its provider's Complete call
+// returns and it has sent its result, which the round consumes as it
+// arrives. A regression that left any of these goroutines pinned (e.g.
+// a worker that never sent its result after a new branch, a send that
+// blocked on a channel nobody drains, a per-task ctx whose cancel
+// wasn't deferred) would scale linearly with the number of
+// orchestrator invocations.
 //
 // This test mirrors the macroscopic shape of the WS+SSE
 // (pkg/ui/goroutine_leak_test.go) and consensus/compare
@@ -57,9 +56,8 @@ func settleOrchGoroutineCount() int {
 // round actually exercises the fan-out (>1 worker per round).
 //
 // Catches regressions in:
-//   - per-task wg.Done deferral
+//   - every worker sending exactly one result
 //   - per-task ctx cancel deferral
-//   - wg.Wait closer goroutine teardown
 //   - safeComplete's panic-recovery cleanup
 func TestRunPMParallel_NoGoroutineLeak(t *testing.T) {
 	prov := &safeProvider{name: "mock", output: "ok\nTASK_DONE"}

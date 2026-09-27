@@ -89,6 +89,11 @@ const (
 	EventVerify      Event = "verify"
 	EventCheckpoint  Event = "checkpoint"
 
+	// EventTaskInterrupted tags a task returned to pending because its run
+	// stopped while it was executing (Task 20348). Like an abort it is not a
+	// failure, so it gets its own name rather than EventTaskFailed.
+	EventTaskInterrupted Event = "task_interrupted"
+
 	// EventAuthz tags access-control decisions and failures of the
 	// authorization machinery itself (Task 20164). Decisions are also
 	// written to the tamper-evident audit log; these entries exist so an

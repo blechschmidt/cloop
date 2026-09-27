@@ -1032,8 +1032,9 @@ func (s *Server) handleRunStop(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "no run currently in progress", http.StatusConflict)
 		return
 	}
-	// Interrupt rather than kill: cloop traps SIGINT to checkpoint before
-	// exiting, so a killed run loses the work of the task in flight.
+	// Interrupt rather than kill: cloop traps SIGINT and returns the task in
+	// flight to pending before exiting, while a killed run leaves it
+	// in_progress until the next run's recovery pass resets it.
 	if err := ex.Signal(r.Context(), handle.ID, executor.SignalInterrupt); err != nil {
 		jsonErr(w, "failed to stop run: "+err.Error(), http.StatusInternalServerError)
 		return

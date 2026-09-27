@@ -484,6 +484,9 @@ function _eventVisuals(kind) {
     // back in the queue rather than being judged, so the row must not read as
     // a terminal outcome.
     case 'task_aborted':        return { glyph:'⚠', cls:'ev-task-abort',  label:'aborted'   };
+    // The run stopped while the task was executing, so the task went back to
+    // pending for the next run. Not a verdict on the task, so not 'failed'.
+    case 'task_interrupted':    return { glyph:'⏸', cls:'ev-task-status', label:'interrupted'};
     case 'evolve_round_start':  return { glyph:'↻', cls:'ev-evolve',      label:'evolve'    };
     case 'evolve_discovered':   return { glyph:'✨', cls:'ev-evolve',      label:'discovered'};
     case 'evolve_no_op':        return { glyph:'—', cls:'ev-evolve',      label:'no-op'     };

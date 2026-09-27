@@ -3354,11 +3354,14 @@ func (s *Server) consumeRunOutput(workDir string, ex executor.Executor, handleID
 	}
 }
 
-// handleStop sends SIGINT to the "cloop run" processes of the requested
-// project (?project_idx=N, falling back to the server's WorkDir). It is
-// project-scoped via a /proc cwd walk — the pre-fix handler signalled
-// *every* cloop run on the host, so pressing Stop on one project's page
-// terminated unrelated projects' runs (Task 20153).
+// handleStop interrupts the run of the requested project (?project_idx=N,
+// falling back to the server's WorkDir): the run returns the task it was
+// working on to pending and pauses, so the next start resumes it. See
+// interruptRun for how the run is reached — through the executor the hub
+// dispatched it to, and a /proc cwd walk for runs started by hand. Both are
+// project-scoped — the pre-fix handler signalled *every* cloop run on the
+// host, so pressing Stop on one project's page terminated unrelated
+// projects' runs (Task 20153).
 //
 // When no live process exists but persisted state still says the project is
 // running (the run was SIGKILLed, OOM-killed, or the host rebooted before
@@ -3371,8 +3374,12 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
-	pids := multiui.CloopRunPIDsInDir(workDir)
-	if len(pids) == 0 {
+	d := s.interruptRun(workDir)
+	if msg, failed := d.failure(); failed {
+		jsonOK(w, map[string]interface{}{"ok": false, "message": msg})
+		return
+	}
+	if d.Signalled == 0 {
 		if s.reconcileDeadRun(workDir, runVerdict{}) {
 			jsonOK(w, map[string]interface{}{"ok": true, "message": "no running process found — cleared stale running status"})
 			return
@@ -3380,13 +3387,8 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]interface{}{"ok": false, "message": "no running cloop process found"})
 		return
 	}
-	signalled := signalPIDs(pids, syscall.SIGINT)
-	if signalled == 0 {
-		jsonOK(w, map[string]interface{}{"ok": false, "message": "found cloop processes but signalling failed (permission denied?)"})
-		return
-	}
 	s.observeRunExit(workDir)
-	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent", "signalled": signalled})
+	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent", "signalled": d.Signalled})
 }
 
 // observeRunExit watches for the signalled run to actually exit and then
@@ -6263,19 +6265,25 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "command": strings.Join(args, " ")})
 }
 
-// handleProjectStop sends SIGINT to `cloop run` processes in the given project directory.
+// handleProjectStop interrupts the run of the given project, exactly as
+// handleStop does for the selected one.
 func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.projectAtIdx(w, r)
 	if !ok {
 		return
 	}
-	// Project-scoped: only signal cloop run processes whose cwd matches
-	// entry.Path. The pre-fix implementation shelled out to
-	// `pkill -SIGINT -f "cloop run"`, which signalled *every* cloop run on
-	// the host — pressing stop on project A killed runs for B, C, etc.
-	pids := multiui.CloopRunPIDsInDir(entry.Path)
-	if len(pids) == 0 {
-		// No live process: if state still claims the project is running (the
+	// Project-scoped: only this project's workload and the cloop run
+	// processes whose cwd matches entry.Path. The pre-fix implementation
+	// shelled out to `pkill -SIGINT -f "cloop run"`, which signalled *every*
+	// cloop run on the host — pressing stop on project A killed runs for B,
+	// C, etc.
+	d := s.interruptRun(entry.Path)
+	if msg, failed := d.failure(); failed {
+		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": msg})
+		return
+	}
+	if d.Signalled == 0 {
+		// Nothing running: if state still claims the project is running (the
 		// run died without writing a terminal status), clear it so the card
 		// stops offering a Stop button that can never succeed (Task 20153).
 		if s.reconcileDeadRun(entry.Path, runVerdict{}) {
@@ -6285,16 +6293,11 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "no running process found"})
 		return
 	}
-	signalled := signalPIDs(pids, syscall.SIGINT)
-	if signalled == 0 {
-		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "found cloop processes but signalling failed (permission denied?)"})
-		return
-	}
-	// SIGINT was delivered but the child may take a moment to exit. Watch for
-	// the exit and re-broadcast run_state + projects so the UI reflects the
-	// stop without client polling (Task 20126).
+	// The interrupt was delivered but the run may take a moment to exit. Watch
+	// for the exit and re-broadcast run_state + projects so the UI reflects
+	// the stop without client polling (Task 20126).
 	s.observeRunExit(entry.Path)
-	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "signalled": signalled})
+	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "signalled": d.Signalled})
 }
 
 // handleProjectNew creates a new cloop project directory, initialises it, and

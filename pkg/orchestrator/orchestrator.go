@@ -1799,6 +1799,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// A stop that landed while the checks above ran must not start the
+		// task: its provider call would fail at once, and the attempt recorded
+		// would be one that never began. The top of the loop pauses the run.
+		if runInterrupted(ctx) {
+			continue
+		}
+
 		// Pre-task hook: skip the task if it exits non-zero.
 		if hookErr := hooks.RunPreTask(o.config.Hooks, hooks.TaskContext{
 			ID:     task.ID,
@@ -1952,6 +1959,28 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// requeueIfInterrupted returns the task to pending when the run has
+		// stopped under it (Task 20348), and reports whether it did. Every
+		// place below where an execution can end in an error asks it first,
+		// because an error caused by the run ending is not the task's. Git
+		// mode returns to the branch the run started from, as the failure path
+		// does, so the next run branches from the same base rather than from
+		// this task's branch.
+		requeueIfInterrupted := func(stage string) bool {
+			if !runInterrupted(ctx) {
+				return false
+			}
+			o.requeueInterrupted(task, stage, s.CurrentStep)
+			_ = o.queue.MarkFailed(queueID, interruptedQueueNote)
+			if gitTaskBranch != "" {
+				if err := cloopgit.CheckoutBranch(o.config.WorkDir, gitOriginalBranch); err != nil {
+					dimColor.Printf("  git checkout original branch error (ignored): %v\n", err)
+				}
+			}
+			s.Save()
+			return true
+		}
+
 		// Select provider: role-specific route takes precedence over default.
 		taskProvider := o.router.For(task.Role)
 		start := time.Now()
@@ -2000,6 +2029,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				projCtxStr,
 			)
 			if maErr != nil {
+				if requeueIfInterrupted("while the multi-agent pipeline was running") {
+					continue
+				}
 				if isTimeoutErr(taskCtx, maErr) {
 					budgetMin := o.effectiveTaskBudgetMinutes(task)
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
@@ -2060,6 +2092,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					task.Title,
 				)
 				if cErr != nil {
+					if requeueIfInterrupted("while the consensus providers were running") {
+						continue
+					}
 					if isTimeoutErr(taskCtx, cErr) {
 						budgetMin := o.effectiveTaskBudgetMinutes(task)
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
@@ -2135,6 +2170,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					_ = liveFile.Close()
 				}
 				if err != nil {
+					if requeueIfInterrupted("while the agent was working on it") {
+						continue
+					}
 					if isTimeoutErr(taskCtx, err) {
 						budgetMin := o.effectiveTaskBudgetMinutes(task)
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
@@ -2293,6 +2331,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			// currentHealVariant tracks the variant used across heal iterations.
 			currentHealVariant := activeVariant
+			// healInterrupted is set when the run stopped in the middle of a
+			// heal. The TASK_FAILED that started the heal is then not the
+			// task's final word: it was denied the retries that would have
+			// decided it, so it goes back to pending instead (Task 20348).
+			healInterrupted := false
 			for healAttempt := 1; healAttempt <= maxHealRetries && signal == pm.TaskFailed; healAttempt++ {
 				task.HealAttempts++
 				// Enqueue this heal attempt as its own queue entry so the UI shows
@@ -2329,6 +2372,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				diag, diagErr := diagnosis.AnalyzeFailure(taskCtx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
+					if runInterrupted(ctx) {
+						_ = o.queue.MarkFailed(healQueueID, interruptedQueueNote)
+						healInterrupted = true
+						break
+					}
 					_ = o.queue.MarkFailed(healQueueID, fmt.Sprintf("diagnosis error: %v", diagErr))
 					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
 					// Audit-trail accuracy: without this annotation, operators
@@ -2363,6 +2411,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healOpts, healWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
+					if runInterrupted(ctx) {
+						_ = o.queue.MarkFailed(healQueueID, interruptedQueueNote)
+						healInterrupted = true
+						break
+					}
 					_ = o.queue.MarkFailed(healQueueID, truncate(healErr.Error(), 200))
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider error: %v", healAttempt, maxHealRetries, healErr))
@@ -2405,6 +2458,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					healColor.Printf("[HEAL attempt %d/%d] Task %d still failing — %s\n\n", healAttempt, maxHealRetries, task.ID, truncate(taskOutput, 120))
 				}
 			}
+			if healInterrupted && requeueIfInterrupted("during an auto-heal retry") {
+				continue
+			}
 			// Heal exhaustion: when every attempt was made and the task is
 			// still TaskFailed, emit a single summary annotation so operators
 			// can grep for "Heal exhausted" without having to count per-attempt
@@ -2436,6 +2492,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// claim that misleads when the loop errored, returned
 				// empty, or exhausted retries with the LLM still asking.
 				clarifyOutcome := fmt.Sprintf("Clarification auto-resolve exhausted: LLM still asked questions after %d attempts.", maxClarifyRetries)
+				// Set when the run stopped during a re-prompt: the questions
+				// were never answered, so the task has no outcome to judge.
+				clarifyInterrupted := false
 				for clarifyAttempt := 1; clarifyAttempt <= maxClarifyRetries; clarifyAttempt++ {
 					if !o.log.IsJSON() {
 						color.New(color.FgCyan).Printf("[AUTO-RESOLVE %d/%d] LLM asked questions instead of completing task %d — re-prompting to proceed autonomously\n", clarifyAttempt, maxClarifyRetries, task.ID)
@@ -2448,6 +2507,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 					clarifyResult, clarifyErr := safeComplete(taskCtx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
+						if runInterrupted(ctx) {
+							clarifyInterrupted = true
+							break
+						}
 						clarifyOutcome = fmt.Sprintf("Clarification auto-resolve aborted on attempt %d/%d: provider error: %v.", clarifyAttempt, maxClarifyRetries, clarifyErr)
 						break
 					}
@@ -2478,6 +2541,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						clarifyOutcome = fmt.Sprintf("Clarification auto-resolved on attempt %d/%d — LLM proceeded autonomously.", clarifyAttempt, maxClarifyRetries)
 						break
 					}
+				}
+				if clarifyInterrupted && requeueIfInterrupted("while re-prompting after clarification questions") {
+					continue
 				}
 				pm.AddAnnotation(task, "ai", clarifyOutcome)
 			}
@@ -3223,12 +3289,12 @@ type taskResult struct {
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
-// in-flight task goroutines to exit after the parent context is cancelled.
-// Workers' per-task contexts are derived from the parent, so a well-behaved
-// provider should return promptly on cancellation. This watchdog defends
-// against a misbehaving provider that ignores ctx.Done() and would otherwise
-// block wg.Wait() (and thus the orchestrator) indefinitely. Declared as var
-// so tests can shrink it.
+// in-flight task goroutines to report back after the parent context is
+// cancelled. Workers' per-task contexts are derived from the parent, so a
+// well-behaved provider should return promptly on cancellation. This watchdog
+// defends against a misbehaving provider that ignores ctx.Done() and would
+// otherwise hold the result loop (and thus the orchestrator) indefinitely.
+// Declared as var so tests can shrink it.
 var parallelShutdownGracePeriod = 30 * time.Second
 
 // runPMParallel runs all dependency-ready tasks concurrently in each round,
@@ -3608,6 +3674,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			ready = ready[:maxParallel]
 		}
 
+		// A stop that landed while the gates above ran must not launch the
+		// batch (Task 20348): every provider call would fail at once, for
+		// attempts that never began. The top of the loop pauses the run.
+		if runInterrupted(ctx) {
+			continue
+		}
+
 		// Mark all ready tasks as in-progress before starting goroutines.
 		// Each ready task is also enqueued in the central queue so the UI shows
 		// a row per parallel task. queueIDs[i] is the id of ready[i] — we reuse
@@ -3739,14 +3812,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			res taskResult
 		}
 		resultsCh := make(chan indexedResult, len(ready))
-		var wg sync.WaitGroup
 		for i, task := range ready {
-			wg.Add(1)
 			go func(idx int, t *pm.Task, prompt string, workDir string) {
-				defer wg.Done()
 				// Send exactly one result whether the body completes normally
-				// or panics. The defer below runs in LIFO order before
-				// wg.Done(), and recovers any panic from the provider call.
+				// or panics: the consumer below counts results, so a worker
+				// that sent none would stall the batch. The defer recovers any
+				// panic from the provider call.
 				// Panic recovery: a panic inside a provider implementation
 				// (e.g. nil-pointer in a third-party SDK, malformed JSON
 				// deref) would otherwise crash the entire orchestrator
@@ -3797,13 +3868,6 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
-		// Closer: signal end-of-batch once every worker has emitted its
-		// result. Used by the cancellation path's grace-period drain.
-		waitDone := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(waitDone)
-		}()
 
 		// Consume results in completion order so each task's terminal status
 		// is persisted (and pushed to the UI via WebSocket) the moment it
@@ -3811,28 +3875,48 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// when running multiple tasks in parallel.
 		parallelTotal := len(ready)
 		parallelDone := 0
+		// A stop does not abandon the batch where it stands (Task 20348). Every
+		// worker shares ctx, so each is already being cancelled, and the
+		// result each sends back is what decides its task: work that finished
+		// keeps its outcome, and work that was cut short returns to pending
+		// below. Abandoning the batch left every task in it in_progress, as if
+		// still running, until something recovered it — and a result read just
+		// before the cancellation was filed as a failure.
+		//
+		// runDone is watched until it fires, which arms grace. The grace period
+		// bounds the wait for a provider that ignores cancellation.
+		runDone := ctx.Done()
+		var grace *time.Timer
+		var graceC <-chan time.Time
 		for parallelDone < parallelTotal {
 			var ir indexedResult
 			select {
 			case ir = <-resultsCh:
 				// fall through to per-result processing below
-			case <-ctx.Done():
-				// Bounded wait: if a misbehaving provider ignores the per-task
-				// ctx, give workers a grace period to exit, then return early
-				// so the caller regains control. Leaked goroutines may still
-				// send to resultsCh afterward; the channel is buffered to
-				// len(ready) so the send never blocks, and no one reads it
-				// after we return.
-				select {
-				case <-waitDone:
-					// Workers honored cancellation within the grace period
-					// implicitly (drained before we even started the timer).
-				case <-time.After(parallelShutdownGracePeriod):
-					color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", parallelTotal-parallelDone, parallelShutdownGracePeriod)
+			case <-runDone:
+				runDone = nil
+				grace = time.NewTimer(parallelShutdownGracePeriod)
+				graceC = grace.C
+				continue
+			case <-graceC:
+				// Leaked goroutines may still send to resultsCh afterward; the
+				// channel is buffered to len(ready) so the send never blocks,
+				// and no one reads it after we return. Nothing in this process
+				// will finish their tasks, so they go back to pending now
+				// rather than waiting for the next run's recovery pass.
+				color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", parallelTotal-parallelDone, parallelShutdownGracePeriod)
+				mu.Lock()
+				for i, t := range ready {
+					if t.Status != pm.TaskInProgress {
+						continue
+					}
+					o.requeueInterrupted(t, "while the agent was working on it", s.CurrentStep)
+					_ = o.queue.MarkFailed(queueIDs[i], interruptedQueueNote)
 				}
 				s.SetPaused(pausereason.New(pausereason.CodeCancelled,
 					"run interrupted while parallel tasks were in flight"))
 				s.Save()
+				mu.Unlock()
 				return ctx.Err()
 			}
 			parallelDone++
@@ -3864,6 +3948,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 			}
 			if res.err != nil {
+				// Checked before the timeout: under a --timeout the task
+				// context inherits the session deadline, so an expired session
+				// reads as a task timeout too. Either way the run ending is
+				// what stopped the task, not anything it did.
+				if runInterrupted(ctx) {
+					cleanupWorktree(task.ID)
+					mu.Lock()
+					o.requeueInterrupted(task, "while the agent was working on it", s.CurrentStep)
+					_ = o.queue.MarkFailed(parallelQueueID, interruptedQueueNote)
+					s.Save()
+					mu.Unlock()
+					continue
+				}
 				if res.timedOut {
 					budgetMin := o.effectiveTaskBudgetMinutes(task)
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
@@ -4264,6 +4361,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				s.Save()
 				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 			}
+		}
+		// If the run was stopped, the whole batch reported back inside the
+		// grace period; the top of the loop sees the cancellation and pauses.
+		if grace != nil {
+			grace.Stop()
 		}
 	}
 

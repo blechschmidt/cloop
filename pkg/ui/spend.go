@@ -45,20 +45,16 @@ package ui
 // rather than left for a reader to assume the stronger one.
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/cost"
-	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
-	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -388,25 +384,16 @@ func (s *Server) enforceSpendBudget(workDir string) {
 
 // stopRunForBudget ends a run that has spent its budget.
 //
-// It asks the executor first and falls back to signalling host PIDs. The order
-// matters: for a container or an edge agent there are no local PIDs to signal,
-// and the host-only path this project used before executors existed would have
-// left exactly the isolated runs — the ones a hosted deployment cares most
-// about — running past their budget.
+// It goes through interruptRun, which asks the executor before signalling host
+// PIDs. The order matters: for a container or an edge agent there are no local
+// PIDs to signal, and the host-only path this project used before executors
+// existed would have left exactly the isolated runs — the ones a hosted
+// deployment cares most about — running past their budget. Interrupt rather
+// than kill: the orchestrator returns the task in flight to pending and
+// persists state. A budget overrun is not a reason to corrupt the plan of the
+// tenant who hit it.
 func (s *Server) stopRunForBudget(workDir string) {
-	if run, ok := s.trackedRun(workDir); ok && run.ex != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		// Interrupt rather than kill: the orchestrator handles SIGINT by
-		// finishing its in-flight step and persisting state. A budget overrun
-		// is not a reason to corrupt the plan of the tenant who hit it.
-		if err := run.ex.Signal(ctx, run.handleID, executor.SignalInterrupt); err == nil {
-			s.observeRunExit(workDir)
-			return
-		}
-	}
-	if pids := multiui.CloopRunPIDsInDir(workDir); len(pids) > 0 {
-		signalPIDs(pids, syscall.SIGINT)
+	if d := s.interruptRun(workDir); d.Signalled > 0 {
 		s.observeRunExit(workDir)
 	}
 }

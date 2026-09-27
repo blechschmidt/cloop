@@ -7,23 +7,24 @@ package orchestrator
 // happy path. parallel_shutdown_test.go's
 // TestRunPMParallel_HungProvider_HonoursGracePeriod guards the
 // watchdog's elapsed-time bound. Neither asserts goroutine accounting
-// on the cancellation path, so a regression that left workers or the
-// wg.Wait closer pinned per cancelled round (e.g. a missed defer
-// tTaskCancel(), a closer that blocked on a never-receiving channel
-// after the watchdog returned, a new branch that allocated a goroutine
-// without an exit signal) would scale linearly with cancelled rounds.
+// on the cancellation path, so a regression that left workers pinned
+// per cancelled round (e.g. a missed defer tTaskCancel(), a worker
+// blocked sending on a channel nobody drains after the watchdog
+// returned, a new branch that allocated a goroutine without an exit
+// signal) would scale linearly with cancelled rounds.
 //
 // Two scenarios are covered:
 //
 //  1. Honored cancellation: provider returns promptly when its
-//     ctx is cancelled. The natural <-waitDone branch fires inside
-//     the <-ctx.Done() arm. Asserts no leak after N cancelled rounds.
+//     ctx is cancelled, and the result loop drains the whole batch
+//     before the grace period ends. Asserts no leak after N cancelled
+//     rounds.
 //
 //  2. Watchdog-early-return path: provider ignores ctx and only
 //     returns when its own block channel closes. The watchdog fires,
 //     Run returns ctx.Err() while workers are still pinned. After we
-//     close the block channel and wait for the workers to drain, the
-//     closer goroutine also exits. Asserts no permanent leak after
+//     close the block channel, the workers send into the buffered
+//     results channel and exit. Asserts no permanent leak after
 //     N rounds + cleanup — i.e. the early-return path doesn't allocate
 //     any goroutine that survives once the providers eventually return.
 
@@ -41,8 +42,8 @@ import (
 
 // honoringProvider blocks on ctx.Done() and returns ctx.Err() when
 // cancelled. Models a well-behaved provider that respects per-task
-// cancellation, so the natural <-waitDone branch wakes up inside the
-// outer <-ctx.Done() arm.
+// cancellation, so every worker reports back inside the grace period
+// and the result loop drains the batch.
 type honoringProvider struct{}
 
 func (honoringProvider) Complete(ctx context.Context, _ string, _ provider.Options) (*provider.Result, error) {
@@ -55,10 +56,9 @@ func (honoringProvider) DefaultModel() string { return "honoring-model" }
 // TestRunPMParallel_HonoredCancellation_NoGoroutineLeak asserts that
 // after N cancelled rounds where workers honour ctx, NumGoroutine
 // returns to within orchGoroutineLeakSlack of baseline. Catches
-// regressions in per-task ctx cancel deferral, the wg.Wait closer
-// teardown when wg drains naturally under cancellation, and any new
-// per-round goroutine allocation that lacks a corresponding exit
-// signal.
+// regressions in per-task ctx cancel deferral, the grace timer armed by
+// the cancellation, and any new per-round goroutine allocation that
+// lacks a corresponding exit signal.
 func TestRunPMParallel_HonoredCancellation_NoGoroutineLeak(t *testing.T) {
 	prov := honoringProvider{}
 
@@ -159,16 +159,14 @@ func (*releasableStuckProvider) DefaultModel() string { return "releasable-stuck
 // asserts that the watchdog's early-return path doesn't leave any
 // permanently-pinned goroutines once the underlying providers
 // eventually return. Run returns while workers are still blocked; once
-// we close the release channel, every leaked worker exits, the
-// wg.Wait closer unblocks (its receiver is gone, but it only does
-// close(waitDone) and exits — it doesn't send on waitDone, so an
-// abandoned receiver isn't a problem), and NumGoroutine returns to
-// within slack of baseline.
+// we close the release channel, every leaked worker sends its result
+// into the buffered results channel (nobody reads it any more, and the
+// buffer is what keeps that send from blocking) and exits, and
+// NumGoroutine returns to within slack of baseline.
 //
 // Catches regressions in:
-//   - the wg.Wait closer goroutine (e.g. if it were ever changed to
-//     send on waitDone instead of close()ing, the abandoned receiver
-//     after watchdog return would pin it forever)
+//   - the results channel's buffer (a worker whose send blocked after
+//     the watchdog returned would be pinned forever)
 //   - any new per-round goroutine allocated on the early-return path
 //     that lacks an exit signal independent of the leaked workers
 //   - safeComplete's panic-recovery path under late-returning providers
@@ -250,16 +248,15 @@ func TestRunPMParallel_WatchdogEarlyReturn_NoLeakAfterProvidersDrain(t *testing.
 		}
 	}
 
-	// At this point N*2 worker goroutines + N closer goroutines are
-	// pinned waiting on their respective release channels. Release
-	// them all and wait for the runtime to settle.
+	// At this point N*2 worker goroutines are pinned waiting on their
+	// respective release channels. Release them all and wait for the
+	// runtime to settle.
 	for _, r := range releases {
 		close(r)
 	}
 
-	// Give the leaked goroutines time to: receive on release, write
-	// to results[idx], call wg.Done, the closer's wg.Wait unblocks,
-	// the closer calls close(waitDone) and exits. Each worker also
+	// Give the leaked goroutines time to: receive on release, send
+	// their result into the buffered channel and exit. Each worker also
 	// runs through artifact.OpenLiveArtifact + WriteString, which
 	// touches the filesystem. Be generous.
 	settled := false

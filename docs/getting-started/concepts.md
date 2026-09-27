@@ -168,7 +168,10 @@ Each iteration, before any provider call, the loop checks its **stop
 conditions** — cancellation (Ctrl-C), `--steps`, `--token-budget`, the
 project's `max_steps`, `--cost-limit`, the daily `budget` config, and on the
 `claudecode` provider the project's share of the Anthropic subscription. Any of
-them sets the run to `paused` and returns; `cloop run` resumes it. The loop
+them sets the run to `paused` and returns; `cloop run` resumes it. A
+cancellation that lands while a task is executing interrupts that task, and
+the task goes back to `pending` rather than being judged `failed`: resuming
+starts it again, and its dependants are not skipped. The loop
 then **re-reads the plan from disk**, merging externally-added tasks and
 resetting recurring tasks whose cron schedule has fired, and applies
 **deadlines**: overdue tasks are boosted to P1, and with `--auto-promote` tasks

@@ -33,7 +33,7 @@ func (s stuckProvider) DefaultModel() string { return "stuck-model" }
 // TestRunPMParallel_HungProvider_HonoursGracePeriod verifies that when the
 // parent context is cancelled and a provider ignores cancellation,
 // runPMParallel returns within the configured grace period instead of
-// blocking on wg.Wait() indefinitely.
+// waiting indefinitely for the workers' results.
 func TestRunPMParallel_HungProvider_HonoursGracePeriod(t *testing.T) {
 	prev := parallelShutdownGracePeriod
 	parallelShutdownGracePeriod = 100 * time.Millisecond
@@ -79,7 +79,7 @@ func TestRunPMParallel_HungProvider_HonoursGracePeriod(t *testing.T) {
 	// Allow generous slack: cancellation delay (~50ms) + grace period (100ms)
 	// + scheduler/CI noise. If we exceed 5s the watchdog clearly didn't fire.
 	if elapsed > 5*time.Second {
-		t.Fatalf("Run blocked for %s — watchdog did not bound wg.Wait", elapsed)
+		t.Fatalf("Run blocked for %s — the grace period did not bound the wait for results", elapsed)
 	}
 }
 

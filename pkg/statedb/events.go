@@ -71,6 +71,18 @@ const (
 	// the belief that they had shipped.
 	EventTaskAborted EventType = "task_aborted"
 
+	// EventTaskInterrupted records a task whose execution was cut short
+	// because its run stopped — the Stop button, a SIGINT or SIGTERM, a budget
+	// stop from the hub, a --timeout expiring — rather than because of
+	// anything the task did (Task 20348).
+	//
+	// Its own type for the same reason as task_aborted: the task goes back to
+	// pending, and a row that read as task_failed would be a false statement
+	// about work that was simply not allowed to finish. Filing interruptions as
+	// failures is what left stopped tasks terminal, and the tasks depending on
+	// them skipped, when the project was resumed.
+	EventTaskInterrupted EventType = "task_interrupted"
+
 	// EventResourceCeiling records that an operator's resource ceiling lowered
 	// what a workload was given (Task 20301).
 	//

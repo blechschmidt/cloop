@@ -2,10 +2,13 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -250,5 +253,151 @@ func TestBackgroundActivitySummary(t *testing.T) {
 	kept := &provider.BackgroundActivity{Detected: 1, Commands: []string{"srv"}, Waited: time.Minute}
 	if s := kept.Summary(); strings.Contains(s, "terminated") {
 		t.Errorf("kept orphans should not claim termination, got %q", s)
+	}
+}
+
+// processGone reports whether pid has exited. A zombie counts: it is dead and
+// only waiting for whichever ancestor adopted it to reap it.
+func processGone(pid int) bool {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return true
+	}
+	// The state field follows the parenthesised command name.
+	if i := strings.LastIndexByte(string(stat), ')'); i >= 0 && i+2 < len(stat) {
+		return stat[i+2] == 'Z'
+	}
+	return false
+}
+
+// readPID waits for a harness to write a pid to path and returns it.
+func readPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if raw, err := os.ReadFile(path); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("harness never wrote a pid to %s", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requireGone fails the test unless pid exits within a few seconds.
+func requireGone(t *testing.T, pid int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !processGone(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("%s (pid %d) is still running after the stop", what, pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestStopEndsTheBackgroundWait is the provider half of Task 20348. A stop
+// that arrived while cloop was waiting on background work was ignored until
+// the wait budget ran out — half an hour by default — so pressing Stop
+// appeared to do nothing. The wait must end with the stop, and the leftovers
+// must not outlive it: the task is about to be retried, and the retry must not
+// race them.
+func TestStopEndsTheBackgroundWait(t *testing.T) {
+	requireLinux(t)
+	pidFile := filepath.Join(t.TempDir(), "bg.pid")
+	fakeHarness(t, `nohup sleep 300 >/dev/null 2>&1 &
+echo $! > `+pidFile+`
+echo "TASK_DONE"`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &Provider{Background: BackgroundPolicy{
+		Grace:          100 * time.Millisecond,
+		Wait:           time.Hour,
+		TerminateGrace: 500 * time.Millisecond,
+	}}
+	start := time.Now()
+	_, err := p.Complete(ctx, "go", provider.Options{
+		// Stop the moment the wait begins.
+		OnBackgroundWait: func(provider.BackgroundActivity) { cancel() },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Complete = %v, want an error wrapping context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("Complete returned %v after starting — the wait ignored the stop", elapsed)
+	}
+	requireGone(t, readPID(t, pidFile), "the background work")
+}
+
+// TestStopDuringGraceTerminatesLeftovers covers a stop that lands after the
+// harness exited but inside the grace window, before any background work has
+// been counted. The wait ends there too, and what the harness left running is
+// still terminated rather than orphaned by a run that has gone away.
+func TestStopDuringGraceTerminatesLeftovers(t *testing.T) {
+	requireLinux(t)
+	dir := t.TempDir()
+	bgPID := filepath.Join(dir, "bg.pid")
+	harnessPID := filepath.Join(dir, "harness.pid")
+	fakeHarness(t, `echo $$ > `+harnessPID+`
+nohup sleep 300 >/dev/null 2>&1 &
+echo $! > `+bgPID+`
+echo "TASK_DONE"`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Stop once the harness itself has exited and been reaped: the provider is
+	// then inside its grace window, which is long enough that nothing has been
+	// counted yet.
+	go func() {
+		pid := readPID(t, harnessPID)
+		for !processGone(pid) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+
+	p := &Provider{Background: BackgroundPolicy{
+		Grace:          5 * time.Second,
+		Wait:           3 * time.Second,
+		TerminateGrace: 500 * time.Millisecond,
+	}}
+	start := time.Now()
+	_, err := p.Complete(ctx, "go", provider.Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Complete = %v, want an error wrapping context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 5*time.Second {
+		t.Fatalf("Complete returned %v after starting — it sat out the grace window after the stop", elapsed)
+	}
+	requireGone(t, readPID(t, bgPID), "the background work")
+}
+
+// TestTaskDeadlineDoesNotEndTheBackgroundWait pins the other side of that
+// line. A task's own time budget expiring after the harness exited is not a
+// request to abandon the work, so the wait goes on until the work drains. The
+// deadline arrives the way the orchestrator's live task budget delivers it: a
+// cancellation whose cause is context.DeadlineExceeded.
+func TestTaskDeadlineDoesNotEndTheBackgroundWait(t *testing.T) {
+	requireLinux(t)
+	marker := filepath.Join(t.TempDir(), "trained")
+	fakeHarness(t, `nohup bash -c 'sleep 2; touch `+marker+`' >/dev/null 2>&1 &
+echo "TASK_DONE"`)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	p := &Provider{Background: BackgroundPolicy{Grace: 100 * time.Millisecond, Wait: time.Minute}}
+	_, err := p.Complete(ctx, "go", provider.Options{
+		OnBackgroundWait: func(provider.BackgroundActivity) { cancel(context.DeadlineExceeded) },
+	})
+	if err == nil {
+		t.Fatal("Complete succeeded after its task deadline passed")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("the wait ended at the task deadline instead of when the work finished: %v", statErr)
 	}
 }

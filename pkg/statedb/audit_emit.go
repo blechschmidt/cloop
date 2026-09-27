@@ -607,7 +607,12 @@ func taskExitReason(t *pm.Task, outcome string) string {
 	case string(pm.TaskPending):
 		// Leaving in_progress for pending is not an outcome a task can reach on
 		// its own: something reset it — a crash reconciliation that found no
-		// signal, an operator, or an abort retry.
+		// signal, an operator, an abort retry, or the run stopping under it.
+		// The orchestrator's own resets say which in a note written as they
+		// happen, so a newest note authored "cloop" is the reason (Task 20348).
+		if n := len(t.Annotations); n > 0 && t.Annotations[n-1].Author == "cloop" {
+			return truncateReason(t.Annotations[n-1].Text)
+		}
 		return "returned to pending without a recorded outcome"
 	}
 	if t.FailureDiagnosis != "" {

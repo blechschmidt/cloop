@@ -376,12 +376,27 @@ func (p *Provider) settleBackground(ctx context.Context, pgid int, opts provider
 		return nil
 	}
 
-	// Detach from the caller's context for the wait. ctx carries the task
+	// Detach from the caller's deadline for the wait. ctx carries the task
 	// timeout, and by this point the CLI has already exited: an expired
 	// deadline should not turn "wait for the work to finish" into "return
 	// immediately and report it as abandoned", which would mark a task
 	// incomplete for the one reason it is not the task's fault.
-	waitCtx := context.WithoutCancel(ctx)
+	//
+	// A cancellation is not a deadline (Task 20348). Stop, SIGINT or a manual
+	// abort from the dashboard asks for the work to end now, and a wait that
+	// ignored it kept a stopped project running for up to the whole budget —
+	// the Stop button appeared to do nothing for half an hour. So the wait
+	// ends with the request, and what is still running is terminated below
+	// like work that outlived its budget: the task is about to be retried,
+	// and the retry must not race these leftovers.
+	waitCtx, stopWaiting := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopWaiting()
+	unwatch := context.AfterFunc(ctx, func() {
+		if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			stopWaiting()
+		}
+	})
+	defer unwatch()
 
 	out := procgroup.Drain(waitCtx, pgid, procgroup.DrainOptions{
 		Grace:  policy.Grace,
@@ -401,6 +416,14 @@ func (p *Provider) settleBackground(ctx context.Context, pgid int, opts provider
 		},
 	})
 	if out.Detected == 0 {
+		// A stop inside the grace window ends the wait before anything was
+		// counted, so whatever the harness left behind is still running.
+		// Terminate is a no-op on an empty group.
+		if waitCtx.Err() != nil && !policy.KeepOrphans && procgroup.Supported() {
+			if _, err := procgroup.Terminate(pgid, policy.TerminateGrace); err != nil {
+				fmt.Fprintf(os.Stderr, "cloop: terminating background work from pgid %d: %v\n", pgid, err)
+			}
+		}
 		return nil
 	}
 

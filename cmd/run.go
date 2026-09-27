@@ -544,7 +544,10 @@ Press Ctrl+C to pause gracefully.`,
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigCh
-			fmt.Println("\n⏸ Pausing after current step...")
+			// Cancelling interrupts the task in flight rather than waiting for
+			// it to finish; the orchestrator returns it to pending, so the
+			// next run starts it again (Task 20348).
+			fmt.Println("\n⏸ Stopping — the task in progress goes back to pending and the next run picks it up...")
 			cancel()
 		}()
 

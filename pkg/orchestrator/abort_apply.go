@@ -185,6 +185,13 @@ func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectS
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		// Stopped while waiting. The task is already pending, so there is
+		// nothing to requeue; what is left is to record the stop, because the
+		// callers return straight out of the run and a status still saying
+		// "running" would outlive it (Task 20348).
+		s.SetPaused(pausereason.New(pausereason.CodeCancelled,
+			"run interrupted while waiting to retry: "+ab.Reason))
+		s.Save()
 		return true
 	case <-timer.C:
 		return false

@@ -231,10 +231,14 @@ while a run is in progress and it will be picked up in priority order.
 ## Stopping and resuming
 
 Ctrl+C is a pause, not a kill: cloop prints
-`⏸ Pausing after current step...` and lets the step finish so its result is
-saved. Because the plan lives in `state.db` rather than in the process, resuming
-is just running the same command again — the next `cloop run` opens with
-`Resuming plan: 1/3 tasks complete`.
+`⏸ Stopping — the task in progress goes back to pending and the next run picks it up...`,
+interrupts the task it was working on, and returns that task to `pending` with
+a note saying so. A stopped task is not a failed one, so nothing that depends
+on it is skipped. Tasks that had already finished keep their results. The Stop
+button in the dashboard does the same, wherever the run executes. Because the
+plan lives in `state.db` rather than in the process, resuming is just running
+the same command again — the next `cloop run` opens with
+`Resuming plan: 1/3 tasks complete` and starts the interrupted task over.
 
 Other ways to stop deliberately: `--steps N` runs at most N steps this session,
 `--timeout 30m` bounds the whole session, and `--token-budget` or `--cost-limit`

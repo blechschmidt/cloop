@@ -1998,9 +1998,9 @@ it happened.
 When the paying identity's daily budget is gone, **the run is stopped at the
 first task boundary after that** — not merely at the next start, which on its own
 would let one long run spend without limit inside itself. The stop is a SIGINT
-delivered through the executor, so the orchestrator finishes its in-flight step
-and persists its plan; a budget overrun is not a reason to corrupt the work of
-the tenant who hit it. Host PIDs are signalled only as a fallback, because a
+delivered through the executor, so the orchestrator returns its in-flight task
+to pending and persists its plan; a budget overrun is not a reason to corrupt
+the work of the tenant who hit it. Host PIDs are signalled only as a fallback, because a
 container or an edge agent has none locally and those are the runs a hosted
 deployment most wants stopped. The reason is written to the project's live log,
 where the person watching actually finds out, and to the audit trail as
