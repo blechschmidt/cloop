@@ -692,10 +692,28 @@ func oneLine(s string) string {
 }
 
 // reject answers a request that never reached a session.
+//
+// A request that presented no credential at all is counted, not emitted. Nearly
+// all of them are git's own challenge: git sends each request bare, is answered
+// 401, and only then asks the lease's helper for the session credential — so
+// every clone, fetch and push through a guarded lease wrote one of these ahead
+// of its real row, and half of the proxy's audit trail on a live hub was this
+// handshake (Task 20346). The rest are whatever else reaches the port. Neither
+// carries an identity or a decision about any session, and emitting them let
+// anything that can open a connection to the proxy append hash-chained rows
+// to the audit trail, synchronously, as fast as it liked.
+//
+// A request that presented a credential which failed — unknown, wrong,
+// expired, revoked — is still emitted: that is a session token being misused,
+// or a run outliving its session, and both are worth a row.
 func (p *Proxy) reject(w http.ResponseWriter, r *http.Request, status int, repoPath, detail string) {
-	p.reg.emit(Event{
-		Kind: EventRejected, RepoPath: repoPath, Detail: detail, At: p.reg.now(),
-	})
+	if r.Header.Get("Authorization") == "" {
+		hubmetrics.GitProxyAnonymous.Inc()
+	} else {
+		p.reg.emit(Event{
+			Kind: EventRejected, RepoPath: repoPath, Detail: detail, At: p.reg.now(),
+		})
+	}
 	http.Error(w, "cloop git proxy: "+oneLine(detail), status)
 }
 

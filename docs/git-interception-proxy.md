@@ -833,7 +833,7 @@ are safe to write to a log an operator reads. `Event.String()` renders one line.
 | `session_minted` | a session was created | `Detail` carries the allowlist and the expiry. |
 | `session_closed` | a session was revoked or reaped | `Detail` carries the reason and the session's push/fetch/denied counters. |
 | `fetch` | a read went through the proxy | |
-| `rejected` | a request was refused *before* policy ran | Unauthenticated, wrong repository, malformed pkt-lines, a route the proxy does not serve, or an upstream stream that ended early. Distinct from `push_denied`: nothing here got as far as a decision about a ref. |
+| `rejected` | a request was refused *before* policy ran | A credential that failed (unknown, wrong, expired or revoked), a repository outside the session's scope, malformed pkt-lines, a route the proxy does not serve, or an upstream stream that ended early. Distinct from `push_denied`: nothing here got as far as a decision about a ref. A request that presented **no** credential is not an event — see below. |
 
 Every per-request event names the repository **the request addressed**, not the
 session's: a scoped session (a guarded GitHub lease) has no single repository of
@@ -841,6 +841,16 @@ its own, and a refused request is about the one the sandbox tried. An admitted
 path is recorded normalised (`owner/name`, lowercase, no `.git`), a refused one
 as it arrived. `session_minted` and `session_closed` name what the session
 admits — its repository, or its allowlist.
+
+A request that presented no credential at all is answered 401 and counted in
+`cloop_gitproxy_anonymous_requests_total`, not emitted. Nearly all of them are
+git's own challenge: git sends each request bare and asks the lease's credential
+helper only after the 401, so every clone, fetch and push through a guarded lease
+used to write a `rejected` row ahead of its real one — half the proxy's rows on a
+live hub. The rest are whatever else reaches the port, and none carries an
+identity or a decision about a session; auditing them let anything that can open
+a connection append to the hash-chained trail. A credential that *fails* is still
+a `rejected` row.
 
 `OnEvent` runs on the request goroutine. A handler that blocks blocks a push —
 hand off to a queue if the sink can be slow. The hub's own sink does one insert

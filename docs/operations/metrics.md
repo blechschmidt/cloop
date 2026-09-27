@@ -357,11 +357,19 @@ back for a human.
 | --- | --- | --- |
 | `cloop_gitproxy_pushes_total` | counter | `result` |
 | `cloop_gitproxy_push_denials_total` | counter | `reason` |
+| `cloop_gitproxy_anonymous_requests_total` | counter | — |
 
 This is the boundary a sandbox pushes through, so its denial counter is a
 security signal and not only an operational one. `reason` is
 `ref_not_allowed`, `delete_denied`, `create_denied`, `update_denied`,
 `no_write`, `too_many_commands` or `push_cert`.
+
+`cloop_gitproxy_anonymous_requests_total` counts requests that presented no
+credential at all. They are not written to the audit trail: nearly all of them
+are git's own authentication challenge (a bare request, answered 401, before git
+retries with the lease's session credential), and the rest are anything else
+reaching the proxy's port. It tracks the proxy's own traffic closely; a rate far
+above it is something other than git knocking.
 
 **A sandbox probing the allowlist**
 

@@ -291,6 +291,13 @@ var (
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
 	})
+
+	// Counted rather than audited: see Proxy.reject.
+	GitProxyAnonymous = Default.MustRegister(Definition{
+		Name: "cloop_gitproxy_anonymous_requests_total",
+		Help: "Requests to the git proxy that presented no credential and were refused before reaching a session. Most are git's own authentication challenge, answered with 401 before it retries with the session credential; a rate far above the proxy's request rate is something other than git reaching the port.",
+		Type: TypeCounter,
+	})
 )
 
 // Kubernetes access monitor. Same shape and same reasoning as the git proxy
