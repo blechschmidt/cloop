@@ -53,6 +53,22 @@ jobs:
           fi
           echo "all files are gofmt-clean"
 
+      - name: Every release platform compiles
+        # Everything else in this workflow builds for linux/amd64 only, so a
+        # release tag used to be the first thing to compile cloop for any other
+        # platform. v0.0.3's first release run failed that way on linux/arm:
+        # 32-bit, where an int cannot hold 1<<40, on a constant this job had
+        # compiled for weeks. Building here what scripts/build-release.sh builds
+        # (the same flags, one binary per platform) moves that failure from a
+        # tag to the commit that causes it.
+        run: |
+          set -euo pipefail
+          for platform in $(./scripts/build-release.sh --platforms); do
+            echo "==> $platform"
+            CGO_ENABLED=0 GOOS="${platform%/*}" GOARCH="${platform#*/}" \
+              go build -trimpath -o /dev/null .
+          done
+
       - name: No package is orphaned
         # tests/arch is a structural gate, which is why it belongs here rather
         # than in the test job: it parses the module with go/ast and reports

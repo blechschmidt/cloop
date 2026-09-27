@@ -35,6 +35,7 @@
 # Usage:
 #   scripts/build-release.sh <version> [outdir]   build artifacts into outdir
 #   scripts/build-release.sh --list               print artifact names only
+#   scripts/build-release.sh --platforms          print GOOS/GOARCH pairs only
 #
 # --list compiles nothing, and takes no version — because the names do not
 # depend on one. It exists so the drift gates above can assert the naming
@@ -84,6 +85,16 @@ if [ "${1:-}" = "--list" ]; then
   for platform in "${PLATFORMS[@]}"; do
     printf '%s\n' "$(artifact_name "${platform%/*}" "${platform#*/}")"
   done
+  exit 0
+fi
+
+# --platforms is for CI's cross-compile gate (.github/workflows/ci.yml), which
+# builds what a release builds on every push. Before it existed a tag was the
+# first thing to compile cloop for anything but linux/amd64, and v0.0.3's first
+# release run died on linux/arm — 32-bit, where an int cannot hold 1<<40 — on
+# a constant every CI run had compiled for weeks (Task 20344).
+if [ "${1:-}" = "--platforms" ]; then
+  printf '%s\n' "${PLATFORMS[@]}"
   exit 0
 fi
 
