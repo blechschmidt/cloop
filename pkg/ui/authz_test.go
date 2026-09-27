@@ -234,7 +234,11 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		"\n" + executorPolicyAPISource +
 		// suggest_api.go holds the suggestions panel's handlers, prefix-less
 		// since before the route table existed (moved there by Task 20342).
-		"\n" + suggestAPISource
+		"\n" + suggestAPISource +
+		// virtual_executors_api.go holds handleVirtualExecutors and
+		// handleVirtualExecutor, prefix-less for the sandbox route's reason
+		// (Task 20345).
+		"\n" + virtualExecutorsAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -301,6 +305,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"executors_api.go", executorsAPISource},
 		{"executor_sandbox_api.go", executorSandboxAPISource},
 		{"executor_policy_api.go", executorPolicyAPISource},
+		{"virtual_executors_api.go", virtualExecutorsAPISource},
 		{"suggest_api.go", suggestAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {

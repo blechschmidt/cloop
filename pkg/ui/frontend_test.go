@@ -53,6 +53,14 @@ var executorSandboxAPISource string
 //go:embed executor_policy_api.go
 var executorPolicyAPISource string
 
+// virtualExecutorsAPISource is pkg/ui/virtual_executors_api.go (Task 20345),
+// embedded for the same two reasons: it broadcasts `executor_update`, and its
+// two handlers are registered without a method prefix, so the verbs each one
+// accepts are discoverable only from its body.
+//
+//go:embed virtual_executors_api.go
+var virtualExecutorsAPISource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
