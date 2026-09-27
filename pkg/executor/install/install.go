@@ -207,6 +207,16 @@ type Spec struct {
 	// NoStart installs the unit without enabling or starting it, for
 	// golden-image builds where the device must not enroll until first boot.
 	NoStart bool
+
+	// PacketFilter grants the agent what it needs to install a virtual
+	// executor's IP firewall on the host (Task 20345): CAP_NET_ADMIN, and the
+	// netlink socket family nft(8) speaks. Off by default, because it is a
+	// real widening of what the service may do — it can then rewrite the
+	// host's packet filter — and a device that only ever runs host-mode or
+	// unfiltered sandboxes has no use for it. A device whose agent can
+	// already drive a rootful container engine holds a stronger privilege
+	// than this through the engine's socket.
+	PacketFilter bool
 }
 
 // hasCredentialMaterial reports whether this install carries something to

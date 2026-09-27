@@ -166,10 +166,14 @@ func SystemdUnit(s Spec) string {
 	b.WriteString(relaxationNote)
 	b.WriteString("\n")
 	for _, h := range hardening {
-		if h.why != "" {
-			fmt.Fprintf(&b, "# %s\n", h.why)
+		directive, why := h.directive, h.why
+		if s.PacketFilter {
+			directive, why = packetFilterRelaxation(directive, why)
 		}
-		b.WriteString(h.directive)
+		if why != "" {
+			fmt.Fprintf(&b, "# %s\n", why)
+		}
+		b.WriteString(directive)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -236,4 +240,23 @@ func underDir(parent, child string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// packetFilterRelaxation is the whole difference --packet-filter makes to the
+// hardening block (Task 20345): one capability, and the socket family nft(8)
+// uses to reach the kernel. Everything else stays exactly as it was, which is
+// why this rewrites three directives in place instead of carrying a second
+// table that could drift from the first.
+func packetFilterRelaxation(directive, why string) (string, string) {
+	switch directive {
+	case "CapabilityBoundingSet=":
+		return "CapabilityBoundingSet=CAP_NET_ADMIN",
+			"--packet-filter: CAP_NET_ADMIN only, so the agent can install a virtual executor's firewall with nft(8)"
+	case "AmbientCapabilities=":
+		return "AmbientCapabilities=CAP_NET_ADMIN", "and handed to it at exec, since the agent runs as a system user"
+	case "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX":
+		return "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+			"IP, local and netlink sockets; netlink is how nft(8) reaches the kernel's packet filter. No AF_PACKET"
+	}
+	return directive, why
 }

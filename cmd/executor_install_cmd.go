@@ -239,6 +239,7 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 	}
 	maxConc, _ := cmd.Flags().GetInt("max-concurrent")
 	noStart, _ := cmd.Flags().GetBool("no-start")
+	packetFilter, _ := cmd.Flags().GetBool("packet-filter")
 
 	spec := install.Spec{
 		ServiceName:     str("service-name"),
@@ -259,6 +260,7 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 		Labels:          labels,
 		Image:           str("image"),
 		NoStart:         noStart,
+		PacketFilter:    packetFilter,
 	}
 
 	// Default the binary to the one being run, not to a path that may not
@@ -501,6 +503,9 @@ func init() {
 			"back to the previous binary (default 30s)")
 	f.String("root", "",
 		"stage the files beneath this directory instead of installing them, for image builds")
+	f.Bool("packet-filter", false,
+		"grant the agent CAP_NET_ADMIN and netlink so it can install virtual executors' IP firewalls "+
+			"with nft(8); without it a virtual executor with a firewall is refused on this device")
 
 	f.String("bundle", "",
 		"enrollment bundle from `cloop executor enroll` (or set "+enrollBundleEnv+", "+
