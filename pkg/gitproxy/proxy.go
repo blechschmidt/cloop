@@ -372,7 +372,7 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 		sess.denied.Add(1)
 		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
 		hubmetrics.GitProxyDenials.Inc(string(DenyTooManyCommands))
-		p.emitPush(sess, EventPushDenied, head.Commands,
+		p.emitPush(r, sess, EventPushDenied, head.Commands,
 			fmt.Sprintf("%d ref updates exceeds the %d this session allows", len(head.Commands), pol.MaxCommands))
 		p.refuse(w, r, sess, head, nil,
 			fmt.Sprintf("push carries %d ref updates; this session allows %d", len(head.Commands), pol.MaxCommands))
@@ -395,13 +395,13 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 			}
 		}
 		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
-		p.emitPush(sess, EventPushDenied, head.Commands, strings.Join(refused, "; "))
+		p.emitPush(r, sess, EventPushDenied, head.Commands, strings.Join(refused, "; "))
 		p.refuse(w, r, sess, head, decisions, "")
 		return
 	}
 
 	hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultAllowed)
-	p.emitPush(sess, EventPushAllowed, head.Commands, summarize(head.Commands))
+	p.emitPush(r, sess, EventPushAllowed, head.Commands, summarize(head.Commands))
 
 	up, err := p.upstreamRequest(r, sess, "/"+receivePackService, replay)
 	if err != nil {
@@ -433,7 +433,7 @@ func (p *Proxy) handleUploadPack(w http.ResponseWriter, r *http.Request, sess *S
 	}
 	sess.fetches.Add(1)
 	p.reg.emit(Event{
-		Kind: EventFetch, SessionID: sess.ID, RepoPath: sess.RepoPath,
+		Kind: EventFetch, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
 		At: p.reg.now(),
 	})
@@ -552,7 +552,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, u
 		// The status line is already out, so there is nowhere to report this
 		// except the audit trail.
 		p.reg.emit(Event{
-			Kind: EventRejected, SessionID: sess.ID, RepoPath: sess.RepoPath,
+			Kind: EventRejected, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 			ProjectID: sess.ProjectID, TaskID: sess.TaskID,
 			Detail: "upstream stream ended early: " + scrub(err, sess).Error(),
 			At:     p.reg.now(),
@@ -702,19 +702,43 @@ func (p *Proxy) reject(w http.ResponseWriter, r *http.Request, status int, repoP
 // rejectSession answers a request that authenticated but was refused.
 func (p *Proxy) rejectSession(w http.ResponseWriter, r *http.Request, sess *Session, status int, detail string) {
 	p.reg.emit(Event{
-		Kind: EventRejected, SessionID: sess.ID, RepoPath: sess.RepoPath,
+		Kind: EventRejected, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
 		Detail: detail, At: p.reg.now(),
 	})
 	http.Error(w, "cloop git proxy: "+oneLine(detail), status)
 }
 
-func (p *Proxy) emitPush(sess *Session, kind EventKind, cmds []RefUpdate, detail string) {
+func (p *Proxy) emitPush(r *http.Request, sess *Session, kind EventKind, cmds []RefUpdate, detail string) {
 	p.reg.emit(Event{
-		Kind: kind, SessionID: sess.ID, RepoPath: sess.RepoPath,
+		Kind: kind, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
 		Refs: refNames(cmds), Detail: detail, At: p.reg.now(),
 	})
+}
+
+// requestRepo is the repository an event about r records.
+//
+// The session's own RepoPath is not the answer. A scoped session has none — it
+// admits an allowlist — so every fetch and push through a guarded GitHub lease
+// was recorded against no repository at all, and "which repository did this
+// sandbox push to" had no answer in the audit trail. And on any session, a
+// refused request is about the repository the sandbox *tried*, which a pinned
+// session's RepoPath misnames as the one it was minted for (Task 20346).
+//
+// So the request's own path is recorded: in its normalised form when the
+// session admits it, which is the form grants and joins use, and as it arrived
+// when it does not, because the exact spelling of a refused path is the
+// evidence.
+func requestRepo(r *http.Request, sess *Session) string {
+	repo, _, ok := splitGitPath(r.URL.Path)
+	if !ok || repo == "" {
+		return sess.RepoPath
+	}
+	if sess.AllowsRepo(repo) {
+		return NormalizeRepoPath(repo)
+	}
+	return repo
 }
 
 func summarize(cmds []RefUpdate) string {

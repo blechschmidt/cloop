@@ -835,6 +835,13 @@ are safe to write to a log an operator reads. `Event.String()` renders one line.
 | `fetch` | a read went through the proxy | |
 | `rejected` | a request was refused *before* policy ran | Unauthenticated, wrong repository, malformed pkt-lines, a route the proxy does not serve, or an upstream stream that ended early. Distinct from `push_denied`: nothing here got as far as a decision about a ref. |
 
+Every per-request event names the repository **the request addressed**, not the
+session's: a scoped session (a guarded GitHub lease) has no single repository of
+its own, and a refused request is about the one the sandbox tried. An admitted
+path is recorded normalised (`owner/name`, lowercase, no `.git`), a refused one
+as it arrived. `session_minted` and `session_closed` name what the session
+admits — its repository, or its allowlist.
+
 `OnEvent` runs on the request goroutine. A handler that blocks blocks a push —
 hand off to a queue if the sink can be slow. The hub's own sink does one insert
 for that reason.

@@ -443,7 +443,10 @@ func (r *Registry) Close(id, reason string) {
 	r.emit(Event{
 		Kind:      EventSessionClosed,
 		SessionID: s.ID,
-		RepoPath:  s.RepoPath,
+		// The allowlist for a scoped session, as the mint row names it: its
+		// RepoPath is empty, and a closing row that named nothing could not
+		// be matched to the session it ends by anyone reading repositories.
+		RepoPath:  s.scopeDescription(),
 		ProjectID: s.ProjectID,
 		TaskID:    s.TaskID,
 		Actor:     s.Actor,
@@ -474,7 +477,7 @@ func (r *Registry) ReapExpired() int {
 			r.emit(Event{
 				Kind:      EventSessionClosed,
 				SessionID: s.ID,
-				RepoPath:  s.RepoPath,
+				RepoPath:  s.scopeDescription(),
 				ProjectID: s.ProjectID,
 				TaskID:    s.TaskID,
 				Actor:     s.Actor,
