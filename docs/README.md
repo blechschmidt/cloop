@@ -54,8 +54,8 @@ Six pages in order, indexed at
   its GitHub lease rewrites to the proxy — what each executor backend
   contributes, the files and variables a sandbox holds, which credential each
   kind of hub delivers, the network a sandbox needs, how long a session really
-  lives, and the places the integration is
-  [still incomplete](architecture/git-proxy.md#where-the-integration-is-incomplete).
+  lives, and the
+  [limits that remain](architecture/git-proxy.md#limits-that-remain).
 - **[Kubernetes access monitor](architecture/kubernetes-access.md)** — how a
   sandbox is allowed to read one namespace of a cluster and nothing else,
   without ever holding a credential that could reach the rest of it: why a

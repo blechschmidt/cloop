@@ -502,7 +502,7 @@ ends up holding, and that difference decides how much a leak costs.
 | What the sandbox receives, no git proxy | that same token | an installation token minted for this lease |
 | What the sandbox receives, git proxy configured | a proxy session credential | a proxy session credential |
 | Who enforces the repository allowlist | cloop's credential helper, at `git`'s request | **GitHub**, on every call |
-| Lifetime in the sandbox | the PAT's own, typically months | ~1 hour, re-minted each lease period |
+| Lifetime in the sandbox | the PAT's own, typically months | ~1 hour from dispatch; the lease is extended in place for a long run, the token is not re-minted |
 | Revocation | wipe the file; the token itself is untouched | wipe the file **and** `DELETE /installation/token` |
 | If the workload reads the file and calls the REST API directly | unconstrained — the PAT is whatever GitHub issued | constrained — GitHub refuses anything outside the grant |
 
@@ -2572,6 +2572,11 @@ not installed.
 | Where no proxy guards a branch-restricted grant, its push is withheld, never delivered unrestricted: an App token is minted read-only, a PAT is not delivered, and a write token minted for a guard that then declines is destroyed at GitHub | `pkg/secretbroker: TestUnguardedAppWithBranchesIsMintedReadOnly`, `TestUnguardedPATWithBranchesIsNotDelivered`, `TestDecliningGuardDestroysAWriteTokenMintedForBranches` |
 | The dashboard's verdict on a branch list matches what the broker will do on this hub | `pkg/ui: TestBranchEnforcementTellsTheTruthAboutThisHub` |
 | Live, opt-in: a grant assigned through the panel's endpoint, leased and materialised as a dispatch does, pushes through the proxy to a real GitHub repository — outside its branches refused, inside them landed, the installation token nowhere in the sandbox | `pkg/ui: TestLiveBranchRestrictionThroughTheGitProxy` |
+| Only `cloop ui` runs the proxy, and every other process that registers the Kubernetes driver with the section enabled refuses git workspaces rather than handing a Pod the forge credential | `pkg/executor/reconcile: TestWorkspaceSourceFailsClosedWithoutTheProxy`, `TestWorkspaceSourceRoutesThroughTheCallersProxy` |
+| A pinned session holds the lease behind its upstream token until the session ends, and releases it exactly once — a `github_app` token is not destroyed while a session still presents it — while a session nothing used is closed when the driver hands it back | `pkg/gitproxy: TestOnEndRunsOnceWhenTheSessionLeaves`, `pkg/executor/gitproxycreds: TestInnerLeaseOutlivesTheDelivery`, `TestUnusedSessionIsClosedOnRelease`, `TestReapedSessionReleasesTheInnerLease` |
+| In a Pod the workspace fetch presents the session id the proxy looks up, from the run's Secret rather than the Pod spec, and the lease credential helper is executable but never writable | `pkg/executor/kubernetes: TestStart_WorkspaceSecretCarriesTheSessionUsername`, `TestBuildPod_CredentialHelperIsExecutable` |
+| A running workload's lease is extended in place only while every grant it holds is still valid, so a revocation still lands within one lease period, and the janitor sweeps at the extended deadline rather than the issued one | `pkg/secretbroker: TestExtendRefusesARevokedGrant`, `TestExtendIsClampedToTheGrant`, `pkg/ui: TestLeaseKeepaliveOutlivesTheIssuedTTL`, `TestLeaseKeepaliveStopsOnARevokedGrant` |
+| A virtual executor's workspace is leased as the virtual executor — never under its device's grants | `pkg/executor/gitcreds: TestVirtualExecutorLeasesItsOwnGrant`, `TestVirtualExecutorDoesNotBorrowTheDevicesGrant`, `pkg/executor/remote: TestVirtualDispatchLeasesAsTheVirtualExecutor` |
 
 ### Result write-back — `writeback_bundle_test.go`
 

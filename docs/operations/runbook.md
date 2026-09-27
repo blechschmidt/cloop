@@ -603,12 +603,14 @@ with an authentication error from git and a `gitproxy.rejected` row. Set the TTL
 against the longest run the hub is expected to finish, not the median one.
 
 A session minted for a GitHub **lease** — the one the workload's own git uses —
-ends with its lease instead: when the run ends, when the lease is revoked from
-the Secrets panel or `POST /api/leases/{id}/revoke`, and when the lease lapses.
-The last is the one that bites. A run's lease is issued for at most 15 minutes,
-nothing renews it, and the janitor sweeps it within a minute of lapsing, closing
-the session — so a workload that pushes more than about a quarter of an hour into
-its run is refused, whatever `session_minutes` says. See
+ends with its lease or at its own `session_minutes`, whichever is first: when the
+run ends, when the lease is revoked from the Secrets panel or `POST
+/api/leases/{id}/revoke`, and when the lease lapses. A run's lease is issued for
+15 minutes and extended in place while the run is live, so it lapses only when
+the run is gone or a grant it holds was revoked or expired; the janitor then
+sweeps it within a minute, closing the session. Each extension is a
+`secret.renew` row, and a refused one — the grant was revoked — is a denied
+`secret.renew` naming the grant. See
 [how long a session lives](../architecture/git-proxy.md#how-long-a-session-lives).
 
 There is no command that ends one workspace session early. Sessions live in the

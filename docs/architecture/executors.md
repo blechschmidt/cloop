@@ -1325,8 +1325,9 @@ not a proxy URL whose session died with the run. `container` and `localprocess`
 never reach this path at all — they bind the operator's own checkout and provision
 nothing. Their workloads' own git still reaches the proxy, through a GitHub lease
 rather than a workspace; [git proxy architecture](git-proxy.md) covers both
-paths, what each backend contributes to them, and one gap on this one — the
-Kubernetes init container does not yet authenticate to the proxy.
+paths and what each backend contributes to them. On Kubernetes the init container
+authenticates to the proxy with the session id, which the run's workspace Secret
+carries beside the token.
 
 A workspace whose fetch nobody can authorise fails with a typed
 `*executor.WorkspaceGrantError` that names the repository, the grant and the

@@ -10,9 +10,8 @@ the session model, and what it deliberately does not check. This page is the map
 around it: which process runs which piece, the two routes a sandbox's git
 traffic takes through it, what each executor backend does to put a sandbox on
 those routes, what the sandbox ends up holding, how long it holds it, and how the
-arrangement fails and is observed. It ends with the places where the integration
-is [not yet complete](#where-the-integration-is-incomplete), because an operator
-planning a deployment needs those as much as the design.
+arrangement fails and is observed. It ends with the [limits that remain](#limits-that-remain),
+because an operator planning a deployment needs those as much as the design.
 
 Three facts carry most of it:
 
@@ -28,9 +27,8 @@ Three facts carry most of it:
 - **One rule.** While the proxy runs, no forge credential — neither a PAT nor a
   GitHub App installation token — is delivered into a sandbox the hub dispatches.
   While a valid proxy section is configured but the proxy is not running, GitHub
-  access fails closed; it never falls back to handing the credential over. (`cloop
-  serve` is the exception, listed with the other
-  [gaps](#where-the-integration-is-incomplete).)
+  access fails closed; it never falls back to handing the credential over — and
+  that includes every process that is not `cloop ui` and so never runs one.
 
 - [One process, and why](#one-process-and-why)
 - [Two paths into one proxy](#two-paths-into-one-proxy)
@@ -43,7 +41,7 @@ Three facts carry most of it:
 - [How it fails](#how-it-fails)
 - [Observing it](#observing-it)
 - [How it is tested](#how-it-is-tested)
-- [Where the integration is incomplete](#where-the-integration-is-incomplete)
+- [Limits that remain](#limits-that-remain)
 
 ---
 
@@ -113,9 +111,12 @@ when the hub builds that device's credential source
 per broker, when the broker is opened (`attachGitGuard`). Both read the singleton
 at the moment they need it.
 
-Only `cloop ui` starts a proxy. `cloop serve` and the Kubernetes executors the
-CLI registers for its own subcommands never wrap anything — see
-[where the integration is incomplete](#where-the-integration-is-incomplete).
+Only `cloop ui` starts a proxy, so only `cloop ui` has a wrapper to hand the
+Kubernetes driver. Every other process that registers that driver — `cloop
+serve`, `cloop hub doctor`, the CLI's own subcommands — gets a source that
+refuses git workspaces while `executors.git_proxy` is enabled
+(`routeWorkspaceSource` in `pkg/executor/reconcile`), rather than one that hands
+the Pod the forge credential. `cloop serve` says so at startup.
 
 ### Two seams, so nothing below the hub knows
 
@@ -147,7 +148,7 @@ No driver imports `pkg/gitproxy`, and neither does `pkg/secretbroker`:
 | **Policy** | the hub's, with the grant's branch list as `RestrictRefs` | the hub's, narrowed by `guardPolicy` — see [below](#the-policy-a-session-carries) |
 | **Reaches git as** | a credential in the environment of **one git child**, as an origin-scoped `http.<origin>.extraHeader` — never on disk | three files in the lease directory and a few environment variables |
 | **How git finds the proxy** | the workspace's `Repo` is replaced by `Minted.RepoURL`, so the fetch and any push aim at it | the lease's gitconfig rewrites `https://github.com/`, `git@github.com:` and `ssh://git@github.com/` to it |
-| **Ended by** | its TTL (`session_minutes`), or the hub shutting down | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
+| **Ended by** | its TTL (`session_minutes`), the hub shutting down, or — when the sandbox never presented it — the driver handing it back; the lease behind it is released when it ends | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
 | **Session actor** | `ui` | the credential's owner for a personal secret, else the lease's actor |
 
 ### The workspace path
@@ -178,13 +179,22 @@ withholds the push from a branch-restricted GitHub credential headed into a
 sandbox, because nothing in a sandbox can hold a push to a branch; it has no
 reason to withhold it from one the proxy will hold.
 
-Three behaviours of the decorator are worth knowing by name:
+Four behaviours of the decorator are worth knowing by name:
 
 - **It fails closed.** A session that cannot be minted fails the dispatch and
   releases the inner lease. Falling back to the direct credential would deliver
   it at precisely the moment the boundary is broken.
 - **A public repository passes through.** An empty credential is an anonymous
   fetch; there is nothing to keep off the sandbox, so no session is minted.
+- **The lease lives as long as the session.** The inner lease is released when
+  the session ends — closed, reaped after its TTL, or closed with the hub —
+  through the registry's `OnEnd` hook, not when the driver has delivered the
+  credential. For a `github_app` grant, releasing the lease destroys the
+  installation token at GitHub, and the session presents that token upstream for
+  its whole life; released at delivery, it left the session holding a dead token,
+  and on Kubernetes the fetch itself met one. The release a driver is handed now
+  closes the session only if nothing ever authenticated with it — a dispatch that
+  failed before the fetch — so a used session keeps its TTL for the write-back.
 - **The credential and the URL travel together.** A driver that took the token
   and ignored `Repo` would aim the sandbox at the forge holding a token the forge
   has never heard of — a loud failure, never a quiet return to the direct path.
@@ -319,7 +329,7 @@ workload, and where git runs relative to the proxy:
 | --- | --- | --- | --- | --- |
 | `localprocess` | not used: a `bind` workspace, the operator's own checkout | the hub's own tmpfs directory (`/dev/shm/cloop-lease-…`), read in place | on the hub's host, as the hub's user | the hub's host — the loopback default works |
 | `container` — runc, gVisor, Kata | not used: a `bind` workspace | a per-run tmpfs the driver stages, bind-mounted read-only at `/run/cloop/cloop-lease-<slug>` | inside the container | the container's network, which is `none` unless configured |
-| `kubernetes` | the `workspace` init container fetches (`cloop workspace provision`); wrapped at reconciliation, though it does not yet authenticate — see [the gaps](#where-the-integration-is-incomplete) | a per-run `Secret`, projected read-only at `/run/cloop/cloop-lease-<slug>`, every file mode `0400` — see the gaps | in the harness container | the Pod network — the hub's `Service` |
+| `kubernetes` | the `workspace` init container fetches (`cloop workspace provision`), wrapped at reconciliation; the per-run `cloop-ws-<handle>` Secret carries the session id as `CLOOP_WORKSPACE_USER` beside the token | a per-run `Secret`, projected read-only at `/run/cloop/cloop-lease-<slug>`: files `0400`, the credential helper `0550` so git can run it | in the harness container | the Pod network — the hub's `Service` |
 | `remote`, host mode | the agent fetches on the device before the harness starts, holding the session credential in its memory | the start frame's `secret_files`; the agent writes them into its own `cloop-lease-*` tmpfs and relocates the paths | on the device, as the agent's user | the device |
 | `remote`, container mode, and every virtual executor | as host mode: the fetch runs on the device **host**, never inside the container | as host mode, then bind-mounted read-only into the container | inside the container on the device | from inside that container: its network or firewall must admit the proxy |
 
@@ -336,11 +346,13 @@ A few consequences follow from that table.
   wherever the payload runs — in container mode, behind the container's network
   and the executor's firewall. A device can therefore provision a workspace
   through the proxy and still have a sandbox that cannot reach it.
-- **Virtual executors inherit their parent's credential source.** A virtual
-  executor has no workspace source of its own; its dispatch goes through the
-  parent device's, so the lease is taken as the parent. See
-  [where the integration is incomplete](#where-the-integration-is-incomplete)
-  for what that does to a grant issued to the virtual executor's id.
+- **Virtual executors borrow their parent's credential source, not its
+  identity.** A virtual executor has no workspace source of its own; its
+  dispatch goes through the parent device's, which leases as the virtual
+  executor (`executor.WithRequestingExecutor`). So the grant chosen before
+  dispatch, the workspace lease and the workload's own lease all match the same
+  subject: a grant issued `--to executor:<virtual id>` provisions the workspace,
+  and one issued to the parent device does not reach its virtual executors.
 - **`localprocess` is not a boundary for the proxy to hold.** The workload runs
   as the hub's own user. The proxy still keeps the token out of the lease
   directory there, but a process that can read the hub's database can read
@@ -578,7 +590,11 @@ the fetch happens at the start of a run and a push write-back, where one is aske
 for, at the end; a session closed at delivery would refuse the push it exists to
 authorise. The reaper drops it within five minutes of lapsing, and a hub shutdown
 closes it with the reason *"the hub is shutting down"*. What bounds it in practice
-is the fetch: the device or the init container uses it once, early.
+is the fetch: the device or the init container uses it once, early. The one
+early close is a session nothing ever authenticated with — the dispatch failed
+before the fetch — which the driver's release closes with the reason *"workspace
+credential released unused"*. Whichever way it ends, the lease behind it is
+released then, and a `github_app` token with it.
 
 **A lease session ends with the lease that minted it**, whichever of these comes
 first:
@@ -589,7 +605,7 @@ first:
 | The dispatch fails after the lease was taken | every early return in `startWorkloadAs` |
 | An operator revokes the lease, or cordons or drains the executor holding it | `revokeLeaseEverywhere`, `pkg/ui/secrets_revoke.go` |
 | The identity whose credential it is gets offboarded | the offboarding lease release, `pkg/ui/offboard_api.go` |
-| **The lease lapses** — the lease janitor sweeps expired leases every minute | `sweepExpiredLeases`, `pkg/ui/secrets_revoke.go` |
+| **The lease lapses** — the lease janitor sweeps expired leases every minute; a live run's lease is extended before it can | `sweepExpiredLeases`, `pkg/ui/secrets_revoke.go` |
 | The session's own TTL runs out | the proxy refuses it at authentication |
 
 Each of the first five runs `secretLease.Close`, which calls
@@ -600,18 +616,32 @@ session is what makes the release mean something — wiping the lease directory
 removes the token from the sandbox, but a workload that copied it first would
 otherwise keep PAT-backed access to the whole allowlist until the TTL.
 
-The lapse row sets the practical ceiling. A run's lease is issued once, at
-dispatch, for at most `secretbroker.DefaultMaxLeaseTTL` — **15 minutes** — and
-nothing on the dispatch path renews it. So a lease session lasts at most about 15
-to 16 minutes, however long the run is and whatever `session_minutes` says. A task
-that clones at minute two and pushes at minute forty has its push refused with
-HTTP 401 and a `gitproxy.rejected` row, and on an edge device the lease files are
-scrubbed as well. The row's detail is only `gitproxy: unauthenticated`: closing a
-session removes it from the registry, so a later request presenting it is
-indistinguishable from one presenting a token that never existed — the
-`gitproxy.session_closed` row before it is where the reason is. That is listed
-under [where the integration is incomplete](#where-the-integration-is-incomplete),
-because the lease design assumes a renewal the dispatch path does not perform.
+A run's lease is issued at dispatch for at most `secretbroker.DefaultMaxLeaseTTL`
+— **15 minutes** — and **kept alive while the run is**. Every lease the hub
+issues carries a keepalive (`secretLease.keepAlive`, `pkg/ui/secrets.go`) that
+checks once a minute and, when the deadline is within five minutes, extends it
+in place with `Broker.Extend`: same lease, same material, a new deadline one lease
+period out. Extending re-reads every grant the lease holds, so a grant revoked or
+expired since dispatch refuses the extension, the lease lapses on its current
+deadline, and the janitor takes the material back — a revocation still lands
+within one lease period. A workload the executor reports finished is not
+extended, and the keepalive stops when its holder closes the lease. Each
+extension is a `secret.renew` row reading *"extended in place while its run is
+live"*.
+
+Before the keepalive (Task 20349), nothing on the dispatch path renewed a lease,
+so every run's lease lapsed a quarter of an hour in: its lease sessions were
+closed, an edge device scrubbed its lease files, and a `github_app` token was
+destroyed at GitHub, however long the run still had to go. A push refused that
+way shows a `gitproxy.rejected` row whose detail is only `gitproxy:
+unauthenticated` — closing a session removes it from the registry, so a later
+request presenting it is indistinguishable from one presenting a token that
+never existed — and the reason is on the `gitproxy.session_closed` row before it.
+
+What still bounds a lease session is its own TTL, `session_minutes`, counted from
+dispatch: the keepalive extends the lease, not the session. Set it against the
+longest run the hub is expected to complete — see
+[a session's life is its TTL](../git-interception-proxy.md#a-sessions-life-is-its-ttl-not-the-runs).
 
 A hub restart drops every session of both kinds — the registry is memory — and a
 workload that survives the restart on an edge device keeps a credential that no
@@ -729,6 +759,8 @@ all of it is reconnaissance.
 | The hub wiring | TLS on the listener, fail-closed when required and absent, both halves of a session narrowed by the grant's branches | `pkg/ui` `gitproxy_test.go`, `gitguard_test.go` |
 | The lease delivery with real git | the rewrite, the helper's host check, no token on disk | `pkg/secretbroker` `guardedintegration_test.go` |
 | Conformance | a guarded PAT never reaches either delivery shape; a broken guard never delivers the token | `tests/security/gitguard_test.go` |
+| Workspace credentials in a Pod | the session id reaches the init container through the run's Secret, the helper is projected executable, and the lease behind the token lives as long as that Secret | `pkg/executor/kubernetes` `workspace_test.go`, `secretfiles_test.go` |
+| Session and lease lifetimes | a pinned session releases its lease exactly once when it ends, an unused one is closed on release, a lease is extended only while its grants hold and its run is live | `pkg/gitproxy` `session_test.go`, `pkg/executor/gitproxycreds`, `pkg/secretbroker` `extend_test.go`, `pkg/ui` `secrets_keepalive_test.go` |
 | Live GitHub, opt-in | a grant assigned through the panel's endpoint pushes through the proxy to a real repository — outside its branches refused, inside them landed, no token in the sandbox | `TestLiveBranchRestrictionThroughTheGitProxy` in `pkg/ui` |
 
 The [guarantee → test table](../security/model.md#git-interception-proxy--the-package-suites)
@@ -750,60 +782,46 @@ Task 20346, passed all 132 checks across runc, gVisor, a firewall admitting only
 the proxy, a provisioned workspace and host mode.
 
 What it does not cover is the Kubernetes backend, where nothing yet exercises
-the proxy end to end — which is where two of the gaps below were found only by
-reading.
+the proxy end to end — which is why two of the seven gaps in
+[limits that remain](#limits-that-remain) were found only by reading.
 
 ---
 
-## Where the integration is incomplete
+## Limits that remain
 
-Found while writing this page, by reading the code rather than by a failing run,
-and listed so a deployment is planned around them rather than discovering them.
-Each names where it lives.
+This section used to list seven places where the integration was incomplete,
+found while this page was first written (Task 20347) by reading the code rather
+than by a failing run. Task 20349 closed all seven:
 
-1. **Kubernetes workspaces cannot authenticate to the proxy.** The Pod's
-   `workspace` init container authenticates with `CLOOP_WORKSPACE_USER`, which
-   the driver always sets to `x-access-token`, and the per-run `cloop-ws-<handle>`
-   Secret carries only the password (`pkg/executor/kubernetes/pod.go`,
-   `workspace.go`). The proxy looks a session up by its basic-auth *username*,
-   which must be the session id — so with the proxy on, every private workspace
-   fetch on Kubernetes is refused with a 401. Nothing leaks; nothing is fetched.
-2. **The credential helper is not executable on Kubernetes.** Every file of a
-   projected lease is mounted with `defaultMode: 0400`, which the Pod's `fsGroup`
-   turns into an effective `0440`, and the `items` carry no per-file mode
-   (`pkg/executor/kubernetes/secretfiles.go`). `git-credential-cloop` therefore
-   lands without an execute bit, and the gitconfig runs it by path — so git
-   obtains no credential from a GitHub lease in a Pod, guarded or not.
-3. **A run's lease is not renewed.** See
-   [how long a session lives](#how-long-a-session-lives): the lease janitor
-   closes a guarded session about 15 minutes into a run, and a long task loses
-   its git access mid-run. The broker's `Renew` exists; nothing on the
-   dashboard's dispatch path calls it.
-4. **A `github_app` workspace credential is revoked when the inner lease is
-   released.** `Broker.Release` destroys the installation tokens minted for a
-   lease at GitHub, but the pinned session keeps presenting that token upstream.
-   An edge device releases only once it has fetched, so there only a later push
-   write-back would fail — and nothing asks for push write-back today. The
-   Kubernetes driver releases as soon as the cluster holds the `Secret`, before
-   the init container runs, so a `github_app` workspace fetch in a Pod presents a
-   token that is already dead — with or without the proxy.
-5. **Only `cloop ui` routes through the proxy.** `cloop serve`
-   (`pkg/apiserver`), and a Kubernetes executor registered by any other `cloop`
-   command, never wrap a credential source, so they hand the forge credential
-   over even with `enabled: true`. `tests/arch/bootstrap_options_test.go` records
-   the `serve` half as a known gap.
-6. **A virtual executor only provisions a workspace from a `project:` grant.**
-   Grant selection before dispatch matches the virtual executor's id, while the
-   lease is taken through the parent device's credential source, as the parent.
-   A grant issued `--to executor:<virtual id>` is chosen, and then the lease does
-   not contain it, so the dispatch fails as though no grant existed; one issued to
-   the parent is never chosen. The Repository access panel grants to the project,
-   which both steps match.
-7. **Toggling the proxy strands device checkouts.** A device keeps a project's
-   checkout between runs and refuses to reuse one whose `origin` differs from
-   the workspace's (`pkg/executor/gitprovision`). Turning the proxy on or off, or
-   changing `advertise_url`, changes that origin, so the next provisioning is
-   refused until the directory is removed on the device.
+| It was | Now |
+| --- | --- |
+| A Kubernetes workspace fetch authenticated as `x-access-token`, and the proxy looks a session up by its username, so every private fetch through the proxy met a 401 | The per-run `cloop-ws-<handle>` Secret carries the credential's username — the session id — beside the token, and the init container reads both from it (`pkg/executor/kubernetes`) |
+| A lease's files were projected into a Pod `0400`, so `git-credential-cloop` had no execute bit and git obtained no credential from a GitHub lease | Executable files get a per-item mode of `0550`: read and execute for the Pod's group, which is how the non-root harness reaches them, and write for nobody |
+| A run's lease was never renewed, so the janitor swept it fifteen minutes in — sessions closed, device files scrubbed, App tokens destroyed | Every lease is kept alive while its run is, by `Broker.Extend`; see [how long a session lives](#how-long-a-session-lives) |
+| Releasing the inner lease destroyed a `github_app` token the pinned session still presented, and on Kubernetes that happened before the init container fetched | The inner lease lives as long as the session (`gitproxy.MintRequest.OnEnd`); on Kubernetes as long as the workspace Secret; on a device with a push write-back, until the workload ends |
+| Only `cloop ui` routed through the proxy; `cloop serve` and the CLI's own executors handed the forge credential over | Every other process refuses git workspaces while `executors.git_proxy` is enabled (`reconcile.routeWorkspaceSource`) |
+| A virtual executor's workspace was leased as its parent device, so a grant issued to the virtual executor was chosen and then missing | The lease is taken as the virtual executor |
+| Turning the proxy on or off, or moving `advertise_url`, left a device refusing its own checkout | The checkout records which repository it is of (`cloop.upstream`), and a provisioning that reaches the same repository another way re-points `origin` instead of refusing |
+
+What remains is either deliberate or beyond what the hub can reach today:
+
+1. **A GitHub App token lives GitHub's hour.** The keepalive extends a lease,
+   not the installation token minted for it at dispatch — in the sandbox without
+   a proxy, and upstream of the session with one. A run that still needs GitHub
+   more than an hour after dispatch loses it then. `Broker.Renew` mints a fresh
+   token, but nothing can yet hand a running sandbox new material, or swap the
+   credential a live session presents upstream.
+2. **A lease session is bounded by `session_minutes`**, counted from dispatch,
+   whatever the lease does. That is the operator's ceiling by design; set it
+   against the longest run the hub is expected to complete.
+3. **Nothing exercises the proxy end to end on Kubernetes.** The fixes above are
+   pinned by unit tests against the objects the driver sends the API server; no
+   test yet runs a Pod through the proxy, the way
+   [the live kit](#on-a-real-device) runs a device.
+4. **A device checkout provisioned through the proxy before Task 20349 has no
+   recorded upstream.** Turning the proxy *on*, or moving it, works for every
+   checkout, because the forge URL is the new route's upstream; turning it
+   *off* refuses such a checkout once, naming the directory to remove.
 
 ---
 

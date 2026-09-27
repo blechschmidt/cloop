@@ -315,10 +315,12 @@ dashboard, rather than being stored and failing inside somebody's run. Add
 At lease time the hub signs a nine-minute JWT with that key and exchanges it for
 an installation token narrowed to the repositories the grant allows and the
 permissions it names. **Only the token is delivered.** The private key never
-leaves the hub, the token expires in about an hour, each lease renewal mints a
-fresh one and destroys the old, and releasing or revoking calls
-`DELETE /installation/token` so the credential dies at GitHub rather than only
-on the sandbox's disk. Each destruction is audited as `github_app.token_destroy`
+leaves the hub, the token expires in about an hour, and releasing or revoking
+calls `DELETE /installation/token` so the credential dies at GitHub rather than
+only on the sandbox's disk. A run's lease is kept alive in place while the run
+is, which keeps the token it was issued rather than minting another: a run that
+still needs GitHub more than an hour after dispatch loses it when that token
+expires. Each destruction is audited as `github_app.token_destroy`
 — its own action rather than `secret.revoke`, because it happens on every
 ordinary task teardown and would otherwise drown the count of grants an operator
 actually withdrew. A DELETE that GitHub refuses is recorded as a **denial**

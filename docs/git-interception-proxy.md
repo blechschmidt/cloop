@@ -543,10 +543,13 @@ file), which is how `secretLease.Close` finds the sessions to end without the
 broker having to learn what a proxy session is.
 
 A lease is released when its workload ends, when an operator revokes it — and
-when it lapses. A run's lease is issued once, at dispatch, for at most 15 minutes,
-nothing renews it, and the lease janitor sweeps a lapsed one within a minute. So
-in practice a guarded session lasts no more than about 16 minutes, whatever
-`session_minutes` says: a workload that pushes later than that is refused. See
+when it lapses. A run's lease is issued for at most 15 minutes and extended in
+place while its run is live (Task 20349), so it lapses only when the run is gone
+or one of its grants was revoked or expired — and then the lease janitor sweeps
+it within a minute, closing its sessions. Until that fix nothing renewed a lease,
+and a guarded session lasted about 16 minutes whatever `session_minutes` said.
+What bounds a guarded session now is the earlier of its lease's release and its
+own `session_minutes`. See
 [how long a session lives](architecture/git-proxy.md#how-long-a-session-lives).
 
 `Registry.ReapExpired()` drops sessions past their TTL and returns how many
@@ -839,9 +842,12 @@ driver through `reconcile.Options.WrapWorkspaceSource`, and the remote agent
 through the hub's per-executor credential factory. The `container` and
 `localprocess` drivers bind the operator's own checkout and never clone, so there
 is no workspace on them to intercept — though their workloads' own git is, on the
-lease path below. Only `cloop ui` does this wiring: `cloop serve` does not, and on
-Kubernetes the routed fetch does not yet authenticate to the proxy. Both are in
-[where the integration is incomplete](architecture/git-proxy.md#where-the-integration-is-incomplete).
+lease path below. Only `cloop ui` does this wiring, because only `cloop ui` runs
+the proxy; with the section enabled, every other process that registers the
+Kubernetes driver — `cloop serve` among them — refuses git workspaces rather than
+hand a Pod the forge credential. On Kubernetes the routed fetch authenticates with
+the session id, which the per-run workspace Secret carries beside the token. See
+[limits that remain](architecture/git-proxy.md#limits-that-remain).
 
 The PAT itself is a `secretbroker` lease like any other — the change is where it
 is *used*, not where it comes from. See
@@ -974,7 +980,7 @@ Some sharper points:
 
 - [Git proxy architecture](architecture/git-proxy.md) — how the proxy is wired
   into the hub, the workspace and lease paths into it, each executor's part, what
-  a sandbox holds, and where the integration is incomplete
+  a sandbox holds, and the limits that remain
 - [Security model](security/model.md) — the trust boundaries, the workspace
   credential's path, and the guarantee → test table
 - [Threat model](security/threat-model.md) — STRIDE per boundary, with the
