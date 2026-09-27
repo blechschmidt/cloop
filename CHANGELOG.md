@@ -81,6 +81,13 @@ release still installs — see 0.0.2 in `CHANGELOG.md` for the detail.
 - **A revocation is sent to a reconnecting device once.** One recorded as the
   device reconnected could be sent twice, and the reply to the first could be
   taken by the second, reporting a reachable device as unreachable.
+- **Push-to-talk no longer sends a clip it meant to discard.** A tap too short
+  to be speech is thrown away, but its recorder stopped asynchronously, and a
+  press landing before it had — a second tap at once, or any press on a slow
+  device — let the discarded clip upload after all, often transcribed as a
+  hallucinated title. A release the page got to late could also stretch a tap
+  past the minimum hold. Holds are now timed by the pointer events themselves,
+  on the dashboard and the glasses link alike.
 - **`cloop chaos suite` gives every fault its full window.** Windows were
   measured from when the suite was built, so the last faults ran with a
   fraction of theirs — the SQLite one with under half a second of its two —
