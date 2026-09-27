@@ -29,7 +29,7 @@ func startLongRunning(t *testing.T, lb *loopback, spec executor.Spec) (executor.
 		spec.WorkDir = "attach-target"
 	}
 	if len(spec.Argv) == 0 {
-		spec.Argv = []string{"/bin/sh", "-c", "sleep 120"}
+		spec.Argv = []string{"/bin/sh", "-c", "exec sleep 120"}
 	}
 	h, err := ex.Start(context.Background(), spec)
 	if err != nil {
@@ -212,11 +212,11 @@ func TestLoopbackAttachTwoSessionsDoNotCrossTalk(t *testing.T) {
 
 	connA := ex.attach(t, executor.AttachRequest{
 		HandleID: h.ID,
-		Command:  []string{"/bin/sh", "-c", "echo AAA_ONLY; sleep 5"},
+		Command:  []string{"/bin/sh", "-c", "echo AAA_ONLY; exec sleep 5"},
 	})
 	connB := ex.attach(t, executor.AttachRequest{
 		HandleID: h.ID,
-		Command:  []string{"/bin/sh", "-c", "echo BBB_ONLY; sleep 5"},
+		Command:  []string{"/bin/sh", "-c", "echo BBB_ONLY; exec sleep 5"},
 	})
 
 	outA, okA := readUntilE2E(t, connA, "AAA_ONLY", 30*time.Second)

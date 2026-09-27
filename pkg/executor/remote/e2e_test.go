@@ -144,8 +144,57 @@ func newLoopback(t *testing.T) *loopback {
 		hub: hub, registry: reg, server: srv, agent: a,
 		credPath: credPath, root: root, cancel: cancel,
 	}
+	// Registered after the server and the agent, so it runs before either is
+	// torn down: the kill has to reach a device that is still connected.
+	t.Cleanup(func() { lb.stopWorkloads(t) })
 	lb.waitConnected(t)
 	return lb
+}
+
+// loopbackWorkloadDeathBound caps how long stopWorkloads waits for a killed
+// workload to be reported terminal. A backstop rather than a budget: after
+// SIGKILL the device reports within its two-second drain grace at the very
+// latest. Running past it means the kill never landed, which is the leak the
+// cleanup exists to catch, so it fails the test rather than hanging it.
+const loopbackWorkloadDeathBound = 30 * time.Second
+
+// stopWorkloads kills whatever the loopback's agent is still running and waits
+// for the device to report each workload terminal.
+//
+// The agent leaves its workloads running when it stops, by design: on a device
+// the service unit takes them down with it. A test has no unit around it, so a
+// workload still running when a test ended outlived the test binary, and every
+// run of this package left its `sleep 120`s behind, reparented to init. The
+// long sleeps the tests park in are exec'd for the same reason: a kill that
+// reaches only the shell leaves its sleep running.
+func (lb *loopback) stopWorkloads(t *testing.T) {
+	for _, ex := range lb.hub.Executors() {
+		for _, id := range ex.Handles() {
+			lines, err := ex.Stream(context.Background(), id)
+			if err != nil {
+				continue
+			}
+			// Best effort, because the proof is the stream closing below, not
+			// the signal. A workload the test already stopped can have been
+			// forgotten by the agent while its terminal status is still on the
+			// wire, and the agent then answers "no workload" to a kill that has
+			// nothing left to do.
+			sigErr := ex.Signal(context.Background(), id, executor.SignalKill)
+			ended := make(chan struct{})
+			go func() {
+				defer close(ended)
+				for range lines {
+				}
+			}()
+			select {
+			case <-ended:
+			case <-time.After(loopbackWorkloadDeathBound):
+				t.Errorf("workload %s was not reported terminal %s after SIGKILL (signal: %v); "+
+					"a test must not leave a process running when it ends",
+					id, loopbackWorkloadDeathBound, sigErr)
+			}
+		}
+	}
 }
 
 // waitConnected blocks until the agent's executor is registered and online.
@@ -322,7 +371,7 @@ func TestLoopbackSignalStopsWorkload(t *testing.T) {
 
 	handle, err := ex.Start(context.Background(), executor.Spec{
 		WorkDir: "long-running",
-		Argv:    []string{"/bin/sh", "-c", "sleep 120"},
+		Argv:    []string{"/bin/sh", "-c", "exec sleep 120"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

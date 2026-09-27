@@ -220,7 +220,7 @@ func TestLoopbackRevokeKillTerminatesHolder(t *testing.T) {
 	lease, mount := mintLease(t, t.TempDir())
 	spec := executor.Spec{
 		WorkDir: "revoke-kill",
-		Argv:    []string{"/bin/sh", "-c", `echo READY; sleep 120`},
+		Argv:    []string{"/bin/sh", "-c", `echo READY; exec sleep 120`},
 		Env:     append(os.Environ(), mount.Env()...),
 		Secrets: leaseBindings(lease, mount),
 	}
@@ -280,7 +280,7 @@ func TestLoopbackRevokeRefusesPathsOutsideALeaseDirectory(t *testing.T) {
 
 	spec := executor.Spec{
 		WorkDir: "confinement",
-		Argv:    []string{"/bin/sh", "-c", "echo READY; sleep 60"},
+		Argv:    []string{"/bin/sh", "-c", "echo READY; exec sleep 60"},
 		Secrets: []executor.SecretBinding{{
 			LeaseID: "lease_evil",
 			EnvKeys: []string{"NOTHING"},
