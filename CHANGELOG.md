@@ -10,6 +10,34 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+### Added
+
+- **Parallel features.** `cloop feature new` — and **+ New feature** on a
+  project's Overview — starts a line of work in its own git worktree on branch
+  `cloop/feature/<slug>`, with its own task list and its own auto-evolve,
+  innovate and parallel settings. Features run at the same time as their project
+  and as each other; the dashboard nests them under their project, and each is
+  otherwise an ordinary project with its own run, tasks and options. When one is
+  done, **Open pull request** (`cloop feature pr`) pushes its branch and opens a
+  GitHub pull request into the branch it was cut from — or the hub does it by
+  itself on completion when the feature asked for that. A feature runs on its
+  project's executor with its project's grants and roles, by a mapping read from
+  its path so that it fails closed. See `docs/guides/features.md`.
+
+### Changed
+
+- **The dashboard's script ships without its comments.** Whole-line `//`
+  comments were over a third of its wire bytes; they are now stripped when the
+  bundle is built, keeping every line number, by a lexer that refuses — and
+  serves the source unchanged — whenever it cannot prove a line is a comment.
+  First paint fell from 279 KB to 213 KB, the parallel-features UI included.
+- **Stop, the running indicator and run re-entrancy treat a feature as its own
+  project.** A run in `.cloop/features/<slug>` no longer marks its parent as
+  running, and the parent's Stop no longer signals it.
+- `cloop clean` refuses while the project has features unless `--force`, which
+  removes them through git first; snapshots neither archive feature worktrees
+  nor touch them on restore; disk-usage reports no longer count them.
+
 ## [0.0.2] - 2026-09-17
 
 This release exists to publish the installer fix below, which was written

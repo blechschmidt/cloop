@@ -125,6 +125,12 @@ Six pages in order, indexed at
 
 ## Guides
 
+- **[Developing features in parallel](guides/features.md)** — several lines of
+  work on one repository at once: a git worktree per feature on its own branch,
+  each with its own task list and its own auto-evolve and innovate settings,
+  running concurrently and proposed as a GitHub pull request when done. What a
+  feature inherits from its project (executor, grants, roles) and why, where it
+  may run, and how removal protects uncommitted work.
 - **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT (for
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress

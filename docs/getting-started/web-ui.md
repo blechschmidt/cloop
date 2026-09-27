@@ -135,6 +135,7 @@ The Overview tab is the control panel for one project, top to bottom:
 | **Instructions / Constraints** | the extra instructions the AI is given, also editable |
 | **Overview** | Steps, Provider, Executor, Mode, Tokens, Est. Cost, Created, Updated |
 | **Active Options** | the persistent run flags — see [Run options](#run-options) |
+| **Features** | the project's parallel features — a git worktree each, with its own tasks and settings — and **+ New feature**; see [developing features in parallel](../guides/features.md) |
 | **Claude Code Subscription Caps** | weekly / 5-hour / Opus / Sonnet utilisation ceilings, shown only on the `claudecode` provider |
 | **Controls** | **Run**, **Pause / Stop** while running, **Refresh**, **Voice** |
 | **Live Output** | the running step's output as it arrives, with **Clear** |
@@ -145,6 +146,11 @@ picker whose choice is saved on the project and used by every subsequent run
 until changed; the Effort selector there applies to `claudecode` only and says
 so. **Executor** picks where this project's harness actually runs, and takes
 effect on the next run — work already in flight stays where it started.
+
+A feature's Overview is the same page for the feature, headed by a banner that
+names its project and branch and offers **Open pull request** and **Remove
+feature**. Its executor, repository access and credentials are its project's,
+so those controls step aside on it.
 
 ---
 
