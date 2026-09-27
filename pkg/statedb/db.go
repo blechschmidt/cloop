@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,7 +124,7 @@ type OpenOptions struct {
 // OpenWithOptions is Open with the version-skew opt-out under the caller's
 // control rather than the environment's.
 func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := sql.Open("sqlite", connString(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("statedb open %s: %w", dbPath, classifyDriverErr(err))
 	}
@@ -158,6 +159,32 @@ func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 	return &DB{conn: conn}, nil
 }
 
+// connString is dbPath plus the settings the driver applies to every
+// connection it opens, before the first statement runs (Task 20349).
+//
+// They used to be issued by applyPragmas after the connection existed, with
+// `PRAGMA journal_mode=WAL` first. So the open itself had no busy handler: a
+// hub opening a project's database just as a `cloop run` closed it — the last
+// close of a WAL database checkpoints under an exclusive lock — failed at once
+// with "enable WAL mode: database is locked". The driver applies busy_timeout
+// ahead of every other pragma, so it now covers the WAL pragma, the migration
+// check and everything after; and a connection the pool reopens gets the same
+// settings, where one issued once by applyPragmas would have lost them.
+//
+// _txlock=immediate makes every transaction take the write lock at BEGIN
+// rather than at its first write. Every transaction statedb opens reads and
+// then writes, and a deferred one fails instantly with SQLITE_BUSY_SNAPSHOT
+// (517) — no busy handler, no retry — whenever another handle commits between
+// its read and its write: two handles appending audit rows concurrently lost
+// half of them that way. An immediate transaction waits on busy_timeout
+// instead, and in WAL mode readers are not blocked by it.
+func connString(dbPath string) string {
+	return dbPath + "?" + url.Values{
+		"_pragma": {"busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"},
+		"_txlock": {"immediate"},
+	}.Encode()
+}
+
 // applyPragmas configures the SQLite connection for safe multi-process use.
 //
 //   - journal_mode=WAL: persistent file-level setting. Lets one writer and
@@ -170,16 +197,21 @@ func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 //   - synchronous=NORMAL: safe under WAL — a sudden power loss may lose
 //     the very last commit but cannot corrupt the database — and is
 //     several times faster than the FULL default for our write pattern.
+//
+// connString already applies busy_timeout, synchronous and foreign_keys when
+// the driver opens the connection, busy_timeout before anything else; they are
+// repeated here, busy_timeout first, so a connection string built elsewhere
+// cannot quietly lose them.
 func applyPragmas(conn *sql.DB) error {
+	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		return fmt.Errorf("statedb: set busy_timeout: %w", err)
+	}
 	var mode string
 	if err := conn.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
 		return fmt.Errorf("statedb: enable WAL mode: %w", err)
 	}
 	if !strings.EqualFold(mode, "wal") {
 		return fmt.Errorf("statedb: WAL mode rejected (got journal_mode=%q); filesystem may not support it", mode)
-	}
-	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return fmt.Errorf("statedb: set busy_timeout: %w", err)
 	}
 	if _, err := conn.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
 		return fmt.Errorf("statedb: set synchronous=NORMAL: %w", err)
