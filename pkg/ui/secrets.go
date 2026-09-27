@@ -44,6 +44,21 @@ import (
 // than hanging an HTTP handler.
 const leaseTimeout = 10 * time.Second
 
+// The lease keepalive's pacing (Task 20349).
+//
+// A lease is issued for secretbroker.DefaultMaxLeaseTTL — fifteen minutes —
+// and nothing used to renew it, so the lease janitor swept every run's lease a
+// quarter of an hour in: the device scrubbed its files, the git proxy closed
+// its sessions, and a GitHub App token died at GitHub, however long the run
+// still had to go. The keepalive checks once a tick and extends when the
+// deadline is within the margin, which with the defaults is roughly once every
+// ten minutes and leaves five checks' worth of retries before a lease that
+// could not be extended actually lapses.
+const (
+	leaseKeepaliveTick   = time.Minute
+	leaseKeepaliveMargin = 5 * time.Minute
+)
+
 // liveLeases tracks the leases this hub has issued and still holds open, so
 // GET /api/leases can answer "which executor is holding which credential
 // right now" and POST /api/leases/{id}/revoke can take it away (Task 20171).
@@ -147,7 +162,164 @@ type secretLease struct {
 	db  *statedb.DB
 	dir string
 
+	// mu guards expiry and alive, which the keepalive goroutine, the lease
+	// janitor and the leases panel all reach from different goroutines.
+	mu sync.Mutex
+	// expiry is the lease's current deadline: lease.ExpiresAt until the
+	// keepalive extends it. The Lease itself is never written after issue,
+	// because it is read unguarded all over the hub.
+	expiry time.Time
+	// alive, when set, is asked before each extension whether the workload
+	// holding this lease is still running; see setLiveness.
+	alive func(context.Context) bool
+	// stopKeepalive ends the keepalive goroutine and waits for it. Close
+	// calls it first, so no extension can land on a lease being released.
+	stopKeepalive func()
+
 	once sync.Once
+}
+
+// ExpiresAt returns the lease's current deadline, including any extension.
+func (sl *secretLease) ExpiresAt() time.Time {
+	if sl == nil || sl.lease == nil {
+		return time.Time{}
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if sl.expiry.IsZero() {
+		return sl.lease.ExpiresAt
+	}
+	return sl.expiry
+}
+
+// Expired reports whether the lease had lapsed at now.
+func (sl *secretLease) Expired(now time.Time) bool {
+	if sl == nil || sl.lease == nil {
+		return true
+	}
+	return !now.Before(sl.ExpiresAt())
+}
+
+// TTL returns the lease's remaining lifetime at now, clamped at zero.
+func (sl *secretLease) TTL(now time.Time) time.Duration {
+	if d := sl.ExpiresAt().Sub(now); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// setLiveness tells the keepalive how to ask whether the workload holding
+// this lease is still running. wipeLeaseOnExit sets it, because it is the one
+// holder that knows the executor and handle; the synchronous holders need
+// none — while their call is in progress, the workload is.
+func (sl *secretLease) setLiveness(alive func(context.Context) bool) {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	sl.alive = alive
+	sl.mu.Unlock()
+}
+
+// keepAlive extends the lease when its deadline is within the margin of now,
+// and reports whether the keepalive should keep running.
+//
+// It stops for good when the broker refuses for a reason that will not change
+// — a revoked or expired grant, a lease already lapsed or released — which is
+// how a revocation still lands within one lease period: the refused lease
+// lapses on schedule and the janitor takes the material back. Anything else is
+// retried on the next tick, and there are several before the margin runs out.
+// A workload the executor reports finished is never extended.
+func (sl *secretLease) keepAlive(ctx context.Context, now time.Time) bool {
+	if sl == nil || sl.lease == nil || sl.broker == nil {
+		return false
+	}
+	current := sl.ExpiresAt()
+	if current.Sub(now) > leaseKeepaliveMargin {
+		return true
+	}
+	sl.mu.Lock()
+	alive := sl.alive
+	sl.mu.Unlock()
+	if alive != nil && !alive(ctx) {
+		// Finished, or gone from the executor. Its holder is about to close
+		// the lease; extending it now would only widen the window in which a
+		// lost workload keeps a credential.
+		return false
+	}
+	deadline, err := sl.broker.Extend(ctx, sl.lease.ID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		if leaseExtensionIsFinal(err) {
+			fmt.Fprintf(os.Stderr, "ui: lease %s will not be extended and lapses at %s: %v\n",
+				sl.lease.ID, current.UTC().Format(time.RFC3339), err)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "ui: extend lease %s (will retry): %v\n", sl.lease.ID, err)
+		return true
+	}
+	if !deadline.After(current) {
+		// Clamped to a grant that expires no later than the lease already
+		// does. Nothing more can be gained, and asking again every tick would
+		// only write the same audit row over and over.
+		return false
+	}
+	sl.mu.Lock()
+	if deadline.After(sl.expiry) {
+		sl.expiry = deadline
+	}
+	sl.mu.Unlock()
+	return true
+}
+
+// leaseExtensionIsFinal reports whether a refused extension will be refused
+// again, so the keepalive can stop asking.
+func leaseExtensionIsFinal(err error) bool {
+	for _, final := range []error{
+		secretbroker.ErrGrantRevoked,
+		secretbroker.ErrGrantExpired,
+		secretbroker.ErrLeaseNotFound,
+		secretbroker.ErrLeaseExpired,
+		secretbroker.ErrInvalidGrant,
+	} {
+		if errors.Is(err, final) {
+			return true
+		}
+	}
+	return false
+}
+
+// startKeepalive runs keepAlive every tick until the lease is closed or the
+// keepalive decides to stop. Called once, by acquireSecretLease, so no holder
+// of a lease can forget to keep it alive.
+func (sl *secretLease) startKeepalive(tick time.Duration) {
+	if sl == nil || sl.lease == nil || sl.broker == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	sl.stopKeepalive = func() {
+		cancel()
+		<-done
+	}
+	go func() {
+		defer close(done)
+		defer recoverGoroutine("secret lease keepalive: " + sl.lease.ID)
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				if !sl.keepAlive(ctx, now) {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // Env returns the environment additions for the workload, or nil.
@@ -249,7 +421,7 @@ func (sl *secretLease) Bindings() []executor.SecretBinding {
 	if sl == nil || sl.lease == nil {
 		return nil
 	}
-	return secretbroker.ExecutorBindings(sl.lease.ID, sl.lease.ExpiresAt, sl.leaseBindings())
+	return secretbroker.ExecutorBindings(sl.lease.ID, sl.ExpiresAt(), sl.leaseBindings())
 }
 
 // ExecutorID returns the executor this lease was issued to, or "".
@@ -267,6 +439,10 @@ func (sl *secretLease) Close() {
 		return
 	}
 	sl.once.Do(func() {
+		// First, so no extension can land on a lease that is being released.
+		if sl.stopKeepalive != nil {
+			sl.stopKeepalive()
+		}
 		if sl.lease != nil {
 			liveLeases.remove(sl.lease.ID)
 		}
@@ -372,7 +548,7 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 		return nil
 	}
 
-	sl := &secretLease{broker: broker, lease: lease, closer: closeDB}
+	sl := &secretLease{broker: broker, lease: lease, closer: closeDB, expiry: lease.ExpiresAt}
 	if ex != nil && ex.Capabilities().SecretFilesFromHostPath {
 		// Name the directory, record the intent, *then* write the plaintext.
 		//
@@ -439,6 +615,11 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 		}
 		sl.delivery = delivery
 	}
+	// Kept alive from here until Close, whichever holder closes it — see
+	// leaseKeepaliveTick for what happened to long runs before. Started
+	// before the lease is registered: from that moment a revoke on another
+	// goroutine may Close it, and Close must find the keepalive to stop.
+	sl.startKeepalive(leaseKeepaliveTick)
 	// Registered only once the credentials actually exist on disk: every
 	// earlier return path has already released the lease, and a registry
 	// entry for one of those would offer a revoke button for a lease that

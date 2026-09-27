@@ -325,10 +325,13 @@ func (s *Server) StopLeaseJanitor() {
 func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 	var out []remote.ExpiredLease
 	for _, sl := range liveLeases.snapshot() {
-		if sl == nil || sl.lease == nil || !sl.lease.Expired(now) {
+		// The lease's *current* deadline, which the keepalive moves forward
+		// while its run is live (Task 20349). Reading the issued one swept
+		// every run's credentials fifteen minutes in.
+		if sl == nil || sl.lease == nil || !sl.Expired(now) {
 			continue
 		}
-		age := now.Sub(sl.lease.ExpiresAt).Round(time.Second)
+		age := now.Sub(sl.ExpiresAt()).Round(time.Second)
 		out = append(out, remote.ExpiredLease{
 			LeaseID: sl.lease.ID,
 			Reason:  fmt.Sprintf("lease TTL expired %s ago", age),

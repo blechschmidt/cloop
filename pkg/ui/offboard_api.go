@@ -229,7 +229,7 @@ func (hubLeases) LiveLeases() []offboard.LeaseRef {
 			ExecutorID: sl.lease.ExecutorID,
 			ProjectID:  sl.lease.ProjectID,
 			Kinds:      leaseKindNames(sl.lease.Kinds()),
-			ExpiresAt:  sl.lease.ExpiresAt,
+			ExpiresAt:  sl.ExpiresAt(),
 		})
 	}
 	return out

@@ -486,7 +486,7 @@ var registry = []Entry{
 		Action:    ActionSecretRenew,
 		Home:      HomeControlPlane,
 		Entity:    "secret",
-		Trigger:   "A live lease is re-issued to the same holder before it expires.",
+		Trigger:   "A live lease is renewed before it expires: re-issued to the same holder, or extended in place while its run is live.",
 		Payload:   secretPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,

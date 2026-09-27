@@ -1225,11 +1225,11 @@ func (s *Server) handleLeasesList(w http.ResponseWriter, r *http.Request) {
 			ProjectPath: l.ProjectID,
 			ProjectName: names[l.ProjectID],
 			IssuedAt:    l.IssuedAt,
-			ExpiresAt:   l.ExpiresAt,
-			Expired:     l.Expired(now),
+			ExpiresAt:   sl.ExpiresAt(),
+			Expired:     sl.Expired(now),
 			Materials:   []leaseMaterialView{},
 		}
-		view.RemainingSeconds = int64(l.TTL(now) / time.Second)
+		view.RemainingSeconds = int64(sl.TTL(now) / time.Second)
 		view.Revocations = revocations[l.ID]
 		view.Holders, view.Revocable = s.leaseHolders(l.ID)
 		for _, m := range l.Materials {

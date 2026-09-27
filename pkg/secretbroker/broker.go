@@ -105,6 +105,10 @@ type leaseState struct {
 	// kinds are the credential kinds this lease carried, kept so an
 	// expiring lease can be counted by kind after its materials are gone.
 	kinds []Kind
+	// grantIDs are the grants whose material the lease carries. Extend
+	// re-checks exactly these, so a lease is never kept alive by a grant it
+	// does not hold, nor past one it does that was revoked.
+	grantIDs []string
 }
 
 // Option configures a Broker.
@@ -728,9 +732,14 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	}
 
 	kinds := lease.Kinds()
+	grantIDs := make([]string, 0, len(materials))
+	for _, mat := range materials {
+		grantIDs = append(grantIDs, mat.GrantID)
+	}
 	b.mu.Lock()
 	b.leases[lease.ID] = &leaseState{
 		requester: r, actor: actor, expiresAt: lease.ExpiresAt, kinds: kinds,
+		grantIDs: grantIDs,
 	}
 	if len(rec.tokens) > 0 {
 		b.minted[lease.ID] = rec.tokens
@@ -819,6 +828,118 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 		Reason:     "renewed from " + leaseID,
 	})
 	return renewed, nil
+}
+
+// Extend keeps a live lease valid for another lease period, in place: same ID,
+// same materials, a later deadline.
+//
+// It is the renewal a dispatched workload can actually use (Task 20349).
+// Renew re-issues — a new lease ID, a fresh GitHub App installation token, a
+// fresh git-proxy session — and destroys the old lease's tokens, which is
+// right for a caller that can hand the workload the new material and wrong for
+// one that cannot: a sandbox holding a token in its environment or in a file
+// the hub cannot rewrite would lose it the moment Renew returned. Nothing on
+// the dispatch path could re-deliver, so nothing renewed, and every run's lease
+// lapsed fifteen minutes in — its files scrubbed, its git proxy sessions
+// closed, its App token destroyed at GitHub — however long the run was.
+//
+// What Extend keeps from Renew is the property the short TTL exists for: every
+// grant the lease carries is re-read from the store and re-checked, so a grant
+// revoked or expired since the lease was issued refuses the extension, the
+// lease lapses on its own schedule, and the janitor takes the material back —
+// a revocation still lands within one lease period. The new deadline is
+// clamped to the earliest grant expiry exactly as at issue.
+//
+// It does not re-render anything. A secret whose value an operator re-minted
+// reaches the next dispatch, not this one, and an App token keeps the hour
+// GitHub gave it when it was minted.
+func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) {
+	ev := Event{Action: ActionRenew, LeaseID: leaseID}
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	b.mu.Lock()
+	st, ok := b.leases[leaseID]
+	var (
+		requester Requester
+		actor     string
+		expiresAt time.Time
+		grantIDs  []string
+	)
+	if ok {
+		requester, actor, expiresAt = st.requester, st.actor, st.expiresAt
+		grantIDs = append([]string(nil), st.grantIDs...)
+	}
+	b.mu.Unlock()
+	if !ok {
+		return time.Time{}, b.denyf(ev, ErrLeaseNotFound, "unknown lease %q", leaseID)
+	}
+	ev.Actor = actor
+	ev.ExecutorID = requester.ExecutorID
+	ev.ProjectID = requester.ProjectID
+	ev.RunID = requester.RunID
+
+	now := b.now()
+	if !now.Before(expiresAt) {
+		// A lapsed lease stays lapsed. The janitor may already be taking its
+		// material back, and extending it here would race that sweep into
+		// leaving a credential with a workload the hub has written off.
+		return time.Time{}, b.denyf(ev, ErrLeaseExpired,
+			"lease %s lapsed at %s and cannot be extended", leaseID, expiresAt.UTC().Format(time.RFC3339))
+	}
+
+	var earliest time.Time
+	for _, id := range grantIDs {
+		g, err := b.store.GetGrant(id)
+		if err != nil {
+			ev.GrantID = id
+			return time.Time{}, b.denyf(ev, ErrGrantNotFound,
+				"lease %s holds grant %s, which can no longer be read: %v", leaseID, id, err)
+		}
+		if reason := g.DenyReason(now); reason != "" {
+			ev.GrantID = id
+			sentinel := ErrGrantExpired
+			if !g.RevokedAt.IsZero() {
+				sentinel = ErrGrantRevoked
+			}
+			return time.Time{}, b.denyf(ev, sentinel, "lease %s holds grant %s: %s", leaseID, id, reason)
+		}
+		if !g.Subject.Matches(requester) {
+			ev.GrantID = id
+			return time.Time{}, b.denyf(ev, ErrInvalidGrant,
+				"lease %s holds grant %s, which is no longer issued to this requester", leaseID, id)
+		}
+		if _, err := b.store.GetSecret(g.SecretID); err != nil {
+			ev.GrantID = id
+			return time.Time{}, b.denyf(ev, ErrSecretNotFound,
+				"lease %s holds grant %s, whose secret %s is gone", leaseID, id, g.SecretID)
+		}
+		if !g.ExpiresAt.IsZero() && (earliest.IsZero() || g.ExpiresAt.Before(earliest)) {
+			earliest = g.ExpiresAt
+		}
+	}
+
+	deadline := b.leaseDeadline(now, earliest)
+	b.mu.Lock()
+	st, ok = b.leases[leaseID]
+	if ok && deadline.After(st.expiresAt) {
+		st.expiresAt = deadline
+	}
+	if ok {
+		deadline = st.expiresAt
+	}
+	b.mu.Unlock()
+	if !ok {
+		// Released while the grants were being read. Nothing to keep alive,
+		// and recreating the record would resurrect a lease its holder gave up.
+		return time.Time{}, b.denyf(ev, ErrLeaseNotFound, "lease %s was released", leaseID)
+	}
+
+	ev.Decision = DecisionAllow
+	ev.ExpiresAt = deadline
+	ev.Reason = "extended in place while its run is live"
+	b.emit(ev)
+	return deadline, nil
 }
 
 // Release drops a lease's server-side record and destroys any credential the
