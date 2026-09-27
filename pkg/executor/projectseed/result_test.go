@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -625,5 +626,39 @@ func TestMergeNeverLeavesABarePause(t *testing.T) {
 		if st.Status != "paused" || st.PauseReason == nil || !pausereason.Known(st.PauseReason.Code) {
 			t.Errorf("reason %+v: status %q with pause reason %+v", pr, st.Status, st.PauseReason)
 		}
+	}
+}
+
+// TestTokenTotalsNeitherOverflowNorWrap pins the two halves of the bound on
+// what a run's report may add: one delta is clamped to maxTokenDelta, and the
+// running total saturates instead of wrapping negative.
+//
+// Written against math.MaxInt rather than a literal so it compiles, and means
+// the same thing, on the 32-bit targets the release builds for — the v0.0.3
+// release build failed on linux/arm because maxTokenDelta was a constant no
+// int there can hold (Task 20344).
+func TestTokenTotalsNeitherOverflowNorWrap(t *testing.T) {
+	if got := boundedDelta(-7); got != 0 {
+		t.Errorf("boundedDelta(-7) = %d, want 0: a report cannot subtract from a total", got)
+	}
+	if got := boundedDelta(math.MaxInt); got != maxTokenDelta {
+		t.Errorf("boundedDelta(MaxInt) = %d, want the ceiling %d", got, maxTokenDelta)
+	}
+	if got := boundedDelta(12345); got != 12345 {
+		t.Errorf("boundedDelta(12345) = %d, want it unchanged", got)
+	}
+	if got := addBounded(math.MaxInt-3, maxTokenDelta); got != math.MaxInt {
+		t.Errorf("addBounded near MaxInt = %d, want it to saturate at MaxInt", got)
+	}
+	if got := addBounded(math.MaxInt, 1); got != math.MaxInt {
+		t.Errorf("addBounded(MaxInt, 1) = %d, want MaxInt", got)
+	}
+	if got := addBounded(100, 50); got != 150 {
+		t.Errorf("addBounded(100, 50) = %d, want 150", got)
+	}
+	// A total already negative (a corrupt record) must not be mistaken for one
+	// about to overflow.
+	if got := addBounded(-10, 4); got != -6 {
+		t.Errorf("addBounded(-10, 4) = %d, want -6", got)
 	}
 }

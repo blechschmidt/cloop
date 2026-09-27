@@ -67,7 +67,12 @@ const (
 	maxPauseDetailBytes = 1 << 10
 	// maxTokenDelta bounds what one run may add to a project's token totals.
 	// Far beyond any real run; there so a hostile report cannot overflow them.
-	maxTokenDelta = 1 << 40
+	//
+	// No larger than math.MaxInt, so that it is an int on every platform the
+	// release builds for. 1<<40 alone is not one on 32-bit linux/arm, and the
+	// v0.0.3 release build failed there on exactly this constant: CI compiles
+	// only for 64-bit targets, so nothing had caught it (Task 20344).
+	maxTokenDelta = min(1<<40, math.MaxInt)
 )
 
 // eventTypePattern is what a journal event type looks like. Anything else is
@@ -383,9 +388,9 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 	}
 	rep.Costs = len(rec.Costs)
 
-	st.TotalInputTokens += boundedDelta(r.InputTokens)
-	st.TotalOutputTokens += boundedDelta(r.OutputTokens)
-	st.EvolveStep += boundedDelta(r.EvolveSteps)
+	st.TotalInputTokens = addBounded(st.TotalInputTokens, boundedDelta(r.InputTokens))
+	st.TotalOutputTokens = addBounded(st.TotalOutputTokens, boundedDelta(r.OutputTokens))
+	st.EvolveStep = addBounded(st.EvolveStep, boundedDelta(r.EvolveSteps))
 
 	mergeStatus(st, r, scrub, &rep)
 	return rep, rec
@@ -765,6 +770,20 @@ func normalizeTimes(s string) string {
 
 func boundedDelta(n int) int {
 	return clampInt(n, 0, maxTokenDelta)
+}
+
+// addBounded adds a delta from boundedDelta to a running total, saturating at
+// math.MaxInt rather than wrapping negative.
+//
+// On a 64-bit hub no run gets near that: one delta is at most 1<<40. On a
+// 32-bit one the per-run bound is math.MaxInt itself, so without this a single
+// hostile report could wrap a total, which is the overflow maxTokenDelta
+// exists to prevent.
+func addBounded(total, delta int) int {
+	if total > 0 && delta > math.MaxInt-total {
+		return math.MaxInt
+	}
+	return total + delta
 }
 
 func clampInt(n, lo, hi int) int {
