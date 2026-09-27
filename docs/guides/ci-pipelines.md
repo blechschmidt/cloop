@@ -369,6 +369,13 @@ Three things revoke a session immediately, mid-job:
   otherwise keep spending under a policy that no longer exists;
 - **turning federation off**.
 
+Revocation stops the spend at once — every call after it is refused — but it
+does not end the job at once. A revoked or expired session is answered with a
+`401`, and Claude Code 2.1.282 retries that: eleven attempts over about three
+minutes, then it exits with `Not logged in · Please run /login`. So a revoked
+job holds its runner for those minutes and then fails with a message about
+logging in, not about the revocation.
+
 Every relay decision — allowed and denied, with the model and the token counts
 — lands in the hub's audit trail as `ci.relay.allowed` / `ci.relay.denied`,
 alongside `ci.exchange.accepted` / `ci.exchange.rejected` and the
@@ -389,6 +396,7 @@ attempt with the claims the token actually carried. The common causes:
 | `403`, "not on the allowlist" | no rule matched — compare the recorded claims against your rule |
 | `403` and the detail says *undecidable rules* | a rule reads a claim this token does not carry, usually `environment` |
 | `503` | federation is off, or the hub has no Anthropic credential |
+| relay `401`, "session token was not accepted" | the session expired or was revoked — Claude Code retries for minutes, then says `Not logged in` |
 | relay `403`, "model is not permitted" | the harness asked for a model outside the rule's allowlist |
 | relay `429` | the session's request budget is spent |
 
