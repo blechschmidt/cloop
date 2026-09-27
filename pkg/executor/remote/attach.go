@@ -102,6 +102,9 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 		inbox:    make(chan []byte, attachInboxDepth),
 		closed:   make(chan struct{}),
 	}
+	// Every failed return below goes through abandon, which is what ends this
+	// goroutine; unregistering alone left it parked on an inbox nothing would
+	// ever fill, one per refused attach, for the life of the hub.
 	go as.pump()
 	// The same redaction the log stream applies to this handle's output. The
 	// remote driver installs its set on the handle's bus at Start; reusing it
@@ -118,8 +121,10 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 	// site that forgets the limiter still cannot turn one agent connection into
 	// an unbounded fan-out of pipes.
 	if !sess.registerAttach(as) {
-		return nil, fmt.Errorf("%w: agent %s is already carrying %d interactive sessions",
+		err := fmt.Errorf("%w: agent %s is already carrying %d interactive sessions",
 			executor.ErrAttachBusy, e.id, maxAttachSessionsPerConnection)
+		as.abandon(err.Error())
+		return nil, err
 	}
 
 	frame, err := sess.frame(TypeAttachOpen, newCorrelationID(), req.HandleID, AttachOpenPayload{
@@ -132,16 +137,17 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 		Env:       req.Env,
 	})
 	if err != nil {
-		sess.unregisterAttach(sessionID)
+		as.abandon(err.Error())
 		return nil, err
 	}
 	reply, err := sess.request(ctx, frame, TypeAttachOpened)
 	if err != nil {
-		sess.unregisterAttach(sessionID)
-		return nil, fmt.Errorf("remote: attach to %s on agent %s: %w", req.HandleID, e.id, err)
+		err = fmt.Errorf("remote: attach to %s on agent %s: %w", req.HandleID, e.id, err)
+		as.abandon(err.Error())
+		return nil, err
 	}
 	if _, derr := DecodeAttachOpened(reply); derr != nil {
-		sess.unregisterAttach(sessionID)
+		as.abandon(derr.Error())
 		return nil, derr
 	}
 	return as, nil
