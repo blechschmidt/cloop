@@ -24,6 +24,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,11 +55,59 @@ func (p *hangingProvider) Complete(ctx context.Context, _ string, _ provider.Opt
 func (*hangingProvider) Name() string         { return "hanging" }
 func (*hangingProvider) DefaultModel() string { return "hanging-model" }
 
-// TestTaskTimeout_PerTaskBudget asserts that a task with task.MaxMinutes=1
-// (1 ms under the test unit) is cancelled and marked timed_out within a tight
-// budget, that the task's FailureDiagnosis carries the timeout reason, and
-// that a final artifact line is written even though the provider produced
-// no partial output.
+// errRunGuard is the cause runGuardedPM cancels a run with once runGuard has
+// passed.
+var errRunGuard = errors.New("test run guard expired")
+
+// runGuard only turns a task whose own deadline never fires into a failure
+// instead of a hang. A correct run is well inside it: under the millisecond
+// test unit its task is cut off tens of milliseconds after starting, and a
+// whole run, bookkeeping included, took under 7s on a 4-core box at load
+// average 30. It is also kept below the 60,000-unit (60s) global budget
+// TestTaskTimeout_ProjectDefault shadows, so a task armed with that budget is
+// stopped here rather than timing out on it.
+const runGuard = 30 * time.Second
+
+// runGuardedPM runs o.runPM under a context with no deadline, cancelled with
+// errRunGuard only if runGuard passes first.
+//
+// These tests used to bound runPM with context.WithTimeout and infer from its
+// total running time which budget had cut the task off. That confused two
+// things. runPM's own bookkeeping — state saves before and after the task —
+// can outlast such a bound on a loaded runner: CI failed
+// TestTaskTimeout_ProjectDefault at 2.0027s against 2s, with the task timed
+// out on its 25-unit budget as intended. And the bound was itself a deadline
+// that is recorded as the task timing out: the task's context inherits
+// DeadlineExceeded from its parent, which isTimeoutErr accepts. Cancelled with
+// errRunGuard instead, the task's context reports Canceled with that cause,
+// which is never taken for a timeout. So a task recorded as timed_out here was
+// cut off by its own deadline, and the budget it records says which one.
+func runGuardedPM(t *testing.T, o *Orchestrator) {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	guard := time.AfterFunc(runGuard, func() { cancel(errRunGuard) })
+	defer guard.Stop()
+
+	if err := o.runPM(ctx); err != nil {
+		t.Logf("runPM returned: %v", err)
+	}
+	if errors.Is(context.Cause(ctx), errRunGuard) {
+		t.Logf("run guard fired after %s", runGuard)
+	}
+}
+
+// timedOutAfter is how handleTaskTimeout's FailureDiagnosis names the budget
+// the task was cut off by.
+func timedOutAfter(budgetMinutes int) string {
+	return fmt.Sprintf("timed out after %d minute(s)", budgetMinutes)
+}
+
+// TestTaskTimeout_PerTaskBudget asserts that a task with task.MaxMinutes=50
+// (50 ms under the test unit) is cancelled by its own deadline and marked
+// timed_out, that the task's FailureDiagnosis carries the timeout reason and
+// that budget, and that a final artifact line is written even though the
+// provider produced no partial output.
 func TestTaskTimeout_PerTaskBudget(t *testing.T) {
 	defer withTaskTimeoutUnit(time.Millisecond)()
 
@@ -81,22 +130,8 @@ func TestTaskTimeout_PerTaskBudget(t *testing.T) {
 	// each blocking another 50ms — slow and irrelevant to this assertion).
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, NoHeal: true}, prov)
 
-	// Tight wall-clock budget: 50ms unit-budget × at most a couple of retries
-	// + bookkeeping overhead. If the timeout machinery breaks, the test will
-	// hit the t.Fatal below long before this expires.
-	hardDeadline := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), hardDeadline)
-	defer cancel()
+	runGuardedPM(t, o)
 
-	start := time.Now()
-	if err := o.runPM(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		t.Logf("runPM returned: %v", err)
-	}
-	elapsed := time.Since(start)
-
-	if elapsed >= hardDeadline {
-		t.Fatalf("runPM exceeded hard deadline %s (elapsed %s) — per-task timeout did not fire", hardDeadline, elapsed)
-	}
 	if atomic.LoadInt32(&prov.calls) == 0 {
 		t.Fatalf("provider was never called")
 	}
@@ -110,10 +145,13 @@ func TestTaskTimeout_PerTaskBudget(t *testing.T) {
 	}
 	task := final.Plan.Tasks[0]
 	if task.Status != pm.TaskTimedOut {
-		t.Fatalf("expected status %q, got %q", pm.TaskTimedOut, task.Status)
+		t.Fatalf("expected status %q, got %q — the per-task timeout did not fire", pm.TaskTimedOut, task.Status)
 	}
 	if !strings.Contains(strings.ToLower(task.FailureDiagnosis), "timed out") {
 		t.Errorf("expected FailureDiagnosis to mention timeout, got %q", task.FailureDiagnosis)
+	}
+	if want := timedOutAfter(50); !strings.Contains(task.FailureDiagnosis, want) {
+		t.Errorf("FailureDiagnosis = %q, want the task's own budget: %q", task.FailureDiagnosis, want)
 	}
 	// Final artifact line: handleTaskTimeout always writes one (Task 20108
 	// requirement), even when the provider returned no partial output.
@@ -170,17 +208,7 @@ func TestTaskTimeout_GlobalDefault(t *testing.T) {
 		TaskTimeoutMinutes: 30, // 30 ms under the test unit
 	}, prov)
 
-	hardDeadline := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), hardDeadline)
-	defer cancel()
-
-	start := time.Now()
-	_ = o.runPM(ctx)
-	elapsed := time.Since(start)
-
-	if elapsed >= hardDeadline {
-		t.Fatalf("runPM exceeded hard deadline %s — global default did not fire", hardDeadline)
-	}
+	runGuardedPM(t, o)
 
 	final, err := state.Load(dir)
 	if err != nil {
@@ -188,7 +216,10 @@ func TestTaskTimeout_GlobalDefault(t *testing.T) {
 	}
 	task := final.Plan.Tasks[0]
 	if task.Status != pm.TaskTimedOut {
-		t.Fatalf("expected status %q, got %q", pm.TaskTimedOut, task.Status)
+		t.Fatalf("expected status %q, got %q — the global default did not fire", pm.TaskTimedOut, task.Status)
+	}
+	if want := timedOutAfter(30); !strings.Contains(task.FailureDiagnosis, want) {
+		t.Fatalf("FailureDiagnosis = %q, want the global default's budget: %q", task.FailureDiagnosis, want)
 	}
 }
 
@@ -219,27 +250,21 @@ func TestTaskTimeout_ProjectDefault(t *testing.T) {
 		TaskTimeoutMinutes: 60_000, // very large; should be shadowed by the project default
 	}, prov)
 
-	hardDeadline := 2 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), hardDeadline)
-	defer cancel()
-
-	start := time.Now()
-	_ = o.runPM(ctx)
-	elapsed := time.Since(start)
-
-	// 25 ms unit + bookkeeping should comfortably fit inside 2 s. If the
-	// project-level value were ignored and the global won, the run would
-	// take roughly 60 seconds and trip the hard deadline.
-	if elapsed >= hardDeadline {
-		t.Fatalf("runPM exceeded %s — project DefaultMaxMinutes was not honoured (elapsed %s)", hardDeadline, elapsed)
-	}
+	runGuardedPM(t, o)
 
 	final, err := state.Load(dir)
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}
-	if final.Plan.Tasks[0].Status != pm.TaskTimedOut {
-		t.Fatalf("expected timed_out, got %q", final.Plan.Tasks[0].Status)
+	task := final.Plan.Tasks[0]
+	if task.Status != pm.TaskTimedOut {
+		t.Fatalf("expected timed_out, got %q — no per-task deadline fired before the run guard: project DefaultMaxMinutes was not honoured", task.Status)
+	}
+	// Timed out under runGuardedPM means the task's own deadline fired; the
+	// budget it records says whose. Had the global won, the task would have
+	// run into the run guard well before its 60,000 units were up.
+	if want := timedOutAfter(25); !strings.Contains(task.FailureDiagnosis, want) {
+		t.Fatalf("FailureDiagnosis = %q, want the project default's budget: %q — project DefaultMaxMinutes was not honoured", task.FailureDiagnosis, want)
 	}
 }
 
@@ -413,10 +438,9 @@ func TestTaskTimeout_WebhookEvent(t *testing.T) {
 		WebhookURL: srv.URL,
 	}, prov)
 
-	hardDeadline := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), hardDeadline)
-	defer cancel()
-	_ = o.runPM(ctx)
+	// Guarded rather than bounded by a deadline: an expiring run deadline is
+	// itself recorded as the task timing out, and would send this very event.
+	runGuardedPM(t, o)
 
 	select {
 	case <-gotTimedOut:
