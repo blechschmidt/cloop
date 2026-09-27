@@ -166,6 +166,18 @@ done and what is hidden.
 (`1` = highest) and a comma-separated list of task IDs to depend on. **Add
 Task** appends it immediately.
 
+**AI Feature Suggestions**, below the form, proposes tasks for you to review.
+Leave its text box empty and **Generate** brainstorms ideas from the project
+goal; the number beside it says how many, five when blank. Describe what you
+want instead — *"add OAuth login with GitHub"* — and the request is broken into
+the tasks of a plan: the number is relabelled **Tasks in plan**, and left blank
+the plan is as long as the request needs. A plan's cards are numbered steps
+that say which steps they come *after*. **Add as task**, **Skip** and **Add
+all** work the same for both. A plan's tasks join the end of the queue in plan
+order and keep their dependencies on each other, in whatever order you add them
+and through any you skip. On the command line this is
+[`cloop suggest --input`](../reference/commands.md#cloop-suggest).
+
 **Editing** happens in a modal with title, description, priority, dependencies
 and a per-task **Max minutes** budget (`0` inherits the project default).
 The per-row buttons set status directly, and a row carries the ones that make

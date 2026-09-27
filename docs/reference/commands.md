@@ -528,6 +528,30 @@ cloop prioritize --provider anthropic
 | `--provider` | from config | AI provider |
 | `--model` | from config | Model override |
 
+### `cloop suggest`
+
+Brainstorm feature ideas for the project, or break a request of your own into a plan of tasks. Each proposal is reviewed interactively, and the accepted ones become PM tasks. The dashboard's **AI Feature Suggestions** panel on the Tasks tab runs the same command.
+
+```bash
+cloop suggest                                      # brainstorm 5 ideas
+cloop suggest --count 10                           # brainstorm 10 ideas
+cloop suggest --input "add OAuth login"            # plan it in as many tasks as it needs
+cloop suggest --input "add OAuth login" --count 4  # plan it in exactly 4 tasks
+cloop suggest --yes                                # accept everything proposed
+```
+
+With `--input`, the proposals are the ordered tasks of one plan, each naming the earlier tasks it depends on. `--count` then sets the plan's length, up to 20; leave it out and the plan is as long as the request needs — a small request may be a single task. Accepted tasks join the end of the run queue in plan order and keep their dependencies on each other, through any task you reject: if task 3 needs task 2 and task 2 needs task 1, rejecting task 2 makes task 3 wait for task 1.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input` | | A request to break into a plan of tasks, instead of brainstorming ideas |
+| `--count` | 5 ideas; a plan sizes itself | Number of ideas, or with `--input` the number of tasks in the plan (at most 20) |
+| `--yes` | `false` | Accept every proposal |
+| `--dry-run` | `false` | Show the proposals without prompting or adding tasks |
+| `--json` | `false` | Print the proposals as JSON, without prompting or changing the plan |
+| `--provider` | from config | Provider to use |
+| `--model` | from config | Model override |
+
 ### `cloop milestone`
 
 Sprint and release planning. Organize PM tasks into milestones with deadlines and velocity-based forecasting.
