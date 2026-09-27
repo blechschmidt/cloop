@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,6 +81,53 @@ func newScriptedAgent(t *testing.T, credPath, root string) (*Agent, <-chan *cont
 		t.Fatalf("New: %v", err)
 	}
 	return a, conns
+}
+
+// openGate releases a workload blocked on `read x < fifo`: opening the write
+// end completes the workload's own open, and closing it hands its read an EOF.
+// Blocking on the open is the handshake — it returns only once the workload is
+// actually waiting at the gate, so the release cannot be lost.
+func openGate(t *testing.T, fifo string) {
+	t.Helper()
+	opened := make(chan error, 1)
+	go func() {
+		f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err == nil {
+			err = f.Close()
+		}
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		if err != nil {
+			t.Fatalf("open the gate %s: %v", fifo, err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the workload never reached its gate: it did not start, or exited before it")
+	}
+}
+
+// waitForExit blocks until a workload's process has exited and been reaped,
+// which is when its host driver closes the output stream.
+func waitForExit(t *testing.T, a *Agent, handleID string) {
+	t.Helper()
+	wl := mustWorkload(t, a, handleID)
+	localID, _ := wl.local()
+	lines, err := wl.runner().Stream(context.Background(), localID)
+	if err != nil {
+		t.Fatalf("stream %s: %v", handleID, err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		for range lines {
+		}
+	}()
+	select {
+	case <-exited:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("workload %s did not exit after it was released", handleID)
+	}
 }
 
 // handshake performs the control-plane side: read hello, send welcome.
@@ -660,14 +708,21 @@ func TestWorkloadFinishingOfflineReportsOnReconnect(t *testing.T) {
 	cp := <-conns
 	cp.handshake(t, "agent-1", nil, "clac1.a.b.c")
 
-	// Drop the link first, then start a workload that exits quickly, so it
-	// finishes with no session to report to.
+	// The workload holds its exit until the test opens the gate, which happens
+	// only once the link is down. A workload that simply exited quickly raced
+	// the drop below, and under load it won: it finished and reported on the
+	// session the test was about to discard, and the reconnect had nothing left
+	// to report.
+	gate := filepath.Join(dir, "gate")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
 	const handleID = "h1"
 	f, err := remote.NewFrame(remote.TypeStart, "req-1", handleID, remote.StartPayload{
 		HandleID: handleID,
 		Spec: executor.Spec{
 			WorkDir: "proj",
-			Argv:    []string{"/bin/sh", "-c", "printf OFFLINEOUT; exit 5"},
+			Argv:    []string{"/bin/sh", "-c", `read x < "$1"; printf OFFLINEOUT; exit 5`, "sh", gate},
 		},
 	})
 	if err != nil {
@@ -677,12 +732,18 @@ func TestWorkloadFinishingOfflineReportsOnReconnect(t *testing.T) {
 	cp.readUntil(remote.TypeStarted, 10*time.Second)
 	_ = cp.conn.Close("drop before the workload finishes")
 
+	// The agent dialling again is the proof that it has let the old session go:
+	// runOnce clears the current session before Run waits and redials. From
+	// here until the welcome below, the agent has no session at all.
 	var cp2 *controlPlane
 	select {
 	case cp2 = <-conns:
 	case <-time.After(20 * time.Second):
 		t.Fatal("agent should reconnect")
 	}
+	openGate(t, gate)
+	waitForExit(t, a, handleID)
+
 	// Ask for everything from the start: we received nothing.
 	cp2.handshake(t, "agent-1", []remote.ResumeAck{{HandleID: handleID, FromOffset: 0}}, "")
 
