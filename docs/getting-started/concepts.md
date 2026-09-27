@@ -82,11 +82,14 @@ flowchart TD
     end
     UA -.->|"merged in at the top<br/>of each iteration"| G
     %% ── Styles ────────────────────────────────────────────────────
-    classDef queue fill:#1e3a5f,stroke:#4a90d9,color:#e8f4fd
-    classDef decision fill:#2d4a1e,stroke:#6abf4b,color:#e8f8e8
-    classDef action fill:#2a2a2a,stroke:#888,color:#eee
-    classDef endpoint fill:#4a1e1e,stroke:#d94a4a,color:#fde8e8
-    classDef user fill:#3a2d1e,stroke:#d9944a,color:#fdf0e8
+    %% Fills are 15% tints (alpha 26) and no class sets a text colour: the
+    %% page shows through, so text in the theme's colour reads in light and
+    %% dark alike. tests/docs/diagram_contrast_test.go holds diagrams to it.
+    classDef queue fill:#4a90d926,stroke:#4a90d9
+    classDef decision fill:#4c9a2a26,stroke:#4c9a2a
+    classDef action fill:#88888826,stroke:#888
+    classDef endpoint fill:#d94a4a26,stroke:#d94a4a
+    classDef user fill:#c27c2c26,stroke:#c27c2c
 
     class G,B queue
     class D,H,J,L,N,P,FC,TC,AE0,AE1,AE6,AE8 decision

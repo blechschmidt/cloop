@@ -21,6 +21,15 @@
   margin: 1.2em 0;
 }
 
+/* Material writes a sequence diagram's block label ("loop", "alt", "opt") in
+   the accent colour on a 10% tint of that same accent: 2.2:1 in the light
+   scheme. Use the colour every other diagram label uses. Custom properties
+   inherit into the shadow root each diagram is rendered in, which is the only
+   way page CSS reaches inside one. */
+.md-typeset .mermaid {
+  --md-mermaid-sequence-label-fg-color: var(--md-mermaid-label-fg-color);
+}
+
 /* Screenshots of the dashboard are UI, not illustrations: a border keeps a
    light-theme screenshot from bleeding into a light-theme page. */
 .md-typeset img[src*="screenshots/"] {

@@ -1826,9 +1826,11 @@ flowchart TB
     SUP -->|"unreachable → ClaimRequeue"| SESS
     SESS -->|"re-place on surviving node"| DISPATCH
 
-    style POL fill:#fde,stroke:#c39
-    style SB fill:#efd,stroke:#7a4
-    style hub fill:#f6f8fa,stroke:#999
+    %% Tints, not opaque fills, and no text colour: see
+    %% tests/docs/diagram_contrast_test.go.
+    style POL fill:#cc339926,stroke:#c39
+    style SB fill:#5f8f2f26,stroke:#5f8f2f
+    style hub fill:#8888881a,stroke:#888
 ```
 
 The call chain in code, for the common "start a run" path

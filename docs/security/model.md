@@ -41,8 +41,10 @@ flowchart LR
     C --> W
     K --> W
 
-    style H fill:#e8f0fe,stroke:#4674d1,stroke-width:2px
-    style W fill:#fde,stroke:#c39
+    %% Tints, not opaque fills, and no text colour: see
+    %% tests/docs/diagram_contrast_test.go.
+    style H fill:#4674d126,stroke:#4674d1,stroke-width:2px
+    style W fill:#cc339926,stroke:#c39
 ```
 
 The hub is the only trusted component. Everything on the far side of a numbered
