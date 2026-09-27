@@ -255,8 +255,11 @@ function handleRealtimeMsg(type, data, scope) {
       break;
     case 'projects':
       try {
+        const gone = reanchorSelection(data.projects || []);
         renderProjects(data.projects || [], data.stats || {});
         updateProjectSelector();
+        renderFeaturePanels();
+        if (gone) clearProjectSelection();
         // Task 20134: no per-project /api/state refetch here. The selected
         // project's state is kept fresh via the state_diff events delivered
         // on the same WS subscription (see broadcastStateDiff in watchProjects).

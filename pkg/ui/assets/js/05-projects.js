@@ -62,11 +62,33 @@ function seedProjects(d) {
   _projectsSeed = d;
 }
 
+// reanchorSelection keeps the selection on the same project by path. The list
+// is addressed by index, and creating or removing a feature (Task 20341) — or
+// a project — shifts every index after it; without this the next call made
+// with the old index would act on a neighbour. A moved selection reconnects
+// its stream, whose scope was captured with the old index and would otherwise
+// have every frame it delivers refused.
+//
+// It returns true when the selected project is gone from the list — a feature
+// removed elsewhere — and the caller should return to the projects page.
+function reanchorSelection(projects) {
+  if (selectedProjectIdx === null || !selectedProjectPath) return false;
+  const i = projects.findIndex(p => p.path === selectedProjectPath);
+  if (i >= 0 && i !== selectedProjectIdx) {
+    selectedProjectIdx = i;
+    connectWS();
+  }
+  return i < 0;
+}
+
 function applyProjects(d) {
   const projects = d.projects || [];
   isMultiProject = d.multi_project === true || projects.length > 1;
+  const gone = reanchorSelection(projects);
   renderProjects(projects, d.stats || {});
   updateProjectSelector();
+  renderFeaturePanels();
+  if (gone) clearProjectSelection();
   // Refresh the overview cards if we're on the overview tab with no project selected.
   if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
     renderMultiProjectOverview();
@@ -144,7 +166,10 @@ function renderProjects(projects, stats) {
   // the list so every index-addressed call keeps pointing at the same
   // project — so the grid drops them here while carrying the original index
   // along for the action buttons. Settings is where they reappear.
-  const shown = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden);
+  // Features (Task 20341) render inside their project's card, not as cards of
+  // their own — unless their project is not in the list to hold them.
+  const hasParent = p => p.parent && projects.some(q => q.path === p.parent);
+  const shown = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden && !hasParent(p));
   renderHiddenProjectsButton(projects);
   renderHiddenProjects(projects);   // a no-op unless the dialog is open
 
@@ -181,7 +206,8 @@ function renderProjects(projects, stats) {
   }
 
   // Filter out fully-completed projects unless toggle is on; preserve original index for API calls.
-  const isCompleted = p => p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
+  const done = p => p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
+  const isCompleted = p => done(p) && featuresOf(p.path).every(({p: f}) => done(f));
   const visibleI = showCompletedProjects ? shown : shown.filter(({p}) => !isCompleted(p));
   const completedCount = shown.length - visibleI.length;
   const btn = document.getElementById('toggleCompletedProjectsBtn');
@@ -239,6 +265,7 @@ function renderProjects(projects, stats) {
           <span title="last activity">${lastAct}</span>
           ${(p.provider || p.model) ? `<span title="Provider / Model">${esc([p.provider, p.model].filter(Boolean).join(' / '))}</span>` : ''}
         </div>
+        ${featureChips(p.path)}
         <div class="proj-actions" onclick="event.stopPropagation()">
           ${p.running
             ? '<button class="btn danger" onclick="projectStop('+idx+')" title="Stop">&#9632; Stop</button>'
@@ -477,6 +504,8 @@ window.submitDeleteProject = function() {
 window.openProject = function(idx, name) {
   selectedProjectIdx  = idx;
   selectedProjectName = name;
+  const sel = projList()[idx];
+  selectedProjectPath = sel ? sel.path : '';
   // Drop stale per-project state so the new project's initial WS task_update
   // is the first thing the renderer sees. Dropping appState is not enough on
   // its own — the panels rendered from it keep their markup until something
@@ -510,6 +539,7 @@ window.openProject = function(idx, name) {
 window.clearProjectSelection = function() {
   selectedProjectIdx  = null;
   selectedProjectName = '';
+  selectedProjectPath = '';
   appState            = null;
   clearProjectScopedPanels();
   const bc = document.getElementById('projectBreadcrumb');
@@ -546,13 +576,21 @@ function updateProjectSelector() {
   // feature: a hidden project still offered by the header dropdown is one
   // click from being selected again. Index before filtering — the item
   // addresses its project by position in the unfiltered payload.
-  drop.innerHTML = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden).map(({p, i}) => {
+  // Each project is followed by its features (Task 20341), indented.
+  const rows = [];
+  projects.forEach((p, i) => {
+    if (p.hidden || p.parent) return;
+    rows.push({p, i, sub: false});
+    featuresOf(p.path).forEach(f => rows.push({p: f.p, i: f.i, sub: true}));
+  });
+  drop.innerHTML = rows.map(({p, i, sub}) => {
     const health = p.health || 'unknown';
     const activeCls = selectedProjectIdx === i ? ' active' : '';
     const dotStyle = 'background:' + healthColor(health);
-    return '<div class="proj-selector-item'+activeCls+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name).replace(/"/g,'&quot;')+')">' +
+    const label = sub ? '&#9095; ' + esc((p.feature && p.feature.title) || p.name) : esc(p.name);
+    return '<div class="proj-selector-item'+activeCls+(sub ? ' sub' : '')+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name).replace(/"/g,'&quot;')+')">' +
       '<span class="pi-dot" style="'+dotStyle+'"></span>' +
-      '<span class="pi-name">'+esc(p.name)+'</span>' +
+      '<span class="pi-name">'+label+'</span>' +
       '<span style="font-size:10px;color:var(--muted)">'+health+'</span>' +
       '</div>';
   }).join('');

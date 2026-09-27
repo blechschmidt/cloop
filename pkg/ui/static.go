@@ -116,6 +116,11 @@ var bundleFiles = []string{
 	// CI/CD pipeline federation (Task 20278): the Settings panel that edits
 	// the pipeline allowlist and watches the sessions it mints.
 	"assets/js/32-cicd.js",
+	// Parallel features (Task 20341): the Features panel on a project's
+	// Overview, the banner on a feature's, and their three dialogs. Uses
+	// nothing but 00-core.js/00-overlay.js helpers and openProject from
+	// 05-projects.js, all in scope by the time it runs.
+	"assets/js/32-features.js",
 	// GitHub App connection and per-project repository assignment
 	// (Task 20306). Two panels — one on Settings, one on the project
 	// overview — in one fragment, because they share the state that carries

@@ -22,6 +22,9 @@ const FILTER_TABS = new Set(['tasks','kanban','timeline','deps']);
 let isMultiProject      = false;  // true when multiple projects are registered
 let selectedProjectIdx  = null;   // null = no project selected (Projects landing page)
 let selectedProjectName = '';
+// The selection by path, which survives the list being renumbered — see
+// reanchorSelection in 05-projects.js.
+let selectedProjectPath = '';
 
 // pUrl appends ?project_idx=N to a URL when a project is selected in multi-project mode.
 function pUrl(url) {

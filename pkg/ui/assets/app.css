@@ -992,6 +992,7 @@
   .event-icon.ev-task-abort  { background:#c07a2c; }
   .event-icon.ev-writeback   { background:#2f7fa8; }
   .event-icon.ev-plan        { background:var(--cyan); }
+  .event-icon.ev-feature     { background:#8957e5; }
   .event-icon.ev-session     { background:#444; }
   .event-icon.ev-other       { background:var(--border); color:var(--text); }
   .event-time { font-size:10px; color:var(--muted); flex-shrink:0; font-variant-numeric:tabular-nums; }
@@ -1511,6 +1512,7 @@
   .proj-selector-item:last-child { border-bottom: none; }
   .proj-selector-item:hover { background: rgba(88,166,255,.08); }
   .proj-selector-item.active { background: rgba(88,166,255,.12); color: var(--accent); }
+  .proj-selector-item.sub { padding-left: 24px; }
   .proj-selector-item .pi-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proj-selector-item .pi-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
@@ -2203,3 +2205,21 @@
     /* Timeline: horizontal scroll */
     .timeline-chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   }
+
+/* Parallel features (Task 20341) */
+.feat-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.feat-chip { display:inline-flex; align-items:center; gap:5px; max-width:100%; font-size:11px; padding:3px 9px; border:1px solid var(--border); border-radius:12px; background:var(--bg); color:var(--text); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.feat-chip:hover { border-color:var(--accent); }
+.feat-chip-meta { color:var(--muted); }
+.feat-chip .proj-health-dot, .feat-main .proj-health-dot { position:static; flex-shrink:0; }
+.feat-row { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:10px 12px; margin-bottom:8px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
+.feat-main { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex:1 1 320px; min-width:0; cursor:pointer; }
+.feat-branch { font-size:11px; color:var(--muted); word-break:break-all; }
+.feat-opt { font-size:10px; padding:1px 6px; border-radius:8px; background:var(--hover-bg); color:var(--muted); }
+.feat-progress { display:flex; align-items:center; gap:6px; flex:0 1 170px; font-size:11px; color:var(--muted); }
+.feat-progress .proj-progress-bar { flex:1; }
+.feat-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.feat-actions .btn { padding:4px 10px; font-size:12px; }
+.feature-banner { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; padding:12px 14px; border:1px solid var(--accent); border-radius:var(--radius); background:var(--surface); }
+.feat-banner-main { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:13px; }
+.feat-note { font-size:11px; color:var(--muted); }

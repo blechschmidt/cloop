@@ -186,7 +186,8 @@ window.loadProjectRepositories = function() {
   // subject — so the panel hides. On a single-project hub selectedProjectIdx
   // is null *because there is only one*, and index 0 is it. Conflating the
   // two hid the panel on exactly the common deployment.
-  if (isMultiProject && selectedProjectIdx === null) {
+  // A feature holds its project's grants (Task 20341); they are edited there.
+  if ((isMultiProject && selectedProjectIdx === null) || isFeatureSelected()) {
     panel.style.display = 'none';
     return Promise.resolve();
   }

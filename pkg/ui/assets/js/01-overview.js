@@ -153,6 +153,7 @@ function render(s) {
   document.getElementById('statModel').textContent    = (s.model || '') + (s.effort ? ' @ ' + s.effort : '');
   prepopulateAdvancedRunOptions(s);
   renderActiveOptions(s);
+  renderFeaturePanels();
   if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
   document.getElementById('statMode').textContent     = 'Product Manager';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
@@ -304,8 +305,10 @@ function renderMultiProjectOverview() {
   // fills a card here has not been hidden, it has been misplaced. Index
   // before filtering: the card's openProject() call addresses the project by
   // its position in the *unfiltered* payload.
+  // Features (Task 20341) are summarised by their project, as on the grid.
+  const listed = function(path) { return data.projects.some(function(q) { return q.path === path; }); };
   const shown = data.projects.map(function(p, i) { return {p: p, i: i}; })
-                             .filter(function(e) { return !e.p.hidden; });
+                             .filter(function(e) { return !e.p.hidden && !(e.p.parent && listed(e.p.parent)); });
   if (!shown.length) {
     grid.innerHTML = '<div class="empty-state"><h3>All projects hidden</h3><p>Restore them under <strong>Settings &rarr; Hidden Projects</strong>.</p></div>';
     return;
@@ -489,6 +492,9 @@ function _eventVisuals(kind) {
     // come back, and that run has to be visible as its own line.
     case 'write_back':          return { glyph:'⎇', cls:'ev-writeback',   label:'write-back'};
     case 'plan_complete':       return { glyph:'★', cls:'ev-plan',        label:'plan done' };
+    case 'feature_created':     return { glyph:'⎇', cls:'ev-feature',     label:'feature'   };
+    case 'feature_removed':     return { glyph:'⎇', cls:'ev-feature',     label:'removed'   };
+    case 'feature_pr':          return { glyph:'⇪', cls:'ev-feature',     label:'pull req.' };
     case 'session_started':     return { glyph:'▷', cls:'ev-session',     label:'session'   };
     case 'session_paused':      return { glyph:'⏸', cls:'ev-session',     label:'paused'    };
     case 'session_failed':      return { glyph:'✗', cls:'ev-session',     label:'failed'    };

@@ -279,6 +279,10 @@
              all computed over tasks that include work which never happened. -->
         <div id="abortedLedgerBanner" class="ledger-banner" style="display:none"></div>
 
+        <!-- Shown when the selected project is a feature (Task 20341): its
+             branch, its parent, and its pull request. -->
+        <div id="featureBanner" class="feature-banner" style="display:none"></div>
+
         <!-- Goal + status -->
         <div class="section">
           <div class="section-title">Project Goal</div>
@@ -353,6 +357,16 @@
         <div class="section">
           <div class="section-title">Active Options</div>
           <div class="options-grid" id="activeOptionsGrid"></div>
+        </div>
+
+        <!-- Parallel features (Task 20341): git worktrees of this project,
+             each with its own task list and run settings. -->
+        <div class="section" id="featuresSection" style="display:none">
+          <div class="section-title" style="display:flex;align-items:center;gap:12px">
+            Features
+            <button class="btn primary" id="newFeatureBtn" data-perm="project.write" onclick="openNewFeatureModal()" style="margin-left:auto;padding:4px 10px;font-size:12px">+ New feature</button>
+          </div>
+          <div id="featuresList"></div>
         </div>
 
         <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
@@ -3632,6 +3646,76 @@
       <span id="dc-count" style="margin-right:auto;font-size:12px;color:var(--muted)"></span>
       <button class="btn" onclick="closeDecomposeModal()">Cancel</button>
       <button class="btn primary" id="dc-apply-btn" onclick="applyDecompose()" style="display:none">Add sub-tasks</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Features (Task 20341) ──────────────────────────────────────────────── -->
+<div id="newfeat-overlay" data-overlay="flex" onclick="if(event.target===this)closeNewFeatureModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:8px">New feature</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px">A git worktree of <strong id="nfParent"></strong> on its own branch, with its own task list and run settings. It runs in parallel with the project and its other features.</p>
+    <div class="form-group">
+      <label class="form-label" for="nfName">Name *</label>
+      <input class="form-input" id="nfName" maxlength="120" placeholder="e.g. Dark mode">
+      <div id="nfSlug" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="nfDesc">What should it achieve? *</label>
+      <textarea class="form-textarea" id="nfDesc" style="min-height:70px" placeholder="The feature's goal. Its first run plans tasks from it unless you list some below."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="nfTasks">Initial tasks (optional, one per line)</label>
+      <textarea class="form-textarea" id="nfTasks" style="min-height:60px"></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="nfBase">Base branch</label>
+      <input class="form-input" id="nfBase" placeholder="default branch (main)">
+    </div>
+    <div class="adv-grid" style="margin-bottom:12px">
+      <label class="adv-label"><input type="checkbox" id="nfEvolve"> Auto-evolve</label>
+      <label class="adv-label"><input type="checkbox" id="nfInnovate"> Innovate</label>
+      <label class="adv-label"><input type="checkbox" id="nfParallel"> Parallel tasks</label>
+      <label class="adv-label"><input type="checkbox" id="nfAutoPR"> Open PR when complete</label>
+      <label class="adv-label"><input type="checkbox" id="nfStart" checked> Start now</label>
+    </div>
+    <div id="nfError" style="display:none;color:var(--red);font-size:12px;margin-bottom:10px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeNewFeatureModal()">Cancel</button>
+      <button class="btn primary" id="nfSubmit" onclick="submitNewFeature()">Create feature</button>
+    </div>
+  </div>
+</div>
+
+<div id="featpr-overlay" data-overlay="flex" onclick="if(event.target===this)closeFeaturePRModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:8px" id="fprTitle">Open pull request</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px" id="fprIntro"></p>
+    <div class="form-group" id="fprFields">
+      <label class="form-label" for="fprName">Title</label>
+      <input class="form-input" id="fprName" maxlength="256">
+      <label class="form-label" for="fprBody" style="margin-top:10px">Description</label>
+      <textarea class="form-textarea" id="fprBody" style="min-height:70px" placeholder="Leave empty to describe the feature and its tasks"></textarea>
+      <label class="adv-label" style="margin-top:10px"><input type="checkbox" id="fprDraft"> Draft</label>
+    </div>
+    <div id="fprError" style="display:none;color:var(--red);font-size:12px;margin-bottom:10px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeFeaturePRModal()">Cancel</button>
+      <button class="btn primary" id="fprSubmit" onclick="submitFeaturePR()">Open pull request</button>
+    </div>
+  </div>
+</div>
+
+<div id="delfeat-overlay" data-overlay="flex" onclick="if(event.target===this)closeRemoveFeatureModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:90;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:92vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;color:var(--danger,#e55)">Remove feature</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Removes the worktree of <strong id="dfName"></strong> with its task list and history. Its branch <code id="dfBranch"></code> is kept unless you delete it below.</p>
+    <label class="adv-label" style="margin-bottom:8px"><input type="checkbox" id="dfBranchToo"> Also delete the branch (only if merged)</label>
+    <label class="adv-label"><input type="checkbox" id="dfForce"> Force: discard uncommitted changes and delete an unmerged branch</label>
+    <div id="dfError" style="display:none;color:var(--red);font-size:12px;margin-top:10px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeRemoveFeatureModal()">Cancel</button>
+      <button class="btn danger" id="dfSubmit" onclick="submitRemoveFeature()">Remove</button>
     </div>
   </div>
 </div>

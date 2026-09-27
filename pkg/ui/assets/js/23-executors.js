@@ -1119,6 +1119,8 @@ function _renderExecutorCard(d) {
 }
 
 window.openExecutorPickerModal = function() {
+  // A feature runs where its project runs (Task 20341).
+  if (isFeatureSelected()) { toast('A feature runs on its project\'s executor — change it on the project', 'err'); return; }
   const sel = document.getElementById('epExecutor');
   const err = document.getElementById('epError');
   if (err) err.style.display = 'none';
