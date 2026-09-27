@@ -150,25 +150,36 @@ func TestVirtualExecutorRefusals(t *testing.T) {
 // own migrations, so this build's 0049 and 0050 are skipped there. 0051 has to
 // create the table anyway, or the feature would be missing exactly where it
 // was deployed.
+//
+// Both shapes seen in the field are covered: the :8888 control plane recorded
+// 49 and 50 from stranded files, and a database on the sgx executor host
+// recorded 49 only — where an index-only 0050 aborted the whole run.
 func TestVirtualExecutorsSurviveACollidedSchemaHistory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
-	conn := openRaw(t, path)
-	if _, err := MigrateTo(conn, 48); err != nil {
-		t.Fatalf("MigrateTo(48): %v", err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for v, name := range map[int]string{49: "0049_project_members.sql", 50: "0050_project_members.sql"} {
-		if _, err := conn.Exec(`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat)
-			VALUES (?, ?, ?, 'stranded', 'additive')`, v, now, name); err != nil {
-			t.Fatalf("record collided version %d: %v", v, err)
-		}
-	}
-	if _, err := Migrate(conn); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	var n int
-	if err := conn.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN
-		('virtual_executors', 'idx_virtual_executors_parent')`).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("virtual_executors objects present: %d (%v), want 2", n, err)
+	for name, collided := range map[string]map[int]string{
+		":8888 (49 and 50)": {49: "0049_project_members.sql", 50: "0050_project_members.sql"},
+		"sgx (49 only)":     {49: "0049_project_members.sql"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.db")
+			conn := openRaw(t, path)
+			if _, err := MigrateTo(conn, 48); err != nil {
+				t.Fatalf("MigrateTo(48): %v", err)
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			for v, file := range collided {
+				if _, err := conn.Exec(`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat)
+					VALUES (?, ?, ?, 'stranded', 'additive')`, v, now, file); err != nil {
+					t.Fatalf("record collided version %d: %v", v, err)
+				}
+			}
+			if _, err := Migrate(conn); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
+			var n int
+			if err := conn.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN
+				('virtual_executors', 'idx_virtual_executors_parent')`).Scan(&n); err != nil || n != 2 {
+				t.Fatalf("virtual_executors objects present: %d (%v), want 2", n, err)
+			}
+		})
 	}
 }
