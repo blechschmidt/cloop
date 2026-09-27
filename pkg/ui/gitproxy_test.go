@@ -274,13 +274,21 @@ func TestGitProxyCloseEndsSessions(t *testing.T) {
 		Kind: executor.WorkspaceGit, Repo: testUpstream,
 		Ref: "main", CredentialGrant: "github-pat",
 	}
-	_, release, err := svc.Wrap("exec-1", inner).ForWorkspace(t.Context(), "/srv/acme", w)
+	access, release, err := svc.Wrap("exec-1", inner).ForWorkspace(t.Context(), "/srv/acme", w)
 	if err != nil {
 		t.Fatalf("ForWorkspace: %v", err)
+	}
+	// The sandbox fetches: the session is presented, so the driver handing
+	// the credential back leaves it live for a later write-back (Task 20349).
+	if _, err := svc.reg.Authenticate(access.Credential.Username, access.Credential.Password); err != nil {
+		t.Fatalf("the session the sandbox was handed does not authenticate: %v", err)
 	}
 	release()
 	if n := len(svc.reg.Sessions()); n != 1 {
 		t.Fatalf("live sessions = %d, want 1", n)
+	}
+	if inner.released != 0 {
+		t.Fatalf("the inner lease was released while its session is live (%d)", inner.released)
 	}
 
 	svc.Close()
@@ -288,6 +296,10 @@ func TestGitProxyCloseEndsSessions(t *testing.T) {
 		if !s.Closed() {
 			t.Fatalf("session %s survived shutdown", s.ID)
 		}
+	}
+	// The session ending is what gives the lease behind it back.
+	if inner.released != 1 {
+		t.Fatalf("closing the session at shutdown released the inner lease %d times, want 1", inner.released)
 	}
 }
 
