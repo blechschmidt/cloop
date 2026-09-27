@@ -50,8 +50,9 @@
 // binary, and otherwise `claude` is looked up on PATH. Without one the agent
 // step runs testdata/stand-in-claude.sh, which makes the same HTTP call Claude
 // Code makes and proves the API path but not the harness; the test says so in
-// its log. CLOOP_CIWORKFLOW_REQUIRE_CLAUDE=1 turns that fallback into a
-// failure, for a job that installed Claude Code and wants to be sure it ran.
+// its log. CLOOP_CIWORKFLOW_REQUIRE_CLAUDE=1 turns that fallback — and the skip
+// for a missing runner tool — into a failure, for a job that installed Claude
+// Code and wants to be sure it ran.
 //
 // # Against the real API
 //
@@ -124,7 +125,8 @@ const (
 	claudeEnv = "CLOOP_CIWORKFLOW_CLAUDE"
 
 	// requireClaudeEnv fails the suite rather than falling back to the
-	// stand-in when no Claude Code is found.
+	// stand-in when no Claude Code is found, or skipping when a tool the
+	// played runner needs is missing.
 	requireClaudeEnv = "CLOOP_CIWORKFLOW_REQUIRE_CLAUDE"
 
 	// liveKeyEnv relays to the real Anthropic API with this key.
@@ -191,15 +193,21 @@ func cloopBinary(t *testing.T) string {
 
 // requireTools skips when the machine cannot play a GitHub-hosted runner. Every
 // one of these is preinstalled on ubuntu-latest; a developer machine without
-// them is not a failure of the workflow.
+// them is not a failure of the workflow. Under requireClaudeEnv it fails
+// instead: a job that exists to run the harness must not go green by skipping
+// before it gets there.
 func requireTools(t *testing.T) {
 	t.Helper()
+	skip := t.Skipf
+	if os.Getenv(requireClaudeEnv) != "" {
+		skip = t.Fatalf
+	}
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skipf("the workflow runs under bash on a Linux runner; this is %s", runtime.GOOS)
+		skip("the workflow runs under bash on a Linux runner; this is %s", runtime.GOOS)
 	}
 	for _, tool := range runnerTools {
 		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is not installed; the played runner needs it", tool)
+			skip("%s is not installed; the played runner needs it", tool)
 		}
 	}
 }
