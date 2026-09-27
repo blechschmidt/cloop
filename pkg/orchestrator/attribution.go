@@ -233,7 +233,7 @@ func isolationOf(rec artifact.SandboxRecord) string {
 	switch rec.ExecutorKind {
 	case executor.KindContainer:
 		return string(executor.IsolationContainer)
-	case executor.KindRemoteAgent, executor.KindKubernetes:
+	case executor.KindRemoteAgent, executor.KindKubernetes, executor.KindVirtual:
 		return string(executor.IsolationRemote)
 	default:
 		return string(executor.IsolationNone)

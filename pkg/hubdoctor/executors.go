@@ -256,6 +256,9 @@ func remediationFor(ex executor.Executor) string {
 	case executor.KindRemoteAgent:
 		return "The device is offline or its agent stopped; restart `cloop executor agent` on it, " +
 			"or re-enroll with `cloop executor enroll`"
+	case executor.KindVirtual:
+		return "Its device is offline, or cannot apply its firewall or devices; the card in the " +
+			"Executors panel names which, and the device's own entry above says whether it is reachable"
 	default:
 		return "Run `cloop executor test " + ex.ID() + "` for the driver's own diagnosis"
 	}

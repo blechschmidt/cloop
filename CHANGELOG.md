@@ -46,10 +46,19 @@ schema and the hub's HTTP API may change in any release.
 - Device passthrough is no longer advertised or attempted under gVisor or Kata.
   Measured on a gVisor host: the node exists in the sandbox and every open of it
   fails with `ENXIO`. The enterprise-hosts guide claimed the combination worked.
-- A filtered sandbox is pointed at the resolvers its filter opened (`--dns`).
-  Dropping private space also drops the engine's default resolver — on a cloud
-  VM usually the provider's, in CGNAT space — so DNS failed inside such a
-  sandbox unless the host happened to use a public resolver.
+- A filtered sandbox resolves through the resolvers its filter opened, named in
+  a `resolv.conf` of its own. Dropping private space also drops the engine's
+  default resolver — on a cloud VM usually the provider's, in CGNAT space — and
+  under gVisor Docker's embedded resolver on `127.0.0.11` is unreachable
+  altogether (measured: every lookup `EAI_AGAIN`), so DNS failed inside such a
+  sandbox.
+- An egress filter is refused under rootless podman, whose networks live in a
+  network namespace the host's packet filter cannot see: the ruleset loaded,
+  matched nothing, and the sandbox ran unfiltered.
+- A task whose harness reported "API Error: Can't reach the API server" was
+  recorded as done. An unreachable provider is now an abort
+  (`network_unreachable`) that pauses the run and names the cause.
+- Revoking a device deletes its virtual executors, each with an audit row.
 - The Executors panel's sandbox chip always described a container-mode device's
   network as `none`: the card read a field the API never filled in.
 
