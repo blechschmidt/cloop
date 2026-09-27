@@ -56,6 +56,11 @@ type attachSession struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+	// endErr is what the reader is left holding once it has read everything
+	// the session produced: the far side's reason for ending it. Written before
+	// closed is closed and read by pump only after, which is the ordering the
+	// channel close provides.
+	endErr error
 }
 
 // Attach implements executor.Attacher.
@@ -184,6 +189,11 @@ func (a *attachSession) Resize(rows, cols uint16) error {
 }
 
 func (a *attachSession) Close() error {
+	// Hang up the pipe first, and whether or not the session has already
+	// ended. The caller has stopped reading, and a session the device ended a
+	// moment ago may still have its pump delivering the tail into this pipe —
+	// which, with nobody left to read it, would block that goroutine for good.
+	_ = a.pw.Close()
 	a.closeOnce.Do(func() {
 		close(a.closed)
 		// Best effort: tell the device to kill the command. A failure here is
@@ -192,7 +202,6 @@ func (a *attachSession) Close() error {
 		// inside a sandbox that still holds the project's credentials.
 		_ = a.send(TypeAttachClose, AttachClosePayload{SessionID: a.id, Reason: "closed by operator"})
 		a.sess.unregisterAttach(a.id)
-		_ = a.pw.Close()
 	})
 	return nil
 }
@@ -227,7 +236,7 @@ func (a *attachSession) deliver(data []byte) {
 		// alternatives are to block the shared read loop (which kills every
 		// task on the device) or to keep buffering (which makes a slow reader a
 		// memory-exhaustion primitive against the hub).
-		a.finish("terminal fell too far behind and was disconnected")
+		a.abandon("terminal fell too far behind and was disconnected")
 	}
 }
 
@@ -235,30 +244,61 @@ func (a *attachSession) deliver(data []byte) {
 func (a *attachSession) pump() {
 	for {
 		select {
-		case <-a.closed:
-			return
 		case chunk := <-a.inbox:
 			if _, err := a.pw.Write(chunk); err != nil {
 				return
+			}
+		case <-a.closed:
+			// Whatever the device sent before the session ended is queued
+			// already: data and close frames are handled in order on one read
+			// loop. Deliver it, then hand the reader the reason. A pipe that
+			// Close or abandon has already hung up fails the first write, which
+			// is how those two skip the tail.
+			for {
+				select {
+				case chunk := <-a.inbox:
+					if _, err := a.pw.Write(chunk); err != nil {
+						return
+					}
+				default:
+					_ = a.pw.CloseWithError(a.endErr)
+					return
+				}
 			}
 		}
 	}
 }
 
-// finish ends the session because the far side said so.
+// finish ends the session because the far side said so: the device reported
+// that the command exited, or the connection carrying the session is gone.
+//
+// It does not close the pipe; pump does, once it has written out what was
+// already queued. Something usually is. A command that prints a line and exits
+// sends its output and its close back to back, and the read loop hands over
+// both before the pump has had a chance to run. Closing the pipe here raced the
+// pump for that last chunk and usually won, so an operator who ran `pwd` was
+// shown "command exited" and an empty transcript.
 //
 // The reason travels as the pipe's close error rather than as bytes written
-// into it. Writing it would block whenever the consumer is not reading — which
-// is precisely the situation that calls finish from deliver — and that write
-// happens on the shared session read loop. CloseWithError never blocks, and the
-// reader gets the same sentence either way.
+// into it. Writing it would block whenever the consumer is not reading, and
+// this runs on the shared session read loop; the close error reaches the reader
+// the moment it has read everything before it.
 func (a *attachSession) finish(reason string) {
 	a.closeOnce.Do(func() {
-		close(a.closed)
-		a.sess.unregisterAttach(a.id)
 		if strings.TrimSpace(reason) == "" {
 			reason = "session ended"
 		}
-		_ = a.pw.CloseWithError(errors.New(reason))
+		a.endErr = errors.New(reason)
+		close(a.closed)
+		a.sess.unregisterAttach(a.id)
 	})
+}
+
+// abandon ends the session without delivering what is still queued: for a
+// consumer that has stopped reading, which is the one case where draining is
+// exactly what cannot be done. CloseWithError never blocks and fails a write
+// the pump has in progress, so this is safe on the shared read loop.
+func (a *attachSession) abandon(reason string) {
+	_ = a.pw.CloseWithError(errors.New(reason))
+	a.finish(reason)
 }
