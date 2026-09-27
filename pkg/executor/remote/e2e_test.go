@@ -130,8 +130,24 @@ func newLoopback(t *testing.T) *loopback {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopped := make(chan struct{})
+	// Cancel, and then wait for Run to return. Cleanups run last-registered
+	// first, so this finishes before the temp directories above are removed —
+	// which matters because an agent still completing its enrollment writes
+	// agent.json.tmp into credPath's directory, and a RemoveAll racing that
+	// write failed the test with "directory not empty". The bound is a backstop
+	// against a Run that never returns, which would otherwise hang cleanup until
+	// -timeout; a cancelled Run returns as soon as its reads see the context.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-stopped:
+		case <-time.After(30 * time.Second):
+			t.Error("agent.Run did not return after its context was cancelled")
+		}
+	})
 	go func() {
+		defer close(stopped)
 		// logf, not t.Logf: a.Run commonly returns *after* the test body has
 		// finished, which is the same post-completion logging race the
 		// detachable wrapper exists to close.
