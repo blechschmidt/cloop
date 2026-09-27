@@ -36,24 +36,56 @@ filter — nor its device list, since the host already has every device.
 |---|---|
 | any virtual executor | a container engine (`docker`, `podman` or `nerdctl`) on the agent's PATH, and an agent speaking protocol v8 |
 | a firewall or devices | an agent speaking protocol **v14** — the Executors panel shows the version |
-| a firewall | `nft(8)` on the device, and the agent holding `CAP_NET_ADMIN` and the netlink socket family: install it with `cloop executor agent install --packet-filter` |
+| a firewall | `nft(8)` on the device, and the agent holding `CAP_NET_ADMIN` and the netlink socket family — which `cloop executor agent install` grants by default |
 
 The hardened service unit `cloop executor agent install` writes grants the agent
-no capabilities and no netlink sockets, so by default a device **cannot** install
-a firewall. The panel says so on the device and on every virtual executor that
-has one, and a dispatch to it is refused rather than started unfiltered.
-`--packet-filter` relaxes exactly three directives and nothing else:
+no capabilities and no netlink sockets. The installer then adds exactly one
+capability and one socket family, in a drop-in beside the unit,
+`/etc/systemd/system/cloop-executor.service.d/10-packet-filter.conf`:
 
 ```ini
+[Service]
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictAddressFamilies=AF_NETLINK
 ```
 
-On a device installed without it, re-run the installer with the flag, or add
-those three lines in a drop-in (`/etc/systemd/system/cloop-executor.service.d/`)
-and restart the agent. An agent that can already drive a rootful container
-engine holds a stronger privilege than this through the engine's socket.
+Each line adds to the unit rather than replacing it — systemd merges these
+across a unit and its drop-ins — so the effective set is `CAP_NET_ADMIN` and
+nothing else, and the address families are the unit's `AF_INET AF_INET6
+AF_UNIX` plus `AF_NETLINK`. `NoNewPrivileges` and the rest of the hardening
+stay as they are.
+
+**The capability stays with the agent.** systemd hands a capability to a
+service that runs as an ordinary user through the *ambient* set, which every
+program it starts would inherit — the harness, its shell, git and the hooks git
+runs from a workload's repository. So the first thing a cloop process does is
+clear its ambient and inheritable sets on every thread (`pkg/caps`), keeping the
+capability for itself; the only program it hands it back to is `nft(8)`. A
+host-mode workload on the device holds no capability at all
+(`grep Cap /proc/self/status` shows `CapPrm`, `CapEff`, `CapInh` and `CapAmb` all
+zero), and a sandbox is a container the engine starts, which never sees it.
+
+A device installed before the installer granted this by default — or with
+`--packet-filter=false` — **cannot** install a firewall. The panel says so on
+the device, with the reason the device gave, and on every virtual executor that
+has one, and a dispatch to it is refused rather than started unfiltered. Grant
+it on the device, without the enrollment bundle:
+
+```bash
+sudo cloop executor agent install --upgrade --packet-filter
+```
+
+That writes the drop-in and restarts the agent even when its build is already
+current, and restores the previous configuration if the agent does not come
+back. A plain `--upgrade` never changes the grant either way;
+`--upgrade --packet-filter=false` withdraws it. The agent's startup log says
+where it stands: `firewall: nft(8) — CAP_NET_ADMIN held by the agent, never by
+its workloads`, or `firewall: unavailable:` and the reason.
+
+An agent that can already drive a rootful container engine holds a stronger
+privilege than `CAP_NET_ADMIN` through the engine's socket; the grant matters on
+a device whose agent cannot.
 
 ## Creating one
 

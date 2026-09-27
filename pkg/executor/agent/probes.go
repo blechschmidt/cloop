@@ -26,9 +26,10 @@ const probeTimeout = 5 * time.Second
 // nftables ruleset, and the reason when it cannot.
 //
 // The reason is the point. The two failures an operator meets have different
-// fixes — nftables not installed, or the agent's service unit withholding
-// CAP_NET_ADMIN and AF_NETLINK, which the hardened default does — and the
-// dashboard shows this string beside the firewall it cannot apply.
+// fixes — nftables not installed, or the agent's service withholding
+// CAP_NET_ADMIN or netlink sockets — and the dashboard shows this string beside
+// the firewall it cannot apply. The second is fixed by one command on the
+// device, which needs no enrollment bundle, so the string names it.
 func probePacketFilter() (bool, string) {
 	applier, err := netfilter.NewApplier()
 	if err != nil {
@@ -37,8 +38,8 @@ func probePacketFilter() (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	if err := applier.Available(ctx); err != nil {
-		return false, err.Error() + " — install the agent with --packet-filter, or add a drop-in granting " +
-			"AmbientCapabilities=CAP_NET_ADMIN and AF_NETLINK in RestrictAddressFamilies"
+		return false, err.Error() + " — on the device, `sudo " + executor.PacketFilterGrantProcedure +
+			"` grants what nft(8) needs"
 	}
 	return true, ""
 }

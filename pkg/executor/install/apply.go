@@ -125,6 +125,13 @@ func (in *Installer) Apply(p Plan) error {
 			return err
 		}
 	}
+	// Before the reload below, so systemd never starts the service with a
+	// grant this install withholds.
+	for _, path := range p.Remove {
+		if err := in.removeFile(path); err != nil {
+			return err
+		}
+	}
 
 	switch p.Output {
 	case OutputSystemd:
@@ -241,6 +248,21 @@ func (in *Installer) writeArtifact(s Spec, a Artifact) error {
 		in.logf("wrote %s", a.Path)
 	}
 	return nil
+}
+
+// removeFile deletes one file an install must not keep, logging only when
+// there was something to delete.
+func (in *Installer) removeFile(path string) error {
+	err := os.Remove(in.path(path))
+	switch {
+	case err == nil:
+		in.logf("removed %s", path)
+		return nil
+	case os.IsNotExist(err):
+		return nil
+	default:
+		return fmt.Errorf("install: remove %s: %w", path, err)
+	}
 }
 
 // chown sets the service user as owner, skipping silently when the user does

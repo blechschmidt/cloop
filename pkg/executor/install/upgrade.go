@@ -21,7 +21,9 @@ package install
 // quietly write a unit pointing at no server — turning "your agent is one
 // version behind" into "your agent no longer knows where its hub is". Changing
 // the unit is what re-running a full install with the bundle is for, and
-// UpgradeResult says plainly that the unit was left alone.
+// UpgradeResult says plainly that the unit was left alone. The firewall grant
+// is the one exception, and only when asked for: it is a drop-in beside the
+// unit precisely so an upgrade can add or remove it (see packetfilter.go).
 //
 // Five properties are asserted by tests rather than assumed:
 //
@@ -128,6 +130,16 @@ type UpgradeOptions struct {
 	// pkg/executor/remote/upgradeproto.go.
 	ProvenanceEstablished bool
 
+	// PacketFilter grants or withdraws the packet-filter drop-in (Task 20352)
+	// as part of the upgrade. The zero value leaves it as the device has it.
+	//
+	// It is how a device installed before the installer granted CAP_NET_ADMIN
+	// gets the grant without the enrollment bundle a full install needs, and it
+	// applies even when the binary is already current: the drop-in is written,
+	// systemd reloaded, and the agent restarted, with the same rollback as a
+	// binary swap if it does not come back.
+	PacketFilter PacketFilterChange
+
 	// SettleTimeout bounds the wait for a restarted service to report itself
 	// active before the upgrade concludes the new build is bad and rolls back.
 	// Zero uses serviceSettleTimeout.
@@ -226,6 +238,10 @@ type UpgradeResult struct {
 	// AlreadyCurrent reports that the installed binary was byte-identical and
 	// nothing was changed.
 	AlreadyCurrent bool
+	// BinaryCurrent reports that the installed binary was already this build,
+	// so none was copied — whether or not something else, the packet-filter
+	// drop-in, changed.
+	BinaryCurrent bool
 	// BinaryReplaced reports that the service binary was rewritten.
 	BinaryReplaced bool
 	// Restarted reports that the service was asked to restart. False with
@@ -257,6 +273,15 @@ type UpgradeResult struct {
 	// and the previous one was restored. It travels with a non-nil error:
 	// the upgrade failed, and this says the device was left working.
 	RolledBack bool
+
+	// PacketFilterChanged reports that the upgrade wrote or removed the
+	// packet-filter drop-in, and PacketFilterChange says how, for the log.
+	PacketFilterChanged bool
+	PacketFilterChange  string
+	// PacketFilterGranted reports whether the device's unit grants the agent
+	// what installing a sandbox firewall takes, once the upgrade is done. Only
+	// meaningful for OutputSystemd.
+	PacketFilterGranted bool
 
 	// PreviousChecksum and NewChecksum are SHA-256 sums of the old and new
 	// binaries, for an operator correlating a rollout across a fleet.
@@ -355,20 +380,34 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 	target := in.path(s.BinaryPath)
 	res.PreviousChecksum, _ = fileChecksum(target) // absent is fine; "" means unknown
 
-	if res.PreviousChecksum == newChecksum && !opts.Force {
-		res.AlreadyCurrent = true
-		in.logf("%s is already running this build (%s); nothing to do", s.BinaryPath, shortChecksum(newChecksum))
-		return res, nil
+	// The drop-in is decided before the binary, because either one alone is
+	// reason to restart the service and neither alone makes an upgrade a no-op.
+	dropIn, granted, err := in.planPacketFilter(s, out, opts.PacketFilter)
+	if err != nil {
+		return res, err
 	}
+	res.PacketFilterGranted = granted
 
 	// Same file on disk: replacing it with itself is a no-op that a rename
 	// would turn into a deleted binary. Reachable when --force is passed while
 	// running the installed binary, and when a checksum collision is not the
 	// explanation, an identity check is.
-	if sameFile(source, target) {
-		res.AlreadyCurrent = true
+	swapBinary := true
+	switch {
+	case res.PreviousChecksum == newChecksum && !opts.Force:
+		swapBinary = false
+		in.logf("%s is already running this build (%s)", s.BinaryPath, shortChecksum(newChecksum))
+	case sameFile(source, target):
+		swapBinary = false
 		in.logf("%s is the binary being run; nothing to copy", s.BinaryPath)
+	}
+	res.BinaryCurrent = !swapBinary
+	if !swapBinary && dropIn == nil {
+		res.AlreadyCurrent = true
 		return res, nil
+	}
+	if !swapBinary {
+		return in.changeDropInOnly(res, s, out, dropIn, opts)
 	}
 
 	// Provenance, and it has to come before verifyUpgrade rather than after.
@@ -406,6 +445,10 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 	// is the line a dry run stops at, placed after the checks precisely so a
 	// dry run is worth running.
 	if opts.DryRun {
+		if dropIn != nil {
+			res.PacketFilterChange = dropIn.describe(true)
+			in.logf("%s", res.PacketFilterChange)
+		}
 		in.logf("would replace %s (%s -> %s) and restart %s",
 			s.BinaryPath, shortChecksum(res.PreviousChecksum), shortChecksum(newChecksum), s.ServiceName)
 		return res, nil
@@ -426,7 +469,25 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 	}
 	res.BackupPath = backup
 
+	// The drop-in first: of the two, it is the change that can fail for a
+	// reason of its own (a read-only /etc), and failing before the binary is
+	// touched leaves nothing to undo.
+	if dropIn != nil {
+		if err := in.applyDropIn(s, dropIn); err != nil {
+			return res, err
+		}
+		res.PacketFilterChanged, res.PacketFilterChange = true, dropIn.describe(false)
+		res.PacketFilterGranted = dropIn.grantedAfter
+	}
+
 	if err := in.replaceBinary(source, s.BinaryPath); err != nil {
+		if dropIn != nil {
+			if rErr := in.restoreDropIn(s, dropIn); rErr != nil {
+				return res, fmt.Errorf("%w\n(and restoring %s also failed: %v)", err, dropIn.path, rErr)
+			}
+			res.PacketFilterChanged, res.PacketFilterChange = false, ""
+			res.PacketFilterGranted = dropIn.grantedBefore
+		}
 		return res, err
 	}
 	res.BinaryReplaced = true
@@ -441,7 +502,7 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 			// will not bring it back. The old binary is the only one known to
 			// work here, so put it back rather than leaving the device on an
 			// untested build it is not even running.
-			return res, in.rollback(&res, s, out, backup,
+			return res, in.rollback(&res, s, out, backup, dropIn,
 				fmt.Errorf("the service did not restart: %w", err))
 		}
 		// Nothing was running, so nothing was taken down. This is the
@@ -460,11 +521,56 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 	if wasUp {
 		settle := opts.settleTimeout()
 		if !in.waitForService(s, out, settle) {
-			return res, in.rollback(&res, s, out, backup, fmt.Errorf(
+			return res, in.rollback(&res, s, out, backup, dropIn, fmt.Errorf(
 				"%s was running before the upgrade and did not come back within %s on the new "+
 					"build (%s)", s.ServiceName, settle, res.StagedBuild.Version))
 		}
 		in.logf("%s is running the new build", s.ServiceName)
+	}
+	return res, nil
+}
+
+// changeDropInOnly is an upgrade whose binary is already current but whose
+// packet-filter grant is to change: write the drop-in, restart, and put the
+// old drop-in back if the service does not come back.
+//
+// It restarts even though no binary changed — systemd applies a unit's
+// capabilities at exec, so a grant the running agent was not started with does
+// nothing until it is — and with the same try-restart as a binary upgrade: a
+// service an operator stopped stays stopped, and picks the change up when it
+// is next started.
+func (in *Installer) changeDropInOnly(res UpgradeResult, s Spec, out Output, dropIn *dropInChange,
+	opts UpgradeOptions) (UpgradeResult, error) {
+	if opts.DryRun {
+		res.PacketFilterChange = dropIn.describe(true)
+		in.logf("%s, then restart %s", res.PacketFilterChange, s.ServiceName)
+		return res, nil
+	}
+	wasRunning, runningKnown := in.serviceActive(s, out)
+	if err := in.applyDropIn(s, dropIn); err != nil {
+		return res, err
+	}
+	res.PacketFilterChanged, res.PacketFilterChange = true, dropIn.describe(false)
+	res.PacketFilterGranted = dropIn.grantedAfter
+	in.logf("%s", res.PacketFilterChange)
+
+	wasUp := runningKnown && wasRunning
+	restarted, err := in.restartService(s, out)
+	if err != nil {
+		if wasUp {
+			return res, in.rollback(&res, s, out, "", dropIn, fmt.Errorf("the service did not restart: %w", err))
+		}
+		return res, fmt.Errorf("install: %s was changed but the service did not restart: %w\n"+
+			"The new configuration is in place; start the service to apply it", dropIn.path, err)
+	}
+	res.Restarted = restarted
+	if wasUp {
+		settle := opts.settleTimeout()
+		if !in.waitForService(s, out, settle) {
+			return res, in.rollback(&res, s, out, "", dropIn, fmt.Errorf(
+				"%s was running before the change and did not come back within %s", s.ServiceName, settle))
+		}
+		in.logf("%s is running with the new configuration", s.ServiceName)
 	}
 	return res, nil
 }
@@ -523,7 +629,40 @@ func (in *Installer) verifyUpgrade(res *UpgradeResult, source, target string, op
 // It always returns non-nil: it is only called on a failure path, and a rollback
 // that reported success would leave an operator believing a build was deployed
 // that was not.
-func (in *Installer) rollback(res *UpgradeResult, s Spec, out Output, backup string, cause error) error {
+func (in *Installer) rollback(res *UpgradeResult, s Spec, out Output, backup string, dropIn *dropInChange,
+	cause error) error {
+	// The drop-in goes back first, so that whichever binary starts below starts
+	// with the unit configuration it last ran under.
+	if dropIn != nil && res.PacketFilterChanged {
+		if dErr := in.restoreDropIn(s, dropIn); dErr != nil {
+			return fmt.Errorf("install: %s is in an inconsistent state and needs manual recovery.\n"+
+				"  The upgrade failed: %v\n"+
+				"  Restoring %s also failed: %v",
+				s.ServiceName, cause, dropIn.path, dErr)
+		}
+		res.PacketFilterChanged, res.PacketFilterChange = false, ""
+		res.PacketFilterGranted = dropIn.grantedBefore
+		if err := in.run("systemctl", "daemon-reload"); err != nil {
+			in.logf("note: systemctl daemon-reload failed: %v", err)
+		}
+	}
+	if !res.BinaryReplaced {
+		// Only the drop-in changed, and it is back; start the service on it.
+		if sErr := in.startService(s, out); sErr != nil {
+			return fmt.Errorf("install: %s is in an inconsistent state and needs manual recovery.\n"+
+				"  The change failed: %v\n"+
+				"  The previous configuration was restored, but the service did not restart: %v",
+				s.ServiceName, cause, sErr)
+		}
+		res.RolledBack = true
+		res.Restarted = false
+		return fmt.Errorf("install: the change was rolled back.\n"+
+			"  %v\n"+
+			"  The previous configuration was restored and %s was restarted, so this device is still "+
+			"in the fleet.\n"+
+			"Check the device's logs: journalctl -u %s",
+			cause, s.ServiceName, s.ServiceName)
+	}
 	if rErr := in.restoreBackup(s, out, backup); rErr != nil {
 		// Both the upgrade and the recovery failed. This is the one outcome
 		// that needs a human on the device, and it must not be reported in the

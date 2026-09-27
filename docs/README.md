@@ -170,8 +170,9 @@ Six pages in order, indexed at
   contained sandboxes on one enrolled device: each with its own engine and
   runtime, an IP firewall with an allowlist and a denylist, and USB devices chosen
   from the device's inventory — a hardware security module, a serial adapter — by
-  vendor, product and serial. What the agent needs (`--packet-filter`), udev
-  groups for device access, and why hardware and gVisor do not combine.
+  vendor, product and serial. What the agent needs (the installer's
+  `CAP_NET_ADMIN` grant, and how it stays out of workloads), udev groups for
+  device access, and why hardware and gVisor do not combine.
 
 ## Operations
 

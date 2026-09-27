@@ -367,6 +367,15 @@ or when the control plane revokes its credential.`,
 		if len(caps.Harnesses) > 0 {
 			fmt.Printf("  harnesses: %s\n", strings.Join(caps.Harnesses, ", "))
 		}
+		// Whether this device can install a sandbox's firewall, and if not
+		// why: the one capability question an operator reads the journal
+		// for, and otherwise answered only on the hub's Executors panel.
+		switch {
+		case caps.PacketFilter:
+			fmt.Printf("  firewall: nft(8) — CAP_NET_ADMIN held by the agent, never by its workloads\n")
+		case caps.PacketFilterIssue != "":
+			fmt.Printf("  firewall: unavailable: %s\n", caps.PacketFilterIssue)
+		}
 		fmt.Println()
 
 		// Ctrl-C and SIGTERM end the loop cleanly. Without this the agent's

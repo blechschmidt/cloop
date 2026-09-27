@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/caps"
 )
 
 // apply.go installs a compiled policy into the host kernel with nft(8).
@@ -69,8 +71,7 @@ func (a *Applier) Available(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.nftPath, "list", "tables")
-	cmd.Env = minimalEnv()
+	cmd := a.command(ctx, "list", "tables")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -78,13 +79,50 @@ func (a *Applier) Available(ctx context.Context) error {
 		if detail == "" {
 			detail = err.Error()
 		}
-		if os.Geteuid() != 0 {
-			return fmt.Errorf("%w: nft(8) needs CAP_NET_ADMIN and this process runs as uid %d (%s)",
-				ErrUnavailable, os.Geteuid(), detail)
-		}
-		return fmt.Errorf("%w: nft(8) is present but not usable (%s)", ErrUnavailable, detail)
+		return unavailable(detail)
 	}
 	return nil
+}
+
+// unavailable explains a failed nft(8) invocation, naming which of the two
+// things this process lacks.
+//
+// They are separate on purpose. A service unit that withholds the capability
+// and one that holds it but forbids netlink sockets fail with different
+// messages from nft, and the second used to be reported as the first — sending
+// an operator to grant a capability the agent already had.
+func unavailable(detail string) error {
+	return explainUnavailable(os.Geteuid(), caps.Holds(caps.NetAdmin), detail)
+}
+
+func explainUnavailable(uid int, holdsNetAdmin bool, detail string) error {
+	switch {
+	case uid == 0:
+		return fmt.Errorf("%w: nft(8) is present but not usable (%s)", ErrUnavailable, detail)
+	case !holdsNetAdmin:
+		return fmt.Errorf("%w: nft(8) needs CAP_NET_ADMIN, which this process (uid %d) does not hold (%s)",
+			ErrUnavailable, uid, detail)
+	case strings.Contains(strings.ToLower(detail), "address family not supported"):
+		return fmt.Errorf("%w: this process (uid %d) holds CAP_NET_ADMIN, but may not open the netlink "+
+			"socket nft(8) talks to the kernel through — its service allows no AF_NETLINK (%s)",
+			ErrUnavailable, uid, detail)
+	default:
+		return fmt.Errorf("%w: this process (uid %d) holds CAP_NET_ADMIN, but nft(8) still failed (%s)",
+			ErrUnavailable, uid, detail)
+	}
+}
+
+// command builds an nft(8) invocation.
+//
+// nft is the one program cloop starts that needs a capability. An executor
+// agent is installed holding CAP_NET_ADMIN and keeps it from everything it
+// starts (pkg/caps), so here it is handed back to exactly this child. As root,
+// or in a process that does not hold it, the command is left as it is.
+func (a *Applier) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, a.nftPath, args...)
+	cmd.Env = minimalEnv()
+	caps.Grant(cmd, caps.NetAdmin)
+	return cmd
 }
 
 // Apply installs the policy, replacing any ruleset previously installed under
@@ -133,8 +171,7 @@ func (a *Applier) run(ctx context.Context, script string) error {
 	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.nftPath, "-f", "-")
-	cmd.Env = minimalEnv()
+	cmd := a.command(ctx, "-f", "-")
 	cmd.Stdin = strings.NewReader(script)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -147,13 +184,26 @@ func (a *Applier) run(ctx context.Context, script string) error {
 		if detail == "" {
 			detail = err.Error()
 		}
-		if os.Geteuid() != 0 && strings.Contains(strings.ToLower(detail), "permission denied") {
-			return fmt.Errorf("%w: %s (this process runs as uid %d and needs CAP_NET_ADMIN)",
-				ErrUnavailable, detail, os.Geteuid())
+		if os.Geteuid() != 0 && privilegeFailure(detail) {
+			return unavailable(detail)
 		}
 		return errors.New(detail)
 	}
 	return nil
+}
+
+// privilegeFailure reports whether nft failed for want of privilege rather
+// than over the ruleset itself. nft says "Operation not permitted" for a
+// missing capability, and the kernel's "Address family not supported" is a
+// seccomp filter refusing the netlink socket.
+func privilegeFailure(detail string) bool {
+	d := strings.ToLower(detail)
+	for _, s := range []string{"permission denied", "operation not permitted", "address family not supported"} {
+		if strings.Contains(d, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // minimalEnv is the environment nft runs with.

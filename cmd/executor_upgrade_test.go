@@ -13,11 +13,14 @@ package cmd
 // string the UI shows must name a flag that exists.
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/install"
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
@@ -117,6 +120,57 @@ func TestNoUIStringNamesAnUnknownInstallFlag(t *testing.T) {
 				t.Errorf("UI string %q names --%s, undefined on `%s`", s, name, cmd.CommandPath())
 			}
 		}
+	}
+}
+
+// TestPacketFilterGrantProcedureResolves: the device's probe and the hub's
+// refusal both tell an operator to run executor.PacketFilterGrantProcedure on
+// a device that cannot install a sandbox firewall (Task 20352). It has to name
+// flags this command really has, and --packet-filter has to be a switch an
+// upgrade honours only when it is passed — otherwise a plain upgrade would
+// change what the device may do.
+func TestPacketFilterGrantProcedureResolves(t *testing.T) {
+	fields := strings.Fields(executor.PacketFilterGrantProcedure)
+	if len(fields) < 4 || fields[0] != "cloop" {
+		t.Fatalf("PacketFilterGrantProcedure = %q", executor.PacketFilterGrantProcedure)
+	}
+	var path, flags []string
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "--") {
+			flags = append(flags, strings.TrimPrefix(f, "--"))
+		} else {
+			path = append(path, f)
+		}
+	}
+	cmd := findCommand(t, path...)
+	for _, name := range flags {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("PacketFilterGrantProcedure names --%s, which `%s` does not define", name, cmd.CommandPath())
+		}
+	}
+	if !slices.Contains(flags, "upgrade") || !slices.Contains(flags, "packet-filter") {
+		t.Errorf("PacketFilterGrantProcedure = %q, want an --upgrade that passes --packet-filter",
+			executor.PacketFilterGrantProcedure)
+	}
+
+	pf := cmd.Flags().Lookup("packet-filter")
+	if pf == nil || pf.DefValue != "true" {
+		t.Fatalf("--packet-filter must default to granting on install (Task 20352), got %+v", pf)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("packet-filter", "true")
+		pf.Changed = false
+	})
+	if got := upgradePacketFilter(cmd); got != install.PacketFilterKeep {
+		t.Errorf("an upgrade without --packet-filter = %v, want PacketFilterKeep", got)
+	}
+	_ = cmd.Flags().Set("packet-filter", "true")
+	if got := upgradePacketFilter(cmd); got != install.PacketFilterGrant {
+		t.Errorf("--upgrade --packet-filter = %v, want PacketFilterGrant", got)
+	}
+	_ = cmd.Flags().Set("packet-filter", "false")
+	if got := upgradePacketFilter(cmd); got != install.PacketFilterWithdraw {
+		t.Errorf("--upgrade --packet-filter=false = %v, want PacketFilterWithdraw", got)
 	}
 }
 

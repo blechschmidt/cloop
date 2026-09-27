@@ -210,12 +210,17 @@ type Spec struct {
 
 	// PacketFilter grants the agent what it needs to install a virtual
 	// executor's IP firewall on the host (Task 20345): CAP_NET_ADMIN, and the
-	// netlink socket family nft(8) speaks. Off by default, because it is a
-	// real widening of what the service may do — it can then rewrite the
-	// host's packet filter — and a device that only ever runs host-mode or
-	// unfiltered sandboxes has no use for it. A device whose agent can
-	// already drive a rootful container engine holds a stronger privilege
-	// than this through the engine's socket.
+	// netlink socket family nft(8) speaks. It is written as a drop-in beside
+	// the unit (PacketFilterDropIn) rather than into it, and a plan without it
+	// removes a drop-in an earlier install or upgrade left, so the flag always
+	// describes the device afterwards. systemd output only.
+	//
+	// `cloop executor agent install` grants it unless told
+	// --packet-filter=false (Task 20352): a device that cannot install a
+	// firewall refuses every sandbox that has one, and the grant stays with
+	// the agent — pkg/caps keeps it from every program the agent starts except
+	// nft(8), so a workload never holds it. The zero value withholds it, for
+	// callers that build a Spec themselves.
 	PacketFilter bool
 }
 
@@ -450,6 +455,11 @@ type Plan struct {
 	// Next lists the follow-up steps Apply performs (or that the operator
 	// must perform when the plan targets a system this machine is not).
 	Next []string
+
+	// Remove lists files an earlier install may have left that this plan must
+	// not keep — today, the packet-filter drop-in of a device now installed
+	// without it. Absent files are fine: removing is about the state after.
+	Remove []string
 }
 
 // BuildPlan renders everything an install needs, without writing anything.
@@ -479,6 +489,15 @@ func BuildPlan(spec Spec, out Output) (Plan, error) {
 		p.Artifacts = append(p.Artifacts, Artifact{
 			Path: s.UnitPath(), Mode: UnitFileMode, Content: unit,
 		})
+		// The grant is its own file, so the unit above is byte-identical with
+		// or without it and withholding it is a deletion.
+		if s.PacketFilter {
+			p.Artifacts = append(p.Artifacts, Artifact{
+				Path: s.PacketFilterDropInPath(), Mode: UnitFileMode, Content: PacketFilterDropIn(s),
+			})
+		} else {
+			p.Remove = append(p.Remove, s.PacketFilterDropInPath())
+		}
 		p.Display = unit
 		p.Next = []string{
 			"systemctl daemon-reload",

@@ -238,6 +238,14 @@ func BlockedByBuildFloor(ex Executor) (bool, string) {
 // not come back. See pkg/executor/install.
 const AgentUpgradeProcedure = "cloop executor agent install --upgrade"
 
+// PacketFilterGrantProcedure is the command that lets an installed device
+// install sandbox firewalls (Task 20352): it writes the drop-in granting the
+// agent CAP_NET_ADMIN and netlink sockets and restarts the agent, with no
+// enrollment bundle and whether or not the binary is current. Here for the
+// same reason as AgentUpgradeProcedure: the device's own probe, the hub's
+// refusal and the CLI all name it, and cmd tests that it parses.
+const PacketFilterGrantProcedure = "cloop executor agent install --upgrade --packet-filter"
+
 // buildRank orders two candidates by how current their build is, for ranking
 // rather than rejection. It reports whether a precedes b, and whether the two
 // could be ordered at all.

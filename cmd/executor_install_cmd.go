@@ -47,6 +47,11 @@ device needs to stay enrolled across reboots:
   * NoNewPrivileges, ProtectSystem=strict, PrivateTmp, an empty capability
     bounding set, and a syscall filter
   * a StateDirectory holding the enrollment token at mode 0600
+  * a drop-in granting CAP_NET_ADMIN and netlink sockets, so the agent can
+    install the IP firewall of a sandbox that has one with nft(8). The agent
+    keeps the capability to itself: nothing it starts receives it except nft,
+    so a workload never holds it. --packet-filter=false withholds it, and the
+    device then refuses every sandbox with a firewall
 
 The token never appears in ExecStart. A unit file is world-readable and
 ` + "`systemctl show`" + ` prints the command line to anyone who asks, so the token is
@@ -57,14 +62,19 @@ carries its path. The agent deletes that file once the token is redeemed.
   --output shell    emit a POSIX init script for devices without systemd
   --dry-run         print what would be written, and write nothing
   --uninstall       reverse an install; idempotent, safe to re-run
-  --upgrade         replace the binary of an existing install and restart it
+  --upgrade         replace the binary of an existing install and restart it;
+                    with --packet-filter, also grant (or with =false, withdraw)
+                    the firewall capability on a device installed without it
 
 --upgrade rolls a device forward without re-enrolling it. It replaces the binary
 atomically and restarts the service, and it deliberately does nothing else: the
 unit file and the credential are left exactly as they are, because re-rendering
 the unit needs the control-plane URL and certificate pin from an enrollment
 bundle that nobody still has months later. A unit change means re-running a full
-install with the bundle.
+install with the bundle. The one exception is the firewall grant, which is a
+drop-in beside the unit precisely so that --upgrade --packet-filter can add it
+(and --packet-filter=false take it away) without the bundle; a plain --upgrade
+leaves it as it is.
 
 It is idempotent — an upgrade to the identical binary copies nothing and
 restarts nothing — and it refuses rather than half-installing a device that was
@@ -97,6 +107,10 @@ Examples:
 
   # Upgrade from an explicit path instead of the running executable.
   sudo cloop executor agent install --upgrade --from /tmp/cloop-new
+
+  # Let a device installed before the default changed install sandbox
+  # firewalls. No bundle needed; restarts the agent even if its build is current.
+  sudo cloop executor agent install --upgrade --packet-filter
 
   # Remove it, including the agent's identity and workspaces.
   sudo cloop executor agent install --uninstall --purge`,
@@ -156,6 +170,7 @@ Examples:
 				Force:         force,
 				DryRun:        dryRun,
 				SettleTimeout: settle,
+				PacketFilter:  upgradePacketFilter(cmd),
 			})
 			if err != nil {
 				return err
@@ -177,6 +192,18 @@ Examples:
 			}
 			dim.Println("Revoke the credential on the control plane too: cloop executor revoke <agent-id>")
 			return nil
+		}
+
+		// The grant is a systemd drop-in. Asked for explicitly on another
+		// output, it is refused rather than silently not made; left at its
+		// default there, it simply does not apply.
+		if out != install.OutputSystemd && spec.PacketFilter {
+			if cmd.Flags().Changed("packet-filter") {
+				return fmt.Errorf("--packet-filter applies to --output systemd only: the grant is a systemd "+
+					"drop-in, and the %s output has no equivalent that keeps the capability from the agent's "+
+					"workloads", out)
+			}
+			spec.PacketFilter = false
 		}
 
 		plan, err := install.BuildPlan(spec, out)
@@ -274,6 +301,20 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 	return spec, out, nil
 }
 
+// upgradePacketFilter maps --packet-filter onto an upgrade. Unlike an install,
+// where it defaults to granting, an upgrade acts on it only when it was passed:
+// what a fleet device may do is not something to change as a side effect of
+// replacing its binary.
+func upgradePacketFilter(cmd *cobra.Command) install.PacketFilterChange {
+	if !cmd.Flags().Changed("packet-filter") {
+		return install.PacketFilterKeep
+	}
+	if grant, _ := cmd.Flags().GetBool("packet-filter"); grant {
+		return install.PacketFilterGrant
+	}
+	return install.PacketFilterWithdraw
+}
+
 // requirePrivilege refuses an install that cannot succeed, rather than failing
 // half-way through with a permission error on the third file.
 func requirePrivilege(inst *install.Installer, dryRun bool) error {
@@ -325,6 +366,9 @@ func printDryRun(w io.Writer, p install.Plan) {
 		}
 		fmt.Fprintf(w, "  %s  (mode %04o)\n", a.Path, a.Mode)
 	}
+	for _, r := range p.Remove {
+		fmt.Fprintf(w, "  %s  (removed if present)\n", r)
+	}
 	if len(p.Next) > 0 {
 		fmt.Fprintln(w)
 		for _, n := range p.Next {
@@ -335,6 +379,16 @@ func printDryRun(w io.Writer, p install.Plan) {
 	header.Fprintf(w, "── %s ", p.Output)
 	dim.Fprintf(w, "%s\n", strings.Repeat("─", 56))
 	fmt.Fprintln(w, p.Display)
+	// Every other file the plan writes in full — the packet-filter drop-in —
+	// so a review before committing sees the grant, not just its path.
+	for _, a := range p.Artifacts {
+		if a.Secret || a.Content == p.Display {
+			continue
+		}
+		header.Fprintf(w, "── %s ", a.Path)
+		dim.Fprintf(w, "%s\n", strings.Repeat("─", 8))
+		fmt.Fprintln(w, a.Content)
+	}
 }
 
 // printUpgraded reports what the upgrade actually did.
@@ -354,8 +408,24 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 		ok.Fprintf(w, "\nAlready up to date.\n")
 		fmt.Fprintf(w, "  binary:  %s\n", res.Spec.BinaryPath)
 		dim.Fprintf(w, "  build:   %s\n", shortChecksum(res.NewChecksum))
+		printPacketFilter(w, res)
 		dim.Fprintln(w, "  Nothing was replaced and the service was not restarted.")
 		dim.Fprintln(w, "  Pass --force to replace and restart anyway.")
+		return
+	}
+
+	// The binary was current and only the firewall grant changed.
+	if res.BinaryCurrent {
+		if res.DryRun {
+			color.New(color.FgCyan, color.Bold).Fprintf(w, "\nDry run — nothing was changed.\n")
+		} else {
+			ok.Fprintf(w, "\nUpdated %s.\n", res.Spec.ServiceName)
+		}
+		fmt.Fprintf(w, "  binary:  %s (already this build: %s)\n", res.Spec.BinaryPath, shortChecksum(res.NewChecksum))
+		printPacketFilter(w, res)
+		if res.Restarted {
+			fmt.Fprintf(w, "  service: restarted\n")
+		}
 		return
 	}
 
@@ -367,6 +437,7 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 		fmt.Fprintf(w, "  build:   %s -> %s\n",
 			shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
 		printVerification(w, res)
+		printPacketFilter(w, res)
 		dim.Fprintf(w, "\n  Would replace the binary and restart %s.\n", res.Spec.ServiceName)
 		dim.Fprintln(w, "  The unit file and credential would be left unchanged.")
 		return
@@ -377,6 +448,7 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 	fmt.Fprintf(w, "  from:    %s\n", res.Source)
 	fmt.Fprintf(w, "  build:   %s -> %s\n", shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
 	printVerification(w, res)
+	printPacketFilter(w, res)
 	if res.BackupPath != "" {
 		// Named because it is the operator's manual escape hatch, and because
 		// a file silently appearing beside the service binary is the kind of
@@ -400,10 +472,33 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 	fmt.Fprintln(w)
 	// Named because an upgrade that silently left the unit alone would
 	// otherwise look like one that refreshed everything.
-	dim.Fprintln(w, "  The unit file and credential were left unchanged.")
+	if res.PacketFilterChanged {
+		dim.Fprintln(w, "  The unit file and credential were left unchanged; the firewall grant is the")
+		dim.Fprintln(w, "  drop-in beside the unit.")
+	} else {
+		dim.Fprintln(w, "  The unit file and credential were left unchanged.")
+	}
 	dim.Fprintln(w, "  To change either, re-run a full install with the enrollment bundle.")
 	if res.Output == install.OutputSystemd {
 		dim.Fprintf(w, "  logs: journalctl -fu %s\n", res.Spec.UnitFileName())
+	}
+}
+
+// printPacketFilter reports the firewall grant: what the upgrade did to it, or,
+// on a device without it, the flag that adds it. Silent for outputs that have
+// no grant to report.
+func printPacketFilter(w io.Writer, res install.UpgradeResult) {
+	if res.Output != install.OutputSystemd {
+		return
+	}
+	dim := color.New(color.Faint)
+	switch {
+	case res.PacketFilterChange != "":
+		fmt.Fprintf(w, "  firewall: %s\n", res.PacketFilterChange)
+	case res.PacketFilterGranted:
+		dim.Fprintf(w, "  firewall: granted (the agent holds CAP_NET_ADMIN for nft(8))\n")
+	default:
+		color.New(color.FgYellow).Fprintf(w, "  firewall: not granted — %s\n", install.PacketFilterHint)
 	}
 }
 
@@ -450,6 +545,11 @@ func printInstalled(p install.Plan) {
 		fmt.Printf("  unit:    %s\n", p.Spec.UnitPath())
 		fmt.Printf("  state:   %s\n", p.Spec.StateDir)
 		fmt.Printf("  user:    %s (no login shell)\n", p.Spec.User)
+		if p.Spec.PacketFilter {
+			fmt.Printf("  firewall: CAP_NET_ADMIN for nft(8) only, in %s\n", p.Spec.PacketFilterDropInPath())
+		} else {
+			fmt.Printf("  firewall: withheld (--packet-filter=false); a sandbox with a firewall is refused here\n")
+		}
 		fmt.Printf("  server:  %s\n", p.Spec.Server)
 		if p.Spec.Pin != "" {
 			fmt.Printf("  pin:     %s\n", p.Spec.Pin)
@@ -503,9 +603,12 @@ func init() {
 			"back to the previous binary (default 30s)")
 	f.String("root", "",
 		"stage the files beneath this directory instead of installing them, for image builds")
-	f.Bool("packet-filter", false,
-		"grant the agent CAP_NET_ADMIN and netlink so it can install virtual executors' IP firewalls "+
-			"with nft(8); without it a virtual executor with a firewall is refused on this device")
+	f.Bool("packet-filter", true,
+		"grant the agent CAP_NET_ADMIN and netlink sockets, in a drop-in beside the unit, so it can "+
+			"install sandboxes' IP firewalls with nft(8) — nothing the agent starts receives the "+
+			"capability except nft. =false withholds it, and the device then refuses every sandbox with "+
+			"a firewall. With --upgrade it acts only when passed: it grants or withdraws the drop-in on "+
+			"an existing install. systemd output only")
 
 	f.String("bundle", "",
 		"enrollment bundle from `cloop executor enroll` (or set "+enrollBundleEnv+", "+

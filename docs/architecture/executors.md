@@ -2518,11 +2518,12 @@ CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sudo -E cloop executor agent install
 CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sh -c "$(curl -fsSL https://hub.example.com/install.sh)"
 ```
 
-It writes two files and nothing else:
+It writes three files and nothing else:
 
 | Path | Mode | Contents |
 | --- | --- | --- |
 | `/etc/systemd/system/cloop-executor.service` | `0644` | the unit — **no credential** |
+| `/etc/systemd/system/cloop-executor.service.d/10-packet-filter.conf` | `0644` | the one relaxation: `CAP_NET_ADMIN` and `AF_NETLINK`, so the agent can install a sandbox's firewall (not written with `--packet-filter=false`) |
 | `/var/lib/cloop-executor/enrollment` | `0600` | the enrollment bundle, owned by the service user |
 
 The split is the point. A unit file is world-readable and `systemctl show`
@@ -2541,6 +2542,20 @@ directory. A device that runs *container* workloads through the agent must drop
 `PrivateDevices=` and `RestrictNamespaces=`; the unit says so in a comment where
 the operator will find it.
 
+The packet-filter drop-in is the installer's only relaxation, and it is a
+separate file so the unit is byte-identical with or without it, an upgrade can
+add or remove it without the enrollment bundle, and an operator can delete the
+whole grant as one file. Its three directives *add* to the unit's — systemd
+merges them — so the effective bounding and ambient sets are exactly
+`CAP_NET_ADMIN`, and `AF_NETLINK` joins `AF_INET AF_INET6 AF_UNIX`. Because an
+ambient capability is inherited by every program a process starts, every cloop
+process first clears its ambient and inheritable sets on all threads
+(`pkg/caps`: `AllThreadsSyscall` in a `CGO_ENABLED=0` build, a C constructor
+that runs before the Go runtime's first thread in a cgo build), and
+`pkg/netfilter` hands the capability back only to `nft(8)`. The agent holds
+`CAP_NET_ADMIN`; nothing it starts does. See
+[Virtual executors](../guides/virtual-executors.md#what-the-device-needs).
+
 Other outputs and flags:
 
 | Flag | Effect |
@@ -2555,6 +2570,7 @@ Other outputs and flags:
 | `--upgrade` | replaces the binary of an existing install and restarts it — see [Upgrading a device](#upgrading-a-device) |
 | `--from <path>` | with `--upgrade`, the new binary (default: the running executable) |
 | `--force` | with `--upgrade`, replace and restart even when the installed binary is already identical |
+| `--packet-filter` | on by default: writes the drop-in granting `CAP_NET_ADMIN` and `AF_NETLINK`; `=false` withholds it and removes a drop-in an earlier install left. With `--upgrade` it acts only when passed — `--upgrade --packet-filter` grants it on a device installed without it, restarting the agent even if its build is current; a plain `--upgrade` never changes it |
 
 **`GET /install.sh`** serves the bootstrap script. It is gated on
 `executor.manage` — the same permission as minting a token, since it discloses
@@ -2723,6 +2739,19 @@ cloop executor agent install --upgrade --dry-run
 running executable cannot be opened for writing on Linux at all) and then asks
 systemd to `try-restart` the unit. `try-restart` rather than `restart`, so a
 service an operator deliberately stopped stays stopped.
+
+It leaves the unit alone, and with it the firewall grant: a plain upgrade never
+adds or removes the packet-filter drop-in. Passing `--packet-filter` (or
+`--packet-filter=false`) makes it write (or remove) the drop-in as part of the
+upgrade — even when the binary is already current, in which case nothing is
+copied and the agent is restarted so the grant takes effect — and a service
+that does not come back gets the previous drop-in back along with the previous
+binary. That is how a device installed before the grant was the default gets
+it, with no enrollment bundle:
+
+```bash
+sudo cloop executor agent install --upgrade --packet-filter
+```
 
 #### The staged binary is executed before it is installed
 

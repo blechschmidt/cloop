@@ -10,6 +10,13 @@ package install
 // (ProtectSystem=strict), cannot see other users' data (ProtectHome,
 // ProtectProc=invisible), and cannot reach the kernel's tuning surfaces at all.
 //
+// The one relaxation the installer makes lives in a separate file, the
+// packet-filter drop-in beside the unit (Task 20352): CAP_NET_ADMIN and netlink
+// sockets, which installing a sandbox's firewall takes. Keeping it out of the
+// unit means the unit is the same with or without it, an upgrade can add or
+// remove it without the enrollment bundle a full re-render needs, and an
+// operator can see and delete the whole grant as one file.
+//
 // Everything is emitted in a fixed order so two installs of the same spec
 // produce byte-identical units — a config-management system that re-renders
 // the unit on every run must not restart the fleet because a map iterated
@@ -30,7 +37,7 @@ var hardening = []struct{ directive, why string }{
 	{"NoNewPrivileges=yes",
 		"a harness that finds a setuid binary still cannot use it"},
 	{"CapabilityBoundingSet=",
-		"the agent needs no capability; an empty set means none can be regained"},
+		"an empty set, so no capability can be regained; the packet-filter drop-in adds exactly one"},
 	{"AmbientCapabilities=",
 		"and none are handed to it at exec"},
 	{"ProtectSystem=strict",
@@ -61,7 +68,7 @@ var hardening = []struct{ directive, why string }{
 	{"RestrictSUIDSGID=yes",
 		"a workload cannot create a setuid file to escalate through later"},
 	{"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
-		"IP and local sockets only; no AF_PACKET, no AF_NETLINK"},
+		"IP and local sockets; no AF_PACKET, and AF_NETLINK only through the packet-filter drop-in"},
 	{"LockPersonality=yes", ""},
 	{"SystemCallArchitectures=native", ""},
 	{"SystemCallFilter=@system-service",
@@ -165,15 +172,13 @@ func SystemdUnit(s Spec) string {
 	b.WriteString("# ── Hardening ──────────────────────────────────────────────────────────\n")
 	b.WriteString(relaxationNote)
 	b.WriteString("\n")
+	fmt.Fprintf(&b, "# CAP_NET_ADMIN and AF_NETLINK — what installing a sandbox's firewall takes —\n"+
+		"# are granted separately, by this drop-in when it exists:\n#   %s\n", s.PacketFilterDropInPath())
 	for _, h := range hardening {
-		directive, why := h.directive, h.why
-		if s.PacketFilter {
-			directive, why = packetFilterRelaxation(directive, why)
+		if h.why != "" {
+			fmt.Fprintf(&b, "# %s\n", h.why)
 		}
-		if why != "" {
-			fmt.Fprintf(&b, "# %s\n", why)
-		}
-		b.WriteString(directive)
+		b.WriteString(h.directive)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -242,21 +247,73 @@ func underDir(parent, child string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// packetFilterRelaxation is the whole difference --packet-filter makes to the
-// hardening block (Task 20345): one capability, and the socket family nft(8)
-// uses to reach the kernel. Everything else stays exactly as it was, which is
-// why this rewrites three directives in place instead of carrying a second
-// table that could drift from the first.
-func packetFilterRelaxation(directive, why string) (string, string) {
-	switch directive {
-	case "CapabilityBoundingSet=":
-		return "CapabilityBoundingSet=CAP_NET_ADMIN",
-			"--packet-filter: CAP_NET_ADMIN only, so the agent can install a virtual executor's firewall with nft(8)"
-	case "AmbientCapabilities=":
-		return "AmbientCapabilities=CAP_NET_ADMIN", "and handed to it at exec, since the agent runs as a system user"
-	case "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX":
-		return "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
-			"IP, local and netlink sockets; netlink is how nft(8) reaches the kernel's packet filter. No AF_PACKET"
+// packetFilterDropInName is the drop-in that grants the agent what installing
+// a sandbox's firewall takes.
+//
+// Numbered so it sorts before override.conf, the name `systemctl edit` uses:
+// an operator's own drop-in is read after this one and so has the last word —
+// "CapabilityBoundingSet=" there takes the grant away again.
+const packetFilterDropInName = "10-packet-filter.conf"
+
+// DropInDir is the unit's drop-in directory.
+func (s Spec) DropInDir() string { return s.UnitPath() + ".d" }
+
+// PacketFilterDropInPath is where the packet-filter grant is written.
+func (s Spec) PacketFilterDropInPath() string {
+	return filepath.Join(s.DropInDir(), packetFilterDropInName)
+}
+
+// packetFilterGrant is the whole grant, in the order it is written.
+//
+// Each directive *adds* to what the unit says rather than restating it:
+// systemd merges these three across a unit and its drop-ins, so the unit's
+// empty capability set becomes exactly CAP_NET_ADMIN and its address families
+// gain exactly AF_NETLINK, whatever else the unit allows. That is what makes
+// the drop-in safe to lay over a unit rendered by an older release.
+var packetFilterGrant = []struct{ directive, why string }{
+	{"CapabilityBoundingSet=CAP_NET_ADMIN",
+		"one capability on top of the unit's empty set: nft(8) needs it to load a sandbox's ruleset"},
+	{"AmbientCapabilities=CAP_NET_ADMIN",
+		"handed over at exec, since the agent runs as a system user. The agent keeps it to itself:\n" +
+			"# nothing it starts receives it except nft(8) — not a workload, not git, not a shell"},
+	{"RestrictAddressFamilies=AF_NETLINK",
+		"one socket family on top of the unit's list: netlink is how nft(8) reaches the kernel's\n" +
+			"# packet filter. Still no AF_PACKET"},
+}
+
+// PacketFilterDropIn renders the drop-in that grants the agent CAP_NET_ADMIN
+// and netlink sockets (Task 20352), so it can install the IP firewall a virtual
+// executor's sandboxes carry.
+func PacketFilterDropIn(s Spec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s — generated by `cloop executor agent install`.\n", packetFilterDropInName)
+	b.WriteString("#\n")
+	fmt.Fprintf(&b, "# Lets %s install, with nft(8), the IP firewall of a\n", s.UnitFileName())
+	b.WriteString("# sandbox that has one. Without it the device refuses every sandbox with a\n")
+	b.WriteString("# firewall rather than starting it unfiltered.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Withdraw it with `cloop executor agent install --upgrade --packet-filter=false`,\n")
+	b.WriteString("# or delete this file, run `systemctl daemon-reload` and restart the agent.\n")
+	b.WriteString("\n")
+	b.WriteString("[Service]\n")
+	for _, g := range packetFilterGrant {
+		fmt.Fprintf(&b, "# %s\n", g.why)
+		b.WriteString(g.directive)
+		b.WriteString("\n")
 	}
-	return directive, why
+	return b.String()
+}
+
+// unitDirectives returns a unit file's directive lines, without comments or
+// blank lines, so two renderings that differ only in their prose compare equal.
+func unitDirectives(body string) []string {
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }

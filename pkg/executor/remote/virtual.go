@@ -296,9 +296,10 @@ func (e *Executor) canApply(virtual *VirtualDispatch) error {
 	caps := e.AgentCapabilities()
 	if !caps.PacketFilter {
 		return fmt.Errorf("%w: virtual executor %s has a firewall, but device %s (%s) cannot install one "+
-			"(%s); grant the agent CAP_NET_ADMIN (see `cloop executor agent install --packet-filter`) "+
-			"or remove the firewall — a sandbox is never started unfiltered in its place",
-			ErrVirtualExecutorUnsupported, virtual.ID, e.id, e.name, packetFilterIssue(caps))
+			"(%s); grant the agent CAP_NET_ADMIN with `sudo %s` on the device, or remove the firewall "+
+			"— a sandbox is never started unfiltered in its place",
+			ErrVirtualExecutorUnsupported, virtual.ID, e.id, e.name, packetFilterIssue(caps),
+			executor.PacketFilterGrantProcedure)
 	}
 	return nil
 }
