@@ -76,9 +76,11 @@ package container
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -192,6 +194,15 @@ type Options struct {
 	// workloads this executor does not manage, and installing a default-deny
 	// ruleset on their bridge would firewall them too.
 	EgressFilter EgressFilter
+
+	// StageDir is a directory, visible to the engine at the same path, where
+	// the driver writes the small files it bind-mounts into every sandbox —
+	// today the resolv.conf a filtered sandbox resolves through (Task 20345).
+	// Empty uses the same tmpfs-preferring location secret files are staged
+	// in, which is right for a driver sharing the engine's mount namespace.
+	// A driver that does not — the remote agent, which runs with a private
+	// /tmp and /dev — must name a directory the engine can see.
+	StageDir string
 
 	// GroupAdd are supplementary group IDs every sandbox's user is given
 	// (--group-add), numeric and never 0 (Task 20345). They are how a device
@@ -673,6 +684,24 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		}
 		req.Network = network
 		req.DNS = dns
+		if len(dns) > 0 {
+			// The engine's --dns alone is not enough. On a user-defined
+			// network docker points the sandbox at its embedded resolver on
+			// 127.0.0.11, which lives in the kernel's view of the namespace;
+			// gVisor's netstack never reaches it (measured: "connection
+			// refused" under runsc), and podman's resolver sits on the
+			// bridge gateway, in the private space the filter drops. Naming
+			// the allowed resolvers in the sandbox's own resolv.conf works
+			// the same way under every runtime.
+			conf, rerr := e.resolvConf(dns)
+			if rerr != nil {
+				return executor.Handle{}, rerr
+			}
+			req.ExtraMounts = append(req.ExtraMounts, mount{
+				HostPath: conf, TargetPath: "/etc/resolv.conf", ReadOnly: true,
+				SELinuxLabel: e.opts.SELinuxLabel,
+			})
+		}
 	}
 
 	// Resolve the image last, because it is the only step that can be slow:
@@ -2196,3 +2225,58 @@ func newHandleID() string {
 // namespace — rootless podman — which puts every network it creates out of the
 // host packet filter's sight.
 func (e *Executor) rootless() bool { return e.rt.Rootless }
+
+// resolvConf writes, once per resolver list, the resolv.conf a filtered sandbox
+// is given, and returns its path.
+//
+// The file is not per run: it holds no secret, its content is a pure function
+// of the resolver list, and the name is derived from that content — so two
+// sandboxes on one executor share it, and a changed list gets a new file rather
+// than rewriting one a running sandbox has mounted. World-readable, because the
+// sandbox runs as an unprivileged user who must be able to read it.
+func (e *Executor) resolvConf(dns []string) (string, error) {
+	var b strings.Builder
+	b.WriteString("# Written by cloop: the resolvers this sandbox's egress filter allows.\n")
+	for _, d := range dns {
+		a, err := netip.ParseAddr(strings.TrimSpace(d))
+		if err != nil {
+			return "", fmt.Errorf("container: resolver %q is not an address literal", d)
+		}
+		b.WriteString("nameserver " + a.String() + "\n")
+	}
+	b.WriteString("options edns0\n")
+	content := b.String()
+	sum := sha256.Sum256([]byte(content))
+
+	base := strings.TrimSpace(e.opts.StageDir)
+	if base == "" {
+		base = secretStageBase()
+	}
+	dir := filepath.Join(base, "cloop-resolv")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("container: create %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, sanitizeNetworkPart(e.id)+"-"+hex.EncodeToString(sum[:6])+".conf")
+	if cur, err := os.ReadFile(path); err == nil && string(cur) == content {
+		return path, nil
+	}
+	tmp, err := os.CreateTemp(dir, ".resolv-")
+	if err != nil {
+		return "", fmt.Errorf("container: stage resolv.conf: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("container: stage resolv.conf: %w", err)
+	}
+	_ = tmp.Close()
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("container: stage resolv.conf: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("container: stage resolv.conf: %w", err)
+	}
+	return path, nil
+}

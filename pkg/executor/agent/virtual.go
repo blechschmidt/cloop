@@ -173,7 +173,13 @@ func virtualDriverKey(s executor.SandboxSettings, v *remote.VirtualStart, groups
 
 // virtualDriverFor returns the container driver for a virtual executor's
 // dispatch, building it on first use.
-func (c *driverCache) virtualDriverFor(s executor.SandboxSettings, v *remote.VirtualStart, groups []string) (payloadDriver, error) {
+//
+// stageDir is where the driver writes the files it bind-mounts into a sandbox —
+// the resolv.conf of a filtered one. It is the agent's work root, because the
+// engine resolves bind-mount sources in the host's mount namespace, and the
+// agent's own /tmp is private to its service unit.
+func (c *driverCache) virtualDriverFor(s executor.SandboxSettings, v *remote.VirtualStart, groups []string,
+	stageDir string) (payloadDriver, error) {
 	s = s.Normalize()
 	if err := v.Validate(s); err != nil {
 		return nil, fmt.Errorf("agent: refusing virtual executor configuration from the control plane: %w", err)
@@ -201,6 +207,7 @@ func (c *driverCache) virtualDriverFor(s executor.SandboxSettings, v *remote.Vir
 		Network:      network,
 		EgressFilter: filter,
 		GroupAdd:     groups,
+		StageDir:     stageDir,
 	}
 	ex, err := container.New(opts)
 	if err != nil {
@@ -234,7 +241,7 @@ func (a *Agent) virtualRunner(payload remote.StartPayload, spec *executor.Spec, 
 		// it for revocation and write-back.
 		spec.Devices = append(append([]executor.HostDevice(nil), spec.Devices...), devs.Devices...)
 	}
-	return a.drivers.virtualDriverFor(payload.Sandbox, v, devs.Groups)
+	return a.drivers.virtualDriverFor(payload.Sandbox, v, devs.Groups, a.root)
 }
 
 // handleInventoryReq answers the control plane's request to re-read this

@@ -233,6 +233,12 @@ func runVirtualSandbox(t *testing.T, engine string) {
 	if !strings.Contains(out, "4") {
 		t.Errorf("the device did not reach the sandbox: %q", out)
 	}
+	// Resolved through the allowed resolver directly, not through an engine's
+	// embedded one — which gVisor cannot reach and a filter on private space
+	// drops.
+	if !strings.Contains(out, "nameserver 1.1.1.1") || strings.Contains(out, "127.0.0.11") {
+		t.Errorf("the sandbox does not resolve through the allowed resolver: %q", out)
+	}
 	if res.Handle.ExecutorID != id {
 		t.Errorf("handle executor = %q, want the virtual executor %q", res.Handle.ExecutorID, id)
 	}

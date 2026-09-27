@@ -244,14 +244,14 @@ func TestVirtualDriverRevalidates(t *testing.T) {
 	c := newDriverCache()
 	s := executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: "docker", Runtime: "runsc"}
 	v := &remote.VirtualStart{ID: "vx-test", Devices: []executor.DeviceSelector{{Name: "z", Path: "/dev/zero"}}}
-	if _, err := c.virtualDriverFor(s, v, nil); err == nil || !strings.Contains(err.Error(), "runsc") {
+	if _, err := c.virtualDriverFor(s, v, nil, ""); err == nil || !strings.Contains(err.Error(), "runsc") {
 		t.Fatalf("a device list under runsc was accepted: %v", err)
 	}
 	if _, err := c.virtualDriverFor(executor.SandboxSettings{Mode: executor.SandboxModeHost},
-		&remote.VirtualStart{ID: "vx-test"}, nil); err == nil {
+		&remote.VirtualStart{ID: "vx-test"}, nil, ""); err == nil {
 		t.Fatal("host mode was accepted for a virtual executor")
 	}
-	if _, err := c.virtualDriverFor(s, &remote.VirtualStart{ID: "Bad ID"}, nil); err == nil {
+	if _, err := c.virtualDriverFor(s, &remote.VirtualStart{ID: "Bad ID"}, nil, ""); err == nil {
 		t.Fatal("a malformed virtual executor id was accepted")
 	}
 }

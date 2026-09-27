@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 
@@ -190,5 +191,44 @@ func TestRootlessEngineCannotFilter(t *testing.T) {
 	if _, _, err := ex.installFirewall(context.Background(), executor.EgressScopeUnset); err == nil ||
 		!errors.Is(err, executor.ErrUnsupported) || !strings.Contains(err.Error(), "rootless") {
 		t.Fatalf("installFirewall on a rootless engine = %v", err)
+	}
+}
+
+// TestResolvConfIsStagedWhereTheEngineCanSeeIt: the file names exactly the
+// allowed resolvers, lives under the configured stage directory (the agent's
+// work root, not its private /tmp), is readable by the unprivileged sandbox
+// user, and is written once per resolver list.
+func TestResolvConfIsStagedWhereTheEngineCanSeeIt(t *testing.T) {
+	stage := t.TempDir()
+	ex := &Executor{id: "vx-abc", opts: Options{StageDir: stage}}
+	path, err := ex.resolvConf([]string{"1.1.1.1", "2606:4700:4700::1111"})
+	if err != nil {
+		t.Fatalf("resolvConf: %v", err)
+	}
+	if !strings.HasPrefix(path, stage+string(os.PathSeparator)) {
+		t.Errorf("staged at %s, outside the stage dir %s", path, stage)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "nameserver 1.1.1.1\n") ||
+		!strings.Contains(string(raw), "nameserver 2606:4700:4700::1111\n") ||
+		strings.Contains(string(raw), "127.0.0.11") {
+		t.Errorf("resolv.conf = %q", raw)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode %v, want 0644 so the sandbox user can read it", fi.Mode().Perm())
+	}
+	again, err := ex.resolvConf([]string{"1.1.1.1", "2606:4700:4700::1111"})
+	if err != nil || again != path {
+		t.Errorf("the same list produced another file: %s vs %s (%v)", again, path, err)
+	}
+	other, _ := ex.resolvConf([]string{"9.9.9.9"})
+	if other == path {
+		t.Error("a different list reused the same file, which a running sandbox may have mounted")
+	}
+	if _, err := ex.resolvConf([]string{"dns.google"}); err == nil {
+		t.Error("a name was accepted as a resolver")
 	}
 }
