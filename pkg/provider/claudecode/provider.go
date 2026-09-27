@@ -475,9 +475,11 @@ func (p *Provider) settleBackground(ctx context.Context, pgid int, opts provider
 	if out.Detected == 0 {
 		// A stop inside the grace window ends the wait before anything was
 		// counted, so whatever the harness left behind is still running.
-		// Terminate is a no-op on an empty group.
+		// Terminate is a no-op on an empty group — and TerminateOrphaned
+		// refuses one whose id has since gone to another process, which an
+		// empty group's id is free to do.
 		if waitCtx.Err() != nil && !policy.KeepOrphans && procgroup.Supported() {
-			if _, err := procgroup.Terminate(pgid, policy.TerminateGrace); err != nil {
+			if _, err := procgroup.TerminateOrphaned(pgid, policy.TerminateGrace); err != nil {
 				fmt.Fprintf(os.Stderr, "cloop: terminating background work from pgid %d: %v\n", pgid, err)
 			}
 		}
@@ -499,7 +501,7 @@ func (p *Provider) settleBackground(ctx context.Context, pgid int, opts provider
 	// of this task would start a second copy racing the first over the same
 	// output files. Operators who want the opposite set KeepOrphans.
 	if !policy.KeepOrphans {
-		killed, err := procgroup.Terminate(pgid, policy.TerminateGrace)
+		killed, err := procgroup.TerminateOrphaned(pgid, policy.TerminateGrace)
 		activity.Terminated = killed
 		if err != nil {
 			// Report rather than fail: the caller is about to mark this task

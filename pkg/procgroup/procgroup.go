@@ -371,3 +371,25 @@ func Terminate(pgid int, grace time.Duration) (int, error) {
 	}
 	return len(members), nil
 }
+
+// TerminateOrphaned is Terminate for a group whose leader the caller started
+// and has already reaped — what a harness leaves behind after it exits.
+//
+// A reaped leader's PID stays reserved only while the rest of its group lives:
+// the kernel does not hand out a number any process still has as its group.
+// Once the group empties, the number is free, and a new process can take it
+// and lead a group of its own under the same id. So a process that holds the
+// leader's PID now proves the group emptied and its id went to someone else,
+// and signalling "the group" would kill unrelated work. That is refused.
+func TerminateOrphaned(pgid int, grace time.Duration) (int, error) {
+	if !Supported() {
+		return 0, ErrUnsupported
+	}
+	if pgid > 0 {
+		if _, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pgid))); err == nil {
+			return 0, fmt.Errorf("procgroup: pid %d belongs to a live process, so group %d is no "+
+				"longer the one its reaped leader led; not signalling it", pgid, pgid)
+		}
+	}
+	return Terminate(pgid, grace)
+}

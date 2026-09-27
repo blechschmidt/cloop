@@ -333,6 +333,56 @@ func TestTerminateEmptyGroupIsNoOp(t *testing.T) {
 	}
 }
 
+func TestTerminateOrphanedKillsWhatTheLeaderLeft(t *testing.T) {
+	if !Supported() {
+		t.Skip("not linux")
+	}
+	pgid := startGroup(t, "sleep 30 & exit 0")
+
+	n, err := TerminateOrphaned(pgid, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("TerminateOrphaned: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected to report the killed processes")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if m, _ := Members(pgid); len(m) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("group survived TerminateOrphaned")
+}
+
+// TestTerminateOrphanedRefusesAReusedID: a live process holding the id is what
+// a reused leader PID looks like — here the group's own leader, alive, stands
+// in for a stranger that was handed the number after the real leader's group
+// emptied.
+func TestTerminateOrphanedRefusesAReusedID(t *testing.T) {
+	if !Supported() {
+		t.Skip("not linux")
+	}
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	pgid := cmd.Process.Pid
+
+	if _, err := TerminateOrphaned(pgid, 0); err == nil {
+		t.Fatal("TerminateOrphaned signalled a group whose leader PID belongs to a live process")
+	}
+	if m, _ := Members(pgid); len(m) != 1 {
+		t.Errorf("members after the refusal = %v, want the untouched leader", m)
+	}
+}
+
 func TestCommandNamesDedupesAndBounds(t *testing.T) {
 	var many []Process
 	for i := 0; i < 50; i++ {
