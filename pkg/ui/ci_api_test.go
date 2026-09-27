@@ -172,6 +172,13 @@ type ciHarness struct {
 	forge  *ciForge
 	up     *ciUpstream
 	client *http.Client
+
+	// relaysInFlight counts the relay requests the hub is still handling,
+	// guarded by relayMu; relayIdle is broadcast whenever it drops, so
+	// waitRelayed can block on it rather than poll.
+	relayMu        sync.Mutex
+	relayIdle      *sync.Cond
+	relaysInFlight int
 }
 
 const ciHubKey = "sk-ant-hub-key-never-leaves-the-hub"
@@ -201,7 +208,22 @@ func newCIHarness(t *testing.T, mutate ...func(*config.Config)) *ciHarness {
 	}
 
 	h.srv = New(dir, 0, "")
-	h.http = httptest.NewServer(h.srv.Handler())
+	h.relayIdle = sync.NewCond(&h.relayMu)
+	handler := h.srv.Handler()
+	h.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, ciMountPath+"/") {
+			h.relayMu.Lock()
+			h.relaysInFlight++
+			h.relayMu.Unlock()
+			defer func() {
+				h.relayMu.Lock()
+				h.relaysInFlight--
+				h.relayIdle.Broadcast()
+				h.relayMu.Unlock()
+			}()
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	t.Cleanup(func() {
 		h.http.Close()
 		h.srv.closeCI()
@@ -281,17 +303,25 @@ func (h *ciHarness) exchange(t *testing.T, token string) (*http.Response, ciExch
 }
 
 // relay makes a Messages API call the way an SDK inside a runner would, and
-// drains the response before returning.
+// returns only once the hub has finished with it.
 //
-// The drain is load-bearing, not tidiness. An HTTP client returns as soon as
-// the response *headers* arrive, while the hub is still streaming the body —
-// and the relay's token counters are only added once that stream completes. A
-// test that read Usage() off the returned response would see the request
-// counted and the tokens not, intermittently, for a reason that has nothing to
-// do with the code under test.
+// Reading the whole response is not enough for that, though this helper used
+// to rely on it. The relay adds a request's tokens to its session after the
+// last byte of the body has gone out, because it reads them out of the body as
+// it passes — and the fake upstream answers with a Content-Length, which the
+// relay passes on, so the client can hold every byte while the hub is still
+// counting. A test that read the spend on the strength of the body alone saw
+// the request counted and its tokens not, intermittently.
+// TestCI_SessionsAreListedWithTheirSpend is the one that would have shown it.
+//
+// So the harness tracks the relay requests the hub is still handling, and this
+// waits until there are none, its own included: the response in hand means the
+// handler has started, so it cannot be missed. The body is still read in full
+// first, because a handler blocked writing to a client that has stopped reading
+// would never return.
 func (h *ciHarness) relay(t *testing.T, sessionToken, body string) *http.Response {
 	t.Helper()
-	resp := h.do(t, http.MethodPost, "/api/ci/anthropic/v1/messages", nil, func(r *http.Request) {
+	resp := h.do(t, http.MethodPost, ciMountPath+"/v1/messages", nil, func(r *http.Request) {
 		r.Body = io.NopCloser(strings.NewReader(body))
 		r.ContentLength = int64(len(body))
 		r.Header.Set("Content-Type", "application/json")
@@ -303,7 +333,21 @@ func (h *ciHarness) relay(t *testing.T, sessionToken, body string) *http.Respons
 	}
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(strings.NewReader(string(drained)))
+	h.waitRelayed()
 	return resp
+}
+
+// waitRelayed blocks until the hub is handling no relay request.
+//
+// No timeout, because this adds no new way to hang: it is the wait
+// httptest.Server.Close already performs at cleanup for every request in
+// flight, moved ahead of the assertions that depend on it.
+func (h *ciHarness) waitRelayed() {
+	h.relayMu.Lock()
+	defer h.relayMu.Unlock()
+	for h.relaysInFlight > 0 {
+		h.relayIdle.Wait()
+	}
 }
 
 const ciRelayBody = `{"model":"claude-sonnet-4-6","max_tokens":64,` +
