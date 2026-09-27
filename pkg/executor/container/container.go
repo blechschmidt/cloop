@@ -783,7 +783,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 				perr = fmt.Errorf("the sandbox exited before its interfaces could be " +
 					"attached; a workload granted host interfaces must stay alive long " +
 					"enough to receive them and wait for the links named by " +
-					"$CLOOP_HOST_INTERFACES to appear")
+					"$CLOOP_HOST_INTERFACES to come up")
 			}
 			return executor.Handle{}, fmt.Errorf("container: %s: %w", req.Name, perr)
 		}

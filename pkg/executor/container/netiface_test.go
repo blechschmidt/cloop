@@ -231,15 +231,19 @@ func TestInterfaceReachesTheSandboxAtLayer2(t *testing.T) {
 		// The wait is the contract, not a workaround for a flaky test. The
 		// move happens after `run -d` returns — there is no namespace to move
 		// into before that — so a workload granted an interface waits for the
-		// link named by $CLOOP_HOST_INTERFACES to appear. Three seconds is a
-		// tight enough bound that a regression which never attaches still
-		// fails here rather than hanging.
+		// link named by $CLOOP_HOST_INTERFACES to come up, the last step of
+		// its configuration. Waiting for it to appear was not enough: the name
+		// lands while the link is still down and unaddressed, and a ping from
+		// there failed, ended the workload, and took the namespace with it.
+		// Three seconds is a tight enough bound that a regression which never
+		// attaches still fails here rather than hanging.
 		//
 		// Then three assertions in one line, so a failure says which part of
 		// the path broke: the link is present under the *granted* name, it
 		// carries the granted address, and a frame reaches the peer.
 		Argv: []string{"/bin/sh", "-c",
-			"i=0; while [ ! -e /sys/class/net/eth1 ] && [ $i -lt 60 ]; do i=$((i+1)); sleep 0.05; done; " +
+			"i=0; until [ $(( $(cat /sys/class/net/eth1/flags 2>/dev/null || echo 0) & 1 )) -eq 1 ] || " +
+				"[ $i -ge 60 ]; do i=$((i+1)); sleep 0.05; done; " +
 				// `ip addr show`, not `ip -br addr show`: busybox's ip is a
 				// reduced applet with no -br, and the sandbox image is
 				// whatever the bench runs rather than a full iproute2.

@@ -705,10 +705,16 @@ few tens of milliseconds.
 
 The window is one-directional: it can only ever show a workload *less* than it
 was granted, never more. A workload that needs to synchronise waits for the link
-named by `$CLOOP_HOST_INTERFACES`:
+named by `$CLOOP_HOST_INTERFACES` to come **up** — not merely to exist. The
+kernel only renames a link while it is down, so the name appears first; the MTU
+and address follow, and bringing the link up is the last step (bar a granted
+gateway's default route, installed just after it):
 
 ```sh
-while [ ! -e /sys/class/net/eth1 ]; do sleep 0.05; done
+# IFF_UP is bit 0 of the link's flags
+until [ $(( $(cat /sys/class/net/eth1/flags 2>/dev/null || echo 0) & 1 )) -eq 1 ]; do
+  sleep 0.05
+done
 ```
 
 A workload that exits before the move completes is a hard failure, not a silent

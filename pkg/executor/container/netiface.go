@@ -327,8 +327,13 @@ func attachInterfaces(ctx context.Context, pid int, ifaces []executor.HostInterf
 //
 // The order is forced by the kernel and by what each step needs: the interface
 // must be down to be renamed, renamed before anything refers to the new name,
-// up before a route through it can be installed, and addressed before a gateway
-// through it resolves.
+// addressed before a gateway through it resolves, and up before a route through
+// it can be installed. Within that, bringing it up comes after everything a
+// down link accepts — MTU and address — because "up" is the signal a workload
+// waits for. The name cannot be: it has to change while the link is down, so it
+// appears before the link is usable, and a workload that took the name as its
+// cue pinged out of an unaddressed link, exited, and took the namespace with it
+// before the address could land (Task 20349).
 func moveInterface(ctx context.Context, pid int, n executor.HostInterface) (string, error) {
 	src := strings.TrimSpace(n.Source)
 	target := n.EffectiveTarget()
@@ -364,13 +369,13 @@ func moveInterface(ctx context.Context, pid int, n executor.HostInterface) (stri
 			return cur, fmt.Errorf("container: interface %q: %w", n.Name, err)
 		}
 	}
-	if _, err := runIP(ctx, pid, "link", "set", "dev", cur, "up"); err != nil {
-		return cur, fmt.Errorf("container: interface %q: %w", n.Name, err)
-	}
 	if addr := strings.TrimSpace(n.Address); addr != "" {
 		if _, err := runIP(ctx, pid, "addr", "add", addr, "dev", cur); err != nil {
 			return cur, fmt.Errorf("container: interface %q: %w", n.Name, err)
 		}
+	}
+	if _, err := runIP(ctx, pid, "link", "set", "dev", cur, "up"); err != nil {
+		return cur, fmt.Errorf("container: interface %q: %w", n.Name, err)
 	}
 	if gw := strings.TrimSpace(n.Gateway); gw != "" {
 		// `replace` rather than `add`: a sandbox on a runtime network already
