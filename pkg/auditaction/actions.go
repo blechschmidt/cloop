@@ -101,6 +101,16 @@ const (
 	// result — an executor's last audience entry being withdrawn widens access
 	// to the whole fleet, which reads as a small edit and is not one.
 	ActionExecutorAudience Action = "executor.audience"
+	// ActionExecutorVirtual records a virtual executor being created, changed
+	// or deleted (Task 20345): a sub-executor of a device with its own engine,
+	// runtime, IP firewall and host devices.
+	//
+	// One action for the three verbs, carried in the payload, because a
+	// reviewer's question is the same for all of them — "who changed what this
+	// sandbox can reach, and which hardware it holds" — and the payload keeps
+	// the configuration before and after, so a widened firewall or an added
+	// device is legible from the trail alone.
+	ActionExecutorVirtual Action = "executor.virtual"
 	// ActionExecutorUpgrade records the control plane asking a device to
 	// replace its own binary and restart (Task 20331).
 	//

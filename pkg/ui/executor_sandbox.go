@@ -51,6 +51,10 @@ type executorSandboxSummary struct {
 	Engine  string `json:"engine,omitempty"`
 	Runtime string `json:"runtime,omitempty"`
 	Image   string `json:"image,omitempty"`
+	// Network is the container network payloads join. The card's tooltip has
+	// always read it; until Task 20345 nothing filled it in, so every
+	// container-mode card claimed "none".
+	Network string `json:"network,omitempty"`
 	// Configured distinguishes an admin's explicit default from an executor
 	// nobody has looked at.
 	Configured bool `json:"configured"`
@@ -101,6 +105,7 @@ func applySandboxModes(views []executorView, db *statedb.DB) []executorView {
 			Engine:     rec.Settings.Engine,
 			Runtime:    rec.Settings.Runtime,
 			Image:      rec.Settings.Image,
+			Network:    rec.Settings.Network,
 			Configured: true,
 		}
 	}

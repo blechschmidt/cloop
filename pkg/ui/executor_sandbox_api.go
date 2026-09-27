@@ -124,6 +124,15 @@ func (s *Server) handleExecutorSandbox(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "executor id is required", http.StatusBadRequest)
 		return
 	}
+	// A virtual executor's sandbox is part of its definition (Task 20345). A
+	// row here would be read by nothing — the virtual executor never consults
+	// this table — and an admin who saved one would believe they had changed
+	// a containment boundary they had not touched.
+	if ex, err := executor.Get(id); err == nil && ex.Kind() == executor.KindVirtual {
+		jsonErr(w, "executor "+id+" is a virtual executor; its sandbox is part of its definition — "+
+			"edit it with PUT /api/executors/"+id+"/virtual", http.StatusConflict)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:

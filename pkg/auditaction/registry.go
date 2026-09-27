@@ -322,6 +322,18 @@ var registry = []Entry{
 			"whole fleet — the one edit here that grants rather than revokes.",
 	},
 	{
+		Action:    ActionExecutorVirtual,
+		Home:      HomeControlPlane,
+		Entity:    "executor",
+		Trigger:   "An admin creates, edits or deletes a virtual executor on an enrolled device.",
+		Payload:   []string{"action", "executor_id", "parent_id", "name", "from", "to"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`action` is \"create\", \"update\" or \"delete\". `from` and `to` describe the whole " +
+			"configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an " +
+			"added device is visible from this row alone.",
+	},
+	{
 		Action:    ActionExecutorStateChange,
 		Home:      HomeControlPlane,
 		Entity:    "executor",

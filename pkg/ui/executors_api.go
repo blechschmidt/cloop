@@ -114,6 +114,14 @@ type executorView struct {
 	Admitted   bool              `json:"admitted"`
 	Labels     map[string]string `json:"labels,omitempty"`
 
+	// Virtual describes a virtual executor (Task 20345): its parent device, a
+	// summary of its firewall and devices, and why the device cannot apply
+	// them when it cannot. Nil for every other executor.
+	Virtual *virtualExecutorSummary `json:"virtual,omitempty"`
+	// VirtualCount is how many virtual executors a device carries, so its
+	// card can say so without a second request.
+	VirtualCount int `json:"virtual_count,omitempty"`
+
 	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
 	EnrolledBy    string     `json:"enrolled_by,omitempty"`
@@ -590,10 +598,16 @@ func (s *Server) buildExecutorView(
 		// A remote agent that has cleanly disconnected is "offline", not
 		// "degraded": the distinction is whether something is wrong or
 		// whether the device is simply not here right now.
-		if view.Status == "" || view.Status == statedb.ExecutorStatusOnline {
-			if ex.Kind() == executor.KindRemoteAgent {
+		if view.Status == "" || view.Status == statedb.ExecutorStatusOnline ||
+			ex.Kind() == executor.KindVirtual {
+			vx, isVirtual := ex.(*remote.Virtual)
+			switch {
+			case ex.Kind() == executor.KindRemoteAgent:
 				view.Status = statedb.ExecutorStatusOffline
-			} else {
+			case isVirtual && !vx.Parent().Connected():
+				// A virtual executor is exactly as reachable as its device.
+				view.Status = statedb.ExecutorStatusOffline
+			default:
 				view.Status = statedb.ExecutorStatusDegraded
 			}
 		}
@@ -803,6 +817,7 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 	// an executor that failed to register is exactly the one whose configured
 	// containment an operator is trying to account for.
 	resp.Executors = applySandboxModes(resp.Executors, db)
+	resp.Executors = applyVirtualExecutors(resp.Executors, db)
 	resp.Executors = s.applyAudience(r, resp.Executors, db)
 	jsonOK(w, resp)
 }
@@ -1859,7 +1874,10 @@ func syncRegistryToStore(dir string) {
 
 	now := time.Now()
 	for _, ex := range executor.List() {
-		if ex.Kind() == executor.KindRemoteAgent {
+		// Virtual executors own their rows (statedb.CreateVirtualExecutor):
+		// a sync here would overwrite the admin's label with the ID and drop
+		// the parent link.
+		if ex.Kind() == executor.KindRemoteAgent || ex.Kind() == executor.KindVirtual {
 			continue
 		}
 		if existing, err := db.GetExecutor(ex.ID()); err == nil && existing.Kind == executor.KindRemoteAgent {

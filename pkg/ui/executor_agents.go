@@ -151,6 +151,9 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		if err := hub.Restore(); err != nil {
 			fmt.Fprintf(os.Stderr, "ui: restore remote executors: %v\n", err)
 		}
+		// And their sub-executors (Task 20345), which need their parents in
+		// the registry first.
+		restoreVirtualExecutors(state.DBPath(s.WorkDir), db)
 		executorHub = hub
 	})
 	return executorHub, executorHubErr

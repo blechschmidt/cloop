@@ -801,6 +801,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "/api/executors/{id}/limits", Handler: s.handleExecutorLimits, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "/api/executors/{id}/audience", Handler: s.handleExecutorAudience, Methods: []string{"GET", "POST", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
 
+		// Virtual executors (Task 20345): sub-executors of an enrolled device
+		// with their own engine, runtime, firewall and host devices. {id} is
+		// the device on …/virtuals and the virtual executor on …/virtual, so
+		// the gate authorizes each request against the executor it is about.
+		// execMgmt on the reads for the sandbox route's reason: a device's
+		// hardware inventory and why its firewall would not hold are
+		// reconnaissance.
+		{Pattern: "/api/executors/{id}/virtuals", Handler: s.handleVirtualExecutors, Methods: []string{"GET", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/virtual", Handler: s.handleVirtualExecutor, Methods: []string{"GET", "PUT", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+
 		// ── Compliance audit trail ───────────────────────────────────
 		// Admin-only, and global: the trail records the actions of every
 		// role including those above the reader, so it is not something a

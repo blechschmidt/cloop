@@ -79,7 +79,16 @@ function _execCapChips(ex) {
   // question an admin auditing the fleet is actually asking, and it names the
   // runtime with it: a container on runc and a container on kata are different
   // boundaries.
-  if (ex.kind === 'remote') {
+  if (ex.virtual) {
+    const v = ex.virtual;
+    chips.push('<span class="exec-chip ' + (v.firewall ? 'pos' : 'neg') + '" title="' + esc(v.firewall || 'No firewall: the '
+      + 'network setting applies as-is') + '">firewall: ' + (v.firewall ? 'on' : 'off') + '</span>');
+    if (v.devices && v.devices.length) {
+      chips.push('<span class="exec-chip" title="' + esc(v.devices.join('\n')) + '">devices: ' + esc(v.devices.length) + '</span>');
+    }
+    if (v.issue) chips.push('<span class="exec-chip neg" title="' + esc(v.issue) + '">cannot apply</span>');
+  }
+  if (ex.kind === 'remote' || ex.kind === 'virtual') {
     const sb = ex.sandbox;
     if (sb && sb.mode === 'container') {
       const rt = sb.runtime ? ' / ' + sb.runtime : '';
@@ -406,6 +415,12 @@ function _renderExecutors(d) {
         + 'onclick="openExecutorSandbox(' + i + ')" '
         + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>';
     }
+    // Sub-executors with their own firewall and devices (Task 20345).
+    if (ex.kind === 'remote' || ex.kind === 'virtual') {
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="openExecutorVirtual(' + i + ')" '
+        + 'title="Sandboxes on this device with their own runtime, IP firewall and USB devices">'
+        + (ex.kind === 'virtual' ? 'Edit' : 'Virtual' + (ex.virtual_count ? ' (' + esc(ex.virtual_count) + ')' : '')) + '</button>';
+    }
     // Limits and Access apply to every executor kind, unlike Sandbox above: a
     // ceiling bounds whatever the driver hands out, and an access list names
     // who may reach the device at all. Neither is implied by the driver, so
@@ -426,6 +441,8 @@ function _renderExecutors(d) {
     if (ex.enrolled && ex.kind === 'remote') {
       h += _execUpgradeButton(ex, i);
       h += '<button class="btn danger" style="padding:3px 9px;font-size:11.5px" onclick="revokeExecutor(' + i + ')">Revoke</button>';
+    } else if (ex.virtual) {
+      h += '<span style="font-size:11px;color:var(--muted)">Virtual executor on ' + esc(ex.virtual.parent_name || ex.virtual.parent_id) + '</span>';
     } else {
       h += '<span style="font-size:11px;color:var(--muted)">Configured in .cloop/config.yaml</span>';
     }
@@ -755,6 +772,182 @@ window.clearExecutorSandbox = function() {
       loadExecutors();
     })
     .catch(() => toast('Failed to reset sandbox configuration', 'err'));
+};
+
+// ── Virtual executors (Task 20345) ──────────────────────────────────────────
+//
+// A virtual executor is a sub-executor of an enrolled device: its own engine,
+// runtime and image, an IP firewall with an allowlist and a denylist, and the
+// host devices its sandboxes are given. The dialog is opened from the device's
+// card (to add one, and to see the device's USB hardware) or from a virtual
+// executor's own card (to edit it). Its form is built here rather than in
+// index.html because every field depends on what the device reported.
+let execVx = null;
+
+window.openExecutorVirtual = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  const virtual = ex.kind === 'virtual';
+  execVx = {parent: virtual ? (ex.virtual || {}).parent_id : ex.id, edit: virtual ? ex.id : ''};
+  document.getElementById('evxBody').innerHTML = '<div class="form-hint">Loading…</div>';
+  openOverlay('executor-virtual-overlay', {dismiss: closeExecutorVirtual});
+  _evxLoad(false);
+};
+
+window.closeExecutorVirtual = function() {
+  closeOverlay('executor-virtual-overlay');
+  execVx = null;
+};
+
+window.refreshExecutorVirtual = function() { if (execVx) _evxLoad(true); };
+
+function _evxLoad(refresh) {
+  api('/api/executors/' + encodeURIComponent(execVx.parent) + '/virtuals' + (refresh ? '?refresh=1' : ''))
+    .then(d => {
+      if (!execVx) return;
+      if (!d || d.error) { document.getElementById('evxBody').textContent = (d && d.error) || 'Failed to load'; return; }
+      execVx.data = d;
+      _evxRender();
+    })
+    .catch(e => { document.getElementById('evxBody').textContent = _execDetailErrText(e); });
+}
+
+// _evxOpts renders <option>s, marking the selected one.
+function _evxOpts(values, cur) {
+  return values.map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>'
+    + esc(v || '—') + '</option>').join('');
+}
+
+function _evxField(label, html, hint) {
+  return '<div class="form-group"><label class="form-label">' + label + '</label>' + html
+    + (hint ? '<div class="form-hint">' + hint + '</div>' : '') + '</div>';
+}
+
+function _evxRender() {
+  const d = execVx.data;
+  const cur = (d.virtual_executors || []).find(v => v.id === execVx.edit) || {spec: {sandbox: {}}};
+  const sp = cur.spec, sb = sp.sandbox || {}, fw = sp.firewall;
+  const lines = a => esc((a || []).join('\n'));
+  const chosen = {};
+  (sp.devices || []).forEach(x => { if (x.usb) chosen[x.usb.vendor_id + ':' + x.usb.product_id + ':' + (x.usb.serial || '')] = x; });
+  let h = '<div class="form-hint" style="margin-bottom:10px">' + esc(d.name) + ' · '
+    + (d.connected ? 'connected, protocol v' + esc(d.protocol_version) : 'offline — showing its last report')
+    + (d.connected && !d.supported ? ' · <b>agent too old for firewalls and devices (needs v14)</b>' : '')
+    + (d.packet_filter ? '' : ' · <b>cannot install a firewall</b>: ' + esc(d.packet_filter_issue || 'not reported')) + '</div>';
+  h += (d.virtual_executors || []).map((v, i) => '<div class="exec-chips">'
+    + '<span class="exec-chip' + (v.id === execVx.edit ? ' pos' : '') + '">' + esc(v.name) + ' · ' + esc(v.id) + '</span>'
+    + (v.issue ? '<span class="exec-chip neg" title="' + esc(v.issue) + '">cannot apply</span>' : '')
+    + '<button class="btn" style="padding:2px 8px;font-size:11px" onclick="editExecutorVirtual(' + i + ')">Edit</button></div>').join('');
+  h += '<h3 style="font-size:13px;margin:12px 0 4px">USB devices on ' + esc(d.name)
+    + ' <button class="btn" style="padding:2px 8px;font-size:11px" onclick="refreshExecutorVirtual()">Refresh</button></h3>';
+  if (d.usb_error) h += '<div class="form-hint">' + esc(d.usb_error) + '</div>';
+  const usb = (d.usb_devices || []).filter(u => u.class !== '09');
+  h += usb.length ? usb.map((u, i) => {
+    const k = u.vendor_id + ':' + u.product_id + ':' + (u.serial || '');
+    const perm = u.mode ? ' · ' + esc(u.mode) + (u.group ? ' ' + esc(u.group) : '') : '';
+    return '<label style="display:block;font-size:12px;margin:3px 0"><input type="checkbox" id="evxUsb' + i + '"'
+      + (chosen[k] ? ' checked' : '') + '> ' + esc(((u.manufacturer || '') + ' ' + (u.product || '')).trim() || 'USB device')
+      + ' <code>' + esc(u.vendor_id + ':' + u.product_id) + '</code>' + (u.serial ? ' serial ' + esc(u.serial) : '')
+      + ' <span style="color:var(--muted)">' + esc(u.node) + ' port ' + esc(u.port) + perm + '</span></label>';
+  }).join('') : '<div class="form-hint">No USB devices reported.</div>';
+  const g = (sp.devices || []).find(x => x.group);
+  h += _evxField('Device group', '<input class="form-input" id="evxGroup" value="' + esc(g ? g.group : '') + '" placeholder="plugdev">',
+    'The group the device nodes belong to (set by a udev rule), so the unprivileged sandbox user can open them read-write. Never root.');
+  h += _evxField('Other device nodes', '<textarea class="form-input" id="evxPaths" rows="2" placeholder="/dev/ttyS0">'
+    + lines((sp.devices || []).filter(x => x.path).map(x => x.path)) + '</textarea>');
+  h += '<h3 style="font-size:13px;margin:12px 0 4px">' + (execVx.edit ? 'Edit ' + esc(cur.name) : 'New virtual executor') + '</h3>';
+  h += _evxField('Name', '<input class="form-input" id="evxName" value="' + esc(cur.name || '') + '" placeholder="HSM sandbox">');
+  h += '<div class="form-row">' + _evxField('Engine', '<select class="form-select" id="evxEngine">'
+      + _evxOpts([''].concat(d.engines || []), sb.engine || '') + '</select>')
+    + _evxField('Runtime', '<input class="form-input" id="evxRuntime" list="evxRuntimes" value="' + esc(sb.runtime || '')
+      + '" placeholder="engine default"><datalist id="evxRuntimes">' + _evxOpts(d.oci_runtimes || [], '') + '</datalist>')
+    + '</div>';
+  h += _evxField('Image', '<input class="form-input" id="evxImage" value="' + esc(sb.image || '') + '" placeholder="the device default">');
+  h += _evxField('Network', '<select class="form-select" id="evxNetwork">' + _evxOpts(['none', 'bridge'], sb.network || 'none')
+    + '</select>', 'Ignored when the firewall is on: the sandbox then gets a filtered bridge of its own.');
+  h += '<label style="display:block;font-size:13px;margin:8px 0"><input type="checkbox" id="evxFw"' + (fw ? ' checked' : '')
+    + '> IP firewall</label>';
+  const f = fw || {allow_public_internet: true, resolvers: ['1.1.1.1']};
+  h += '<label style="display:block;font-size:12px;margin:4px 0"><input type="checkbox" id="evxPublic"'
+    + (f.allow_public_internet ? ' checked' : '') + '> Allow the public Internet</label>';
+  h += '<div class="form-row">' + _evxField('Allowlist', '<textarea class="form-input" id="evxAllow" rows="3" placeholder="10.8.0.0/24">'
+      + lines(f.allow_cidrs) + '</textarea>', 'Ranges reachable directly, private ones included.')
+    + _evxField('Denylist', '<textarea class="form-input" id="evxDeny" rows="3" placeholder="203.0.113.0/24">'
+      + lines(f.deny_cidrs) + '</textarea>', 'Never reachable, whatever is allowed.') + '</div>';
+  h += '<div class="form-row">' + _evxField('Ports', '<input class="form-input" id="evxPorts" value="' + esc((f.allow_ports || []).join(', '))
+      + '" placeholder="all ports">')
+    + _evxField('DNS resolvers', '<input class="form-input" id="evxDns" value="' + esc((f.resolvers || []).join(', ')) + '">') + '</div>';
+  h += '<div class="modal-footer">'
+    + (execVx.edit ? '<button class="btn danger" onclick="deleteExecutorVirtual()">Delete</button>'
+      + '<button class="btn" onclick="editExecutorVirtual(-1)">New</button>' : '')
+    + '<button class="btn primary" onclick="saveExecutorVirtual()">' + (execVx.edit ? 'Save' : 'Create') + '</button></div>';
+  document.getElementById('evxBody').innerHTML = h;
+}
+
+// Index-based, like every other handler in this file: see _renderExecutors.
+window.editExecutorVirtual = function(i) {
+  if (!execVx || !execVx.data) return;
+  const v = (execVx.data.virtual_executors || [])[i];
+  execVx.edit = v ? v.id : '';
+  _evxRender();
+};
+
+// _evxList splits a textarea or a comma list into trimmed entries.
+function _evxList(id) {
+  return ((document.getElementById(id) || {}).value || '').split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+}
+
+function _evxVal(id) { return ((document.getElementById(id) || {}).value || '').trim(); }
+
+window.saveExecutorVirtual = function() {
+  const d = execVx && execVx.data;
+  if (!d) return;
+  const group = _evxVal('evxGroup');
+  const devices = [];
+  (d.usb_devices || []).filter(u => u.class !== '09').forEach((u, i) => {
+    const box = document.getElementById('evxUsb' + i);
+    if (!box || !box.checked) return;
+    const base = ((u.product || 'usb') + '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '') || 'usb';
+    devices.push({name: (base + '-' + i).slice(0, 60), group: group,
+      usb: {vendor_id: u.vendor_id, product_id: u.product_id, serial: u.serial || ''}});
+  });
+  _evxList('evxPaths').forEach((p, i) => devices.push({name: 'dev-' + i + '-' + p.split('/').pop(), path: p, group: group}));
+  const spec = {
+    sandbox: {mode: 'container', engine: _evxVal('evxEngine'), runtime: _evxVal('evxRuntime'),
+      image: _evxVal('evxImage'), network: _evxVal('evxNetwork')},
+    devices: devices,
+  };
+  if ((document.getElementById('evxFw') || {}).checked) {
+    spec.sandbox.network = '';
+    spec.firewall = {
+      allow_public_internet: !!(document.getElementById('evxPublic') || {}).checked,
+      allow_cidrs: _evxList('evxAllow'), deny_cidrs: _evxList('evxDeny'),
+      allow_ports: _evxList('evxPorts').map(Number), resolvers: _evxList('evxDns'),
+    };
+  }
+  const body = {name: _evxVal('evxName'), spec: spec};
+  const call = execVx.edit
+    ? apiMethod('PUT', '/api/executors/' + encodeURIComponent(execVx.edit) + '/virtual', body)
+    : api('/api/executors/' + encodeURIComponent(execVx.parent) + '/virtuals', body);
+  call.then(r => {
+    if (!r || r.error) { toast((r && r.error) || 'Failed to save the virtual executor', 'err'); return; }
+    toast('Virtual executor ' + (r.name || r.id) + ' saved', 'ok');
+    execVx.edit = r.id;
+    _evxLoad(false);
+    loadExecutors();
+  }).catch(e => toast(_execDetailErrText(e) || 'Failed to save the virtual executor', 'err'));
+};
+
+window.deleteExecutorVirtual = function() {
+  const id = execVx && execVx.edit;
+  if (!id || !confirm('Delete virtual executor ' + id + '?\n\nProjects bound to it are unbound; running tasks finish.')) return;
+  apiMethod('DELETE', '/api/executors/' + encodeURIComponent(id) + '/virtual').then(r => {
+    if (!r || r.error) { toast((r && r.error) || 'Failed to delete', 'err'); return; }
+    toast('Virtual executor ' + id + ' deleted', 'ok');
+    execVx.edit = '';
+    _evxLoad(false);
+    loadExecutors();
+  }).catch(e => toast(_execDetailErrText(e) || 'Failed to delete', 'err'));
 };
 
 // _execDetailErrText pulls a sentence out of whatever the failure arrived as:

@@ -156,6 +156,12 @@ Six pages in order, indexed at
   of the filesystem is a bind mount, and passing a serial port, GPU or TUN device
   in. Includes the topology table, and what a read-only device grant does and
   does not enforce.
+- **[Virtual executors](guides/virtual-executors.md)** — several differently
+  contained sandboxes on one enrolled device: each with its own engine and
+  runtime, an IP firewall with an allowlist and a denylist, and USB devices chosen
+  from the device's inventory — a hardware security module, a serial adapter — by
+  vendor, product and serial. What the agent needs (`--packet-filter`), udev
+  groups for device access, and why hardware and gVisor do not combine.
 
 ## Operations
 

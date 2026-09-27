@@ -51,18 +51,23 @@ settling before you configure anything:
 | sandboxes on the hub's own host | `executors.container` | yes | yes | yes |
 | sandboxes on **another** host | a hub on that host | yes | yes | yes |
 | sandboxes across a cluster | `executors.kubernetes` | yes (RuntimeClass) | no | no |
-| work on a NAT'd edge device | `cloop executor agent` | no | no | no |
+| sandboxes on a NAT'd edge device | `cloop executor agent` + [virtual executors](virtual-executors.md) | yes | yes | no |
 
-The remote agent (`cloop executor agent`) is for reaching devices behind NAT,
-and it runs each workload as a plain process in its own namespaces — it has no
-sandbox to put a device *into*. A grant naming `/dev/ttyUSB0` on the hub also
-says nothing about `/dev/ttyUSB0` on a machine in another building. Both facts
-are why it reports `SupportsDevices: false`, and why cloop refuses the placement
-instead of exposing whatever that machine happens to have at the same path.
+A host_device *grant* names a path with no machine attached to it, so the remote
+agent does not accept one: `/dev/ttyUSB0` on the hub says nothing about
+`/dev/ttyUSB0` in another building. Hardware on an edge device is given to a
+sandbox the other way round — by a [virtual executor](virtual-executors.md), a
+sub-executor of that device whose devices an admin chooses from the device's own
+USB inventory, alongside its own runtime and IP firewall. Projects are bound to
+executors explicitly, so a developer picks the machine and the containment by
+picking the executor.
 
-For "critical hosts with hardware", the shape that works is **a hub per site**,
-each with a container executor on the machine it manages. Projects are bound to
-executors explicitly, so a developer picks the site by picking the executor.
+Devices and gVisor do not combine, on any driver. Measured on a gVisor host: a
+node passed with `--device` exists in the sandbox and every open of it fails with
+`ENXIO`, and `/sys/bus/usb` is absent. cloop refuses the pair at placement
+rather than start a hardware task that cannot touch its hardware; put hardware
+on an executor with the engine's default runtime, and untrusted work on a
+separate one with `runsc`.
 
 Every refusal below is a placement refusal that names the constraint. That is
 deliberate: a sandbox spec quietly ignored is worse than one rejected, because
@@ -720,7 +725,10 @@ executors:
   container:
     enabled: true
     runtime: podman
-    oci_runtime: runsc           # gVisor
+    # The engine's default runtime (runc or crun), not runsc: the serial
+    # lines below are opened through the host kernel, and under gVisor every
+    # open of a passed-through node fails with ENXIO. Untrusted work belongs
+    # on a second executor that does set oci_runtime: runsc.
     # Digest-pinned, because require_digest below is hub-wide and
     # `cloop hub doctor` checks this field against it too — a tag here
     # reports "would be refused by this hub's own image policy".
@@ -769,13 +777,15 @@ resources:
   cpu: 8
   memory: 16g
 capabilities:
-  kernel_isolated: true    # syscalls never reach the bench host's kernel
   egress: public           # crates.io yes, the corporate network no
   devices: [serial0]       # the analyser is granted but this task does not need it
   git: true
 ```
 
-What that produces: a gVisor sandbox on the bench host, `/workspace` a bind
+No `kernel_isolated: true` here: it would place the project on a gVisor
+executor, where the serial line cannot be opened (see the topology section).
+
+What that produces: a container sandbox on the bench host, `/workspace` a bind
 mount of the project and nothing else on the filesystem visible, two checkouts
 read-only at `/repos`, one serial port at `/dev/ttyUSB0`, the public Internet
 reachable on 443 and every private address dropped — and a task that asks for

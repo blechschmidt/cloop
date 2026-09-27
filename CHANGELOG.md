@@ -10,6 +10,49 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+### Added
+
+- **Virtual executors.** An enrolled device can carry named sub-executors, each
+  with its own container engine, OCI runtime and image, an **IP firewall with an
+  allowlist and a denylist**, and the **host devices** its sandboxes are given.
+  Projects bind to one like to any executor, and resource limits and the access
+  list apply to it under its own ID — so one machine can offer a locked-down
+  sandbox to everyone and one holding its hardware security module to the few
+  people allowed near it. Press **Virtual** on a device's card in the Executors
+  tab: the dialog shows the device's USB devices (vendor, product, serial, node;
+  **Refresh** re-reads them from the device) to pick from. API:
+  `/api/executors/{device}/virtuals` and `/api/executors/{id}/virtual`; audit
+  action `executor.virtual`. See `docs/guides/virtual-executors.md`.
+- **Executor protocol v14.** Agents report their USB inventory (read from sysfs,
+  which the hardened unit leaves visible), whether they can install a packet
+  filter, and their engine's OCI runtimes; a start frame can carry a virtual
+  executor's firewall and devices, which the device resolves against its live
+  hardware at every dispatch — an unplugged device fails the start, naming it.
+  A USB device is selected by identity rather than by `/dev/bus/usb` path, which
+  changes on every re-enumeration.
+- `cloop executor agent install --packet-filter` grants the agent
+  `CAP_NET_ADMIN` and netlink so it can install a virtual executor's firewall
+  with nft(8); without it such a virtual executor is refused, never started
+  unfiltered.
+- A denylist for the IP-layer egress filter (`netfilter.Input.DenyCIDRs`),
+  compiled ahead of every allow and carried into Kubernetes NetworkPolicies as
+  `except` ranges.
+
+### Fixed
+
+- A project's `capabilities.egress: public` on an executor whose firewall allows
+  only a private range handed the project the whole public Internet. It is now
+  refused, like the broker-only case: a scope may only remove reach.
+- Device passthrough is no longer advertised or attempted under gVisor or Kata.
+  Measured on a gVisor host: the node exists in the sandbox and every open of it
+  fails with `ENXIO`. The enterprise-hosts guide claimed the combination worked.
+- A filtered sandbox is pointed at the resolvers its filter opened (`--dns`).
+  Dropping private space also drops the engine's default resolver — on a cloud
+  VM usually the provider's, in CGNAT space — so DNS failed inside such a
+  sandbox unless the host happened to use a public resolver.
+- The Executors panel's sandbox chip always described a container-mode device's
+  network as `none`: the card read a field the API never filled in.
+
 ## [0.0.4] - 2026-09-27
 
 The first release that ships 0.0.2's installer fix. 0.0.2 was tagged on
