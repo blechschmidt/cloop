@@ -724,3 +724,52 @@ func TestWorkloadFinishingOfflineReportsOnReconnect(t *testing.T) {
 		t.Errorf("output produced offline should be resent, got %q", out.String())
 	}
 }
+
+// TestFinalStatusThatCouldNotBeSentWaitsForTheNextSession covers an exit that
+// lands on the link as it drops: the output pump found a session, but it was
+// closed by the time the terminal status was written. That status never left
+// the device, so it must not count as delivered. The agent used to mark it
+// reported and forget the workload regardless, which lost the exit code for
+// good: the next hello no longer offered the handle, and nothing was left to
+// report it on the session after.
+func TestFinalStatusThatCouldNotBeSentWaitsForTheNextSession(t *testing.T) {
+	a := &Agent{
+		cfg:       Config{Logf: func(format string, args ...any) { t.Logf("agent: "+format, args...) }},
+		workloads: make(map[string]*workload),
+		vault:     newVault(),
+	}
+	const handleID = "h1"
+	wl := &workload{
+		handleID: handleID,
+		buf:      newRetainBuffer(0),
+		finished: true,
+		status:   executor.Status{HandleID: handleID, State: executor.StateExited, ExitCode: 5},
+	}
+	a.workloads[handleID] = wl
+
+	deadConn, _ := remote.NewPipe(1)
+	dead := &deviceSession{conn: deadConn, closed: make(chan struct{})}
+	dead.close("link dropped")
+	a.deliverFinal(context.Background(), dead, wl)
+
+	if _, ok := a.workload(handleID); !ok {
+		t.Fatal("a terminal status that could not be sent was treated as delivered: the workload " +
+			"was forgotten, so no later session can report its exit")
+	}
+
+	agentSide, cpSide := remote.NewPipe(4)
+	live := &deviceSession{conn: agentSide, closed: make(chan struct{})}
+	a.deliverFinal(context.Background(), live, wl)
+
+	cp := &controlPlane{t: t, conn: cpSide}
+	sp, err := remote.DecodeStatus(cp.readUntil(remote.TypeStatus, 5*time.Second))
+	if err != nil {
+		t.Fatalf("DecodeStatus: %v", err)
+	}
+	if !sp.Status.State.Terminal() || sp.Status.ExitCode != 5 {
+		t.Errorf("status on the next session = %+v, want the exit with code 5", sp.Status)
+	}
+	if _, ok := a.workload(handleID); ok {
+		t.Error("a workload whose outcome was delivered must stop being tracked")
+	}
+}

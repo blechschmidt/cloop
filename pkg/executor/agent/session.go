@@ -915,22 +915,56 @@ func (a *Agent) pumpOutput(wl *workload) {
 // deliverFinal reports a finished workload's terminal status and releases its
 // slot. Idempotent: only the first delivery is sent, so a reconnect that races
 // the output pump cannot report the same exit twice.
+//
+// Only a status that was actually written counts as delivered. This used to
+// mark the workload reported before the write and forget it whatever the write
+// returned, so a link that dropped between the pump's currentSession() and its
+// write — the session already closed, a.sess not yet cleared — swallowed the
+// exit: the frame never left, the handle was no longer offered on reconnect,
+// and the control plane later resolved a clean exit as a lost workload. A
+// status that cannot be sent now leaves the workload exactly as one that
+// finished offline is left: tracked, unreported, and delivered by the next
+// session's flushAll.
 func (a *Agent) deliverFinal(ctx context.Context, sess *deviceSession, wl *workload) {
+	if a.sendFinal(ctx, sess, wl) {
+		a.forget(wl.handleID)
+	}
+}
+
+// sendFinal writes a finished workload's terminal status unless it has already
+// gone out, reporting whether this call is the one that sent it.
+func (a *Agent) sendFinal(ctx context.Context, sess *deviceSession, wl *workload) bool {
+	// Held from the check to the mark, so the output pump and a reconnect's
+	// flushAll cannot both find the status unsent and both send it: the second
+	// waits, then sees reported. It is also the lock every other frame for this
+	// handle is written under, which keeps the status behind the log tail.
+	wl.sendMu.Lock()
+	defer wl.sendMu.Unlock()
+
 	wl.mu.Lock()
 	done, already, status := wl.finished, wl.reported, wl.status
-	if done && !already {
-		wl.reported = true
-	}
 	wl.mu.Unlock()
 	if !done || already {
-		return
+		return false
 	}
-	a.reply(ctx, sess, remote.TypeStatus, "", wl.handleID, remote.StatusPayload{
+	frame, err := sess.frame(remote.TypeStatus, "", wl.handleID, remote.StatusPayload{
 		Status: status,
 		// Now accurate: the pump has drained, so this really is the total.
 		FinalOffset: wl.buf.Total(),
 	})
-	a.forget(wl.handleID)
+	if err != nil {
+		a.cfg.logf("encode the final status of %s: %v", wl.handleID, err)
+		return false
+	}
+	if err := sess.write(ctx, frame); err != nil {
+		a.cfg.logf("workload %s: send the final status: %v; it will be re-sent after the next reconnect",
+			wl.handleID, err)
+		return false
+	}
+	wl.mu.Lock()
+	wl.reported = true
+	wl.mu.Unlock()
+	return true
 }
 
 // flushAll pushes any retained output for every workload onto sess and
