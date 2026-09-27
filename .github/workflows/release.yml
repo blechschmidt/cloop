@@ -190,20 +190,53 @@ jobs:
           fi
 
       - name: Publish the GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/release/*.tar.gz
-            dist/release/checksums.txt
-            dist/release/*.sigstore.json
-          body_path: release-body.md
-          generate_release_notes: true
-          # make_latest is what puts the release behind the /releases/latest
-          # endpoint, which is the only one `cloop upgrade` ever queries. A
-          # release that is not "latest" is invisible to the upgrader.
-          make_latest: true
-          draft: false
-          prerelease: false
+        # Through the gh CLI, one asset at a time, each upload retried —
+        # rather than softprops/action-gh-release, which lost v0.0.2 outright.
+        # It uploaded all twelve assets at once; GitHub's upload service
+        # answered one of them "Error creating asset temp dir", a server-side
+        # failure the action does not retry (nor does its v3), and the job
+        # failed with the tag pushed and no release behind it. So `latest`
+        # stayed on 0.0.1's versioned asset names and the installer kept
+        # 404ing for ten more days, through a fix that had been tagged.
+        #
+        # Draft first, published last: nothing reaches /releases/latest until
+        # every asset is present, since a half-uploaded release breaks the
+        # installer exactly as a missing one does. Re-running the job resumes
+        # rather than duplicates — it reuses the draft, and --clobber makes
+        # each upload idempotent.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists (a re-run); reusing it"
+          else
+            # --generate-notes appends GitHub's commit list to the changelog
+            # section: "what changed, in prose", then "every commit".
+            gh release create "$tag" --draft --verify-tag --title "$tag" \
+              --notes-file release-body.md --generate-notes
+          fi
+          for f in dist/release/*.tar.gz dist/release/checksums.txt dist/release/*.sigstore.json; do
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$tag" "$f" --clobber; then
+                echo "ok: $f"
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::could not upload $f after $attempt attempts; the" \
+                     "release is still a draft, so re-run this job to resume"
+                exit 1
+              fi
+              echo "::warning::uploading $f failed (attempt $attempt); retrying"
+              sleep $((attempt * 10))
+            done
+          done
+          # --latest is what puts the release behind the /releases/latest
+          # endpoint, which is the only one `cloop upgrade` and the installer
+          # ever query. A release that is not "latest" is invisible to both.
+          gh release edit "$tag" --draft=false --latest
 
       - name: The install script's download URL resolves
         # The one check that would have caught Task 20240 before a user did.
