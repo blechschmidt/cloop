@@ -862,12 +862,18 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	}
 	hs.mu.Lock()
 	hs.startedAt = startedAt
-	hs.status.State = executor.StateRunning
-	hs.status.PID = started.PID
-	hs.status.StartedAt = startedAt
-	if spec.WriteBack.Mode == executor.WriteBackPush && !cred.Empty() && !hs.closed {
-		hs.releaseWorkspace = releaseCred
-		keepCred = true
+	// A workload that ended at once may have reported its exit before this
+	// reply was handled; that status is final (see applyStatus), and the
+	// leases and credential it held were already given back.
+	ended := hs.closed
+	if !ended {
+		hs.status.State = executor.StateRunning
+		hs.status.PID = started.PID
+		hs.status.StartedAt = startedAt
+		if spec.WriteBack.Mode == executor.WriteBackPush && !cred.Empty() {
+			hs.releaseWorkspace = releaseCred
+			keepCred = true
+		}
 	}
 	hs.mu.Unlock()
 
@@ -875,7 +881,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// workload that never ran would make the executor claim to hold a
 	// credential it was never given, and a revocation would then wait for an
 	// ack that has no reason to exist.
-	e.leases.Bind(handleID, spec.Secrets)
+	if !ended {
+		e.leases.Bind(handleID, spec.Secrets)
+	}
 
 	return executor.Handle{
 		ID:         handleID,
@@ -1340,6 +1348,16 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 	st.ExecutorID = e.id
 
 	hs.mu.Lock()
+	if hs.closed && !st.State.Terminal() {
+		// Stale: the handle already ended. The agent answers a signal from its
+		// frame loop with "running" while the output still drains
+		// (workload.draining), and the pump's terminal status can go out
+		// first. Applied, that reply reopened a finished handle, and Status
+		// then asked the device about a workload it had forgotten and
+		// reported "unknown" for a run that had been stopped.
+		hs.mu.Unlock()
+		return
+	}
 	if hs.status.StartedAt.IsZero() {
 		st.StartedAt = hs.startedAt
 	} else if st.StartedAt.IsZero() {
