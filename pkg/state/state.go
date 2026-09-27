@@ -167,6 +167,12 @@ type ProjectState struct {
 	// (cheap lookup of the newest step row); used by health probes to detect stalled
 	// runs without scanning the Steps slice.
 	LastStepTime time.Time `json:"-"`
+
+	// base is every task as this process last read or wrote it: what the
+	// three-way merge of definition fields compares against, so an edit
+	// another process made meanwhile survives this one's next Save (see
+	// taskmerge.go).
+	base map[int]*pm.Task
 }
 
 // liveMu serializes Save/SaveDirect/SyncFromDisk (whose merge step rewrites
@@ -426,6 +432,8 @@ func (s *ProjectState) Save() error {
 	if err := db.SaveState(toRaw(s)); err != nil {
 		return err
 	}
+	// What is on disk now is exactly this process's view.
+	s.base = snapshotDefinitions(s.Plan)
 
 	// Append a plan history snapshot whenever the plan changes. Best-effort:
 	// snapshot failures are reported to stderr but never fail the save.
@@ -461,6 +469,7 @@ func (s *ProjectState) SaveDirect() error {
 	if err := db.SaveState(toRaw(s)); err != nil {
 		return err
 	}
+	s.base = snapshotDefinitions(s.Plan)
 
 	// Best-effort snapshot; see Save.
 	if s.PMMode && s.Plan != nil {
@@ -529,6 +538,14 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	for _, t := range s.Plan.Tasks {
 		inMemIDs[t.ID] = struct{}{}
 	}
+	diskTasks := make(map[int]*pm.Task, len(disk.Plan.Tasks))
+	for _, t := range disk.Plan.Tasks {
+		diskTasks[t.ID] = t
+	}
+	// Edits another process made to the definition of a task this one already
+	// holds (Task 20349): adopted field by field where this process left the
+	// field alone, so neither the run's own changes nor the edit are lost.
+	s.mergeDefinitions(diskTasks)
 	// Pick up UI-driven reordering of tasks this run already knows about
 	// (Task 20299). The merge below only ever *appends* unseen IDs, so without
 	// this a drag in the dashboard was worse than ignored: the handler wrote
@@ -543,15 +560,11 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	// a task a worker has just finished. A task that is already running cannot
 	// be reordered anyway — it is not in the queue any more.
 	if adoptOrder {
-		diskByID := make(map[int]*pm.Task, len(disk.Plan.Tasks))
-		for _, t := range disk.Plan.Tasks {
-			diskByID[t.ID] = t
-		}
 		for _, t := range s.Plan.Tasks {
 			if t.Status != pm.TaskPending {
 				continue
 			}
-			if d, ok := diskByID[t.ID]; ok {
+			if d, ok := diskTasks[t.ID]; ok {
 				t.Priority = d.Priority
 				t.Pinned = d.Pinned
 			}
@@ -561,6 +574,10 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	for _, t := range disk.Plan.Tasks {
 		if _, exists := inMemIDs[t.ID]; !exists {
 			s.Plan.Tasks = append(s.Plan.Tasks, t)
+			// Its definition as read, so a later edit of it is recognised.
+			if s.base != nil {
+				s.base[t.ID] = definitionCopy(t)
+			}
 			// Record an event so the unified history shows externally-added
 			// tasks (Task 20118). Best-effort — never block the merge on
 			// observability failures.
@@ -748,6 +765,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 			}
 		}
 	}
+	s.base = snapshotDefinitions(s.Plan)
 	return s
 }
 
