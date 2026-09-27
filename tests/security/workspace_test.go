@@ -119,6 +119,10 @@ func TestWorkspaceStructurallyCannotCarryACredential(t *testing.T) {
 	allowed := map[string]bool{
 		"Kind": true, "Repo": true, "Ref": true, "Depth": true,
 		"CredentialGrant": true, "SizeLimitMB": true,
+		// Upstream (Task 20349) is the forge URL a git proxy routed Repo away
+		// from. It is held to Repo's own rules — https only, no userinfo — so
+		// it can carry a credential no more than Repo can; asserted below.
+		"Upstream": true,
 	}
 	ty := reflect.TypeOf(executor.Workspace{})
 	for i := 0; i < ty.NumField(); i++ {
@@ -127,6 +131,25 @@ func TestWorkspaceStructurallyCannotCarryACredential(t *testing.T) {
 			t.Errorf("executor.Workspace gained field %q. A Spec is persisted, logged and "+
 				"shipped to remote agents, so any new field must be shown not to be able to "+
 				"carry credential material — then added to this list", name)
+		}
+	}
+
+	// The URL fields cannot smuggle a credential as userinfo, and cannot name a
+	// cleartext transport a token would travel over.
+	for _, bad := range []string{
+		"https://x-access-token:ghp_conformance0123456789@github.com/acme/tool.git",
+		"https://ghp_conformance0123456789@github.com/acme/tool.git",
+		"http://github.com/acme/tool.git",
+	} {
+		repo := executor.Workspace{Kind: executor.WorkspaceGit, Repo: bad}
+		if err := repo.Validate(); err == nil {
+			t.Errorf("a workspace repo %q validated; a credential could ride in it", bad)
+		}
+		upstream := executor.Workspace{
+			Kind: executor.WorkspaceGit, Repo: "https://proxy.internal:8443/acme/tool", Upstream: bad,
+		}
+		if err := upstream.Validate(); err == nil {
+			t.Errorf("a workspace upstream %q validated; a credential could ride in it", bad)
 		}
 	}
 

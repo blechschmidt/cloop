@@ -670,6 +670,120 @@ func TestProvisionRefusesToCloneOverADifferentRemote(t *testing.T) {
 	}
 }
 
+// routeTo gives the fixture's repository a second URL on the same forge, the way
+// a git proxy gives a repository a URL of its own: a different origin string,
+// the same objects behind it.
+func routeTo(t *testing.T, f *fixture, route string) string {
+	t.Helper()
+	real := f.forge.Path(owner, repo)
+	root := filepath.Dir(filepath.Dir(real))
+	alias := filepath.Join(root, route, owner, repo+".git")
+	if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+		t.Fatalf("creating the route: %v", err)
+	}
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatalf("linking the route: %v", err)
+	}
+	direct := f.forge.RepoURL(owner, repo)
+	base := strings.TrimSuffix(direct, "/"+owner+"/"+repo+".git")
+	return base + "/" + route + "/" + owner + "/" + repo + ".git"
+}
+
+func gitConfig(t *testing.T, f *fixture, key string) string {
+	t.Helper()
+	tools := gitforge.RequireGit(t)
+	return strings.TrimSpace(gitforge.Git(t, tools, f.home, f.dir, "-C", f.dir, "config", "--get", key))
+}
+
+// TestProvisionFollowsTheRepositoryAcrossARouteChange (Task 20349): turning the
+// git proxy on or off, or moving its advertise_url, changes the origin a device
+// is asked to fetch while the repository stays the same. The device used to
+// refuse its own checkout until someone removed the directory by hand.
+func TestProvisionFollowsTheRepositoryAcrossARouteChange(t *testing.T) {
+	f := newFixture(t, gitforge.Options{})
+	direct := f.ws.Repo
+	if err := f.provision(); err != nil {
+		t.Fatalf("first Provision: %v\nlog:\n%s", err, f.log())
+	}
+	if got := gitConfig(t, f, "cloop.upstream"); !gitprovision.SameRemote(got, direct) {
+		t.Fatalf("the checkout records upstream %q, want %q", got, direct)
+	}
+	keep := filepath.Join(f.dir, "untracked-work.txt")
+	if err := os.WriteFile(keep, []byte("in flight\n"), 0o644); err != nil {
+		t.Fatalf("writing the untracked file: %v", err)
+	}
+
+	// The proxy comes on: the same repository, at the proxy's URL.
+	proxied := routeTo(t, f, "proxy-a")
+	f.ws = executor.WorkspaceAccess{Repo: proxied}.Apply(f.ws)
+	if f.ws.Upstream != direct {
+		t.Fatalf("Apply recorded upstream %q, want the forge URL %q", f.ws.Upstream, direct)
+	}
+	f.emitted.Reset()
+	if err := f.provision(); err != nil {
+		t.Fatalf("Provision through the proxy refused the device's own checkout: %v\nlog:\n%s", err, f.log())
+	}
+	if got := gitConfig(t, f, "remote.origin.url"); got != proxied {
+		t.Errorf("origin = %q after the route changed, want %q", got, proxied)
+	}
+	if !strings.Contains(f.log(), "origin is updated") {
+		t.Errorf("the route change was not reported\nlog:\n%s", f.log())
+	}
+
+	// The proxy moves: the checkout's origin is the old proxy URL now, and
+	// only the recorded upstream says what it is.
+	moved := routeTo(t, f, "proxy-b")
+	f.ws = executor.WorkspaceAccess{Repo: moved}.Apply(executor.Workspace{
+		Kind: f.ws.Kind, Repo: direct, Ref: f.ws.Ref, Depth: f.ws.Depth,
+	})
+	if err := f.provision(); err != nil {
+		t.Fatalf("Provision after the proxy moved: %v\nlog:\n%s", err, f.log())
+	}
+	if got := gitConfig(t, f, "remote.origin.url"); got != moved {
+		t.Errorf("origin = %q after the proxy moved, want %q", got, moved)
+	}
+
+	// And it goes off again: straight to the forge, no upstream on the spec.
+	f.ws = executor.Workspace{Kind: f.ws.Kind, Repo: direct, Ref: f.ws.Ref, Depth: f.ws.Depth}
+	if err := f.provision(); err != nil {
+		t.Fatalf("Provision with the proxy off: %v\nlog:\n%s", err, f.log())
+	}
+	if got := gitConfig(t, f, "remote.origin.url"); got != direct {
+		t.Errorf("origin = %q with the proxy off, want %q", got, direct)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the untracked file did not survive the route changes: %v", err)
+	}
+	f.assertNoLeak(nil)
+}
+
+// TestProvisionStillRefusesAnotherRepositoryThroughAProxy: recognising a
+// re-routed checkout must not become a way to fetch one repository into
+// another's working tree.
+func TestProvisionStillRefusesAnotherRepositoryThroughAProxy(t *testing.T) {
+	f := newFixture(t, gitforge.Options{})
+	if err := f.provision(); err != nil {
+		t.Fatalf("first Provision: %v\nlog:\n%s", err, f.log())
+	}
+	before := headOf(t, f)
+
+	f.forge.Create(t, owner, "a-completely-different-repo")
+	other := f.forge.RepoURL(owner, "a-completely-different-repo")
+	f.ws = executor.WorkspaceAccess{Repo: "https://proxy.invalid:8443/" + owner + "/a-completely-different-repo"}.
+		Apply(executor.Workspace{Kind: f.ws.Kind, Repo: other, Ref: f.ws.Ref, Depth: f.ws.Depth})
+
+	err := f.provision()
+	if err == nil {
+		t.Fatalf("Provision fetched another repository into this checkout\nlog:\n%s", f.log())
+	}
+	if !strings.Contains(err.Error(), other) {
+		t.Errorf("the refusal does not name the repository the workload asked for (%s): %v", other, err)
+	}
+	if after := headOf(t, f); after != before {
+		t.Errorf("the existing checkout moved from %s to %s during a refusal", before, after)
+	}
+}
+
 func headOf(t *testing.T, f *fixture) string {
 	t.Helper()
 	tools := gitforge.RequireGit(t)

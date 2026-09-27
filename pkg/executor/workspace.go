@@ -163,6 +163,23 @@ type Workspace struct {
 	// SizeLimitMB bounds the provisioned tree, from the project's
 	// .cloop/sandbox.yaml resources.disk. 0 means the executor's own default.
 	SizeLimitMB int `json:"size_limit_mb,omitempty"`
+	// Upstream is the repository Repo was routed away from, set by
+	// WorkspaceAccess.Apply when a git proxy redirected the fetch: the forge
+	// URL, where Repo is now the proxy's. Only the shipped copy of a Spec
+	// carries it. A device keeps its checkout between runs and uses this to
+	// recognise that checkout after the route changed — the proxy turned on
+	// or off, or its advertise_url moved — rather than refusing it as some
+	// other repository (Task 20349).
+	Upstream string `json:"upstream,omitempty"`
+}
+
+// UpstreamRepo returns the repository the workspace is a checkout of: Upstream
+// when a proxy routed it, Repo otherwise.
+func (w Workspace) UpstreamRepo() string {
+	if u := strings.TrimSpace(w.Upstream); u != "" {
+		return u
+	}
+	return w.Repo
 }
 
 // NeedsProvisioning reports whether the executor must do work before the
@@ -218,12 +235,22 @@ func (w Workspace) Validate() error {
 		case strings.TrimSpace(w.CredentialGrant) != "":
 			return fmt.Errorf("%w: workspace credential_grant is set but kind is %q, not git",
 				ErrInvalidSpec, w.Kind)
+		case strings.TrimSpace(w.Upstream) != "":
+			return fmt.Errorf("%w: workspace upstream is set but kind is %q, not git", ErrInvalidSpec, w.Kind)
 		}
 		return nil
 	}
 
 	if _, err := w.parseRepo(); err != nil {
 		return err
+	}
+	if strings.TrimSpace(w.Upstream) != "" {
+		// Held to the same rules as Repo: it is written into the checkout's
+		// config and compared against its origin, and a URL carrying userinfo
+		// would put a credential somewhere nothing wipes.
+		if _, err := (Workspace{Kind: WorkspaceGit, Repo: w.Upstream}).parseRepo(); err != nil {
+			return fmt.Errorf("%w: workspace upstream: %w", ErrInvalidSpec, err)
+		}
 	}
 	if err := validateGitRef(w.Ref); err != nil {
 		return fmt.Errorf("%w: workspace ref: %w", ErrInvalidSpec, err)
@@ -618,6 +645,11 @@ type WorkspaceAccess struct {
 // authenticates against a URL its header does not cover.
 func (a WorkspaceAccess) Apply(w Workspace) Workspace {
 	if repo := strings.TrimSpace(a.Repo); repo != "" {
+		// Remember where it was routed from, so the executor can still tell
+		// which repository its existing checkout is of once the route differs.
+		if strings.TrimSpace(w.Upstream) == "" && repo != strings.TrimSpace(w.Repo) {
+			w.Upstream = w.Repo
+		}
 		w.Repo = repo
 	}
 	return w
@@ -641,6 +673,38 @@ type WorkspaceCredentialSource interface {
 	// *WorkspaceGrantError, which names the missing grant. Drivers surface it
 	// unchanged rather than starting a workload against an empty tree.
 	ForWorkspace(ctx context.Context, projectID string, w Workspace) (WorkspaceAccess, func(), error)
+}
+
+// requestingExecutorKey carries WithRequestingExecutor's identity on a context.
+type requestingExecutorKey struct{}
+
+// WithRequestingExecutor marks ctx as a dispatch made for executor id when that
+// is not the executor whose driver runs it: a virtual executor, whose work is
+// carried out by its parent device.
+//
+// A credential source keys the lease on the executor it was built for, which
+// for a device's virtual executors is the device. The grant chosen before the
+// dispatch, though, was matched against the virtual executor — so a grant
+// issued to the virtual executor was chosen and then missing from the lease,
+// and one issued to the device was leased but never chosen (Task 20349). A
+// source that honours this makes both steps ask about the same identity.
+func WithRequestingExecutor(ctx context.Context, id string) context.Context {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestingExecutorKey{}, id)
+}
+
+// RequestingExecutor returns the identity WithRequestingExecutor put on ctx,
+// or fallback when there is none.
+func RequestingExecutor(ctx context.Context, fallback string) string {
+	if ctx != nil {
+		if id, ok := ctx.Value(requestingExecutorKey{}).(string); ok && id != "" {
+			return id
+		}
+	}
+	return fallback
 }
 
 // --- audit ------------------------------------------------------------------

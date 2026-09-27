@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -643,4 +644,103 @@ func assertNoPAT(t *testing.T, access executor.WorkspaceAccess) {
 // is not comparable.
 func zeroAccess(a executor.WorkspaceAccess) bool {
 	return reflect.DeepEqual(a, executor.WorkspaceAccess{})
+}
+
+// --- the inner lease lives as long as the session (Task 20349) --------------
+
+// TestInnerLeaseOutlivesTheDelivery: releasing the inner lease destroys a
+// GitHub App's installation token at GitHub, and the session presents that
+// token upstream for its whole life. So the driver being done with what it was
+// handed must not release it while the session can still be used.
+func TestInnerLeaseOutlivesTheDelivery(t *testing.T) {
+	inner := &fakeInner{access: patAccess()}
+	reg := newRegistry(t, time.Time{})
+	src := newSource(t, inner, reg, 0)
+
+	access, release, err := src.ForWorkspace(context.Background(), "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace: %v", err)
+	}
+	// The sandbox fetches: the session is presented and authenticates.
+	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); err != nil {
+		t.Fatalf("the session the sandbox was handed does not authenticate: %v", err)
+	}
+
+	release()
+	if inner.releases != 0 {
+		t.Fatalf("the driver's release gave the inner lease back while the session is live "+
+			"(%d releases): an App token would be dead before the write-back presents it", inner.releases)
+	}
+	sess, err := reg.Session(access.Credential.Username)
+	if err != nil || sess.Closed() {
+		t.Fatalf("a used session was closed by the driver's release (err=%v)", err)
+	}
+
+	// The session ending is what gives the lease back — exactly once.
+	reg.Close(access.Credential.Username, "run finished")
+	if inner.releases != 1 {
+		t.Fatalf("closing the session released the inner lease %d times, want 1", inner.releases)
+	}
+	reg.Close(access.Credential.Username, "again")
+	if inner.releases != 1 {
+		t.Fatalf("a second close re-released the inner lease; count = %d", inner.releases)
+	}
+}
+
+// TestUnusedSessionIsClosedOnRelease: a dispatch that failed before the fetch
+// hands the credential back unused, and holding a live App token for the rest
+// of the session's TTL would help nobody.
+func TestUnusedSessionIsClosedOnRelease(t *testing.T) {
+	inner := &fakeInner{access: patAccess()}
+	reg := newRegistry(t, time.Time{})
+	src := newSource(t, inner, reg, 0)
+
+	access, release, err := src.ForWorkspace(context.Background(), "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace: %v", err)
+	}
+	release()
+	if inner.releases != 1 {
+		t.Fatalf("an unused session's release gave the inner lease back %d times, want 1", inner.releases)
+	}
+	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); err == nil {
+		t.Fatal("the session still authenticates after being handed back unused")
+	}
+	release() // idempotent
+	if inner.releases != 1 {
+		t.Fatalf("a second release re-released the inner lease; count = %d", inner.releases)
+	}
+}
+
+// TestReapedSessionReleasesTheInnerLease: a session that simply runs out its
+// TTL still gives its lease back, so no App token outlives the session that
+// was the only thing presenting it.
+func TestReapedSessionReleasesTheInnerLease(t *testing.T) {
+	inner := &fakeInner{access: patAccess()}
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	reg, err := gitproxy.NewRegistry(proxyBase)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	var mu sync.Mutex
+	reg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	src := newSource(t, inner, reg, 30*time.Minute)
+
+	access, _, err := src.ForWorkspace(context.Background(), "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace: %v", err)
+	}
+	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	mu.Lock()
+	now = now.Add(31 * time.Minute)
+	mu.Unlock()
+	if n := reg.ReapExpired(); n != 1 {
+		t.Fatalf("ReapExpired dropped %d sessions, want 1", n)
+	}
+	if inner.releases != 1 {
+		t.Fatalf("reaping the session released the inner lease %d times, want 1", inner.releases)
+	}
 }

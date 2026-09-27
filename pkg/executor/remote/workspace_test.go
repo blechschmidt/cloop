@@ -54,12 +54,16 @@ type fakeSource struct {
 	calls     int
 	released  int
 	projectID string
+	// requester is the executor the lease was asked for, as the context
+	// carried it; "" when the dispatch named none.
+	requester string
 }
 
-func (f *fakeSource) ForWorkspace(_ context.Context, projectID string, _ executor.Workspace) (executor.WorkspaceAccess, func(), error) {
+func (f *fakeSource) ForWorkspace(ctx context.Context, projectID string, _ executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	f.mu.Lock()
 	f.calls++
 	f.projectID = projectID
+	f.requester = executor.RequestingExecutor(ctx, "")
 	f.mu.Unlock()
 	release := func() {
 		f.mu.Lock()
@@ -250,6 +254,105 @@ func TestWorkspaceCredentialTravelsOutsideTheSpec(t *testing.T) {
 	// prints nothing usable.
 	if s := payload.WorkspaceCredential.String(); strings.Contains(s, workspaceTestToken) {
 		t.Errorf("WorkspaceCredential.String() leaks the token: %s", s)
+	}
+}
+
+// TestVirtualDispatchLeasesAsTheVirtualExecutor (Task 20349): the device's
+// driver runs a virtual executor's dispatch with the device's credential
+// source, and the lease must still be asked for the virtual executor — the
+// identity the grant was chosen against before dispatch. A device's own
+// dispatch names nobody, so its source leases as the device.
+func TestVirtualDispatchLeasesAsTheVirtualExecutor(t *testing.T) {
+	src := &fakeSource{cred: executor.GitCredential{
+		Username: "x-access-token", Password: workspaceTestToken,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}}
+	ex := newWorkspaceExecutor(t, src)
+	p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1"}, helloAt(remote.ProtocolVersion), nil)
+	defer sess.Close()
+
+	v, err := remote.NewVirtual(ex, "virt-1", "sandboxed", func() (executor.VirtualSpec, error) {
+		return executor.VirtualSpec{Sandbox: executor.SandboxSettings{
+			Mode: executor.SandboxModeContainer, Engine: "docker",
+		}}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewVirtual: %v", err)
+	}
+
+	got := captureStart(t, p)
+	if _, err := v.Start(context.Background(), gitSpec("github-ci")); err != nil {
+		t.Fatalf("virtual Start: %v", err)
+	}
+	<-got
+	src.mu.Lock()
+	requester := src.requester
+	src.mu.Unlock()
+	if requester != "virt-1" {
+		t.Fatalf("the workspace lease was asked for %q, want the virtual executor virt-1 — "+
+			"a grant issued to it would be chosen and then missing from the lease", requester)
+	}
+
+	got = captureStart(t, p)
+	if _, err := ex.Start(context.Background(), gitSpec("github-ci")); err != nil {
+		t.Fatalf("device Start: %v", err)
+	}
+	<-got
+	src.mu.Lock()
+	requester = src.requester
+	src.mu.Unlock()
+	if requester != "" {
+		t.Errorf("the device's own dispatch named requester %q; its source leases as the device", requester)
+	}
+}
+
+// TestWorkspaceLeaseOutlivesTheStartForAPushWriteBack (Task 20349): a push
+// write-back presents the workspace credential again when the workload
+// finishes. Releasing the lease once the agent confirmed the start destroyed a
+// GitHub App token at GitHub before the write-back could use it, so the lease
+// is held until the handle closes — and still released exactly once.
+func TestWorkspaceLeaseOutlivesTheStartForAPushWriteBack(t *testing.T) {
+	src := &fakeSource{cred: executor.GitCredential{
+		Username: "x-access-token", Password: workspaceTestToken,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}}
+	ex := newWorkspaceExecutor(t, src)
+	p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1"}, helloAt(remote.ProtocolVersion), nil)
+	defer sess.Close()
+
+	spec := gitSpec("github-ci")
+	spec.Workspace.Ref = strings.Repeat("c", 40)
+	spec.WriteBack = executor.WriteBack{Mode: executor.WriteBackPush, Branch: "cloop/task-7"}
+	got := captureStart(t, p)
+	handle, err := ex.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-got
+	if _, released := src.counts(); released != 0 {
+		t.Fatalf("the workspace lease was released %d time(s) at start, before the push "+
+			"write-back that presents the credential again", released)
+	}
+
+	statusFrame, err := remote.NewFrame(remote.TypeStatus, "", handle.ID, remote.StatusPayload{
+		Status: executor.Status{HandleID: handle.ID, State: executor.StateExited},
+	})
+	if err != nil {
+		t.Fatalf("build status: %v", err)
+	}
+	p.write(statusFrame)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, released := src.counts(); released == 1 {
+			break
+		} else if released > 1 {
+			t.Fatalf("the workspace lease was released %d times, want exactly once", released)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the workspace lease was never released after the workload finished")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

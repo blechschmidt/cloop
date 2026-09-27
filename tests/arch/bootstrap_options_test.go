@@ -84,18 +84,15 @@ func TestBootstrapOptions_BothHubsSetTheSameFields(t *testing.T) {
 // here needs the consequence spelled out, not just a name, so a reader can tell
 // the two apart.
 var knownOptionsSkew = map[string]string{
-	// Pre-existing, found by this gate rather than caused by it. pkg/ui routes
-	// the Kubernetes driver's workspace fetches and write-back pushes through
-	// the git interception proxy; pkg/apiserver does not, so a run dispatched
-	// through `cloop serve` pushes straight to the upstream and the proxy's
-	// branch allowlist (Task 20184) never sees it.
-	//
-	// Not fixed here because the fix is not a one-line addition: activeGitProxy
-	// and its singleton live in pkg/ui, and sharing them means lifting the
-	// service out into a package both hubs can import. That is its own change
-	// with its own tests, not a rider on Task 20281.
-	"WrapWorkspaceSource": "pkg/apiserver does not wire the git interception proxy — real gap, " +
-		"needs gitProxyService lifted out of pkg/ui first",
+	// Found by this gate (Task 20281), closed in Task 20349. Only pkg/ui runs
+	// the git interception proxy, so only it has a wrapper to pass. With the
+	// field unset, reconcile now makes a Kubernetes executor refuse git
+	// workspaces whenever executors.git_proxy is enabled (routeWorkspaceSource),
+	// so a run dispatched through `cloop serve` is refused instead of being
+	// handed the forge credential. Before that fix this entry recorded a real
+	// bypass of the proxy's branch allowlist.
+	"WrapWorkspaceSource": "pkg/apiserver runs no git proxy; with executors.git_proxy enabled " +
+		"its git workspaces fail closed in reconcile.routeWorkspaceSource",
 }
 
 // diffFields returns the fields in have that want lacks, minus the ones

@@ -67,6 +67,29 @@ type handleState struct {
 	// the hub collects it. Nil until a project_result frame arrives; see
 	// projectresult.go.
 	projectResult *projectResultState
+	// releaseWorkspace gives back the workspace credential's lease, parked
+	// here when a push write-back will present that credential again once
+	// the workload finishes; run once, when the handle closes.
+	releaseWorkspace func()
+}
+
+// takeWorkspaceRelease returns the parked workspace release, at most once.
+func (h *handleState) takeWorkspaceRelease() func() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.releaseWorkspace
+	h.releaseWorkspace = nil
+	return r
+}
+
+// finishWorkspaceRelease runs the parked workspace release, if any.
+func (h *handleState) finishWorkspaceRelease() {
+	if h == nil {
+		return
+	}
+	if r := h.takeWorkspaceRelease(); r != nil {
+		r()
+	}
 }
 
 // snapshotStatus returns the last known status under lock.
@@ -636,8 +659,26 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// holds the material, and a lease left open here is a credential the broker
 	// believes is still out in the world. The release is deferred rather than
 	// called at each exit because there are six of them below.
-	access, releaseCred, credErr := e.leaseWorkspace(ctx, spec)
-	defer releaseCred()
+	leaseCtx := ctx
+	if virtual != nil {
+		// Leased as the virtual executor, which is what the grant chosen
+		// before this dispatch was matched against. Leased as this device, a
+		// grant issued to the virtual executor was chosen and then missing
+		// from the lease (Task 20349).
+		leaseCtx = executor.WithRequestingExecutor(ctx, virtual.ID)
+	}
+	access, releaseCred, credErr := e.leaseWorkspace(leaseCtx, spec)
+	// Given back as soon as the agent has the material — unless a push
+	// write-back will present the same credential when the workload finishes.
+	// Then it is parked on the handle and released when the handle closes:
+	// releasing a GitHub App lease destroys the token at GitHub, and the
+	// write-back would meet a dead one (Task 20349).
+	keepCred := false
+	defer func() {
+		if !keepCred {
+			releaseCred()
+		}
+	}()
 	if credErr != nil {
 		return executor.Handle{}, credErr
 	}
@@ -824,6 +865,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	hs.status.State = executor.StateRunning
 	hs.status.PID = started.PID
 	hs.status.StartedAt = startedAt
+	if spec.WriteBack.Mode == executor.WriteBackPush && !cred.Empty() && !hs.closed {
+		hs.releaseWorkspace = releaseCred
+		keepCred = true
+	}
 	hs.mu.Unlock()
 
 	// Recorded only after the agent confirmed the start: a binding for a
@@ -1042,6 +1087,7 @@ func (e *Executor) dropHandle(handleID string) {
 	executor.ForgetHandle(store, handleID)
 	if hs != nil {
 		hs.bus.Close()
+		hs.finishWorkspaceRelease()
 	}
 }
 
@@ -1329,6 +1375,8 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 		// finished task and reporting "unreachable" for a credential that is
 		// already gone with the process that held it.
 		e.releaseLeases(handleID)
+		// The write-back, if there was one, has run on the device by now.
+		hs.finishWorkspaceRelease()
 		// And the durable row: nothing can reattach to a workload the device
 		// has already reported terminal, and a row that outlived its process
 		// would be re-adopted on the next boot, offered by nobody, and then
@@ -1395,6 +1443,7 @@ func (e *Executor) failAllHandles(reason string) {
 		hs.closed = true
 		hs.mu.Unlock()
 		hs.bus.Close()
+		hs.finishWorkspaceRelease()
 	}
 }
 

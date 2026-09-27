@@ -190,6 +190,15 @@ func Provision(ctx context.Context, r Request) error {
 	if !reuse.fresh {
 		emit("workspace: reusing the existing checkout; fetching instead of cloning\n")
 	}
+	if reuse.reroute != "" {
+		// Before the plan: its fetch names the remote, and the remote must be
+		// the route the control plane chose for this run.
+		emit(fmt.Sprintf("workspace: the checkout's origin was %s; the same repository is now "+
+			"reached at %s, so the origin is updated\n", quoteRemote(reuse.reroute), w.Repo))
+		if err := gitLocal(ctx, dir, "remote", "set-url", "origin", w.Repo); err != nil {
+			return fail("cannot point the existing checkout at %s: %v", w.Repo, err)
+		}
+	}
 
 	for _, step := range plan {
 		if !reuse.fresh && (step.Name == "init" || step.Name == "remote") {
@@ -221,6 +230,14 @@ func Provision(ctx context.Context, r Request) error {
 	if err := enforceSize(dir, w, hostName); err != nil {
 		reuse.rollback(dir, emit)
 		return fail("%v", err)
+	}
+
+	// Which repository this is, whatever its origin names: what lets the next
+	// run recognise the checkout after the route changes. Not fatal — the tree
+	// is ready — but worth a line, because without it a later change of route
+	// needs the directory removed by hand.
+	if err := gitLocal(ctx, dir, "config", "--local", upstreamConfigKey, w.UpstreamRepo()); err != nil {
+		emit(fmt.Sprintf("workspace: could not record which repository this checkout is of: %v\n", err))
 	}
 
 	emit(fmt.Sprintf("workspace: ready at %s\n", dir))
@@ -383,7 +400,15 @@ type reuseState struct {
 	// empty records that the directory held nothing at all, which is the only
 	// case in which removing its whole contents is provably safe.
 	empty bool
+	// reroute is the existing checkout's origin when it names the same
+	// repository by another route — through a git proxy, or no longer through
+	// one — and so must be pointed at the workspace's Repo before the fetch.
+	reroute string
 }
+
+// upstreamConfigKey is where a provisioned checkout records which repository
+// it is a checkout of, whatever route its origin names (Task 20349).
+const upstreamConfigKey = "cloop.upstream"
 
 // rollback undoes a failed provisioning, as far as it safely can.
 //
@@ -447,14 +472,65 @@ func inspectDir(ctx context.Context, dir string, w executor.Workspace, hostName 
 	if err != nil {
 		return reuse, err
 	}
-	if !SameRemote(have, w.Repo) {
-		return reuse, fmt.Errorf(
-			"%s already holds a checkout of %s, but this workload asks for %s; "+
-				"refusing to re-clone over it because that would discard whatever is there. "+
-				"Use a different workdir, or remove the directory on %s",
-			dir, quoteRemote(have), w.Repo, hostName)
+	if SameRemote(have, w.Repo) {
+		return reuse, nil
 	}
-	return reuse, nil
+	// The same repository reached another way. A git proxy rewrites the
+	// origin to its own URL, so turning it on or off — or moving its
+	// advertise_url — changes the route between runs while the repository
+	// stays the same, and refusing the checkout then stranded the project on
+	// this machine until someone removed the directory by hand. The checkout
+	// is recognised by the upstream it recorded when it was provisioned, or,
+	// for one provisioned before that record existed, by an origin that is
+	// the workspace's upstream itself.
+	upstream := w.UpstreamRepo()
+	recorded, err := configValue(ctx, dir, upstreamConfigKey)
+	if err != nil {
+		return reuse, err
+	}
+	if (recorded != "" && SameRemote(recorded, upstream)) || SameRemote(have, upstream) {
+		reuse.reroute = have
+		return reuse, nil
+	}
+	return reuse, fmt.Errorf(
+		"%s already holds a checkout of %s, but this workload asks for %s; "+
+			"refusing to re-clone over it because that would discard whatever is there. "+
+			"Use a different workdir, or remove the directory on %s",
+		dir, quoteRemote(have), upstream, hostName)
+}
+
+// configValue reads one key from a checkout's own config, or "" when it is not
+// set. Bounded like remoteURL, for the same reasons.
+func configValue(ctx context.Context, dir, key string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--local", "--get", key)
+	cmd.Env = executor.GitBaseEnv()
+	cmd.Dir = dir
+	BoundChild(cmd)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if stdout.Len() == 0 && strings.TrimSpace(stderr.String()) == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("cannot read %s in %s: %v: %s", key, dir, err, Collapse(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// gitLocal runs a local git command in dir — one that touches only the
+// checkout's own files, never the network — and reports its failure.
+func gitLocal(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = executor.GitBaseEnv()
+	cmd.Dir = dir
+	BoundChild(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, Collapse(stderr.String()))
+	}
+	return nil
 }
 
 // remoteURL reads the origin URL of an existing checkout.

@@ -50,7 +50,7 @@ func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (exec
 			Repo:        spec.Workspace.Repo,
 			RepoPath:    repoPath,
 			Grant:       strings.TrimSpace(spec.Workspace.CredentialGrant),
-			ExecutorID:  e.id,
+			ExecutorID:  executor.RequestingExecutor(ctx, e.id),
 			ProjectPath: projectOf(spec),
 			Reason: "this control plane has no secret broker configured, so no grant can be " +
 				"leased for the fetch",

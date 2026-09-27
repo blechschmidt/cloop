@@ -206,6 +206,15 @@ func bootstrapExecutors(dir string) {
 	if cfg == nil {
 		return
 	}
+	if cfg.Executors.GitProxy.Enabled {
+		// Said at startup, where an operator reads it, rather than only in
+		// the refusal a dispatch meets later: this server runs no git proxy,
+		// and reconcile makes its executors refuse git workspaces instead of
+		// handing them the forge credential (Task 20349).
+		fmt.Fprintf(os.Stderr, "apiserver: executors.git_proxy is enabled, but `cloop serve` "+
+			"does not run the git interception proxy (only `cloop ui` does): git workspaces "+
+			"on this server's executors will be refused rather than given the forge credential\n")
+	}
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		ReconcileOrphans: true,
 		SweepInterval:    cfg.Executors.OrphanSweepInterval(),

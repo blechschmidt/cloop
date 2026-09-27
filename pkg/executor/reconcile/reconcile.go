@@ -60,6 +60,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
+	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -808,10 +809,7 @@ func ensureKubernetes(
 		return nil, false, err
 	}
 	driverOpts.Credentials = identity.Cluster
-	driverOpts.Workspace = identity.Workspace
-	if opts.WrapWorkspaceSource != nil && driverOpts.Workspace != nil {
-		driverOpts.Workspace = opts.WrapWorkspaceSource(driverOpts.ID, driverOpts.Workspace)
-	}
+	driverOpts.Workspace = routeWorkspaceSource(cfg, opts, driverOpts.ID, identity.Workspace)
 
 	// The operator's assertion arrived with driverOpts, from the config file.
 	// The other half of the evidence — what a probe actually observed against
@@ -920,6 +918,35 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		return Identity{}, nil, err
 	}
 	return Identity{Cluster: src, Workspace: ws}, closeDB, nil
+}
+
+// routeWorkspaceSource decides what a driver's workspace fetches go through.
+//
+// A caller that runs the git proxy says so with WrapWorkspaceSource, and gets
+// its wrapper. A caller that does not — `cloop serve`, `cloop hub doctor`, and
+// every CLI command that registers the driver — used to get the source
+// undecorated even when the configuration asked for the proxy, so a Pod it
+// dispatched was handed the forge credential that the proxy exists to keep on
+// the hub (Task 20349). Now such a caller gets a source that refuses, the way
+// `cloop ui` refuses when its own proxy failed to start: interception that was
+// asked for fails closed, whichever process is doing the asking.
+func routeWorkspaceSource(cfg *config.Config, opts Options, execID string,
+	src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
+	if src == nil {
+		return nil
+	}
+	if opts.WrapWorkspaceSource != nil {
+		return opts.WrapWorkspaceSource(execID, src)
+	}
+	if cfg != nil && cfg.Executors.GitProxy.Enabled {
+		return gitproxycreds.Refusing(fmt.Sprintf(
+			"executors.git_proxy is enabled, and this process does not run the git "+
+				"interception proxy — only `cloop ui` does — so executor %s cannot provision "+
+				"a git workspace without handing the forge credential to the sandbox; "+
+				"dispatch the run through `cloop ui`, or set executors.git_proxy.enabled: "+
+				"false to deliver the credential as before", execID))
+	}
+	return src
 }
 
 // optionalWorkspaceSource builds a workspace credential source from dir's

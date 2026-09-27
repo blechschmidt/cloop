@@ -824,3 +824,69 @@ func countKind(events []Event, kind EventKind) int {
 	}
 	return n
 }
+
+// TestOnEndRunsOnceWhenTheSessionLeaves (Task 20349): OnEnd is how a caller ties
+// what a session's upstream credential stands on — the lease behind a GitHub
+// App token — to the session's life. It must run exactly once, whichever way
+// the session goes, and never while the session can still be used.
+func TestOnEndRunsOnceWhenTheSessionLeaves(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(reg *Registry, id string, advance func(time.Duration))
+	}{
+		{"closed", func(reg *Registry, id string, _ func(time.Duration)) {
+			reg.Close(id, "lease released")
+			reg.Close(id, "again")
+		}},
+		{"reaped", func(reg *Registry, id string, advance func(time.Duration)) {
+			advance(2 * time.Hour)
+			reg.ReapExpired()
+			reg.ReapExpired()
+			reg.Close(id, "after the reap")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+			reg, err := NewRegistry(testBase)
+			if err != nil {
+				t.Fatalf("NewRegistry: %v", err)
+			}
+			reg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+			advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+
+			ends := 0
+			m, err := reg.Mint(MintRequest{
+				Upstream:   "https://github.com/acme/tool.git",
+				Credential: Credential{Username: "x-access-token", Password: "ghs_upstream"},
+				OnEnd:      func() { ends++ },
+			})
+			if err != nil {
+				t.Fatalf("Mint: %v", err)
+			}
+			if m.Session.Used() {
+				t.Fatal("a session nobody presented reports itself used")
+			}
+			if _, err := reg.Authenticate(m.Session.ID, "wrong-token"); err == nil {
+				t.Fatal("a wrong token authenticated")
+			}
+			if m.Session.Used() {
+				t.Fatal("a failed authentication marked the session used")
+			}
+			if _, err := reg.Authenticate(m.Session.ID, m.Token); err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+			if !m.Session.Used() {
+				t.Fatal("a session that authenticated does not report itself used")
+			}
+			if ends != 0 {
+				t.Fatalf("OnEnd ran %d times while the session was live", ends)
+			}
+
+			tc.end(reg, m.Session.ID, advance)
+			if ends != 1 {
+				t.Fatalf("OnEnd ran %d times, want exactly once", ends)
+			}
+		})
+	}
+}

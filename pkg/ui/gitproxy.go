@@ -280,7 +280,7 @@ func (s *gitProxyService) Wrap(execID string, src executor.WorkspaceCredentialSo
 			// downgrade the section exists to prevent. Refusing costs the git
 			// workspaces on this hub and nothing else; the dashboard, the
 			// bind-mount executors and every non-git workload keep working.
-			return unavailableWorkspaceSource{}
+			return unavailableWorkspaceSource()
 		}
 		return src
 	}
@@ -295,7 +295,7 @@ func (s *gitProxyService) Wrap(execID string, src executor.WorkspaceCredentialSo
 			// on. That the cause is a policy this process failed to validate
 			// rather than a proxy that failed to start makes no difference to
 			// what the sandbox ends up holding.
-			return unavailableWorkspaceSource{}
+			return unavailableWorkspaceSource()
 		}
 		return src
 	}
@@ -326,22 +326,13 @@ func (s *gitProxyService) Close() {
 }
 
 // unavailableWorkspaceSource refuses every workspace, for the hub that was
-// told to intercept and could not.
-//
-// It refuses rather than returning no source at all because the two are read
-// differently downstream: a nil source means "this hub has no broker", whose
-// remedy is to create a grant, while this means "the proxy the operator
-// configured is not running", whose remedy is to fix the section. Sending an
-// operator after a grant they already have is a bad hour.
-type unavailableWorkspaceSource struct{}
-
-func (unavailableWorkspaceSource) ForWorkspace(_ context.Context, _ string, _ executor.Workspace) (executor.WorkspaceAccess, func(), error) {
-	return executor.WorkspaceAccess{}, func() {}, fmt.Errorf(
-		"%w: executors.git_proxy is enabled but the git interception proxy is not running, "+
-			"so no workspace credential can be brokered; see the hub's startup log for why it "+
-			"failed to start, or set executors.git_proxy.enabled: false to provision workspaces "+
-			"by handing the forge credential to the sandbox as before",
-		executor.ErrWorkspaceUnavailable)
+// told to intercept and could not. See gitproxycreds.Refusing for why it
+// refuses rather than returning no source at all.
+func unavailableWorkspaceSource() executor.WorkspaceCredentialSource {
+	return gitproxycreds.Refusing("executors.git_proxy is enabled but the git interception " +
+		"proxy is not running, so no workspace credential can be brokered; see the hub's " +
+		"startup log for why it failed to start, or set executors.git_proxy.enabled: false " +
+		"to provision workspaces by handing the forge credential to the sandbox as before")
 }
 
 // Addr reports where the proxy is listening, for diagnostics.

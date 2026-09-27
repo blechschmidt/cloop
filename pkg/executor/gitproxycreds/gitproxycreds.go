@@ -112,12 +112,22 @@ func New(inner executor.WorkspaceCredentialSource, reg *gitproxy.Registry, polic
 
 // ForWorkspace implements executor.WorkspaceCredentialSource.
 //
-// The release function is always non-nil and gives back the *inner* lease — the
-// forge credential the hub holds — exactly as the undecorated source does. It
-// does not close the session: the sandbox fetches at the start of a run and
-// pushes at the end, so a session closed when the credential was delivered
-// would refuse the write-back it exists to authorise. A session's life is its
-// TTL, and Registry.Close is how an operator ends one early.
+// The inner lease — the forge credential the hub holds — lives as long as the
+// session, and is released when the session ends: closed, reaped after its TTL,
+// or closed with the hub. It used to be released when the driver was done
+// delivering, which for a github_app grant destroyed the installation token at
+// GitHub while the session went on presenting it upstream: every later git
+// operation through the session met a dead token, and on Kubernetes, which
+// delivers before the init container fetches, the fetch itself did (Task 20349).
+//
+// The release function handed to the driver is therefore about the *session*.
+// It is always non-nil, and it closes the session only if nothing ever
+// authenticated with it — the dispatch failed, or the fetch never reached the
+// proxy — which releases the inner lease with it. A session the sandbox did use
+// keeps its TTL: the sandbox fetches at the start of a run and pushes at the
+// end, so a session closed when the credential was delivered would refuse the
+// write-back it exists to authorise. Registry.Close is how an operator ends one
+// early.
 func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	noop := func() {}
 	if s == nil || s.Inner == nil || s.Registry == nil {
@@ -183,8 +193,14 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		// the nearest available string — the grant name — would put
 		// "task=github-pat" on every proxy event and quietly break any join
 		// against the run and task records that field exists to support.
-		ExecutorID: s.ExecutorID,
+		// The executor the dispatch is for, which a virtual executor's
+		// device is not: the proxy's rows should name the one the operator
+		// bound the project to.
+		ExecutorID: executor.RequestingExecutor(ctx, s.ExecutorID),
 		Actor:      s.Actor,
+		// The inner lease stands behind the session's upstream credential, so
+		// it goes when the session does and not a moment before.
+		OnEnd: release,
 	})
 	if err != nil {
 		// Fail the dispatch. Falling back to the direct credential would hand
@@ -217,7 +233,19 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			Branches: access.Credential.Branches,
 		},
 		Repo: m.RepoURL,
-	}, release, nil
+	}, s.relinquish(m.Session), nil
+}
+
+// relinquish returns the release a driver calls when it is done with what it
+// was handed: it closes a session nothing ever authenticated with, and leaves a
+// used one to its TTL. See ForWorkspace.
+func (s *Source) relinquish(sess *gitproxy.Session) func() {
+	return func() {
+		if sess.Used() {
+			return
+		}
+		s.Registry.Close(sess.ID, "workspace credential released unused")
+	}
 }
 
 // HeldSource is implemented by an inner source that can lease a credential
@@ -236,3 +264,27 @@ type HeldSource interface {
 // Static assertion: a signature change on the interface must fail here rather
 // than at the single wiring site, which is behind optional configuration.
 var _ executor.WorkspaceCredentialSource = (*Source)(nil)
+
+// Refusing returns a source that refuses every workspace with
+// executor.ErrWorkspaceUnavailable, saying why.
+//
+// It is what a process whose configuration asks for the git proxy puts in
+// front of a driver when that process cannot route through one — the proxy
+// failed to start in `cloop ui`, or the process is not `cloop ui` at all and so
+// never runs one (Task 20349). Handing the undecorated source back instead
+// would deliver the forge credential into every sandbox while the
+// configuration says it cannot happen.
+//
+// It refuses rather than standing in for "no source" because the two read
+// differently downstream: no source means "this hub has no broker", whose
+// remedy is a grant, while this means "the proxy the operator configured is not
+// in the path", whose remedy is the proxy.
+func Refusing(reason string) executor.WorkspaceCredentialSource {
+	return refusingSource{reason: strings.TrimSpace(reason)}
+}
+
+type refusingSource struct{ reason string }
+
+func (r refusingSource) ForWorkspace(_ context.Context, _ string, _ executor.Workspace) (executor.WorkspaceAccess, func(), error) {
+	return executor.WorkspaceAccess{}, func() {}, fmt.Errorf("%w: %s", executor.ErrWorkspaceUnavailable, r.reason)
+}

@@ -94,13 +94,19 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 		return executor.WorkspaceAccess{}, noop, nil
 	}
 
+	// The executor the lease is for: this source's own, unless the dispatch
+	// is for a virtual executor its device carries out, in which case the
+	// grant chosen before dispatch was matched against the virtual one and
+	// the lease has to be too (Task 20349).
+	executorID := executor.RequestingExecutor(ctx, s.ExecutorID)
+
 	repoPath, hasRepoPath := w.RepoPath()
 	denied := func(reason string) error {
 		return &executor.WorkspaceGrantError{
 			Repo:        w.Repo,
 			RepoPath:    repoPath,
 			Grant:       strings.TrimSpace(w.CredentialGrant),
-			ExecutorID:  s.ExecutorID,
+			ExecutorID:  executorID,
 			ProjectPath: projectID,
 			Reason:      reason,
 		}
@@ -114,7 +120,7 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	}
 
 	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID:    s.ExecutorID,
+		ExecutorID:    executorID,
 		ProjectID:     projectID,
 		GitHubProxied: proxied,
 	}, s.Actor)

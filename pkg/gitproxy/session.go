@@ -118,6 +118,26 @@ type Session struct {
 	denied    atomic.Int64
 	bytesUp   atomic.Int64
 	bytesDown atomic.Int64
+	// used records that the session authenticated at least once — the
+	// sandbox presented it, whatever it went on to ask for.
+	used atomic.Bool
+
+	// onEnd is MintRequest.OnEnd, run once by end.
+	onEnd   func()
+	endOnce sync.Once
+}
+
+// Used reports whether the session ever authenticated a request.
+func (s *Session) Used() bool { return s.used.Load() }
+
+// end runs the session's OnEnd hook, at most once, after the session has left
+// the registry.
+func (s *Session) end() {
+	s.endOnce.Do(func() {
+		if s.onEnd != nil {
+			s.onEnd()
+		}
+	})
 }
 
 // Expired reports whether the session's TTL has run out.
@@ -180,6 +200,17 @@ type MintRequest struct {
 	TaskID     string
 	ExecutorID string
 	Actor      string
+
+	// OnEnd, when set, runs once after the session has left the registry —
+	// closed, reaped after its TTL, or closed at shutdown — on the goroutine
+	// that ended it and outside the registry's lock.
+	//
+	// It is for releasing what the upstream credential stands on. A GitHub
+	// App installation token is destroyed at GitHub when the lease that
+	// minted it is released, and a session presents that token upstream for
+	// its whole life: releasing the lease when the credential was *delivered*
+	// left the session holding a dead token (Task 20349).
+	OnEnd func()
 }
 
 // Minted is a new session plus the one-time secret.
@@ -337,6 +368,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		ExpiresAt:    now.Add(ttl),
 		tokenHash:    sha256.Sum256([]byte(token)),
 		credential:   req.Credential,
+		onEnd:        req.OnEnd,
 	}
 
 	r.mu.Lock()
@@ -400,6 +432,7 @@ func (r *Registry) Authenticate(id, token string) (*Session, error) {
 	if s.Expired(r.now()) {
 		return nil, fmt.Errorf("%w: session expired at %s", ErrUnauthenticated, s.ExpiresAt.UTC().Format(time.RFC3339))
 	}
+	s.used.Store(true)
 	return s, nil
 }
 
@@ -454,6 +487,7 @@ func (r *Registry) Close(id, reason string) {
 		Detail: fmt.Sprintf("%s (pushes=%d fetches=%d denied=%d)",
 			reason, st.Pushes, st.Fetches, st.Denied),
 	})
+	s.end()
 }
 
 // ReapExpired drops sessions past their TTL and returns how many went.
@@ -484,6 +518,7 @@ func (r *Registry) ReapExpired() int {
 				At:        now,
 				Detail:    "expired",
 			})
+			s.end()
 		}
 	}
 	return len(dead)
