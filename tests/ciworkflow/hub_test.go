@@ -360,7 +360,7 @@ func (h *hub) exchangeRaw(t *testing.T, idToken string) int {
 	return resp.StatusCode
 }
 
-// errNotFound distinguishes "the hub has no such section" in failure output.
+// errNotFound marks a heading or code block the guide does not have.
 var errNotFound = errors.New("not found")
 
 // docsWorkflow extracts the YAML block under "## The workflow" in the guide.
