@@ -45,7 +45,8 @@ func TestFeatures_InBrowser(t *testing.T) {
 		t.Skip("node not installed; cannot drive the browser")
 	}
 
-	f := newFeatureFixture(t)
+	// Unstarted until stubCLI has run: see newUnstartedFeatureFixture.
+	f := newUnstartedFeatureFixture(t)
 	addFeature(t, f.parent, "login", time.Now().Add(-2*time.Hour), nil)
 	addFeature(t, f.parent, "dark-mode", time.Now().Add(-time.Hour), nil)
 
@@ -59,6 +60,7 @@ func TestFeatures_InBrowser(t *testing.T) {
 		filepath.Join(dest, ".cloop"), template, dest, string(record), feature.MetaPath(dest))
 	stubCLI(t, f.srv, extra, map[string]any{"ok": true, "feature": map[string]any{
 		"slug": "payments", "branch": "cloop/feature/payments", "base": "main", "path": dest}}, 0)
+	f.start(t)
 
 	// Bounded: a Chrome that stalls must fail this test, not eat the suite.
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)

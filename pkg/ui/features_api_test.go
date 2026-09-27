@@ -40,6 +40,25 @@ type featureFixture struct {
 
 func newFeatureFixture(t *testing.T) *featureFixture {
 	t.Helper()
+	f := newUnstartedFeatureFixture(t)
+	f.start(t)
+	return f
+}
+
+// newUnstartedFeatureFixture is newFeatureFixture before its hub serves
+// anything, for a test that configures the Server first — stubCLI, say — and
+// then hands the URL to a browser.
+//
+// The order matters under -race. A request from this process's own HTTP client
+// is ordered after the test's earlier writes to the Server (the race detector
+// treats a socket write and the read that receives it as a synchronisation),
+// but a request from Chrome carries no such edge: to the detector, the
+// handler's read of srv.SelfExe was concurrent with stubCLI's write, and
+// TestFeatures_InBrowser failed with "race detected during execution of test"
+// about one run in four under load (Task 20344). Configuring the Server before
+// start() orders every write before the goroutine that will serve it.
+func newUnstartedFeatureFixture(t *testing.T) *featureFixture {
+	t.Helper()
 	// A home of its own: the package's shared one accumulates other tests'
 	// projects, and these tests assert on indices.
 	t.Setenv("HOME", t.TempDir())
@@ -51,9 +70,14 @@ func newFeatureFixture(t *testing.T) *featureFixture {
 	}
 	srv := New(primary, 0, "")
 	srv.Projects = []string{parent}
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return &featureFixture{srv: srv, ts: ts, primary: primary, parent: parent}
+	return &featureFixture{srv: srv, primary: primary, parent: parent}
+}
+
+// start serves the fixture's hub.
+func (f *featureFixture) start(t *testing.T) {
+	t.Helper()
+	f.ts = httptest.NewServer(f.srv.Handler())
+	t.Cleanup(f.ts.Close)
 }
 
 // addFeature makes a feature of parent the way `cloop feature new` leaves one:
