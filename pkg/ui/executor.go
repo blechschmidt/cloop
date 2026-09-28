@@ -207,11 +207,19 @@ func reconcileConfiguredExecutors(dir string) {
 	if err != nil || cfg == nil {
 		return
 	}
+	node := currentCluster()
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		// This is a process a control plane restarts as, so it is worth
 		// paying for the sweep that cleans up Pods a previous instance left
 		// running when it died mid-run.
 		ReconcileOrphans: true,
+		// Scoped to this process when others serve the same control plane
+		// (Task 20354): drivers adopt only the workloads of this process or
+		// of one that died, and an orphan sweep still sees — and spares —
+		// the rest. Nil (the default store) for a standalone hub.
+		HandleStore: clusterScopedHandleStore(dir, node),
+		// And only one process sweeps. See reconcile.Options.SweepGate.
+		SweepGate: clusterSweepGate(node),
 		// And keeps paying for it: a hub that stays up for weeks loses Pods to
 		// node evictions, which the startup sweep by definition never sees.
 		SweepInterval: cfg.Executors.OrphanSweepInterval(),

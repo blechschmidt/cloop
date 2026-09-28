@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -185,6 +187,20 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 		return s.autoResumeStart(workDir)
 	}
 
+	// The sweep runs on the leader, but a project on an edge agent can only be
+	// dispatched by the hub member holding that agent's socket (Task 20354).
+	// That member re-checks everything before starting anything.
+	if m, ok := s.dispatchMember(workDir); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return s.clusterNode().Call(ctx, m, http.MethodPost, clusterAPIAutoResume,
+			map[string]string{"project": workDir}, nil)
+	}
+
+	if owner, err := s.claimRun(workDir, "auto_resume"); err != nil {
+		return fmt.Errorf("%w (member %s)", err, owner.InstanceID)
+	}
+
 	payer := s.runIdentity(nil, workDir)
 	s.openSpendCursor(workDir, payer)
 
@@ -192,16 +208,22 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 	ex, handle, err := startWorkloadAs(nil, payer, workDir,
 		[]string{exe, "run"}, map[string]string{"handler": "auto_resume"})
 	if err != nil {
+		s.releaseRunClaim(workDir)
 		return err
 	}
 
 	s.liveLogStartRun(workDir)
-	s.trackRun(workDir, ex, handle.ID)
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	s.trackRunWithCancel(workDir, ex, handle.ID, cancelStream)
+	s.recordRunDispatch(workDir, "auto_resume", ex, handle.ID)
 	s.broadcastRunState(workDir, true, true)
+	s.publishRunState(workDir, true)
 
-	lines, streamErr := ex.Stream(context.Background(), handle.ID)
+	lines, streamErr := ex.Stream(streamCtx, handle.ID)
 	if streamErr != nil {
+		cancelStream()
 		s.liveLogSetRunning(workDir, false)
+		s.publishRunState(workDir, false)
 		s.runEnded(workDir, ex, handle.ID)
 		return streamErr
 	}

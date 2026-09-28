@@ -18,6 +18,7 @@ package quotastore
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -124,6 +125,13 @@ func (s *Store) PutCounter(c quota.CounterRow) error {
 		Value:     c.Value,
 		UpdatedAt: c.UpdatedAt,
 	})
+}
+
+// AdjustCounter adds delta to one counter atomically; see
+// statedb.AdjustQuotaCounter. It makes this store a quota.AtomicStore, which
+// is what lets several hub processes enforce one set of caps (Task 20354).
+func (s *Store) AdjustCounter(identity string, res quota.Resource, bucket string, delta, limit float64, enforce bool, at time.Time) (float64, bool, error) {
+	return s.db.AdjustQuotaCounter(identity, string(res), bucket, delta, limit, enforce, at)
 }
 
 // ReplaceGauges swaps the whole gauge set atomically.

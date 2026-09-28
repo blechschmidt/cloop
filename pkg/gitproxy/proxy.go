@@ -101,6 +101,7 @@ const (
 type Proxy struct {
 	reg    *Registry
 	client *http.Client
+	opts   Options
 
 	mu       sync.Mutex
 	srv      *http.Server
@@ -116,6 +117,16 @@ type Options struct {
 	// so a test can point the upstream leg at a self-signed fixture without
 	// weakening the default.
 	Transport http.RoundTripper
+
+	// Fallback, when set, is offered every request whose credential names a
+	// session this registry has never heard of, before it is refused
+	// (Task 20354). Several hub processes may serve one control plane, each
+	// with its own registry, and a sandbox's request reaches whichever of
+	// them the network sends it to; the hub forwards it to the process that
+	// minted the session. It reports whether it answered the request.
+	// Credentials naming a session this registry knows — right or wrong
+	// token, live or expired — are always decided here.
+	Fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
 }
 
 // New returns a proxy over reg.
@@ -137,7 +148,8 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 		}
 	}
 	return &Proxy{
-		reg: reg,
+		reg:  reg,
+		opts: opts,
 		client: &http.Client{
 			Transport: rt,
 			// Refuse redirects. A forge that 302s a receive-pack elsewhere
@@ -221,6 +233,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if p.opts.Fallback != nil {
+		if id, _, ok := r.BasicAuth(); ok && id != "" && !p.reg.Known(id) && p.opts.Fallback(w, r, id) {
+			return
+		}
+	}
 	sess, err := p.authenticate(r)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="cloop git proxy"`)

@@ -654,15 +654,9 @@ func (s *Server) broadcastAuditAppend(action string) {
 	if err != nil {
 		return
 	}
-	msg := wsMessage{Type: "audit_append", Data: json.RawMessage(payload)}
-
-	s.hubMu.Lock()
-	for _, clients := range s.hubClients {
-		for hc := range clients {
-			s.sendOrLag(hc, msg)
-		}
-	}
-	s.hubMu.Unlock()
+	// Every hub member's clients, not only this one's (Task 20354): the
+	// change is to a hub-wide resource another member's dashboard is showing.
+	s.broadcastToAll(wsMessage{Type: "audit_append", Data: json.RawMessage(payload)})
 }
 
 // countFilteredAudit returns how many rows match filter, ignoring paging.

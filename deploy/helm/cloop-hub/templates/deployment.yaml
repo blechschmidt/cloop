@@ -9,11 +9,24 @@ metadata:
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
-    # Recreate, not RollingUpdate. The state is SQLite on a ReadWriteOnce
-    # volume: a rolling update would schedule the new Pod before the old one
-    # released the volume, which either deadlocks the rollout or — on a
-    # storage class that permits it — runs two writers against one database.
+    {{- if .Values.strategy }}
+    {{- toYaml .Values.strategy | nindent 4 }}
+    {{- else if gt (int .Values.replicaCount) 1 }}
+    # A replacement joins the hub cluster before a member leaves, and the
+    # leaving member hands its runs and agents over on SIGTERM — so an upgrade
+    # never has zero members serving.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    # Recreate for a single replica: without the co-location term below (it
+    # applies only once Pods can coexist), a surge Pod could be scheduled onto
+    # a node that cannot mount the ReadWriteOnce volume, and the rollout would
+    # hang. Set strategy.type=RollingUpdate to opt into the term and zero-
+    # downtime upgrades.
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "cloop-hub.selectorLabels" . | nindent 6 }}
@@ -70,6 +83,16 @@ spec:
             # /var/lib/cloop so one volume holds all persistent state.
             - name: HOME
               value: /var/lib/cloop
+            # Where the other replicas reach this one: a member forwards a
+            # request only one member can answer — a Stop for a run it
+            # streams, a login callback for a login it began — to that
+            # member's own address. The Pod IP rather than the Service, which
+            # would pick any replica. A host rather than a URL because the IP
+            # may be IPv6; cloop adds the brackets, the scheme and the port.
+            - name: CLOOP_CLUSTER_ADVERTISE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -140,7 +163,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- /*
+        Pods that can run at once share one SQLite database, and SQLite's WAL
+        needs all of its processes on one kernel — so they are required onto
+        the node already running one of them, which is also the node the
+        ReadWriteOnce volume is attached to. The first Pod matches its own
+        term, which the scheduler treats as satisfied when nothing else does.
+        Appended to whatever .Values.affinity sets rather than replacing it.
+      */}}
+      {{- $affinity := deepCopy (default dict .Values.affinity) }}
+      {{- if include "cloop-hub.coexist" . }}
+      {{- $podAffinity := default dict (get $affinity "podAffinity") }}
+      {{- $required := default list (get $podAffinity "requiredDuringSchedulingIgnoredDuringExecution") }}
+      {{- $term := dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" (include "cloop-hub.selectorLabels" . | fromYaml)) }}
+      {{- $_ := set $podAffinity "requiredDuringSchedulingIgnoredDuringExecution" (append $required $term) }}
+      {{- $_ := set $affinity "podAffinity" $podAffinity }}
+      {{- end }}
+      {{- with $affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}

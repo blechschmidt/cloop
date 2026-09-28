@@ -234,6 +234,10 @@ type Supervisor struct {
 	// the registry's own executors with their persisted health.
 	candidates func() []Candidate
 
+	// probeFilter, when set, decides which executors this supervisor probes
+	// at all. See WithProbeFilter.
+	probeFilter func(Executor) bool
+
 	mu        sync.Mutex
 	nextProbe map[string]time.Time // executor ID → earliest next probe
 	running   bool
@@ -274,6 +278,20 @@ func WithClock(c Clock) SupervisorOption {
 			sv.clock = c
 		}
 	}
+}
+
+// WithProbeFilter restricts probing to the executors fn accepts (Task 20354).
+//
+// For control planes served by several hub processes. Each process has every
+// executor in its registry, but only one of them can observe a given edge
+// agent — the one holding its socket — and to every other process that agent
+// looks unreachable. Letting them all probe would have each non-holder demote
+// a healthy device within seconds and fail its work over onto another
+// executor: two agents on one task. The filter lets exactly one process speak
+// for each executor. Executors skipped are neither probed nor transitioned;
+// their persisted health is whatever the process that does probe them wrote.
+func WithProbeFilter(fn func(Executor) bool) SupervisorOption {
+	return func(sv *Supervisor) { sv.probeFilter = fn }
 }
 
 // WithCandidateSource overrides how the failover placement pool is assembled.
@@ -401,6 +419,18 @@ func (sv *Supervisor) ProbeOnce(ctx context.Context) []Transition {
 		}
 		due = append(due, ex)
 	}
+	sv.mu.Unlock()
+	// Outside sv.mu: the filter may consult a database.
+	if sv.probeFilter != nil {
+		kept := due[:0]
+		for _, ex := range due {
+			if sv.probeFilter(ex) {
+				kept = append(kept, ex)
+			}
+		}
+		due = kept
+	}
+	sv.mu.Lock()
 	// Forget schedule entries for executors that have been unregistered, so
 	// a long-lived control plane that churns edge devices does not grow this
 	// map without bound.

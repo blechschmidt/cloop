@@ -215,7 +215,9 @@ func StartPeriodicSweep(ctx context.Context, opts Options) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				SweepOrphansOnce(ctx, opts)
+				if opts.sweepAllowed(true) {
+					SweepOrphansOnce(ctx, opts)
+				}
 			}
 		}
 	}()

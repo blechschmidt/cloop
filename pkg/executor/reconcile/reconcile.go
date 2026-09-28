@@ -259,6 +259,24 @@ type Options struct {
 	// It is a pointer so the zero value can mean "yes" while still letting a
 	// caller say "no" explicitly.
 	Publish *bool
+
+	// SweepGate, when set, is asked before the startup sweep (periodic false)
+	// and before each periodic orphan sweep (periodic true); a pass it refuses
+	// is skipped. Nil runs every pass, which is right for a control plane
+	// served by one process.
+	//
+	// For one served by several (Task 20354): the startup sweep closes
+	// session rows whose workload this process cannot see and prunes the
+	// worktrees of tasks not among them — both true of every live peer's work
+	// — so it may only run while no peer is serving. The periodic orphan sweep
+	// spares peers' workloads by itself (see executor.TrackedElsewhere) and is
+	// gated to one process only so that it is not done N times.
+	SweepGate func(periodic bool) bool
+}
+
+// sweepAllowed consults SweepGate.
+func (o Options) sweepAllowed(periodic bool) bool {
+	return o.SweepGate == nil || o.SweepGate(periodic)
 }
 
 // Identity is everything the Kubernetes driver authenticates with: one
@@ -516,7 +534,12 @@ func FromConfig(ctx context.Context, dir string, cfg *config.Config, opts Option
 	// one whose workload is gone. Detached because a git prune and a runtime
 	// listing must not sit between the hub's start and its listener.
 	if opts.ReconcileOrphans {
-		go Sweep(context.WithoutCancel(ctx), dir, opts)
+		if opts.sweepAllowed(false) {
+			go Sweep(context.WithoutCancel(ctx), dir, opts)
+		} else {
+			opts.logf("executor: startup sweep skipped — other hub processes are serving this control " +
+				"plane, and their in-flight work would look like residue from here")
+		}
 		// And again on a timer from here on. Startup-only covered a control
 		// plane killed mid-run and nothing else; a node eviction orphans a Pod
 		// while this process is perfectly healthy, and before Task 20281 those

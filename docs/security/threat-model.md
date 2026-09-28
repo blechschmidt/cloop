@@ -378,6 +378,23 @@ variable and fails if it can.
 | **E**levation of privilege | DNS rebinding between check and dial | Resolve-once pinning: the name is resolved once, every resolved address is policy-checked, and the dial goes to the checked literal | — |
 | **E**levation of privilege | Exfiltration through an allowed host | Per-session byte quotas (`--max-up`, `--max-down`), enforced mid-stream | CONNECT tunnels are opaque — cloop holds no key for the origin, so it sees bytes, not content. `--methods` gates plain HTTP only |
 
+## Cross-cutting: hub members
+
+Several `cloop ui` processes may serve one control plane as a
+[hub cluster](../architecture/hub-cluster.md), forwarding to each other the
+requests only one of them can answer. The members trust each other exactly as
+much as a single hub trusts itself — they share its database — so what needs a
+boundary is the channel between them, which a client can also reach.
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S**poofing | A client poses as a member to skip the per-address rate limit, claim another address in the audit trail, or reach `/api/internal/cluster/*` | Every forwarded request carries an HMAC over the sender, the recipient, a timestamp, a nonce, the method, the URI and the original client's address, keyed by a secret kept in the control-plane database; a request whose claim fails verification is refused with `403`, never served as an ordinary one (`TestForgedAndReplayedPeerClaimsAreRefused`, `TestClusterRefusesForgedPeerClaims`) | Anyone who can read `state.db` holds the key — and could already rewrite every table the hub trusts |
+| **S**poofing | A captured forwarded request is replayed | The nonce is single-use at its recipient within the two-minute skew window, and the signature names the recipient, so the capture is refused everywhere else (`TestAPeerRequestIsGoodOnlyAtItsRecipient`) | — |
+| **E**levation of privilege | Forwarding launders a request past authorization | The owner re-authenticates the forwarded caller from its own cookie or token and applies the route's permission as if reached directly; a member vouches only for the client's address | — |
+| **I**nformation disclosure | Forwarded requests carry session cookies and tokens across the network | Members advertise `https://` URLs where others can observe the traffic, and verify peers against the system roots, their own certificate and `ui.cluster.peer_ca_file` | The default is plain HTTP on loopback, and the Helm chart's is plain HTTP between Pods — safe only because every member is on one node, which a cluster requires anyway |
+| **T**ampering | Two members act on one run, or one agent | Runs, agents and in-flight logins are owned through compare-and-swap rows; a start on a project another member runs is refused with `409`; adoption of a dead member's run is conditioned on the row it read | A member paused past its TTL whose run was adopted meanwhile keeps streaming it until its next ownership check — a few seconds after it resumes — then lets it go without settling it |
+| **D**enial of service | A member dies holding runs, agents and logins | Survivors adopt runs whose workloads outlived it, agents reconnect to them, and a new leader takes the exactly-once duties | Host-executor runs, in-flight logins and proxy sessions of the dead member are lost; rate limits and connection caps are per member, so N members admit N times the per-address rate |
+
 ---
 
 ## Deployment-level threats
@@ -390,7 +407,7 @@ variable and fails if it can.
 | `hub.env` (sealing key, UI token) leaked | Written 0600 by `cloop hub bootstrap`, CI asserts the mode; never committed | Anyone who can read it can unseal every stored secret. Back it up separately from the database, and never together with it |
 | Sealing key lost | — | **Unrecoverable.** Every sealed secret becomes permanently unopenable. See [key rotation](../operations/runbook.md#key-rotation) |
 | State database corrupted or lost | Hot backup (`cloop db backup`) with a SHA-256 sidecar; `cloop db verify`; restore takes a pre-restore copy first | Backups contain sealed secrets — same handling as the database itself |
-| Shared PVC corrupts SQLite | Chart pins `replicaCount: 1` and `ReadWriteOnce`, and refuses configurations that would share the volume | Nothing stops an operator from mounting the same volume elsewhere out of band |
+| Shared PVC corrupts SQLite | Replicas share the volume only on one node: the chart adds a required podAffinity term pinning them to the node holding the `ReadWriteOnce` volume, and refuses replicas without persistence or with `ReadWriteOncePod` | Nothing stops an operator from mounting the same volume on another node out of band, or from removing the affinity term by editing the Deployment |
 
 ---
 

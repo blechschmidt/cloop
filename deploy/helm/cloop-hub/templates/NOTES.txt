@@ -71,5 +71,12 @@ Verify:
   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "cloop-hub.fullname" . }}
   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "cloop-hub.fullname" . }} -- \
     cloop hub healthcheck --endpoint readyz
+{{- if gt (int .Values.replicaCount) 1 }}
+
+{{ .Values.replicaCount }} replicas serve one control plane as a hub cluster, pinned to the node
+that holds the volume. The members, the leader and who holds what:
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "cloop-hub.fullname" . }} -- \
+    cloop hub cluster status
+{{- end }}
 
 Full documentation: https://github.com/blechschmidt/cloop/blob/main/deploy/README.md

@@ -128,7 +128,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// Mirror into storage, then push the change to open dashboards
 			// so the Executors panel's status dot is event-driven rather
 			// than polled (Tasks 20126/20134, 20160).
-			OnStatusChange: s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db)),
+			//
+			// clusterAgentStatus outermost (Task 20354): on a control plane
+			// several hub members serve, only the member holding an agent's
+			// socket may report it, and the one it just left must not.
+			OnStatusChange: s.clusterAgentStatus(s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db))),
 			OnEnroll:       s.makeExecutorEnrollBroadcaster(makeExecutorEnrollRecorder(db)),
 			// Every connect, not just the enrolling one: a device's build
 			// version and hardware are what change when it is upgraded, so

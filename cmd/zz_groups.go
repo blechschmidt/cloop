@@ -362,6 +362,7 @@ var hubCommandGroups = map[string]string{
 	"doctor":      groupHubOperate,
 	"healthcheck": groupHubOperate,
 	"lease":       groupHubOperate,
+	"cluster":     groupHubOperate,
 	"audit":       groupHubOperate,
 	"retention":   groupHubOperate,
 	"telemetry":   groupHubOperate,

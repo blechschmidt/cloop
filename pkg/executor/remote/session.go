@@ -187,6 +187,15 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 	// only an agent at MinResumeTerminateVersion or newer can be told to stop a
 	// workload the control plane no longer tracks, and an older one has to be
 	// given the pre-v5 payload instead. See reconcileResume.
+	//
+	// Rehydrate first (Task 20354). With several hub members serving one
+	// control plane, the workload this agent is offering may have been
+	// dispatched by another member after this one last read the handle table
+	// — the agent was connected there, and has just reconnected here. Answering
+	// from this member's startup snapshot would refuse the offer and tell the
+	// device to terminate a healthy run. Adoption is idempotent and scoped to
+	// this agent's rows, so this costs one indexed read per handshake.
+	opts.Executor.rehydrate()
 	acks := opts.Executor.reconcileResume(hello.Resume, version)
 
 	welcome, err := NewFrameAt(version, TypeWelcome, frame.ID, "", WelcomePayload{

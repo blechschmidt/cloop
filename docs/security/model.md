@@ -163,6 +163,24 @@ decorative — still cannot. Nor does it widen the namespace's blast radius:
 to read any Secret in the namespace by mounting it into a Pod and printing it.
 The namespace has always been the boundary. Run workloads in one of their own.
 
+### Between hub members
+
+The trusted core may be several processes: `cloop ui` instances serving one
+control plane as a [hub cluster](../architecture/hub-cluster.md). They are not a
+numbered boundary, because they trust each other exactly as much as one hub
+trusts itself — they share its database. What needs protecting is the channel
+between them, which clients can reach too:
+
+| Concern | Mechanism | Where |
+| --- | --- | --- |
+| A client posing as a member | HMAC over sender, recipient, time, nonce, method, URI and client address, keyed by a secret in the control-plane database; a failed claim is refused with `403`, never served as an ordinary request | `pkg/hubcluster/peer.go` |
+| Replay | Single-use nonce at the recipient within a two-minute window; the signature names the recipient, so no other member accepts it | `pkg/hubcluster/peer.go` |
+| Authorization on the forwarded request | Re-evaluated by the member that answers, from the caller's own cookie or token — forwarding moves a request, it does not vouch for it | `pkg/ui/cluster.go` |
+| Confidentiality | `https://` advertise URLs where the traffic can be observed, verified against the system roots, the hub's certificate and `ui.cluster.peer_ca_file`; plain HTTP is for loopback and one node's Pod network | `cmd/ui_cluster.go` |
+
+[Hub members](threat-model.md#cross-cutting-hub-members) in the threat model
+lists what remains.
+
 ### The kernel underneath the sandbox
 
 Boundaries ③ and ④ both end at a workload that shares the **executing machine's

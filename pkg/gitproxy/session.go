@@ -458,6 +458,15 @@ func (r *Registry) Sessions() []*Session {
 	return out
 }
 
+// Known reports whether id names a session this registry holds, live or not.
+// It does not authenticate anything; see Options.Fallback for its one use.
+func (r *Registry) Known(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.sessions[id]
+	return ok
+}
+
 // Close revokes a session. It is idempotent, so a driver can call it from a
 // defer without checking whether the run already ended.
 func (r *Registry) Close(id, reason string) {

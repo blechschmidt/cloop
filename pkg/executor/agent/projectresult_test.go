@@ -176,6 +176,41 @@ func TestAgentReturnsTheRunsProjectBeforeItsFinalStatus(t *testing.T) {
 	}
 }
 
+// TestStatusStaysRunningUntilTheFinalStatusIsSent (Task 20354): between the
+// process exiting and its final status the agent reads the run's changes back
+// and produces the write-back, and the hub settles a run the moment it sees a
+// terminal state. A status request answered in that window must therefore say
+// "running" — answered terminal, it closed the hub's handle, the project
+// result that followed was refused, and the run settled without its changes.
+func TestStatusStaysRunningUntilTheFinalStatusIsSent(t *testing.T) {
+	exited := executor.Status{State: executor.StateExited, FinishedAt: time.Now()}
+	wl := &workload{}
+
+	// Still draining output: not terminal yet.
+	if got := wl.draining(exited); got.State != executor.StateRunning {
+		t.Fatalf("while draining output = %s, want running", got.State)
+	}
+	// Output drained, result and status not yet sent: still not terminal.
+	wl.mu.Lock()
+	wl.finished = true
+	wl.mu.Unlock()
+	if got := wl.draining(exited); got.State != executor.StateRunning || !got.FinishedAt.IsZero() {
+		t.Fatalf("after the pump, before the final status = %s (finished %v), want running",
+			got.State, got.FinishedAt)
+	}
+	// The final status went out: from here on the truth is the truth.
+	wl.mu.Lock()
+	wl.reported = true
+	wl.mu.Unlock()
+	if got := wl.draining(exited); got.State != executor.StateExited {
+		t.Fatalf("after the final status = %s, want exited", got.State)
+	}
+	// A non-terminal state is never rewritten.
+	if got := (&workload{}).draining(executor.Status{State: executor.StateRunning}); got.State != executor.StateRunning {
+		t.Fatalf("running = %s", got.State)
+	}
+}
+
 // TestAgentSendsNoProjectResultToAnOlderHub: a v12 hub has no case for the
 // frame and answers it with a protocol error. The agent must stay silent on
 // such a session — and the run must still end normally.

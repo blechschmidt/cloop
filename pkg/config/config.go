@@ -11,6 +11,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1493,6 +1494,76 @@ type UIConfig struct {
 	// CI federates CI/CD pipeline OIDC identities and relays their Anthropic
 	// calls. Disabled by default; see CIConfig.
 	CI CIConfig `yaml:"ci,omitempty"`
+
+	// Cluster configures how this hub process cooperates with others serving
+	// the same control plane. See ClusterConfig.
+	Cluster ClusterConfig `yaml:"cluster,omitempty"`
+}
+
+// ClusterConfig is how several `cloop ui` processes share one control plane
+// (Task 20354).
+//
+// Nothing here has to be set for a cluster to form: every hub process joins
+// the control plane at its working directory as a member, and a second one
+// started against the same state.db joins the first instead of refusing to
+// start. What these settings decide is how the members reach each other, which
+// only matters once there is more than one.
+type ClusterConfig struct {
+	// AdvertiseURL is how other members reach this process's HTTP listener,
+	// e.g. http://10.0.3.17:8080 — a request another member must answer (a
+	// Stop for a run it streams, a login callback for a login it began) is
+	// forwarded there. Empty uses http(s)://127.0.0.1:<port>, which is right
+	// for members on one machine. Per process, so it belongs in the instance
+	// overlay (config.ui-<port>.yaml), the --advertise-url flag or
+	// CLOOP_CLUSTER_ADVERTISE_URL rather than the shared config.yaml.
+	AdvertiseURL string `yaml:"advertise_url,omitempty"`
+
+	// PeerServerName is the name a member's TLS certificate is verified
+	// against when its advertise URL is an https address by IP. Empty uses the
+	// host of ui.external_url.
+	PeerServerName string `yaml:"peer_server_name,omitempty"`
+
+	// PeerCAFile is a PEM bundle trusted for members' certificates, on top of
+	// the system roots and this process's own ui.tls certificate.
+	PeerCAFile string `yaml:"peer_ca_file,omitempty"`
+
+	// Exclusive restores the pre-cluster rule: this process refuses to start
+	// while another hub serves the control plane, and a hub started beside it
+	// refuses too. For an operator who wants one process and a guarantee of
+	// it.
+	Exclusive bool `yaml:"exclusive,omitempty"`
+}
+
+// Validate reports a malformed cluster block.
+func (c ClusterConfig) Validate() error {
+	if u := strings.TrimSpace(c.AdvertiseURL); u != "" {
+		if err := ValidateAdvertiseURL(u); err != nil {
+			return fmt.Errorf("ui.cluster.advertise_url: %w", err)
+		}
+	}
+	return nil
+}
+
+// ValidateAdvertiseURL checks that u is an absolute http(s) URL with a host and
+// no path, query or credentials — a base other members append request paths to.
+func ValidateAdvertiseURL(u string) error {
+	parsed, err := url.Parse(strings.TrimSpace(u))
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%q must be an http or https URL", u)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%q has no host", u)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%q must not carry credentials", u)
+	}
+	if p := strings.Trim(parsed.Path, "/"); p != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%q must be a bare origin, with no path or query", u)
+	}
+	return nil
 }
 
 // CIConfig turns a cloop hub into an OIDC relying party for CI/CD pipelines,

@@ -166,9 +166,11 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		fmt.Fprintf(os.Stderr,
 			"ui: kubernetes monitor decisions will go to stderr, not the audit trail: %v\n", dbErr)
 	}
-	reg.OnEvent = kubeGuardAuditSink(auditDB)
+	reg.OnEvent = withProxySessionOwnership(ownerKubeGuard, kubeGuardSessionEvent, kubeGuardAuditSink(auditDB))
 
-	px, err := kubeguard.New(reg, kubeguard.Options{})
+	px, err := kubeguard.New(reg, kubeguard.Options{
+		Fallback: clusterProxyFallback(ownerKubeGuard, clusterAPIProxyKube),
+	})
 	if err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("kubernetes monitor: %w", err)

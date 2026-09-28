@@ -235,6 +235,37 @@ func LoadHandles(store HandleStore, executorID string) []HandleRecord {
 	return recs
 }
 
+// ForeignHandleLister is implemented by a HandleStore that hides the rows
+// another live control-plane member tracks (Task 20354).
+//
+// A hub member must not *adopt* a workload a live peer is streaming — two
+// members watching one container would both settle it — so its drivers
+// rehydrate from a store that leaves those rows out. But an orphan sweep asks
+// the opposite question, "is anyone tracking this?", and answering it from the
+// same filtered view would reap a peer's live workload as an orphan. This is
+// how a sweep sees the rows it may not adopt.
+type ForeignHandleLister interface {
+	ListForeignHandles(executorID string) ([]HandleRecord, error)
+}
+
+// TrackedElsewhere returns executorID's rows that another live member tracks,
+// or nil when store is not member-scoped. A read failure yields nil and is
+// logged: the sweeps that call this also hold a grace period, which is the
+// guard that holds when this one cannot.
+func TrackedElsewhere(store HandleStore, executorID string) []HandleRecord {
+	lister, ok := store.(ForeignHandleLister)
+	if !ok || lister == nil {
+		return nil
+	}
+	recs, err := lister.ListForeignHandles(executorID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "executor: could not list handles other hub members track for %s: %v\n",
+			executorID, err)
+		return nil
+	}
+	return recs
+}
+
 // MemoryHandleStore is an in-memory HandleStore for tests and for embedders
 // with no state database. It is concurrency-safe and, being a map, forgets
 // everything on process exit — which makes it useful for asserting that a

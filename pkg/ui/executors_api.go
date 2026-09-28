@@ -72,6 +72,12 @@ type executorView struct {
 	Status   string `json:"status"`
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// ConnectedVia names the hub process holding this edge agent's socket,
+	// when it is not the one answering (Task 20354). The device is online;
+	// its live details — running handles, a health probe — are that
+	// process's to report.
+	ConnectedVia string `json:"connected_via,omitempty"`
+
 	// Registered reports presence in the live registry. False means the
 	// backend is recorded but this process cannot dispatch to it — a
 	// container executor whose config section was removed, say.
@@ -590,6 +596,17 @@ func (s *Server) buildExecutorView(
 	caps := ex.Capabilities()
 	view.Capabilities = &caps
 	view.Isolation = string(caps.Isolation)
+
+	// An edge agent connected to another hub member (Task 20354) has no
+	// session here, and asking it for a health check would report a healthy
+	// device offline on every member but one.
+	if member, held := s.agentHeldByPeer(ex); held {
+		view.Status = statedb.ExecutorStatusOnline
+		view.ConnectedVia = member
+		view.Blocked, view.BlockedReason = blockedFor(ex)
+		s.annotateRevocation(&view, ex)
+		return view
+	}
 
 	healthCtx, cancel := context.WithTimeout(ctx, executorHealthTimeout)
 	defer cancel()
@@ -1139,6 +1156,9 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		Actor:      s.auditActor(r),
 		Detail:     map[string]any{"name": row.Name, "kind": string(row.Kind)},
 	})
+	// The device may be connected to another hub member, and every member
+	// has it in its registry (Task 20354).
+	s.publishAgentChange(id, agentEventDeleted)
 	s.broadcastAuditAppend("revoke")
 	s.broadcastExecutorUpdate("revoked", id)
 	jsonOK(w, map[string]any{"ok": true, "id": id, "revoked": true})
@@ -1807,15 +1827,22 @@ func (s *Server) broadcastExecutorUpdate(event, executorID string) {
 	if err != nil {
 		return
 	}
-	msg := wsMessage{Type: "executor_update", Data: json.RawMessage(payload)}
+	// Every hub member's clients, not only this one's (Task 20354): the
+	// change is to a hub-wide resource another member's dashboard is showing.
+	s.broadcastToAll(wsMessage{Type: "executor_update", Data: json.RawMessage(payload)})
+}
 
-	s.hubMu.Lock()
-	for _, clients := range s.hubClients {
-		for hc := range clients {
-			s.sendOrLag(hc, msg)
-		}
+// broadcastExecutorUpdateLocal is broadcastExecutorUpdate for this hub
+// member's clients only — for a change another member already announced.
+func (s *Server) broadcastExecutorUpdateLocal(event, executorID string) {
+	payload, err := json.Marshal(map[string]any{
+		"event":       event,
+		"executor_id": executorID,
+	})
+	if err != nil {
+		return
 	}
-	s.hubMu.Unlock()
+	s.deliverToAll(wsMessage{Type: "executor_update", Data: json.RawMessage(payload)})
 }
 
 // makeExecutorStatusBroadcaster wraps a status mirror so a device going
@@ -1843,6 +1870,10 @@ func (s *Server) makeExecutorEnrollBroadcaster(
 		if inner != nil {
 			inner(agent, caps)
 		}
+		// Other hub members restored their fleet before this device existed;
+		// they register it now, so a project bound to it resolves there too
+		// (Task 20354).
+		s.publishAgentChange(agent.AgentID, agentEventEnrolled)
 		s.broadcastExecutorUpdate("redeemed", agent.AgentID)
 	}
 }

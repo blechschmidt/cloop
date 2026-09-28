@@ -169,10 +169,41 @@ type Enforcer struct {
 	// this process, and refusing to admit because SQLite was briefly
 	// locked would convert a durability problem into an outage.
 	onStoreError func(error)
+
+	// shared makes the store authoritative (WithSharedCounters), and
+	// lastSync is when counters were last refreshed from it.
+	shared   bool
+	lastSync time.Time
 }
+
+// AtomicStore is a Store whose counters can be adjusted in one atomic step,
+// check included (Task 20354). See statedb.AdjustQuotaCounter.
+type AtomicStore interface {
+	// AdjustCounter adds delta to a counter and returns the value afterwards.
+	// With enforce set and delta positive it refuses — admitted false, counter
+	// unchanged — an addition that would exceed limit. The value never goes
+	// below zero.
+	AdjustCounter(identity string, res Resource, bucket string, delta, limit float64, enforce bool, at time.Time) (value float64, admitted bool, err error)
+}
+
+// sharedSyncInterval bounds how stale a shared enforcer's view of other
+// processes' counters may be when it only reads them (the panel, the spend
+// check). Admission never uses the cached view: it asks the store.
+const sharedSyncInterval = time.Second
 
 // Option configures an Enforcer.
 type Option func(*Enforcer)
+
+// WithSharedCounters makes the store, not this process's memory, the
+// authority for every counter (Task 20354). For hub processes that share one
+// control plane: each admits against the same rows through AtomicStore, so a
+// cap of two concurrent runs means two across all of them rather than two per
+// process, and reads are refreshed from the store rather than answered from a
+// memory that only saw this process's admissions. Ignored when the store does
+// not implement AtomicStore.
+func WithSharedCounters() Option {
+	return func(e *Enforcer) { e.shared = true }
+}
 
 // WithClock replaces the clock, for tests and for day-rollover assertions.
 func WithClock(now func() time.Time) Option {
@@ -376,8 +407,33 @@ func (e *Enforcer) Admit(subject *authz.Subject, res Resource, n float64) (Effec
 	e.rememberSubjectLocked(subject)
 	eff := e.resolveLocked(subject)
 	key := counterKey{identity, res, bucket}
-	used := e.counters[key]
 
+	if as := e.atomicStore(); as != nil {
+		limit, capped := eff.Limits.Get(res)
+		value, admitted, err := as.AdjustCounter(identity, res, bucket, n, limit, capped, e.now())
+		if err == nil {
+			e.setCounterLocked(key, value)
+			if !admitted {
+				e.denials[res]++
+				return eff, &Denial{
+					Identity:   identity,
+					Resource:   res,
+					Limit:      limit,
+					Used:       value,
+					Requested:  n,
+					RetryAfter: e.retryAfter(res),
+					Source:     eff.Sources[res],
+				}
+			}
+			return eff, nil
+		}
+		// The shared store is unreachable. Enforce against this process's
+		// view rather than not at all — the same trade the unshared path
+		// makes when persistence fails.
+		e.reportStoreError(fmt.Errorf("quota: shared admission: %w", err))
+	}
+
+	used := e.counters[key]
 	if limit, ok := eff.Limits.Get(res); ok && used+n > limit {
 		e.denials[res]++
 		return eff, &Denial{
@@ -408,6 +464,15 @@ func (e *Enforcer) Release(identity string, res Resource, n float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if as := e.atomicStore(); as != nil {
+		value, _, err := as.AdjustCounter(identity, res, "", -n, 0, false, e.now())
+		if err == nil {
+			e.setCounterLocked(key, value)
+			return
+		}
+		e.reportStoreError(fmt.Errorf("quota: shared release: %w", err))
+	}
+
 	remaining := e.counters[key] - n
 	if remaining <= 0 {
 		delete(e.counters, key)
@@ -429,6 +494,29 @@ func (e *Enforcer) Spend(identity string, tokens, usd float64) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if as := e.atomicStore(); as != nil {
+		failed := false
+		for _, add := range []struct {
+			res Resource
+			n   float64
+		}{{ResDailyTokens, tokens}, {ResDailyCostUSD, usd}} {
+			if add.n <= 0 {
+				continue
+			}
+			k := counterKey{identity, add.res, bucket}
+			value, _, err := as.AdjustCounter(identity, add.res, bucket, add.n, 0, false, e.now())
+			if err != nil {
+				e.reportStoreError(fmt.Errorf("quota: shared spend: %w", err))
+				failed = true
+				break
+			}
+			e.setCounterLocked(k, value)
+		}
+		if !failed {
+			return
+		}
+	}
 
 	if tokens > 0 {
 		k := counterKey{identity, ResDailyTokens, bucket}
@@ -458,6 +546,7 @@ func (e *Enforcer) CheckSpend(subject *authz.Subject) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncSharedLocked()
 
 	// Remember the claims, as every other subject-taking entry point does.
 	// The hub's spend drain resolves this identity's ceiling later, from the
@@ -518,6 +607,7 @@ func (e *Enforcer) CheckSpendIdentity(identity string) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncSharedLocked()
 
 	// Not resolveLocked: that looks the override up by subject.Label(), which
 	// is the same non-round-tripping key the counter problem above turns on.
@@ -565,6 +655,7 @@ func (e *Enforcer) Usage(identity string) Usage {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncSharedLocked()
 	return e.usageLocked(identity, bucket)
 }
 
@@ -635,6 +726,7 @@ func (e *Enforcer) Snapshot(extra []string) []View {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncSharedLocked()
 
 	seen := make(map[string]struct{}, len(e.overrides)+len(e.subjects)+len(extra))
 	for id := range e.overrides {
@@ -678,6 +770,7 @@ func (e *Enforcer) ViewFor(subject *authz.Subject) View {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncSharedLocked()
 	e.rememberSubjectLocked(subject)
 	eff := e.resolveLocked(subject)
 	_, overridden := e.overrides[identity]
@@ -690,7 +783,86 @@ func (e *Enforcer) ViewFor(subject *authz.Subject) View {
 	}
 }
 
+// ReloadOverrides re-reads every override from the store (Task 20354). Another
+// hub process sharing this control plane wrote one, and this process's copy —
+// read once at Load — would otherwise go on enforcing the old limit until a
+// restart.
+func (e *Enforcer) ReloadOverrides() error {
+	if e == nil || e.store == nil {
+		return nil
+	}
+	overrides, err := e.store.LoadOverrides()
+	if err != nil {
+		return fmt.Errorf("quota: reload overrides: %w", err)
+	}
+	fresh := make(map[string]Limits, len(overrides))
+	for _, o := range overrides {
+		if o.Identity == "" {
+			continue
+		}
+		fresh[o.Identity] = o.Limits.Clone()
+	}
+	e.mu.Lock()
+	e.overrides = fresh
+	e.lastSync = time.Time{}
+	e.mu.Unlock()
+	return nil
+}
+
+// Shared reports whether the store is authoritative for this enforcer.
+func (e *Enforcer) Shared() bool { return e != nil && e.atomicStore() != nil }
+
 // ── internals ───────────────────────────────────────────────────────────────
+
+// atomicStore returns the store as an AtomicStore when shared mode is on and
+// the store supports it.
+func (e *Enforcer) atomicStore() AtomicStore {
+	if !e.shared || e.store == nil {
+		return nil
+	}
+	as, _ := e.store.(AtomicStore)
+	return as
+}
+
+// setCounterLocked caches a value the store just returned.
+func (e *Enforcer) setCounterLocked(k counterKey, value float64) {
+	if value <= 0 {
+		delete(e.counters, k)
+		return
+	}
+	e.counters[k] = value
+}
+
+// syncSharedLocked refreshes the cached counters from the store when shared
+// mode is on and the cache is older than sharedSyncInterval, so reads see what
+// other processes admitted and spent.
+func (e *Enforcer) syncSharedLocked() {
+	if e.atomicStore() == nil {
+		return
+	}
+	now := e.now()
+	if !e.lastSync.IsZero() && now.Sub(e.lastSync) < sharedSyncInterval {
+		return
+	}
+	rows, err := e.store.LoadCounters()
+	if err != nil {
+		e.reportStoreError(fmt.Errorf("quota: refresh shared counters: %w", err))
+		return
+	}
+	today := e.dayBucket(now)
+	fresh := make(map[counterKey]float64, len(rows))
+	for _, c := range rows {
+		if c.Identity == "" || !c.Resource.Valid() || c.Value <= 0 {
+			continue
+		}
+		if c.Resource.Kind() == KindDaily && c.Bucket != today {
+			continue
+		}
+		fresh[counterKey{c.Identity, c.Resource, c.Bucket}] = c.Value
+	}
+	e.counters = fresh
+	e.lastSync = now
+}
 
 func (e *Enforcer) resolveLocked(subject *authz.Subject) Effective {
 	return e.resolver.Resolve(subject, e.overrides[subject.Label()])

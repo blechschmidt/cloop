@@ -225,11 +225,18 @@ func (s *Server) buildCIService(cfg *config.Config) (*ciService, error) {
 	if audience == "" {
 		audience = ciauth.DefaultAudience
 	}
-	verifier, err := ciauth.NewVerifier(ciauth.VerifierConfig{
+	vcfg := ciauth.VerifierConfig{
 		Issuer:    issuer,
 		Audience:  audience,
 		ClockSkew: time.Duration(c.ClockSkew()) * time.Second,
-	})
+	}
+	// One token, one exchange, across every hub process (Task 20354).
+	if n := s.clusterNode(); n != nil {
+		vcfg.SharedReplay = func(jti string, expires time.Time) (bool, error) {
+			return n.MarkSeen("ci_jti", jti, expires)
+		}
+	}
+	verifier, err := ciauth.NewVerifier(vcfg)
 	if err != nil {
 		return nil, err
 	}
@@ -263,11 +270,14 @@ func (s *Server) buildCIService(cfg *config.Config) (*ciService, error) {
 	}
 
 	reg := claudeproxy.NewRegistry(strings.TrimSuffix(cfg.UI.ExternalURL, "/") + ciMountPath)
-	reg.OnEvent = ciAuditSink(auditDB)
+	reg.OnEvent = withProxySessionOwnership(ownerCISession, ciSessionEvent, ciAuditSink(auditDB))
 
 	px, err := claudeproxy.New(reg, claudeproxy.Options{
 		Upstream:   upstream,
 		PathPrefix: ciMountPath,
+		// A CI session is minted by the hub process that took the pipeline's
+		// token exchange; its relayed calls reach any of them (Task 20354).
+		Fallback: s.ciRelayFallback,
 	})
 	if err != nil {
 		return nil, err

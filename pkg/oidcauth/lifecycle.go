@@ -296,6 +296,7 @@ func (a *Authenticator) terminate(rec SessionRecord, event auditaction.Action, r
 	a.mu.Lock()
 	delete(a.cache, rec.ID)
 	a.mu.Unlock()
+	a.notifyInvalidated(rec.ID)
 
 	existed, err := a.store.Delete(rec.ID)
 	if err != nil || !existed {
@@ -358,6 +359,7 @@ func (a *Authenticator) LogoutAll(subject, keepID, actor string) (int, error) {
 	}
 	a.mu.Unlock()
 	for _, rec := range gone {
+		a.notifyInvalidated(rec.ID)
 		a.auditTermination(rec, AuditSessionRevoked, "logout_all", actor)
 	}
 	return len(gone), nil
@@ -386,6 +388,7 @@ func (a *Authenticator) RevokeSession(id, actor, reason string) (bool, error) {
 	a.mu.Lock()
 	delete(a.cache, id)
 	a.mu.Unlock()
+	a.notifyInvalidated(id)
 
 	existed, err := a.store.Delete(id)
 	if err != nil {
@@ -472,6 +475,9 @@ func (a *Authenticator) SweepExpired() int {
 	}
 	a.mu.Unlock()
 	for _, rec := range gone {
+		a.notifyInvalidated(rec.ID)
+	}
+	for _, rec := range gone {
 		reason := "idle_timeout"
 		if rec.Expired(now) {
 			reason = "absolute_ttl"
@@ -505,11 +511,35 @@ func (a *Authenticator) RevalidateDue(ctx context.Context) (int, int) {
 		if ctx.Err() != nil {
 			break
 		}
-		if a.revalidate(ctx, rec).terminated {
+		if a.revalidateDueLocked(ctx, rec, cutoff) {
 			terminated++
 		}
 	}
 	return len(due), terminated
+}
+
+// revalidateDueLocked is one iteration of RevalidateDue under the refresh
+// lock. The row is re-read once the lock is held: a synchronous claim refresh
+// on another process may have redeemed this session's token while the lock
+// was being waited for, and redeeming the token that refresh just rotated
+// away would end the session.
+func (a *Authenticator) revalidateDueLocked(ctx context.Context, rec SessionRecord, cutoff time.Time) bool {
+	release, err := a.lockRefresh(ctx, rec.ID)
+	if err != nil {
+		return false
+	}
+	defer release()
+	if a.cfg.RefreshLock != nil {
+		fresh, err := a.store.Get(rec.ID)
+		if err != nil {
+			return false // gone meanwhile; nothing to revalidate
+		}
+		if fresh.RefreshCheckedAt.After(cutoff) {
+			return false // somebody else just did
+		}
+		rec = fresh
+	}
+	return a.revalidate(ctx, rec).terminated
 }
 
 // revalidateOutcome is what one revalidation established, for the two callers
@@ -789,6 +819,15 @@ func (a *Authenticator) invalidateCache(id string) {
 	a.mu.Lock()
 	delete(a.cache, id)
 	a.mu.Unlock()
+	a.notifyInvalidated(id)
+}
+
+// notifyInvalidated tells whoever else caches sessions that id changed. See
+// Config.OnCacheInvalidate.
+func (a *Authenticator) notifyInvalidated(id string) {
+	if a.cfg.OnCacheInvalidate != nil && id != "" {
+		a.cfg.OnCacheInvalidate(id)
+	}
 }
 
 // refreshGrant performs the refresh_token grant.

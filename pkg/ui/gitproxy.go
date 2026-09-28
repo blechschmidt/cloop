@@ -178,9 +178,13 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		fmt.Fprintf(os.Stderr,
 			"ui: git proxy decisions will go to stderr, not the audit trail: %v\n", dbErr)
 	}
-	reg.OnEvent = gitProxyAuditSink(auditDB)
+	// Sessions are recorded as owned by this process, so another hub process
+	// the sandbox's git request reaches can forward it here (Task 20354).
+	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent, gitProxyAuditSink(auditDB))
 
-	px, err := gitproxy.New(reg, gitproxy.Options{})
+	px, err := gitproxy.New(reg, gitproxy.Options{
+		Fallback: clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
+	})
 	if err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("git proxy: %w", err)

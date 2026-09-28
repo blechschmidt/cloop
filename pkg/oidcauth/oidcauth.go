@@ -257,6 +257,70 @@ type Config struct {
 	// It is consulted only on the revalidation path, never per request, so
 	// its cost is paid once per session per refresh interval.
 	EffectiveRole func(identity string, groups, roles []string) (role string, rank int)
+
+	// StatePrefix, when set, begins every login's state parameter, followed
+	// by a dot (Task 20354). The state is the one value the identity
+	// provider hands back unchanged on the callback, and a login's nonce and
+	// PKCE verifier live only in the memory of the process that began it —
+	// so on a control plane served by several hub processes the state has to
+	// say which one that was, and the process the callback reaches forwards
+	// it there. See StateOwner. It must not contain a dot.
+	StatePrefix string
+
+	// OnCacheInvalidate, when set, is told each time a session's cached copy
+	// is dropped because the session changed — revoked, logged out, expired,
+	// or its claims refreshed (Task 20354). Other hub processes sharing the
+	// session store keep their own caches, and without this they would go on
+	// honouring a revoked session until their copy aged out. It must not
+	// block.
+	OnCacheInvalidate func(sessionID string)
+
+	// RefreshLock, when set, serialises refresh-token redemptions for one
+	// session across every process sharing the session store (Task 20354).
+	// It returns once the caller holds the right to redeem, and the release
+	// to call afterwards. A single process collapses concurrent refreshes of
+	// one session into one flight; several processes cannot see each other's
+	// flights, and a provider that rotates refresh tokens answers the second
+	// redemption of one token with invalid_grant — which ends the session. A
+	// dashboard's page load fans out across processes, so without this the
+	// first privileged page load after the claims went stale would sign the
+	// user out.
+	RefreshLock func(ctx context.Context, sessionID string) (release func(), err error)
+}
+
+// StateOwner returns the StatePrefix a login's state parameter carries, or ""
+// when it carries none.
+func StateOwner(state string) string {
+	prefix, _, found := strings.Cut(state, ".")
+	if !found {
+		return ""
+	}
+	return prefix
+}
+
+// EvictCachedSession drops this process's cached copy of a session another
+// process changed, without telling anyone (Task 20354). Compare
+// invalidateCache, which is for changes made here.
+func (a *Authenticator) EvictCachedSession(sessionID string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.cache, sessionID)
+	a.mu.Unlock()
+}
+
+// EvictAllCachedSessions drops every cached session — for when the change
+// another process made cannot be narrowed to one (a bulk logout).
+func (a *Authenticator) EvictAllCachedSessions() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	for k := range a.cache {
+		delete(a.cache, k)
+	}
+	a.mu.Unlock()
 }
 
 // Identity is the authenticated user extracted from a validated ID token.
@@ -676,6 +740,9 @@ func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) Login
 		return LoginDiscoveryFailed
 	}
 	state, err1 := randToken()
+	if a.cfg.StatePrefix != "" && err1 == nil {
+		state = a.cfg.StatePrefix + "." + state
+	}
 	nonce, err2 := randToken()
 	verifier, err3 := randToken()
 	if err := errors.Join(err1, err2, err3); err != nil {

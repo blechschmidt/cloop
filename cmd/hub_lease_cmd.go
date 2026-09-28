@@ -38,13 +38,15 @@ import (
 
 var hubLeaseCmd = &cobra.Command{
 	Use:   "lease",
-	Short: "Inspect or release the control-plane lease that fences this hub's state",
-	Long: `Inspect or release the instance lease on this directory's control plane.
+	Short: "Inspect or release the control-plane lease held by the leading hub process",
+	Long: `Inspect or release the lease on this directory's control plane.
 
-One cloop hub owns one .cloop/state.db. The hub keeps its project-status cache,
-run registry and WebSocket clients in memory, so a second hub against the same
-database does not share load — it diverges, silently, while both run the same
-background sweeps. The lease makes that a startup error instead.
+Several ` + "`cloop ui`" + ` processes may serve one .cloop/state.db (see ` + "`cloop hub cluster status`" + `).
+The lease is held by whichever of them leads — the one that runs the work that
+must happen exactly once: retention, backups, auto-resume, the session janitor.
+A leader that stops renewing loses it to another member within its TTL. With
+ui.cluster.exclusive set the lease is the older, stricter fence: one hub, and a
+second refuses to start.
 
   cloop hub lease status    who holds it, and when it lapses
   cloop hub lease clear     release a lapsed lease explicitly`,
@@ -109,7 +111,7 @@ process is already gone, how long remains before the lease lapses on its own.`,
 		if st.Live {
 			fmt.Printf("  lapses in  %s if the holder stops renewing\n", st.Expires.Round(time.Second))
 			fmt.Println()
-			dim.Println("  Starting a second hub here will refuse while this lease is held.")
+			dim.Println("  The holder leads the hub cluster; another member takes over if it stops renewing.")
 		}
 		return nil
 	},

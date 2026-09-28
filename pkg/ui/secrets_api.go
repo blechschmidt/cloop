@@ -277,6 +277,9 @@ type leaseView struct {
 	Revocable bool `json:"revocable"`
 	// Holders lists the remote executors currently holding this lease.
 	Holders []string `json:"holders,omitempty"`
+	// Member is the hub process that issued the lease and keeps it alive, on
+	// a control plane several of them serve (Task 20354). Empty otherwise.
+	Member string `json:"member,omitempty"`
 }
 
 // brokerStatusView tells the panel whether the secret store is usable, and
@@ -1204,15 +1207,29 @@ func (s *Server) handleLeasesList(w http.ResponseWriter, r *http.Request) {
 		names[entry.Path] = entry.Name
 	}
 
-	now := time.Now()
-	resp := leasesListResponse{Leases: []leaseView{}}
+	resp := leasesListResponse{Leases: s.localLeaseViews(names)}
 	resp.Broker.SecretsAvailable = true
 	resp.Broker.EgressAvailable = true
+	// Every hub member's leases, not only this one's (Task 20354): a lease
+	// lives in the memory of the member that issued it, and a panel that
+	// listed one member's would show an outstanding credential as absent.
+	resp.Leases = append(resp.Leases, s.peerLeaseViews(r.Context())...)
+	jsonOK(w, resp)
+}
+
+// localLeaseViews renders the leases this hub process issued.
+func (s *Server) localLeaseViews(names map[string]string) []leaseView {
+	now := time.Now()
+	out := []leaseView{}
 
 	// Indexed once for the whole table rather than per row: the fleet log is
 	// a single in-memory snapshot, and asking the hub per lease would turn an
 	// O(1) read into O(leases × executors).
 	revocations := s.fleetRevocations()
+	member := ""
+	if n := s.clusterNode(); n != nil {
+		member = n.ID()
+	}
 
 	for _, sl := range liveLeases.snapshot() {
 		l := sl.lease
@@ -1245,9 +1262,10 @@ func (s *Server) handleLeasesList(w http.ResponseWriter, r *http.Request) {
 				Summary:    m.Summary,
 			})
 		}
-		resp.Leases = append(resp.Leases, view)
+		view.Member = member
+		out = append(out, view)
 	}
-	jsonOK(w, resp)
+	return out
 }
 
 // handleLeaseRevoke serves POST /api/leases/{id}/revoke.
@@ -1591,13 +1609,7 @@ func (s *Server) broadcastSecretsUpdate(event, id string) {
 	if err != nil {
 		return
 	}
-	msg := wsMessage{Type: "secrets_update", Data: json.RawMessage(payload)}
-
-	s.hubMu.Lock()
-	for _, clients := range s.hubClients {
-		for hc := range clients {
-			s.sendOrLag(hc, msg)
-		}
-	}
-	s.hubMu.Unlock()
+	// Every hub member's clients, not only this one's (Task 20354): the
+	// change is to a hub-wide resource another member's dashboard is showing.
+	s.broadcastToAll(wsMessage{Type: "secrets_update", Data: json.RawMessage(payload)})
 }

@@ -65,6 +65,16 @@ func (r *RunningDirs) add(cwd string) {
 	}
 }
 
+// Add records a run known by other means than this host's process table — a
+// run another hub process is streaming (Task 20354), or one this process
+// dispatched to an executor whose workload is not a local process.
+func (r *RunningDirs) Add(dir string) {
+	if dir == "" {
+		return
+	}
+	r.add(dir)
+}
+
 // Any reports whether any cloop run process was found at all. A hub whose
 // tenants are all idle gets a false here and can skip per-project work.
 func (r RunningDirs) Any() bool { return len(r.dirs) > 0 }

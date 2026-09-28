@@ -48,7 +48,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
@@ -336,9 +335,13 @@ const maxSTTKeyBytes = 4096
 //
 // config.Save is atomic, so the file is never torn — but two writers that both
 // read before either wrote would still lose one of the two edits. The window is
-// tiny and the contention is nil (an operator typing into a settings form), so
-// a plain mutex is the whole fix.
-var hubConfigMu sync.Mutex
+// tiny and the contention is nil (an operator typing into a settings form).
+//
+// A mutex was the whole fix while one process wrote the file. Several hub
+// processes may now serve one control plane (Task 20354), and two operators
+// saving settings on two of them are two writers the mutex cannot see — so it
+// also takes an advisory lock on the file, which every member honours.
+var hubConfigMu hubConfigLock
 
 // sttSettings is the Settings panel's view of the dictation credential.
 //

@@ -902,6 +902,20 @@ The dashboard shows: project goal, status, step history with outputs, task list 
 |------|---------|-------------|
 | `--port` | `8080` | Port to listen on |
 | `--no-browser` | `false` | Do not open the browser automatically |
+| `--advertise-url` | `http(s)://127.0.0.1:<port>` | Where the other hubs serving this directory reach this one (also `CLOOP_CLUSTER_ADVERTISE_URL`, or `CLOOP_CLUSTER_ADVERTISE_HOST` for the host alone) |
+
+Several `cloop ui` in one directory serve it together, as members of one
+[hub cluster](../architecture/hub-cluster.md) behind a load balancer:
+
+```bash
+cloop ui --port 8080 --no-browser &
+cloop ui --port 8081 --no-browser &
+cloop hub cluster status     # the members, the leader, and where each is reached
+```
+
+`cloop hub cluster status [--json]` reads the database directly, so it also
+answers while every member is down, and lists members that stopped within the
+last day as gone.
 
 ### `cloop hub`
 

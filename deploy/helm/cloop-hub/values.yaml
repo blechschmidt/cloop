@@ -22,27 +22,34 @@ image:
 nameOverride: ""
 fullnameOverride: ""
 
-# One replica, and the chart refuses to render with more.
+# Hub processes serving this release. Every replica is a member of one hub
+# cluster (docs/architecture/hub-cluster.md): the Service may send any request
+# to any replica, a member forwards what only another can answer — a Stop for a
+# run another member streams, a login callback for a login another began — and
+# when a replica goes away, crashed or replaced by an upgrade, the others pick
+# up its runs, agents and sessions. `cloop hub cluster status` in any Pod shows
+# the members, the leader and who owns what.
 #
-# Not a conservative default to raise once you trust it: the hub is not
-# horizontally scalable, and raising this does not distribute load. Its
-# project-status cache, run registry and WebSocket client set live in process
-# memory, and an event reaches only the clients of the Pod that produced it —
-# so a second replica serves a second, quietly diverging view of the same
-# database while duplicating every background sweep against it.
+# What replicas buy: upgrades and Pod restarts without downtime, and request,
+# WebSocket and agent connections spread over several processes. What they do
+# not buy is a second node. The control plane is one SQLite database, and
+# SQLite's write-ahead log needs every process using it on one kernel, so the
+# chart pins the replicas to the node the volume is attached to (a required
+# podAffinity term, added to whatever `affinity` sets) and refuses to render
+# them without persistence — Pods on their own emptyDirs would be separate
+# hubs. For capacity to run more work, move the work to executors
+# (executor.kubernetes.enabled): those scale out across the cluster.
 #
-# cloop enforces this itself: one hub holds a lease on the control plane
-# (`cloop hub lease status`), and a second refuses to start rather than
-# diverge. Extra replicas would CrashLoopBackOff, so the chart fails at
-# template time with the reason attached instead.
-#
-# The Deployment uses Recreate for the same constraint — a rolling update
-# would run two Pods against one volume during the handover, and the new one
-# would refuse to start until the old one released its lease.
-#
-# To handle more load: give the hub more resources, or move work off it with
-# executor.kubernetes.enabled. Executors scale out; the control plane does not.
+# With more than one replica the Deployment rolls: a replacement joins before a
+# member leaves, and a leaving member hands its runs over on SIGTERM. With one
+# it recreates, unless strategy.type is RollingUpdate — see `strategy` below.
 replicaCount: 1
+
+# The Deployment's update strategy. Empty derives it from replicaCount:
+# Recreate for one replica, RollingUpdate (maxSurge 1, maxUnavailable 0) for
+# more. Set type: RollingUpdate with one replica for upgrades without downtime;
+# the chart then pins the surge Pod to the node holding the volume too.
+strategy: {}
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
 service:
@@ -271,9 +278,11 @@ persistence:
   # database, artifacts and the project registry all land on the volume.
   size: 10Gi
   storageClass: ""
-  # ReadWriteOnce is not a limitation to work around. SQLite over a shared
-  # filesystem with two writers corrupts; the single replica above is the
-  # other half of the same constraint.
+  # ReadWriteOnce is not a limitation to work around. SQLite needs every
+  # process writing to it on one kernel — over a filesystem shared between
+  # nodes, two writers corrupt it — and ReadWriteOnce is exactly "one node".
+  # Replicas share the volume by being pinned to that node (see replicaCount).
+  # Not ReadWriteOncePod, which would admit only one of them.
   accessMode: ReadWriteOnce
   existingClaim: ""
 

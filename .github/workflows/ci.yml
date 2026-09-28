@@ -1057,6 +1057,84 @@ jobs:
           echo "── disk ──"
           df -h / || true
 
+  hub-cluster:
+    name: Hub cluster (three processes, one control plane)
+    runs-on: ubuntu-latest
+    # Horizontal scaling (Task 20354): several `cloop ui` processes serving one
+    # control-plane database behind a load balancer with no stickiness.
+    #
+    # pkg/hubcluster and pkg/ui/cluster_test.go prove the mechanisms one at a
+    # time, in one process. This proves the composition with real processes,
+    # which is the only place two members stop sharing an executor registry
+    # and an agent hub: a run started on one member is dispatched by the
+    # member holding its agent's socket; its output reaches a dashboard on a
+    # third; the member streaming it is SIGKILLed and a survivor adopts the
+    # run without starting it over; Stop pressed on a member that is not
+    # streaming a run reaches the one that is; and SIGTERM — a rolling update —
+    # hands a run over. No container runtime, network or credential: the
+    # harness is a stub on PATH.
+    #
+    # The binary is built with -race. A race in the bus or the ownership paths
+    # is how a relayed frame reaches the wrong dashboard or a run gets two
+    # owners, and it can only happen while members actually run side by side.
+    #
+    # Gating from the first run, like the soak: every wait in the suite polls a
+    # named condition, and it ran green fifteen times in a row, twice under
+    # -race, before it was wired in here.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build cloop with the race detector
+        timeout-minutes: 8
+        run: go build -race -o /tmp/cloop-cluster-bin .
+
+      - name: Run the cluster
+        timeout-minutes: 5 # observed locally: ~30s with the race-enabled binary
+        env:
+          CLOOP_CLUSTER_E2E: "1"
+          CLOOP_CLUSTER_BIN: /tmp/cloop-cluster-bin
+          # Kept so the members' logs can be searched for race reports below
+          # and printed on failure.
+          CLOOP_CLUSTER_KEEP: "1"
+          TMPDIR: /tmp/cloop-cluster-e2e
+        # Required to have run by name: the suite skips — exit 0 — when
+        # CLOOP_CLUSTER_E2E is lost.
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          go test ./tests/cluster/ -run TestHubClusterEndToEnd -v -count=1 -timeout 4m 2>&1 | tee /tmp/cluster.log
+          grep -qE '^--- PASS: TestHubClusterEndToEnd \(' /tmp/cluster.log || {
+            echo "::error::go test succeeded but TestHubClusterEndToEnd did not pass — it was skipped"
+            exit 1
+          }
+          # A race report fails the job even when the scenario completed: the
+          # member that raced may just have been lucky this time.
+          if grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'; then
+            echo "::error::a hub member or the agent reported a data race (files above)"
+            exit 1
+          fi
+
+      - name: Member logs on failure
+        timeout-minutes: 2
+        if: failure()
+        run: |
+          shopt -s nullglob
+          logs=(/tmp/cloop-cluster-e2e/cloop-cluster-e2e-*/*.log)
+          [ ${#logs[@]} -gt 0 ] || { echo "(no member logs)"; exit 0; }
+          for f in "${logs[@]}"; do
+            echo "── $f ──"
+            tail -150 "$f"
+          done
+
   eval-stack:
     name: Eval stack (SSO + remote executor)
     runs-on: ubuntu-latest
@@ -1312,6 +1390,11 @@ jobs:
           helm lint deploy/helm/cloop-hub \
             --set secrets.existingSecret=external \
             --set persistence.enabled=false
+          # A hub cluster: the co-location term and the rolling strategy.
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set executor.kubernetes.enabled=true \
+            --set replicaCount=3
 
       - name: Chart guard rails refuse what they should
         # These fail() calls are load-bearing — one of them is the only thing
@@ -1351,6 +1434,15 @@ jobs:
           refuses "ingress host disagreeing with externalURL" \
             --set secrets.existingSecret=x --set ingress.enabled=true \
             --set ingress.host=other.example.com
+          # Replicas on their own emptyDirs are separate hubs behind one
+          # Service; a ReadWriteOncePod volume admits only one of them. The
+          # executor is set so that these are the only reasons to refuse.
+          refuses "replicas without persistence" \
+            --set secrets.existingSecret=x --set executor.kubernetes.enabled=true \
+            --set replicaCount=2 --set persistence.enabled=false
+          refuses "replicas on a ReadWriteOncePod volume" \
+            --set secrets.existingSecret=x --set executor.kubernetes.enabled=true \
+            --set replicaCount=2 --set persistence.accessMode=ReadWriteOncePod
 
       - name: Create a kind cluster
         # kubectl needs a cluster even for --dry-run=client: it resolves REST
@@ -1452,6 +1544,45 @@ jobs:
         run: |
           kubectl -n cloop exec deploy/cloop-cloop-hub -- \
             /usr/local/bin/cloop executor test kubernetes
+
+      - name: Scale to three replicas and assert one hub cluster
+        # Horizontal scaling (Task 20354). The replicas must land on the node
+        # holding the ReadWriteOnce volume (the chart's podAffinity term), open
+        # one database, find each other at their Pod IPs and elect exactly one
+        # leader — and still be one cluster after a rolling restart has
+        # replaced every one of them. tests/cluster covers what a cluster does;
+        # this covers that the chart produces one.
+        run: |
+          set -euo pipefail
+          helm upgrade cloop deploy/helm/cloop-hub --namespace cloop --reuse-values \
+            --set replicaCount=3 --wait --timeout 5m
+          expect_one_cluster() {
+            # Membership is read from the database, and a member that has
+            # just started is seen by the others within a bus poll.
+            for _ in $(seq 1 30); do
+              # Tolerant of a failed exec: right after a restart it can land
+              # on a Pod that is still terminating.
+              verdict=$(kubectl -n cloop exec deploy/cloop-cloop-hub -- \
+                  /usr/local/bin/cloop hub cluster status --json 2>/dev/null |
+                python3 -c 'import json,sys; d=json.load(sys.stdin); live=[m for m in d["members"] if m["alive"]]; print(len(live), sum(1 for m in live if m["leader"]))' 2>/dev/null ||
+                true)
+              if [ "$verdict" = "3 1" ]; then
+                echo "three live members and one leader $1"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::expected three live members and one leader $1; got (live, leaders) = $verdict"
+            kubectl -n cloop exec deploy/cloop-cloop-hub -- /usr/local/bin/cloop hub cluster status
+            return 1
+          }
+          expect_one_cluster "after scaling to three"
+          nodes=$(kubectl -n cloop get pods -l app.kubernetes.io/instance=cloop,app.kubernetes.io/name=cloop-hub \
+            -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | wc -l)
+          [ "$nodes" = 1 ] || { echo "::error::the replicas are spread over $nodes nodes"; exit 1; }
+          kubectl -n cloop rollout restart deploy/cloop-cloop-hub
+          kubectl -n cloop rollout status deploy/cloop-cloop-hub --timeout 5m
+          expect_one_cluster "after a rolling restart"
 
       - name: Hub diagnostics on failure
         if: failure()

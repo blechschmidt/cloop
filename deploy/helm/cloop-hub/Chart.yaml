@@ -6,7 +6,7 @@ type: application
 # Chart version tracks the chart's own shape. appVersion follows the cloop
 # release the default image tag points at; overriding image.tag without
 # overriding this is fine and expected.
-version: 0.1.0
+version: 0.2.0
 appVersion: "dev"
 
 home: https://github.com/blechschmidt/cloop
@@ -19,7 +19,8 @@ keywords:
   - control-plane
 
 annotations:
-  # A single replica is not a placeholder to raise later. The hub's state is a
-  # SQLite database on a ReadWriteOnce volume, and two replicas would race on
-  # it. Scaling out is a change to the storage layer, not to replicaCount.
-  cloop.dev/single-replica: "SQLite state; see deploy/README.md"
+  # Replicas form one hub cluster over one SQLite database, so they scale out
+  # across processes on one node, not across nodes: the chart pins them to the
+  # node holding the ReadWriteOnce volume. Capacity to run work scales out
+  # through executors instead.
+  cloop.dev/replicas: "one node; see docs/architecture/hub-cluster.md"

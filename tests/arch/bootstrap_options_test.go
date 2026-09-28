@@ -93,6 +93,14 @@ var knownOptionsSkew = map[string]string{
 	// bypass of the proxy's branch allowlist.
 	"WrapWorkspaceSource": "pkg/apiserver runs no git proxy; with executors.git_proxy enabled " +
 		"its git workspaces fail closed in reconcile.routeWorkspaceSource",
+	// Task 20354. pkg/ui scopes durable handles to the hub cluster member that
+	// wrote them, so a member never adopts a live peer's workload. `cloop
+	// serve` is not a member and adopts every row, as both hubs did before
+	// clustering — which beside a live cluster means a second watcher on its
+	// members' containers and Pods. Its sweeps, the destructive half, stand
+	// down while any member serves (its SweepGate).
+	"HandleStore": "pkg/apiserver is not a hub cluster member and adopts every handle row; " +
+		"its orphan sweeps stand down while a cluster member serves the control plane",
 }
 
 // diffFields returns the fields in have that want lacks, minus the ones

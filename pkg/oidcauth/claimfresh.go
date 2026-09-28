@@ -271,6 +271,22 @@ func (a *Authenticator) EnsureFreshClaims(ctx context.Context, sessionID string)
 	return a.refreshClaimsNow(ctx, sessionID, maxAge)
 }
 
+// lockRefresh takes the cross-process refresh right for sessionID, when the
+// deployment has one (Config.RefreshLock). A no-op otherwise.
+func (a *Authenticator) lockRefresh(ctx context.Context, sessionID string) (func(), error) {
+	if a.cfg.RefreshLock == nil {
+		return func() {}, nil
+	}
+	release, err := a.cfg.RefreshLock(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("oidcauth: wait for another hub process to finish refreshing this session: %w", err)
+	}
+	if release == nil {
+		release = func() {}
+	}
+	return release, nil
+}
+
 // storedSession reads a session straight from the store.
 //
 // Not through the read-through cache, on purpose: that cache exists to keep the
@@ -322,6 +338,13 @@ func (a *Authenticator) refreshClaimsNow(ctx context.Context, sessionID string, 
 // revalidateForClaims is the leader's half of the flight: one IdP round trip,
 // then the store re-read that turns it into an answer.
 func (a *Authenticator) revalidateForClaims(ctx context.Context, sessionID string, maxAge time.Duration) (SessionRecord, error) {
+	// Held across the re-read below, so a process that waited for another's
+	// refresh reads the claims it wrote instead of redeeming the token again.
+	release, err := a.lockRefresh(ctx, sessionID)
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	defer release()
 	rec, err := a.storedSession(sessionID)
 	if err != nil {
 		return SessionRecord{}, err

@@ -206,7 +206,10 @@ func (s *Server) startSessionJanitor(ctx context.Context) {
 	if !s.oidcEnabled() {
 		return
 	}
-	go s.OIDC.RunJanitor(ctx)
+	// One member sweeps and revalidates (Task 20354): a revalidation redeems
+	// a refresh token, and two members doing so for the same session is a
+	// sign-out with a provider that rotates them.
+	s.runLeaderDuty(ctx, "session-janitor", s.OIDC.RunJanitor)
 }
 
 // ---------------------------------------------------------------------------

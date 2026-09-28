@@ -86,6 +86,15 @@ type VerifierConfig struct {
 
 	// Now overrides the clock, for tests.
 	Now func() time.Time
+
+	// SharedReplay, when set, is consulted after the in-memory replay check
+	// with the token's jti and expiry, and a false answer refuses the token
+	// as replayed (Task 20354). Several hub processes may serve one control
+	// plane, each with its own memory, and a token refused as a replay by one
+	// must not be accepted by the next. An error is not a refusal: the
+	// in-memory check already passed, and the token's short life is the
+	// defence that holds when the shared one cannot answer.
+	SharedReplay func(jti string, expires time.Time) (fresh bool, err error)
 }
 
 // Verifier verifies CI OIDC assertions. It caches the issuer's discovery
@@ -104,7 +113,8 @@ type Verifier struct {
 	fetchedAt   time.Time
 	lastAttempt time.Time
 
-	replay *replayCache
+	replay       *replayCache
+	sharedReplay func(jti string, expires time.Time) (bool, error)
 }
 
 // NewVerifier validates the configuration and returns a Verifier.
@@ -161,6 +171,8 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 		allowHTTP: allowHTTP,
 		keys:      map[string]any{},
 		replay:    newReplayCache(),
+		// Shared across hub processes when the caller supplies it.
+		sharedReplay: cfg.SharedReplay,
 	}, nil
 }
 
@@ -253,6 +265,11 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Claims, error) {
 	if c.JTI != "" {
 		if !v.replay.admit(c.JTI, exp, now) {
 			return nil, fmt.Errorf("%w: %v", ErrUnverified, ErrReplayed)
+		}
+		if v.sharedReplay != nil {
+			if fresh, err := v.sharedReplay(c.JTI, exp); err == nil && !fresh {
+				return nil, fmt.Errorf("%w: %v", ErrUnverified, ErrReplayed)
+			}
 		}
 	}
 	return c, nil

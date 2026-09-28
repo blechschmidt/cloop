@@ -419,7 +419,10 @@ func TestRegistry_SaveLeavesNoTempFile(t *testing.T) {
 		t.Fatalf("read registry dir: %v", err)
 	}
 	for _, e := range entries {
-		if e.Name() == filepath.Base(regPath) {
+		// The registry and its advisory lock file (Task 20354), which is
+		// meant to persist: it is what the next writer — in this process or
+		// another hub process — locks.
+		if e.Name() == filepath.Base(regPath) || e.Name() == filepath.Base(regPath)+".lock" {
 			continue
 		}
 		t.Errorf("unexpected file left in registry dir after Save: %q", e.Name())

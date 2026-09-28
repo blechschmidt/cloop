@@ -103,6 +103,11 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "executor id is required", http.StatusBadRequest)
 		return
 	}
+	// The upgrade request goes over the device's socket, which is held by
+	// one hub member (Task 20354).
+	if s.routeAgentRequest(w, r, id) {
+		return
+	}
 	var req executorUpgradeRequest
 	if !decodeExecutorBody(w, r, &req) {
 		return

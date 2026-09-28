@@ -96,6 +96,11 @@ func (s *Server) handleVirtualExecutors(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	parentID := strings.TrimSpace(r.PathValue("id"))
+	// The device's live view — connected, its inventory, a refresh — comes
+	// over its socket, which one hub member holds (Task 20354).
+	if s.routeAgentRequest(w, r, parentID) {
+		return
+	}
 	parent, ok := remoteParent(parentID)
 	if !ok {
 		jsonErr(w, fmt.Sprintf("%q is not an enrolled device; virtual executors are created under one", parentID),

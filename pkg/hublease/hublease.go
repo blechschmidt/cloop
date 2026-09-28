@@ -112,6 +112,14 @@ type Options struct {
 	// Identity overrides the recorded hostname/pid/boot id. Tests use it to
 	// impersonate another host; production leaves it zero.
 	Identity Identity
+
+	// InstanceID names the holder. Empty mints a fresh one, which is what a
+	// standalone hub wants. A cluster member passes its own member id so the
+	// leader recorded here can be matched to a row in hub_members — "who
+	// holds the lease" and "which member is that" must be one question, or a
+	// leader that is not a member (an older, pre-cluster hub) cannot be told
+	// apart from one that is (Task 20354).
+	InstanceID string
 }
 
 // Identity is who the holder claims to be.
@@ -187,10 +195,13 @@ func Acquire(opts Options) (*Lease, error) {
 		return nil, err
 	}
 
-	instanceID, err := newInstanceID()
-	if err != nil {
-		closeIfOwned(store, ownsStore)
-		return nil, err
+	instanceID := strings.TrimSpace(opts.InstanceID)
+	if instanceID == "" {
+		instanceID, err = newInstanceID()
+		if err != nil {
+			closeIfOwned(store, ownsStore)
+			return nil, err
+		}
 	}
 
 	observed, err := readLease(store, scope)
@@ -423,11 +434,37 @@ func evaluate(row statedb.HubLeaseRow, self Identity, now time.Time, ttl time.Du
 	// another host says nothing here, and a pid from a previous boot names
 	// whatever process inherited the number. Both fall through to the TTL.
 	if row.Hostname != "" && row.Hostname == self.Hostname &&
-		row.BootID != "" && row.BootID == self.BootID &&
+		SameBoot(row.BootID, self.BootID) &&
 		row.PID > 0 && !alive(row.PID) {
 		return verdict{takeable: true, reason: "the holder's process is gone"}
 	}
 	return verdict{}
+}
+
+// SameBoot reports whether a recorded boot id is this process's — the same
+// boot of the same kernel, in the same pid namespace — so that a pid recorded
+// beside it may be probed from here.
+//
+// A row written before Task 20354 recorded the kernel's boot id alone. It is
+// judged by the rule it was written under, which is the rule the build that
+// wrote it applies to its own rows: the kernel's boot id. Never matching it
+// would be safer only in theory — the build that wrote it already trusts
+// exactly this — and in practice it made the first start of a current build
+// after an older one was killed, rather than stopped, refuse for a full TTL
+// beside a holder that was plainly gone: under a supervisor, a crash loop, and
+// under a deploy script with a shorter health window, a rolled-back upgrade.
+func SameBoot(recorded, self string) bool {
+	if recorded == "" || self == "" {
+		return false
+	}
+	if recorded == self {
+		return true
+	}
+	if strings.Contains(recorded, "+") {
+		return false
+	}
+	kernel, _, _ := strings.Cut(self, "+")
+	return recorded == kernel
 }
 
 // ConflictError reports that another instance holds the lease.
@@ -634,12 +671,28 @@ func LocalIdentity() Identity {
 // a recorded pid safe to probe, and every other branch of the fence works
 // without it. On a platform with no boot id the same-host fast path simply
 // never engages and a crashed holder costs the TTL instead of nothing.
+//
+// The pid namespace is part of it (Task 20354). The kernel's boot id is the
+// same in every container on a machine, and so is the hostname of two
+// containers started with the same `hostname:` — so boot id and hostname alone
+// would let one container probe a pid that only means something in another's
+// namespace, find nothing, and evict a live holder. A pid is only comparable
+// within the namespace that issued it, and saying so here makes every probe
+// that trusts BootID safe by construction. An identity from an older build
+// (no suffix) is compared by its kernel part alone; see SameBoot.
 func bootID() string {
 	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	id := strings.TrimSpace(string(b))
+	if id == "" {
+		return ""
+	}
+	if ns, err := os.Readlink("/proc/self/ns/pid"); err == nil && strings.TrimSpace(ns) != "" {
+		id += "+" + strings.TrimSpace(ns)
+	}
+	return id
 }
 
 // processAlive reports whether pid names a live process on this host.

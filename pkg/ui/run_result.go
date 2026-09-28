@@ -72,6 +72,19 @@ func rememberSeededDispatch(ex executor.Executor, handleID string, prov projects
 	}
 }
 
+// peekSeededDispatch returns the record for handleID on ex without forgetting
+// it, so the run's owner row can carry the provenance to a member that adopts
+// the run (Task 20354).
+func peekSeededDispatch(ex executor.Executor, handleID string) (seededDispatch, bool) {
+	if ex == nil || handleID == "" {
+		return seededDispatch{}, false
+	}
+	seededMu.Lock()
+	defer seededMu.Unlock()
+	d, ok := seeded[seededKey(ex.ID(), handleID)]
+	return d, ok
+}
+
 // isSeededDispatch reports whether handleID on ex was sent the project and has
 // not been settled yet, without forgetting it.
 func isSeededDispatch(ex executor.Executor, handleID string) bool {
@@ -98,6 +111,15 @@ func isSeededDispatch(ex executor.Executor, handleID string) bool {
 // overriding it would misreport one that is already pausing or finishing.
 func (s *Server) overlaySeededRunStatus(workDir string, ps *state.ProjectState) {
 	if ps == nil || workDir == "" || ps.Status == "running" || ps.Status == "evolving" {
+		return
+	}
+	// Another hub member may be the one streaming it (Task 20354): its owner
+	// row says so, and says whether it was carried out as a seed.
+	if o, meta, found := s.clusterRunOwner(workDir); found && !o.Self {
+		if meta.Seeded && s.peerRunExecuting(workDir) {
+			ps.Status = "running"
+			ps.PauseReason = nil
+		}
 		return
 	}
 	if !s.liveLogRunningFor(workDir) {

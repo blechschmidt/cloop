@@ -42,8 +42,13 @@ const liveLogMaxRooms = 64
 // dashboard is open and replaying is in use even when its run is quiet, and
 // evicting it would blank a screen somebody is watching.
 type liveLogRoom struct {
-	lines    []string
-	running  bool
+	lines   []string
+	running bool
+	// remote marks a run another hub member is streaming, relayed here over
+	// the cluster bus (Task 20354). It is shown as running like any other,
+	// but it is not evidence this member may act on: whether that run is
+	// alive is its owner's to say, and liveLogLocalRunningFor ignores it.
+	remote   bool
 	lastUsed time.Time
 }
 
@@ -155,6 +160,34 @@ func (s *Server) liveLogStartRun(workDir string) {
 	}
 	room.lines = nil
 	room.running = true
+	room.remote = false
+}
+
+// liveLogStartRemoteRun is liveLogStartRun for a run another hub member
+// started: the replay buffer starts afresh and the room reads as running,
+// flagged as relayed.
+func (s *Server) liveLogStartRemoteRun(workDir string) {
+	if workDir == "" {
+		return
+	}
+	s.liveLogMu.Lock()
+	defer s.liveLogMu.Unlock()
+	room := s.liveLogRoomFor(workDir, true)
+	if room == nil {
+		return
+	}
+	room.lines = nil
+	room.running = true
+	room.remote = true
+}
+
+// liveLogLocalRunningFor reports whether this member itself is streaming a run
+// for workDir — liveLogRunningFor minus runs relayed from other members.
+func (s *Server) liveLogLocalRunningFor(workDir string) bool {
+	s.liveLogMu.Lock()
+	defer s.liveLogMu.Unlock()
+	room := s.liveLogRoomFor(workDir, false)
+	return room != nil && room.running && !room.remote
 }
 
 // liveLogSetRunning updates workDir's in-memory run flag.
@@ -171,6 +204,8 @@ func (s *Server) liveLogSetRunning(workDir string, running bool) {
 		return
 	}
 	room.running = running
+	// Whatever this member sets is its own view, never a relay.
+	room.remote = false
 }
 
 // liveLogRunningFor reports whether this server is streaming a run for

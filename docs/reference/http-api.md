@@ -51,14 +51,14 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-208 endpoints, by the permission each one requires:
+209 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 25 |
 | `audit.read` | 5 |
 | `config.write` | 12 |
-| `executor.manage` | 24 |
+| `executor.manage` | 25 |
 | `executor.read` | 3 |
 | `project.read` | 48 |
 | `project.write` | 12 |
@@ -109,6 +109,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/claudecode/auth/logout` | `secret.own` | global |
 | GET | `/api/claudecode/auth/status` | `project.read` | global |
 | POST | `/api/client-error` | `public` | global |
+| GET | `/api/cluster` | `executor.manage` | global |
 | GET | `/api/config` | `project.read` | project |
 | GET | `/api/config/oidc` | `user.manage` | global |
 | PUT | `/api/config/oidc` | `user.manage` | global |

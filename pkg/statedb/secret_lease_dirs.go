@@ -35,6 +35,10 @@ type SecretLeaseDirRow struct {
 	// sweep does not need it to decide, but an operator reading the audit
 	// event for a swept directory needs to know whether it had already lapsed.
 	ExpiresAt time.Time
+	// InstanceID is the hub process that materialised it, on a control plane
+	// several of them serve (Task 20354); '' for one written before that. A
+	// sweep must not wipe a directory a live peer's run is reading from.
+	InstanceID string
 }
 
 // PutSecretLeaseDir records the intent to materialise a lease at row.Dir.
@@ -54,16 +58,17 @@ func (d *DB) PutSecretLeaseDir(row SecretLeaseDirRow) error {
 	defer d.mu.Unlock()
 	_, err := d.conn.Exec(
 		`INSERT INTO secret_lease_dirs(dir, lease_id, executor_id, project_path,
-		                               created_at, expires_at)
-		 VALUES(?,?,?,?,?,?)
+		                               created_at, expires_at, instance_id)
+		 VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(dir) DO UPDATE SET
 		   lease_id     = excluded.lease_id,
 		   executor_id  = excluded.executor_id,
 		   project_path = excluded.project_path,
 		   created_at   = excluded.created_at,
-		   expires_at   = excluded.expires_at`,
+		   expires_at   = excluded.expires_at,
+		   instance_id  = excluded.instance_id`,
 		row.Dir, row.LeaseID, row.ExecutorID, row.ProjectPath,
-		formatOptionalTime(row.CreatedAt), formatOptionalTime(row.ExpiresAt),
+		formatOptionalTime(row.CreatedAt), formatOptionalTime(row.ExpiresAt), row.InstanceID,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: put secret lease dir %q: %w", row.Dir, classifyDriverErr(err))
@@ -80,7 +85,7 @@ func (d *DB) ListSecretLeaseDirs() ([]SecretLeaseDirRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	rows, err := d.conn.Query(
-		`SELECT dir, lease_id, executor_id, project_path, created_at, expires_at
+		`SELECT dir, lease_id, executor_id, project_path, created_at, expires_at, instance_id
 		   FROM secret_lease_dirs
 		  ORDER BY created_at, dir`)
 	if err != nil {
@@ -95,7 +100,7 @@ func (d *DB) ListSecretLeaseDirs() ([]SecretLeaseDirRow, error) {
 			createdAt, expiresAt string
 		)
 		if err := rows.Scan(&rec.Dir, &rec.LeaseID, &rec.ExecutorID, &rec.ProjectPath,
-			&createdAt, &expiresAt); err != nil {
+			&createdAt, &expiresAt, &rec.InstanceID); err != nil {
 			return nil, fmt.Errorf("statedb: scan secret lease dir: %w", classifyDriverErr(err))
 		}
 		rec.CreatedAt = parseOptionalTime(createdAt)

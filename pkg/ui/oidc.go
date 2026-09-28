@@ -201,6 +201,11 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "OIDC authentication is not enabled on this server", http.StatusNotFound)
 		return
 	}
+	// The login's secrets are in the memory of the hub member that began it
+	// (Task 20354).
+	if s.routeOIDCCallback(w, r) {
+		return
+	}
 	recordLoginOutcome(s.OIDC.HandleCallback(w, r))
 }
 

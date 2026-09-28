@@ -572,6 +572,8 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 			ExecutorID:  executorID,
 			ProjectPath: workDir,
 			ExpiresAt:   lease.ExpiresAt,
+			// So a peer starting up does not take it for an orphan (Task 20354).
+			InstanceID: processInstanceID(),
 		}
 		if err := db.PutSecretLeaseDir(row); err != nil {
 			// Fail closed. A credential this hub cannot account for is one it

@@ -78,10 +78,23 @@ const workloadStatusTimeout = 5 * time.Second
 type dispatchedRun struct {
 	ex       executor.Executor
 	handleID string
+	// cancel ends this member's subscription to the run's output. Set for runs
+	// whose stream was opened with a cancellable context, so that a run
+	// adopted by another hub member can be let go without being settled here
+	// (Task 20354).
+	cancel context.CancelFunc
+	// handedOver marks a run another member took over.
+	handedOver bool
 }
 
 // trackRun remembers the workload dispatched for workDir.
 func (s *Server) trackRun(workDir string, ex executor.Executor, handleID string) {
+	s.trackRunWithCancel(workDir, ex, handleID, nil)
+}
+
+// trackRunWithCancel is trackRun for a run whose output subscription can be
+// cancelled — see dispatchedRun.cancel.
+func (s *Server) trackRunWithCancel(workDir string, ex executor.Executor, handleID string, cancel context.CancelFunc) {
 	if workDir == "" || ex == nil || handleID == "" {
 		return
 	}
@@ -90,16 +103,43 @@ func (s *Server) trackRun(workDir string, ex executor.Executor, handleID string)
 	if s.runHandles == nil {
 		s.runHandles = make(map[string]dispatchedRun)
 	}
-	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID}
+	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID, cancel: cancel}
 }
 
 // untrackRun forgets workDir's workload. The map is therefore bounded by the
 // number of runs currently in flight rather than by the number this hub has
-// ever started.
+// ever started. The run's cluster-wide owner row goes with it (Task 20354):
+// the run is over, and another member may start the next one.
 func (s *Server) untrackRun(workDir string) {
+	s.untrackRunKeepClaim(workDir)
+	s.releaseRunClaim(workDir)
+}
+
+// untrackRunKeepClaim forgets workDir's workload here without releasing its
+// owner row — for a run another member took over, which now owns the row.
+func (s *Server) untrackRunKeepClaim(workDir string) {
 	s.runHandleMu.Lock()
 	defer s.runHandleMu.Unlock()
+	if run, ok := s.runHandles[workDir]; ok && run.handedOver {
+		if s.handedOverRuns == nil {
+			s.handedOverRuns = make(map[string]bool)
+		}
+		s.handedOverRuns[run.handleID] = true
+	}
 	delete(s.runHandles, workDir)
+}
+
+// takeHandedOver reports, once, whether handleID's run was handed over to
+// another member — the consumer of its output asks when its stream ends, to
+// know it must not settle a run it no longer owns.
+func (s *Server) takeHandedOver(handleID string) bool {
+	s.runHandleMu.Lock()
+	defer s.runHandleMu.Unlock()
+	if !s.handedOverRuns[handleID] {
+		return false
+	}
+	delete(s.handedOverRuns, handleID)
+	return true
 }
 
 // trackedRun returns the workload dispatched for workDir, if this hub started
@@ -145,7 +185,14 @@ func (s *Server) projectExecuting(workDir string) bool {
 		}
 		return !st.State.Terminal()
 	}
-	return s.liveLogRunningFor(workDir)
+	// A run another hub member started (Task 20354). It is in neither this
+	// member's process table nor its handle map, and before this check a
+	// member that did not start a run concluded it was dead — and paused the
+	// project and reset its tasks underneath it. See peerRunExecuting.
+	if s.peerRunExecuting(workDir) {
+		return true
+	}
+	return s.liveLogLocalRunningFor(workDir)
 }
 
 // runVerdict is how a run ended, in terms a project's event journal can carry.

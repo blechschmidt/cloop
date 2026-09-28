@@ -2299,6 +2299,12 @@ func (e *Executor) ReconcileOrphans(ctx context.Context) ([]string, error) {
 	}
 
 	tracked := e.trackedPodNames()
+	// Pods another hub member is running are not orphans (Task 20354).
+	for _, rec := range executor.TrackedElsewhere(e.handleStore(), e.id) {
+		if _, podName, ok := splitExternalID(rec.ExternalID); ok {
+			tracked[podName] = struct{}{}
+		}
+	}
 	cutoff := e.opts.now().Add(-e.opts.OrphanGracePeriod)
 
 	var removed []string
@@ -2440,7 +2446,6 @@ func (e *Executor) createsNetworkPolicies() bool {
 // underneath a running Pod.
 func (e *Executor) trackedPolicyNames() map[string]struct{} {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	names := make(map[string]struct{}, len(e.handles))
 	for _, rec := range e.handles {
 		rec.mu.Lock()
@@ -2448,6 +2453,14 @@ func (e *Executor) trackedPolicyNames() map[string]struct{} {
 			names[rec.networkPolicyName] = struct{}{}
 		}
 		rec.mu.Unlock()
+	}
+	e.mu.Unlock()
+	// The firewalls of Pods another hub member runs (Task 20354). Read
+	// outside e.mu: handleStore takes it, and the store may do I/O.
+	for _, rec := range executor.TrackedElsewhere(e.handleStore(), e.id) {
+		if name := strings.TrimSpace(rec.Meta[metaNetworkPolicy]); name != "" {
+			names[name] = struct{}{}
+		}
 	}
 	return names
 }

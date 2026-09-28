@@ -106,6 +106,11 @@ type attachTarget struct {
 // instead of an error after the click.
 func (s *Server) handleAttachInfo(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
+	// The task's handle is tracked by the hub member streaming its run
+	// (Task 20354), and only that member can open a terminal into it.
+	if s.routeRunOwner(w, r, workDir) {
+		return
+	}
 	taskID, err := attachTaskID(r)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
@@ -210,6 +215,11 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
+	// Forwarded whole, upgrade included, to the member streaming the run
+	// (Task 20354).
+	if s.routeRunOwner(w, r, workDir) {
+		return
+	}
 	taskID, err := attachTaskID(r)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)

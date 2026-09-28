@@ -96,19 +96,16 @@ func (s *Server) broadcastSuggestStatus(workDir string) {
 		return
 	}
 	raw, _ := s.suggestStatusJSON(workDir)
-	s.broadcastToProject(workDir, wsMessage{Type: "suggest_status", Data: raw})
+	msg := wsMessage{Type: "suggest_status", Data: raw}
+	s.deliverToProject(workDir, msg)
 
 	// Mirror to this project's SSE clients (fallback path). The payload
 	// carries generated text about one project, so it is scoped the same way
 	// as the WebSocket line above (Task 20189).
-	s.mu.Lock()
-	for c := range s.clients {
-		if c.workDir != workDir {
-			continue
-		}
-		s.sendSSEOrLag(c, sseEvent{Event: "suggest_status", Data: string(raw)})
-	}
-	s.mu.Unlock()
+	s.deliverSSE(workDir, sseEvent{Event: "suggest_status", Data: string(raw)})
+	// The job lives on this hub member; dashboards on the others learn of it
+	// through the bus, SSE mirror included (Task 20354).
+	s.publishWS(workDir, msg, "suggest_status")
 }
 
 // suggestCount resolves the count a client asked for: how many ideas to
@@ -133,6 +130,11 @@ func suggestCount(n int, plan bool) int {
 // result reaches clients as a suggest_status event.
 func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
+		return
+	}
+	// A job lives in the memory of the hub member that ran it, and status and
+	// add must reach the same member (Task 20354).
+	if s.routeProjectAffinity(w, r, ownerSuggest, s.resolveWorkDir(r)) {
 		return
 	}
 	var req struct {
@@ -241,6 +243,9 @@ func (s *Server) finishSuggest(workDir string, job *suggestJob, result *suggest.
 // handleSuggestStatus returns the project's job status and the proposals
 // still awaiting review (GET /api/suggest/status).
 func (s *Server) handleSuggestStatus(w http.ResponseWriter, r *http.Request) {
+	if s.routeToOwner(w, r, ownerSuggest, s.resolveWorkDir(r)) {
+		return
+	}
 	raw, _ := s.suggestStatusJSON(s.resolveWorkDir(r))
 	jsonOK(w, json.RawMessage(raw))
 }
@@ -256,6 +261,9 @@ func (s *Server) handleSuggestStatus(w http.ResponseWriter, r *http.Request) {
 // ID, and any other is added as an independent idea, as it always was.
 func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
+		return
+	}
+	if s.routeToOwner(w, r, ownerSuggest, s.resolveWorkDir(r)) {
 		return
 	}
 	var req struct {

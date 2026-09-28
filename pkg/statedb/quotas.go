@@ -7,6 +7,8 @@ package statedb
 // conversion between these rows and that model lives in pkg/quotastore.
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -134,6 +136,70 @@ func (d *DB) PutQuotaCounter(row QuotaCounterRow) error {
 		return fmt.Errorf("statedb: put quota counter: %w", classifyDriverErr(err))
 	}
 	return nil
+}
+
+// AdjustQuotaCounter adds delta to one counter in a single write transaction
+// and returns the value afterwards (Task 20354).
+//
+// It is the operation several hub processes sharing one control plane need
+// and PutQuotaCounter cannot give them: PutQuotaCounter stores an absolute
+// value each process computed from its own memory, so two processes admitting
+// at once each write "one more than I saw" and one admission vanishes — and
+// each process checks the limit against its own count, so N processes admit
+// N times the cap.
+//
+// With enforce set and delta positive, the addition is refused — admitted is
+// false and the counter unchanged — when it would take the value above limit.
+// Check and increment share the transaction, which statedb opens IMMEDIATE,
+// so no other writer can land between them. The result never goes below
+// zero: a double release must not mint headroom.
+func (d *DB) AdjustQuotaCounter(identity, resource, bucket string, delta, limit float64, enforce bool, at time.Time) (value float64, admitted bool, err error) {
+	if strings.TrimSpace(identity) == "" || strings.TrimSpace(resource) == "" {
+		return 0, false, fmt.Errorf("statedb: quota counter identity and resource are required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return 0, false, fmt.Errorf("statedb: adjust quota counter: %w", classifyDriverErr(err))
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var cur float64
+	err = tx.QueryRow(
+		`SELECT value FROM quota_counters WHERE identity = ? AND resource = ? AND bucket = ?`,
+		identity, resource, bucket).Scan(&cur)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, fmt.Errorf("statedb: read quota counter: %w", classifyDriverErr(err))
+	}
+	if enforce && delta > 0 && cur+delta > limit {
+		return cur, false, nil
+	}
+	next := cur + delta
+	if next <= 0 {
+		next = 0
+		if _, err := tx.Exec(
+			`DELETE FROM quota_counters WHERE identity = ? AND resource = ? AND bucket = ?`,
+			identity, resource, bucket); err != nil {
+			return 0, false, fmt.Errorf("statedb: clear quota counter: %w", classifyDriverErr(err))
+		}
+	} else if _, err := tx.Exec(
+		`INSERT INTO quota_counters (identity, resource, bucket, value, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(identity, resource, bucket) DO UPDATE SET
+		     value      = excluded.value,
+		     updated_at = excluded.updated_at`,
+		identity, resource, bucket, next, formatOptionalTime(at)); err != nil {
+		return 0, false, fmt.Errorf("statedb: adjust quota counter: %w", classifyDriverErr(err))
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("statedb: adjust quota counter: %w", classifyDriverErr(err))
+	}
+	return next, true, nil
 }
 
 // ListQuotaCounters returns every counter row.

@@ -45,7 +45,9 @@ narrows the registry further if you want it somewhere else again.
 Two reasons to set it:
 
 - **Running more than one hub under one Unix account.** Without it they share a
-  registry, so projects registered by one appear in the other.
+  registry, so projects registered by one appear in the other. That sharing is
+  exactly what the members of one [hub cluster](../architecture/hub-cluster.md)
+  need, so do *not* give them different values.
 - **Testing.** The registry is process-global state at a fixed path outside the
   working tree, which makes it easy for a test to write to the machine it runs
   on and leave it there. That is not theoretical: a dashboard test accumulated
@@ -1550,6 +1552,33 @@ of what an older binary sharing the directory does with a key it does not know:
 not ignore it, but drop it, the next time anything calls `Save()`. A block whose
 job is to require a login must not be deletable that way. Nothing opens a
 filename it has never heard of.
+
+#### Several hubs, one control plane
+
+Hubs that share a directory are members of one
+[hub cluster](../architecture/hub-cluster.md): they serve the same state, forward
+to each other what only one of them can answer, and elect one leader. `ui.cluster`
+says how a member is reached and whether it may have company:
+
+```yaml
+ui:
+  cluster:
+    peer_server_name: hub.example.com      # verify peers' certificates as this name
+    peer_ca_file: /etc/cloop/peer-ca.pem   # trust this CA for them, too
+    # exclusive: true                      # one process, and refuse any other
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `advertise_url` | `http(s)://127.0.0.1:<port>` | Where the other members reach this one. Per process: set it in the instance overlay, or use `--advertise-url`, `CLOOP_CLUSTER_ADVERTISE_URL` or `CLOOP_CLUSTER_ADVERTISE_HOST` (a host only — cloop adds the scheme, brackets an IPv6 address and appends its port), which take precedence in that order. A bare origin: no path, query or credentials. |
+| `peer_server_name` | host of `ui.external_url` | The name an `https://` peer's certificate is verified against when it is advertised by IP. |
+| `peer_ca_file` | — | PEM bundle trusted for peers' certificates, on top of the system roots and this hub's own `ui.tls` certificate. |
+| `exclusive` | `false` | Take the control plane alone, as every hub did before clustering: refuse to start while another hub serves it, and make any other refuse while this one does. |
+
+On one machine the defaults are right and nothing needs setting. Forwarded
+requests carry the caller's credentials, so members that reach each other over
+a network others can observe should advertise `https://` URLs — see
+[the peer channel](../architecture/hub-cluster.md#the-peer-channel).
 
 #### Front-end telemetry
 

@@ -66,6 +66,14 @@ Six pages in order, indexed at
   than data, and [operating it](architecture/kubernetes-access.md#turning-it-on)
   — `executors.kube_guard`, the grant's `--verbs`, and what a leaked session
   token is worth. Off by default.
+- **[Hub cluster](architecture/hub-cluster.md)** — several `cloop ui`
+  processes serving one control plane behind a load balancer with no
+  stickiness: what a cluster requires (one database, one kernel), what the
+  members share — membership, a leader for the work that must happen once, an
+  event bus, and ownership of what only one process can hold — which requests
+  are forwarded to which member over the signed peer channel, what happens to
+  a run when its member is killed or upgraded, and the
+  [limits](architecture/hub-cluster.md#limits).
 
 ## Reference
 

@@ -308,6 +308,15 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 // Authenticate resolves a presented token to a live session.
 //
 // Every failure returns ErrUnauthenticated with no further detail, so a caller
+// Known reports whether id names a session this registry holds, live or not.
+// See Options.Fallback.
+func (r *Registry) Known(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.sessions[id]
+	return ok
+}
+
 // cannot tell an unknown session from an expired or revoked one by probing.
 func (r *Registry) Authenticate(token string) (*Session, error) {
 	id, ok := sessionIDOf(token)

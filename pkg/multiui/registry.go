@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
@@ -26,11 +27,47 @@ import (
 // concurrent UI-server handlers (or any other in-process callers) cannot lose
 // each other's writes when both load → mutate → save the same file.
 //
-// This is in-process only — multiple cloop CLI processes that race to write
-// the registry at the same moment can still drop updates, but Save's atomic
-// rename guarantees the file on disk is never observed truncated/corrupt
-// (last-writer-wins instead of partial-data-wins).
-var registryMu sync.Mutex
+// It also takes an advisory lock on the registry file (Task 20354): several
+// hub processes may serve one control plane, and two of them registering or
+// hiding a project at the same moment would otherwise each load the same
+// baseline and one edit would silently vanish. Save's atomic rename still
+// guarantees the file is never observed torn.
+var registryMu registryLock
+
+// registryLock is a mutex plus a best-effort flock on <root>/projects.json.lock.
+type registryLock struct {
+	mu sync.Mutex
+	f  *os.File
+}
+
+func (l *registryLock) Lock() {
+	l.mu.Lock()
+	path, err := registryPath()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return
+	}
+	l.f = f
+}
+
+func (l *registryLock) Unlock() {
+	if l.f != nil {
+		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+		_ = l.f.Close()
+		l.f = nil
+	}
+	l.mu.Unlock()
+}
 
 // IsCloopRunningInDir returns true if a "cloop run" process is executing in
 // the project at dir. It reads /proc/*/cwd symlinks (Linux only).

@@ -1248,8 +1248,8 @@ func (w *workload) snapshot() executor.Status {
 	return w.status
 }
 
-// draining withholds a terminal state until the output pump has finished
-// forwarding the workload's output.
+// draining withholds a terminal state until the workload's final status frame
+// has gone out.
 //
 // The local backend marks a handle killed the moment a signal is delivered,
 // while the process's remaining output is still in the pipe. The control plane
@@ -1258,13 +1258,22 @@ func (w *workload) snapshot() executor.Status {
 // silently discard everything the process printed on its way out — which, for
 // a killed or timed-out run, is exactly where the useful output lives.
 //
-// Reporting "still running" until the pump drains is not a lie: from this
-// agent's perspective the workload is not finished until its output is.
-// pumpOutput sends the real terminal status, once, immediately afterwards.
+// The same holds after the pump has drained, and this used to stop there.
+// Between the process exiting and its final status, pumpOutput reads back what
+// a seeded run changed and produces the write-back; both are sent *before* the
+// status because the hub settles the run when a terminal state arrives. A
+// status request answered terminal in that window — a second or so, and any
+// hub member that adopts the run asks exactly then — closed the handle first,
+// and the hub refused the project result that followed it: the run settled
+// without its changes, and its task never became done on the hub.
+//
+// Reporting "still running" until then is not a lie: from the control plane's
+// perspective the workload is not finished until everything it owes has been
+// delivered. deliverFinal sends the real terminal status, once, afterwards.
 func (w *workload) draining(st executor.Status) executor.Status {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.finished || !st.State.Terminal() {
+	if w.reported || !st.State.Terminal() {
 		return st
 	}
 	st.State = executor.StateRunning

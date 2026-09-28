@@ -238,6 +238,11 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 	// withdraw the one the panel is showing.
 	s.glassesMu.Lock()
 	defer s.glassesMu.Unlock()
+	// And across hub processes (Task 20354): the two taps may reach two of
+	// them, which the mutex above cannot see.
+	if release, err := s.clusterMutex(r.Context(), ownerLock, "glasses-link"); err == nil {
+		defer release()
+	}
 
 	// Revoke first, and revoke *every* live link this user holds rather than
 	// the newest one. If the mint below fails the user is left with no link
@@ -384,6 +389,9 @@ func (s *Server) handleGlassesLinkRevoke(w http.ResponseWriter, r *http.Request)
 	// otherwise report success against a link the mint is about to replace.
 	s.glassesMu.Lock()
 	defer s.glassesMu.Unlock()
+	if release, err := s.clusterMutex(r.Context(), ownerLock, "glasses-link"); err == nil {
+		defer release()
+	}
 
 	live, err := s.liveGlassesTokens(r)
 	if err != nil {

@@ -1762,6 +1762,13 @@ func (e *Executor) ReapOrphans(ctx context.Context) ([]string, error) {
 	}
 
 	live := e.liveContainerNames()
+	// And whatever another hub member sharing this runtime is running
+	// (Task 20354): absent from this process's map by design, and not orphans.
+	for _, rec := range executor.TrackedElsewhere(e.handleStore(), e.id) {
+		if name := strings.TrimSpace(rec.ExternalID); name != "" {
+			live[name] = struct{}{}
+		}
+	}
 	now := time.Now()
 	grace := e.orphanGracePeriod()
 	var removed []string

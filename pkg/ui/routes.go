@@ -204,6 +204,9 @@ func (s *Server) projectScopeFromIdx(r *http.Request) (authz.Scope, bool) {
 // project list. Inside a handler it does not resolve when the index has come
 // to name a project other than the one the gate authorized (see pinProject).
 func (s *Server) entryAtIdx(r *http.Request) (multiui.ProjectEntry, bool) {
+	if e, ok, forwarded := s.peerEntry(r); forwarded {
+		return e, ok
+	}
 	i, err := strconv.Atoi(strings.TrimSpace(r.PathValue("idx")))
 	if err != nil {
 		return multiui.ProjectEntry{}, false
@@ -363,6 +366,14 @@ func (s *Server) pinProject(kind scopeKind, r *http.Request) (*http.Request, aut
 // list — the one way every /api/projects/{idx}/… handler does — and refuses
 // when the gate authorized a different project for this index a moment ago.
 func (s *Server) projectAtIdx(w http.ResponseWriter, r *http.Request) (multiui.ProjectEntry, bool) {
+	// Forwarded by another hub member: by path, for the reason resolveWorkDir
+	// gives (Task 20354).
+	if e, ok, forwarded := s.peerEntry(r); forwarded {
+		if !ok {
+			jsonErr(w, "project index out of range", http.StatusBadRequest)
+		}
+		return e, ok
+	}
 	idx, err := strconv.Atoi(r.PathValue("idx"))
 	if err != nil {
 		jsonErr(w, "invalid project index", http.StatusBadRequest)
@@ -757,6 +768,10 @@ func (s *Server) routeTable() []routeSpec {
 		// falls through to "/" and answers a JSON client with an HTML page.
 		{Pattern: "/api/executors", Handler: s.handleExecutorsList, Methods: []string{"GET"}, Perm: execRead, Scope: scopeGlobal},
 		{Pattern: "POST /api/executors/enroll", Handler: s.handleExecutorEnroll, Perm: execMgmt, Scope: scopeGlobal},
+		// Which hub processes serve this control plane, which one leads, and
+		// what each holds (Task 20354). Admin-only: member addresses are the
+		// deployment's internal network topology.
+		s.clusterStatusRoute(),
 		// The edge-device bootstrap script (Task 20172). Same permission as
 		// minting a token, because it is the other half of the same action:
 		// it discloses the hub's URL and certificate pin, and it is useful

@@ -39,6 +39,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -572,6 +573,10 @@ type Server struct {
 	// from whether output is still arriving (see stale_recovery.go).
 	runHandleMu sync.Mutex
 	runHandles  map[string]dispatchedRun
+	// handedOverRuns holds the handles of runs another hub member adopted
+	// while this one was streaming them, until their consumer notices. Guarded
+	// by runHandleMu.
+	handedOverRuns map[string]bool
 
 	// Suggest jobs, one per project and keyed by workDir: each project's
 	// latest brainstorm or plan, held while its proposals are reviewed. See
@@ -712,6 +717,30 @@ type Server struct {
 	// constructed, because the resolver takes it as a fixed reference. Zero
 	// value means this hub resolves from configured bindings alone.
 	roles roleStoreState
+
+	// Cluster is this hub's membership of a control plane served by several
+	// `cloop ui` processes (Task 20354). Nil means standalone: this process
+	// leads, owns everything and publishes nothing, which is also what every
+	// test that builds a Server as a struct literal gets. Set by `cloop ui`
+	// before New, through NewInCluster, because bootstrap already needs to
+	// know whether peers are serving — a startup sweep that assumed it was
+	// alone would reap their workloads. See cluster.go.
+	Cluster *hubcluster.Node
+
+	// clusterMu guards the cluster-relay state below. A leaf lock: nothing is
+	// called while holding it.
+	clusterMu sync.Mutex
+	// logBatch coalesces live output bound for other members.
+	logBatch *logBatcher
+	// remoteRuns records, per project, the member whose run this member is
+	// relaying to its clients, so the relay can be dropped the moment that
+	// member dies.
+	remoteRuns map[string]string
+	// remotePresence holds the dashboard users other members reported, per
+	// project and per member.
+	remotePresence map[string]map[string][]presenceUser
+	// lastAdoptSweep is when the watcher last looked for orphaned runs.
+	lastAdoptSweep time.Time
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -756,11 +785,22 @@ func (s *Server) selfExe() string {
 // token is optional; if non-empty every API request must supply it via
 // "Authorization: Bearer <token>" header or "?token=<token>" query param.
 func New(workdir string, port int, token string) *Server {
+	return NewInCluster(workdir, port, token, nil)
+}
+
+// NewInCluster is New for a hub process that is one of several serving the
+// control plane at workdir (Task 20354). node must already have joined: the
+// executor bootstrap below decides from it whether peers are serving, and a
+// startup sweep that believed it was alone would reap their workloads and wipe
+// their credentials. A nil node is New.
+func NewInCluster(workdir string, port int, token string, node *hubcluster.Node) *Server {
+	setProcessCluster(node)
 	// Register the built-in execution drivers and point the registry at
 	// this control plane's persisted project→executor bindings, so every
 	// handler can call executor.Resolve (Task 20156).
 	bootstrapExecutors(workdir)
 	return &Server{
+		Cluster:         node,
 		WorkDir:         workdir,
 		Port:            port,
 		Token:           token,
@@ -874,6 +914,13 @@ func (s *Server) evictAuthFailsLocked(now time.Time) {
 // uiRateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
 func (s *Server) uiRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A request another hub member forwarded was already charged against
+		// its client's bucket there (Task 20354). Charging it again here would
+		// halve that client's rate for exactly the requests that had to move.
+		if _, forwarded := peerCallFrom(r); forwarded {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !s.uiAllow(clientIP(r)) {
 			rps := s.RPS
 			if rps <= 0 {
@@ -902,6 +949,13 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 	// against a list that may have changed since (see pinProject).
 	if p, ok := r.Context().Value(pinnedWorkDirKey{}).(string); ok && p != "" {
 		return p
+	}
+	// A request another hub member forwarded names the project that member
+	// resolved (Task 20354). Answering by path rather than re-resolving the
+	// index means the two members cannot disagree about which project a Stop
+	// or a Start was for, even while one of them is a registry refresh behind.
+	if dir, ok := s.peerWorkDir(r); ok {
+		return dir
 	}
 	if idx := r.URL.Query().Get("project_idx"); idx != "" {
 		i, err := strconv.Atoi(idx)
@@ -985,11 +1039,18 @@ func (s *Server) Handler() http.Handler {
 // authenticated, so the identity it resolves into a permission set is the one
 // the route gates will enforce (Task 20164).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	app := s.uiRateLimitMiddleware(s.securityHeaders(s.executorConnectBypass(s.authMiddleware(s.authzMiddleware(mux)))))
+	app := s.uiRateLimitMiddleware(s.securityHeaders(s.executorConnectBypass(
+		s.clusterInternalBypass(s.authMiddleware(s.authzMiddleware(mux))))))
 	// gzip wraps the application but sits below the panic recovery, so a
 	// handler that panics mid-body still unwinds into the 500 rather than
 	// leaving a half-written deflate stream the browser cannot parse.
-	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(s.gzipAPIMiddleware(app))))
+	//
+	// The peer layer (Task 20354) sits outside gzip and the rate limiter: a
+	// request another hub member forwarded carries that member's signature,
+	// and verifying it first is what lets the layers below see the original
+	// client's address instead of the forwarding member's.
+	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(
+		s.servedByMiddleware(s.peerMiddleware(s.gzipAPIMiddleware(app))))))
 }
 
 // uiRequestIDMiddleware threads a correlation ID through every Web UI
@@ -1179,19 +1240,28 @@ func (s *Server) Run(ctx context.Context) error {
 	// the watchers because they are the background sweeps a second hub would
 	// duplicate, and the lease is what entitles this process to run them.
 	s.Lease.Start(watcherCtx)
+	// Or, on a control plane several hub processes serve (Task 20354): join
+	// the others. The membership heartbeat and the leader campaign start
+	// here; the sweeps below that must happen exactly once run only while
+	// this member leads (runLeaderDuty), and the bus subscriptions are what
+	// deliver the other members' events to this member's dashboards.
+	s.startClusterBus()
+	if n := s.clusterNode(); n != nil {
+		n.Start(watcherCtx)
+	}
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
-	go s.watchAutoBackup(watcherCtx)
+	s.runLeaderDuty(watcherCtx, "autobackup", s.watchAutoBackup)
 	// Bounds .cloop on a timer. Started after the lease for the same reason
 	// the other sweeps are: its VACUUM step rewrites the control-plane file,
 	// and the lease is what entitles this process to do that. See
 	// retention.go.
-	go s.watchRetention(watcherCtx)
+	s.runLeaderDuty(watcherCtx, "retention", s.watchRetention)
 	// Restarts runs a subscription cap parked, once the window they were
 	// waiting on has rolled over. Started with the other sweeps and for the
 	// same reason: it acts on every registered project, so it belongs to
 	// whichever hub holds the instance lease. See autoresume.go.
-	go s.watchAutoResume(watcherCtx)
+	s.runLeaderDuty(watcherCtx, "autoresume", s.watchAutoResume)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential
@@ -1337,6 +1407,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		ccAuth.Shutdown()
 	}
 	err := srv.Shutdown(ctx)
+	// Leave the cluster once requests have drained (Task 20354): leadership
+	// is released, and the member row is marked left so the others adopt
+	// what this member owned now rather than after the membership TTL.
+	if n := s.clusterNode(); n != nil {
+		s.releaseAgentOwnership()
+		if cerr := n.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("leave hub cluster: %w", cerr)
+		}
+	}
 	// The instance lease goes last, after in-flight requests have drained: it
 	// is what entitles this process to be the control plane, so releasing it
 	// while a handler is still writing would invite a successor to start
@@ -1502,6 +1581,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 // on this host); otherwise any remote client could spoof the header to
 // bypass per-IP rate limits, auth lockout, and WebSocket connection caps.
 func clientIP(r *http.Request) string {
+	// A request another hub member forwarded names the client that member
+	// saw, under its signature (Task 20354); the connection's own address is
+	// the member's.
+	if pc, ok := peerCallFrom(r); ok && pc.ClientIP != "" {
+		return pc.ClientIP
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -1812,6 +1897,17 @@ func (s *Server) resetStateDiffCache(workDir string) {
 // and map write" runtime panic. sendOrLag is non-blocking (select/default),
 // so holding the lock briefly here is safe.
 func (s *Server) broadcastToProject(workDir string, msg wsMessage) {
+	s.deliverToProject(workDir, msg)
+	// Relayed to other hub members' clients only when it describes something
+	// only this member knows (Task 20354); see relayedWSTypes.
+	if relayedWSTypes[msg.Type] {
+		s.publishWS(workDir, msg, "")
+	}
+}
+
+// deliverToProject is broadcastToProject without the relay: this member's
+// clients of workDir only. The bus delivers peers' messages through it.
+func (s *Server) deliverToProject(workDir string, msg wsMessage) {
 	s.hubMu.Lock()
 	defer s.hubMu.Unlock()
 	for hc := range s.hubClients[workDir] {
@@ -1819,8 +1915,47 @@ func (s *Server) broadcastToProject(workDir string, msg wsMessage) {
 	}
 }
 
-// presenceUsers returns a snapshot of all users connected to a project.
+// deliverToAll sends msg to every WebSocket client of this member.
+func (s *Server) deliverToAll(msg wsMessage) {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			s.sendOrLag(hc, msg)
+		}
+	}
+}
+
+// broadcastToAll sends msg to every WebSocket client on every hub member. For
+// the hub-global envelopes (executor, secret and audit changes), whose
+// payloads carry an event verb and an id and nothing a viewer may not see.
+func (s *Server) broadcastToAll(msg wsMessage) {
+	s.deliverToAll(msg)
+	s.publishWS("", msg, "")
+}
+
+// deliverSSE sends ev to this member's SSE clients of workDir.
+func (s *Server) deliverSSE(workDir string, ev sseEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for c := range s.clients {
+		if c.workDir != workDir {
+			continue
+		}
+		s.sendSSEOrLag(c, ev)
+	}
+}
+
+// presenceUsers returns a snapshot of all users connected to a project: this
+// member's own clients plus those other hub members reported (Task 20354).
 func (s *Server) presenceUsers(workDir string) []presenceUser {
+	users := s.localPresenceUsers(workDir)
+	return append(users, s.remotePresenceUsers(workDir)...)
+}
+
+// localPresenceUsers is presenceUsers for this member's clients only — what
+// it tells its peers.
+func (s *Server) localPresenceUsers(workDir string) []presenceUser {
 	s.hubMu.Lock()
 	defer s.hubMu.Unlock()
 	clients := s.hubClients[workDir]
@@ -1831,11 +1966,18 @@ func (s *Server) presenceUsers(workDir string) []presenceUser {
 	return users
 }
 
-// broadcastPresence sends the current presence list to all clients in a project.
+// broadcastPresence sends the current presence list to all clients in a
+// project, and tells the other hub members who is here.
 func (s *Server) broadcastPresence(workDir string) {
+	s.deliverPresence(workDir)
+	s.publishPresence(workDir)
+}
+
+// deliverPresence sends the merged presence list to this member's clients.
+func (s *Server) deliverPresence(workDir string) {
 	users := s.presenceUsers(workDir)
 	raw, _ := json.Marshal(map[string]interface{}{"users": users})
-	s.broadcastToProject(workDir, wsMessage{Type: "presence", Data: raw})
+	s.deliverToProject(workDir, wsMessage{Type: "presence", Data: raw})
 }
 
 // checkAndRecordEdit records that clientID edited the given fields of taskID in
@@ -1848,6 +1990,38 @@ func (s *Server) broadcastPresence(workDir string) {
 // lifetime. Combined with the conflictWindow cutoff the tracker stays bounded
 // by current editing activity rather than session lifetime.
 func (s *Server) checkAndRecordEdit(workDir, clientID string, taskID int, fields []string) bool {
+	conflict := s.checkAndRecordEditLocal(workDir, clientID, taskID, fields)
+	// The other hub members record it too, so an edit of the same field that
+	// reaches one of them inside the window is flagged there (Task 20354).
+	s.publishEdit(workDir, clientID, taskID, fields)
+	return conflict
+}
+
+// recordRemoteEdit records an edit another hub member saw. It only records:
+// the member that received the edit already decided whether it conflicted.
+func (s *Server) recordRemoteEdit(workDir, clientID string, taskID int, fields []string, at time.Time) {
+	if at.IsZero() || time.Since(at) >= conflictWindow {
+		return
+	}
+	s.conflictMu.Lock()
+	defer s.conflictMu.Unlock()
+	if s.conflictTracker == nil {
+		s.conflictTracker = make(map[string]map[string]*conflictEntry)
+	}
+	inner := s.conflictTracker[workDir]
+	if inner == nil {
+		inner = make(map[string]*conflictEntry)
+		s.conflictTracker[workDir] = inner
+	}
+	for _, field := range fields {
+		if len(inner) >= maxConflictEntriesPerWorkDir {
+			break
+		}
+		inner[fmt.Sprintf("%d:%s", taskID, field)] = &conflictEntry{clientID: clientID, editedAt: at}
+	}
+}
+
+func (s *Server) checkAndRecordEditLocal(workDir, clientID string, taskID int, fields []string) bool {
 	now := time.Now()
 	s.conflictMu.Lock()
 	defer s.conflictMu.Unlock()
@@ -1914,6 +2088,15 @@ var presenceColors = []string{
 // receive a typed "run_state" SSE event so polling is eliminated on that
 // path too.
 func (s *Server) broadcastRunState(workDir string, running, force bool) {
+	s.deliverRunState(workDir, running, force)
+}
+
+// deliverRunState is broadcastRunState's body. It never relays: a run's state
+// is published to other hub members by the member that owns the run, at the
+// moment it starts or settles (publishRunState), and nowhere else — a member
+// that merely *observes* a run it does not own must not tell the others it
+// stopped just because its own process table cannot see it.
+func (s *Server) deliverRunState(workDir string, running, force bool) {
 	s.runStateMu.Lock()
 	prev, ok := s.runStates[workDir]
 	if !force && ok && prev == running {
@@ -1933,18 +2116,11 @@ func (s *Server) broadcastRunState(workDir string, running, force bool) {
 	if err != nil {
 		return
 	}
-	s.broadcastToProject(workDir, wsMessage{Type: "run_state", Data: raw})
+	s.deliverToProject(workDir, wsMessage{Type: "run_state", Data: raw})
 
 	// Mirror to this project's SSE clients (fallback path) — matching the
 	// scoping the WebSocket line above already applies (Task 20189).
-	s.mu.Lock()
-	for c := range s.clients {
-		if c.workDir != workDir {
-			continue
-		}
-		s.sendSSEOrLag(c, sseEvent{Event: "run_state", Data: string(raw)})
-	}
-	s.mu.Unlock()
+	s.deliverSSE(workDir, sseEvent{Event: "run_state", Data: string(raw)})
 }
 
 // broadcastLog ships one chunk of workDir's live harness output to that
@@ -1965,23 +2141,27 @@ func (s *Server) broadcastLog(workDir, chunk string) {
 	if workDir == "" {
 		return
 	}
+	s.deliverLog(workDir, chunk)
+	// And to the dashboards attached to other hub members (Task 20354),
+	// batched: see logBatcher.
+	s.publishLog(workDir, chunk)
+}
+
+// deliverLog is broadcastLog for this member's clients only. Peers' output
+// arrives through it, so it lands in this member's replay buffer too and a
+// dashboard that connects here mid-run gets the backlog.
+func (s *Server) deliverLog(workDir, chunk string) {
+	if workDir == "" {
+		return
+	}
 	s.liveLogAppend(workDir, chunk)
 
 	data, err := json.Marshal(map[string]string{"chunk": chunk})
 	if err != nil {
 		return
 	}
-
-	s.mu.Lock()
-	for c := range s.clients {
-		if c.workDir != workDir {
-			continue
-		}
-		s.sendSSEOrLag(c, sseEvent{Event: "log", Data: string(data)})
-	}
-	s.mu.Unlock()
-
-	s.broadcastToProject(workDir, wsMessage{Type: "step_output", Data: json.RawMessage(data)})
+	s.deliverSSE(workDir, sseEvent{Event: "log", Data: string(data)})
+	s.deliverToProject(workDir, wsMessage{Type: "step_output", Data: json.RawMessage(data)})
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -2965,7 +3145,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 		// Send initial run state so the client can position the Run/Stop buttons
 		// without polling /api/livelog.
-		running := s.liveLogRunningFor(workDir) || multiui.IsCloopRunningInDir(workDir)
+		running := s.liveLogRunningFor(workDir) || multiui.IsCloopRunningInDir(workDir) ||
+			s.peerRunExecuting(workDir)
 		if raw, err := json.Marshal(map[string]interface{}{"running": running}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "run_state", Data: raw}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
@@ -3161,6 +3342,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
+	// A project whose executor is an edge agent can only be dispatched by the
+	// hub member holding that agent's socket (Task 20354). Before the body is
+	// consumed, so the forwarded request carries it.
+	if s.routeDispatch(w, r, s.resolveWorkDir(r)) {
+		return
+	}
 	// Body is ignored; all knobs come from persisted state. We still tolerate a
 	// JSON body so older clients don't error.
 	_, _ = io.Copy(io.Discard, r.Body)
@@ -3244,6 +3431,16 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// authenticated caller left to ask (Task 20264).
 	payer := s.runIdentity(r, workDir)
 
+	// The cluster-wide right to start this project's run (Task 20354), taken
+	// before anything is dispatched: projectExecuting above answers for runs
+	// that already exist, and this closes the window in which two hub members
+	// both pass it and dispatch two harnesses into one working directory.
+	if owner, err := s.claimRun(workDir, "run"); err != nil {
+		releaseSlot()
+		writeRunOwnedElsewhere(w, owner)
+		return
+	}
+
 	// Seed the billing cursor before the workload exists, not after. Seeded at
 	// the project ledger's current end, so this run pays for what it spends and
 	// never for what was already there — and with no window in which a task
@@ -3257,6 +3454,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// the browser can show the remediation instead of a generic 500
 		// (Task 20160).
 		releaseSlot()
+		s.releaseRunClaim(workDir)
 		jsonWorkloadErr(w, err)
 		return
 	}
@@ -3264,19 +3462,26 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Clear this project's old log and mark it running.
 	s.liveLogStartRun(workDir)
 	// Remember the workload behind that flag, so if it dies without saying so
-	// the driver can still be asked (stale_recovery.go).
-	s.trackRun(workDir, ex, handle.ID)
+	// the driver can still be asked (stale_recovery.go). The stream context is
+	// kept with it so that, should another hub member take the run over, this
+	// one can let go without settling it.
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	s.trackRunWithCancel(workDir, ex, handle.ID, cancelStream)
+	s.recordRunDispatch(workDir, "run", ex, handle.ID)
 	s.broadcastRunState(workDir, true, true)
+	s.publishRunState(workDir, true)
 
-	lines, streamErr := ex.Stream(context.Background(), handle.ID)
+	lines, streamErr := ex.Stream(streamCtx, handle.ID)
 	if streamErr != nil {
 		// We can no longer observe the run, so we cannot tell when it ends.
 		// Clear the running flag rather than leaving the UI wedged showing a
 		// run in progress forever.
 		fmt.Fprintf(os.Stderr, "ui: cannot stream run output: %v\n", streamErr)
+		cancelStream()
 		s.liveLogSetRunning(workDir, false)
 		s.untrackRun(workDir)
 		s.broadcastRunState(workDir, false, true)
+		s.publishRunState(workDir, false)
 		// The run is live but unobservable, so nothing will ever tell us it
 		// ended. Release the slot now rather than hold one forever: the cap
 		// exists to stop a tenant starving the fleet, and a counter that can
@@ -3338,6 +3543,12 @@ func (s *Server) consumeRunOutput(workDir string, ex executor.Executor, handleID
 		os.Stderr.WriteString(line.Text) // also echo to server's stderr
 		s.broadcastLog(workDir, line.Text)
 	}
+	// Another hub member adopted this run while it was streaming here (its
+	// agent reconnected there, Task 20354). That member settles it; doing so
+	// here as well would record its end twice and merge its result twice.
+	if s.takeHandedOver(handleID) {
+		return
+	}
 	stopDrain()
 	// One final drain after the workload is reaped: the last task's cost
 	// row lands as the run exits, and without this it would stay unbooked
@@ -3346,6 +3557,7 @@ func (s *Server) consumeRunOutput(workDir string, ex executor.Executor, handleID
 	s.drainSpend(workDir)
 	s.liveLogSetRunning(workDir, false)
 	s.broadcastRunState(workDir, false, true)
+	s.publishRunState(workDir, false)
 	// The stream closing is the earliest and best-informed moment to
 	// settle the run: the driver still holds its exit status, so a run
 	// that was killed rather than finished can be recorded as such
@@ -3385,6 +3597,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
+	// The member streaming the run is the one that can signal it (Task 20354).
+	if s.routeRunOwner(w, r, workDir) {
+		return
+	}
 	d := s.interruptRun(workDir)
 	if msg, failed := d.failure(); failed {
 		jsonOK(w, map[string]interface{}{"ok": false, "message": msg})
@@ -4805,6 +5021,10 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
+	// `cloop listen` runs on the default executor (Task 20354).
+	if s.routeDispatch(w, r, "") {
+		return
+	}
 
 	// Cap the total request body so a client can't spool unbounded data to
 	// disk: ParseMultipartForm's argument only bounds the in-memory portion,
@@ -4908,6 +5128,11 @@ func (s *Server) appendChatMessage(workDir string, msg ChatMessage) {
 // GET /api/chat/history
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
+	// The history is held by the hub member that served the conversation
+	// (Task 20354).
+	if s.routeToOwner(w, r, ownerChat, workDir) {
+		return
+	}
 	s.chatMu.Lock()
 	hist := s.chatHistories[workDir]
 	h := make([]ChatMessage, len(hist))
@@ -4921,6 +5146,9 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 // POST /api/chat  {"message":"..."}
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
+		return
+	}
+	if s.routeProjectAffinity(w, r, ownerChat, s.resolveWorkDir(r)) {
 		return
 	}
 
@@ -5157,6 +5385,10 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
+	// Dispatched like a run, so it goes where a run would (Task 20354).
+	if s.routeDispatch(w, r, s.resolveWorkDir(r)) {
+		return
+	}
 	exe := s.selfExe()
 	out, err := runCloopSubcommand(r.Context(), exe, s.resolveWorkDir(r), resetSubprocessTimeout, "reset")
 	if err != nil {
@@ -5309,7 +5541,7 @@ func (s *Server) cachedRunningClaims() map[string]struct{} {
 // refreshProjectStatuses rebuilds the projStatuses cache from disk, reloading
 // every project.
 func (s *Server) refreshProjectStatuses() {
-	s.refreshProjectStatusesUsing(s.allProjectEntries(), multiui.ScanRunningDirs(), nil)
+	s.refreshProjectStatusesUsing(s.allProjectEntries(), s.scanRunning(), nil)
 }
 
 // refreshProjectStatusesUsing rebuilds the projStatuses cache for a caller that
@@ -5549,8 +5781,13 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 
 	// One process-table walk per tick, shared by both passes and by the status
 	// refresh. Each pass used to ask per project, and every one of those
-	// questions walked the whole of /proc.
-	live := multiui.ScanRunningDirs()
+	// questions walked the whole of /proc. Plus the runs other hub members are
+	// streaming (Task 20354), which no walk of this process table can find.
+	live := s.scanRunning()
+	// A member that stopped owning a run it streams (another member adopted
+	// it) lets it go here if the handover message was missed.
+	s.verifyRunOwnership()
+	s.maybeAdoptOrphanedRuns(now)
 	running := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		running[e.Path] = live.Contains(e.Path)
@@ -6216,6 +6453,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.routeDispatch(w, r, entry.Path) {
+		return
+	}
 
 	// Same re-entrancy refusal as handleRun (Task 20253): the grid's Run button
 	// is one more view that can be looking at a stale run flag, and a second
@@ -6246,31 +6486,46 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	// Dispatched to the project's bound executor rather than forked here
 	// (Task 20156).
 	payer := s.runIdentity(r, entry.Path)
+	if owner, err := s.claimRun(entry.Path, "project-run"); err != nil {
+		writeRunOwnedElsewhere(w, owner)
+		return
+	}
 	s.openSpendCursor(entry.Path, payer)
 	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), payer,
 		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
+		s.releaseRunClaim(entry.Path)
 		jsonWorkloadErr(w, err)
 		return
 	}
 	// Echo the run's output into the server log, which is what
 	// cmd.Stdout = os.Stderr used to do.
-	if lines, streamErr := ex.Stream(context.Background(), handle.ID); streamErr == nil {
-		s.trackRun(entry.Path, ex, handle.ID)
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	if lines, streamErr := ex.Stream(streamCtx, handle.ID); streamErr == nil {
+		s.trackRunWithCancel(entry.Path, ex, handle.ID, cancelStream)
+		s.recordRunDispatch(entry.Path, "project-run", ex, handle.ID)
 		go func() {
 			stopDrain := s.startSpendDrain(entry.Path)
 			defer stopDrain()
 			defer func() { _, _ = s.drainSpend(entry.Path) }() // run over; next start is the gate
 			drainToStderr(lines, "project-run "+entry.Name)
+			if s.takeHandedOver(handle.ID) {
+				return // adopted by another hub member, which settles it
+			}
+			s.publishRunState(entry.Path, false)
 			s.runEnded(entry.Path, ex, handle.ID)
 		}()
+	} else {
+		cancelStream()
+		s.releaseRunClaim(entry.Path)
 	}
 	// Push immediate run_state + projects events so the UI updates the
 	// Run/Stop button and project card without waiting for the 2s
 	// watchProjects ticker. Replaces the client-side setTimeout(loadProjects)
 	// pseudo-poll (Task 20126).
 	s.broadcastRunState(entry.Path, true, true)
+	s.publishRunState(entry.Path, true)
 	s.refreshProjectStatuses()
 	s.broadcastProjectsUpdate()
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "command": strings.Join(args, " ")})
@@ -6281,6 +6536,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.projectAtIdx(w, r)
 	if !ok {
+		return
+	}
+	if s.routeRunOwner(w, r, entry.Path) {
 		return
 	}
 	// Project-scoped: only this project's workload and the cloop run
@@ -6319,6 +6577,12 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 //
 //	"model": "...", "pmMode": false, "autoRun": false }
 func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
+	// Initialising the project is a workload on the executor it will be
+	// bound to, and an edge agent's is reachable only from the hub member
+	// holding its socket (Task 20354).
+	if s.routeNewProject(w, r) {
+		return
+	}
 	var req struct {
 		Dir      string `json:"dir"`
 		Goal     string `json:"goal"`
@@ -6498,24 +6762,40 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			runArgs = append(runArgs, "--pm")
 		}
 		autoPayer := s.runIdentity(r, abs)
-		s.openSpendCursor(abs, autoPayer)
-		runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), autoPayer,
-			abs, append([]string{exe}, runArgs...),
-			map[string]string{"handler": "project-new-autorun"})
-		if startErr != nil {
-			// Non-fatal: the project was created successfully, only the
-			// optional immediate run failed. Surfacing it in the server log
-			// beats silently swallowing it as the pre-executor code did.
-			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
-		} else if lines, streamErr := runEx.Stream(context.Background(), runHandle.ID); streamErr == nil {
-			s.trackRun(abs, runEx, runHandle.ID)
-			go func() {
-				stopDrain := s.startSpendDrain(abs)
-				defer stopDrain()
-				defer func() { _, _ = s.drainSpend(abs) }() // run over; next start is the gate
-				drainToStderr(lines, "auto-run "+abs)
-				s.runEnded(abs, runEx, runHandle.ID)
-			}()
+		if _, claimErr := s.claimRun(abs, "project-new-autorun"); claimErr != nil {
+			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s skipped: %v\n", abs, claimErr)
+		} else {
+			s.openSpendCursor(abs, autoPayer)
+			runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), autoPayer,
+				abs, append([]string{exe}, runArgs...),
+				map[string]string{"handler": "project-new-autorun"})
+			streamCtx, cancelStream := context.WithCancel(context.Background())
+			if startErr != nil {
+				// Non-fatal: the project was created successfully, only the
+				// optional immediate run failed. Surfacing it in the server log
+				// beats silently swallowing it as the pre-executor code did.
+				cancelStream()
+				s.releaseRunClaim(abs)
+				fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
+			} else if lines, streamErr := runEx.Stream(streamCtx, runHandle.ID); streamErr == nil {
+				s.trackRunWithCancel(abs, runEx, runHandle.ID, cancelStream)
+				s.recordRunDispatch(abs, "project-new-autorun", runEx, runHandle.ID)
+				s.publishRunState(abs, true)
+				go func() {
+					stopDrain := s.startSpendDrain(abs)
+					defer stopDrain()
+					defer func() { _, _ = s.drainSpend(abs) }() // run over; next start is the gate
+					drainToStderr(lines, "auto-run "+abs)
+					if s.takeHandedOver(runHandle.ID) {
+						return
+					}
+					s.publishRunState(abs, false)
+					s.runEnded(abs, runEx, runHandle.ID)
+				}()
+			} else {
+				cancelStream()
+				s.releaseRunClaim(abs)
+			}
 		}
 	}
 
@@ -7766,6 +8046,18 @@ func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.R
 	if denyHostSideEffect(w, "", "claude CLI (auth login)") {
 		return
 	}
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	// The login is a `claude auth login` child that waits for its code in
+	// this process, so the code must come back here (Task 20354): the member
+	// that starts it claims it, and the code and cancel requests are routed
+	// to that member.
+	if s.claimOrRoute(w, r, ownerCCAuth, scope.Owner) {
+		return
+	}
 	var req struct {
 		Console bool   `json:"console"`
 		Email   string `json:"email"`
@@ -7777,11 +8069,6 @@ func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.R
 			respondToBodyError(w, err)
 			return
 		}
-	}
-	scope, err := s.claudeScopeFor(r)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusForbidden)
-		return
 	}
 	sess, err := s.claudeAuthManager().Start(r.Context(), scope.Owner, scope.ConfigDir, claudecodeauth.LoginOptions{
 		Console: req.Console,
@@ -7802,6 +8089,14 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 	if denyHostSideEffect(w, "", "claude CLI (auth login)") {
 		return
 	}
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if s.routeToOwner(w, r, ownerCCAuth, scope.Owner) {
+		return
+	}
 	var req struct {
 		Code string `json:"code"`
 	}
@@ -7810,12 +8105,8 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 		respondToBodyError(w, err)
 		return
 	}
-	scope, err := s.claudeScopeFor(r)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusForbidden)
-		return
-	}
 	st, err := s.claudeAuthManager().SubmitCode(scope.Owner, req.Code)
+	s.releaseClusterClaim(ownerCCAuth, scope.Owner)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
@@ -7841,7 +8132,11 @@ func (s *Server) handleClaudeCodeAuthLoginCancel(w http.ResponseWriter, r *http.
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	if s.routeToOwner(w, r, ownerCCAuth, scope.Owner) {
+		return
+	}
 	s.claudeAuthManager().Cancel(scope.Owner)
+	s.releaseClusterClaim(ownerCCAuth, scope.Owner)
 	jsonOK(w, map[string]bool{"ok": true})
 }
 

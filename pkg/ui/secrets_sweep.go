@@ -116,8 +116,15 @@ func sweepOrphanedLeaseDirs(controlPlaneDir string) leaseSweepResult {
 		}
 	}
 
+	node := currentCluster()
 	for _, row := range rows {
 		if _, live := held[row.Dir]; live {
+			result.Skipped++
+			continue
+		}
+		// Materialised by another hub process that is still serving
+		// (Task 20354): its run is reading from this directory right now.
+		if node != nil && row.InstanceID != "" && row.InstanceID != node.ID() && node.IsAlive(row.InstanceID) {
 			result.Skipped++
 			continue
 		}

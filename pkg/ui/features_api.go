@@ -694,9 +694,24 @@ func (s *Server) maybeAutoOpenFeaturePR(workDir string) {
 	if _, busy := autoPRInFlight.LoadOrStore(workDir, true); busy {
 		return
 	}
+	// Every hub member sees a run end (Task 20354) — the one that streamed it
+	// and every one whose sweep watched it stop. One of them opens the pull
+	// request; the claim decides which, and the rest see its owner and stand
+	// aside.
+	if n := s.clusterNode(); n != nil {
+		if _, won, err := n.Claim(ownerAutoPR, workDir, nil); err == nil && !won {
+			autoPRInFlight.Delete(workDir)
+			return
+		}
+	}
 	autoPRLastTry.Store(workDir, time.Now())
 	go func() {
 		defer autoPRInFlight.Delete(workDir)
+		defer func() {
+			if n := s.clusterNode(); n != nil {
+				_, _ = n.Release(ownerAutoPR, workDir)
+			}
+		}()
 		defer recoverGoroutine("automatic feature pull request")
 		ctx, cancel := context.WithTimeout(context.Background(), featurePRTimeout+time.Minute)
 		defer cancel()

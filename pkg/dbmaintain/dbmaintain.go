@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditretention"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -329,10 +330,16 @@ func refusePeerHub(dbPath string) error {
 		// is unreadable for an unrelated reason. Say so and continue.
 		return nil //nolint:nilerr // deliberately non-fatal; see comment
 	}
-	if !st.Live {
-		return nil
+	if st.Live {
+		return fmt.Errorf("%w: %s (pid %d) has held the lease since %s — stop it, or re-run once its lease lapses (%s)",
+			ErrPeerHubLive, st.Row.Hostname, st.Row.PID,
+			st.Row.AcquiredAt.Format(time.RFC3339), st.TTL)
 	}
-	return fmt.Errorf("%w: %s (pid %d) has held the lease since %s — stop it, or re-run once its lease lapses (%s)",
-		ErrPeerHubLive, st.Row.Hostname, st.Row.PID,
-		st.Row.AcquiredAt.Format(time.RFC3339), st.TTL)
+	// Hubs serving as a cluster hold the lease only through their leader, and
+	// for a few seconds after a leader dies nobody does (Task 20354).
+	if live, err := hubcluster.LiveMemberRows(dbPath, time.Now()); err == nil && len(live) > 0 {
+		return fmt.Errorf("%w: %d hub process(es) serve this database, %s (pid %d) among them — stop them first",
+			ErrPeerHubLive, len(live), live[0].Hostname, live[0].PID)
+	}
+	return nil
 }

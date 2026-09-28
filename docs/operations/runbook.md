@@ -224,19 +224,32 @@ every kubelet poll.
 
 ## The control-plane lease
 
-**One hub per `state.db`.** This is enforced, not advised: a hub takes a lease
-at startup and a second one refuses to start.
+**Several hubs may serve one `state.db`, as members of one cluster.** Every
+`cloop ui` joins the control plane at its working directory; start more in the
+same directory, or raise `replicaCount` in the Helm chart, and they serve the
+same state behind one load balancer. They share the database, forward to each
+other what only one of them can answer, relay live events between their
+dashboards, and elect one leader for the work that must happen exactly once.
+[Hub cluster](../architecture/hub-cluster.md) describes how.
 
-The reason is not the file. SQLite's WAL keeps it perfectly consistent under two
-writers, which is why this used to fail silently. What diverges is everything
-the hub keeps *beside* it — the project-status cache, the run registry, chat
-histories, live-log rooms and the WebSocket client set are all process memory,
-and an event reaches only the clients of the process that produced it. A second
-hub therefore serves a view that quietly stops agreeing with the first, while
-running the same background sweeps and issuing its own stop signals for the same
-runs.
+The lease is the leader's. Whoever holds it runs retention, backups,
+auto-resume, the session janitor and the periodic orphan sweep; the other
+members serve everything else.
 
 ```console
+$ cloop hub cluster status
+Hub cluster
+  /srv/cloop/.cloop/state.db
+
+  hub_59f28a07ceea8b8fa2b4386edc1cef40 leader  serving
+      host hub-1 pid 1234, listening :8080, reachable at http://127.0.0.1:8080
+      version v0.9.0, started 2026-09-12T17:23:15Z
+  hub_d74093a016f4198a7ec530075841bd4f  serving
+      host hub-1 pid 1301, listening :8081, reachable at http://127.0.0.1:8081
+      version v0.9.0, started 2026-09-12T17:25:02Z
+
+  2 member(s) serving
+
 $ cloop hub lease status
 Control-plane lease
   /srv/cloop/.cloop/state.db
@@ -254,39 +267,51 @@ Control-plane lease
 
 | Situation | What happens |
 | --- | --- |
-| Clean shutdown (SIGTERM, `helm upgrade`, `systemctl restart`) | The lease is released after requests drain. The replacement starts immediately. |
-| Hub killed outright (SIGKILL, OOM, node crash) — same host | The successor probes the recorded pid and takes over at once. No wait. |
-| Hub gone on another host, or after a reboot | The pid cannot be trusted, so the lease lapses on its **last heartbeat + 60s** and the next start succeeds. |
-| A hub is paused past the TTL and its lease taken | Its next renewal fails, it logs `standing down`, drains and exits non-zero. It does **not** keep serving. |
-| A second hub started deliberately | Refuses with an error naming the holder's host, pid and port. |
+| Clean shutdown (SIGTERM, `helm upgrade`, `systemctl restart`) | The member hands over its runs and agents, releases the lease if it led, and leaves. Another member — or the restarted process — leads within seconds. |
+| A member killed outright (SIGKILL, OOM) — same host | The others probe its recorded pid and take over at once: its runs are adopted, and if it led, a new leader is elected. |
+| A member gone on another host or node, in another container, or after a reboot | The pid cannot be trusted. The member is judged dead after 20s of silence and its runs adopted; the lease, if it led, lapses on its **last heartbeat + 60s**. |
+| A leader paused past the TTL and its lease taken | It steps down and keeps serving as a member. |
+| A second hub started deliberately | It joins as a member. |
+| A hub from before clustering holds the lease | A current build refuses to start beside it — see below. |
 
 Nothing here needs an operator in the normal case, including the crash case.
-That is the point of a lease rather than a lock file: a stale lease is free, so a
-dead hub cannot wedge its own restart.
+A stale lease is free, so a dead hub cannot wedge its own restart.
 
 ### When a hub refuses to start
 
+Two situations make a hub refuse rather than join.
+
+**A hub from before clustering is serving.** It holds the lease without being a
+member, so it would neither forward requests to a new member nor see its events:
+
 ```
-Error: another cloop hub already controls this state (/srv/cloop/.cloop/state.db)
+Error: another cloop hub controls this state and cannot share it
 
   holder     hub_59f28a07… on hub-1 (pid 1234), serving :8080
+  version    v0.8.2
+  last beat  4s ago
 ```
 
-Treat this as correct until proven otherwise — it is reporting a second hub, and
-the fix is almost always to stop that one. In order:
+Upgrade or stop it. A restart does that: the old process releases the lease on
+the way out. If it was killed rather than stopped, a new build on the same host
+probes its pid and starts at once; elsewhere its lease has to lapse first —
+within a minute.
 
-1. `cloop hub lease status` — is the holder this machine? Is its pid alive?
-2. If the holder is alive, stop it. Under Kubernetes check for a second Pod;
-   `replicaCount` above 1 is the usual cause and the chart now refuses to render
-   with it.
-3. If you want two dashboards on purpose, give the second one its **own
-   directory**. A hub roots its control plane at its working directory, so a
-   second one needs a second one. They will not share state — that is the whole
-   constraint — but both can watch the same registered projects.
-4. If the holder is genuinely gone, wait for `lapses in` to reach zero and start
-   again. `cloop hub lease clear` does it explicitly, and refuses while the lease
-   is live. There is no `--force`: a live lease means a hub is renewing it right
-   now, and evicting it would create exactly the split-brain the lease prevents.
+**`ui.cluster.exclusive` is set**, on this hub or on the one already serving.
+That is the pre-cluster rule on request — one process, guaranteed — and the
+refusal names the member that is serving. Stop it, or remove the setting to let
+them join.
+
+In either case:
+
+1. `cloop hub cluster status` and `cloop hub lease status` — who is serving and
+   who holds the lease? Is the holder this machine, and is its pid alive?
+2. If you meant to run one hub, stop the other. Under Kubernetes look for a
+   Pod of an older release.
+3. If the holder is genuinely gone, wait for `lapses in` to reach zero.
+   `cloop hub lease clear` releases a lapsed lease explicitly, and refuses while
+   the lease is live. There is no `--force`: a live lease means a hub is
+   renewing it right now.
 
 ---
 
@@ -506,9 +531,9 @@ Three things worth knowing:
 
 - **Pruning does not shrink the file.** It frees pages onto SQLite's freelist.
   Run `cloop db maintain` to return them to the filesystem. That command
-  VACUUMs, which rewrites the whole file, so it **refuses while another hub
-  holds the control-plane lease** — stop the peer or wait for the lease to
-  lapse (`cloop hub lease status`).
+  VACUUMs, which rewrites the whole file, so it **refuses while any hub is
+  serving the control plane** — stop the members (`cloop hub cluster status`
+  lists them) or wait for the lease to lapse (`cloop hub lease status`).
 - **`verify-seals` is the check that leaves the database.** Chain verification
   can only prove the survivors agree with what the anchors claim, and anyone
   who can rewrite `audit_events` can rewrite `audit_anchors` too. Copy the
@@ -1465,17 +1490,22 @@ endpoints, which is the fastest way to tell a wrong realm path from a
 certificate the hub does not trust. The gate clears on its own once the
 provider answers, including via an ordinary sign-in; no restart is needed.
 
-**The hub exits with "another cloop hub already controls this state".**
-Not a bug — a second hub was started against a control plane that already has
-one, and it refused rather than diverging. See
-[the control-plane lease](#the-control-plane-lease).
+**The hub exits with "another cloop hub controls this state and cannot share it".**
+Not a bug — a hub that is not a cluster member is serving this control plane:
+one from before clustering, or one running with `ui.cluster.exclusive`. The new
+one refused rather than diverging from it. See
+[when a hub refuses to start](#when-a-hub-refuses-to-start).
 
-**The hub logs "standing down" and exits after running normally.**
-It lost its lease: something else took over the control plane while this process
-was unable to renew for a full TTL, usually a long pause (a suspended node, a
-stalled volume) or a second hub that judged it dead. The process is right to
-exit — past that point another hub owns the state. Find the other hub with
-`cloop hub lease status` and decide which one should be running.
+**A member logs "stepped down: leadership was lost".**
+It could not renew the lease for a full TTL — usually a long pause (a suspended
+node, a stalled volume) — and another member took over the leader's duties. It
+keeps serving as a member, which is correct: the duties moved, the dashboard did
+not. If it happens repeatedly, look for what is stalling that process.
+
+**A hub started with `ui.cluster.exclusive` logs "standing down" and exits.**
+The same loss of the lease, under the pre-cluster rule that setting restores:
+past that point another hub owns the state, so this one stops rather than
+serving beside it. Find the other with `cloop hub lease status`.
 
 `"check": "executors"` means the hub has nothing to dispatch to: strict mode is
 on and no isolating executor registered. The `remediation` field says what to

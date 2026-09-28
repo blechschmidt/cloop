@@ -75,11 +75,18 @@ func (s *Server) SetQuotaPolicy(resolver *quota.Resolver) {
 			map[string]interface{}{"error": err.Error()})
 		store = nil
 	}
-	enforcer := quota.NewEnforcer(resolver, store,
+	opts := []quota.Option{
 		quota.WithStoreErrorHandler(func(err error) {
 			s.log().Warn(logger.EventAuthz, 0, "quota: persist counter",
 				map[string]interface{}{"error": err.Error()})
-		}))
+		}),
+	}
+	// Several hub processes share one set of caps (Task 20354): the database
+	// is the authority for every counter, not this process's memory.
+	if s.clusterNode() != nil && store != nil {
+		opts = append(opts, quota.WithSharedCounters())
+	}
+	enforcer := quota.NewEnforcer(resolver, store, opts...)
 	if err := enforcer.Load(); err != nil {
 		s.log().Warn(logger.EventAuthz, 0, "quota: load persisted state",
 			map[string]interface{}{"error": err.Error()})
@@ -87,6 +94,16 @@ func (s *Server) SetQuotaPolicy(resolver *quota.Resolver) {
 	s.quotaMu.Lock()
 	s.quotaEnforcer = enforcer
 	s.quotaMu.Unlock()
+}
+
+// reloadQuotaOverrides re-reads overrides another hub member changed.
+func (s *Server) reloadQuotaOverrides() {
+	if e := s.quotas(); e != nil {
+		if err := e.ReloadOverrides(); err != nil {
+			s.log().Warn(logger.EventAuthz, 0, "quota: reload overrides",
+				map[string]interface{}{"error": err.Error()})
+		}
+	}
 }
 
 // quotas returns the active enforcer, or nil when no policy was installed.
@@ -372,6 +389,14 @@ func (s *Server) auditQuotaEvent(actor string, eventType auditaction.Action, ent
 func (s *Server) ReconcileQuotas() {
 	e := s.quotas()
 	if e == nil {
+		return
+	}
+	// Rebuilding the gauges replaces them wholesale, and a member joining a
+	// control plane other members are already serving would erase the
+	// reservations they took a moment ago (Task 20354). The counters are
+	// shared and correct already; reconciliation is for a cold start.
+	if s.clusterPeersAlive() {
+		s.log().Info(logger.EventAuthz, 0, "quota: reconcile skipped, other hub members are serving and the counters are shared", nil)
 		return
 	}
 	live := quota.LiveState{
@@ -663,6 +688,9 @@ func (s *Server) handleQuotaSet(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteFromError(w, err)
 		return
 	}
+	// Every other hub member enforces from its own copy of the overrides
+	// (Task 20354); tell them to re-read.
+	s.publishInvalidate(invalidateQuota, nil)
 	s.auditQuotaChange(r, identity, auditaction.ActionQuotaOverrideSet, limits)
 
 	subj := quota.SubjectForIdentity(identity)
@@ -692,6 +720,7 @@ func (s *Server) handleQuotaClear(w http.ResponseWriter, r *http.Request) {
 			"no quota override exists for this identity"))
 		return
 	}
+	s.publishInvalidate(invalidateQuota, nil)
 	s.auditQuotaChange(r, identity, auditaction.ActionQuotaOverrideCleared, nil)
 	jsonOK(w, map[string]interface{}{"ok": true})
 }

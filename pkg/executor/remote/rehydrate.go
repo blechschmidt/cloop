@@ -234,8 +234,9 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 	// build is otherwise indistinguishable from a harness that produced
 	// nonsense.
 	hs.bus.Emit(fmt.Sprintf(
-		"[cloop] the control plane restarted; reattaching to this workload on agent %s. "+
-			"Output produced before the restart is not repeated here unless the device still holds it.\n",
+		"[cloop] reattaching to this workload on agent %s (the control plane restarted, or the "+
+			"agent reconnected to another hub member). Output produced before that is not repeated "+
+			"here unless the device still holds it.\n",
 		e.id))
 }
 

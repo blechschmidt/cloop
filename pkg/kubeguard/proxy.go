@@ -77,6 +77,16 @@ type Options struct {
 	// production it is nil and each session's own transport, built from its
 	// kubeconfig's TLS material, is used instead.
 	Transport http.RoundTripper
+
+	// Fallback, when set, is offered every request whose credential names a
+	// session this registry has never heard of, before it is refused
+	// (Task 20354). Several hub processes may serve one control plane, each
+	// with its own registry, and a sandbox's request reaches whichever of
+	// them the network sends it to; the hub forwards it to the process that
+	// minted the session. It reports whether it answered the request.
+	// Credentials naming a session this registry knows — right or wrong
+	// token, live or expired — are always decided here.
+	Fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
 }
 
 // Proxy serves the Kubernetes API to sandboxes, under policy.
@@ -165,6 +175,11 @@ func (p *Proxy) Close() error {
 
 // ServeHTTP is the whole decision path, in order.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.opts.Fallback != nil {
+		if id := p.sessionIDOf(r); id != "" && !p.reg.Known(id) && p.opts.Fallback(w, r, id) {
+			return
+		}
+	}
 	sess, err := p.authenticate(r)
 	if err != nil {
 		p.rejectUnauthenticated(w, r, err)
@@ -179,6 +194,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.forward(w, r, sess, req)
+}
+
+// sessionIDOf returns the session id half of the request's bearer token, or "".
+func (p *Proxy) sessionIDOf(r *http.Request) string {
+	raw := strings.TrimSpace(r.Header.Get("Authorization"))
+	token, ok := cutBearer(raw)
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(strings.TrimSpace(token), ".")
+	if !ok {
+		return ""
+	}
+	return id
 }
 
 // authenticate resolves the request's bearer token to a live session.

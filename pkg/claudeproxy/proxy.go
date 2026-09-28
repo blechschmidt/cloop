@@ -79,15 +79,26 @@ type Options struct {
 
 	// Now overrides the clock.
 	Now func() time.Time
+
+	// Fallback, when set, is offered every request whose credential names a
+	// session this registry has never heard of, before it is refused
+	// (Task 20354). Several hub processes may serve one control plane, each
+	// with its own registry, and a sandbox's request reaches whichever of
+	// them the network sends it to; the hub forwards it to the process that
+	// minted the session. It reports whether it answered the request.
+	// Credentials naming a session this registry knows — right or wrong
+	// token, live or expired — are always decided here.
+	Fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
 }
 
 // Proxy relays requests from CI sessions to the Anthropic API.
 type Proxy struct {
-	reg    *Registry
-	up     Upstream
-	prefix string
-	client *http.Client
-	now    func() time.Time
+	reg      *Registry
+	up       Upstream
+	prefix   string
+	client   *http.Client
+	now      func() time.Time
+	fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
 }
 
 // New returns a Proxy serving sessions from reg.
@@ -112,9 +123,10 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 		now = time.Now
 	}
 	return &Proxy{
-		reg:    reg,
-		up:     opts.Upstream,
-		prefix: strings.TrimSuffix(opts.PathPrefix, "/"),
+		reg:      reg,
+		up:       opts.Upstream,
+		prefix:   strings.TrimSuffix(opts.PathPrefix, "/"),
+		fallback: opts.Fallback,
 		// No client timeout: a streamed agent turn legitimately runs for
 		// minutes, and the request context already cancels when the pipeline
 		// gives up.
@@ -128,6 +140,11 @@ func (p *Proxy) Registry() *Registry { return p.reg }
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.fallback != nil {
+		if id, ok := sessionIDOf(p.presentedToken(r)); ok && !p.reg.Known(id) && p.fallback(w, r, id) {
+			return
+		}
+	}
 	sess, err := p.authenticate(r)
 	if err != nil {
 		p.reg.emit(Event{
@@ -199,6 +216,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ANTHROPIC_AUTH_TOKEN as a bearer, while the SDKs send ANTHROPIC_API_KEY in
 // x-api-key. A pipeline should not have to know which one the harness it runs
 // happens to use.
+// presentedToken is the credential the request carries, "" for none.
+func (p *Proxy) presentedToken(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if tok, ok := strings.CutPrefix(auth, "Bearer "); ok {
+			return strings.TrimSpace(tok)
+		}
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
+}
+
 func (p *Proxy) authenticate(r *http.Request) (*Session, error) {
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if tok, ok := strings.CutPrefix(auth, "Bearer "); ok {

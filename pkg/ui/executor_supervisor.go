@@ -98,6 +98,9 @@ func startExecutorSupervisor(dir string) {
 		executor.WithSessionStore(sched),
 		executor.WithEventSink(sched),
 		executor.WithFailoverHandler(failoverHandler(dir)),
+		// One process speaks for each executor (Task 20354). Nil — probe
+		// everything — for a standalone hub.
+		executor.WithProbeFilter(clusterProbeFilter(currentCluster())),
 	)
 	stop := sv.Start(context.Background())
 
@@ -334,6 +337,11 @@ func requeueTasksForFailover(ev executor.FailoverEvent) error {
 func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent) error {
 	if ev.To == "" {
 		return fmt.Errorf("failover: no replacement executor for session %s", ev.Session.ID)
+	}
+	// A replacement that is an edge agent connected to another hub member
+	// can only be started there (Task 20354).
+	if routed, err := redispatchOnAgentOwner(ctx, ev); routed {
+		return err
 	}
 	spec := ev.Session.Spec
 	if err := spec.Validate(); err != nil {

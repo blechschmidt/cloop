@@ -42,6 +42,18 @@ app.kubernetes.io/name: {{ include "cloop-hub.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+cloop-hub.coexist is "true" when two hub Pods can run at once: more than one
+replica, or a rolling update that starts the new Pod before stopping the old.
+Both then have to reach the same SQLite database, which is what the storage
+refusals in _validate.tpl and the co-location term in deployment.yaml key on.
+*/}}
+{{- define "cloop-hub.coexist" -}}
+{{- if or (gt (int .Values.replicaCount) 1) (eq (toString (dig "type" "" (default dict .Values.strategy))) "RollingUpdate") -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "cloop-hub.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "cloop-hub.fullname" .) .Values.serviceAccount.name -}}

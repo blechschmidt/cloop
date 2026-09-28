@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -150,6 +151,19 @@ func requireHubLease(workdir, alternative string) (func(), error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A free lease is not an idle control plane once hubs serve it as a
+	// cluster (Task 20354): the lease is its leader's, and between a leader's
+	// death and the next election the members are still serving, still
+	// holding what this command would write underneath them.
+	if live, lerr := hubcluster.LiveMemberRows(state.DBPath(workdir), time.Now()); lerr == nil && len(live) > 0 {
+		_ = lease.Release()
+		return nil, fmt.Errorf(
+			"%d hub process(es) are serving here: %s (%s pid %d) is one\n\n"+
+				"This command writes state those hubs loaded into memory at startup, so a\n"+
+				"write now would neither take effect nor survive their next edit. Use %s\n"+
+				"while they are running, or stop them first.",
+			len(live), live[0].InstanceID, live[0].Hostname, live[0].PID, alternative)
 	}
 	// Not Start()ed: the command finishes in milliseconds, far inside the
 	// lease TTL, so a renewal goroutine would only add a way to fail.

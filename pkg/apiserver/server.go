@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/reqid"
@@ -218,6 +219,14 @@ func bootstrapExecutors(dir string) {
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		ReconcileOrphans: true,
 		SweepInterval:    cfg.Executors.OrphanSweepInterval(),
+		// `cloop serve` is not a hub cluster member (Task 20354), so it cannot
+		// tell a member's live workload from an orphan. It sweeps only while no
+		// `cloop ui` serves this control plane; while one does, the sweeps are
+		// that cluster's leader's.
+		SweepGate: func(bool) bool {
+			live, err := hubcluster.LiveMemberRows(state.DBPath(dir), time.Now())
+			return err == nil && len(live) == 0
+		},
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "apiserver: "+format+"\n", args...)
 		},

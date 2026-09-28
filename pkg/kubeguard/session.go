@@ -355,6 +355,15 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 // The token is "<id>.<secret>". Splitting it lets the map be indexed without
 // scanning, and the comparison that decides the answer is a constant-time
 // compare of the full token's hash — so a caller learns nothing from timing
+// Known reports whether id names a session this registry holds, live or not.
+// See Options.Fallback.
+func (r *Registry) Known(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.sessions[id]
+	return ok
+}
+
 // about either half.
 func (r *Registry) Authenticate(token string) (*Session, error) {
 	id, _, ok := strings.Cut(strings.TrimSpace(token), ".")

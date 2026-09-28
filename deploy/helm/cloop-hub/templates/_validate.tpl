@@ -67,19 +67,20 @@ Everything here fails the render rather than warning. A warning during
 {{- end }}
 
 {{/* --- replicas -------------------------------------------------------
-  replicaCount is a number, which makes it look like a dial. It is not one:
-  the hub keeps its project-status cache, run registry and WebSocket clients
-  in process memory and fans events out only to its own clients, so a second
-  Pod does not share load — it serves a different, quietly diverging view of
-  the same database while running the same background sweeps against it.
-
-  cloop enforces this itself as of Task 20214: the second hub takes no lease,
-  refuses to start and CrashLoopBackOffs. Failing here instead means the
-  operator learns it from `helm install` with the reason attached, rather than
-  from a Pod that will not stay up.
+  Every replica is a member of one hub cluster serving one SQLite database
+  (docs/architecture/hub-cluster.md). What makes that work is the shared
+  database, so the refusals are about storage: a Pod on its own emptyDir is a
+  separate hub with a separate database, and a volume only one Pod may mount
+  leaves the others unable to start. SQLite's WAL additionally needs every
+  process on one kernel; deployment.yaml pins the replicas to one node for that.
 */}}
-{{- if gt (int .Values.replicaCount) 1 }}
-{{- fail "replicaCount must be 1. The hub is not horizontally scalable: its project-status cache, run registry and WebSocket client set live in process memory, and events reach only the clients of the Pod that produced them — so a second replica serves a diverging view of the same SQLite database while duplicating every background sweep.\n\ncloop refuses this at runtime too: only one hub can hold the control-plane lease, so the extra replicas would take no lease, refuse to start, and CrashLoopBackOff.\n\nTo handle more load, give the hub more resources, or move work to executors (executor.kubernetes.enabled=true) — those scale out, the control plane does not." }}
+{{- if include "cloop-hub.coexist" . }}
+{{- if not .Values.persistence.enabled }}
+{{- fail "more than one hub Pod can run at once (replicaCount > 1, or strategy.type=RollingUpdate), but persistence.enabled is false — each Pod would get its own emptyDir and so its own database: separate hubs behind one Service, each showing a different set of projects and runs.\nEnable persistence so the replicas share one volume." }}
+{{- end }}
+{{- if eq .Values.persistence.accessMode "ReadWriteOncePod" }}
+{{- fail "more than one hub Pod can run at once, but persistence.accessMode is ReadWriteOncePod: only one of them could mount the volume, and the rest would never start.\nUse ReadWriteOnce — the replicas are pinned to one node, which is what ReadWriteOnce allows." }}
+{{- end }}
 {{- end }}
 
 {{/* --- storage -------------------------------------------------------- */}}

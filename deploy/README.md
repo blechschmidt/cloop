@@ -340,39 +340,50 @@ means the PVC mounted, the ConfigMap landed inside it, `fsGroup` made it
 writable, and SQLite opened — under `readOnlyRootFilesystem`, `runAsNonRoot`
 and capabilities dropped.
 
-### One replica, `Recreate`
+### Replicas
 
-Not a placeholder to raise later, and the chart fails to render if you do.
+Every replica is a member of one [hub cluster](../docs/architecture/hub-cluster.md):
+the Service may send any request to any of them, a member forwards to another
+the few requests only that one can answer — a Stop for a run it streams, a
+login callback for a login it began, anything for an edge agent connected to
+it — and when a replica goes away, the others pick up its runs, agents and
+duties. One is elected leader for the work that must happen exactly once:
+retention, backups, auto-resume, the session janitor, the orphan sweep.
 
-The reason is not the volume — it is the hub. Its project-status cache, run
-registry, chat histories and WebSocket client set live in process memory, and
-an event reaches only the clients of the process that produced it. A second
-replica therefore does not halve the load; it serves a second view of the same
-database that quietly stops agreeing with the first, while running the same
-background sweeps and issuing its own stop signals for the same runs. SQLite's
-WAL keeps the file intact throughout, which is exactly why the failure is silent.
-
-cloop enforces this at runtime: one hub holds a lease on the control plane, and
-a second refuses to start with an error naming the holder.
-
-```
-cloop hub lease status    # who holds it, and when it lapses
+```bash
+helm upgrade cloop deploy/helm/cloop-hub -n cloop --reuse-values --set replicaCount=3
+kubectl -n cloop exec deploy/cloop-cloop-hub -- cloop hub cluster status
 ```
 
-The lease is renewed while the hub serves and released on shutdown, so an
-ordinary restart reacquires immediately. A hub that is killed outright leaves
-the lease behind, and the replacement takes it over as soon as the previous
-process is gone — or after 60s of silence if cloop cannot tell (a different
-node, or a reboot). Nothing has to be cleared by hand; `cloop hub lease clear`
-exists for deliberate cleanup and refuses while the lease is live.
+What replicas buy is availability — a Pod crash or an upgrade no longer takes
+the dashboard down — and request, WebSocket and agent connections spread over
+several processes. What they do not buy is a second node. The control plane is
+one SQLite database, and its write-ahead log needs every process that uses it
+on one kernel, so with more than one replica the chart:
 
-`Recreate` follows from the same constraint: a rolling update would start the
-new Pod while the old one still held both the volume and the lease.
+- adds a **required podAffinity** term pinning every replica to the node
+  already running one — the node the ReadWriteOnce volume is attached to. It is
+  appended to whatever `affinity` you set, not a replacement for it;
+- switches the Deployment to **`RollingUpdate`** with `maxSurge: 1` and
+  `maxUnavailable: 0`: a replacement joins before a member leaves, and the
+  leaving member hands its runs over on SIGTERM;
+- sets **`CLOOP_CLUSTER_ADVERTISE_HOST`** to each Pod's IP, which is how the
+  other replicas reach it;
+- **refuses to render** without persistence, or with a `ReadWriteOncePod`
+  volume — see [Refusals](#refusals).
 
-To handle more load, give the hub more resources or move work to executors —
-those scale out, the control plane does not. Making the control plane itself
-horizontally scalable is a change to how the hub holds state, not to
-`replicaCount`.
+A single replica keeps `Recreate`: without the co-location term a surge Pod
+could land on a node that cannot mount the volume, and the rollout would hang.
+Set `strategy.type=RollingUpdate` to opt into the term and upgrades without
+downtime on one replica too.
+
+To run more *work*, move it to executors (`executor.kubernetes.enabled`) —
+those scale out across the cluster. Replicas share one node's CPU and memory, so
+size the node for all of them.
+
+Upgrading from a chart version before 0.2.0: the old Pod holds the control-plane
+lease as a pre-cluster hub, and `Recreate` stops it before the new one starts,
+so the new Pod starts and leads. Raise `replicaCount` once the upgrade is done.
 
 The PVC carries `helm.sh/resource-policy: keep`, so `helm uninstall` does not
 delete your database.
@@ -456,6 +467,8 @@ disappears exactly when someone turns that file off.
 | `oidc.enabled` with `config.fromConfigMap=false` | No OIDC settings would reach the hub; the release would report SSO and serve token auth. |
 | `executor.kubernetes` RBAC with no named ServiceAccount | The RoleBinding would target `default`, granting Pod create/delete to every Pod in the namespace that does not name an account. |
 | `persistence.existingClaim` with `enabled=false` | The claim would be ignored and the hub would run on an emptyDir while appearing to use your volume. |
+| More than one replica (or `strategy.type=RollingUpdate`) without persistence | Each Pod would run on its own emptyDir — separate hubs with separate databases behind one Service. |
+| More than one replica with `persistence.accessMode=ReadWriteOncePod` | Only one Pod could mount the volume; the others would never start. |
 | `ingress.host` ≠ the host in `config.externalURL` | Produces a login that silently loops back to the sign-in page. |
 
 ### TLS

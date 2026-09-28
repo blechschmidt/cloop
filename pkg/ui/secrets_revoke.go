@@ -119,6 +119,17 @@ func aggregateState(results []remote.RevokeResult, wipedLocally bool) remote.Rev
 // "revoked on two devices, one unreachable" is the answer, and there is no
 // honest way to say it in a single flag.
 func (s *Server) revokeLeaseEverywhere(ctx context.Context, leaseID, grantID, reason string, action remote.RevokeAction, actor string) leaseRevocation {
+	out := s.revokeLeaseHere(ctx, leaseID, grantID, reason, action, actor)
+	// And on every other hub member (Task 20354). The lease may have been
+	// issued by any of them, and the agent holding it may be connected to any
+	// of them — not necessarily the same one.
+	s.mergePeerRevocations(ctx, &out, leaseID, grantID, reason, action, actor)
+	return out
+}
+
+// revokeLeaseHere is revokeLeaseEverywhere confined to this hub process: its
+// own copy, the agents connected to it, and its local drivers.
+func (s *Server) revokeLeaseHere(ctx context.Context, leaseID, grantID, reason string, action remote.RevokeAction, actor string) leaseRevocation {
 	out := leaseRevocation{}
 
 	sl, held := liveLeases.revoke(leaseID)
@@ -351,6 +362,10 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 			remote.RevokeScrub, nil, nil)
 	}
 	s.broadcastSecretsUpdate("lease_expired", out[0].LeaseID)
+	// The agents holding these may be connected to another hub member
+	// (Task 20354); the fan-out this return value feeds reaches only this
+	// member's. Scrub on theirs too.
+	s.revokeExpiredOnPeers(out)
 	return out
 }
 
@@ -369,6 +384,11 @@ func (s *Server) revokeLeasesForExecutor(executorID, reason, actor string) {
 	go func() {
 		defer recoverGoroutine("lease revoke on cordon: " + executorID)
 
+		// The agent's session — and so the list of leases it holds — is on
+		// whichever hub member it is connected to (Task 20354).
+		if s.revokeLeasesOnAgentOwner(executorID, reason, actor) {
+			return
+		}
 		hub, err := s.remoteHub()
 		if err != nil || hub == nil {
 			return

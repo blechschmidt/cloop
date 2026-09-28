@@ -10,11 +10,11 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
-	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -31,6 +31,9 @@ var (
 	uiTLSCert    string
 	uiTLSKey     string
 	uiRequireIdP bool
+	// uiAdvertiseURL is how other hub processes serving the same control
+	// plane reach this one (Task 20354).
+	uiAdvertiseURL string
 )
 
 var uiCmd = &cobra.Command{
@@ -56,25 +59,69 @@ but not for anything reachable from a network.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
-		// Fence this process as the sole control plane for workdir's state.db
-		// before anything touches it (Task 20214). This is the first statement
-		// in the command on purpose: ui.New reconciles executors and sweeps
-		// orphaned sessions, and a second hub doing that against a live hub's
-		// rows is the damage the lease exists to prevent — so the check has to
-		// come before the constructor, not inside it.
+		// Load .cloop/config.yaml. A parse failure is fatal, not a warning:
+		// every security-relevant setting the dashboard has — TLS, the origin
+		// allowlist, the WebSocket caps, and OIDC itself — lives in this file,
+		// so a one-character YAML typo would otherwise start a hardened
+		// deployment in plaintext with no authentication and only a line on
+		// stderr to say so. Load returns defaults with a nil error when the
+		// file is absent, so the no-config case is unaffected.
+		//
+		// Read through LoadUIInstance so a host running two dashboards out of
+		// one working directory can say something to this one alone — see
+		// pkg/config/uiinstance.go for why the overlay is a separate file and
+		// not a section. It is named on stdout when it applies: a setting
+		// whose source is invisible is the one an operator edits in the wrong
+		// file.
+		//
+		// Read first, before the control plane is touched: whether this
+		// process joins the others serving it or fences them out is decided
+		// here (ui.cluster).
+		cfg, overlay, err := config.LoadUIInstance(workdir, uiPort)
+		if err != nil {
+			return fmt.Errorf("could not load %s: %w", config.ConfigPath(workdir), err)
+		}
+		if overlay != "" {
+			fmt.Printf("Instance config: %s merged over %s\n", overlay, config.ConfigPath(workdir))
+		}
+		if cfg != nil {
+			if err := cfg.UI.Cluster.Validate(); err != nil {
+				return err
+			}
+		}
+
+		// Join the control plane before anything touches it. This is the
+		// first thing done to state.db on purpose: ui.New reconciles executors
+		// and sweeps orphaned sessions, and doing that without knowing which
+		// other hub processes are serving would reap their work.
+		//
+		// Two modes (Task 20354). By default this process becomes a member of
+		// the cluster serving workdir's control plane — alone, or beside the
+		// processes already serving it — and several `cloop ui` behind one
+		// load balancer share it. With ui.cluster.exclusive it takes the
+		// control plane alone instead, as every hub did before Task 20354, and
+		// refuses while any other hub serves it (Task 20214).
 		//
 		// Released by Server.Shutdown once requests have drained. If this
 		// returns before then — a config error, a bad TLS certificate — the
 		// deferred release stops a failed start from holding the fence.
-		lease, err := hublease.Acquire(hublease.Options{
-			DBPath:  state.DBPath(workdir),
-			Address: ":" + strconv.Itoa(uiPort),
-			Version: Version(),
-		})
-		if err != nil {
-			return err
+		var (
+			lease *hublease.Lease
+			node  *hubcluster.Node
+		)
+		if cfg != nil && cfg.UI.Cluster.Exclusive {
+			lease, err = acquireExclusiveHub(workdir)
+			if err != nil {
+				return err
+			}
+			defer lease.Release()
+		} else {
+			node, err = joinHubCluster(workdir, cfg)
+			if err != nil {
+				return err
+			}
+			defer node.Close()
 		}
-		defer lease.Release()
 
 		token := uiToken
 		if token == "" {
@@ -103,33 +150,12 @@ but not for anything reachable from a network.`,
 			}
 		}
 
-		srv := ui.New(workdir, uiPort, token)
+		srv := ui.NewInCluster(workdir, uiPort, token, node)
 		srv.Lease = lease
 		srv.Projects = projectPaths
 		srv.RPS = uiRateLimit
 		srv.Burst = uiRateBurst
 
-		// Load .cloop/config.yaml. A parse failure is fatal, not a warning:
-		// every security-relevant setting the dashboard has — TLS, the origin
-		// allowlist, the WebSocket caps, and OIDC itself — lives in this file,
-		// so a one-character YAML typo would otherwise start a hardened
-		// deployment in plaintext with no authentication and only a line on
-		// stderr to say so. Load returns defaults with a nil error when the
-		// file is absent, so the no-config case is unaffected.
-		//
-		// Read through LoadUIInstance so a host running two dashboards out of
-		// one working directory can say something to this one alone — see
-		// pkg/config/uiinstance.go for why the overlay is a separate file and
-		// not a section. It is named on stdout when it applies: a setting
-		// whose source is invisible is the one an operator edits in the wrong
-		// file.
-		cfg, overlay, err := config.LoadUIInstance(workdir, uiPort)
-		if err != nil {
-			return fmt.Errorf("could not load %s: %w", config.ConfigPath(workdir), err)
-		}
-		if overlay != "" {
-			fmt.Printf("Instance config: %s merged over %s\n", overlay, config.ConfigPath(workdir))
-		}
 		if cfg != nil {
 			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns
 			srv.MaxWebSocketConnsPerIP = cfg.UI.MaxWebSocketConnsPerIP
@@ -179,6 +205,12 @@ but not for anything reachable from a network.`,
 				// srv.Authz, which is assigned just below — a method value, so
 				// the nil resolver here is never read.
 				authCfg.EffectiveRole = srv.EffectiveRoleFor
+				// On a control plane several hub processes serve (Task
+				// 20354): a login's callback is routed to the process that
+				// began it, a session ended on one stops working on all of
+				// them at once, and two of them never redeem one refresh
+				// token together. A no-op for a standalone hub.
+				srv.ClusterOIDCConfig(&authCfg)
 				auth, oidcErr := oidcauth.New(authCfg)
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
@@ -410,6 +442,10 @@ func init() {
 	uiCmd.Flags().IntVar(&uiRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")
 	uiCmd.Flags().StringVar(&uiTLSCert, "tls-cert", "", "PEM certificate chain to serve HTTPS with (overrides ui.tls.cert_file)")
 	uiCmd.Flags().StringVar(&uiTLSKey, "tls-key", "", "PEM private key matching --tls-cert (overrides ui.tls.key_file)")
+	uiCmd.Flags().StringVar(&uiAdvertiseURL, "advertise-url", "",
+		"URL other hub processes serving this control plane reach this one at, e.g. "+
+			"http://10.0.3.17:8080 (also CLOOP_CLUSTER_ADVERTISE_URL, CLOOP_CLUSTER_ADVERTISE_HOST for "+
+			"just the host, or ui.cluster.advertise_url; default http(s)://127.0.0.1:<port>)")
 	uiCmd.Flags().BoolVar(&uiRequireIdP, "require-idp", false,
 		"Refuse to start when the OIDC issuer cannot be resolved, instead of warning and "+
 			"retrying at the first sign-in (also settable as ui.oidc.require_idp)")

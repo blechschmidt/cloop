@@ -84,7 +84,7 @@ func (s *Server) runRetentionSweep() {
 	// hub's own runStates map is not enough here: it records runs *this hub*
 	// dispatched, and a `cloop run` started from a shell against a registered
 	// project is invisible to it while being exactly as fatal to a step prune.
-	running := multiui.ScanRunningDirs()
+	running := s.scanRunning()
 
 	for _, e := range s.allProjectEntries() {
 		s.maybeRunRetention(e.Path, running)
@@ -179,7 +179,18 @@ func (s *Server) maybeRunRetention(workDir string, running multiui.RunningDirs) 
 	// first argument as a match, so passing an unset path through would hand
 	// this hub's lease identity to a project it does not own.
 	if workDir != "" && s.WorkDir != "" && sameDir(workDir, s.WorkDir) {
-		opts.InstanceID = s.Lease.InstanceID()
+		opts.InstanceID = s.hubInstanceID()
+		// Never VACUUM the control plane under other hub members (Task
+		// 20354). The rewrite holds the database for its duration, and every
+		// member writes its heartbeat, its bus events and its requests'
+		// rows there: a long one would stall them all, and a member whose
+		// heartbeat stalls past the TTL is judged dead and has its work
+		// adopted from under it. Pruning still runs; only the rewrite waits
+		// for a moment this member serves alone.
+		if s.clusterPeersAlive() {
+			opts.SkipVacuum = true
+			opts.SkipVacuumReason = "other hub processes are serving this control plane; a rewrite would stall them"
+		}
 	}
 
 	// Never rewrite a database underneath a live run, and never prune its step

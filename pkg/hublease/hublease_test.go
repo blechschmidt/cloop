@@ -185,6 +185,47 @@ func TestAcquire_DoesNotTrustAPIDFromElsewhere(t *testing.T) {
 	}
 }
 
+// TestAcquire_PidNamespaces (Task 20354): a pid means something only in the
+// namespace that issued it, so two containers on one kernel under one hostname
+// do not probe each other. A row from before boot ids carried the namespace is
+// judged by its kernel part — the rule the build that wrote it applies to its
+// own rows — so starting a current build after an older one was killed does
+// not wait out the TTL beside a process that is gone.
+func TestAcquire_PidNamespaces(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name, holder, self string
+		probed             bool
+	}{
+		{"the same namespace", "boot-1+pid:[1]", "boot-1+pid:[1]", true},
+		{"another namespace", "boot-1+pid:[1]", "boot-1+pid:[2]", false},
+		{"a row from before namespaces, this kernel", "boot-1", "boot-1+pid:[2]", true},
+		{"a row from before namespaces, another boot", "boot-0", "boot-1+pid:[2]", false},
+		{"a namespaced row, seen without one", "boot-1+pid:[1]", "boot-1", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, _ := leaseDB(t)
+			first := baseOpts(db, now)
+			first.Identity = hublease.Identity{Hostname: "host-a", PID: 100, BootID: c.holder}
+			if _, err := hublease.Acquire(first); err != nil {
+				t.Fatalf("first Acquire: %v", err)
+			}
+
+			next := baseOpts(db, now.Add(time.Second))
+			next.Identity = hublease.Identity{Hostname: "host-a", PID: 200, BootID: c.self}
+			next.ProcessAlive = func(int) bool { return false }
+			_, err := hublease.Acquire(next)
+			if c.probed && err != nil {
+				t.Fatalf("Acquire = %v; the holder's pid was comparable and is gone", err)
+			}
+			if !c.probed && err == nil {
+				t.Fatal("probed a pid from another namespace or boot, and evicted a fresh lease")
+			}
+		})
+	}
+}
+
 func TestAcquire_TreatsAReleasedLeaseAsFree(t *testing.T) {
 	db, _ := leaseDB(t)
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)

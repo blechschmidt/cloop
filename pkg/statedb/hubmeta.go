@@ -77,6 +77,32 @@ func (d *DB) SetHubMeta(key, value string) error {
 	return nil
 }
 
+// SetHubMetaIfAbsent writes value only when key has no value yet, and returns
+// whichever value the key holds afterwards. Two processes minting the same
+// secret at once both call it and both come away with the first one written —
+// which a read-then-SetHubMeta cannot promise, since the second write would
+// silently replace a value the first process is already using.
+func (d *DB) SetHubMetaIfAbsent(key, value string) (string, error) {
+	full, err := hubMetaKey(key)
+	if err != nil {
+		return "", err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, err := d.conn.Exec(
+		`INSERT INTO metadata(key, value) VALUES (?,?) ON CONFLICT(key) DO NOTHING`, full, value,
+	); err != nil {
+		return "", fmt.Errorf("statedb: set hub meta %s: %w", key, classifyDriverErr(err))
+	}
+	var stored string
+	if err := d.conn.QueryRow(`SELECT value FROM metadata WHERE key = ?`, full).Scan(&stored); err != nil {
+		return "", fmt.Errorf("statedb: hub meta %s: %w", key, classifyDriverErr(err))
+	}
+	return stored, nil
+}
+
 // DeleteHubMeta removes a hub-scoped metadata value. Deleting one that is not
 // there succeeds: the caller asked for it to be gone, and it is.
 func (d *DB) DeleteHubMeta(key string) error {
