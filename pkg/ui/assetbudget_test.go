@@ -219,7 +219,33 @@ import (
 // The stripper refuses rather than guesses (see its file comment), and when it
 // refuses the bundle ships with its comments — which this test would then
 // report as a 72 KB regression. TestServedBundleIsStripped says why first.
-const eagerWireBudgetBytes = 217_100
+//
+// Raised to 217_550 B by Task 20355, which styled the dashboard's <select>
+// boxes to match the page: 293 B wire. HEAD measured 217,016 B, 84 B of
+// headroom, so it did not fit.
+//
+// What the bytes are. 292 B are app.css: one shared rule every select takes
+// from the element rather than a class, a color-scheme per theme, and the
+// open list drawn as page content where appearance: base-select exists. The
+// other 14 B are the one-line guard in 18-shortcuts.js without which a key
+// typed into that open list reached the page's shortcuts (`t` switched the
+// theme mid-type-ahead, Escape closed the dialog behind the list); the markup
+// shrank by 13 B, since three inline paddings that duplicated .filter-select
+// were deleted rather than overridden.
+//
+// Deferral does not apply. Selects sit on the Tasks tab's filter bar and in
+// the dialogs of the landing page, and a stylesheet that arrived later would
+// paint each one natively first and restyle it a moment after: a visible
+// flash on every load, which is the opposite of what the bytes are for.
+//
+// Trimming came first and is in the figure: .filter-select kept only the three
+// properties that differ from the shared rule, and the rationale lives in
+// select_style_browser_test.go, which is not served. CSS comments, unlike JS
+// ones, still ship: 149 of them, ~17 KB decoded, ~7.6 KB wire at this commit.
+// A CSS pass in jsstrip.go would repay this raise about 25 times over.
+//
+// The new slack is 241 B, the same order as the raises above.
+const eagerWireBudgetBytes = 217_550
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

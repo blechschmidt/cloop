@@ -298,6 +298,12 @@ function kbClearFocus() {
 document.addEventListener('keydown', function(e) {
   // Never intercept when typing in a real input/editable area.
   const tag = ((e.target && e.target.tagName) || '').toUpperCase();
+  // An open <select> picker owns the keyboard (Task 20355). Where app.css
+  // renders selects with appearance: base-select, opening one moves focus onto
+  // its <option>s, so keys typed into the picker arrive here with an OPTION as
+  // the target: letters and digits are its type-ahead, and Escape must close
+  // the picker, not the dialog behind it (dismissTopOverlay below would).
+  if (tag === 'OPTION') return;
   const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable;
 
   // Cmd/Ctrl+K — open command palette (always, even in inputs).

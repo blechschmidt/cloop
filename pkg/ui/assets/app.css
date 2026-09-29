@@ -16,6 +16,7 @@
     --code-bg:     #0d1117;
     --on-accent:   #0d1117;
     --accent-hover:#79bcff;
+    color-scheme:dark;
   }
   [data-theme="light"] {
     --bg:          #ffffff;
@@ -34,6 +35,7 @@
     --code-bg:     #161b22;
     --on-accent:   #ffffff;
     --accent-hover:#0550ae;
+    color-scheme:light;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -147,16 +149,7 @@
   .filter-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
   .filter-check { display: flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer; user-select: none; white-space: nowrap; }
   .filter-check input[type=checkbox] { cursor: pointer; accent-color: var(--accent); }
-  .filter-select {
-    padding: 3px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--fg);
-    font-size: 11px;
-    cursor: pointer;
-    max-width: 130px;
-  }
+  .filter-select { padding: 3px 6px; font-size: 11px; max-width: 130px; }
   .filter-select:focus { outline: 2px solid var(--accent); }
   .filter-tags-wrap { position: relative; }
   .filter-tag-toggle {
@@ -383,7 +376,7 @@
   .audit-filters .form-label { margin-bottom:3px; }
   .audit-filters .audit-field { display:flex; flex-direction:column; min-width:130px; flex:1 1 130px; }
   .audit-filters .audit-field.wide { flex:2 1 220px; }
-  .audit-filters .form-input, .audit-filters .form-select { font-size:12px; padding:5px 8px; }
+  .audit-filters .form-input, .audit-filters .form-select { font-size:12px; padding-block:5px; padding-left:8px; }
 
   .audit-table { width:100%; border-collapse:collapse; font-size:12.5px; }
   .audit-table th {
@@ -919,13 +912,26 @@
   .add-task-bar input { flex:1; min-width:160px; }
 
   /* ── Form elements ── */
-  .form-input, .form-select, .form-textarea {
+  .form-input, .form-textarea, .input, select {
     background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
     color:var(--text); padding:7px 10px; font-size:13px; font-family:inherit;
   }
-  .form-input:focus, .form-select:focus, .form-textarea:focus { outline:none; border-color:var(--accent); }
-  .form-input  { width:100%; }
-  .form-select { width:100%; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238b949e'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; padding-right:28px; }
+  /* Selects (Task 20355): the why is in select_style_browser_test.go. */
+  select:hover { border-color:var(--muted); }
+  .form-input:focus, .form-textarea:focus, .input:focus, select:focus { outline:none; border-color:var(--accent); }
+  .form-input, .form-select, .input { width:100%; }
+  select:not([multiple]) { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238b949e'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; padding-right:28px; line-height:normal; min-height:auto; white-space:nowrap; overflow:clip; overflow-clip-margin:content-box; gap:0; cursor:pointer; }
+  select:disabled { opacity:.5; cursor:not-allowed; }
+  @media not (pointer:coarse) { @supports (appearance:base-select) {
+    select:not([multiple]), ::picker(select) { appearance:base-select; }
+    select::picker-icon { width:0; overflow:hidden; }
+    select:open { border-color:var(--accent); }
+    ::picker(select) { margin-block:4px; padding:4px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); box-shadow:0 8px 24px rgba(0,0,0,.4); }
+    option { padding:.4em .75em; border-radius:6px; }
+    option:hover, option:focus-visible { background:var(--hover-bg); outline:none; }
+    option:checked { background:rgba(88,166,255,.12); color:var(--accent); }
+    option:disabled { background:none; color:var(--muted); }
+  } }
   .form-textarea { width:100%; resize:vertical; min-height:60px; }
   .form-group { margin-bottom:12px; }
   .form-label { font-size:12px; color:var(--muted); margin-bottom:4px; display:block; }
