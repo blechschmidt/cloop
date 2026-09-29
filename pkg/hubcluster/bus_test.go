@@ -149,8 +149,16 @@ func TestAMemberLearnsOfANewcomerWithinAPoll(t *testing.T) {
 // the middle one deleted.
 func TestBusGapFromExplicitPrune(t *testing.T) {
 	path := dbPath(t)
-	a := join(t, fastOpts(path))
-	b, err := hubcluster.Join(fastOpts(path))
+	// The events below are backdated an hour so the test's own prune removes
+	// them. a is started, and as leader its housekeeping prunes past
+	// BusRetention every LeaderInterval — with the default two minutes it could
+	// take event 1 before b read it, leaving b a gap and event 3 alone, which
+	// is how this failed in CI (2026-09-29). A day's retention leaves the
+	// test's prune as the only one that can reach them.
+	opts := fastOpts(path)
+	opts.BusRetention = 24 * time.Hour
+	a := join(t, opts)
+	b, err := hubcluster.Join(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
