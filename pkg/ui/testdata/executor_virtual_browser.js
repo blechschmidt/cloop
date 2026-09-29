@@ -331,7 +331,15 @@ async function main() {
   } finally {
     try { cdp.ws.close(); } catch (e) { /* already closed */ }
     try { proc.kill('SIGKILL'); } catch (e) { /* already gone */ }
-    try { fs.rmSync(dir, {recursive: true, force: true}); } catch (e) { /* best effort */ }
+    // Chrome's helpers go on writing into the profile while it dies; wait for
+    // the exit and retry, so the removal does not race them (see
+    // cssstrip_oracle.js). Cleanup stays best effort either way.
+    if (proc.exitCode === null && proc.signalCode === null) {
+      await new Promise(r => { proc.once('exit', r); setTimeout(r, 5000).unref(); });
+    }
+    try {
+      fs.rmSync(dir, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+    } catch (e) { /* best effort */ }
   }
 }
 

@@ -114,9 +114,26 @@ async function main() {
     ws.close();
     return out;
   } finally {
-    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
-    fs.rmSync(dir, {recursive: true, force: true});
+    await stopChrome(proc, dir);
   }
+}
+
+// stopChrome kills Chrome and removes its profile, as best it can. Chrome's
+// helper processes go on writing into the profile while it dies, so removal is
+// retried after the process exits, and a failure to clean up never replaces
+// the comparison's result: the first CI run of this oracle reported ENOTEMPTY
+// from rmSync instead of a verdict (Task 20356).
+async function stopChrome(proc, dir) {
+  try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+  if (proc.exitCode === null && proc.signalCode === null) {
+    await new Promise(r => {
+      proc.once('exit', r);
+      setTimeout(r, 5000).unref();
+    });
+  }
+  try {
+    fs.rmSync(dir, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+  } catch (_) { /* best effort: a leftover profile in the temp dir harms nothing */ }
 }
 
 main().then(r => {
