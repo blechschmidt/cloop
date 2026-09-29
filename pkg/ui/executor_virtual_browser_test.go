@@ -17,6 +17,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"strings"
@@ -63,10 +64,37 @@ type evxBrowserResult struct {
 		ReopenedOpenChecked  bool            `json:"reopened_open_checked"`
 		ReopenedNetworkName  string          `json:"reopened_network_name"`
 		ReopenedNameVisible  bool            `json:"reopened_name_visible"`
+		Executors            int             `json:"executors"`
 	} `json:"saved_as_chosen"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// lateWrites applies every write to a virtual executor at once but holds its
+// response for delay, the way a hub under -race on a loaded runner answers.
+//
+// In that window the hub already stores the change while the dialog still
+// shows the form it submitted, in create mode after a first save. The first CI
+// run of this test lost exactly there (2026-09-29): the driver took the stale
+// form for the re-rendered one, pressed Create a second time, and waited out
+// its bound for a change that had gone to a new executor. A fast machine never
+// opens the window, so the test opens it on purpose.
+func lateWrites(h http.Handler, delay time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || !strings.Contains(r.URL.Path, "/virtual") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		time.Sleep(delay)
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+	})
 }
 
 func TestVirtualExecutorNetworkAccess_InBrowser(t *testing.T) {
@@ -98,7 +126,7 @@ func TestVirtualExecutorNetworkAccess_InBrowser(t *testing.T) {
 	// Configured before the listener starts: requests from Chrome carry no
 	// happens-before edge the race detector can see.
 	srv := New(dir, 0, "")
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(lateWrites(srv.Handler(), time.Second))
 	defer ts.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -185,6 +213,10 @@ func TestVirtualExecutorNetworkAccess_InBrowser(t *testing.T) {
 		}
 		if o := r.AfterOpen; o == nil || o.Firewall != nil || o.Sandbox["network"] != "lab-net" {
 			t.Errorf("Unfiltered on lab-net stored %+v", o)
+		}
+		if r.Executors != 1 {
+			t.Errorf("three saves of one executor left %d executors — a save after the first created "+
+				"another instead of editing it", r.Executors)
 		}
 		if !r.ReopenedOpenChecked || r.ReopenedNetworkName != "lab-net" || !r.ReopenedNameVisible {
 			t.Errorf("a named network did not survive a reopen: Unfiltered=%v name=%q visible=%v — saving "+

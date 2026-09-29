@@ -208,19 +208,40 @@ async function stored(cdp) {
   })()`);
 }
 
-// save presses the dialog's own button and waits for the hub to hold a virtual
-// executor named `name` whose spec satisfies `ok`.
+// save presses the dialog's own button, waits for the hub to hold a virtual
+// executor named `name` whose spec satisfies `ok`, and then for the dialog to
+// re-render from the save's answer.
+//
+// The last wait is what the next step depends on. The hub stores a write
+// before the dialog hears back, and until the dialog re-renders, the form on
+// screen is the one just submitted — in create mode, after a first save. A
+// click on it is lost when the re-render replaces it, and Create pressed there
+// makes a second executor. No field on that form tells the two apart (the
+// submitted one already shows the name and the choice), so it is marked before
+// the click and the wait is for a form without the mark. The first CI run of
+// this driver acted on the stale form and lost two saves (Task 20356).
 async function save(cdp, name, ok) {
-  await cdp.eval(`(() => {
-    const b = Array.from(document.querySelectorAll('#evxBody .modal-footer .btn.primary'))[0];
-    b.click(); })()`);
+  const clicked = await cdp.eval(`(() => {
+    const f = document.getElementById('evxName');
+    const b = document.querySelector('#evxBody .modal-footer .btn.primary');
+    if (!f || !b) return false;
+    f.dataset.submitted = '1';
+    b.click();
+    return true; })()`);
+  if (!clicked) throw new Error('the dialog has no form to save');
+  let v = null;
   const deadline = Date.now() + WAIT_MS;
   for (;;) {
-    const v = (await stored(cdp)).find(x => x.name === name);
-    if (v && ok(v.spec)) return v;
-    if (Date.now() >= deadline) return v || null;
+    v = (await stored(cdp)).find(x => x.name === name) || null;
+    if (v && ok(v.spec)) break;
+    if (Date.now() >= deadline) return v;
     await sleep(100);
   }
+  if (!await waitFor(cdp, `(() => { const f = document.getElementById('evxName');
+    return !!f && !f.dataset.submitted; })()`)) {
+    throw new Error('the dialog never re-rendered after saving ' + name);
+  }
+  return v;
 }
 
 // ── scenarios ───────────────────────────────────────────────────────────────
@@ -294,6 +315,8 @@ async function scenarioSavedAsChosen(cdp) {
   r.reopened_open_checked = await cdp.eval(`document.getElementById('evxNetOpen').checked`);
   r.reopened_network_name = await cdp.eval(`document.getElementById('evxNetName').value`);
   r.reopened_name_visible = await cdp.eval(visibleExpr('evxNetName'));
+  // Three saves of one executor: one create, two edits.
+  r.executors = (await stored(cdp)).length;
   results.saved_as_chosen = r;
 }
 
