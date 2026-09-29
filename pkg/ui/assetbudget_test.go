@@ -245,7 +245,21 @@ import (
 // A CSS pass in jsstrip.go would repay this raise about 25 times over.
 //
 // The new slack is 241 B, the same order as the raises above.
-const eagerWireBudgetBytes = 217_550
+//
+// Lowered to 215_300 B by Task 20356, which built that CSS pass
+// (cssstrip.go): the served stylesheet drops its comments, 150 of them,
+// taking app.css from 24,148 B to 16,513 B wire with its line count kept.
+// Chrome parses the sheet to the same 824 rules either way
+// (TestStripCSSComments_MatchesChrome).
+//
+// The same task reworked the virtual-executor dialog's network settings into
+// one choice with the firewall rules nested under it and read back as a
+// sentence: 1,390 B wire, which the 241 B of slack could not hold. The pass
+// paid for it five times over. Measured after both: 211,063 B.
+//
+// Lowered rather than left for the reason Task 20341 gave: a ceiling far above
+// the page stops gating. The figure is the measurement plus ~2%, as there.
+const eagerWireBudgetBytes = 215_300
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

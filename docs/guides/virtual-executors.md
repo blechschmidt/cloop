@@ -68,9 +68,10 @@ zero), and a sandbox is a container the engine starts, which never sees it.
 
 A device installed before the installer granted this by default — or with
 `--packet-filter=false` — **cannot** install a firewall. The panel says so on
-the device, with the reason the device gave, and on every virtual executor that
-has one, and a dispatch to it is refused rather than started unfiltered. Grant
-it on the device, without the enrollment bundle:
+the device, with the reason the device gave, under **Firewalled** in its
+virtual-executor dialog, and on every virtual executor that has one, and a
+dispatch to it is refused rather than started unfiltered. Grant it on the
+device, without the enrollment bundle:
 
 ```bash
 sudo cloop executor agent install --upgrade --packet-filter
@@ -99,7 +100,8 @@ the **Executors** tab, press **Virtual** on the device's card. The dialog shows:
   which is what you want right after plugging something in;
 - its existing virtual executors, each with an **Edit** button;
 - the form: name, engine, runtime (the device's registered runtimes are
-  offered), image, network, the firewall and the devices.
+  offered), image, the **network access** — with the firewall's rules under
+  **Firewalled** — and the devices.
 
 The same through the API (`executor.manage`):
 
@@ -126,17 +128,39 @@ after.
 Then bind a project to it like to any executor — the **Executor** card on the
 project's overview — and set its **Limits** and **Access** from its own card.
 
+## Network access
+
+A virtual executor's sandboxes are networked in one of three ways, and the
+dialog offers them as one choice, in order of reach:
+
+| choice | what a sandbox gets | in the spec |
+|---|---|---|
+| **No network** (the default) | no interface at all: it cannot clone a repository, reach the git proxy or resolve a name | `"network": "none"`, no `firewall` |
+| **Firewalled** | a bridge of the executor's own, filtered on the device: nothing is reachable unless a rule allows it | a `firewall` object, `network` unset |
+| **Unfiltered** | the engine's `bridge`, or a network created on the device, with no firewall — on `bridge`, whatever the device can reach, private networks and the cloud metadata service included | `"network": "bridge"` or the network's name, no `firewall` |
+
+The firewall's rules — **Allow the public Internet** among them — belong to
+**Firewalled** and to nothing else: the dialog shows them only under that
+choice, and saving another choice sends none of them. Rules typed and then left
+for another choice stay in the form, out of sight, in case you come back.
+
 ## The firewall
 
 Nothing is reachable unless an allow names it:
 
 | field | meaning |
 |---|---|
-| **Allow the public Internet** | every address outside the block set: RFC1918, link-local and the cloud metadata endpoint, CGNAT, loopback and multicast stay dropped |
-| **Allowlist** | ranges the sandbox may reach directly, private ones included — the only thing that reaches into blocked space |
-| **Denylist** | ranges the sandbox may never reach, whatever is allowed. Checked before every allow |
-| **Ports** | bounds the allows; empty means every port |
+| **Allow the public Internet** | every address outside the block set, over TCP: RFC1918, link-local and the cloud metadata endpoint, CGNAT, loopback and multicast stay dropped |
+| **Allowlist** | ranges the sandbox may reach directly over TCP, private ones included — the only thing that reaches into blocked space |
+| **Denylist** | ranges the sandbox may never reach, over any protocol, whatever is allowed. Checked before every allow, the resolvers included |
+| **Ports** | bounds the two allows above to these TCP ports; empty means every port |
 | **DNS resolvers** | opened on UDP and TCP, and the sandbox is told to resolve through them |
+
+Everything else is dropped: UDP reaches only the resolvers, and nothing answers
+a ping. Under the rules, the dialog reads them back as one sentence — what
+sandboxes can reach, what they never can — and flags two rule sets: one that
+allows nothing, which the device applies as no network at all, and one that
+opens the Internet with no resolver, under which no host name resolves.
 
 A single address is read as a host (`198.51.100.7` means `/32`). An allow of
 `0.0.0.0/0` is refused, because it would waive the metadata service along with
@@ -146,7 +170,7 @@ The resolvers matter more than they look. A firewall that drops private address
 space also drops the resolver the container engine hands a sandbox by default —
 on a cloud VM that is usually the provider's resolver in CGNAT or link-local
 space — so without resolvers of its own, every hostname fails to resolve. The
-panel pre-fills `1.1.1.1` when you turn the firewall on.
+dialog pre-fills `1.1.1.1` for a new executor's firewall.
 
 How it is enforced: the device creates a bridge for the virtual executor
 (`cloop-sbx-<id>`) and installs an nftables table (`cloop_sbx_<id>`) that filters

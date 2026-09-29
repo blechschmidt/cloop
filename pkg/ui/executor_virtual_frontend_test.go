@@ -14,6 +14,12 @@ import (
 // and what an admin ticks and types reaches the API as the spec the backend
 // validates — the YubiHSM selected by identity, the firewall's allowlist and
 // denylist split into lists, an empty port field sent as "every port".
+//
+// Task 20356 made the network one choice — No network, Firewalled, Unfiltered —
+// because an "IP firewall" checkbox beside an always-editable "Allow the public
+// Internet" and allowlist left it unclear which depended on which, and rules
+// typed with the firewall off were silently dropped. The scenarios below pin
+// that the rules are on screen, sent and summarised only under Firewalled.
 func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -51,11 +57,20 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 
 	cards := res["cards"].HTML
-	for _, want := range []string{"openExecutorVirtual(0)", "Virtual (1)", "firewall: on", "devices: 1",
-		"Virtual executor on sgx", "openExecutorVirtual(1)"} {
+	for _, want := range []string{"openExecutorVirtual(0)", "Virtual (1)", "devices: 1",
+		"Virtual executor on sgx", "openExecutorVirtual(1)",
+		// The network chip speaks the dialog's three words, and only an
+		// unfiltered network is the negative one: no network at all is the
+		// tightest access there is, not a missing firewall.
+		`<span class="exec-chip pos" title="IP firewall: public Internet; deny 203.0.113.0/24">network: firewalled</span>`,
+		`<span class="exec-chip neg" title="The lab-net network, with no firewall">network: unfiltered</span>`,
+		`<span class="exec-chip pos" title="No network interface at all">network: none</span>`} {
 		if !strings.Contains(cards, want) {
 			t.Errorf("cards lack %q", want)
 		}
+	}
+	if strings.Contains(cards, "firewall: off") {
+		t.Error(`a card still says "firewall: off", which reads as a weakness on an executor with no network at all`)
 	}
 	if strings.Contains(cards, "revokeExecutor(1)") {
 		t.Error("the virtual executor's card offers Revoke")
@@ -70,6 +85,52 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 	if strings.Contains(dialog, "1d6b:0002") {
 		t.Error("the dialog offers a USB hub, whose node passes nothing through")
+	}
+	// A new virtual executor starts with no network, the rules and the network
+	// name out of sight under the choices that apply them.
+	for _, want := range []string{`name="evxNet" id="evxNetNone" checked`, `id="evxNetFw" onchange="evxSync()"`,
+		`id="evxNetOpen" onchange="evxSync()"`, `id="evxFwRules" style="display:none"`,
+		`id="evxOpenNet" style="display:none"`, "Nothing is reachable unless a rule below allows it"} {
+		if !strings.Contains(dialog, want) {
+			t.Errorf("dialog lacks %q", want)
+		}
+	}
+	// The old controls, whose relationship nothing on screen explained.
+	for _, gone := range []string{`id="evxNetwork"`, `id="evxFw"`, "IP firewall</label>"} {
+		if strings.Contains(dialog, gone) {
+			t.Errorf("dialog still has %q", gone)
+		}
+	}
+	// The rules sit between the Firewalled choice and the next one, so they
+	// read as its settings rather than as the dialog's.
+	fwAt, rulesAt, openAt := strings.Index(dialog, `id="evxNetFw"`), strings.Index(dialog, `id="evxFwRules"`),
+		strings.Index(dialog, `id="evxNetOpen"`)
+	if !(fwAt < rulesAt && rulesAt < openAt) {
+		t.Errorf("the rules are not nested under Firewalled: Firewalled at %d, rules at %d, Unfiltered at %d",
+			fwAt, rulesAt, openAt)
+	}
+	if strings.Contains(dialog, "cannot install a firewall") {
+		t.Error("a device that can filter is said not to")
+	}
+
+	edit := res["editFirewalled"].HTML
+	for _, want := range []string{`id="evxNetFw" checked`, `<div class="evx-sub" id="evxFwRules">`,
+		"203.0.113.0/24", `id="evxOpenNet" style="display:none"`} {
+		if !strings.Contains(edit, want) {
+			t.Errorf("editing a firewalled executor: dialog lacks %q", want)
+		}
+	}
+	named := res["editNamed"].HTML
+	for _, want := range []string{`id="evxNetOpen" checked`, `<div class="evx-sub" id="evxOpenNet">`,
+		`id="evxNetName" list="evxNetNames" value="lab-net"`, `id="evxFwRules" style="display:none"`} {
+		if !strings.Contains(named, want) {
+			t.Errorf("editing an executor on a named network: dialog lacks %q — saving would reset it", want)
+		}
+	}
+	nopf := res["noPacketFilter"].HTML
+	if !strings.Contains(nopf, "sgx cannot install a firewall</b>: nft(8) needs CAP_NET_ADMIN") ||
+		strings.Index(nopf, "cannot install a firewall") < strings.Index(nopf, `id="evxNetFw"`) {
+		t.Errorf("a device that cannot filter does not say so under Firewalled:\n%s", nopf)
 	}
 
 	settings := res["settings"].HTML
@@ -117,5 +178,68 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	if len(sp.Devices) != 1 || sp.Devices[0].USB["vendor_id"] != "1050" || sp.Devices[0].USB["serial"] != "0031650425" ||
 		sp.Devices[0].Group != "plugdev" {
 		t.Errorf("devices = %+v", sp.Devices)
+	}
+
+	// Rules typed and then left for another choice are not applied.
+	for name, network := range map[string]string{"createNoNetwork": "none", "createUnfiltered": "lab-net"} {
+		var got struct {
+			Spec map[string]json.RawMessage `json:"spec"`
+		}
+		if err := json.Unmarshal([]byte(res[name].Body), &got); err != nil {
+			t.Fatalf("%s posted %q: %v", name, res[name].Body, err)
+		}
+		if _, ok := got.Spec["firewall"]; ok {
+			t.Errorf("%s sent a firewall: rules left under Firewalled were applied to another choice", name)
+		}
+		var sb map[string]string
+		if err := json.Unmarshal(got.Spec["sandbox"], &sb); err != nil || sb["network"] != network {
+			t.Errorf("%s: network = %q, want %q (%v)", name, sb["network"], network, err)
+		}
+	}
+
+	var sums map[string]struct {
+		Sum   string `json:"sum"`
+		Warn  bool   `json:"warn"`
+		Rules string `json:"rules"`
+		Open  string `json:"open"`
+	}
+	if err := json.Unmarshal([]byte(res["summaries"].Body), &sums); err != nil {
+		t.Fatalf("summaries: %q: %v", res["summaries"].Body, err)
+	}
+	for name, want := range map[string][]string{
+		"full": {"sandboxes can open TCP connections to the public Internet and 10.8.0.0/24 on any port",
+			"and query DNS at 1.1.1.1", "Never reachable: 203.0.113.0/24.", "Everything else is dropped."},
+		"ports":   {"on ports 443, 8443"},
+		"noDNS":   {"With no DNS resolver, host names will not resolve."},
+		"nothing": {"nothing is allowed, so sandboxes get no network at all"},
+		"dnsOnly": {"sandboxes can only query DNS at 1.1.1.1.", "Never reachable: 203.0.113.0/24."},
+		"hostile": {"&lt;img"},
+	} {
+		got := sums[name]
+		for _, w := range want {
+			if !strings.Contains(got.Sum, w) {
+				t.Errorf("summary %s = %q, want it to contain %q", name, got.Sum, w)
+			}
+		}
+		if got.Rules != "" || got.Open != "none" {
+			t.Errorf("summary %s: under Firewalled the rules must show (%q) and the network name hide (%q)",
+				name, got.Rules, got.Open)
+		}
+	}
+	for name, warn := range map[string]bool{"full": false, "ports": false, "dnsOnly": false, "noDNS": true, "nothing": true} {
+		if sums[name].Warn != warn {
+			t.Errorf("summary %s: warn = %v, want %v", name, sums[name].Warn, warn)
+		}
+	}
+	if strings.Contains(sums["hostile"].Sum, "<img") {
+		t.Error("a typed allowlist entry reached the summary's innerHTML unescaped")
+	}
+	if sums["none"].Rules != "none" || sums["none"].Open != "none" {
+		t.Errorf("under No network the rules (%q) and the network name (%q) must both hide",
+			sums["none"].Rules, sums["none"].Open)
+	}
+	if sums["open"].Rules != "none" || sums["open"].Open != "" {
+		t.Errorf("under Unfiltered the rules must hide (%q) and the network name show (%q)",
+			sums["open"].Rules, sums["open"].Open)
 	}
 }

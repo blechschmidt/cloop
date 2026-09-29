@@ -80,9 +80,15 @@ function _execCapChips(ex) {
   // runtime with it: a container on runc and a container on kata are different
   // boundaries.
   if (ex.virtual) {
-    const v = ex.virtual;
-    chips.push('<span class="exec-chip ' + (v.firewall ? 'pos' : 'neg') + '" title="' + esc(v.firewall || 'No firewall: the '
-      + 'network setting applies as-is') + '">firewall: ' + (v.firewall ? 'on' : 'off') + '</span>');
+    // Network access, in the dialog's three words (Task 20356). This chip was
+    // "firewall: off", greyed like a missing capability, on every virtual
+    // executor without a firewall — including one with no network at all, the
+    // tightest there is. Only an unfiltered network is the negative one now.
+    const v = ex.virtual, net = (ex.sandbox && ex.sandbox.network) || 'none';
+    const k = v.firewall ? 'firewalled' : net === 'none' ? 'none' : 'unfiltered';
+    chips.push('<span class="exec-chip ' + (k === 'unfiltered' ? 'neg' : 'pos') + '" title="' + esc(v.firewall
+      ? 'IP firewall: ' + v.firewall : k === 'none' ? 'No network interface at all' : 'The ' + net + ' network, with no firewall')
+      + '">network: ' + k + '</span>');
     if (v.devices && v.devices.length) {
       chips.push('<span class="exec-chip" title="' + esc(v.devices.join('\n')) + '">devices: ' + esc(v.devices.length) + '</span>');
     }
@@ -830,10 +836,11 @@ function _evxRender() {
   const lines = a => esc((a || []).join('\n'));
   const chosen = {};
   (sp.devices || []).forEach(x => { if (x.usb) chosen[x.usb.vendor_id + ':' + x.usb.product_id + ':' + (x.usb.serial || '')] = x; });
+  // Whether the device can install a firewall is said under the Firewalled
+  // choice (_evxNet), where it decides something, rather than up here.
   let h = '<div class="form-hint" style="margin-bottom:10px">' + esc(d.name) + ' · '
     + (d.connected ? 'connected, protocol v' + esc(d.protocol_version) : 'offline — showing its last report')
-    + (d.connected && !d.supported ? ' · <b>agent too old for firewalls and devices (needs v14)</b>' : '')
-    + (d.packet_filter ? '' : ' · <b>cannot install a firewall</b>: ' + esc(d.packet_filter_issue || 'not reported')) + '</div>';
+    + (d.connected && !d.supported ? ' · <b>agent too old for firewalls and devices (needs v14)</b>' : '') + '</div>';
   h += (d.virtual_executors || []).map((v, i) => '<div class="exec-chips">'
     + '<span class="exec-chip' + (v.id === execVx.edit ? ' pos' : '') + '">' + esc(v.name) + ' · ' + esc(v.id) + '</span>'
     + (v.issue ? '<span class="exec-chip neg" title="' + esc(v.issue) + '">cannot apply</span>' : '')
@@ -863,25 +870,108 @@ function _evxRender() {
       + '" placeholder="engine default"><datalist id="evxRuntimes">' + _evxOpts(d.oci_runtimes || [], '') + '</datalist>')
     + '</div>';
   h += _evxField('Image', '<input class="form-input" id="evxImage" value="' + esc(sb.image || '') + '" placeholder="the device default">');
-  h += _evxField('Network', '<select class="form-select" id="evxNetwork">' + _evxOpts(['none', 'bridge'], sb.network || 'none')
-    + '</select>', 'Ignored when the firewall is on: the sandbox then gets a filtered bridge of its own.');
-  h += '<label style="display:block;font-size:13px;margin:8px 0"><input type="checkbox" id="evxFw"' + (fw ? ' checked' : '')
-    + '> IP firewall</label>';
-  const f = fw || {allow_public_internet: true, resolvers: ['1.1.1.1']};
-  h += '<label style="display:block;font-size:12px;margin:4px 0"><input type="checkbox" id="evxPublic"'
-    + (f.allow_public_internet ? ' checked' : '') + '> Allow the public Internet</label>';
-  h += '<div class="form-row">' + _evxField('Allowlist', '<textarea class="form-input" id="evxAllow" rows="3" placeholder="10.8.0.0/24">'
-      + lines(f.allow_cidrs) + '</textarea>', 'Ranges reachable directly, private ones included.')
-    + _evxField('Denylist', '<textarea class="form-input" id="evxDeny" rows="3" placeholder="203.0.113.0/24">'
-      + lines(f.deny_cidrs) + '</textarea>', 'Never reachable, whatever is allowed.') + '</div>';
-  h += '<div class="form-row">' + _evxField('Ports', '<input class="form-input" id="evxPorts" value="' + esc((f.allow_ports || []).join(', '))
-      + '" placeholder="all ports">')
-    + _evxField('DNS resolvers', '<input class="form-input" id="evxDns" value="' + esc((f.resolvers || []).join(', ')) + '">') + '</div>';
+  h += _evxNet(d, sb, fw);
   h += '<div class="modal-footer">'
     + (execVx.edit ? '<button class="btn danger" onclick="deleteExecutorVirtual()">Delete</button>'
       + '<button class="btn" onclick="editExecutorVirtual(-1)">New</button>' : '')
     + '<button class="btn primary" onclick="saveExecutorVirtual()">' + (execVx.edit ? 'Save' : 'Create') + '</button></div>';
   document.getElementById('evxBody').innerHTML = h;
+  evxSync();
+}
+
+// _evxNet renders the network access choice (Task 20356).
+//
+// It used to be a Network select, then an "IP firewall" checkbox, then the
+// rules — all on screen and editable at once. Nothing said whether "Allow the
+// public Internet" needed the firewall, or whether an allowlist typed with the
+// firewall off did anything (it did not: save dropped it). The three ways a
+// sandbox can be networked are now one choice, and the rules are on screen only
+// under the choice that applies them. The order is the order of reach.
+//
+// A named network (one an operator created on the device) is Unfiltered with
+// that name; the old select could not show one, so saving an edit reset it to
+// none.
+function _evxNet(d, sb, fw) {
+  const net = sb.network || 'none', mode = fw ? 'fw' : net === 'none' ? 'none' : 'open';
+  const f = fw || {allow_public_internet: true, resolvers: ['1.1.1.1']};
+  const lines = a => esc((a || []).join('\n'));
+  const ev = ' oninput="evxSync()"';
+  const opt = (m, id, title, text) => '<label class="sec-own-opt"><input type="radio" name="evxNet" id="' + id + '"'
+    + (m === mode ? ' checked' : '') + ' onchange="evxSync()"><span><strong>' + title + '</strong> — ' + text + '</span></label>';
+  // Rendered in the state evxSync would leave it in, so nothing flashes.
+  const sub = (id, m, html) => '<div class="evx-sub" id="' + id + '"' + (m === mode ? '' : ' style="display:none"') + '>' + html + '</div>';
+  return '<div class="form-group"><label class="form-label">Network access</label>'
+    + opt('none', 'evxNetNone', 'No network', 'no interface at all. Sandboxes cannot clone a repository, reach the git '
+      + 'proxy or resolve a name.')
+    + opt('fw', 'evxNetFw', 'Firewalled', 'a bridge of this executor’s own, filtered on ' + esc(d.name) + ' before any '
+      + 'sandbox joins it. Nothing is reachable unless a rule below allows it.')
+    + (d.packet_filter ? '' : '<div class="evx-sub form-hint" style="color:var(--yellow)">&#9888; <b>' + esc(d.name)
+      + ' cannot install a firewall</b>: '
+      + esc(d.packet_filter_issue || 'not reported') + '. Work sent here is refused, never run unfiltered, until it can.</div>')
+    + sub('evxFwRules', 'fw', '<label class="sec-own-opt"><input type="checkbox" id="evxPublic"'
+      + (f.allow_public_internet ? ' checked' : '') + ' onchange="evxSync()"><span><strong>Allow the public Internet</strong> — '
+      + 'every public address, over TCP. Private (RFC 1918), link-local and cloud metadata, CGNAT, loopback and multicast '
+      + 'addresses stay closed unless the allowlist names them.</span></label>'
+      + '<div class="form-row">' + _evxField('Allowlist', '<textarea class="form-input" id="evxAllow" rows="3" placeholder="10.8.0.0/24"'
+        + ev + '>' + lines(f.allow_cidrs) + '</textarea>', 'Also reachable, private ranges included.')
+      + _evxField('Denylist', '<textarea class="form-input" id="evxDeny" rows="3" placeholder="203.0.113.0/24"' + ev + '>'
+        + lines(f.deny_cidrs) + '</textarea>', 'Never reachable, over any protocol: checked before every allow, the '
+        + 'resolvers included.') + '</div>'
+      + '<div class="form-row">' + _evxField('Ports', '<input class="form-input" id="evxPorts" value="'
+        + esc((f.allow_ports || []).join(', ')) + '" placeholder="all ports"' + ev + '>',
+        'Limits the public Internet and the allowlist to these TCP ports. Empty means every port.')
+      + _evxField('DNS resolvers', '<input class="form-input" id="evxDns" value="' + esc((f.resolvers || []).join(', '))
+        + '"' + ev + '>', 'Reachable for DNS over UDP and TCP, and what sandboxes resolve names through.') + '</div>'
+      + '<div class="evx-sum" id="evxFwSum"></div>')
+    + opt('open', 'evxNetOpen', 'Unfiltered', 'a network of the engine’s, with no firewall. On <code>bridge</code>, sandboxes reach '
+      + 'whatever ' + esc(d.name) + ' can, private networks and the cloud metadata service included.')
+    + sub('evxOpenNet', 'open', _evxField('Network', '<input class="form-input" id="evxNetName" list="evxNetNames" value="'
+      + esc(mode === 'open' ? net : 'bridge') + '"><datalist id="evxNetNames"><option value="bridge"></datalist>',
+      '<code>bridge</code>, or a network created on the device.'))
+    + '</div>';
+}
+
+function _evxMode() {
+  const on = id => (document.getElementById(id) || {}).checked;
+  return on('evxNetFw') ? 'fw' : on('evxNetOpen') ? 'open' : 'none';
+}
+
+// evxSync shows the settings of the chosen network access and hides the others,
+// then reads the firewall rules back as a sentence. Hidden values are kept, so
+// switching away and back loses no typing; save sends only the chosen one's.
+window.evxSync = function() {
+  const m = _evxMode(), sum = document.getElementById('evxFwSum');
+  [['evxFwRules', 'fw'], ['evxOpenNet', 'open']].forEach(p => {
+    const e = document.getElementById(p[0]);
+    if (e) e.style.display = m === p[1] ? '' : 'none';
+  });
+  if (!sum) return;
+  const s = _evxFwSum();
+  sum.innerHTML = s[1];
+  sum.classList.toggle('warn', s[0]);
+};
+
+// _evxFwSum says what the rules let through, in the order the device applies
+// them (netfilter.Compile): the denylist, then the allows, then a drop for
+// everything else. Allows are TCP; only the resolvers are open to UDP. Returns
+// [warn, html].
+function _evxFwSum() {
+  const to = [], allow = _evxList('evxAllow'), deny = _evxList('evxDeny'), ports = _evxList('evxPorts'), dns = _evxList('evxDns');
+  if ((document.getElementById('evxPublic') || {}).checked) to.push('the public Internet');
+  if (allow.length) to.push(allow.join(', '));
+  if (!to.length && !dns.length) {
+    // The agent turns this into no network at all (egressFilterFor).
+    return [true, '<b>In effect:</b> nothing is allowed, so sandboxes get no network at all — the same as <b>No network</b>.'];
+  }
+  let s = '<b>In effect:</b> ' + (to.length
+    ? 'sandboxes can open TCP connections to ' + esc(to.join(' and ')) + ' on '
+      + (ports.length ? 'port' + (ports.length > 1 ? 's ' : ' ') + esc(ports.join(', ')) : 'any port')
+      + (dns.length ? ', and query DNS at ' + esc(dns.join(', ')) : '') + '.'
+    : 'sandboxes can only query DNS at ' + esc(dns.join(', ')) + '.');
+  if (deny.length) s += ' Never reachable: ' + esc(deny.join(', ')) + '.';
+  s += ' Everything else is dropped.';
+  const noDNS = to.length > 0 && !dns.length;
+  return [noDNS, noDNS ? s + ' <b>With no DNS resolver, host names will not resolve.</b>' : s];
 }
 
 // Index-based, like every other handler in this file: see _renderExecutors.
@@ -912,13 +1002,16 @@ window.saveExecutorVirtual = function() {
       usb: {vendor_id: u.vendor_id, product_id: u.product_id, serial: u.serial || ''}});
   });
   _evxList('evxPaths').forEach((p, i) => devices.push({name: 'dev-' + i + '-' + p.split('/').pop(), path: p, group: group}));
+  const m = _evxMode();
   const spec = {
-    sandbox: {mode: 'container', engine: _evxVal('evxEngine'), runtime: _evxVal('evxRuntime'),
-      image: _evxVal('evxImage'), network: _evxVal('evxNetwork')},
+    sandbox: {mode: 'container', engine: _evxVal('evxEngine'), runtime: _evxVal('evxRuntime'), image: _evxVal('evxImage'),
+      network: m === 'fw' ? '' : m === 'open' ? _evxVal('evxNetName') || 'bridge' : 'none'},
     devices: devices,
   };
-  if ((document.getElementById('evxFw') || {}).checked) {
-    spec.sandbox.network = '';
+  // Only the chosen access is sent. Rules left under Firewalled after choosing
+  // another are not applied — and are off screen, so the form never shows a
+  // rule that is not in force.
+  if (m === 'fw') {
     spec.firewall = {
       allow_public_internet: !!(document.getElementById('evxPublic') || {}).checked,
       allow_cidrs: _evxList('evxAllow'), deny_cidrs: _evxList('evxDeny'),
