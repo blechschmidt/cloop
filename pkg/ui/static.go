@@ -192,7 +192,10 @@ type assetSet struct {
 	// served is the bundle as it goes over the wire: bundle with its
 	// whole-line comments removed (jsstrip.go), or bundle itself if the
 	// stripper declined.
-	served      string
+	served string
+	// servedCSS is css as it goes over the wire, its comments removed
+	// (cssstrip.go), or css itself if the stripper declined.
+	servedCSS   string
 	boundary    string
 	indexTmpl   string
 	glassesTmpl string
@@ -230,12 +233,16 @@ func buildAssets() *assetSet {
 	glassesTmpl := read("assets/glasses.html")
 
 	// Comments are for maintainers, not for every browser that paints the
-	// dashboard; they were over a third of its script's wire bytes. The
-	// stripper refuses anything it cannot prove unchanged, and then the bundle
-	// ships as written — see jsstrip.go.
+	// dashboard; they were over a third of its script's wire bytes, and of its
+	// stylesheet's. Each stripper refuses anything it cannot prove unchanged,
+	// and then that asset ships as written — see jsstrip.go and cssstrip.go.
 	served, stripErr := stripJSLineComments(bundle.String())
 	if stripErr != nil {
 		fmt.Fprintf(os.Stderr, "ui: serving the dashboard script with its comments: %v\n", stripErr)
+	}
+	servedCSS, cssErr := stripCSSComments(string(css))
+	if cssErr != nil {
+		fmt.Fprintf(os.Stderr, "ui: serving the dashboard stylesheet with its comments: %v\n", cssErr)
 	}
 
 	set := &assetSet{
@@ -244,6 +251,7 @@ func buildAssets() *assetSet {
 		css:         string(css),
 		bundle:      bundle.String(),
 		served:      served,
+		servedCSS:   servedCSS,
 		boundary:    string(boundary),
 		indexTmpl:   string(indexTmpl),
 		glassesTmpl: string(glassesTmpl),
@@ -257,7 +265,7 @@ func buildAssets() *assetSet {
 		ctype string
 		body  []byte
 	}{
-		{"app.css", "app", "css", "text/css; charset=utf-8", css},
+		{"app.css", "app", "css", "text/css; charset=utf-8", []byte(servedCSS)},
 		{"app.js", "app", "js", jsContentType, []byte(served)},
 		{"errboundary.js", "errboundary", "js", jsContentType, boundary},
 		{"chart.js", "chart", "js", jsContentType, chart},
