@@ -47,6 +47,7 @@ const (
 	EventTaskDeleted       = statedb.EventTaskDeleted
 	EventTaskStatusChange  = statedb.EventTaskStatusChange
 	EventTaskBackground    = statedb.EventTaskBackground
+	EventTaskReview        = statedb.EventTaskReview
 	EventTaskAborted       = statedb.EventTaskAborted
 	EventTaskInterrupted   = statedb.EventTaskInterrupted
 	EventEvolveRoundStart  = statedb.EventEvolveRoundStart

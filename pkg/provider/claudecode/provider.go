@@ -177,8 +177,19 @@ func buildArgs(opts provider.Options) []string {
 	if id := resumableSession(opts.ResumeSession); id != "" {
 		args = append(args, "--resume", id)
 	}
+	// A read-only call (the review gate's reviewer, Task 20357) gets an
+	// allow-list of tools that only read, and no MCP servers, whose tools
+	// the allow-list does not govern. An allow-list rather than a deny-list:
+	// a tool that writes and is added to a later CLI is then withheld by
+	// default instead of granted by omission.
+	if opts.ReadOnly {
+		args = append(args, "--tools", readOnlyTools, "--strict-mcp-config")
+	}
 	return args
 }
+
+// readOnlyTools are the built-in tools a read-only call may use.
+const readOnlyTools = "Read,Grep,Glob"
 
 // resumableSession returns id when it is a session id the CLI can resume, and
 // "" otherwise.
@@ -307,6 +318,10 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 	// directory, so leaving one in place would silently run every user's tasks
 	// on the host's account instead of their own.
 	cmd.Env = claudecodeauth.ScopeEnv(append(os.Environ(), "IS_SANDBOX=1"), os.Getenv("CLAUDE_CONFIG_DIR"))
+	// Variables the caller adds for this process — the review gate's push
+	// hold (Task 20357). Appended, so exec's keep-the-last deduplication lets
+	// them override what was inherited, as PATH must.
+	cmd.Env = append(cmd.Env, opts.Env...)
 	if tokenOverride != "" {
 		// exec deduplicates the environment keeping the last occurrence, so
 		// this wins over any CLAUDE_CODE_OAUTH_TOKEN inherited or loaded from

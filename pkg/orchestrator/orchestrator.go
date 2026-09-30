@@ -403,6 +403,19 @@ type Config struct {
 	// validated to [OrchestratorTaskTimeoutMinutesLower, ...Upper]. Sourced
 	// from config.Orchestrator.TaskTimeoutMinutes by cmd/run.go.
 	TaskTimeoutMinutes int
+
+	// ProviderModels maps a provider name to the model config.yaml names for
+	// it (anthropic.model, openai.model, ...). The review gate uses it when
+	// its reviewer runs on another provider than the work and names no model
+	// (Task 20357).
+	ProviderModels map[string]string
+
+	// ReviewProvider, when set, is the review gate's reviewer, whatever the
+	// project's gate names; tests use it. Nil builds the reviewer from
+	// ProviderCfg. ReviewGateHelper overrides the program that holds the
+	// agent's pushes (default: this executable's review-gate-remote-helper).
+	ReviewProvider   provider.Provider
+	ReviewGateHelper []string
 }
 
 type Orchestrator struct {
@@ -467,6 +480,12 @@ type Orchestrator struct {
 	// effect on the currently-running task within a few seconds rather
 	// than only on the next one (Task 20143).
 	liveDeadlines *liveDeadlineRegistry
+
+	// reviewers caches the review gate's reviewer providers by provider
+	// name for the run (Task 20357). Guarded: parallel workers review
+	// concurrently.
+	reviewersMu sync.Mutex
+	reviewers   map[string]provider.Provider
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -1424,11 +1443,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	var (
 		taskCtx    context.Context
 		taskCancel context.CancelFunc
+		// activeGate is the review gate's hold on the current task's pushes
+		// (Task 20357), released the same way and for the same reason.
+		activeGate *gateRun
 	)
 	defer func() {
 		if taskCancel != nil {
 			taskCancel()
 		}
+		activeGate.close()
 	}()
 
 	for {
@@ -1438,6 +1461,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			taskCancel()
 			taskCancel = nil
 		}
+		activeGate.close()
+		activeGate = nil
 
 		select {
 		case <-ctx.Done():
@@ -1840,6 +1865,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// per task.
 		repoBefore := repoFingerprint(o.config.WorkDir)
 
+		// Review gate (Task 20357): record what the repositories look like and
+		// start holding the agent's pushes, before the agent runs.
+		activeGate = o.openGate(ctx, s.ReviewGate, o.config.WorkDir)
+		var gateOut *gateOutcome
+		// taskSessionID is the conversation the agent's latest turn ran in,
+		// which a review sending it back resumes.
+		taskSessionID := ""
+
 		// Central queue: record this task execution as a work item BEFORE the
 		// provider call. The id is carried forward so we can mark the entry
 		// done/failed/skipped after the call returns. Every work path in the
@@ -1932,6 +1965,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 			prompt = learningMem + prompt
 		}
+		prompt = withGateSection(prompt, activeGate.promptSection())
 
 		// Prompt A/B testing: track the currently recommended variant for this
 		// task's role. Used to record outcomes and to select a replacement on
@@ -2080,6 +2114,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Running consensus (n=%d) on critical task %d...\n", o.config.ConsensusN, task.ID)
 				consensusProviders := o.buildConsensusProviders(taskProvider)
 				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in consensus mode
+				opts.Env = activeGate.env()
 				cOutput, cReport, cErr := consensus.RunConsensus(
 					taskCtx,
 					consensusProviders,
@@ -2134,6 +2169,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				opts, wasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				opts = o.withBackgroundWaitNotice(opts, s, task, nil)
+				opts.Env = activeGate.env()
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2227,6 +2263,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				taskOutput = result.Output
 				taskBackground = result.Background
+				taskSessionID = result.SessionID
 				taskInputTokens = result.InputTokens
 				taskOutputTokens = result.OutputTokens
 				taskThinkingTokens = result.ThinkingTokens
@@ -2414,6 +2451,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
 				healOpts, healWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
+				healOpts.Env = activeGate.env()
 				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					if runInterrupted(ctx) {
@@ -2447,6 +2485,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				taskOutput = healResult.Output
 				taskBackground = healResult.Background
+				taskSessionID = healResult.SessionID
 
 				// Account for tokens used by heal attempts.
 				s.TotalInputTokens += healResult.InputTokens
@@ -2510,6 +2549,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"Make your best judgment for ALL decisions and proceed to full completion. " +
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
+					clarifyOpts.Env = activeGate.env()
 					clarifyResult, clarifyErr := safeComplete(taskCtx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						if runInterrupted(ctx) {
@@ -2539,6 +2579,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					taskOutput = clarifyResult.Output
 					taskBackground = clarifyResult.Background
+					taskSessionID = clarifyResult.SessionID
 					s.TotalInputTokens += clarifyResult.InputTokens
 					s.TotalOutputTokens += clarifyResult.OutputTokens
 					signal = pm.CheckTaskSignal(taskOutput)
@@ -2582,6 +2623,69 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					"⏳ Task %d left %d background process(es) running after %ds — not accepting it as complete\n",
 					task.ID, task.Background.Detected, task.Background.WaitedSeconds)
 			}
+		}
+
+		// Review gate (Task 20357). A task that says it is done — or ended
+		// without a signal, which the default arm below may still promote —
+		// has its changes reviewed before anything leaves the machine. What
+		// the gate does not approve fails here, before any merge or push.
+		reviewReroute := false
+		if activeGate != nil && (signal == pm.TaskDone || signal == pm.TaskInProgress) {
+			if requeueIfInterrupted("before the review gate ran") {
+				continue
+			}
+			if !o.log.IsJSON() {
+				dimColor.Printf("  Review gate: reviewing task %d's changes...\n", task.ID)
+			}
+			fixOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
+			fixOpts = o.withBackgroundWaitNotice(fixOpts, s, task, nil)
+			fixOpts.Env = activeGate.env()
+			gateOut = o.passGate(provideraudit.WithTaskContext(taskCtx, task.ID, task.Title), activeGate, gateInput{
+				task: task, goal: s.Goal, conventions: s.Instructions, prompt: prompt,
+				output: taskOutput, signal: signal, sessionID: taskSessionID, background: taskBackground,
+				worker: taskProvider, workerOpts: fixOpts, model: s.Model,
+			})
+			if requeueIfInterrupted("while the review gate was running") {
+				continue
+			}
+			for i, st := range gateOut.steps {
+				s.AddStep(state.StepResult{
+					Task:         fmt.Sprintf("Task %d: %s (review fix %d)", task.ID, task.Title, i+1),
+					Output:       st.output,
+					Duration:     st.duration.Round(time.Second).String(),
+					Time:         time.Now(),
+					InputTokens:  st.inputTok,
+					OutputTokens: st.outputTok,
+				})
+			}
+			s.TotalInputTokens += gateOut.workIn + gateOut.reviewIn
+			s.TotalOutputTokens += gateOut.workOut + gateOut.reviewOut
+			taskInputTokens += gateOut.workIn
+			taskOutputTokens += gateOut.workOut
+			taskThinkingTokens += gateOut.workThinking
+			if len(gateOut.steps) > 0 {
+				taskOutput, taskBackground, taskSessionID = gateOut.output, gateOut.background, gateOut.sessionID
+				task.Result = truncate(taskOutput, 500)
+				signal = applyBackgroundOutcome(task, taskBackground, gateOut.signal)
+			}
+			task.Review = gateOut.review
+			pm.AddAnnotation(task, "reviewer", gateOut.note)
+			o.logReviewEvent(s, task, gateOut)
+			o.recordReviewCost(task, gateOut)
+			if gateOut.fail {
+				signal = pm.TaskFailed
+				reviewReroute = true
+				task.FailureDiagnosis = gateOut.review.Diagnosis()
+				if !gateOut.review.Blocked {
+					task.FailureDiagnosis = gateOut.note
+				}
+				if !o.log.IsJSON() {
+					failColor.Printf("✗ %s\n", gateOut.note)
+				}
+			} else if !o.log.IsJSON() {
+				successColor.Printf("✓ %s\n", gateOut.note)
+			}
+			s.Save()
 		}
 
 		switch signal {
@@ -2763,7 +2867,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// clarification reroute above — the auto-resolve loop's outcome
 			// annotation (line ~1993) already captures the real root cause, and
 			// claiming "per AI TASK_FAILED signal" would misattribute it.
-			if !clarificationReroute {
+			if !clarificationReroute && !reviewReroute {
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
 			}
 			if !o.log.IsJSON() {
@@ -2791,7 +2895,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 			// AI failure diagnosis: analyze what went wrong and store it on the task.
 			// This runs before adaptive replan so the diagnosis can inform replanning too.
-			if o.config.DiagnoseFailures {
+			// A task the review gate failed already carries the reviewer's
+			// findings as its diagnosis, which is the better account.
+			if o.config.DiagnoseFailures && !reviewReroute {
 				dimColor.Printf("  Diagnosing failure for task %d...\n", task.ID)
 				diag, diagErr := diagnosis.AnalyzeFailure(taskCtx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
@@ -3046,6 +3152,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			case pm.TaskDone, pm.TaskSkipped:
 				if commitErr := cloopgit.CommitTaskArtifacts(o.config.WorkDir, task); commitErr != nil {
 					dimColor.Printf("  git commit error (ignored): %v\n", commitErr)
+				} else if ok, why := o.gateAllowsMergeOf(ctx, activeGate, gateOut, o.config.WorkDir, "HEAD"); !ok {
+					// The review gate stands in front of this merge too: the
+					// branch stays, unmerged, for a person to look at.
+					dimColor.Printf("  git: not merging %s — %s\n", gitTaskBranch, why)
+					pm.AddAnnotation(task, "reviewer", fmt.Sprintf("Review gate: branch %s was not merged — %s.", gitTaskBranch, why))
+					if err := cloopgit.CheckoutBranch(o.config.WorkDir, gitOriginalBranch); err != nil {
+						dimColor.Printf("  git checkout original branch error (ignored): %v\n", err)
+					}
 				} else if mergeErr := cloopgit.MergeBranch(o.config.WorkDir, gitOriginalBranch, gitTaskBranch); mergeErr != nil {
 					dimColor.Printf("  git merge error (ignored): %v\n", mergeErr)
 				} else {
@@ -3058,6 +3172,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					dimColor.Printf("  git checkout original branch error (ignored): %v\n", checkoutErr)
 				}
 			}
+		}
+
+		// A task that ended without passing the review gate publishes nothing;
+		// say so when the agent had pushes waiting (Task 20357).
+		if activeGate != nil && gateOut == nil && activeGate.withheldNote(task) {
+			s.Save()
 		}
 
 		// Post-task AI code review: run on successful tasks when enabled.
@@ -3294,6 +3414,9 @@ type taskResult struct {
 	// continued is how many times the agent's turn was handed back because
 	// it ended waiting on its own work (Task 20349).
 	continued int
+	// gate is what the review gate decided (Task 20357); nil when the gate
+	// is off or the task did not reach it.
+	gate *gateOutcome
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
@@ -3329,6 +3452,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	fmt.Printf("   Provider: %s\n", o.provider.Name())
 	fmt.Printf("   Goal: %s\n", s.Goal)
 	fmt.Println()
+
+	// roundGates are the review gate's holds for the round in flight (Task
+	// 20357), one per ready task; released after the round and on any exit.
+	var roundGates []*gateRun
+	defer func() {
+		for _, g := range roundGates {
+			g.close()
+		}
+	}()
 
 	// Worktree-parallel mode: each task runs in an isolated git worktree under
 	// .cloop/worktrees/task-<id>/ and its changes are merged back to the base
@@ -3803,6 +3935,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 		}
 
+		// Review gate (Task 20357): one hold per task, opened in the task's
+		// own directory before any agent in the round starts. Settings and
+		// the project facts the review reads are captured here, so the
+		// workers never read the live state concurrently with its saves.
+		for _, g := range roundGates {
+			g.close()
+		}
+		roundGates = make([]*gateRun, len(ready))
+		for i := range ready {
+			roundGates[i] = o.openGate(ctx, s.ReviewGate, taskWorkDirs[i])
+		}
+		gateGoal, gateConventions, gateModel := s.Goal, s.Instructions, s.Model
+
 		// Launch goroutines for each ready task and stream their results back
 		// through resultsCh as each one finishes (Task 20129) so a fast task's
 		// terminal status is persisted/broadcast immediately rather than after
@@ -3852,6 +3997,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// of the shared project root. Falls through to o.config.WorkDir
 				// when worktree mode is off or creation failed for this task.
 				opts.WorkDir = workDir
+				gate := roundGates[idx]
+				prompt = withGateSection(prompt, gate.promptSection())
+				opts.Env = gate.env()
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
@@ -3871,9 +4019,34 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						_ = lf.Close()
 					}
 				}
+				// The review gate runs here, in the worker, so reviews of a
+				// round's tasks proceed side by side rather than one after
+				// another in the consumer below. It sees what the consumer
+				// would accept as done: a signalled or unsignalled finish,
+				// not a clarification question, not unfinished background
+				// work.
+				var gateOut *gateOutcome
+				if err == nil && result != nil && gate != nil {
+					sig := pm.CheckTaskSignal(result.Output)
+					if (sig == pm.TaskDone || sig == pm.TaskInProgress) &&
+						!looksLikeClarificationQuestion(result.Output) && !result.Background.Incomplete() {
+						gateOut = o.passGate(tAuditCtx, gate, gateInput{
+							task: t, goal: gateGoal, conventions: gateConventions, prompt: prompt,
+							output: result.Output, signal: sig, sessionID: result.SessionID, background: result.Background,
+							worker: taskProvider, workerOpts: opts, model: gateModel,
+						})
+						if len(gateOut.steps) > 0 {
+							// The agent's last word is its fix turn's.
+							result.Output, result.Background = gateOut.output, gateOut.background
+							result.InputTokens += gateOut.workIn
+							result.OutputTokens += gateOut.workOut
+							result.ThinkingTokens += gateOut.workThinking
+						}
+					}
+				}
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
-				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut, continued: continued}
+				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut, continued: continued, gate: gateOut}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 
@@ -4136,6 +4309,24 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if backgroundWork != nil && backgroundWork.State == pm.BackgroundAbandoned {
 				task.FailureDiagnosis = backgroundFailureDiagnosis(backgroundWork)
 			}
+			// Review gate (Task 20357): the worker reviewed the task; what
+			// the gate did not let through fails here.
+			reviewReroute := false
+			gateOut := res.gate
+			if gateOut != nil {
+				task.Review = gateOut.review
+				pm.AddAnnotation(task, "reviewer", gateOut.note)
+				s.TotalInputTokens += gateOut.reviewIn
+				s.TotalOutputTokens += gateOut.reviewOut
+				if gateOut.fail && signal != pm.TaskSkipped {
+					signal = pm.TaskFailed
+					reviewReroute = true
+					task.FailureDiagnosis = gateOut.review.Diagnosis()
+					if !gateOut.review.Blocked {
+						task.FailureDiagnosis = gateOut.note
+					}
+				}
+			}
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
@@ -4181,8 +4372,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Skip the explicit-signal annotation when the failure came from
 				// the clarification reroute above — the reroute already added an
 				// accurate annotation (line ~3137), and claiming "per AI
-				// TASK_FAILED signal" would misattribute it.
-				if !clarificationReroute {
+				// TASK_FAILED signal" would misattribute it. Likewise a review
+				// gate failure, annotated where the gate's outcome was applied.
+				if !clarificationReroute && !reviewReroute {
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
 				}
 				if !o.log.IsJSON() {
@@ -4273,6 +4465,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						if _, cErr := wt.Commit(task); cErr != nil {
 							dimColor.Printf("  worktree commit task %d: %v\n", task.ID, cErr)
 						}
+						// The review gate stands in front of the merge queue:
+						// only the tree the reviewer approved is merged.
+						if ok, why := o.gateAllowsMergeOf(ctx, roundGates[resIdx], gateOut, wt.Path, "HEAD"); !ok {
+							dimColor.Printf("  worktree: not merging %s — %s\n", wt.Branch, why)
+							pm.AddAnnotation(task, "reviewer", fmt.Sprintf("Review gate: branch %s was not merged — %s.", wt.Branch, why))
+							break
+						}
 						mr := mergeQ.Submit(mergequeue.Request{
 							Branch: wt.Branch,
 							TaskID: task.ID,
@@ -4318,6 +4517,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// under the existing lock.
 			parallelStep := s.CurrentStep
 			o.logTaskOutcomeEvent(task, taskDur, parallelStep)
+
+			// Review gate (Task 20357): journal and bill the review, and say
+			// so when a task that never reached it had pushes waiting. The
+			// hold is released now that the task is decided.
+			if gateOut != nil {
+				o.logReviewEvent(s, task, gateOut)
+				o.recordReviewCost(task, gateOut)
+			} else if resIdx < len(roundGates) {
+				roundGates[resIdx].withheldNote(task)
+			}
+			if resIdx < len(roundGates) {
+				roundGates[resIdx].close()
+			}
 
 			// Record task outcome into metrics.
 			if o.metrics != nil && task.StartedAt != nil {

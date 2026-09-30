@@ -271,6 +271,7 @@ function renderTasks(s) {
           (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtTimeEstimate(t)+
+          fmtReviewChip(t)+
         '</div>'+
         fmtBackgroundWork(t)+
         fmtAbortedOutcome(t)+
@@ -332,6 +333,16 @@ function fmtBackgroundWork(t) {
     '<span class="bg-glyph">' + glyph + '</span>' + esc(text) +
     (names ? '<span class="bg-cmds">' + names + '</span>' : '') +
     '</div>';
+}
+
+// fmtReviewChip marks a task the review gate looked at (Task 20357); a task it
+// kept from being published is marked in red, since its work never left.
+function fmtReviewChip(t) {
+  const r = t && t.review;
+  if (!r || !r.verdict) return '';
+  const txt = r.blocked ? 'review: not published' : (r.verdict === 'approved' ? 'reviewed ✓' : 'review: ' + r.verdict.replace('_', ' '));
+  return '<span' + (r.blocked ? ' style="color:var(--red)"' : '') + ' title="' +
+    esc('Review gate' + (r.model ? ' (' + r.model + ')' : '') + ': ' + r.verdict.replace('_', ' ')) + '">🔍 ' + esc(txt) + '</span>';
 }
 
 // fmtDurationShort renders a second count as the coarsest useful unit.

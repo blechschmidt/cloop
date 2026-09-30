@@ -740,3 +740,35 @@ func TestClassifyCLIError(t *testing.T) {
 		})
 	}
 }
+
+// --- review gate (Task 20357) ---
+
+// A read-only call gets an allow-list of reading tools and no MCP servers;
+// an ordinary call gets neither.
+func TestBuildArgs_ReadOnly(t *testing.T) {
+	joined := strings.Join(buildArgs(provider.Options{ReadOnly: true, Model: "m"}), " ")
+	if !strings.Contains(joined, "--tools Read,Grep,Glob") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("read-only args = %s", joined)
+	}
+	if plain := strings.Join(buildArgs(provider.Options{}), " "); strings.Contains(plain, "--tools") || strings.Contains(plain, "--strict-mcp-config") {
+		t.Errorf("an ordinary call was restricted: %s", plain)
+	}
+}
+
+// Env reaches the agent's process on top of what it inherits, and wins over an
+// inherited value of the same name — which is how the review gate puts its push
+// helper first on the agent's PATH.
+func TestComplete_EnvReachesTheProcess(t *testing.T) {
+	binDir := fakeClaudeScript(t, "#!/bin/sh\necho \"gate=$CLOOP_TEST_GATE count=$GIT_CONFIG_COUNT\"\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	res, err := New().Complete(context.Background(), "hi", provider.Options{
+		Env: []string{"CLOOP_TEST_GATE=held", "GIT_CONFIG_COUNT=9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Output != "gate=held count=9" {
+		t.Errorf("output = %q", res.Output)
+	}
+}

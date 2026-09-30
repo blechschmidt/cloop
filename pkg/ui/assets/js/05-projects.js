@@ -693,6 +693,75 @@ window.saveProviderModel = function() {
   });
 };
 
+// ── Review gate (Task 20357) ──────────────────────────────────────────────────
+// The gate is a reviewer model that checks each task's changes before they are
+// pushed or merged. Its settings ride on the project state as review_gate, so
+// the card re-renders from every state_diff like the Provider card does.
+
+function renderReviewGateCard(s) {
+  const v = document.getElementById('statReviewGate');
+  const sub = document.getElementById('statReviewGateSub');
+  if (!v) return;
+  const g = (s && s.review_gate) || {};
+  if (!g.enabled) { v.textContent = 'off'; if (sub) sub.textContent = ''; return; }
+  v.textContent = g.model || (g.provider ? g.provider + ' default' : 'project model');
+  if (sub) sub.textContent = (g.provider || 'same provider') + ' · ' + (g.mode || 'fix');
+}
+
+// rgModelOptions fills the reviewer model list for the chosen provider. An
+// empty provider means the project's own, whose blank model means the
+// project's model; a saved model not in the list is kept as an option so
+// opening and saving the dialog never silently changes it.
+function rgModelOptions(preselect) {
+  const sel = document.getElementById('rgModel');
+  if (!sel) return;
+  const chosen = document.getElementById('rgProvider').value;
+  const prov = chosen || _currentProvider || 'claudecode';
+  const list = (providerModels[prov] || [{value: '', label: '(default)'}]).slice();
+  if (!chosen) list[0] = {value: '', label: '(the project\'s model' + (_currentModel ? ' — ' + _currentModel : '') + ')'};
+  if (preselect && !list.some(m => m.value === preselect)) list.push({value: preselect, label: preselect});
+  sel.innerHTML = list.map(m => '<option value="' + esc(m.value) + '"' + (m.value === preselect ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('');
+}
+
+window.onRGProviderChange = function() { rgModelOptions(''); };
+window.onRGModeChange = function() {
+  document.getElementById('rgRoundsRow').style.display = document.getElementById('rgMode').value === 'fix' ? '' : 'none';
+};
+
+window.openReviewGateModal = function() {
+  const g = (appState && appState.review_gate) || {};
+  document.getElementById('rgEnabled').checked = !!g.enabled;
+  document.getElementById('rgProvider').value = g.provider || '';
+  rgModelOptions(g.model || '');
+  document.getElementById('rgEffort').value = g.effort || '';
+  document.getElementById('rgMode').value = g.mode || 'fix';
+  document.getElementById('rgRounds').value = g.max_fix_rounds || 2;
+  document.getElementById('rgInstructions').value = g.instructions || '';
+  document.getElementById('rgError').style.display = 'none';
+  onRGModeChange();
+  openOverlay('review-gate-overlay', {dismiss: closeReviewGateModal, focus: '#rgEnabled'});
+};
+
+window.closeReviewGateModal = function() { closeOverlay('review-gate-overlay'); };
+
+window.saveReviewGate = function() {
+  const val = id => document.getElementById(id).value;
+  const errEl = document.getElementById('rgError');
+  const body = {
+    enabled: document.getElementById('rgEnabled').checked,
+    provider: val('rgProvider'), model: val('rgModel'), effort: val('rgEffort'),
+    mode: val('rgMode'), max_fix_rounds: parseInt(val('rgRounds'), 10) || 0,
+    instructions: val('rgInstructions'),
+  };
+  errEl.style.display = 'none';
+  apiMethod('POST', pUrl('/api/options/review-gate'), body).then(d => {
+    if (!d || !d.ok) { errEl.textContent = (d && d.error) || 'Failed to save'; errEl.style.display = ''; return; }
+    if (appState) { appState.review_gate = d.review_gate; renderReviewGateCard(appState); }
+    closeReviewGateModal();
+    toast('Review gate ' + (body.enabled ? 'on' : 'off'), 'ok');
+  }).catch(e => { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = ''; });
+};
+
 // ── New Project modal ─────────────────────────────────────────────────────────
 
 window.openGoalEditModal = function() {

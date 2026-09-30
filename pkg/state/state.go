@@ -156,6 +156,12 @@ type ProjectState struct {
 	// provider).
 	DryRun bool `json:"dry_run,omitempty"`
 
+	// ReviewGate configures the optional reviewer that checks each task's
+	// changes before cloop pushes or merges them (Task 20357). Nil or disabled
+	// means no review. Set from the dashboard or `cloop review gate`; a
+	// running orchestrator picks up changes at its next sync.
+	ReviewGate *pm.ReviewGate `json:"review_gate,omitempty"`
+
 	// StepCount is the total number of step rows in the database. Always
 	// populated: Load mirrors len(Steps); LoadLite fills it from a cheap
 	// SELECT COUNT(*) while Steps is nil. Read it instead of len(Steps)
@@ -612,6 +618,28 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	// Task 20149: pick up UI-driven effort changes so subsequent provider
 	// calls in a running session use the new level without a restart.
 	s.Effort = disk.Effort
+	// Task 20357: the review gate is switched and reconfigured from the
+	// dashboard while a run is going; the next task's review uses the change.
+	s.ReviewGate = disk.ReviewGate
+}
+
+// SetReviewGate stores a project's review gate settings (Task 20357) without
+// rewriting anything else in its state. A run in progress picks the change up
+// at its next sync.
+func SetReviewGate(workDir string, g *pm.ReviewGate) error {
+	if err := g.Validate(); err != nil {
+		return err
+	}
+	dbPath := effectiveDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("no cloop project in %s: %w", workDir, err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveReviewGate(g)
 }
 
 // SetPaused parks the run and records why.
@@ -697,6 +725,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		PlanOnly:          s.PlanOnly,
 		RetryFailed:       s.RetryFailed,
 		DryRun:            s.DryRun,
+		ReviewGate:        s.ReviewGate.Clone(),
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -744,6 +773,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		PlanOnly:          r.PlanOnly,
 		RetryFailed:       r.RetryFailed,
 		DryRun:            r.DryRun,
+		ReviewGate:        r.ReviewGate,
 		StepCount:         r.StepCount,
 		LastStepTime:      r.LastStepTime,
 	}
@@ -882,6 +912,10 @@ type legacyState struct {
 	PlanOnly          bool                   `json:"plan_only,omitempty"`
 	RetryFailed       bool                   `json:"retry_failed,omitempty"`
 	DryRun            bool                   `json:"dry_run,omitempty"`
+	// ReviewGate travels to isolating executors through this decoder
+	// (pkg/executor/projectseed), so a run on a remote device reviews its
+	// tasks exactly as a run on the hub would (Task 20357).
+	ReviewGate *pm.ReviewGate `json:"review_gate,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -929,6 +963,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		PlanOnly:          legacy.PlanOnly,
 		RetryFailed:       legacy.RetryFailed,
 		DryRun:            legacy.DryRun,
+		ReviewGate:        legacy.ReviewGate,
 	}
 
 	db, err := statedb.Open(dbPath)

@@ -637,6 +637,31 @@ cloop review --provider anthropic
 
 Issues are graded as: `critical`, `major`, `minor`, `suggestion`.
 
+### `cloop review gate`
+
+Show or configure the project's review gate: a reviewer model — its own
+provider and model — that checks each task's changes before they are pushed or
+merged. The agent's pushes are held until the reviewer approves. See
+[Reviewing tasks before they are published](../guides/review-gate.md).
+
+```bash
+cloop review gate                                    # show the settings
+cloop review gate --enable --provider anthropic --model claude-opus-5-5
+cloop review gate --mode block --instructions "Reject changes to migrations/."
+cloop review gate --disable
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--enable` / `--disable` | | Turn the gate on or off (settings are kept) |
+| `--provider` | the project's | `claudecode`, `anthropic`, `openai`, `ollama` |
+| `--model` | the project's model on its own provider | Reviewer model |
+| `--effort` | provider default | Reviewer reasoning effort (`claudecode` only) |
+| `--mode` | `fix` | `fix` (send back, then block), `block`, `advisory` |
+| `--max-fix-rounds` | `0` (= 2) | How often `fix` sends a task back, at most 5 |
+| `--instructions` | | Extra review criteria sent with every review |
+| `--json` | `false` | Print the settings as JSON |
+
 ---
 
 ## Collaboration & Automation

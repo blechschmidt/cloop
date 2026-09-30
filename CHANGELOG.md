@@ -12,6 +12,21 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Review gate.** A project can have a reviewer model — its own provider and
+  model, free to differ from the ones doing the work — check each task's changes
+  before anything leaves the working copy. While a task runs, the agent's `git
+  push` is held (reported to it as "held by cloop's review gate" and recorded,
+  through a `pushInsteadOf` rewrite in its environment only); when it reports
+  the task done, the reviewer reads the diff of every repository the task
+  touched, read-only. On approval cloop sends the held pushes itself, at the
+  reviewed commits and never with a commit the reviewer did not see, and lets
+  git-mode and worktree merges proceed only for the approved tree. On a request
+  for changes, `fix` mode sends the findings back to the agent in its own
+  conversation and reviews again, `block` fails the task, `advisory` records
+  and publishes. A reviewer that gives no verdict fails the task closed.
+  Configure it from the Overview's **Review gate** card or `cloop review gate`;
+  the verdict shows in the task list, the task details and the event history.
+  API: `/api/options/review-gate`. See `docs/guides/review-gate.md`.
 - **Virtual executors.** An enrolled device can carry named sub-executors, each
   with its own container engine, OCI runtime and image, an **IP firewall with an
   allowlist and a denylist**, and the **host devices** its sandboxes are given.

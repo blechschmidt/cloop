@@ -329,6 +329,11 @@
               <div class="stat-value" id="statExecutor" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statExecutorSub"></div>
             </div>
+            <div class="stat-card stat-card-clickable" id="reviewGateCard" onclick="openReviewGateModal()" title="Click to set up the review gate: a reviewer model that checks each task's changes before they are pushed or merged" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openReviewGateModal();}">
+              <div class="stat-label">Review gate <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
+              <div class="stat-value" id="statReviewGate" style="font-size:13px;margin-top:4px">off</div>
+              <div class="stat-sub" id="statReviewGateSub"></div>
+            </div>
             <div class="stat-card">
               <div class="stat-label">Mode</div>
               <div class="stat-value" id="statMode" style="font-size:13px;margin-top:4px">—</div>
@@ -3481,6 +3486,29 @@
       <button class="btn" onclick="closeProviderModelModal()">Cancel</button>
       <button class="btn primary" onclick="saveProviderModel()">Save</button>
     </div>
+  </div>
+</div>
+
+<!-- Review gate modal (Task 20357) -->
+<div id="review-gate-overlay" data-overlay="flex" onclick="if(event.target===this)closeReviewGateModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div role="dialog" aria-labelledby="rgTitle" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 id="rgTitle" style="font-size:15px;font-weight:600;margin-bottom:8px">Review gate</h2>
+    <p class="form-hint" style="margin-bottom:12px">A reviewer model checks each task's changes before anything is pushed or merged. The agent's pushes are held and sent only after it approves.</p>
+    <label class="form-label" style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="rgEnabled"> Review each task before its changes leave this machine</label>
+    <div class="form-row">
+      <div class="form-group" style="flex:1"><label class="form-label" for="rgProvider">Reviewer provider</label>
+        <select class="form-select" id="rgProvider" onchange="onRGProviderChange()"><option value="">Same as the project</option><option value="claudecode">claudecode</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="ollama">ollama</option></select></div>
+      <div class="form-group" style="flex:1"><label class="form-label" for="rgModel">Reviewer model</label><select class="form-select" id="rgModel"></select></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1"><label class="form-label" for="rgEffort">Effort (claudecode)</label><select class="form-select" id="rgEffort"><option value="">(default)</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
+      <div class="form-group" style="flex:1"><label class="form-label" for="rgMode">When changes are requested</label>
+        <select class="form-select" id="rgMode" onchange="onRGModeChange()"><option value="fix">Send back to the agent to fix</option><option value="block">Block: fail the task</option><option value="advisory">Advisory: publish anyway</option></select></div>
+    </div>
+    <div class="form-group" id="rgRoundsRow"><label class="form-label" for="rgRounds">Fix rounds before blocking</label><input class="form-input" id="rgRounds" type="number" min="1" max="5" step="1" style="max-width:90px"></div>
+    <div class="form-group"><label class="form-label" for="rgInstructions">Extra review criteria (optional)</label><textarea class="form-textarea" id="rgInstructions" maxlength="4000" placeholder="e.g. Reject any change to database migrations."></textarea></div>
+    <div id="rgError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer"><button class="btn" onclick="closeReviewGateModal()">Cancel</button><button class="btn primary" data-perm="config.write" onclick="saveReviewGate()">Save</button></div>
   </div>
 </div>
 

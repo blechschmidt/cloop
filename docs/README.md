@@ -149,6 +149,12 @@ Six pages in order, indexed at
   running concurrently and proposed as a GitHub pull request when done. What a
   feature inherits from its project (executor, grants, roles) and why, where it
   may run, and how removal protects uncommitted work.
+- **[Reviewing tasks before they are published](guides/review-gate.md)** — the
+  review gate: a second model, configured per project and free to differ from
+  the one doing the work, that reads each task's changes before anything is
+  pushed or merged. How the agent's pushes are held and replayed only at
+  reviewed commits, the `fix`, `block` and `advisory` modes, why it fails
+  closed, what the reviewer sees, and the limits of a guardrail.
 - **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT (for
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress

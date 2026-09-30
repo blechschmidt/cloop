@@ -60,6 +60,19 @@ type Options struct {
 	// whose agent ended its turn mid-work is given the turn back with its
 	// context intact (Task 20349).
 	ResumeSession string
+
+	// ReadOnly asks a provider that runs an agent harness to give it only
+	// tools that read — no edit, no write, no shell. The review gate sets it
+	// (Task 20357): a reviewer that could rewrite the work it is judging
+	// would not be reviewing it. Honoured by claudecode (--tools); HTTP
+	// providers run no tools and ignore it.
+	ReadOnly bool
+
+	// Env adds variables to the environment of an agent harness process, on
+	// top of the one it inherits. The review gate uses it to hold the agent's
+	// pushes (Task 20357). Honoured by claudecode; HTTP providers spawn no
+	// process and ignore it.
+	Env []string
 }
 
 // EffortLevels are the valid reasoning-effort levels accepted by

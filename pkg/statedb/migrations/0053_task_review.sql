@@ -1,0 +1,14 @@
+-- plan_tasks.review — the review gate's verdict on a task (Task 20357).
+--
+-- A project can configure a reviewer model that checks each task's changes
+-- before cloop pushes or merges them. What it decided — approved, changes
+-- requested, or no verdict — and which of the agent's held pushes were then
+-- published is the record an operator reads when a task failed although its
+-- agent said TASK_DONE, or when they need to know that what reached a remote
+-- was looked at first. It is stored as JSON, like background and abort, and
+-- absent is the empty string.
+--
+-- Additive in the form schema_compat.go admits: NOT NULL with a DEFAULT and no
+-- constraint, so an older binary sharing this database neither selects nor
+-- inserts the column and keeps opening it.
+ALTER TABLE plan_tasks ADD COLUMN review TEXT NOT NULL DEFAULT '';

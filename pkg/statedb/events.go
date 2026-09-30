@@ -58,6 +58,15 @@ const (
 	// TASK_DONE was nonetheless not accepted as done.
 	EventTaskBackground EventType = "task_background"
 
+	// EventTaskReview records what a project's review gate decided about a
+	// task's changes before they were published, and which of the agent's
+	// held pushes went out (Task 20357).
+	//
+	// Its own type because it explains the case a status alone cannot: a task
+	// whose agent said TASK_DONE and which nonetheless failed, because a
+	// different model read its diff and would not let it leave the machine.
+	EventTaskReview EventType = "task_review"
+
 	// EventTaskAborted records a run that never produced work: a provider
 	// usage limit or quota, a rejected credential, a harness that refused to
 	// start, or output with no diff and no artifact behind it (Task 20211).

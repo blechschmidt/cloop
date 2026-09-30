@@ -112,6 +112,10 @@ type MergeReport struct {
 	Steps, Events, Costs int
 	// Omitted is what the device said it left out.
 	Omitted []string
+	// Unreviewed are tasks that came back done without a review although the
+	// project's review gate is on (Task 20357): the device's cloop predates
+	// the gate, so it ran them — and published their work — unreviewed.
+	Unreviewed []int
 }
 
 // Changed reports whether the merge altered the hub's project at all.
@@ -171,6 +175,15 @@ func (m MergeReport) Summary() string {
 	}
 	if len(m.Omitted) > 0 {
 		msg += " The executor left out: " + strings.Join(m.Omitted, "; ") + "."
+	}
+	if len(m.Unreviewed) > 0 {
+		var each []string
+		for _, id := range m.Unreviewed {
+			each = append(each, fmt.Sprintf("#%d", id))
+		}
+		msg += " The review gate is on, but " + plural(len(each), "task", "tasks") + " (" + strings.Join(each, ", ") +
+			") came back done without a review: the executor's cloop predates the gate, so their work was not reviewed " +
+			"before it was pushed. Upgrade cloop on the executor."
 	}
 	return msg
 }
@@ -255,6 +268,16 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		appendAnnotations(h, tc.Before, tc.After, scrub)
 		if startedByRun {
 			stamp(h, prov)
+		}
+		// A project with the review gate on expects every task that finished
+		// to carry a verdict. A device whose cloop predates the gate ignores
+		// the setting and runs the task unreviewed — its pushes included — so
+		// the task says so rather than reading as if it had been reviewed.
+		if st.ReviewGate.Active() && startedByRun && h.Status == pm.TaskDone && h.Review == nil {
+			pm.AddAnnotation(h, "cloop", "Review gate: this task came back done from the executor without a review. "+
+				"The executor's cloop predates the review gate, so the task's work was not reviewed before it was "+
+				"pushed. Upgrade cloop on the executor.")
+			rep.Unreviewed = append(rep.Unreviewed, id)
 		}
 		rep.Updated = append(rep.Updated, id)
 		rep.Outcomes[id] = h.Status
@@ -539,7 +562,8 @@ func sameOutcome(a, b *pm.Task) bool {
 		a.TDDStatus == b.TDDStatus &&
 		a.TDDScore == b.TDDScore &&
 		sameJSON(a.Background, b.Background) &&
-		sameJSON(a.Abort, b.Abort)
+		sameJSON(a.Abort, b.Abort) &&
+		sameJSON(a.Review, b.Review)
 }
 
 // applyOutcome copies the outcome fields from the run's task onto the hub's.
@@ -557,6 +581,7 @@ func applyOutcome(h, after *pm.Task, scrub func(string) string) {
 	h.TDDScore = clampInt(after.TDDScore, 0, 100)
 	h.Background = sanitizeBackground(after.Background, scrub)
 	h.Abort = sanitizeAbort(after.Abort, h.Abort, scrub)
+	h.Review = sanitizeReview(after.Review, scrub)
 }
 
 // appendAnnotations adds the notes the run attached to a task. It reports
@@ -682,6 +707,39 @@ func sanitizeAbort(a, hub *pm.TaskAbort, scrub func(string) string) *pm.TaskAbor
 	}
 	return &c
 }
+
+// sanitizeReview bounds a review-gate record from a run on a device (Task
+// 20357). A verdict this build does not know is dropped with the record: the
+// dashboard renders the verdict, and an unknown one is a claim it cannot show.
+func sanitizeReview(r *pm.TaskReview, scrub func(string) string) *pm.TaskReview {
+	if r == nil || !pm.ValidVerdict(r.Verdict) {
+		return nil
+	}
+	c := r.Clone()
+	c.Mode = truncate(c.Mode, 16)
+	c.Provider = truncate(c.Provider, 64)
+	c.Model = truncate(c.Model, 128)
+	c.Rounds, c.FixRounds = clampInt(c.Rounds, 0, 100), clampInt(c.FixRounds, 0, 100)
+	if len(c.Repos) > maxReviewRepos {
+		c.Repos = c.Repos[:maxReviewRepos]
+	}
+	for i := range c.Repos {
+		c.Repos[i].Path = truncate(scrub(c.Repos[i].Path), 300)
+	}
+	if len(c.Published) > maxReviewRepos {
+		c.Published = c.Published[:maxReviewRepos]
+	}
+	for i := range c.Published {
+		p := &c.Published[i]
+		p.Repo, p.Remote, p.Ref = truncate(scrub(p.Repo), 300), truncate(scrub(p.Remote), 300), truncate(p.Ref, 300)
+	}
+	scrubReview(c, scrub)
+	c.Bound()
+	return c
+}
+
+// maxReviewRepos bounds the per-repository lists of a returned review record.
+const maxReviewRepos = 32
 
 // validDetails keeps an event's details only if they are bounded, valid JSON.
 func validDetails(d string) string {

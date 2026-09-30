@@ -489,6 +489,15 @@ Press Ctrl+C to pause gracefully.`,
 			AutoPromoteThresholdDays: autoPromoteThresholdDays,
 			CoachMode:                coachMode,
 			TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
+			// The review gate's reviewer may run on another provider than the
+			// work; with no model of its own it uses config.yaml's for that
+			// provider (Task 20357).
+			ProviderModels: map[string]string{
+				"anthropic":  cfg.Anthropic.Model,
+				"openai":     cfg.OpenAI.Model,
+				"ollama":     cfg.Ollama.Model,
+				"claudecode": cfg.ClaudeCode.Model,
+			},
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)

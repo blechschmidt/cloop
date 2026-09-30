@@ -153,6 +153,7 @@ function render(s) {
   document.getElementById('statModel').textContent    = (s.model || '') + (s.effort ? ' @ ' + s.effort : '');
   prepopulateAdvancedRunOptions(s);
   renderActiveOptions(s);
+  renderReviewGateCard(s);
   renderFeaturePanels();
   if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
   document.getElementById('statMode').textContent     = 'Product Manager';
@@ -479,6 +480,7 @@ function _eventVisuals(kind) {
     // running long after its agent stopped talking, and why a task whose
     // output said TASK_DONE was not accepted as done.
     case 'task_background':     return { glyph:'⏳', cls:'ev-task-bg',     label:'background'};
+    case 'task_review':         return { glyph:'🔍', cls:'ev-task-review', label:'review'};
     // A run that produced no work — a provider limit, a rejected credential,
     // a harness that refused to start. Distinct from 'failed': the task went
     // back in the queue rather than being judged, so the row must not read as

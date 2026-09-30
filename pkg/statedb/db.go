@@ -67,6 +67,9 @@ type State struct {
 	PlanOnly          bool
 	RetryFailed       bool
 	DryRun            bool
+	// ReviewGate is the project's review-gate configuration (Task 20357),
+	// stored as JSON under the review_gate meta key. Nil when never set.
+	ReviewGate *pm.ReviewGate
 }
 
 // StepRow represents one recorded step result.
@@ -378,6 +381,15 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		meta["pause_reason"] = ""
 	}
 
+	// The review gate (Task 20357) is written only when this state carries
+	// one. A process holding an older copy without it must not be able to
+	// switch a project's gate off by saving; the gate is changed through
+	// SaveReviewGate, and switched off by storing it disabled.
+	if s.ReviewGate != nil {
+		b, _ := json.Marshal(s.ReviewGate)
+		meta["review_gate"] = string(b)
+	}
+
 	// workdir is write-once: it records where the project was created, and the
 	// process saving is not always in a position to know that. An isolating
 	// executor bind-mounts the project somewhere of its own — the container
@@ -586,6 +598,13 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 		}
 	}
 
+	if v := metaMap["review_gate"]; v != "" {
+		var g pm.ReviewGate
+		if err := json.Unmarshal([]byte(v), &g); err == nil {
+			s.ReviewGate = &g
+		}
+	}
+
 	tasks, err := loadTasks(d.conn)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -705,7 +724,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned,
+			executor_id, executor_kind, isolation, pinned, review,
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
@@ -721,7 +740,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	t := &pm.Task{}
 	var (
 		status, role, depsJSON, tagsJSON, annJSON   string
-		bgJSON, abortJSON                           string
+		bgJSON, abortJSON, reviewJSON               string
 		startedAt, completedAt, deadline, nextRunAt sql.NullString
 		reqApproval, approved, pinned               int
 	)
@@ -736,7 +755,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &t.RunID,
+		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &reviewJSON, &t.RunID,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -747,6 +766,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
 	t.Background = decodeBackground(bgJSON)
 	t.Abort = decodeAbort(abortJSON)
+	t.Review = decodeReview(reviewJSON)
 	t.RequiresApproval = reqApproval == 1
 	t.Approved = approved == 1
 	t.Pinned = pinned == 1
@@ -868,8 +888,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			executor_id, executor_kind, isolation, pinned, review
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -892,7 +912,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			background=excluded.background, abort=excluded.abort,
 			executor_id=excluded.executor_id,
 			executor_kind=excluded.executor_kind,
-			isolation=excluded.isolation, pinned=excluded.pinned`,
+			isolation=excluded.isolation, pinned=excluded.pinned,
+			review=excluded.review`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -907,6 +928,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
 		encodeAbort(t.Abort),
 		t.ExecutorID, t.ExecutorKind, t.Isolation, boolInt(t.Pinned),
+		encodeReview(t.Review),
 	)
 	return err
 }
@@ -919,7 +941,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned,
+			executor_id, executor_kind, isolation, pinned, review,
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
@@ -932,7 +954,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		t := &pm.Task{}
 		var (
 			status, role, depsJSON, tagsJSON, annJSON   string
-			bgJSON, abortJSON                           string
+			bgJSON, abortJSON, reviewJSON               string
 			startedAt, completedAt, deadline, nextRunAt sql.NullString
 			reqApproval, approved, pinned               int
 		)
@@ -947,7 +969,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &t.RunID,
+			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &reviewJSON, &t.RunID,
 		); err != nil {
 			return nil, err
 		}
@@ -959,6 +981,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
 		t.Background = decodeBackground(bgJSON)
 		t.Abort = decodeAbort(abortJSON)
+		t.Review = decodeReview(reviewJSON)
 		t.RequiresApproval = reqApproval == 1
 		t.Approved = approved == 1
 		if startedAt.Valid {
@@ -1341,4 +1364,57 @@ func decodeAbort(raw string) *pm.TaskAbort {
 		return nil
 	}
 	return &a
+}
+
+// SaveReviewGate stores the project's review gate settings and nothing else
+// (Task 20357). The dashboard and `cloop review gate` change them while a run
+// may be saving its tasks; a full SaveState from their copy would write stale
+// tasks back over the run's.
+func (d *DB) SaveReviewGate(g *pm.ReviewGate) error {
+	value := ""
+	if g != nil {
+		b, err := json.Marshal(g)
+		if err != nil {
+			return fmt.Errorf("statedb: encode review gate: %w", err)
+		}
+		value = string(b)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec(
+		`INSERT INTO metadata(key,value) VALUES('review_gate',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		value,
+	); err != nil {
+		return fmt.Errorf("statedb: save review gate: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
+// encodeReview serialises a task's review-gate record for the
+// plan_tasks.review column (Task 20357). Same shape as encodeBackground:
+// absent is the empty string, so a row written by this build reads the same
+// as one predating migration 0053.
+func encodeReview(r *pm.TaskReview) string {
+	if r == nil {
+		return ""
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeReview parses the review column, treating anything unreadable — or a
+// record without a verdict, which could not say what it decided — as "not
+// reviewed".
+func decodeReview(raw string) *pm.TaskReview {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var r pm.TaskReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil || r.Verdict == "" {
+		return nil
+	}
+	return &r
 }

@@ -277,6 +277,10 @@ type Task struct {
 	// pre-completion sweep and is what stops a plan full of usage-limit
 	// messages counting as finished. See abort.go for the lifecycle.
 	Abort *TaskAbort `json:"abort,omitempty"`
+	// Review records what the project's review gate decided about this task's
+	// changes, and which of the pushes it held were published (Task 20357).
+	// Nil when the gate was off. See review.go.
+	Review *TaskReview `json:"review,omitempty"`
 }
 
 // BackgroundWork records processes an agent left running after it reported the

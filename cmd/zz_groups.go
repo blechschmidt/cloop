@@ -190,20 +190,23 @@ var rootCommandGroups = map[string]string{
 
 	// Integrations and delivery — everything that talks to a system outside
 	// the .cloop directory, plus the git/release surface.
-	"github":       groupDelivery,
-	"sync":         groupDelivery,
-	"ci":           groupDelivery,
-	"release":      groupDelivery,
-	"pr":           groupDelivery,
-	"commit-msg":   groupDelivery,
-	"review":       groupDelivery,
-	"docs":         groupDelivery,
-	"adr":          groupDelivery,
-	"changelog":    groupDelivery,
-	"notify":       groupDelivery,
-	"integrations": groupDelivery,
-	"plugin":       groupDelivery,
-	"finetune":     groupDelivery,
+	"github":     groupDelivery,
+	"sync":       groupDelivery,
+	"ci":         groupDelivery,
+	"release":    groupDelivery,
+	"pr":         groupDelivery,
+	"commit-msg": groupDelivery,
+	"review":     groupDelivery,
+	// The review gate's git remote helper (hidden): git runs it inside an
+	// agent's held push.
+	"review-gate-remote-helper": groupDelivery,
+	"docs":                      groupDelivery,
+	"adr":                       groupDelivery,
+	"changelog":                 groupDelivery,
+	"notify":                    groupDelivery,
+	"integrations":              groupDelivery,
+	"plugin":                    groupDelivery,
+	"finetune":                  groupDelivery,
 
 	// Maintenance and diagnostics — the health checks and the repair tools.
 	"doctor":     groupMaint,

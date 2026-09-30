@@ -51,16 +51,16 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-209 endpoints, by the permission each one requires:
+211 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 25 |
 | `audit.read` | 5 |
-| `config.write` | 12 |
+| `config.write` | 13 |
 | `executor.manage` | 25 |
 | `executor.read` | 3 |
-| `project.read` | 48 |
+| `project.read` | 49 |
 | `project.write` | 12 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
@@ -187,6 +187,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/openapi.json` | `project.read` | global |
 | POST | `/api/options/max-parallel` | `config.write` | project |
 | POST | `/api/options/provider` | `config.write` | project |
+| GET | `/api/options/review-gate` | `project.read` | project |
+| POST | `/api/options/review-gate` | `config.write` | project |
 | POST | `/api/options/step-timeout` | `config.write` | project |
 | POST | `/api/options/task-timeout` | `config.write` | project |
 | POST | `/api/options/toggle` | `config.write` | project |

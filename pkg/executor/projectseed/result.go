@@ -353,6 +353,9 @@ func fingerprint(t *pm.Task) string {
 		c.Abort.DetectedAt = c.Abort.DetectedAt.UTC()
 		c.Abort.ClearedAt = utc(c.Abort.ClearedAt)
 	}
+	if c.Review != nil {
+		c.Review.ReviewedAt = c.Review.ReviewedAt.UTC()
+	}
 	b, err := json.Marshal(c)
 	if err != nil {
 		// Unreachable for a pm.Task; treat as changed, which costs only bytes.
@@ -380,6 +383,7 @@ func cloneTask(t *pm.Task) *pm.Task {
 		ab := *t.Abort
 		c.Abort = &ab
 	}
+	c.Review = t.Review.Clone()
 	return &c
 }
 
@@ -411,7 +415,25 @@ func scrubTask(t *pm.Task, scrub func(string) string) *pm.Task {
 		c.Abort.Evidence = scrub(c.Abort.Evidence)
 		c.Abort.ClearedNote = scrub(c.Abort.ClearedNote)
 	}
+	if c.Review != nil {
+		scrubReview(c.Review, scrub)
+	}
 	return c
+}
+
+// scrubReview passes a review record's free text through scrub in place. The
+// reviewer quotes the diff it read, and the diff is exactly where a credential
+// the agent mishandled would appear.
+func scrubReview(r *pm.TaskReview, scrub func(string) string) {
+	r.Summary = scrub(r.Summary)
+	r.Error = scrub(r.Error)
+	for i := range r.Findings {
+		f := &r.Findings[i]
+		f.File, f.Title, f.Detail = scrub(f.File), scrub(f.Title), scrub(f.Detail)
+	}
+	for i := range r.Published {
+		r.Published[i].Detail = scrub(r.Published[i].Detail)
+	}
 }
 
 // runSteps returns the steps this run recorded, scrubbed and bounded.

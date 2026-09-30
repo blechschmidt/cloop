@@ -1093,5 +1093,8 @@ func (s *Server) routeTable() []routeSpec {
 	// fetches an icon — a browser probing /favicon.ico, a display-glasses
 	// launcher rendering a saved app — sends a credential. See icons.go.
 	table = append(table, s.executorUpgradeRoutes()...)
+	// The review gate's settings (Task 20357), beside the other per-project
+	// run options under /api/options.
+	table = append(table, s.reviewGateRoutes()...)
 	return append(table, s.iconRoutes()...)
 }
