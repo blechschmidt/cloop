@@ -263,7 +263,7 @@ window.switchTab = function(name) {
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
-    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadCIPanel(); loadGitHubApps(); loadUSBSettings(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
+    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadTelemetryPolicy(); loadCIPanel(); loadGitHubApps(); loadUSBSettings(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
     if (name === 'overview') loadProjectRepositories();
     if (name === 'tasks'  && appState) renderTasks(appState);
@@ -283,6 +283,9 @@ window.switchTab = function(name) {
     if (name === 'secrets') loadSecretsPanel();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
+    // The Telemetry tab had no loader: it populated only when the reader
+    // pressed Refresh, which every other panel does on open (Task 20311).
+    if (name === 'telemetry') loadTelemetry();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.

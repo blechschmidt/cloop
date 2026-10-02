@@ -36,7 +36,7 @@
 // # What belongs in it
 //
 // Settings that are true of this hub rather than of this project: OIDC, TLS,
-// the origin allowlist, the WebSocket caps. Not API keys or budgets, which
+// the origin allowlist, the WebSocket caps, telemetry collection. Not API keys or budgets, which
 // belong to the project and should stay in config.yaml where every command
 // reads them — the overlay is read by `cloop ui`, and by nothing else.
 
@@ -48,6 +48,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -114,6 +115,46 @@ func LoadUIInstance(workdir string, port int) (*Config, string, error) {
 // Comments *inside* the replaced ui.oidc block do not survive, which is the
 // honest outcome: that block now has a writer other than the operator.
 func SaveUIInstanceOIDC(path string, o OIDCConfig) error {
+	oidc, err := yaml.Marshal(o)
+	if err != nil {
+		return fmt.Errorf("could not encode ui.oidc: %w", err)
+	}
+	var encoded yaml.Node
+	if err := yaml.Unmarshal(oidc, &encoded); err != nil {
+		return fmt.Errorf("could not re-read encoded ui.oidc: %w", err)
+	}
+	return saveUIInstanceBlock(path, "oidc", documentRoot(&encoded))
+}
+
+// SaveUIInstanceTelemetry writes the ui.telemetry block into an overlay file,
+// leaving every other key in it untouched (Task 20311). Collection is a
+// per-hub decision: it is what this hub records about the people using it.
+//
+// Both keys are written even when they hold their zero value, because the
+// overlay is merged over config.yaml field by field: an absent `sources`
+// would let a narrowing in config.yaml show through a save that ticked every
+// front end, and the panel would show the hub collecting less than was saved.
+// `enabled` is left out only while it is unset in both files.
+func SaveUIInstanceTelemetry(path string, t TelemetryConfig) error {
+	block := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	if t.Enabled != nil {
+		block.Content = append(block.Content, yamlScalar("!!str", "enabled"),
+			yamlScalar("!!bool", strconv.FormatBool(*t.Enabled)))
+	}
+	sources := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+	for _, src := range t.Sources {
+		sources.Content = append(sources.Content, yamlScalar("!!str", src))
+	}
+	block.Content = append(block.Content, yamlScalar("!!str", "sources"), sources)
+	return saveUIInstanceBlock(path, "telemetry", block)
+}
+
+func yamlScalar(tag, value string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value}
+}
+
+// saveUIInstanceBlock replaces ui.<key> in the overlay at path with block.
+func saveUIInstanceBlock(path, key string, block *yaml.Node) error {
 	var doc yaml.Node
 	data, err := os.ReadFile(path)
 	switch {
@@ -130,15 +171,7 @@ func SaveUIInstanceOIDC(path string, o OIDCConfig) error {
 
 	root := documentRoot(&doc)
 	ui := mappingValue(root, "ui")
-	oidc, err := yaml.Marshal(o)
-	if err != nil {
-		return fmt.Errorf("could not encode ui.oidc: %w", err)
-	}
-	var encoded yaml.Node
-	if err := yaml.Unmarshal(oidc, &encoded); err != nil {
-		return fmt.Errorf("could not re-read encoded ui.oidc: %w", err)
-	}
-	setMappingValue(ui, "oidc", documentRoot(&encoded))
+	setMappingValue(ui, key, block)
 
 	out, err := yaml.Marshal(&doc)
 	if err != nil {

@@ -12,6 +12,13 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Settings → Telemetry.** An admin switches front-end telemetry on and off
+  from the dashboard, optionally for one front end only
+  (`ui.telemetry.sources`), and sees what is already stored and for how long;
+  switching off deletes nothing. API: `GET`/`PUT /api/config/telemetry`
+  (`user.manage`); audit action `telemetry.config.updated`. On a hub with a
+  per-instance overlay (`.cloop/config.ui-<port>.yaml`) the setting is read
+  from and saved to that file.
 - **Dictation goes where the caret is.** The Dictate buttons on the Tasks tab
   and in the task editor insert what you said at the caret of the text field
   you were in — the Add Task description, the task filter, the editor's Title —
@@ -66,6 +73,11 @@ schema and the hub's HTTP API may change in any release.
 
 ### Changed
 
+- **Browser telemetry is off by default.** An unset `ui.telemetry.enabled` now
+  means off, and the dashboard and the glasses page ask the hub
+  (`GET /api/telemetry/config`, `/api/glasses/telemetry/config`) before sending
+  anything, so nothing leaves the browser on a hub that collects nothing. A hub
+  whose config already says `enabled: true` keeps collecting.
 - **The error boundary ships without its comments too.** `errboundary.js`, the
   one first-paint script still served as written, goes through the bundle's
   line-preserving comment stripper: 4.9 KB → 2.6 KB on the wire.

@@ -1140,10 +1140,12 @@ refuses to create a database it cannot find rather than reporting an empty one:
 "no telemetry recorded" from the wrong directory reads as "the instrument is
 broken", which is the one wrong answer a diagnostic tool must not give.
 
-Credentials are scrubbed before storage, the table trims itself at 50,000 rows,
-and collection can be switched off with `ui.telemetry.enabled: false`. The
-Telemetry tab in the dashboard shows the same data, gated on `audit.read`. See
-[front-end telemetry](../operations/telemetry.md).
+Collection is **off unless an operator turned it on** — switch it on in
+Settings → Telemetry in the dashboard, or with `ui.telemetry.enabled: true` —
+so an empty trail on a hub nobody configured is the expected answer rather than
+a fault. While on, credentials are scrubbed before storage and the table trims
+itself at 50,000 rows. The Telemetry tab shows the same data, gated on
+`audit.read`. See [front-end telemetry](../operations/telemetry.md).
 
 ---
 

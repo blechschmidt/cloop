@@ -198,9 +198,10 @@ Six pages in order, indexed at
   the alerts worth writing, and what the cardinality ceiling does when an
   instrumentation bug reaches it.
 - **[Front-end telemetry](operations/telemetry.md)** — the diagnostic trail the
-  dashboard and the display-glasses page record, how to read a session back
-  from the CLI or the Telemetry tab, what is scrubbed before storage and why,
-  the limits that bound a public ingest route, and how to turn it off.
+  dashboard and the display-glasses page record: off by default, how to switch
+  it on for one front end or both, how to read a session back from the CLI or
+  the Telemetry tab, what is scrubbed before storage and why, and the limits
+  that bound a public ingest route.
 - **[Live sandbox attach](operations/attach.md)** — the RBAC-gated, audited
   shell into a running task's sandbox: the two deny-by-default permissions and
   how to bind them, why a host-process task can never be entered, what each

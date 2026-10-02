@@ -1202,6 +1202,21 @@ var registry = []Entry{
 			"a row with it set means the hub was still running the previous configuration when the change landed.",
 	},
 
+	// ── telemetry ──────────────────────────────────────────────────────────
+	{
+		Action:    ActionTelemetryConfigUpdated,
+		Home:      HomeControlPlane,
+		Entity:    "config",
+		Trigger:   "Front-end telemetry collection is switched on or off, or narrowed to particular front ends, from Settings → Telemetry.",
+		Payload:   []string{"enabled", "was_enabled", "sources", "was_sources"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Collection is off unless an operator turned it on, and this row is when they did. " +
+			"It exists so that \"was this hub recording its users at the time, and who decided that\" is answerable afterwards — " +
+			"including by the people who were recorded. " +
+			"`sources` is empty when every front end is collected. A save that changed nothing emits no row.",
+	},
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 	{
 		Action:    ActionSTTCredentialSet,

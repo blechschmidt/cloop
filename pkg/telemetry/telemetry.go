@@ -63,6 +63,18 @@ func (s Source) Valid() bool {
 	return s == SourceDashboard || s == SourceGlasses
 }
 
+// AllSources returns every front end that can submit a trail, in the order a
+// reader should be offered them (Task 20311).
+//
+// Returned rather than exported as a slice variable so a caller cannot mutate
+// the set, and derived by the Settings panel rather than hardcoded in
+// JavaScript: the panel offers one checkbox per source, and a second copy of
+// this list in the frontend would be the copy that goes stale the day a third
+// front end appears.
+func AllSources() []Source {
+	return []Source{SourceDashboard, SourceGlasses}
+}
+
 // Kind classifies an event. The set is closed for the same reason Source is,
 // and deliberately small: a reader scanning a trail under time pressure needs
 // to recognise every kind on sight.

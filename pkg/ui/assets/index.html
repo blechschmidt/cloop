@@ -1319,6 +1319,25 @@
           <div id="oidcStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
         </div>
 
+        <!-- Telemetry collection (Task 20311): telemetry_config_api.go. -->
+        <div class="settings-section" id="telemetryPolicySection" data-global-perm="user.manage" data-perm-hide>
+          <h3>Telemetry <span id="telemetryPolicyBadge" class="badge"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            A trail of what this hub's front ends did &mdash; gestures, views, requests, errors &mdash;
+            read on the Telemetry tab. Off until switched on; each front end asks before it sends.
+          </p>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px">
+            <input type="checkbox" id="telemetryPolicyEnabled" onchange="onTelemetryPolicyToggle()">
+            Collect a diagnostic trail
+          </label>
+          <div id="telemetryPolicySources" style="margin:8px 0 0 24px;display:flex;gap:16px;flex-wrap:wrap"></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+            <button class="btn settings-save" id="telemetryPolicySave" onclick="saveTelemetryPolicy()">Save</button>
+            <span id="telemetryPolicyStored" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+          <div id="telemetryPolicyNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
         <!--
           GitHub App connection (Task 20306). Hub-wide, and gated on
           secret.grant because what it stores is a signing key that can mint
@@ -2140,8 +2159,9 @@
           load: gestures received, views opened, requests and their status, and uncaught errors.
           Built for the front ends this hub cannot otherwise observe &mdash; the glasses have no
           console and no network inspector. Credentials are stripped at ingest and the table trims
-          itself; turn collection off with <code>ui.telemetry.enabled: false</code>. Read the same
-          data from a terminal with <code>cloop hub telemetry</code>.
+          itself. Collection is off until an admin switches it on in Settings &rarr; Telemetry, and each
+          front end asks before it sends anything. Read the same data from a terminal with
+          <code>cloop hub telemetry</code>.
         </p>
 
         <div class="audit-filters">

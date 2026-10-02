@@ -18,8 +18,23 @@ import (
 )
 
 // telemetryServer returns a Server whose control-plane database exists, which
-// ingest needs because it writes there.
+// ingest needs because it writes there, and whose config switches collection on.
+//
+// The switch is explicit because collection is off by default (Task 20311).
+// Every test below this line is about the mechanics of ingest, storage and
+// read-back, and each one would otherwise be asserting the default rather than
+// the thing it names. The default itself is tested by
+// TestTelemetry_DefaultsToOff, which builds its server without this helper.
 func telemetryServer(t *testing.T) *Server {
+	t.Helper()
+	srv := telemetryServerUnconfigured(t)
+	writeTelemetryConfig(t, srv.WorkDir, true)
+	return srv
+}
+
+// telemetryServerUnconfigured is the same hub with no telemetry configuration
+// at all — the state a fresh deployment is in.
+func telemetryServerUnconfigured(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	if _, err := state.Init(dir, "telemetry test", 1); err != nil {
@@ -361,16 +376,163 @@ func TestTelemetry_DisabledRefusesIngest(t *testing.T) {
 	}
 }
 
-// TestTelemetry_DefaultsToEnabled: an instrument that must be switched on in
-// advance is never on when the failure it was built for happens.
-func TestTelemetry_DefaultsToEnabled(t *testing.T) {
-	srv := telemetryServer(t)
-	if !srv.telemetryEnabled() {
-		t.Error("telemetry is off with no configuration — the default must be on")
+// TestTelemetry_DefaultsToOff is the default flip of Task 20311, checked at the
+// layer that matters: not whether the config struct says off, but whether a
+// hub with no telemetry configuration refuses a batch and stores nothing.
+//
+// A regression here does not break a feature. It silently starts recording the
+// URLs, user agents and addresses of everyone who opens the dashboard on a hub
+// whose operator never asked for that.
+func TestTelemetry_DefaultsToOff(t *testing.T) {
+	srv := telemetryServerUnconfigured(t)
+
+	if srv.telemetryEnabled() {
+		t.Error("collection is on with no configuration — the default must be off")
 	}
+	for _, path := range []string{"/api/telemetry", "/api/glasses/telemetry"} {
+		w := postTelemetry(t, srv, path, map[string]any{
+			"events": []map[string]any{{"kind": "note", "message": "m"}},
+		})
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s on an unconfigured hub = %d, want 404", path, w.Code)
+		}
+	}
+	if got := readTelemetry(t, srv, "").Total; got != 0 {
+		t.Errorf("%d events were stored on a hub that was never configured to collect", got)
+	}
+
 	writeTelemetryConfig(t, srv.WorkDir, true)
 	if !srv.telemetryEnabled() {
 		t.Error("telemetry is off with enabled: true")
+	}
+}
+
+// TestTelemetry_ClientPolicyIsAskedBeforeAnythingIsSent covers the route that
+// makes "off" mean *not submitted* rather than *submitted and refused*. A front
+// end asks this first; a page that posted and read the 404 would already have
+// sent the trail.
+func TestTelemetry_ClientPolicyIsAskedBeforeAnythingIsSent(t *testing.T) {
+	srv := telemetryServerUnconfigured(t)
+
+	// Unconfigured: both front ends are told not to send.
+	for _, src := range telemetry.AllSources() {
+		if got := readTelemetryClientPolicy(t, srv, src); got.Collect {
+			t.Errorf("%s is told to collect on an unconfigured hub", src)
+		}
+	}
+
+	// Switched on for the glasses alone: each page is told about itself, and
+	// neither learns the other's policy from its own answer.
+	writeTelemetrySourceConfig(t, srv.WorkDir, true, "glasses")
+	if got := readTelemetryClientPolicy(t, srv, telemetry.SourceGlasses); !got.Collect {
+		t.Error("the glasses page is told not to send while sources: [glasses] is configured")
+	}
+	if got := readTelemetryClientPolicy(t, srv, telemetry.SourceDashboard); got.Collect {
+		t.Error("the dashboard is told to send while only the glasses are configured")
+	}
+	if got := readTelemetryClientPolicy(t, srv, telemetry.SourceDashboard); got.Source != "dashboard" {
+		t.Errorf("the dashboard's answer names source %q", got.Source)
+	}
+}
+
+// TestTelemetry_SourcesNarrowIngest: the per-source switch has to be enforced
+// on the write path, not only advertised by the probe. A client that ignores
+// the probe must gain nothing.
+func TestTelemetry_SourcesNarrowIngest(t *testing.T) {
+	srv := telemetryServerUnconfigured(t)
+	writeTelemetrySourceConfig(t, srv.WorkDir, true, "glasses")
+
+	w := postTelemetry(t, srv, "/api/telemetry", map[string]any{
+		"session": "dash", "events": []map[string]any{{"kind": "note", "message": "from the dashboard"}},
+	})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("dashboard ingest = %d, want 404 while sources: [glasses]", w.Code)
+	}
+
+	w = postTelemetry(t, srv, "/api/glasses/telemetry", map[string]any{
+		"session": "specs", "events": []map[string]any{{"kind": "note", "message": "from the glasses"}},
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("glasses ingest = %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	got := readTelemetry(t, srv, "")
+	if got.Total != 1 {
+		t.Fatalf("stored %d events, want only the glasses one", got.Total)
+	}
+	if len(got.Events) > 0 && got.Events[0].Source != string(telemetry.SourceGlasses) {
+		t.Errorf("stored a %q event while only the glasses are collected", got.Events[0].Source)
+	}
+}
+
+// TestTelemetry_PolicyFailsClosedOnAnUnreadableConfig: the fallback when the
+// config cannot be read is "collect nothing". Recording other people's browsing
+// is not a behaviour to fall back into.
+func TestTelemetry_PolicyFailsClosedOnAnUnreadableConfig(t *testing.T) {
+	srv := telemetryServerUnconfigured(t)
+	path := config.ConfigPath(srv.WorkDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("ui: [this is not a mapping\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if srv.telemetryEnabled() {
+		t.Error("collection is on with an unparseable config")
+	}
+	if srv.telemetryCollects(telemetry.SourceGlasses) {
+		t.Error("the glasses are collected with an unparseable config")
+	}
+}
+
+// TestTelemetry_ClientPolicyIsNotCacheable: a page holding a stale permissive
+// answer would keep shipping trails for the hub to refuse, which is precisely
+// the network traffic the probe exists to prevent. A response with no cache
+// headers is eligible for heuristic caching, so the header is not optional.
+func TestTelemetry_ClientPolicyIsNotCacheable(t *testing.T) {
+	srv := telemetryServerUnconfigured(t)
+	for _, h := range []http.HandlerFunc{
+		srv.handleTelemetryClientConfig,
+		srv.handleGlassesTelemetryClientConfig,
+	} {
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest(http.MethodGet, "/api/telemetry/config", nil))
+		if got := w.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+	}
+}
+
+func readTelemetryClientPolicy(t *testing.T, srv *Server, src telemetry.Source) telemetryClientPolicy {
+	t.Helper()
+	path := "/api/telemetry/config"
+	handler := srv.handleTelemetryClientConfig
+	if src == telemetry.SourceGlasses {
+		path = "/api/glasses/telemetry/config"
+		handler = srv.handleGlassesTelemetryClientConfig
+	}
+	w := httptest.NewRecorder()
+	handler(w, httptest.NewRequest(http.MethodGet, path, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s = %d: %s", path, w.Code, w.Body.String())
+	}
+	var out telemetryClientPolicy
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return out
+}
+
+func writeTelemetrySourceConfig(t *testing.T, dir string, enabled bool, sources ...string) {
+	t.Helper()
+	path := config.ConfigPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := fmt.Sprintf("ui:\n  telemetry:\n    enabled: %t\n    sources: [%s]\n",
+		enabled, strings.Join(sources, ", "))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }
 

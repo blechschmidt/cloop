@@ -1556,12 +1556,13 @@ ui:
 - **A parse error is fatal**, for the same reason it is in `config.yaml`: the
   file decides whether anyone has to log in.
 - **Only `cloop ui` reads it.** Put settings that describe *this hub* in it —
-  `ui.oidc`, `ui.tls`, the origin allowlist, the WebSocket caps. Leave API keys
-  and budgets in `config.yaml`, where every other command reads them.
+  `ui.oidc`, `ui.tls`, the origin allowlist, the WebSocket caps,
+  `ui.telemetry`. Leave API keys and budgets in `config.yaml`, where every other
+  command reads them.
 - **The Settings panel follows the hub.** Once an overlay exists, `PUT
-  /api/config/oidc` maintains the `ui.oidc` block *in the overlay*, preserving
-  the rest of the file and its comments. Without one it writes `config.yaml` as
-  before.
+  /api/config/oidc` and `PUT /api/config/telemetry` maintain the `ui.oidc` and
+  `ui.telemetry` blocks *in the overlay*, preserving the rest of the file and
+  its comments. Without one they write `config.yaml` as before.
 - Give it mode `0600`: it can hold a client secret, and `cloop ui` warns if it
   is readable by anyone else.
 
@@ -1605,21 +1606,43 @@ gestures they received, the views they opened, the requests they issued and any
 errors — and post it to the hub, where `cloop hub telemetry` and the Telemetry
 tab read it back. It never leaves the deployment.
 
+**Collection is off by default.** Nothing is submitted, and each front end asks
+the hub before it sends anything at all.
+
 ```yaml
 ui:
   telemetry:
-    enabled: true    # the default; set false to refuse ingest entirely
+    enabled: true          # off unless you set this
+    sources: [glasses]     # optional; omit for every front end
 ```
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `enabled` | `true` | When false, both ingest routes answer `404` rather than silently discarding, so the setting is verifiable. Previously-collected events remain readable; remove them with `cloop hub telemetry prune`. |
+| `enabled` | `false` | The master switch. While off, both ingest routes answer `404` rather than silently discarding, so the setting is verifiable — and the front ends do not post in the first place. |
+| `sources` | all | Restricts collection to the named front ends: `dashboard`, `glasses`. An empty or absent list means every one of them. |
 
-Default-on is deliberate: an instrument that has to be switched on in advance is
-never on when the failure it was built for happens — and the glasses page, which
-has no console and no network inspector, has no other way to be debugged.
-Credentials are scrubbed before storage and the table trims itself at 50,000
-rows. See [front-end telemetry](../operations/telemetry.md).
+Off-by-default is the deliberate part. A trail carries the URLs somebody
+visited, the views they opened, their user agent and their address; collecting
+it is a decision about other people's data, and a deployment that has never
+heard of the setting has not made it.
+
+Switch it on in **Settings → Telemetry** in the dashboard rather than here —
+it takes effect for the next page load, needs no restart, and leaves a
+`telemetry.config.updated` audit row naming who turned it on. Editing this block
+by hand does the same thing. It describes the hub, so where two hubs share a
+directory it belongs in that hub's
+[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory), and that is
+where the panel saves it once the file exists.
+
+`sources: [glasses]` is the posture worth knowing about: the display-glasses
+page has no console and no network inspector, so it is the front end that cannot
+be debugged any other way, while the dashboard is the one that produces the bulk
+of the volume and holds the bulk of the privacy cost.
+
+While on, credentials are scrubbed before storage and the table trims itself at
+50,000 rows. Turning collection off stops new events and deletes none — remove
+what was already collected with `cloop hub telemetry prune`. See
+[front-end telemetry](../operations/telemetry.md).
 
 #### Resuming a capped run
 

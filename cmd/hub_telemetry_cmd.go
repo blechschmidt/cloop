@@ -89,8 +89,12 @@ var hubTelemetrySessionsCmd = &cobra.Command{
 			return err
 		}
 		if len(sessions) == 0 {
-			fmt.Println("No telemetry recorded. Either no front end has reported yet, or " +
-				"collection is off (ui.telemetry.enabled).")
+			// Collection is off unless an operator turned it on, so that is
+			// the likely explanation rather than an afterthought — and the
+			// message says where to turn it on, because an empty trail is
+			// exactly when somebody needs to know.
+			fmt.Println("No telemetry recorded. Collection is off unless switched on: " +
+				"see Settings → Telemetry in the dashboard, or set ui.telemetry.enabled: true.")
 			return nil
 		}
 

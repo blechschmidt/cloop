@@ -4,8 +4,8 @@ The hub collects a diagnostic trail from the browser dashboard and from the
 display-glasses page, so that a front-end defect can be investigated from the
 outside.
 
-It is on by default. What that costs, and how to turn it off, is
-[below](#turning-it-off).
+It is **off by default**. Nothing is collected, and nothing is sent, until an
+operator switches it on — see [turning it on](#turning-it-on).
 
 ## Why it exists
 
@@ -188,12 +188,26 @@ Public here means *no permission*, not *no credential*. Both ingest routes
 still sit behind the authentication middleware, so they reach exactly the
 people already entitled to load a page and never an anonymous scanner.
 
-There are two ingest routes rather than one:
+There are two ingest routes rather than one, and a matching pair that answer
+"may I send at all":
 
 ```
-POST /api/telemetry            the dashboard
-POST /api/glasses/telemetry    the wearable
+POST /api/telemetry                   the dashboard
+POST /api/glasses/telemetry           the wearable
+GET  /api/telemetry/config            may I send?
+GET  /api/glasses/telemetry/config    may I send?
 ```
+
+Each front end asks the second before it uses the first, once per page load, and
+holds its events until the answer arrives. That is what makes "off" mean *not
+submitted* rather than *submitted and refused*: a page that posted first and
+read the `404` would already have sent the trail — over the network and past
+whatever sits in between — on exactly the hub that wanted none of it.
+
+The probe discloses one boolean about the asking page and fails closed: an
+answer that is missing, refused or unparseable leaves the trail off for that
+page load. The hub still refuses the ingest independently, so a hand-written
+client that skips the question gains nothing.
 
 A display-glasses token is pinned to the `/glasses` and `/api/glasses/`
 prefixes, and that pin is load-bearing — it is what stops a credential living
@@ -212,7 +226,76 @@ drop. A page must not learn from a status code whether its events were kept —
 a client that retried on failure would amplify exactly the runaway-loop case
 the caps exist to contain.
 
-## Turning it off
+## Turning it on
+
+In the dashboard: **Settings → Telemetry**, tick the box, Save. It applies to
+the next page load — there is nothing to restart — and records a
+`telemetry.config.updated` audit row naming who turned it on.
+
+Each front end can be enabled separately. `glasses` alone is a sensible
+deployment posture: the display-glasses page is the one that cannot be debugged
+any other way, and the dashboard is the one that produces most of the volume and
+holds most of the privacy cost.
+
+The same thing in config, if you would rather deploy it than click it:
+
+```yaml
+ui:
+  telemetry:
+    enabled: true
+    sources: [glasses]   # optional; omit for every front end
+```
+
+The panel needs `user.manage`, which is admin-only — one step stronger than the
+`config.write` the rest of Settings uses. Reading a trail back is `audit.read`,
+also admin-only, and switching the recording on is the same decision taken one
+step earlier.
+
+Collection is a setting of the hub, not of a project. A hub that has a
+[per-instance overlay](../reference/configuration.md#two-dashboards-in-one-directory) —
+`.cloop/config.ui-<port>.yaml`, for two dashboards sharing one working
+directory — reads it through that overlay and the panel saves it there, so each
+of the two decides for itself, and an older binary rewriting the shared
+`config.yaml` (which drops keys it does not know) cannot switch it off.
+
+### Where the events go
+
+To this hub, and only to this hub. There is deliberately no setting that points
+the front ends at a third-party collector, for two reasons that are worth
+stating rather than leaving to be rediscovered:
+
+- The dashboard is served under `Content-Security-Policy: connect-src 'self'`.
+  A cross-origin POST is refused by the browser, so such a setting would need
+  the hub to weaken its own CSP for every page it serves.
+- Scrubbing happens at ingest, in the hub. The display-glasses page carries its
+  bearer token in the page URL, so a trail sent anywhere else would take a live
+  credential with it — which is precisely the leak `Scrub` exists to prevent.
+
+A fleet that wants one collector should relay hub-side, after scrubbing, rather
+than from the browser. Nothing does that today.
+
+## Why off by default
+
+This shipped on by default, and the argument was a real one: an instrument that
+has to be switched on in advance is never on when the failure it was built for
+happens.
+
+It weighs the wrong interest. A trail carries the URLs somebody visited, the
+views they opened, their user agent and their address. Collecting that is a
+decision about other people's data, and on a hosted hub the operator and the
+recorded person are not the same person. A deployment that has never heard of
+this setting has not made that decision — and defaulting to collection makes it
+silently, on behalf of an operator who would in many jurisdictions have to
+disclose it.
+
+So the instrument is opt-in, and the cost of that is paid in the one place it
+shows: the first report of a glasses defect on a fresh hub arrives with no trail
+behind it. Switch collection on, ask the wearer to reproduce it once, and the
+second report has one.
+
+## Turning it off again
+
+Untick the box, or:
 
 ```yaml
 ui:
@@ -221,14 +304,10 @@ ui:
 ```
 
 Both ingest routes then answer `404` rather than silently discarding, so the
-setting is verifiable. Reading previously-collected events still works; use
-`cloop hub telemetry prune` to remove them.
-
-The default is on, which is the unusual choice and the deliberate one: an
-instrument that has to be switched on in advance is never on when the failure
-it was built for happens. The switch exists because "bounded" is not the same
-as "acceptable to everyone" — a deployment whose policy forbids storing user
-agents or client addresses at all needs a way to say so.
+setting is verifiable, and the front ends stop posting at all. Reading
+previously-collected events still works — **switching collection off deletes
+nothing**. Use `cloop hub telemetry prune` to remove what was already gathered;
+the panel shows how much that is.
 
 ## Where errors also go
 

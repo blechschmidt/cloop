@@ -64,11 +64,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-212 endpoints, by the permission each one requires:
+216 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 26 |
+| `public` (no permission) | 28 |
 | `audit.read` | 5 |
 | `config.write` | 13 |
 | `executor.manage` | 25 |
@@ -85,7 +85,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
 | `token.admin` | 3 |
-| `user.manage` | 7 |
+| `user.manage` | 9 |
 | `view.prefs` | 1 |
 
 | Method | Path | Permission | Scope |
@@ -131,6 +131,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/config/stt` | `project.read` | global |
 | PUT | `/api/config/stt` | `config.write` | global |
 | DELETE | `/api/config/stt` | `config.write` | global |
+| GET | `/api/config/telemetry` | `user.manage` | global |
+| PUT | `/api/config/telemetry` | `user.manage` | global |
 | GET | `/api/cost/identities` | `project.read` | global |
 | GET | `/api/deps` | `project.read` | project |
 | GET | `/api/dictate` | `project.read` | project |
@@ -172,6 +174,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/glasses/tasks` | `task.mutate` | project |
 | GET | `/api/glasses/tasks/{id}` | `project.read` | project |
 | POST | `/api/glasses/telemetry` | `public` | global |
+| GET | `/api/glasses/telemetry/config` | `public` | global |
 | POST | `/api/glasses/transcribe` | `task.mutate` | project |
 | GET | `/api/goal` | `project.read` | project |
 | POST | `/api/goal` | `project.write` | project |
@@ -277,6 +280,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/tasks/{id}/revise` | `task.mutate` | project |
 | GET | `/api/telemetry` | `audit.read` | global |
 | POST | `/api/telemetry` | `public` | global |
+| GET | `/api/telemetry/config` | `public` | global |
 | GET | `/api/telemetry/sessions` | `audit.read` | global |
 | GET | `/api/timeline` | `project.read` | project |
 | GET | `/api/tokens` | `token.admin` | global |

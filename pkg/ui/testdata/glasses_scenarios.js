@@ -1005,6 +1005,53 @@ scenarios.dictate_sound_is_uploaded = async () => {
   return { uploads: posts.length, rows: dom.rows() };
 };
 
+// ── telemetry consent (Task 20311) ──────────────────────────────────────────
+// Collection is off unless an operator switched it on, and the wearable has to
+// honour that from the device rather than rely on the hub to refuse: a page
+// that posted first and read the 404 would already have sent the trail. A
+// wearer cannot be asked to confirm anything, so the only safe reading of "the
+// hub did not say yes" is no.
+//
+// The shim answers 404 for any route a scenario does not register, which is
+// also what a hub with collection off does — so the refusing case needs no
+// setup, and the consenting case is the one that has to be arranged.
+
+function telemetryTraffic(dom) {
+  const posts = dom.sent.filter(s => s.method === 'POST' && s.url.indexOf('/telemetry') !== -1);
+  const probes = dom.sent.filter(s => s.url.indexOf('/api/glasses/telemetry/config') === 0);
+  return { posts: posts.length, probes: probes.length };
+}
+
+scenarios.telemetry_is_not_sent_unless_the_hub_asks_for_it = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  // Gestures are what this page records. Enough of them to fill a batch, which
+  // is what makes the flush happen inside the scenario: the shim leaves
+  // setTimeout to node, so the page's 10s idle flush never fires here and a
+  // quiet run would prove nothing.
+  for (let i = 0; i < 20; i++) { dom.press('ArrowRight'); }
+  await dom.settle();
+  dom.tick();
+  await dom.settle();
+  return telemetryTraffic(dom);
+};
+
+scenarios.telemetry_is_sent_once_the_hub_asks_for_it = async () => {
+  const dom = boot({
+    routes: {
+      '/api/glasses/projects': { projects: PROJECTS },
+      '/api/glasses/telemetry/config': { source: 'glasses', collect: true },
+      '/api/glasses/telemetry': {},
+    },
+  });
+  await dom.settle();
+  for (let i = 0; i < 20; i++) { dom.press('ArrowRight'); }
+  await dom.settle();
+  dom.tick();
+  await dom.settle();
+  return telemetryTraffic(dom);
+};
+
 // ── run ─────────────────────────────────────────────────────────────────────
 
 (async () => {

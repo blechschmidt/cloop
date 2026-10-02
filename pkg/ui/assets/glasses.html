@@ -400,6 +400,12 @@ function fail(err) { say(err && err.message ? err.message : String(err), true); 
 // "the gesture never arrived" from "it arrived and the ring was empty" from
 // "it arrived, the ring was fine, and select() did nothing".
 var TEL_ENDPOINT = '/api/glasses/telemetry';
+// Asked before anything is sent (Task 20311). Collection is off unless an
+// operator switched it on, and posting first to find that out would already
+// have sent the trail. telCollect is null until the hub answers: null holds
+// events, false discards them and stops recording, true sends.
+var TEL_CFG_URL = '/api/glasses/telemetry/config';
+var telCollect = null, telAsked = false;
 var telSession = '', telSeq = 0, telQueue = [], telTimer = null;
 var telRecorded = 0, telPosted = 0;
 // Budgets. Every gesture costs two events — one when it arrives, one for where
@@ -420,8 +426,38 @@ try {
   }
 } catch (e) { telSession = 'n' + Math.floor(Math.random() * 1e12).toString(16); }
 
+// telAsk resolves telCollect, once. Fails closed on every unhappy path — a
+// refused, unreachable or unparseable answer leaves the trail off for this page
+// load. A wearer cannot be asked to confirm anything, so the only safe reading
+// of "the hub did not say yes" is no.
+function telAsk() {
+  if (telAsked) { return; }
+  telAsked = true;
+  try {
+    var headers = {};
+    if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+    fetch(TEL_CFG_URL, { headers: headers, credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(b) {
+        if (!b || !b.collect) { telDeny(); return; }
+        telCollect = true;
+        if (telQueue.length) { telFlush(false); }
+      })
+      .catch(telDeny);
+  } catch (e) { telDeny(); }
+}
+
+function telDeny() {
+  telCollect = false;
+  try {
+    telQueue.length = 0;
+    if (telTimer !== null) { clearTimeout(telTimer); telTimer = null; }
+  } catch (e) {}
+}
+
 function tel(kind, message, detail) {
   try {
+    if (telCollect === false) { return; }
     if (telRecorded >= TEL_EVENT_MAX) { return; }
     telRecorded++;
     var d = '';
@@ -440,6 +476,12 @@ function tel(kind, message, detail) {
 
 function telFlush(beacon) {
   try {
+    // Nothing leaves the device before the hub has said it wants it. While the
+    // answer is outstanding the queue is held rather than dropped, so the
+    // gestures recorded during the first glance still arrive; on the unload
+    // path an unanswered probe simply means the batch is abandoned.
+    if (telCollect === null) { telAsk(); return; }
+    if (telCollect === false) { telDeny(); return; }
     if (telTimer !== null) { clearTimeout(telTimer); telTimer = null; }
     if (!telQueue.length) { return; }
     // Once the link is dead, stop. This is the same rule send() follows and for

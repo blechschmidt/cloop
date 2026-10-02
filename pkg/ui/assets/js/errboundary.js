@@ -29,6 +29,10 @@
   window.__cloopErrBoundaryInstalled = true;
 
   var ENDPOINT   = '/api/telemetry';
+  // Asked once per page load, before anything is sent (Task 20311). Collection
+  // is off unless an operator switched it on, and posting first to find that
+  // out would already have sent the trail — on the hub that wanted none of it.
+  var CFG_URL    = '/api/telemetry/config';
   var SOURCE     = 'dashboard';
 
   var WINDOW_MS  = 30000;     // rolling window for the escalation check
@@ -63,6 +67,55 @@
   var recent     = [];        // timestamps of recent errors
   var release    = '';        // hub build, filled in by the bundle when known
 
+  // Consent, in three states. null is "not asked yet" and holds events rather
+  // than sending or dropping them; nothing is transmitted while it is null.
+  var collect    = null;
+  var asked      = false;
+  // Captured before the instrumentation below replaces window.fetch, so the
+  // probe is neither recorded nor able to recurse.
+  var rawFetch   = (typeof window.fetch === 'function') ? window.fetch.bind(window) : null;
+
+  // bearer returns the headers the hub needs to recognise this page, if any.
+  function bearer() {
+    var h = {};
+    try {
+      var t = sessionStorage.getItem('cloop_token');
+      if (t) h['Authorization'] = 'Bearer ' + t;
+    } catch (_) {}
+    return h;
+  }
+
+  // askHub resolves `collect`, failing closed: a probe that errors, 404s, is
+  // refused or returns something unparseable leaves collection off for this
+  // page load. Sending on an unconfirmed answer is what this exists to remove,
+  // and a hub that wanted the trail is still there on the next load.
+  function askHub() {
+    if (asked) return;
+    asked = true;
+    try {
+      if (!rawFetch) { deny(); return; }
+      rawFetch(CFG_URL, {headers: bearer(), credentials: 'same-origin'})
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(body) {
+          if (!body || !body.collect) { deny(); return; }
+          collect = true;
+          if (queue.length) flush(false);
+        })
+        .catch(deny);
+    } catch (_) { deny(); }
+  }
+
+  // deny switches the reporter off for the rest of the page load and discards
+  // what it buffered. record() is a no-op from here, so an unwanted trail costs
+  // nothing beyond the one probe.
+  function deny() {
+    collect = false;
+    try {
+      queue.length = 0;
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+    } catch (_) {}
+  }
+
   function newSessionID() {
     try {
       // Random per page load: a trail describes one page's life, and the
@@ -96,6 +149,7 @@
   function record(kind, message, opts) {
     try {
       opts = opts || {};
+      if (collect === false) return;
       if (recorded >= EVENT_MAX) return;
       if (opts.routine) {
         if (routine >= ROUTINE_MAX) return;
@@ -140,6 +194,13 @@
   // promises to finish.
   function flush(beacon) {
     try {
+      // Nothing is transmitted before the hub has said it wants it. While the
+      // answer is outstanding the queue is held rather than dropped — the probe
+      // resolves in milliseconds and re-enters here — so a trail that starts at
+      // page load arrives intact. On the beacon path an unanswered probe means
+      // the batch is abandoned rather than sent blind.
+      if (collect === null) { askHub(); return; }
+      if (collect === false) { deny(); return; }
       if (timer !== null) { clearTimeout(timer); timer = null; }
       if (!queue.length) return;
       if (posted >= POST_MAX) { queue.length = 0; return; }
@@ -169,11 +230,8 @@
         // Fall through to fetch+keepalive if sendBeacon is missing or refuses.
       }
 
-      var headers = {'Content-Type': 'application/json'};
-      try {
-        var t = sessionStorage.getItem('cloop_token');
-        if (t) headers['Authorization'] = 'Bearer ' + t;
-      } catch (_) {}
+      var headers = bearer();
+      headers['Content-Type'] = 'application/json';
 
       // keepalive lets the request complete even if the user navigates away or
       // reloads immediately after the error that triggered it.

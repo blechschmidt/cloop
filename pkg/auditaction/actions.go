@@ -359,6 +359,12 @@ const (
 	// being changed.
 	ActionOIDCConfigUpdated Action = "oidc.config.updated"
 
+	// ── telemetry ──────────────────────────────────────────────────────────
+
+	// ActionTelemetryConfigUpdated records front-end telemetry collection
+	// being switched on or off, or narrowed to particular front ends.
+	ActionTelemetryConfigUpdated Action = "telemetry.config.updated"
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 
 	// ActionSTTCredentialSet records the speech-to-text key being configured.

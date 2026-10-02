@@ -503,6 +503,13 @@ func (s *Server) routeTable() []routeSpec {
 		// is a different matter and takes audit.read; those routes are below.
 		{Pattern: "POST /api/telemetry", Handler: s.handleTelemetryIngest, Perm: public},
 
+		// Whether this hub wants that trail at all (Task 20311). Public
+		// for the same reason the ingest route is, and answering it is
+		// what lets a page send nothing on a hub that collects nothing —
+		// posting first and reading a 404 would already have sent it.
+		// Discloses one boolean about the asking page.
+		{Pattern: "GET /api/telemetry/config", Handler: s.handleTelemetryClientConfig, Perm: public},
+
 		// The hub's own build (Task 20249). Read-only, carries no project,
 		// tenant or user data, and every authenticated user needs it: the
 		// dashboard compares it on reconnect to notice it is running stale
@@ -848,6 +855,17 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/telemetry", Handler: s.handleTelemetryList, Perm: auditRead, Scope: scopeGlobal},
 		{Pattern: "GET /api/telemetry/sessions", Handler: s.handleTelemetrySessions, Perm: auditRead, Scope: scopeGlobal},
 
+		// ── Browser telemetry, the policy itself (Task 20311) ────────
+		// user.manage rather than the config.write every other Settings
+		// route uses. This is the switch that decides whether the hub
+		// records what other people's browsers did — the URLs they
+		// opened, their user agent, their address — and that decision
+		// belongs to the role that may also read the result. Granting it
+		// to maintainer would produce a role able to start collecting and
+		// unable to look. See telemetry_config_api.go.
+		{Pattern: "GET /api/config/telemetry", Handler: s.handleTelemetrySettings, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/telemetry", Handler: s.handleTelemetrySettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+
 		// ── Secrets, grants, and leases ──────────────────────────────
 		// Global, and never below maintainer. Reads are gated on
 		// secret.grant rather than project.read because the list of which
@@ -1019,6 +1037,10 @@ func (s *Server) routeTable() []routeSpec {
 		// /api/telemetry by path. Public, like the dashboard's ingest: a link
 		// in its terminal dead state is exactly the condition worth recording.
 		{Pattern: "POST /api/glasses/telemetry", Handler: s.handleGlassesTelemetryIngest, Perm: public},
+
+		// And the wearable's half of the may-I-send question (Task 20311),
+		// on this prefix for the same pinning reason as the row above.
+		{Pattern: "GET /api/glasses/telemetry/config", Handler: s.handleGlassesTelemetryClientConfig, Perm: public},
 
 		// ── Per-identity quotas (Task 20182) ─────────────────────────
 		// Global and admin-only. A quota is the ceiling on what an

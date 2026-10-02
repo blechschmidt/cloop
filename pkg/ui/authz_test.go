@@ -156,6 +156,21 @@ var publicRouteAllowlist = map[string]string{
 		"everywhere, and the table trims itself on the write path. Identity and address are stamped " +
 		"from the request, so a batch reports rather than asserts who sent it. Write-only: reading a " +
 		"trail back is audit.read",
+	// The may-I-send probe (Task 20311). Public because it is the mechanism by
+	// which a page finds out to stay silent, and a gate on it would mean the
+	// pages that cannot pass the gate are the ones that send anyway.
+	"GET /api/telemetry/config": "tells the asking page one boolean: whether this hub collects its " +
+		"trail. It exists because collection is off unless an operator turned it on, and a front end " +
+		"that posted first and read the 404 would already have sent the data — over the network and " +
+		"past whatever sits in between — on exactly the hub that wanted none of it. Read-only, takes " +
+		"no parameters, and scoped to the caller's own front end, so a dashboard learns nothing about " +
+		"the glasses policy or about any project, user or tenant. The hub still refuses the ingest " +
+		"independently, so a client that lies about having asked gains nothing",
+	"GET /api/glasses/telemetry/config": "the wearable's half of the route above, on this prefix " +
+		"because tokenKindAdmitted pins a glasses token to /api/glasses/ and widening that pin for a " +
+		"boolean would trade the containment for a convenience. Same disclosure: one flag about the " +
+		"asking page",
+
 	"POST /api/glasses/telemetry": "the wearable's half of the route above, and the surface telemetry " +
 		"exists for — glasses have no console, no network inspector, and a wearer who can report only " +
 		"a sentence of prose. A separate path rather than a shared one because tokenKindAdmitted pins " +

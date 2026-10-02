@@ -38,6 +38,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/config"
 )
 
 // glassesCursor is one sample of what is on screen, as testdata/glasses_browser.js
@@ -172,6 +174,19 @@ func runGlassesBrowser() glassesBrowserRun {
 		return glassesBrowserRun{fatal: "temp dir: " + err.Error()}
 	}
 	defer func() { _ = os.RemoveAll(work) }()
+
+	// Collection is off unless an operator switched it on (Task 20311), and the
+	// page asks before it sends. Switch it on for this hub rather than stubbing
+	// the answer: the probe then travels the real route, and the assertions
+	// below stop being about a fixture and start being about the shipped
+	// consent flow driven by a real browser.
+	cfgPath := config.ConfigPath(work)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		return glassesBrowserRun{fatal: "config dir: " + err.Error()}
+	}
+	if err := os.WriteFile(cfgPath, []byte("ui:\n  telemetry:\n    enabled: true\n"), 0o600); err != nil {
+		return glassesBrowserRun{fatal: "enable telemetry: " + err.Error()}
+	}
 
 	s := New(work, 0, "")
 	mux := http.NewServeMux()

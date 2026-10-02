@@ -1549,3 +1549,44 @@ func TestGlassesNavigationNeverLeavesTheRingUnanchored(t *testing.T) {
 			nav.During.AnchorScrolls)
 	}
 }
+
+// TestGlassesSendsNoTelemetryUntilTheHubAsksForIt is the wearable's half of
+// Task 20311, and the half that matters most.
+//
+// Collection is off unless an operator switched it on. The dashboard's user can
+// at least see a network panel; a wearer has no console, no inspector, and no
+// way to discover that their glances are being described to a server. So the
+// device has to honour the policy itself rather than rely on the hub to refuse
+// — a page that posted first and read the 404 would already have sent the trail.
+func TestGlassesSendsNoTelemetryUntilTheHubAsksForIt(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var quiet struct {
+		Posts  int `json:"posts"`
+		Probes int `json:"probes"`
+	}
+	glassesScenario(t, results, "telemetry_is_not_sent_unless_the_hub_asks_for_it", &quiet)
+	if quiet.Posts != 0 {
+		t.Errorf("the page posted %d telemetry batch(es) to a hub that never consented; "+
+			"a wearer's gestures left the device on a deployment that collects nothing", quiet.Posts)
+	}
+	if quiet.Probes == 0 {
+		t.Error("the page never asked whether it may send. Without the question it is either " +
+			"sending blind or silent forever; neither is the intended behaviour")
+	}
+
+	var sending struct {
+		Posts  int `json:"posts"`
+		Probes int `json:"probes"`
+	}
+	glassesScenario(t, results, "telemetry_is_sent_once_the_hub_asks_for_it", &sending)
+	if sending.Posts == 0 {
+		t.Error("the page sent nothing to a hub that asked for the trail — the instrument the " +
+			"glasses exist to be debugged with is now permanently off")
+	}
+	if sending.Probes != 1 {
+		t.Errorf("the page asked %d times; the answer is per page load, not per flush", sending.Probes)
+	}
+}

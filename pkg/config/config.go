@@ -1684,41 +1684,99 @@ func (c CIConfig) ExchangeKeep() int {
 	return c.ExchangeKeepRecords
 }
 
-// TelemetryConfig is the switch for browser telemetry collection (Task 20251).
+// TelemetryConfig is the collection policy for browser telemetry (Tasks 20251,
+// 20311).
 //
 //	ui:
 //	  telemetry:
-//	    enabled: false
+//	    enabled: true
+//	    sources: [glasses]
 //
-// Default on, which is the unusual choice and the deliberate one. The trails
-// exist to diagnose front ends the hub cannot otherwise observe — above all
-// the display-glasses page, which has no console and no network inspector —
-// and an instrument that has to be switched on in advance is never on when the
-// failure it was built for happens.
+// # Off unless an operator asks for it
 //
-// What that default costs is bounded rather than argued: events are scrubbed
-// of credentials at ingest, clamped to fixed field budgets, capped per batch,
-// and stored in a table that trims itself on the write path. Reading them back
-// takes audit.read.
+// This shipped default-on, and the argument was a real one: the trails exist to
+// diagnose front ends the hub cannot otherwise observe — above all the
+// display-glasses page, which has no console and no network inspector — and an
+// instrument that has to be switched on in advance is never on when the failure
+// it was built for happens.
 //
-// The switch exists because "bounded" is not the same as "acceptable to
-// everyone": a deployment whose policy forbids storing user-agent strings or
-// client addresses at all needs a way to say so, and turning it off makes both
-// ingest routes answer 404 rather than silently discarding.
+// The default is now off anyway, because that argument weighs the operator's
+// convenience and not the recorded user's interest, and they are not the same
+// person on a hosted hub. A trail carries the URLs somebody visited, the views
+// they opened, their user agent and their address. Collecting that is a
+// decision about other people's data, and a deployment that has never heard of
+// the setting has not made it. Defaulting to collection makes that choice
+// silently, on behalf of an operator who would in many jurisdictions have to
+// disclose it.
+//
+// So the instrument is opt-in, and turning it on is one switch in Settings →
+// Telemetry rather than a config file edit and a restart. What it costs while
+// on is unchanged and still bounded: events are scrubbed of credentials at
+// ingest, clamped to fixed field budgets, capped per batch, and stored in a
+// table that trims itself on the write path. Reading them back takes audit.read.
+//
+// # Sources
+//
+// Enabled is the master switch; Sources narrows it. The two front ends are not
+// equally worth recording: the glasses page is the one with no other way to be
+// debugged, and the dashboard is the one that generates the bulk of the volume
+// and holds the bulk of the privacy cost. `sources: [glasses]` is therefore a
+// real deployment posture rather than a completeness knob — collect from the
+// device that cannot report for itself, and leave ordinary browser sessions
+// alone.
+//
+// An empty list means every source, so an operator who enables collection and
+// says nothing else gets what the setting used to mean.
+//
+// There is no endpoint setting: the collector is this hub. Pointing a browser
+// at a third-party one would need the dashboard's `connect-src 'self'` CSP
+// weakened for every page, and would carry the display-glasses page's
+// URL-borne credential past the ingest scrubber that exists to remove it. A
+// fleet collector belongs behind the hub, after scrubbing.
 type TelemetryConfig struct {
 	// Enabled is a pointer so that absent and explicitly-false are
-	// distinguishable. A plain bool would make the zero value — an operator
-	// who has never heard of this setting — mean "off", which is the opposite
-	// of the intended default.
+	// distinguishable. The difference is not behavioural — both are off — but
+	// the Settings panel reports it, so that "nobody has configured this" and
+	// "somebody turned it off" do not look identical to the next operator.
 	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Sources restricts collection to the named front ends ("dashboard",
+	// "glasses"). Empty means all of them.
+	//
+	// Names are compared as plain strings rather than validated against
+	// pkg/telemetry: keeping this package free of that dependency is worth
+	// more than rejecting a typo, and a name no front end answers to simply
+	// never matches, which fails closed.
+	Sources []string `yaml:"sources,omitempty"`
 }
 
-// Effective reports whether collection is on, applying the default-on rule.
+// Effective reports whether collection is on at all.
 func (t TelemetryConfig) Effective() bool {
 	if t.Enabled == nil {
-		return true
+		return false
 	}
 	return *t.Enabled
+}
+
+// Collects reports whether events from one named front end may be stored.
+//
+// This is the predicate every write path should ask, rather than Effective:
+// a hub with `sources: [glasses]` is enabled, and must still refuse the
+// dashboard.
+func (t TelemetryConfig) Collects(source string) bool {
+	if !t.Effective() {
+		return false
+	}
+	if len(t.Sources) == 0 {
+		return true
+	}
+	source = strings.ToLower(strings.TrimSpace(source))
+	for _, s := range t.Sources {
+		if strings.ToLower(strings.TrimSpace(s)) == source {
+			return true
+		}
+	}
+	return false
 }
 
 // QuotasConfig is the per-identity admission policy (Task 20182).

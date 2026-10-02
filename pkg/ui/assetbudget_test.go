@@ -303,6 +303,17 @@ import (
 // and what went were checks against a DOM the browser already guarantees,
 // not behaviour; the reasoning stays in whole-line comments, which are free.
 // Measured after: 214,058 B.
+//
+// Task 20311, telemetry off unless switched on in Settings → Telemetry:
+// 1,631 B. 1,025 B are the panel in 30-telemetry.js, 322 B its markup, 261 B
+// the error boundary asking the hub before it sends anything — which has to be
+// resident before the first error, so it cannot be deferred — and 23 B of
+// app.css. Trimmed first, from 1,710 B: markup comments and prose, and the
+// panel's DOM-building code. Measured after: 215,689 B.
+//
+// The new slack is 11 B. The three features cost 2,619 B and the stripping
+// above freed 2,381 B, so the set is 238 B heavier than before this task. The
+// next addition has to trim, defer, or raise this with a reason.
 const eagerWireBudgetBytes = 215_700
 
 // eagerAsset is one member of the first-paint set.

@@ -2,12 +2,30 @@ package ui
 
 // Browser telemetry: ingest and read-back (Task 20251).
 //
-// Four routes, split across two very different trust levels:
+// Six routes, split across two very different trust levels:
 //
-//	POST /api/telemetry           dashboard ingest   — public
-//	POST /api/glasses/telemetry   glasses ingest     — public, glasses-pinned
-//	GET  /api/telemetry           read a page        — audit.read, global
-//	GET  /api/telemetry/sessions  roll-up by session — audit.read, global
+//	POST /api/telemetry                  dashboard ingest   — public
+//	POST /api/glasses/telemetry          glasses ingest     — public, glasses-pinned
+//	GET  /api/telemetry/config           may I send?        — public
+//	GET  /api/glasses/telemetry/config   may I send?        — public, glasses-pinned
+//	GET  /api/telemetry                  read a page        — audit.read, global
+//	GET  /api/telemetry/sessions         roll-up by session — audit.read, global
+//
+// Editing the policy is a seventh and an eighth, in telemetry_config_api.go.
+//
+// # Why a page asks before it sends
+//
+// Collection is off unless an operator turned it on (Task 20311), and a front
+// end that posted anyway and let the hub answer 404 would already have sent the
+// trail — over the network, into a log line, past whatever sits in between. On
+// a hub that collects nothing, that is precisely the data that was not supposed
+// to leave the browser.
+//
+// So the two /config routes exist to be asked first. They disclose one boolean
+// about the asking page, cost one small GET per page load, and are read off the
+// idle path rather than during first paint. The hub still refuses ingest
+// independently: a stale tab or a hand-written client must not be able to write
+// rows into a hub whose answer was no.
 //
 // # Why ingest declares no permission
 //
@@ -31,8 +49,9 @@ package ui
 // to the per-IP rate limiter every route sits behind, and lands in a table that
 // trims itself on the write path (see statedb.TelemetryMaxRows). Identity and
 // address are stamped by the server from the request, so a batch reports rather
-// than asserts who sent it. An operator who wants none of this can set
-// ui.telemetry.enabled=false and both ingest routes answer 404.
+// than asserts who sent it. None of it happens unless an operator switched
+// collection on (Task 20311): until then both ingest routes answer 404, and the
+// front ends, having asked first, never post.
 //
 // # Why the glasses need their own path
 //
@@ -88,6 +107,46 @@ func (s *Server) handleGlassesTelemetryIngest(w http.ResponseWriter, r *http.Req
 	s.ingestTelemetry(w, r, telemetry.SourceGlasses)
 }
 
+// telemetryClientPolicy is what a front end is told about itself before it
+// sends anything (Task 20311).
+//
+// One boolean, scoped to the asking page. A dashboard learns nothing about the
+// glasses policy and vice versa, which keeps this the least informative route
+// that can still do its job: the job is to let a page find out it should stay
+// silent, and "should I speak" needs no more than a yes.
+type telemetryClientPolicy struct {
+	Source  string `json:"source"`
+	Collect bool   `json:"collect"`
+}
+
+// handleTelemetryClientConfig serves GET /api/telemetry/config.
+func (s *Server) handleTelemetryClientConfig(w http.ResponseWriter, r *http.Request) {
+	s.writeTelemetryClientPolicy(w, telemetry.SourceDashboard)
+}
+
+// handleGlassesTelemetryClientConfig serves GET /api/glasses/telemetry/config.
+//
+// A second path for the same answer, for the same reason the ingest routes are
+// split: a display-glasses token is pinned to the /api/glasses/ prefix, and
+// widening that pin so the wearable could read the dashboard's path would trade
+// the containment for a convenience.
+func (s *Server) handleGlassesTelemetryClientConfig(w http.ResponseWriter, r *http.Request) {
+	s.writeTelemetryClientPolicy(w, telemetry.SourceGlasses)
+}
+
+func (s *Server) writeTelemetryClientPolicy(w http.ResponseWriter, src telemetry.Source) {
+	// Never cached. A response with no cache headers is eligible for heuristic
+	// caching, and the stale answer that matters is the permissive one: a page
+	// holding a cached "yes" after collection was switched off would keep
+	// shipping the trail across the network for the hub to refuse. The bytes
+	// leaving the browser are the thing this route exists to prevent.
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, telemetryClientPolicy{
+		Source:  string(src),
+		Collect: s.telemetryCollects(src),
+	})
+}
+
 // ingestTelemetry validates, normalizes and stores one batch.
 //
 // Answers 204 for everything it accepts and for everything it silently drops.
@@ -98,7 +157,11 @@ func (s *Server) ingestTelemetry(w http.ResponseWriter, r *http.Request, src tel
 	if !requirePOST(w, r) {
 		return
 	}
-	if !s.telemetryEnabled() {
+	// Asked per source, not once for the hub: `sources: [glasses]` is enabled
+	// and must still refuse the dashboard. The refusal is the same either way —
+	// a page learns that this hub does not want its trail, and nothing about
+	// why (Task 20311).
+	if !s.telemetryCollects(src) {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "telemetry collection is disabled on this hub"))
 		return
 	}
@@ -180,15 +243,34 @@ func (s *Server) logTelemetryErrors(r *http.Request, events []telemetry.Event) {
 	}
 }
 
-// telemetryEnabled reports whether collection is on. Default is on: an
-// instrument that must be switched on before it records is not there when the
-// failure it was built for happens.
-func (s *Server) telemetryEnabled() bool {
-	cfg, err := config.Load(s.WorkDir)
+// telemetryPolicy reads the hub's collection policy.
+//
+// Through the per-instance overlay (Task 20318), like the hub's other per-hub
+// settings: where two dashboards share a working directory, whether one of
+// them records its users is that hub's decision, and the panel saves it into
+// that hub's overlay (see handleTelemetrySettingsSave).
+//
+// A config that will not load yields the zero policy, which collects nothing.
+// That is the opposite of what this function used to do, and the change is the
+// point of Task 20311: recording other people's browsing is not a behaviour to
+// fall back into when the file that governs it is unreadable.
+func (s *Server) telemetryPolicy() config.TelemetryConfig {
+	cfg, err := s.loadHubConfig()
 	if err != nil || cfg == nil {
-		return true
+		return config.TelemetryConfig{}
 	}
-	return cfg.UI.Telemetry.Effective()
+	return cfg.UI.Telemetry
+}
+
+// telemetryEnabled reports whether collection is on at all — the master switch,
+// for the places that need to describe the hub rather than admit one batch.
+func (s *Server) telemetryEnabled() bool {
+	return s.telemetryPolicy().Effective()
+}
+
+// telemetryCollects reports whether one front end's trail may be stored.
+func (s *Server) telemetryCollects(src telemetry.Source) bool {
+	return s.telemetryPolicy().Collects(string(src))
 }
 
 // ── read-back ───────────────────────────────────────────────────────────────

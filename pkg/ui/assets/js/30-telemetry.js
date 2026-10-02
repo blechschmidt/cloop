@@ -76,6 +76,132 @@ window.loadTelemetry = function(opts) {
     .finally(() => { telemetryState.loading = false; });
 };
 
+// ── collection policy (Task 20311) ──────────────────────────────────────────
+//
+// The switch that decides whether any of the above exists. Collection is off
+// unless an operator turns it on, and editing a YAML key and restarting was the
+// only way to do that — a poor place for the control of a feature whose subject
+// is what the hub records about its users.
+//
+// user.manage, which is admin-only. The markup carries data-global-perm so the
+// block is hidden for everyone else; the guard below keeps a reader without it
+// from also firing a request that can only 403.
+
+// An error answer resolves like any other body (api() normalises it to
+// {error}), so it is turned back into a failure here: rendered as a policy, a
+// refused save would read as collection switched off.
+function _telPolicyBody(d) {
+  if (!d || d.error) throw new Error((d && d.error) || 'no answer');
+  return d;
+}
+
+function _telPolicyNote(text) {
+  const note = document.getElementById('telemetryPolicyNote');
+  if (note) note.textContent = text;
+}
+const _telPolicyFailed = what => err => _telPolicyNote(what + ': ' + ((err && err.message) || err));
+
+window.loadTelemetryPolicy = function() {
+  if (!canGlobal('user.manage')) return Promise.resolve();
+  return api('/api/config/telemetry')
+    .then(_telPolicyBody)
+    .then(_telRenderPolicy)
+    .catch(_telPolicyFailed('Could not read the collection policy'));
+};
+
+function _telRenderPolicy(d) {
+  const sources = Array.isArray(d.sources) ? d.sources : [];
+  const enabled = !!d.enabled;
+  const box = document.getElementById('telemetryPolicyEnabled');
+  if (box) box.checked = enabled;
+
+  const badge = document.getElementById('telemetryPolicyBadge');
+  if (badge) {
+    const on = sources.filter(s => s.collect).length;
+    badge.textContent = !enabled
+      ? (d.configured ? 'off' : 'off (default)')
+      : (on === sources.length ? 'collecting' : 'collecting · ' + on + ' of ' + sources.length);
+    badge.className = 'badge ' + (enabled ? 'running' : 'unknown');
+  }
+
+  // One checkbox per source, from the server's list: the set of front ends is a
+  // Go constant, and a hardcoded pair here would be the copy that goes stale
+  // the day a third one ships. Ticked from the stored selection, not from what
+  // is collected now, so a narrowing reads the same while switched off.
+  const host = document.getElementById('telemetryPolicySources');
+  if (host) {
+    host.innerHTML = sources.map(s => '<label class="tel-src"><input type="checkbox" data-tel-source="' +
+      esc(s.name) + '"' + (s.selected ? ' checked' : '') + (enabled ? '' : ' disabled') + '>' +
+      (s.name === 'glasses' ? 'display glasses' : esc(s.name)) + '</label>').join('');
+  }
+
+  const stored = d.stored || {};
+  const chip = document.getElementById('telemetryPolicyStored');
+  if (chip) {
+    if (stored.error) {
+      chip.textContent = 'stored: unknown (' + stored.error + ')';
+    } else {
+      const sess = (stored.sessions || 0) + (stored.sessions_capped ? '+' : '');
+      chip.textContent = (stored.events || 0) + ' event(s) stored · ' + sess + ' session(s)' +
+        (stored.oldest ? ' · oldest ' + _telTime(stored.oldest) : '');
+    }
+  }
+
+  // The last clause is the one worth saying out loud: an operator switching
+  // collection off for a privacy reason has not thereby deleted anything, and
+  // the count above is what remains.
+  _telPolicyNote((d.retention_days
+    ? 'Events age out after ' + d.retention_days + ' day(s)'
+    : 'Events are kept until the table fills') +
+    '; the table holds at most ' + (d.max_rows || 0).toLocaleString() + ' rows' +
+    '; turning collection off stops new events and deletes none — remove them with ' +
+    'cloop hub telemetry prune.');
+}
+
+// onTelemetryPolicyToggle greys the per-source boxes while the master switch is
+// off, and ticks them all when it goes on with none ticked.
+//
+// The boxes show the stored selection, which is every front end on a hub that
+// never narrowed it, so normally they are already ticked. The fallback is not
+// cosmetic: with every box clear, ticking the master and pressing Save would
+// submit "collect, from nowhere", which is stored as off — the operator turns
+// the feature on and watches it stay off, with the form agreeing with them.
+window.onTelemetryPolicyToggle = function() {
+  const enabled = !!(document.getElementById('telemetryPolicyEnabled') || {}).checked;
+  const boxes = Array.from(document.querySelectorAll('#telemetryPolicySources input[data-tel-source]'));
+  const none = boxes.every(cb => !cb.checked);
+  boxes.forEach(cb => {
+    cb.disabled = !enabled;
+    if (enabled && none) cb.checked = true;
+  });
+};
+
+window.saveTelemetryPolicy = function() {
+  const enabled = !!(document.getElementById('telemetryPolicyEnabled') || {}).checked;
+  const picked = [];
+  document.querySelectorAll('#telemetryPolicySources input[data-tel-source]').forEach(cb => {
+    if (cb.checked) picked.push(cb.getAttribute('data-tel-source'));
+  });
+  // Three cases; the middle one is the trap. An empty list sent with the master
+  // on reaches the hub as "no restriction" and collects precisely what was just
+  // unticked, so it is read as "no front end left to collect from", i.e. off.
+  //
+  // Switching the master off sends no source list at all, so a narrowing
+  // survives being turned off and on again rather than silently widening.
+  const body = enabled ? {enabled: picked.length > 0, sources: picked} : {enabled: false};
+
+  const btn = document.getElementById('telemetryPolicySave');
+  if (btn) btn.disabled = true;
+  return apiMethod('PUT', '/api/config/telemetry', body)
+    .then(_telPolicyBody)
+    .then(d => {
+      _telRenderPolicy(d);
+      toast(d.enabled ? 'Telemetry collection on' : 'Telemetry collection off', 'ok');
+    })
+    .catch(_telPolicyFailed('Save failed'))
+    .finally(() => { if (btn) btn.disabled = false; });
+};
+
 window.loadMoreTelemetry    = function() { return loadTelemetry({append: true}); };
 window.applyTelemetryFilters = function() { return loadTelemetry(); };
 
@@ -91,7 +217,7 @@ window.resetTelemetryFilters = function() {
 // moment.
 window.copyTelemetryAsJSON = function() {
   const text = JSON.stringify(telemetryState.rows, null, 2);
-  const done = () => { if (window.showToast) showToast('Copied ' + telemetryState.rows.length + ' event(s)'); };
+  const done = () => toast('Copied ' + telemetryState.rows.length + ' event(s)', 'ok');
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done).catch(() => {});
@@ -134,7 +260,7 @@ function _telRenderState(d) {
   // table looks identical either way, and an operator who has switched it off
   // and forgotten would otherwise read the silence as a working instrument.
   el.textContent = (d && d.enabled === false)
-    ? '— collection is disabled (ui.telemetry.enabled: false)'
+    ? '— collection is off (Settings → Telemetry)'
     : '';
 }
 
