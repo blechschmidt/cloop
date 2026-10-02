@@ -629,6 +629,7 @@ func TestStaticAssets_BundleParses(t *testing.T) {
 		// What actually goes over the wire, comments stripped (jsstrip.go).
 		{"served bundle", a.served},
 		{"errboundary.js", a.boundary},
+		{"served errboundary.js", a.servedBoundary},
 	} {
 		path := filepath.Join(t.TempDir(), "check.js")
 		if err := os.WriteFile(path, []byte(src.js), 0o644); err != nil {

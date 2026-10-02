@@ -158,6 +158,38 @@ func TestServedBundleIsStripped(t *testing.T) {
 	}
 }
 
+// TestServedBoundaryIsStripped is the same pin for errboundary.js, which is
+// served stripped since Task 20360. It is first-paint like the bundle, and the
+// one script that has to run when the bundle cannot, so a stripper that
+// declined it would cost bytes and one that mangled it would cost the error
+// reporting the dashboard falls back on.
+func TestServedBoundaryIsStripped(t *testing.T) {
+	a := loadAssets()
+	want, err := stripJSLineComments(a.boundary)
+	if err != nil {
+		t.Fatalf("errboundary.js cannot be stripped, so it ships with its comments: %v", err)
+	}
+	if a.servedBoundary != want {
+		t.Fatal("the served error boundary is not the stripped one")
+	}
+	if strings.Count(a.servedBoundary, "\n") != strings.Count(a.boundary, "\n") {
+		t.Error("stripping changed the line count, so a stack trace from the boundary points elsewhere")
+	}
+	if len(a.servedBoundary) > len(a.boundary)*3/4 {
+		t.Errorf("stripping saved only %d of %d bytes — has the stripper stopped matching comment lines?",
+			len(a.boundary)-len(a.servedBoundary), len(a.boundary))
+	}
+	var served *staticAsset
+	for url, asset := range a.byPath {
+		if strings.HasPrefix(url, "/assets/errboundary.") && strings.HasSuffix(url, ".js") {
+			served = asset
+		}
+	}
+	if served == nil || served.contents != a.servedBoundary {
+		t.Error("the errboundary.js asset does not carry the stripped script")
+	}
+}
+
 // findAcorn locates an acorn module directory: $CLOOP_ACORN, or one found in
 // a node_modules nearby. Returns "" when there is none.
 func findAcorn() string {
@@ -188,35 +220,42 @@ func TestStripJSLineComments_MatchesAcorn(t *testing.T) {
 		t.Skip("acorn not found; set CLOOP_ACORN to an acorn module directory to run this check")
 	}
 	a := loadAssets()
-	dir := t.TempDir()
-	rawPath, strippedPath := filepath.Join(dir, "raw.js"), filepath.Join(dir, "stripped.js")
-	if err := os.WriteFile(rawPath, []byte(a.bundle), 0o644); err != nil {
-		t.Fatal(err)
+	// Both scripts the page loads; errboundary.js is served stripped too
+	// since Task 20360.
+	for _, js := range []struct{ name, raw, served string }{
+		{"app.js", a.bundle, a.served},
+		{"errboundary.js", a.boundary, a.servedBoundary},
+	} {
+		dir := t.TempDir()
+		rawPath, strippedPath := filepath.Join(dir, "raw.js"), filepath.Join(dir, "stripped.js")
+		if err := os.WriteFile(rawPath, []byte(js.raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(strippedPath, []byte(js.served), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(node, mustAbs(t, "testdata/jsstrip_oracle.js"), acorn, rawPath, strippedPath).Output()
+		if err != nil {
+			t.Fatalf("%s oracle: %v\n%s", js.name, err, out)
+		}
+		var res struct {
+			OK           bool             `json:"ok"`
+			Blanked      int              `json:"blanked"`
+			CommentLines int              `json:"comment_lines"`
+			Mismatches   []map[string]any `json:"mismatches"`
+			TokensEqual  bool             `json:"tokens_equal"`
+			Error        string           `json:"error"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			t.Fatalf("%s oracle output: %v\n%s", js.name, err, out)
+		}
+		if res.Error != "" {
+			t.Fatalf("%s oracle failed: %s", js.name, res.Error)
+		}
+		if !res.OK {
+			t.Errorf("%s: the stripper disagrees with acorn: blanked %d lines, acorn finds %d whole-line comments; "+
+				"tokens equal: %v; first mismatches: %v", js.name, res.Blanked, res.CommentLines, res.TokensEqual, res.Mismatches)
+		}
+		t.Logf("%s: blanked %d whole-line comments, all confirmed by acorn", js.name, res.Blanked)
 	}
-	if err := os.WriteFile(strippedPath, []byte(a.served), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, mustAbs(t, "testdata/jsstrip_oracle.js"), acorn, rawPath, strippedPath).Output()
-	if err != nil {
-		t.Fatalf("oracle: %v\n%s", err, out)
-	}
-	var res struct {
-		OK           bool             `json:"ok"`
-		Blanked      int              `json:"blanked"`
-		CommentLines int              `json:"comment_lines"`
-		Mismatches   []map[string]any `json:"mismatches"`
-		TokensEqual  bool             `json:"tokens_equal"`
-		Error        string           `json:"error"`
-	}
-	if err := json.Unmarshal(out, &res); err != nil {
-		t.Fatalf("oracle output: %v\n%s", err, out)
-	}
-	if res.Error != "" {
-		t.Fatalf("oracle failed: %s", res.Error)
-	}
-	if !res.OK {
-		t.Errorf("the stripper disagrees with acorn: blanked %d lines, acorn finds %d whole-line comments; "+
-			"tokens equal: %v; first mismatches: %v", res.Blanked, res.CommentLines, res.TokensEqual, res.Mismatches)
-	}
-	t.Logf("blanked %d whole-line comments, all confirmed by acorn", res.Blanked)
 }

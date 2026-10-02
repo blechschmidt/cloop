@@ -200,10 +200,14 @@ type assetSet struct {
 	served string
 	// servedCSS is css as it goes over the wire, its comments removed
 	// (cssstrip.go), or css itself if the stripper declined.
-	servedCSS   string
-	boundary    string
-	indexTmpl   string
-	glassesTmpl string
+	servedCSS string
+	boundary  string
+	// servedBoundary is errboundary.js as it goes over the wire, its
+	// whole-line comments removed like the bundle's, or boundary itself if
+	// the stripper declined.
+	servedBoundary string
+	indexTmpl      string
+	glassesTmpl    string
 }
 
 // loadAssets builds the asset set on first use and reuses it forever after.
@@ -249,17 +253,24 @@ func buildAssets() *assetSet {
 	if cssErr != nil {
 		fmt.Fprintf(os.Stderr, "ui: serving the dashboard stylesheet with its comments: %v\n", cssErr)
 	}
+	// The error boundary is first-paint too, and was the one script still
+	// shipping its prose: 44% of its bytes were comments (Task 20360).
+	servedBoundary, boundaryErr := stripJSLineComments(string(boundary))
+	if boundaryErr != nil {
+		fmt.Fprintf(os.Stderr, "ui: serving the error boundary with its comments: %v\n", boundaryErr)
+	}
 
 	set := &assetSet{
-		byPath:      map[string]*staticAsset{},
-		icons:       buildIcons(),
-		css:         string(css),
-		bundle:      bundle.String(),
-		served:      served,
-		servedCSS:   servedCSS,
-		boundary:    string(boundary),
-		indexTmpl:   string(indexTmpl),
-		glassesTmpl: string(glassesTmpl),
+		byPath:         map[string]*staticAsset{},
+		icons:          buildIcons(),
+		css:            string(css),
+		bundle:         bundle.String(),
+		served:         served,
+		servedCSS:      servedCSS,
+		boundary:       string(boundary),
+		servedBoundary: servedBoundary,
+		indexTmpl:      string(indexTmpl),
+		glassesTmpl:    string(glassesTmpl),
 	}
 
 	// name → (placeholder token, base file name, content type, bytes).
@@ -272,7 +283,7 @@ func buildAssets() *assetSet {
 	}{
 		{"app.css", "app", "css", "text/css; charset=utf-8", []byte(servedCSS)},
 		{"app.js", "app", "js", jsContentType, []byte(served)},
-		{"errboundary.js", "errboundary", "js", jsContentType, boundary},
+		{"errboundary.js", "errboundary", "js", jsContentType, []byte(servedBoundary)},
 		{"chart.js", "chart", "js", jsContentType, chart},
 	}
 

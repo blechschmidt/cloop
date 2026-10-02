@@ -283,6 +283,17 @@ import (
 // that answers it.
 //
 // The new slack is 249 B, the same order as the raises above.
+//
+// Task 20360 serves errboundary.js through the bundle's stripper: it was the
+// one first-paint script still shipping its prose, 44% of its bytes. 4,939 B
+// → 2,558 B wire, 84 comment lines blanked with the line count kept, and
+// acorn agrees on every one (TestStripJSLineComments_MatchesAcorn). Measured
+// after: 213,070 B.
+//
+// The ceiling stays where it was rather than following the measurement down.
+// The same task re-lands three features that were finished but stranded off
+// main (Tasks 20343, 20309 and 20311), and the 2,630 B this frees is the room
+// they are measured against, each in its own commit below.
 const eagerWireBudgetBytes = 215_700
 
 // eagerAsset is one member of the first-paint set.

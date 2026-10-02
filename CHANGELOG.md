@@ -54,6 +54,12 @@ schema and the hub's HTTP API may change in any release.
   compiled ahead of every allow and carried into Kubernetes NetworkPolicies as
   `except` ranges.
 
+### Changed
+
+- **The error boundary ships without its comments too.** `errboundary.js`, the
+  one first-paint script still served as written, goes through the bundle's
+  line-preserving comment stripper: 4.9 KB → 2.6 KB on the wire.
+
 ### Fixed
 
 - A project's `capabilities.egress: public` on an executor whose firewall allows
