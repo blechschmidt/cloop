@@ -891,12 +891,13 @@ func TestFrontendHandles403Gracefully(t *testing.T) {
 	t.Parallel()
 
 	required := []struct{ snippet, why string }{
-		{"function parseAPIResponse(r)", "the shared response parser must exist"},
+		{"function parseAPIResponse(r, retry)", "the shared response parser must exist"},
 		{"if (r.status === 403)", "403 must be handled distinctly from other errors"},
 		{"function handleForbidden(", "denials need a dedicated explanation path"},
 		{"refreshPermissions()", "a 403 means the client's permission view is stale"},
 		{"function applyPermissionGating(", "controls must be hidden/disabled by permission"},
-		{"return fetch(url, opts).then(parseAPIResponse);", "api() must use the shared parser"},
+		{"parseAPIResponse(r, _again ? null : () => api(url, body, true))", "api() must use the shared parser"},
+		{"parseAPIResponse(r, _again ? null : () => apiMethod(method, url, body, true))", "apiMethod() must use the shared parser"},
 	}
 	for _, r := range required {
 		if !strings.Contains(dashboardSource, r.snippet) {
@@ -906,9 +907,29 @@ func TestFrontendHandles403Gracefully(t *testing.T) {
 
 	// Neither helper may keep its own 401-only handling, which would let a
 	// 403 fall through to .json() and surface as an unexplained failure.
-	if strings.Count(dashboardSource, "if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }") > 1 {
+	if strings.Count(dashboardSource, "if (r.status === 401) { handleUnauthorized(r); return Promise.reject(new Error('401')); }") > 1 {
 		t.Error("more than one inline 401 handler remains — every API helper should " +
 			"route through parseAPIResponse so 403s are handled uniformly")
+	}
+
+	// The claim-age retry is bounded at one attempt (Task 20359): the replay
+	// passes _again, so a hub that keeps refusing for a reason a renewal
+	// cannot fix is reported rather than renewed against in a loop.
+	for _, snippet := range []string{"function api(url, body, _again)", "function apiMethod(method, url, body, _again)"} {
+		if !strings.Contains(dashboardSource, snippet) {
+			t.Errorf("dashboard is missing %q — the claim-renewal retry must be bounded at one attempt", snippet)
+		}
+	}
+	// And only a denial the hub marked renewable is retried: which reasons
+	// qualify is the server's judgement, not the browser's guess.
+	if !strings.Contains(dashboardSource, "if (retry && details.renewable)") {
+		t.Error("handleForbidden retries denials the server did not mark renewable")
+	}
+	// No call site may open the token prompt on a 401 by itself: on an SSO hub
+	// that prompt asks for a credential no identity provider issues (Task
+	// 20330). handleUnauthorized decides, and is the one caller.
+	if n := strings.Count(dashboardSource, "showLoginModal();"); n != 1 {
+		t.Errorf("showLoginModal() is called %d times, want once, from handleUnauthorized", n)
 	}
 }
 

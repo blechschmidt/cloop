@@ -259,7 +259,31 @@ import (
 //
 // Lowered rather than left for the reason Task 20341 gave: a ceiling far above
 // the page stops gating. The figure is the measurement plus ~2%, as there.
-const eagerWireBudgetBytes = 215_300
+//
+// Raised to 215_700 B by Task 20359, which re-landed silent sign-in renewal
+// and the way back from a lapsed SSO session (Tasks 20322/20330): 2,370 B
+// wire. HEAD measured 213,081 B, 2,219 B of headroom, so it did not fit.
+//
+// What the bytes are. 2,089 B are 32-renew.js: the scheduler that arms from
+// /api/me, the hidden frame and its origin-checked listener, the one-shot
+// renew-and-retry behind a 403 marked renewable, the 401 branch that sends an
+// SSO user to the identity provider instead of the access-token prompt, its
+// loop guard, and the view restore on the way back. The rest is 00-core.js
+// routing 401s and 403s through it, and the banner's markup.
+//
+// Trimming came first and is in the figure: a warning ahead of the absolute
+// session lifetime and a console status hook were cut (~630 B), since a lapsed
+// session now comes back to the same view on its own. The rationale lives in
+// renew_browser_test.go and signin_redirect_test.go, which are not served.
+//
+// Deferral does not apply, for the reason Task 20320 gave about
+// parseAPIResponse: this code is on the response path of every api() call and
+// of the boot probe in checkAuthAndInit. The first 401 can be the first
+// response the page receives, and there is no later moment to fetch the code
+// that answers it.
+//
+// The new slack is 249 B, the same order as the raises above.
+const eagerWireBudgetBytes = 215_700
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

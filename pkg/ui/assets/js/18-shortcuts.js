@@ -457,7 +457,7 @@ document.addEventListener('keydown', function(e) {
 function checkAuthAndInit() {
   fetch('/api/projects', {headers: authHeaders()}).then(pr => {
     if (pr.status === 401) {
-      showLoginModal();
+      handleUnauthorized(pr);
       return;
     }
     return pr.json().then(pd => {
@@ -474,6 +474,9 @@ function checkAuthAndInit() {
         // draw the roster and then immediately re-request it.
         seedProjects(pd);
         switchTab('projects');
+        // Back from a sign-in the dashboard sent the user through: reopen
+        // the project and tab they were on (32-renew.js).
+        resumeView(projects);
         return;
       }
       // Single-project mode renders the Overview immediately, so this is the
@@ -483,6 +486,7 @@ function checkAuthAndInit() {
         .then(() => {
           // Still show the "Project" scope hint for the default Overview tab.
           updateScopeHint(activeTab || 'overview');
+          resumeView(null);
           // Overview is the landing tab here, so its Executor card needs its
           // one non-state-diff field (Task 20160).
           loadExecutors();

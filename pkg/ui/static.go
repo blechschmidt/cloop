@@ -130,6 +130,11 @@ var bundleFiles = []string{
 	// Depends on nothing but 00-core.js's helpers, so its position is fixed
 	// only by the filename-order rule.
 	"assets/js/32-oidc.js",
+	// Silent sign-in renewal and the way back from a lapsed SSO session
+	// (Task 20359). Called from 00-core.js's response handling and
+	// 18-shortcuts.js's boot, both of which run after every fragment has been
+	// evaluated, so it only has to load before the IIFE closes.
+	"assets/js/32-renew.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is

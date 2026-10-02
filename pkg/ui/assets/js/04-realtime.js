@@ -484,7 +484,7 @@ function connectWS() {
     // If the close was a normal shutdown or we haven't tried SSE yet on the
     // first connection, probe the state endpoint to detect auth failures.
     fetch('/api/state', {headers: authHeaders()}).then(r => {
-      if (r.status === 401) { showLoginModal(); return; }
+      if (r.status === 401) { handleUnauthorized(r); return; }
       // Exponential backoff reconnect (cap at 30 s).
       const delay = Math.min(wsBackoff, 30000);
       wsBackoff = Math.min(wsBackoff * 2, 30000);
@@ -570,7 +570,7 @@ function connectSSE() {
     // by the projects payload that arrives after reconnect.
     fetch('/api/state', {headers: authHeaders()}).then(r => {
       if (r.status === 401) {
-        showLoginModal();
+        handleUnauthorized(r);
       } else {
         setTimeout(connectSSE, 3000);
       }

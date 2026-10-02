@@ -174,6 +174,11 @@ const harness = {
   // screen for a caller whose role was refused. A body alone cannot express
   // that difference.
   routeStatus: {},
+  // Response headers per route prefix, names lower-cased as fetch's Headers
+  // compares them. A 401 from a single sign-on hub carries X-Cloop-Sign-In,
+  // and that header — not the status — is what tells the bundle to send the
+  // user to the identity provider rather than to the token prompt.
+  routeHeaders: {},
 };
 globalThis.__harness = harness;
 
@@ -191,12 +196,14 @@ function stateFor(idx) {
 
 // ── fetch ───────────────────────────────────────────────────────────────────
 
-function jsonResponse(body, status) {
+function jsonResponse(body, status, headers) {
   const text = JSON.stringify(body);
+  const h = {};
+  for (const [k, v] of Object.entries(headers || {})) h[k.toLowerCase()] = String(v);
   return Promise.resolve({
     ok: (status || 200) < 400,
     status: status || 200,
-    headers: {get: () => null},
+    headers: {get: name => h[String(name).toLowerCase()] ?? null},
     json: () => Promise.resolve(JSON.parse(text)),
     text: () => Promise.resolve(text),
   });
@@ -219,7 +226,7 @@ globalThis.fetch = function(url, opts) {
   // this loop does not.
   for (const prefix of Object.keys(harness.routes)) {
     if (u.startsWith(prefix)) {
-      return jsonResponse(harness.routes[prefix], harness.routeStatus[prefix]);
+      return jsonResponse(harness.routes[prefix], harness.routeStatus[prefix], harness.routeHeaders[prefix]);
     }
   }
   if (u.startsWith('/api/state'))    return jsonResponse(stateFor(projectIdxOf(u)));

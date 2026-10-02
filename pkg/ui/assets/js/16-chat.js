@@ -97,7 +97,7 @@ window.submitChat = async function() {
       headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
       body: JSON.stringify({message: msg}),
     });
-    if (resp.status === 401) { showLoginModal(); removeChatThinking(); return; }
+    if (resp.status === 401) { handleUnauthorized(resp); removeChatThinking(); return; }
     const data = await resp.json();
     removeChatThinking();
     const content = data.response || (data.ok ? 'Done.' : (data.error || 'Error'));

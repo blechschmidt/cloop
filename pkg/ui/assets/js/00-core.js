@@ -772,13 +772,21 @@ function applyPermissionGating(root) {
 // a user may hold different roles on different projects.
 function refreshPermissions() {
   return fetch(pUrl('/api/me'), {headers: authHeaders()})
-    .then(r => r.ok ? r.json() : null)
+    .then(r => {
+      // On an SSO hub /api/me needs a session too, so a 401 here is the
+      // session having lapsed (Task 20359).
+      if (r.status === 401) { handleUnauthorized(r); return null; }
+      return r.ok ? r.json() : null;
+    })
     .then(me => {
       if (!me) return null;
       myPerms = Array.isArray(me.permissions) ? me.permissions : null;
       myGlobalPerms = Array.isArray(me.global_permissions) ? me.global_permissions : null;
       myRole = me.role || '';
       applyPermissionGating();
+      // The same answer re-arms the silent sign-in renewal (32-renew.js): every
+      // reason to re-read permissions is a reason the session's clocks moved.
+      noteSessionSchedule(me);
       // The caller's own quota badge rides the same refresh: it changes for
       // exactly the reasons permissions do (a new project selected, an admin
       // edit) and one round trip fewer is one fewer to keep in sync.
@@ -792,9 +800,22 @@ function refreshPermissions() {
 // rather than letting the caller fail silently or show a raw error. The
 // permission set is refreshed afterwards because a 403 means the client's
 // view of what it may do is stale — the operator may have just changed it.
-function handleForbidden(r, payload) {
+//
+// retry, when given, replays the refused request. It is used for one class of
+// denial only: claims that were merely too old, which the hub marks renewable
+// and a silent renewal can clear without the user seeing anything (Task 20359).
+// Everything else is a real answer about authority and is reported.
+function handleForbidden(r, payload, retry) {
   const err = (payload && payload.error) || {};
-  const need = (err.details && err.details.required_permission) || '';
+  const details = err.details || {};
+  if (retry && details.renewable) {
+    return renewAndRetry(retry).then(res => res.retried ? res.value : reportForbidden(err, details));
+  }
+  return reportForbidden(err, details);
+}
+
+function reportForbidden(err, details) {
+  const need = details.required_permission || '';
   // The server's sentence first: a claim-freshness denial names the config
   // changes that fix the hub, which required_permission alone threw away.
   toast(errText(err) || (need
@@ -805,12 +826,13 @@ function handleForbidden(r, payload) {
 }
 
 // parseAPIResponse centralises the auth/authorization outcomes so every
-// caller degrades the same way: 401 re-opens the login modal, 403 explains
-// the denial, and everything else resolves to the decoded body.
-function parseAPIResponse(r) {
-  if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
+// caller degrades the same way: 401 sends the user back to whoever
+// authenticates them (handleUnauthorized), 403 explains the denial or quietly
+// renews and retries, and everything else resolves to the decoded body.
+function parseAPIResponse(r, retry) {
+  if (r.status === 401) { handleUnauthorized(r); return Promise.reject(new Error('401')); }
   if (r.status === 403) {
-    return r.json().catch(() => null).then(body => handleForbidden(r, body));
+    return r.json().catch(() => null).then(body => handleForbidden(r, body, retry));
   }
   return r.json().then(normalizeAPIError);
 }
@@ -828,21 +850,24 @@ function normalizeAPIError(body) {
   return body;
 }
 
-function api(url, body) {
+// _again marks the one replay handleForbidden may make, so a second refusal is
+// reported rather than renewed again: a hub refusing for a reason a renewal
+// cannot fix must not loop against the identity provider.
+function api(url, body, _again) {
   const ah = authHeaders();
   const opts = body !== undefined
     ? { method: 'POST', headers: Object.assign({'Content-Type':'application/json'}, ah), body: JSON.stringify(body) }
     : { method: 'GET',  headers: ah };
-  return fetch(url, opts).then(parseAPIResponse);
+  return fetch(url, opts).then(r => parseAPIResponse(r, _again ? null : () => api(url, body, true)));
 }
 
-function apiMethod(method, url, body) {
+function apiMethod(method, url, body, _again) {
   const opts = { method, headers: authHeaders() };
   if (body !== null && body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  return fetch(url, opts).then(parseAPIResponse);
+  return fetch(url, opts).then(r => parseAPIResponse(r, _again ? null : () => apiMethod(method, url, body, true)));
 }
 
 // pauseReasonLabels is the operator-facing noun for each pausereason.Code

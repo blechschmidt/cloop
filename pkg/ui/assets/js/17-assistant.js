@@ -116,7 +116,7 @@ window.submitAssistantChat = async function() {
       headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
       body,
     });
-    if (resp.status === 401) { showLoginModal(); return; }
+    if (resp.status === 401) { handleUnauthorized(resp); return; }
     if (!resp.ok || !resp.body) {
       const errText = await resp.text().catch(() => 'Request failed');
       bubbleDiv.textContent = errText;
@@ -262,7 +262,7 @@ async function sendChatVoice() {
     const headers = authHeaders();
     delete headers['Content-Type'];
     const resp = await fetch('/api/voice', {method: 'POST', headers, body: formData});
-    if (resp.status === 401) { showLoginModal(); removeChatThinking(); return; }
+    if (resp.status === 401) { handleUnauthorized(resp); removeChatThinking(); return; }
     const data = await resp.json();
     removeChatThinking();
 

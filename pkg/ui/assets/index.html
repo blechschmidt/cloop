@@ -3883,6 +3883,14 @@
   <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="dismissBuildStale()">&times;</button>
 </div>
 
+<!-- The sign-in needs the user (Task 20359): see 32-renew.js. -->
+<div id="sessionRenewBanner" role="status" aria-live="polite" style="display:none;position:fixed;bottom:76px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:125;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(520px,92vw);align-items:center;gap:10px;color:var(--text)">
+  <span aria-hidden="true" style="font-size:15px">&#128274;</span>
+  <span id="sessionRenewText" style="flex:1"></span>
+  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" onclick="signInAgain()">Sign in</button>
+  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="this.parentNode.style.display='none'">&times;</button>
+</div>
+
 <!-- ── JS error boundary toast + full-screen recovery banner ───────────── -->
 <div id="errboundary-toast" role="alert" aria-live="assertive" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid rgba(248,81,73,.6);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(440px,92vw);align-items:center;gap:10px;color:var(--text)">
   <span aria-hidden="true" style="color:var(--red);font-size:15px">&#9888;</span>
