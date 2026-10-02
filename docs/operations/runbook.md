@@ -1490,6 +1490,21 @@ endpoints, which is the fastest way to tell a wrong realm path from a
 certificate the hub does not trust. The gate clears on its own once the
 provider answers, including via an ordinary sign-in; no restart is needed.
 
+**Users keep seeing "Your sign-in needs renewing".**
+The dashboard tried to re-assert their claims from the browser, because the hub
+holds no refresh token for the session, and the provider would not answer
+without showing the user something. Clicking **Sign in** fixes it for one
+`max_claim_age_minutes` window. If it recurs across users,
+`cloop_oidc_renewal_total{outcome="interaction_required"}` will be climbing:
+their browsers keep the provider's cookies out of frames (Safari, Firefox, a
+hardened Chrome), or the provider refuses to be framed at all — the latter never
+reaches the hub and shows only in the browser console as a framing violation.
+Either way the remedy is the same: set `CLOOP_SECRET_KEY` and add
+`offline_access` to `ui.oidc.scopes`, so the hub re-asserts the claims itself and
+the browser never has to. In `cloop hub session list`, a session that stays at
+`never` under IDP CHECKED is one the hub has nothing to re-check with. See
+[Silent renewal from the browser](../security/model.md#silent-renewal-from-the-browser).
+
 **The hub exits with "another cloop hub controls this state and cannot share it".**
 Not a bug — a hub that is not a cluster member is serving this control plane:
 one from before clustering, or one running with `ui.cluster.exclusive`. The new

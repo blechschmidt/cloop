@@ -1312,11 +1312,16 @@ refusal is a `403` naming the cause and the remedy — not a `503`, which invite
 a retry loop against a provider that is already the problem — and it is audited
 as `session.claims_stale`. Reads continue throughout.
 
-This is also the one place where running without `CLOOP_SECRET_KEY` has a hard
-edge: with no retained refresh token there is nothing to re-assert claims with,
-so once the bound lapses every privileged action is refused. Such a deployment
-must set `max_claim_age_minutes: -1`, which makes acting on sign-in-time claims
-an explicit recorded choice rather than an accident.
+Running without `CLOOP_SECRET_KEY` — or against a provider that issues no
+refresh token — leaves the hub with nothing to re-assert claims with. Once the
+bound lapses it can only refuse, and the dashboard then re-asserts them from the
+user's browser instead; see
+[Silent renewal from the browser](#silent-renewal-from-the-browser). API-token
+callers are unaffected, since a token carries no IdP claims. A deployment whose
+users' browsers cannot complete that renewal — every privileged action then
+costs a visible sign-in once per bound — can still set
+`max_claim_age_minutes: -1`, which makes acting on sign-in-time claims an
+explicit recorded choice rather than an accident.
 
 Per-session claim age is shown in the Active Sessions panel and in
 `cloop hub session list`, beside the grant check. The gap between the two
@@ -1357,6 +1362,82 @@ The IP and User-Agent shown in the panel are labels for an operator to
 recognise a session by. Neither is an input to any decision: both are
 attacker-supplied, and pinning a session to either breaks users behind mobile
 networks far more often than it stops a thief.
+
+### Silent renewal from the browser
+
+The hub's own refresh is the first layer and stays the first layer: holding a
+refresh token, it re-asserts a session's claims on the request that needs them,
+with nothing asked of the browser. Without one, the browser can settle the
+question the hub cannot, because the user is still signed in at the identity
+provider. The dashboard does so in three layers:
+
+| Layer | When | What happens |
+| --- | --- | --- |
+| Scheduled | `/api/me` reports `renew_in_seconds` — only for a session the hub holds no refresh token for | a hidden frame loads `GET /auth/renew` shortly before the claims would go stale |
+| Reactive | a privileged call is refused `403` with `details.renewable: true` (reason `no_refresh_token` or `idp_unreachable`) | one renewal, then one replay of the refused call |
+| Visible | the provider will not answer without the user — `login_required`, `interaction_required`, or a frame it cannot run in | a banner offers a sign-in that returns to the same tab, project and view |
+
+`/auth/renew` checks the session cookie, records the session it is for in a
+one-shot pending login — the same `state`, `nonce` and PKCE `S256` binding as a
+sign-in, so it works unchanged for a public client — and redirects the frame to
+the provider with `prompt=none` and the session's email as `login_hint`. The
+provider's answer comes back to the callback, which then:
+
+- **applies to the session that asked and no other.** The callback leg is a
+  cross-site navigation into a frame, so it carries no cookie; the pending
+  login named the session, and the callback acts on that alone.
+- **sets no cookie and moves no clock but the claims'.** It cannot create a
+  session, extend the absolute lifetime, or advance the idle clock — a tab left
+  open and renewing still idles out — and it leaves `RefreshCheckedAt`, which
+  bounds IdP-side revocation, where it was.
+- **refuses another subject.** An `id_token` for anyone else is applied to
+  nothing and audited as
+  [`session.renewal_mismatch`](../reference/audit-events.md#session): either the
+  user switched accounts at the provider, or somebody signed the browser into
+  their own account there hoping the renewal would adopt it. A narrowing it
+  does apply is audited exactly as a server-side one is,
+  [`session.role_narrowed`](../reference/audit-events.md#session), with
+  `via: browser_renewal`.
+- **takes the cluster refresh lock** before writing, re-reads the row under it,
+  and announces the change, so on a hub cluster no member races another's
+  refresh-token redemption and none keeps serving its cached copy. The `state`
+  names the member that began the renewal, and the callback is forwarded there
+  whichever member the load balancer picked, exactly as for a sign-in.
+- **answers in the frame's language.** Every outcome — `prompt=none` refusals
+  included — is a `200` document whose script posts
+  `{type: "cloop.oidc.renew", outcome, renew_in, changed}` to `"/"`, the
+  sending document's own origin, so the browser delivers it to a same-origin
+  parent and nowhere else. The dashboard accepts it only from its own frame and
+  its own origin. `renew_in` re-arms the schedule without a request to
+  `/api/me`, which would count as activity.
+
+**Framing.** Everything the hub serves is `frame-ancestors 'none'` and
+`X-Frame-Options: DENY` except the two documents the renewal frame loads —
+`/auth/renew` and the OIDC callback — which are `frame-ancestors 'self'` and
+`SAMEORIGIN`: only a page already on this origin may frame them. The
+dashboard's `frame-src` is `'self'` plus the issuer's and authorization
+endpoint's origins and nothing else; without the provider named there the
+browser blocks the frame's hop to it.
+
+**A lapsed session is sent to the provider, not to the token prompt.** Every
+`401` an SSO hub sends carries `X-Cloop-Sign-In`, because on such a hub
+`/api/me` needs a session too and cannot be asked once it is gone. The dashboard
+keeps "this hub uses single sign-on" (sticky once learned) apart from "this
+session is alive", and answers a `401` on an SSO hub with a top-level trip
+through `/auth/login?return=<path>`. `return` is narrowed to a path on this
+origin — anything with a scheme, an authority, a leading `//` or `/\`, or a
+control character is dropped — so the public login route is not an open
+redirector. An automatic trip that comes back without a working session is not
+repeated; the banner explains instead, and its button is the person's choice.
+
+**Where it cannot work.** A browser that keeps the provider's cookies out of
+frames — Safari, Firefox's partitioning, a hardened Chrome — gives the provider
+no session to answer from, and a provider that refuses to be framed answers
+nothing. Both end at the banner, and a visible sign-in (where the provider's
+cookie is first-party) fixes them for one bound. The durable remedy for such a
+fleet is the first layer: `CLOOP_SECRET_KEY` and `offline_access`, so the hub
+renews and the browser never has to. `cloop_oidc_renewal_total` counts the
+verdicts that reach the hub; see [Metrics](../operations/metrics.md).
 
 ### API tokens for non-interactive callers
 
@@ -2437,6 +2518,12 @@ a reconstruction, so this row set spans three packages.
 | A rotated refresh token is stored, so the next check is not a false revocation | `pkg/oidcauth: TestRefreshRotationStoresNewToken` |
 | A session survives a process restart with its claims intact | `pkg/sessionstore: TestSessionSurvivesProcessRestart` |
 | Concurrent requests cannot walk `last_seen` backwards or defeat the write throttle | `pkg/oidcauth: TestConcurrentRequestsDoNotCorruptLastSeen` |
+| Of every route the hub serves, only `/auth/renew` and the OIDC callback may be framed, and only by this origin; the dashboard frames the provider and nothing else | `tests/security: TestOnlyTheRenewalDocumentsAreFramable` |
+| A silent renewal sets no cookie, lifts neither the absolute nor the idle clock, and applies to the session that began it and no other subject | `pkg/oidcauth: TestSilentRenewNeverSetsACookie`, `TestSilentRenewDoesNotExtendTheAbsoluteCeiling`, `TestSilentRenewLeavesTheIdleClockAlone`, `TestSilentRenewRefusesADifferentSubject` |
+| A renewal's verdict is posted to a same-origin parent only, and provider text in it is escaped | `pkg/oidcauth: TestRenewDocumentPostsOnlyToItsOwnOrigin`, `TestRenewDocumentEscapesProviderText` |
+| The post-sign-in return path cannot leave this origin | `pkg/oidcauth: TestSafeReturnPath`, `TestLoginRefusesAnOffSiteReturn`, `TestLoginLandingEscapesDestination` |
+| On a hub cluster a renewal is completed by the member holding its PKCE verifier, waits for the session's refresh lock, and evicts the other member's cached copy | `pkg/ui: TestClusterRenewalCompletesOnTheMemberThatBeganIt` |
+| An SSO session's 401 leads to the provider and back to the same view, never to the token prompt, and does not loop | `pkg/ui: TestDashboard_UnauthorizedPicksTheRightSignIn`, `TestSilentRenewalInBrowser` |
 
 ### Container sandbox — `container_test.go`
 

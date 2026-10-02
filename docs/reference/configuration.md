@@ -1331,7 +1331,7 @@ ui:
 | `session_ttl_hours` | `24` | `1`–`720` | The hard ceiling. No amount of activity extends it; when it lapses the user signs in again. |
 | `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
 | `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
-| `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. Requires `CLOOP_SECRET_KEY`. |
+| `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. With `CLOOP_SECRET_KEY` the hub re-asks with the session's refresh token; without one the dashboard re-asserts the claims from the user's browser instead (see below). |
 | `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
 | `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
 
@@ -1391,14 +1391,29 @@ refresh tokens at all (rather than storing a live credential in plaintext), so
 unavailable. `cloop ui` says so at startup and the **Active sessions** panel
 shows a banner.
 
-The same applies to `max_claim_age_minutes`, and there it is louder: with no
-refresh token there is nothing to re-assert claims with, so once the bound
-lapses **every action above operator is refused** with a message naming the
-cause. That is deliberate — a hub that cannot establish current authority
-should not act on stale authority — but it means a deployment that has chosen
-to run without an encryption key must also set `max_claim_age_minutes: -1`,
-which records that choice explicitly rather than leaving administrators to
-discover it at the moment they need to grant something.
+`max_claim_age_minutes` has a second way to re-assert claims, so it keeps
+working without a key. With no refresh token the hub cannot ask the provider
+itself, and refuses actions above operator once the bound lapses — but the
+dashboard then asks from the user's browser: a hidden frame makes a
+`prompt=none` round trip through `GET /auth/renew` shortly before the claims go
+stale, and again, followed by one retry, if a call is refused for their age.
+When it works nothing on screen moves. When the provider needs to see the user —
+they are signed out there, or their browser keeps the provider's cookies out of
+frames, as Safari and Firefox do — a banner offers a sign-in that comes back to
+the same tab and view. See
+[Silent renewal from the browser](../security/model.md#silent-renewal-from-the-browser).
+
+On a fleet whose browsers cannot complete the silent round trip, every
+privileged action costs a visible sign-in once per bound. The durable fix is
+`CLOOP_SECRET_KEY` with `offline_access` in `scopes`; the alternative is
+`max_claim_age_minutes: -1`, which records the choice to act on sign-in-time
+claims explicitly.
+
+A session that has *ended* — its idle or absolute clock ran out, or it was
+revoked — no longer meets the access-token prompt either. Every `401` an SSO hub
+sends says where to sign in again, and the dashboard goes there through the
+provider and returns to the same view; with the user still signed in at the
+provider that is two redirects and no prompt.
 
 ### Claim freshness for privileged actions
 
@@ -1486,7 +1501,10 @@ When a `--token` is set:
 - All responses include hardened HTTP headers:
   - `Content-Security-Policy` — restricts resource loading to same-origin
   - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
+  - `X-Frame-Options: DENY` — with single sign-on configured, `SAMEORIGIN` on
+    `/auth/renew` and the OIDC callback only, which the dashboard frames to
+    renew a session's claims (`frame-ancestors 'self'` in the CSP, whose
+    `frame-src` then also names the identity provider)
   - `Referrer-Policy: no-referrer`
 - CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
 
