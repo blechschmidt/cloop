@@ -73,6 +73,8 @@ type pttResult struct {
 	IdleLabel string `json:"idle_label"`
 
 	Title          string `json:"title"`
+	Desc           string `json:"desc"`
+	Focused        string `json:"focused"`
 	RecordingAfter bool   `json:"recording_after"`
 	DisabledAfter  bool   `json:"disabled_after"`
 	LabelAfter     string `json:"label_after"`
@@ -193,6 +195,7 @@ func TestDictate_PushToTalkInBrowser(t *testing.T) {
 		"labels_say_hold_on_touch", "hold_transcribes_then_stops",
 		"short_tap_sends_nothing", "mid_hold_shows_listening",
 		"mouse_click_still_toggles", "consecutive_holds_both_work",
+		"mouse_click_keeps_the_caret", "touch_hold_follows_the_caret",
 		"glasses_hold_transcribes", "glasses_tap_sends_nothing",
 		"slow_microphone_recovers",
 	} {
@@ -281,6 +284,41 @@ func TestDictate_PushToTalkInBrowser(t *testing.T) {
 			t.Errorf("title after a click-to-start/click-to-stop cycle = %q, want %q", r.Title, pttTranscript)
 		}
 	})
+
+	// Task 20309. The router sends a transcript to whichever text field holds the
+	// caret, which only works if pressing the microphone does not take it away —
+	// and a <button> takes focus on mousedown. That is browser behaviour, so a
+	// regression here is invisible to every other gate in this package: the Node
+	// shim has no notion of one control stealing focus from another, and its
+	// scenarios pass with or without the fix.
+	for _, tc := range []struct{ name, scenario, gesture string }{
+		{"a mouse click leaves the caret in the field", "mouse_click_keeps_the_caret",
+			"the mousedown handler in bindTaskDictationGestures"},
+		{"a hold leaves the caret in the field", "touch_hold_follows_the_caret",
+			"the preventDefault in dictatePointerDown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := got[tc.scenario]
+			if r.Transcribes != 1 {
+				t.Fatalf("%d transcribe requests, want exactly 1 — the rest of this "+
+					"scenario asserts on where words went that were never spoken", r.Transcribes)
+			}
+			if r.Desc != pttTranscript {
+				t.Errorf("description field = %q, want %q: the caret was in it when the "+
+					"microphone was pressed, so that is where the words belong", r.Desc, pttTranscript)
+			}
+			if r.Title != "" {
+				t.Errorf("the title field received %q instead — the press moved the caret "+
+					"onto the button and the router fell back to the button's own field; "+
+					"%s is what is supposed to stop that", r.Title, tc.gesture)
+			}
+			// The caret has to survive the round trip too, or dictating a word into
+			// a sentence means clicking back into the field to carry on typing.
+			if r.Focused != "newTaskDesc" {
+				t.Errorf("focus ended on %q, want it back in newTaskDesc", r.Focused)
+			}
+		})
+	}
 
 	t.Run("consecutive holds both work", func(t *testing.T) {
 		r := got["consecutive_holds_both_work"]

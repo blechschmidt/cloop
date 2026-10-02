@@ -222,6 +222,18 @@ function overlayIndexOf(el) {
   return -1;
 }
 
+// True only while overlayFocusInitial is moving the caret. A dialog focuses its
+// first field the instant it opens — the edit modal's Title, for one — and that
+// is the page's choice, not the user's. Anything that acts on "the field the
+// user put the caret in" has to be able to tell the two apart, and a focusin
+// listener on its own cannot: the event a programmatic focus() dispatches is
+// indistinguishable from the one a click dispatches.
+//
+// Read by the dictation router in 15-voice.js, which would otherwise send every
+// transcript dictated in the edit modal into the Title, whether the speaker
+// aimed there or not.
+let overlayMovingFocus = false;
+
 function overlayFocusInitial(el, want) {
   let target = null;
   if (typeof want === 'string') target = el.querySelector(want);
@@ -236,7 +248,11 @@ function overlayFocusInitial(el, want) {
     if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
     target = el;
   }
+  overlayMovingFocus = true;
+  // finally, not a trailing assignment: focus() can throw on a detached node,
+  // and a flag left set would make every later user focus read as the page's.
   try { target.focus(); } catch (e) { /* detached or not focusable */ }
+  finally { overlayMovingFocus = false; }
 }
 
 function overlayRestoreFocus(invoker) {

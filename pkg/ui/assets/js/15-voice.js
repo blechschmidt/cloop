@@ -85,6 +85,10 @@ function stopVoiceRecording() {
 // Two buttons, one recorder (Task 20302). The second lives in the edit modal
 // and speaks into a field that already has words in it, which is the whole
 // difference between them: see openDictateApply below.
+//
+// Each button has a field it belongs to, but neither is nailed to it any more
+// (Task 20309): if the caret is in a text field when the microphone is pressed,
+// that is where the words go. See dictateDestination.
 
 let dictateRecorder = null;
 let dictateChunks = [];
@@ -92,6 +96,10 @@ let dictateActive = false;
 let dictateStarting = false;
 let dictateHeardSound = false;
 let dictateAudioCtx = null;
+
+// Where this session's words are going, {el, atCaret}: resolved when the
+// session starts and consumed when its transcript arrives (Task 20309).
+let dictateField = null;
 
 // Push-to-talk state (Task 20252). dictateHeldPointer is the pointerId of the
 // finger currently on the button, or null when no hold is in progress — it is
@@ -169,6 +177,104 @@ function dictateIDs()   { return DICTATE_TARGETS[dictateTarget] || DICTATE_TARGE
 function dictateBtn()   { return document.getElementById(dictateIDs().btn); }
 function dictateLabel() { return document.getElementById(dictateIDs().label); }
 
+// ── Where the words land (Task 20309) ────────────────────────────────────────
+//
+// The two microphones above each owned a field: the Add Task one wrote into the
+// title and nothing else, the edit modal's into the description and nothing
+// else. Every other text box on those two screens — the description under the
+// Add Task title, the task filter, the Title in the editor — was unreachable by
+// voice, and the only way to get words into one was to dictate into the field
+// the button did own and then retype them.
+//
+// So the caret decides. If it is sitting in a text field when the microphone is
+// pressed, that is where the transcript goes; the button's own field is what
+// happens when it is not. That rule needs two things to be true, and both are
+// arranged rather than assumed:
+//
+//   * The press must not move the caret. A <button> takes focus on mousedown,
+//     which would empty the very field the rule reads — see the mousedown
+//     handler in bindTaskDictationGestures.
+//   * A caret the *page* placed must not count. Opening the edit modal focuses
+//     its Title field, so without this every transcript dictated in that dialog
+//     would land in the Title whether the speaker aimed there or not, and the
+//     chooser that exists to protect the description (Task 20302) would almost
+//     never be reached. overlayMovingFocus draws that line.
+
+// The field the user has put the caret in, or null. Maintained from events
+// rather than read on demand because by the time anything asks, the answer has
+// to include *how* the caret got there, which activeElement cannot say: a
+// dialog focusing its own first field (overlayMovingFocus, 00-overlay.js) is
+// the page's choice and does not count.
+let dictateCaretField = null;
+
+document.addEventListener('focusin', e => {
+  dictateCaretField = !overlayMovingFocus && dictateTextField(e.target) ? e.target : null;
+}, true);
+
+// Pressing on a field, or typing into one, is the user's choice even when the
+// field already had focus — the edit modal's Title has it from the moment the
+// dialog opens, so a click into it dispatches no focusin and would otherwise
+// leave the caret looking like the page's.
+const dictateClaimCaret = e => { if (dictateTextField(e.target)) dictateCaretField = e.target; };
+document.addEventListener('pointerdown', dictateClaimCaret, true);
+document.addEventListener('input', dictateClaimCaret, true);
+
+// A field whose value is prose. Number and date inputs are deliberately out:
+// speech arrives as words — "forty two" — and those inputs discard a value they
+// cannot parse without saying so, which would lose the sentence with nothing on
+// screen to explain it. Password is out for the obvious reason. So is a field
+// on a tab the user has switched away from (no client rects): dictating on the
+// Tasks tab must not write into the Overview tab's goal box, off screen.
+function dictateTextField(el) {
+  const tag = el && !el.disabled && !el.readOnly && el.tagName;
+  if (tag !== 'TEXTAREA' && !(tag === 'INPUT' && /^(text|search|url|tel|email)$/.test(el.type))) return false;
+  return !el.getClientRects || el.getClientRects().length > 0;
+}
+
+// dictateDestination resolves where a session's words go: {el, atCaret}.
+//
+// The caret is checked against the live activeElement as well as remembered:
+// clicking a region that takes no focus drops it to the body without a
+// focusin, which would leave a field the user has left looking like the one
+// they are in. In the edit modal a caret outside the dialog is stale by
+// construction — the page behind it is inert.
+function dictateDestination() {
+  const el = dictateCaretField, modal = document.getElementById('modal-overlay');
+  if (el && el === document.activeElement && dictateTextField(el) &&
+      (dictateTarget !== 'edit' || !modal || modal.contains(el))) {
+    return {el: el, atCaret: true};
+  }
+  const own = document.getElementById(dictateTarget === 'edit' ? 'modalDesc' : 'newTaskTitle');
+  return own && {el: own, atCaret: false};
+}
+
+// insertDictated writes the words in at the caret: with a selection it
+// replaces it, and mid-paragraph it does the thing that used to be impossible.
+// A field the caret is not in gets what the Add Task title always got — the
+// words appended — because a selection the user cannot see is no place for
+// them. A transcript carries no spacing of its own, so a space is added on
+// either side where the text it lands against has none ("budgetsand").
+//
+// The input event is for a field with a handler behind it — the task filter
+// is one — or the page shows words nothing has reacted to.
+function insertDictated(field, text, atCaret) {
+  let v = field.value || '', a = v.length, b = a;
+  if (!atCaret) { v = v.trim(); a = b = v.length; }
+  else if (typeof field.selectionStart === 'number') { a = field.selectionStart; b = field.selectionEnd; }
+  const before = v.slice(0, a), after = v.slice(b);
+  const head = before + (before && !/\s$/.test(before) ? ' ' : '') + text;
+  field.value = head + (after && !/^\s/.test(after) ? ' ' : '') + after;
+  try {
+    field.focus();
+    field.dispatchEvent(new Event('input', {bubbles: true}));
+    field.setSelectionRange(head.length, head.length);
+  } catch (e) { /* detached, or a type without a selection */ }
+}
+
+// What to call the field in the confirmation. Every destination has an
+// aria-label or a placeholder; placeholders trail off ("Task title…").
+const dictateFieldName = f => String(f.getAttribute('aria-label') || f.placeholder || f.id).replace(/[.…\s]+$/, '');
+
 // A touch press is push-to-talk; a mouse click still toggles (Task 20252).
 // This media query only picks the *wording* — the behaviour is decided per
 // gesture from pointerType further down — so a hybrid device that guesses
@@ -228,7 +334,11 @@ window.initTaskDictation = function() {
     keys.forEach(k => {
       const btn = document.getElementById(DICTATE_TARGETS[k].btn);
       if (!btn) return;
-      btn.title = (k === 'edit' ? how + ' a change to these details' : how + ' the task title') + backend;
+      // Says both halves of the rule, because the second only shows itself when
+      // the caret happens to be somewhere: into whichever field has the caret,
+      // and failing that into the one the button sits beside.
+      btn.title = how + ' into the focused field, otherwise ' +
+                  (k === 'edit' ? 'these details' : 'the task title') + backend;
       paintDictate(k, 'idle', dictateIdleLabel());
     });
   }).catch(() => showAll(false));
@@ -271,6 +381,12 @@ async function startTaskDictation() {
   // to turn it off. Claim the slot synchronously.
   if (dictateStarting) return;
   dictateStarting = true;
+
+  // Fixed here rather than read back when the transcript arrives, so the words
+  // go where the caret was when they were spoken. A transcription round trip is
+  // seconds long and the page stays live throughout it; resolving late would
+  // let a click made while waiting redirect a sentence already said.
+  dictateField = dictateDestination();
 
   // getUserMedia is absent on an insecure origin and on platforms that refuse
   // it outright — the Meta Ray-Ban Display web runtime being the one this
@@ -498,8 +614,16 @@ function dictatePointerUp(e) {
 // and would drop listeners bound to them.
 function bindTaskDictationGestures(btn, key) {
   if (!btn || btn.dataset.pttBound === '1') return;
-  if (typeof window.PointerEvent === 'undefined') return;  // click-toggle still works
   btn.dataset.pttBound = '1';
+
+  // Keep the caret where the user put it (Task 20309). A <button> takes focus
+  // on mousedown, so without this the press empties the very field the router
+  // reads and every mouse click would fall back to the button's own default.
+  // Cancelling the default costs nothing else: the click still fires, and Tab
+  // still reaches the button for anyone driving the page from the keyboard.
+  btn.addEventListener('mousedown', e => { e.preventDefault(); });
+
+  if (typeof window.PointerEvent === 'undefined') return;  // click-toggle still works
   btn.addEventListener('pointerdown', e => dictatePointerDown(e, key));
   btn.addEventListener('pointerup', dictatePointerUp);
   // A pointercancel is the system taking the gesture away — a scroll it decided
@@ -529,19 +653,23 @@ async function sendTaskDictation(blob) {
       return;
     }
 
-    if (dictateTarget === 'edit') {
-      // The edit modal's Description is not an empty field, so the transcript
-      // is a question rather than an answer (Task 20302).
+    // Resolved when the session started. Re-resolved only when the edit modal
+    // closed under a transcription in flight (cancelEditDictation), whose
+    // fields went with it.
+    const dest = dictateField || dictateDestination();
+    dictateField = null;
+    if (dest && dest.el.id === 'modalDesc') {
+      // The edit modal's Description is the one destination whose answer is a
+      // question rather than an assignment: it already holds a paragraph the
+      // speaker may have meant to replace or to build on (Task 20302).
       window.openDictateApply(data.text);
+    } else if (dest) {
+      insertDictated(dest.el, data.text, dest.atCaret);
+      // Named, because the whole point of Task 20309 is that this is no longer
+      // always the same box — and the one time it is worth saying out loud is
+      // when the words went somewhere the speaker was not watching.
+      toast('Heard: ' + data.text + ' → ' + dictateFieldName(dest.el), 'ok');
     } else {
-      const title = document.getElementById('newTaskTitle');
-      if (title) {
-        // Append rather than replace when the field already has words in it, so
-        // a second press extends a sentence instead of discarding the first.
-        title.value = title.value.trim() ? (title.value.trim() + ' ' + data.text) : data.text;
-        title.focus();
-        title.setSelectionRange(title.value.length, title.value.length);
-      }
       toast('Heard: ' + data.text, 'ok');
     }
   } catch (err) {
@@ -701,6 +829,9 @@ window.dictateApplyRevise = function() {
 function cancelEditDictation() {
   closeDictateApply();
   dictateHeardText = '';
+  // The destination is one of the fields going off screen with the dialog, so
+  // it must not survive into whatever the next session resolves.
+  dictateField = null;
   if (dictateTarget !== 'edit') return;
   if (dictateActive || dictateStarting) cancelTaskDictation('');
   paintDictate('edit', 'idle', dictateIdleLabel());

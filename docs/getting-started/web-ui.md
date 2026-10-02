@@ -314,9 +314,13 @@ rows are derived from plan state — so opening the screen costs nothing.
 
 A **Dictate** button sits beside *Add Task* on the Tasks tab. Press it, say the
 task, press it again: the recording goes to the hub, comes back as text, and
-lands in the title field. It is not submitted for you — speech recognition is
-good, not perfect, and the field is right there to correct before you press
-*Add Task*.
+lands at the caret of the text field you were in — the description box, the
+task filter, any text field you clicked into before pressing the button —
+replacing a selection if there is one. With no field focused it goes to the
+title, appended to whatever is already there. It is not submitted for you —
+speech recognition is good, not perfect, and the field is right there to
+correct before you press *Add Task*. A toast names the field the words went
+to.
 
 The button only appears when the hub has a speech backend configured, and the
 browser needs an `https` origin (or `localhost`) to reach a microphone at all.
@@ -333,6 +337,11 @@ the migration". So it asks:
 | **Replace** | the details become what you said |
 | **Add to the end** | the details keep their text and gain a paragraph |
 | **Edit with AI** | what you said is an *instruction*, and the model applies it to the details that are there |
+
+Click into the *Title* before pressing it and the words go there instead, with
+no question: the question protects what is already in the description. (The
+dialog puts the caret in the Title when it opens; that does not count until you
+click or type there.)
 
 The first two are instant and happen in the browser. The third posts the open
 draft — not the saved copy, so anything you have typed since opening the modal

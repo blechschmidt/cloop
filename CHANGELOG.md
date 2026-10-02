@@ -12,6 +12,12 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Dictation goes where the caret is.** The Dictate buttons on the Tasks tab
+  and in the task editor insert what you said at the caret of the text field
+  you were in — the Add Task description, the task filter, the editor's Title —
+  replacing a selection, and a toast names the field. With no field focused
+  they do what they did before: append to the Add Task title, and in the editor
+  ask whether to replace the description, add to it or edit it with AI.
 - **Multi-line task descriptions.** The description box in the Tasks tab's Add
   Task form takes several lines: Enter starts a new one, and Ctrl+Enter
   (⌘+Enter on a Mac) adds the task. It was a one-line field that flattened a

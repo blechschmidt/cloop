@@ -41,6 +41,30 @@ function mkClassList() {
   };
 }
 
+// ── focus ───────────────────────────────────────────────────────────────────
+//
+// Modelled because the dictation router (Task 20309) sends a transcript to
+// whichever field holds the caret, and has to tell a caret the *user* placed
+// apart from one a dialog placed on the way in. That distinction is entirely
+// about which focus events fire and when, so it cannot be asserted against a
+// DOM where focus() is a no-op.
+//
+// Deliberately still thin: focus() moves activeElement and dispatches focusin
+// to the document's capture listeners, which is the whole of what the router
+// reads. No focusout, no tab order, no notion of what is focusable.
+const _docListeners = {};
+
+function fireDocumentEvent(type, ev) {
+  const fns = _docListeners[type];
+  if (!fns) return;
+  for (let i = 0; i < fns.length; i++) fns[i](ev);
+}
+
+function setActiveElement(el) {
+  globalThis.document.activeElement = el;
+  fireDocumentEvent('focusin', {type: 'focusin', target: el});
+}
+
 function mkElement(id) {
   const attrs = {};
   const el = {
@@ -48,6 +72,16 @@ function mkElement(id) {
     innerHTML: '',
     textContent: '',
     value: '',
+    // Auto-vivified elements have no markup to derive these from, so a test
+    // that cares states them: `f.tagName = 'INPUT'; f.type = 'text'`. The Go
+    // side is what checks those claims match the real index.html — see
+    // TestDashboard_DictationFieldsAreDictatable.
+    tagName: 'DIV',
+    type: '',
+    placeholder: '',
+    readOnly: false,
+    selectionStart: null,
+    selectionEnd: null,
     checked: false,
     disabled: false,
     selectedIndex: 0,
@@ -71,12 +105,23 @@ function mkElement(id) {
     appendChild: c => { el.children.push(c); return c; },
     removeChild: c => { el.children = el.children.filter(x => x !== c); return c; },
     insertAdjacentHTML: () => {},
-    querySelector: () => null,
+    // `#id` only. Enough for openOverlay's opts.focus, which is how the edit
+    // modal puts the caret in its Title field — the exact move the dictation
+    // router has to recognise as the page's and not the user's. Anything else
+    // still returns nothing, as it always did.
+    querySelector: sel => (/^#[\w-]+$/.test(String(sel))
+      ? globalThis.document.getElementById(String(sel).slice(1)) : null),
     querySelectorAll: () => [],
     closest: () => null,
+    // There is no tree here, so this cannot answer the question it is asked;
+    // it says yes rather than no because every caller uses it to *exclude*
+    // something, and a shim that excluded everything would silently disable
+    // the features under test rather than reporting on them.
+    contains: () => true,
     remove: () => {},
-    focus: () => {},
-    blur: () => {},
+    focus: () => { setActiveElement(el); },
+    blur: () => { if (globalThis.document.activeElement === el) setActiveElement(globalThis.document.body); },
+    setSelectionRange: (s, e) => { el.selectionStart = s; el.selectionEnd = e; },
     click: () => {},
     select: () => {},
     scrollIntoView: () => {},
@@ -99,8 +144,18 @@ globalThis.document = {
   createTextNode: t => ({textContent: t}),
   querySelector: () => null,
   querySelectorAll: () => [],
-  addEventListener: () => {},
-  removeEventListener: () => {},
+  // Recorded rather than dropped, so an element's focus() can reach the
+  // capture-phase focusin listener the dictation router installs. Nothing here
+  // dispatches on its own — as with the WebSocket above, the test is the only
+  // source of events.
+  addEventListener: (type, fn) => { (_docListeners[type] ||= []).push(fn); },
+  removeEventListener: (type, fn) => {
+    const fns = _docListeners[type];
+    if (fns) _docListeners[type] = fns.filter(f => f !== fn);
+  },
+  // For a scenario standing in for the browser: `{type, target}` reaches the
+  // listeners above as an event would. The bundle never calls it.
+  dispatchEvent: ev => { fireDocumentEvent(ev.type, ev); return true; },
   documentElement: mkElement('html'),
   body: mkElement('body'),
   head: mkElement('head'),
@@ -109,6 +164,10 @@ globalThis.document = {
   cookie: '',
   title: '',
 };
+// Where the caret is. A real document starts with it on the body, and so does
+// this one: "nothing is focused" and "the body is focused" are the same state,
+// and code that compares against activeElement must not see undefined.
+globalThis.document.activeElement = globalThis.document.body;
 
 // ── storage ─────────────────────────────────────────────────────────────────
 
@@ -135,9 +194,45 @@ globalThis.location = {
 };
 // defineProperty, not assignment: node ships a getter-only global navigator.
 Object.defineProperty(globalThis, 'navigator', {
-  value: {userAgent: 'domshim', language: 'en-US', clipboard: {writeText: async () => {}}},
+  value: {
+    userAgent: 'domshim', language: 'en-US', clipboard: {writeText: async () => {}},
+    // Tracks are handed back so a test can assert the microphone was released;
+    // the dictation code stops every one of them before it uploads.
+    mediaDevices: {
+      getUserMedia: async () => ({
+        getTracks: () => globalThis.__harness.micTracks,
+      }),
+    },
+  },
   writable: true, configurable: true,
 });
+// A microphone that produces one chunk and stops. Enough to drive dictation
+// end to end — press, record, release, POST, route the transcript — without a
+// browser, which matters because everything interesting about Task 20309
+// happens *after* the audio and would otherwise be unreachable from here.
+//
+// The gesture itself is not modelled and is not meant to be: pointer capture,
+// the click synthesised after touchend and the empty-clip analyser are real
+// browser behaviour, and ptt_browser.js drives them in real Chromium.
+//
+// No AudioContext on purpose. listenForSound treats a missing one as "cannot
+// measure, assume speech", which is the branch a test wants: the alternative is
+// modelling a level meter to tell the router something it already knows.
+globalThis.MediaRecorder = class FakeMediaRecorder {
+  static isTypeSupported() { return true; }
+  constructor(stream, opts) {
+    this.stream = stream;
+    this.state = 'inactive';
+    this.mimeType = (opts && opts.mimeType) || 'audio/webm';
+    this.ondataavailable = this.onstop = null;
+  }
+  start() { this.state = 'recording'; }
+  stop() {
+    this.state = 'inactive';
+    if (this.ondataavailable) this.ondataavailable({data: {size: 1024}});
+    if (this.onstop) this.onstop();
+  }
+};
 globalThis.matchMedia = () => ({matches: false, addListener: () => {}, removeListener: () => {}, addEventListener: () => {}, removeEventListener: () => {}});
 globalThis.addEventListener = () => {};
 globalThis.removeEventListener = () => {};
@@ -179,6 +274,10 @@ const harness = {
   // and that header — not the status — is what tells the bundle to send the
   // user to the identity provider rather than to the token prompt.
   routeHeaders: {},
+  // The microphone tracks getUserMedia hands out, each recording whether it was
+  // stopped. A live one after a completed dictation is the browser's recording
+  // indicator left lit with nothing able to turn it off.
+  micTracks: [{live: true, stop() { this.live = false; }}],
 };
 globalThis.__harness = harness;
 

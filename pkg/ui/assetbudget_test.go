@@ -297,6 +297,12 @@ import (
 //
 // Task 20343, the Add Task form's multi-line description box: 183 B, its
 // markup and two app.css rules. Measured after: 213,253 B.
+//
+// Task 20309, dictation into the field that has the caret: 805 B, nearly all
+// of it 15-voice.js. Trimmed first: the stranded version measured 1,226 B,
+// and what went were checks against a DOM the browser already guarantees,
+// not behaviour; the reasoning stays in whole-line comments, which are free.
+// Measured after: 214,058 B.
 const eagerWireBudgetBytes = 215_700
 
 // eagerAsset is one member of the first-paint set.

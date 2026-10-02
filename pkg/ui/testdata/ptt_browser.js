@@ -291,12 +291,32 @@ async function warmUp(cdp) {
   await cdp.eval("(() => { const t = document.getElementById('newTaskTitle'); if (t) t.value = ''; })()");
 }
 
-// centre returns viewport coordinates of the dictate button.
-async function centre(cdp) {
+// centreOf returns viewport coordinates of an element, having first scrolled it
+// into view: CDP input events are dispatched at viewport coordinates, so a
+// control below the fold would otherwise be "clicked" through whatever happens
+// to be sitting at those coordinates instead.
+async function centreOf(cdp, id) {
   return cdp.eval(`(() => {
-    const r = document.getElementById('dictateTaskBtn').getBoundingClientRect();
+    const el = document.getElementById(${JSON.stringify(id)});
+    el.scrollIntoView({block: 'center'});
+    const r = el.getBoundingClientRect();
     return {x: r.left + r.width/2, y: r.top + r.height/2};
   })()`);
+}
+
+// centre returns viewport coordinates of the dictate button.
+async function centre(cdp) { return centreOf(cdp, 'dictateTaskBtn'); }
+
+// clickField puts the caret in a text box the way a user does (Task 20309).
+// Deliberately a real click rather than el.focus(): what the caret-routing
+// scenarios assert is which control the browser hands focus to on the press
+// that follows, and a programmatic focus would quietly assume the answer.
+async function clickField(cdp, id) {
+  const p = await centreOf(cdp, id);
+  const base = {x: p.x, y: p.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'mouse'};
+  await cdp.send('Input.dispatchMouseEvent', {type: 'mousePressed', ...base});
+  await cdp.send('Input.dispatchMouseEvent', {type: 'mouseReleased', ...base, buttons: 0});
+  await waitFor(cdp, `document.activeElement === document.getElementById(${JSON.stringify(id)})`);
 }
 
 // touchHold presses for ms and lets go, whatever the page is doing meanwhile.
@@ -356,12 +376,17 @@ async function state(cdp) {
   return cdp.eval(`(() => {
     const b = document.getElementById('dictateTaskBtn');
     const t = document.getElementById('newTaskTitle');
+    const d = document.getElementById('newTaskDesc');
     const toast = document.getElementById('toast');
     return {
       recording: b.classList.contains('recording'),
       disabled: !!b.disabled,
       label: (b.textContent || '').trim(),
       title: t ? t.value : null,
+      desc: d ? d.value : null,
+      // Where the caret ended up. A dictation that leaves it on the microphone
+      // has stopped being an input method and become a detour.
+      focused: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '',
       touchAction: getComputedStyle(b).touchAction,
       // Cleared 3s after it is shown; every read here happens well inside that.
       toast: toast ? (toast.textContent || '').trim() : '',
@@ -371,7 +396,16 @@ async function state(cdp) {
 
 async function reset(cdp) {
   requests = [];
-  await cdp.eval("(() => { const t = document.getElementById('newTaskTitle'); if (t) t.value = ''; })()");
+  // The caret is cleared along with the fields: it decides where a transcript
+  // goes (Task 20309), so a scenario inheriting the previous one's would be
+  // reading state it never set.
+  await cdp.eval(`(() => {
+    ['newTaskTitle', 'newTaskDesc'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  })()`);
 }
 
 
@@ -481,6 +515,45 @@ async function main() {
       title: afterSecond.title,
       transcribe_requests: transcribes(),
     };
+
+    // 4b. The caret decides where the words go (Task 20309) — and the press
+    //     must not take it away. A <button> takes focus on mousedown, so
+    //     without the preventDefault in bindTaskDictationGestures the caret
+    //     lands on the microphone, the router finds no field and the words
+    //     fall back to the title.
+    //
+    //     Invisible to the Node shim, which has no notion of a control
+    //     stealing focus from another — there, this passes either way.
+    await reset(cdp);
+    await clickField(cdp, 'newTaskDesc');
+    await mouseClick(cdp);
+    await waitFor(cdp, LIVE);
+    await sleep(SPEAK_MS);
+    await mouseClick(cdp);
+    await sessionOver(cdp);
+    {
+      const s = await state(cdp);
+      out.mouse_click_keeps_the_caret = {
+        title: s.title, desc: s.desc, focused: s.focused,
+        transcribe_requests: transcribes(),
+      };
+    }
+
+    // 4c. The same rule under a finger, which keeps the caret for a different
+    //     reason: here it is the pointerdown handler's own preventDefault, not
+    //     the mousedown one, so both paths are checked or one of them regresses
+    //     alone.
+    await reset(cdp);
+    await clickField(cdp, 'newTaskDesc');
+    await holdAndSpeak(cdp);
+    await sessionOver(cdp);
+    {
+      const s = await state(cdp);
+      out.touch_hold_follows_the_caret = {
+        title: s.title, desc: s.desc, focused: s.focused,
+        transcribe_requests: transcribes(),
+      };
+    }
 
     // 5. Two holds in a row. The second must work exactly like the first —
     //    this is what fails if a release leaves pointer capture, the
