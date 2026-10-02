@@ -5,7 +5,12 @@ make screenshots          # or: ./scripts/screenshots/capture.sh
 ```
 
 Writes `docs/screenshots/*.png`. Takes a couple of minutes, most of it the
-`go build`.
+`go build`. To retake only some of them — every image retaken is a binary diff —
+name them:
+
+```bash
+CAPTURE_ONLY=03-tasks.png,04-task-edit.png ./scripts/screenshots/capture.sh
+```
 
 ## Why this exists rather than a folder of images
 

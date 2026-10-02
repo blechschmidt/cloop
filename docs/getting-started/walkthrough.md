@@ -214,7 +214,7 @@ next one.
 
 ## 6. The plan
 
-![The Tasks tab with completed tasks shown: a run bar, the Add Task form, then eight tasks — five done, each with a green check and the result the run produced, and three pending with drag handles, role and tag chips, dependency references, estimates and priority badges.](../screenshots/03-tasks.png)
+![The Tasks tab with completed tasks shown: a run bar, the Add Task form with its multi-line description box, then eight tasks — five done, each with a green check and the result the run produced, and three pending with drag handles, role and tag chips, dependency references, estimates and priority badges.](../screenshots/03-tasks.png)
 
 The **Tasks** tab is the plan, and the plan is the product. Every row is a unit
 of work with an identity, a status and — once it has run — a stored result,
@@ -223,7 +223,9 @@ belongs to.
 
 **Adding** is the inline form: title, optional description, priority (`1` is
 highest) and a comma-separated list of task IDs to depend on. **Add Task**
-appends it immediately, to a running plan as readily as to an idle one.
+appends it immediately, to a running plan as readily as to an idle one. The
+description is the brief the agent works from, so its box takes several lines:
+Enter starts a new one, and Ctrl+Enter (⌘+Enter on a Mac) adds the task.
 
 **The list is the run queue.** Tasks run top to bottom, and dragging a row
 rewrites the priorities the scheduler reads — while a run is in flight, too,

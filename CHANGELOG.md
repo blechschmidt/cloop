@@ -12,6 +12,10 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Multi-line task descriptions.** The description box in the Tasks tab's Add
+  Task form takes several lines: Enter starts a new one, and Ctrl+Enter
+  (⌘+Enter on a Mac) adds the task. It was a one-line field that flattened a
+  pasted brief into one run-on line.
 - **Review gate.** A project can have a reviewer model — its own provider and
   model, free to differ from the ones doing the work — check each task's changes
   before anything leaves the working copy. While a task runs, the agent's `git

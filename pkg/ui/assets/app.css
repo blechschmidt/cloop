@@ -915,6 +915,10 @@
   /* ── Add task form ── */
   .add-task-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
   .add-task-bar input { flex:1; min-width:160px; }
+  #newTaskPriority { flex:0 0 140px; }
+  /* A full line for the description (Task 20343): sharing one with the inputs
+     would stretch every one of them to its height. */
+  .add-task-bar textarea { flex:1 1 100%; }
 
   /* ── Form elements ── */
   .form-input, .form-textarea, .input, select {
@@ -2106,6 +2110,9 @@
     /* Add task bar: stack on mobile (FAB handles quick add) */
     .add-task-bar { flex-direction: column; }
     .add-task-bar input, .add-task-bar button { width: 100%; }
+    /* In a column a flex basis is a height: the description's 100% and the
+       priority field's 140px would both be taken as one. */
+    .add-task-bar textarea, #newTaskPriority { flex-basis: auto; }
 
     /* Run bar: drop the hint so the status and the button stay on one row. */
     .tasks-run-hint { display: none; }

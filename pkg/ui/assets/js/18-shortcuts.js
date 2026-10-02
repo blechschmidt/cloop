@@ -24,6 +24,7 @@ const KEYBOARD_SHORTCUTS = {
   ],
   'Task Actions': [
     { keys: ['n'], description: 'New task (focus title field)' },
+    { keys: ['Ctrl', 'Enter'], description: 'Add the task from its description box' },
     { keys: ['j'], description: 'Move focus down through tasks' },
     { keys: ['k'], description: 'Move focus up through tasks' },
     { keys: ['Enter'], description: 'Edit focused task' },

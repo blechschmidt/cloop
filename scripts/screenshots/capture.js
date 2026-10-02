@@ -244,6 +244,17 @@ const SHOTS = [
   },
 ];
 
+// CAPTURE_ONLY=03-tasks.png,04-task-edit.png retakes just those. Every image
+// retaken is a binary diff, so a change to one panel should cost one image
+// rather than all of them.
+const ONLY = [...new Set((process.env.CAPTURE_ONLY || '').split(',').map(s => s.trim()).filter(Boolean))];
+const shots = ONLY.length ? SHOTS.filter(s => ONLY.includes(s.file)) : SHOTS;
+if (shots.length !== (ONLY.length || SHOTS.length)) {
+  console.error('CAPTURE_ONLY names a shot that does not exist; the shots are: ' +
+                SHOTS.map(s => s.file).join(', '));
+  process.exit(2);
+}
+
 // ── driving it ──────────────────────────────────────────────────────────────
 
 async function main() {
@@ -329,7 +340,7 @@ async function main() {
   await sleep(1500);   // first render, WebSocket catch-up
 
   const taken = [];
-  for (const shot of SHOTS) {
+  for (const shot of shots) {
     process.stdout.write('  ' + shot.file + ' … ');
     try {
       await page.eval(`(async () => { ${shot.setup} })()`);
@@ -398,8 +409,8 @@ async function main() {
   chrome.kill('SIGKILL');
   fs.rmSync(profile, {recursive: true, force: true});
 
-  console.log('\ncaptured ' + taken.length + '/' + SHOTS.length + ' into ' + OUTDIR);
-  if (taken.length !== SHOTS.length) process.exit(1);
+  console.log('\ncaptured ' + taken.length + '/' + shots.length + ' into ' + OUTDIR);
+  if (taken.length !== shots.length) process.exit(1);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

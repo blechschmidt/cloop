@@ -156,7 +156,7 @@ so those controls step aside on it.
 
 ## Tasks
 
-![The Tasks tab with completed work shown: a run bar, an inline Add Task form with title, description, priority and dependency fields, then the task list — five done tasks each carrying the result its run produced, and three pending ones with drag handles, role and tag chips, dependency references, estimates and priority badges, and per-row status buttons that differ by status — Reset on the finished ones, Done and Split on the pending ones.](../screenshots/03-tasks.png)
+![The Tasks tab with completed work shown: a run bar, an inline Add Task form with a title field, a multi-line description box below it, and priority and dependency fields, then the task list — five done tasks each carrying the result its run produced, and three pending ones with drag handles, role and tag chips, dependency references, estimates and priority badges, and per-row status buttons that differ by status — Reset on the finished ones, Done and Split on the pending ones.](../screenshots/03-tasks.png)
 
 The list filters by free text, status, priority, assignee and tags, and hides
 completed tasks behind a **Show completed** toggle. The header counts what is
@@ -164,7 +164,9 @@ done and what is hidden.
 
 **Adding** is the inline form at the top: title, optional description, priority
 (`1` = highest) and a comma-separated list of task IDs to depend on. **Add
-Task** appends it immediately.
+Task** appends it immediately. The description box takes as many lines as the
+brief needs — Enter starts a new one there, and Ctrl+Enter (⌘+Enter on a Mac)
+adds the task, as Enter does in the title.
 
 **AI Feature Suggestions**, below the form, proposes tasks for you to review.
 Leave its text box empty and **Generate** brainstorms ideas from the project

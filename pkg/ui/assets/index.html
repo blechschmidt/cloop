@@ -526,8 +526,11 @@
         <div class="section-title">Add Task</div>
         <div class="add-task-bar">
           <input class="form-input" id="newTaskTitle" placeholder="Task title..." style="flex:2;min-width:200px" onkeydown="if(event.key==='Enter')submitAddTask()">
-          <input class="form-input" id="newTaskDesc"  placeholder="Description (optional)" style="flex:2;min-width:160px">
-          <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1" style="flex:0 0 140px">
+          <!-- Multi-line (Task 20343): an <input> flattened the brief's line breaks. -->
+          <textarea class="form-textarea" id="newTaskDesc" rows="3" placeholder="Description (optional)"
+                    aria-label="Description (optional)" title="Enter starts a new line; Ctrl+Enter (Cmd+Enter on a Mac) adds the task"
+                    onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();submitAddTask()}"></textarea>
+          <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1">
           <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
           <!-- Dictate a task (Task 20238). Hidden until GET /api/dictate says a
                speech backend is configured: a microphone that fails after

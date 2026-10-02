@@ -294,6 +294,9 @@ import (
 // The same task re-lands three features that were finished but stranded off
 // main (Tasks 20343, 20309 and 20311), and the 2,630 B this frees is the room
 // they are measured against, each in its own commit below.
+//
+// Task 20343, the Add Task form's multi-line description box: 183 B, its
+// markup and two app.css rules. Measured after: 213,253 B.
 const eagerWireBudgetBytes = 215_700
 
 // eagerAsset is one member of the first-paint set.
