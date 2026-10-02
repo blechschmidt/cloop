@@ -307,6 +307,9 @@ const (
 	ActionSessionClaimsRejected Action = "session.claims_rejected"
 	// ActionSessionClaimsStale records a privileged operation blocked on claim age.
 	ActionSessionClaimsStale Action = "session.claims_stale"
+	// ActionSessionRenewalMismatch records a silent renewal answered for a
+	// different subject than the session's, which leaves the session as it was.
+	ActionSessionRenewalMismatch Action = "session.renewal_mismatch"
 
 	// ── role_binding ───────────────────────────────────────────────────────
 

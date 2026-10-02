@@ -121,6 +121,24 @@ func (e *ClaimFreshnessError) Error() string {
 
 func (e *ClaimFreshnessError) Unwrap() error { return ErrClaimsUnverifiable }
 
+// Renewable reports whether a silent renewal from the user's browser could
+// clear this refusal (Task 20359).
+//
+// True for the two reasons that are about the hub's inability to *ask*: it
+// holds no refresh token, or the provider could not be reached from the
+// server. The user is very likely still signed in at the provider, and a
+// prompt=none round trip from their browser re-asserts the claims without them
+// seeing anything.
+//
+// False for claims_rejected, where the provider looked at this session and
+// declined to vouch for it. Asking again from the browser does not change that
+// answer at the next server-side refresh, so retrying on it would only loop.
+// Decided here, not by the caller comparing reasons, so a reason added later
+// cannot default to "retry".
+func (e *ClaimFreshnessError) Renewable() bool {
+	return e != nil && (e.Reason == reasonNoRefreshToken || e.Reason == reasonIdPUnreachable)
+}
+
 // The closed set of reasons a claim-freshness check can fail. They are audit
 // values and metric labels, so they are constants rather than prose.
 const (

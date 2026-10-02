@@ -1025,7 +1025,9 @@ var registry = []Entry{
 		Payload:   sessionPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "`prior_role` and `role` bracket the demotion; `dropped_claims` names what the IdP stopped asserting.",
+		Note: "`prior_role` and `role` bracket the demotion; `dropped_claims` names what the IdP stopped asserting. " +
+			"`via` is `browser_renewal` when the narrowed claims arrived through a silent renewal from the " +
+			"user's browser, and absent when the hub's own refresh found them.",
 	},
 	{
 		Action:    ActionSessionClaimsUnverified,
@@ -1054,6 +1056,19 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note:      "A block, not a revocation: the session stays, and ordinary reads keep working.",
+	},
+	{
+		Action:    ActionSessionRenewalMismatch,
+		Home:      HomeControlPlane,
+		Entity:    "session",
+		Trigger:   "A silent renewal from the user's browser is answered by the identity provider for a different subject than the session belongs to.",
+		Payload:   sessionPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The session is left exactly as it was: nothing of the other identity is applied or recorded. " +
+			"The benign reading is a user who switched accounts at the provider in another tab; the other is a " +
+			"browser signed into somebody else's account at the provider in the hope that the renewal adopts it. " +
+			"`ip` and `user_agent` are the browser that performed the renewal.",
 	},
 
 	// ── role_binding ───────────────────────────────────────────────────────

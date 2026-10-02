@@ -173,6 +173,25 @@ func (a *Authenticator) IdentityFromRequest(r *http.Request) *Identity {
 // idle session — deliberately without distinguishing them, since the caller
 // must answer all four identically.
 func (a *Authenticator) SessionFromRequest(r *http.Request) (SessionRecord, bool) {
+	rec, ok := a.peekSession(r)
+	if !ok {
+		return SessionRecord{}, false
+	}
+	now := a.now()
+	a.touch(rec.ID, now)
+	rec.LastSeen = now
+	return rec, true
+}
+
+// peekSession is SessionFromRequest without advancing the idle clock: the
+// session is resolved and both clocks enforced, but using it here does not
+// count as the user being active.
+//
+// For requests the dashboard makes on its own behalf rather than the user's — a
+// silent claim renewal (renew.go) is the one today. Counting those as activity
+// would let an open, unattended tab keep its session alive indefinitely, which
+// is the one thing the idle clock exists to prevent.
+func (a *Authenticator) peekSession(r *http.Request) (SessionRecord, bool) {
 	if !a.Enabled() || r == nil {
 		return SessionRecord{}, false
 	}
@@ -195,8 +214,6 @@ func (a *Authenticator) SessionFromRequest(r *http.Request) (SessionRecord, bool
 		a.terminate(rec, AuditSessionExpired, "idle_timeout", "system")
 		return SessionRecord{}, false
 	}
-	a.touch(hash, now)
-	rec.LastSeen = now
 	return rec, true
 }
 
@@ -660,7 +677,7 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) reval
 	// and a request landing in the gap would only refill the cache from the
 	// pre-refresh row it just dropped.
 	a.invalidateCache(rec.ID)
-	a.noteClaimAssertion(rec, refreshed, now)
+	a.noteClaimAssertion(rec, refreshed, now, "")
 	if claimErr != nil && errors.Is(claimErr, ErrClaimsRepudiated) {
 		a.audit(SessionAudit{
 			Event:     AuditSessionClaimsRejected,
@@ -694,7 +711,11 @@ func accessTokenExpiry(tok *tokenResponse, now time.Time) time.Time {
 
 // noteClaimAssertion records what the refresh did to this session's authority:
 // an audit event when it narrowed, and the counters behind RefreshClaimStats.
-func (a *Authenticator) noteClaimAssertion(rec SessionRecord, refreshed *Identity, now time.Time) {
+//
+// via names the path the new claims arrived by when it was not the hub's own
+// refresh — viaBrowserRenewal for a silent renewal — and is carried onto the
+// audit row, so a reviewer can tell the two apart.
+func (a *Authenticator) noteClaimAssertion(rec SessionRecord, refreshed *Identity, now time.Time, via string) {
 	if refreshed == nil {
 		a.mu.Lock()
 		a.claimsUnverified++
@@ -760,6 +781,7 @@ func (a *Authenticator) noteClaimAssertion(rec SessionRecord, refreshed *Identit
 		PriorRole:     priorRole,
 		Role:          nextRole,
 		DroppedClaims: dropped,
+		Via:           via,
 	})
 }
 

@@ -102,6 +102,21 @@ type fakeIdP struct {
 	// forgeKey, when set, signs tokens while the JWKS keeps advertising the
 	// real key — a forged response, on the wire.
 	forgeKey *rsa.PrivateKey
+
+	// codeSub overrides the sub claim of the id_token an authorization_code
+	// grant returns ("" keeps the default). A silent renewal redeems that
+	// grant too, so this is how a test says "the provider answered for a
+	// different person" (Task 20359).
+	codeSub string
+
+	// codeClaims merges into the authorization_code id_token after the
+	// defaults, which is how a renewal is made to carry different groups from
+	// the sign-in before it.
+	codeClaims map[string]any
+
+	// codeRefreshToken, when set, replaces issueRefresh as the refresh_token
+	// of the next authorization_code response only.
+	codeRefreshToken string
 }
 
 // signWith makes this provider sign with another's key without changing the
@@ -259,19 +274,30 @@ func newFakeIdP(t testing.TB) *fakeIdP {
 		if iss == "" {
 			iss = idp.server.URL
 		}
-		idToken := idp.signToken(map[string]any{
+		sub := idp.codeSub
+		if sub == "" {
+			sub = "user-123"
+		}
+		claims := map[string]any{
 			"iss":   iss,
-			"sub":   "user-123",
+			"sub":   sub,
 			"aud":   aud,
 			"exp":   time.Now().Add(idp.expOffset).Unix(),
 			"iat":   time.Now().Unix(),
 			"nonce": idp.nonce,
 			"email": "Alice@Example.com",
 			"name":  "Alice Dev",
-		})
+		}
+		for k, v := range idp.codeClaims {
+			claims[k] = v
+		}
+		refresh := idp.issueRefresh
+		if idp.codeRefreshToken != "" {
+			refresh, idp.codeRefreshToken = idp.codeRefreshToken, ""
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "at-abc", "id_token": idToken, "token_type": "Bearer", "expires_in": 3600,
-			"refresh_token": idp.issueRefresh,
+			"access_token": "at-abc", "id_token": idp.signToken(claims), "token_type": "Bearer", "expires_in": 3600,
+			"refresh_token": refresh,
 		})
 	})
 	idp.server = httptest.NewServer(mux)

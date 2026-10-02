@@ -50,6 +50,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -286,6 +287,18 @@ type Config struct {
 	// first privileged page load after the claims went stale would sign the
 	// user out.
 	RefreshLock func(ctx context.Context, sessionID string) (release func(), err error)
+
+	// RenewObserver receives the verdict of every silent renewal that reached
+	// one (Task 20359). Nil discards them.
+	//
+	// A callback for the same reason Audit is one: the outcome belongs in
+	// hubmetrics, which is not stdlib. It is also the only way the verdict
+	// leaves this package, because a renewal completes inside HandleCallback,
+	// whose return value describes sign-ins — overloading that would put a
+	// background re-check into the ratio an operator reads as "can people sign
+	// in". Called on verdicts only, never on the redirect to the provider.
+	// Implementations must not block.
+	RenewObserver func(RenewOutcome)
 }
 
 // StateOwner returns the StatePrefix a login's state parameter carries, or ""
@@ -364,10 +377,32 @@ func (id *Identity) DisplayName() string {
 	return id.Sub
 }
 
+// pendingLogin is one authorization request in flight, held server-side
+// between the redirect to the provider and the callback.
+//
+// Server-side rather than in a cookie, which is what makes silent renewal
+// possible at all: a renewal's callback arrives in a hidden frame, and a
+// cross-site navigation into a nested browsing context carries neither a Lax
+// nor a Strict cookie. The state parameter is the only thing that survives the
+// trip, so everything the callback needs hangs off this record.
 type pendingLogin struct {
 	nonce    string
 	verifier string
 	created  time.Time
+
+	// returnTo is the dashboard path to land on once the session exists,
+	// already narrowed by safeReturnPath. Empty means "/".
+	returnTo string
+
+	// silent marks a renewal (Task 20359): a prompt=none request whose
+	// callback re-asserts the claims of the session named by sessionHash
+	// instead of creating one. sessionHash and subject are captured from a
+	// request that presented a valid cookie, so a callback cannot name a
+	// session of its own choosing — and, since it never sets a cookie, cannot
+	// establish one either.
+	silent      bool
+	sessionHash string
+	subject     string
 }
 
 // cachedSession is one entry of the read-through session cache.
@@ -391,6 +426,13 @@ type Authenticator struct {
 
 	discMu sync.Mutex
 	disc   *discoveryDoc
+
+	// frameOrigins is what FrameOrigins reports: the issuer's origin, joined
+	// by the authorization endpoint's once discovery has resolved it. Held
+	// apart from disc because the hub reads it on every response it sends,
+	// for the Content-Security-Policy, and discMu is held across the network
+	// fetch — a response must never queue behind an IdP that is slow to answer.
+	frameOrigins atomic.Pointer[[]string]
 
 	jwksMu      sync.Mutex
 	jwksKeys    map[string]any // kid -> *rsa.PublicKey | *ecdsa.PublicKey
@@ -567,7 +609,7 @@ func New(cfg Config) (*Authenticator, error) {
 	if store == nil {
 		store = NewMemorySessionStore(maxSessions)
 	}
-	return &Authenticator{
+	a := &Authenticator{
 		cfg:      cfg,
 		client:   &http.Client{Timeout: httpTimeout},
 		jwksKeys: map[string]any{},
@@ -575,7 +617,9 @@ func New(cfg Config) (*Authenticator, error) {
 		cache:    map[string]*cachedSession{},
 		flights:  map[string]*claimFlight{},
 		store:    store,
-	}, nil
+	}
+	a.noteFrameOrigins(nil)
+	return a, nil
 }
 
 // now returns the authenticator's clock.
@@ -721,15 +765,29 @@ const (
 	// LoginStateError means the CSPRNG failed. It has never been observed;
 	// it is enumerated so no branch of the flow is unaccounted for.
 	LoginStateError LoginOutcome = "state_error"
+
+	// LoginRenewal means the callback completed a silent renewal rather than a
+	// sign-in (Task 20359). It shares the callback route because the provider
+	// knows one redirect URI for this client, and it is not a sign-in verdict:
+	// counting it would put a background re-check into the ratio an operator
+	// reads as "can people sign in". Its own verdict goes to
+	// Config.RenewObserver.
+	LoginRenewal LoginOutcome = "renewal"
 )
 
-// Recorded reports whether o is a verdict worth counting. A pending login is
-// not an outcome.
-func (o LoginOutcome) Recorded() bool { return o != LoginPending }
+// Recorded reports whether o is a verdict worth counting. Neither a pending
+// login nor a silent renewal is a sign-in verdict.
+func (o LoginOutcome) Recorded() bool { return o != LoginPending && o != LoginRenewal }
 
 // BeginLogin starts the authorization-code flow: it records a one-shot
 // state + nonce + PKCE verifier and redirects the browser to the IdP's
 // authorization endpoint.
+//
+// A `return` query parameter names the dashboard path to land on afterwards,
+// so a session that lapsed while somebody was deep in a project does not also
+// cost them their place. safeReturnPath narrows it to a path on this origin;
+// anything else is dropped, which is what keeps a public login route from
+// being an open redirector.
 //
 // It returns LoginPending on the redirect. Any other value means the response
 // is already an error page and the attempt is over.
@@ -739,64 +797,149 @@ func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) Login
 		a.errorPage(w, http.StatusServiceUnavailable, "The identity provider is unreachable or misconfigured.", err)
 		return LoginDiscoveryFailed
 	}
-	state, err1 := randToken()
-	if a.cfg.StatePrefix != "" && err1 == nil {
-		state = a.cfg.StatePrefix + "." + state
-	}
-	nonce, err2 := randToken()
-	verifier, err3 := randToken()
-	if err := errors.Join(err1, err2, err3); err != nil {
+	p, state, err := a.newPendingLogin(pendingLogin{returnTo: safeReturnPath(r.URL.Query().Get("return"))})
+	if err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not generate login state.", err)
 		return LoginStateError
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, a.authorizeURL(disc, state, p, nil), http.StatusFound)
+	return LoginPending
+}
 
-	now := time.Now()
+// newPendingLogin mints the secrets for one authorization request, records it
+// with what the caller already set on tmpl (a return path, or the session a
+// renewal is for), and returns the record and its state parameter.
+//
+// The state carries Config.StatePrefix when one is set, for logins and
+// renewals alike: on a hub cluster the callback reaches whichever member the
+// load balancer picks, and the prefix is how that member knows which one holds
+// this record (Task 20354).
+func (a *Authenticator) newPendingLogin(tmpl pendingLogin) (*pendingLogin, string, error) {
+	state, err1 := randToken()
+	nonce, err2 := randToken()
+	verifier, err3 := randToken()
+	if err := errors.Join(err1, err2, err3); err != nil {
+		return nil, "", err
+	}
+	if a.cfg.StatePrefix != "" {
+		state = a.cfg.StatePrefix + "." + state
+	}
+	p := &tmpl
+	p.nonce, p.verifier, p.created = nonce, verifier, time.Now()
 	a.mu.Lock()
-	a.purgePendingLocked(now)
-	a.pending[state] = &pendingLogin{nonce: nonce, verifier: verifier, created: now}
+	a.purgePendingLocked(p.created)
+	a.pending[state] = p
 	a.mu.Unlock()
+	return p, state, nil
+}
 
-	challenge := sha256.Sum256([]byte(verifier))
+// authorizeURL builds the authorization request for p. extra carries what sets
+// a silent renewal apart from an interactive sign-in (prompt=none, login_hint);
+// everything else is identical, PKCE and nonce included.
+func (a *Authenticator) authorizeURL(disc *discoveryDoc, state string, p *pendingLogin, extra url.Values) string {
+	challenge := sha256.Sum256([]byte(p.verifier))
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", a.cfg.ClientID)
 	q.Set("redirect_uri", a.cfg.RedirectURL)
 	q.Set("scope", strings.Join(a.cfg.Scopes, " "))
 	q.Set("state", state)
-	q.Set("nonce", nonce)
+	q.Set("nonce", p.nonce)
 	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	q.Set("code_challenge_method", "S256")
+	for k, vs := range extra {
+		if len(vs) > 0 && vs[0] != "" {
+			q.Set(k, vs[0])
+		}
+	}
 
 	sep := "?"
 	if strings.Contains(disc.AuthorizationEndpoint, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, disc.AuthorizationEndpoint+sep+q.Encode(), http.StatusFound)
-	return LoginPending
+	return disc.AuthorizationEndpoint + sep + q.Encode()
+}
+
+// maxReturnPathLen bounds a post-sign-in destination. A dashboard URL is a path
+// and a project index; anything longer is not one of ours.
+const maxReturnPathLen = 512
+
+// safeReturnPath narrows a caller-supplied landing spot to a path on this
+// origin, returning "" for anything it will not vouch for.
+//
+// An allowlist rather than a blocklist, because the value reaches a Location
+// header, an HTML attribute and a script: "//evil.example" is a
+// protocol-relative absolute URL that reads like a path, "/\evil.example" is
+// one to every browser that normalises backslashes, and a CR or LF would split
+// the header. Browsers also strip tabs and newlines from a URL before parsing
+// it, so "/\t/evil.example" becomes "//evil.example" — control characters are
+// therefore refused outright rather than escaped.
+func safeReturnPath(p string) string {
+	if p == "" || len(p) > maxReturnPathLen || p[0] != '/' {
+		return ""
+	}
+	if strings.HasPrefix(p, "//") || strings.HasPrefix(p, `/\`) {
+		return ""
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x20 || p[i] == 0x7f {
+			return ""
+		}
+	}
+	// Read it the way the browser will, and refuse anything that carries a
+	// scheme or an authority once it is a URL rather than a string.
+	u, err := url.Parse(p)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return ""
+	}
+	return p
+}
+
+// claimPending takes the pending record for state, if it is live. One-shot: a
+// replayed state finds nothing.
+func (a *Authenticator) claimPending(state string) *pendingLogin {
+	if state == "" {
+		return nil
+	}
+	a.mu.Lock()
+	p := a.pending[state]
+	delete(a.pending, state)
+	a.mu.Unlock()
+	if p == nil || time.Since(p.created) > loginStateTTL {
+		return nil
+	}
+	return p
 }
 
 // HandleCallback completes the flow: validates state, exchanges the code,
 // verifies the ID token, creates a session, and redirects to the dashboard.
 // The returned outcome is always a verdict — this is where a sign-in ends.
+//
+// A silent renewal returns here too, since the provider knows one redirect URI
+// for this client, and is told apart by its state alone. The state is therefore
+// claimed before anything else is decided, including whether the provider
+// reported an error: it says how the response must be rendered, and a renewal
+// has to answer its hidden frame with a message rather than with an error page
+// nobody will see.
 func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) LoginOutcome {
 	q := r.URL.Query()
+	state, code := q.Get("state"), q.Get("code")
+	p := a.claimPending(state)
+	if p != nil && p.silent {
+		a.completeRenew(w, r, p, q)
+		return LoginRenewal
+	}
 	if e := q.Get("error"); e != "" {
 		desc := strings.TrimSpace(e + " " + q.Get("error_description"))
 		a.errorPage(w, http.StatusForbidden, "The identity provider rejected the sign-in: "+desc, nil)
 		return LoginIdPError
 	}
-	state, code := q.Get("state"), q.Get("code")
 	if state == "" || code == "" {
 		a.errorPage(w, http.StatusBadRequest, "The callback is missing its state or code parameter.", nil)
 		return LoginInvalidRequest
 	}
-
-	now := time.Now()
-	a.mu.Lock()
-	p := a.pending[state]
-	delete(a.pending, state) // one-shot: a replayed state must not work twice
-	a.mu.Unlock()
-	if p == nil || now.Sub(p.created) > loginStateTTL {
+	if p == nil {
 		a.errorPage(w, http.StatusBadRequest, "This sign-in attempt has expired or was not initiated here. Please try again.", nil)
 		return LoginInvalidState
 	}
@@ -829,7 +972,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) L
 		return LoginSessionError
 	}
 	http.SetCookie(w, a.sessionCookie(r, sid, int(a.cfg.SessionTTL.Seconds())))
-	a.completeLogin(w, r)
+	a.completeLogin(w, r, p.returnTo)
 	return LoginSuccess
 }
 
@@ -856,31 +999,63 @@ func isPreflightFailure(err error) bool {
 // along. Hence the tiny landing page. The meta refresh covers script being
 // blocked; the link covers both being blocked, in which case one click
 // finishes the job instead of a dead end.
-func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request) {
+//
+// returnTo names where to land, "" meaning the dashboard root. It has been
+// through safeReturnPath, and loginLandingHTML escapes it for each of the
+// three grammars it lands in anyway.
+func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request, returnTo string) {
+	dest := returnTo
+	if dest == "" {
+		dest = "/"
+	}
 	if !a.cookieSecure(r) {
 		// Lax cookie: the plain redirect works and is one round trip cheaper.
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, dest, http.StatusFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, loginLandingHTML)
+	_, _ = io.WriteString(w, loginLandingHTML(dest))
 }
 
 // loginLandingHTML is served once, immediately after sign-in. It is inline
 // rather than a redirect for the reason documented on completeLogin.
-const loginLandingHTML = `<!DOCTYPE html>
+//
+// dest appears in an HTML attribute, a meta refresh directive and a script
+// string literal, and is escaped for each. html.EscapeString alone would not
+// do for the script: an HTML-escaped quote is a quote again by the time the
+// JavaScript parser sees it.
+func loginLandingHTML(dest string) string {
+	attr := html.EscapeString(dest)
+	return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=/">
+<meta http-equiv="refresh" content="0; url=` + attr + `">
 <title>Signing in…</title>
 <style>body{font:14px system-ui,sans-serif;margin:4rem auto;max-width:28rem;text-align:center;color:#333}</style>
 </head><body>
 <p>Signed in. Opening the dashboard…</p>
-<p><a href="/">Continue</a></p>
-<script>location.replace("/");</script>
+<p><a href="` + attr + `">Continue</a></p>
+<script>location.replace(` + jsString(dest) + `);</script>
 </body></html>
 `
+}
+
+// jsString renders s as a JavaScript string literal safe to embed in an inline
+// <script>.
+//
+// json.Marshal is the whole implementation on purpose: it already escapes the
+// characters that make this dangerous. "<", ">" and "&" are written as Unicode
+// escapes, so the literal cannot close the script element, and U+2028 and
+// U+2029, which JSON allows raw and JavaScript treats as line terminators, are
+// escaped too.
+func jsString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
 
 // purgePendingLocked drops expired login attempts and, if the map is still
 // at capacity, evicts oldest-first. Caller holds a.mu.
@@ -1027,6 +1202,7 @@ func (a *Authenticator) discover(ctx context.Context) (*discoveryDoc, error) {
 		return nil, err
 	}
 	a.disc = doc
+	a.noteFrameOrigins(doc)
 	return a.disc, nil
 }
 

@@ -277,6 +277,12 @@ const (
 	// binding is wrong" — which they will go and change, incorrectly — from
 	// "the hub could not reach the IdP", which is a different fix entirely.
 	AuditSessionClaimsStale = auditaction.ActionSessionClaimsStale
+
+	// AuditSessionRenewalMismatch records a silent renewal the identity
+	// provider answered for a different subject than the session belongs to
+	// (Task 20359). The session is left exactly as it was. See
+	// noteRenewalMismatch for why this is worth a row.
+	AuditSessionRenewalMismatch = auditaction.ActionSessionRenewalMismatch
 )
 
 // SessionAudit describes one session lifecycle event.
@@ -305,6 +311,11 @@ type SessionAudit struct {
 	// sign-in and no longer releases. Naming them is the difference between
 	// an event an auditor can act on and one that only says something changed.
 	DroppedClaims []string
+
+	// Via names the path an event arrived by when it was not the hub's own
+	// doing: "browser_renewal" for claims a silent renewal re-asserted from
+	// the user's browser (Task 20359). Empty for the server-side refresh.
+	Via string
 }
 
 // ── in-memory store ─────────────────────────────────────────────────────────
