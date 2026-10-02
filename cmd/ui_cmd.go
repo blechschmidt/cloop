@@ -211,6 +211,10 @@ but not for anything reachable from a network.`,
 				// them at once, and two of them never redeem one refresh
 				// token together. A no-op for a standalone hub.
 				srv.ClusterOIDCConfig(&authCfg)
+				// Counts the silent renewals a dashboard runs to keep its
+				// claims current (Task 20359). The renewal completes inside
+				// oidcauth, where hubmetrics is not reachable.
+				authCfg.RenewObserver = ui.RecordRenewOutcome
 				auth, oidcErr := oidcauth.New(authCfg)
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)

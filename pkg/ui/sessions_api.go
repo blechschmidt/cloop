@@ -165,6 +165,10 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 		if len(ev.DroppedClaims) > 0 {
 			payload["dropped_claims"] = ev.DroppedClaims
 		}
+		// How it arrived, when not by the hub's own refresh (Task 20359).
+		if ev.Via != "" {
+			payload["via"] = ev.Via
+		}
 		actor := ev.Actor
 		if actor == "" {
 			actor = "system"

@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -122,8 +124,9 @@ func viewerKeyFor(user *oidcauth.Identity) string {
 //     automation keeps working without a browser session. A *supplied but
 //     wrong* token counts toward the per-IP auth-failure lockout exactly
 //     like in token-only mode.
-//  4. Everything else: browser navigations are redirected to /auth/login;
-//     API/XHR/WebSocket requests receive 401 JSON. Requests without
+//  4. Everything else: browser navigations are redirected to /auth/login,
+//     carrying where they were going; API/XHR/WebSocket requests receive 401
+//     JSON with the sign-in hint (see signInHintHeader). Requests without
 //     credentials do NOT count as auth failures — a fresh browser hitting
 //     "/" is the normal login entry point, not an attack.
 func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Request) {
@@ -166,15 +169,39 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		}
 		if supplied {
 			s.recordAuthFailure(clientIP(r))
+			setSignInHint(w)
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 	}
 	if wantsHTMLNavigation(r) {
-		http.Redirect(w, r, "/auth/login", http.StatusFound)
+		// Carry where they were going, so a session that lapsed under somebody
+		// mid-task — or a bookmark into a project — does not land them back on
+		// the project list (Task 20359). oidcauth vets the value before it
+		// becomes a redirect.
+		http.Redirect(w, r, "/auth/login?return="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 		return
 	}
+	setSignInHint(w)
 	jsonErr(w, "authentication required", http.StatusUnauthorized)
+}
+
+// signInHintHeader rides on every 401 an SSO hub sends, naming where a browser
+// signs in again (Task 20359).
+//
+// It is how the dashboard tells "this hub wants an access token" from "this
+// session has lapsed, go back through the identity provider" — and it has to
+// be on the refusal itself. Asking /api/me instead does not work at the one
+// moment it matters: on an SSO hub /api/me needs a session too, so a lapsed
+// session cannot ask it anything, and the dashboard fell back to the token
+// prompt — a box asking an SSO user for a credential no identity provider
+// issues (Task 20330). Nothing new is disclosed: an unauthenticated browser
+// navigation to "/" is already redirected to the same path.
+const signInHintHeader = "X-Cloop-Sign-In"
+
+// setSignInHint marks a 401 as one a browser answers by signing in again.
+func setSignInHint(w http.ResponseWriter) {
+	w.Header().Set(signInHintHeader, "/auth/login")
 }
 
 // wantsHTMLNavigation distinguishes a browser page navigation (redirect to
@@ -207,6 +234,26 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recordLoginOutcome(s.OIDC.HandleCallback(w, r))
+}
+
+// handleOIDCRenew serves the hidden frame that re-asserts a session's claims at
+// the identity provider without the user seeing anything (Task 20359).
+//
+// It writes no JSON, even when OIDC is off: the caller is a frame, and the only
+// channel out of one is the document it loads. BeginRenew renders that document
+// for every outcome — a nil authenticator included — so the dashboard always
+// learns why.
+func (s *Server) handleOIDCRenew(w http.ResponseWriter, r *http.Request) {
+	s.OIDC.BeginRenew(w, r)
+}
+
+// RecordRenewOutcome counts one silent renewal that reached a verdict. Wired
+// into the authenticator as Config.RenewObserver by cmd/ui_cmd.go; a function
+// rather than a method because it reads nothing from a server.
+func RecordRenewOutcome(outcome oidcauth.RenewOutcome) {
+	if outcome.Recorded() {
+		hubmetrics.OIDCRenewals.Inc(string(outcome))
+	}
 }
 
 // recordLoginOutcome counts one sign-in attempt that reached a verdict.
@@ -339,19 +386,49 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, body)
 		return
 	}
-	id := s.sessionIdentity(r)
-	if id == nil {
+	rec, ok := s.OIDC.SessionFromRequest(r)
+	if !ok {
 		// Reached with the static bearer token (automation clients).
 		body["authenticated"] = false
 		jsonOK(w, body)
 		return
 	}
+	id := &rec.Identity
 	body["authenticated"] = true
 	body["sub"] = id.Sub
 	body["email"] = id.Email
 	body["name"] = id.Name
 	body["admin"] = s.OIDC.IsAdmin(id)
+	addSessionSchedule(body, s.OIDC, rec)
 	jsonOK(w, body)
+}
+
+// addSessionSchedule tells the browser how long this session's authority has
+// left, so it can act before that rather than meet it as a refused click
+// (Task 20359).
+//
+//	renew_in_seconds            when to re-assert the claims through
+//	                            /auth/renew; present only when the browser
+//	                            has to, i.e. the hub holds no refresh token
+//	                            for this session (oidcauth.BrowserRenewIn)
+//	claim_age_seconds,
+//	max_claim_age_seconds       the clock behind it, when the bound is on
+//	session_expires_in_seconds  the absolute ceiling, which no renewal lifts
+//
+// Durations rather than instants: both clocks are the hub's, and a browser
+// whose own clock is a few minutes out would schedule against the wrong time.
+func addSessionSchedule(body map[string]interface{}, a *oidcauth.Authenticator, rec oidcauth.SessionRecord) {
+	c := a.SessionClock(rec)
+	if c.MaxClaimAge > 0 {
+		body["claim_age_seconds"] = int64(c.ClaimAge / time.Second)
+		body["max_claim_age_seconds"] = int64(c.MaxClaimAge / time.Second)
+	}
+	if c.Renew {
+		body["renew_in_seconds"] = int64(c.RenewIn / time.Second)
+	}
+	if c.HasExpiry {
+		body["session_expires_in_seconds"] = int64(c.ExpiresIn / time.Second)
+	}
 }
 
 // permissionStrings renders a permission slice for JSON. It returns an empty

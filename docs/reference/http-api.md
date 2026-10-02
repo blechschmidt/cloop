@@ -20,6 +20,19 @@ human is present:
   scripts, and anything without a browser.
 - **Session cookie** — set by the OIDC login flow and used by the dashboard.
 
+On a hub with single sign-on every `401` carries `X-Cloop-Sign-In: /auth/login`: a
+browser answers it by sending the user through `GET /auth/login?return=<path>`,
+which comes back to that path on this origin. A token-only hub's `401` carries
+no such header. A privileged action refused because the session's claims are
+too old is a `403` whose `error.details.renewable` says whether re-asserting them
+from the browser — `GET /auth/renew`, loaded in a hidden frame, which runs a
+`prompt=none` round trip to the identity provider and posts its verdict to a
+same-origin parent — can clear it. `GET /api/me` reports the session's clocks:
+`claim_age_seconds`, `max_claim_age_seconds`, `session_expires_in_seconds`, and
+`renew_in_seconds` when the browser has to renew the claims itself because the
+hub holds no refresh token for the session. See
+[silent renewal](../security/model.md#silent-renewal-from-the-browser).
+
 `cloop serve` is different: it is a single-project daemon with one optional
 bearer token and no permission model, so its endpoints are either behind that
 token or exempt from it.
@@ -51,11 +64,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-211 endpoints, by the permission each one requires:
+212 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 25 |
+| `public` (no permission) | 26 |
 | `audit.read` | 5 |
 | `config.write` | 13 |
 | `executor.manage` | 25 |
@@ -279,6 +292,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/auth/callback` | `public` | global |
 | GET | `/auth/login` | `public` | global |
 | POST | `/auth/logout` | `public` | global |
+| GET | `/auth/renew` | `public` | global |
 | GET | `/favicon.ico` | `public` | global |
 | GET | `/glasses` | `public` | global |
 | GET | `/icon-192.png` | `public` | global |

@@ -219,6 +219,24 @@ var (
 		Help: "Failures to resolve the OIDC issuer (discovery or JWKS). Any non-zero rate means no new sign-in can complete; run `cloop hub doctor` for which of the two failed and why.",
 		Type: TypeCounter,
 	})
+
+	// Silent claim renewals (Task 20359): the prompt=none round trip a
+	// signed-in dashboard makes from a hidden frame when the hub holds no
+	// refresh token to re-assert the session's claims with. The outcomes are
+	// oidcauth.Renew*, a closed set.
+	//
+	// Separate from OIDCLogins rather than another outcome on it: a renewal
+	// runs every few minutes per open tab, so folding it in would swamp the
+	// sign-in ratio an operator reads as "can people sign in". The ratio worth
+	// watching here is interaction_required against ok — a hub where it climbs
+	// is one whose users are being sent back to the provider mid-session, most
+	// often because their browser blocks the provider's cookies inside a frame.
+	OIDCRenewals = Default.MustRegister(Definition{
+		Name:   "cloop_oidc_renewal_total",
+		Help:   "Silent claim renewals that reached a verdict, by outcome (ok, interaction_required, no_session, not_enabled, idp_error, discovery_failed, state_error, invalid_state, exchange_failed, token_invalid, subject_mismatch, store_error). A rising interaction_required rate means users are being sent back to the provider mid-session.",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
 )
 
 // API token authentication. The failure reasons are pkg/apitoken's sentinel

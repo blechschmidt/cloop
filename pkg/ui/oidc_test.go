@@ -56,6 +56,51 @@ type uiFakeIdP struct {
 	// wire (Task 20273).
 	issueRefresh    string
 	refreshRequests int
+
+	// mu guards the renewal knobs below, which the browser tests flip from a
+	// control endpoint while Chrome's requests are in flight (Task 20359).
+	mu sync.Mutex
+
+	// lastPrompt is the prompt parameter of the most recent authorization
+	// request, which is what tells a silent renewal from a sign-in, and the
+	// two counters say how many of each the provider has seen.
+	lastPrompt         string
+	authorizeRequests  int
+	promptNoneRequests int
+
+	// silentError, when set, answers a prompt=none authorization request with
+	// that OAuth error instead of a code. login_required is what a provider
+	// says when it cannot see its own session — which is also what a browser
+	// that blocks the provider's cookies inside a frame produces.
+	silentError string
+
+	// silentFramingDenied makes a prompt=none request answer with a page that
+	// refuses to be framed, as a provider does that will not run inside a
+	// frame at all: the browser shows its own error page instead, and nothing
+	// ever posts back to the dashboard.
+	silentFramingDenied bool
+}
+
+// setSilentFramingDenied sets whether prompt=none answers with an unframable page.
+func (idp *uiFakeIdP) setSilentFramingDenied(deny bool) {
+	idp.mu.Lock()
+	idp.silentFramingDenied = deny
+	idp.mu.Unlock()
+}
+
+// authorizeCounts reports the authorization requests seen so far, and how many
+// of them asked for no interaction.
+func (idp *uiFakeIdP) authorizeCounts() (all, silent int) {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return idp.authorizeRequests, idp.promptNoneRequests
+}
+
+// setSilentError sets how the provider answers prompt=none ("" for a code).
+func (idp *uiFakeIdP) setSilentError(code string) {
+	idp.mu.Lock()
+	idp.silentError = code
+	idp.mu.Unlock()
 }
 
 // testIdPKey is generated once per test binary and shared by every fake IdP.
@@ -105,10 +150,30 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 	})
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		idp.mu.Lock()
 		idp.lastNonce = q.Get("nonce")
+		idp.lastPrompt = q.Get("prompt")
+		idp.authorizeRequests++
+		silentErr, denyFraming := "", false
+		if q.Get("prompt") == "none" {
+			idp.promptNoneRequests++
+			silentErr, denyFraming = idp.silentError, idp.silentFramingDenied
+		}
+		idp.mu.Unlock()
+		if denyFraming {
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<!doctype html><p>Sign in</p>"))
+			return
+		}
 		cb, _ := url.Parse(q.Get("redirect_uri"))
 		cq := cb.Query()
-		cq.Set("code", "code-1")
+		if silentErr != "" {
+			cq.Set("error", silentErr)
+		} else {
+			cq.Set("code", "code-1")
+		}
 		cq.Set("state", q.Get("state"))
 		cb.RawQuery = cq.Encode()
 		http.Redirect(w, r, cb.String(), http.StatusFound)
@@ -120,13 +185,16 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 			idp.refreshRequests++
 		}
 		header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "k1"})
+		idp.mu.Lock()
+		nonce := idp.lastNonce
+		idp.mu.Unlock()
 		claims := map[string]any{
 			"iss":   idp.server.URL,
 			"sub":   idp.sub,
 			"aud":   "cloop-dashboard",
 			"exp":   time.Now().Add(time.Hour).Unix(),
 			"iat":   time.Now().Unix(),
-			"nonce": idp.lastNonce,
+			"nonce": nonce,
 			"email": idp.email,
 			"name":  idp.name,
 		}
@@ -262,20 +330,22 @@ func TestOIDCFullLoginFlowAndGating(t *testing.T) {
 	idp := newUIFakeIdP(t)
 	_, ts := newOIDCTestServer(t, idp, "", nil)
 
-	// Unauthenticated browser navigation → redirected into the login flow.
+	// Unauthenticated browser navigation → redirected into the login flow,
+	// carrying the page that was asked for (Task 20359).
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/?project_idx=2", nil)
 	req.Header.Set("Accept", "text/html")
 	resp, err := noRedirect.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/auth/login" {
-		t.Fatalf("unauth GET / = %d %q, want 302 /auth/login", resp.StatusCode, resp.Header.Get("Location"))
+	if want := "/auth/login?return=" + url.QueryEscape("/?project_idx=2"); resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
+		t.Fatalf("unauth GET / = %d %q, want 302 %s", resp.StatusCode, resp.Header.Get("Location"), want)
 	}
 
-	// Unauthenticated API call → 401 JSON, not a redirect.
+	// Unauthenticated API call → 401 JSON, not a redirect, and naming where a
+	// browser signs in again rather than leaving it to guess at a token.
 	resp, err = noRedirect.Get(ts.URL + "/api/state")
 	if err != nil {
 		t.Fatal(err)
@@ -283,6 +353,9 @@ func TestOIDCFullLoginFlowAndGating(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauth GET /api/state = %d, want 401", resp.StatusCode)
+	}
+	if got := resp.Header.Get(signInHintHeader); got != "/auth/login" {
+		t.Fatalf("401 carries %s = %q, want /auth/login", signInHintHeader, got)
 	}
 
 	// Full login via the redirect chain: / → /auth/login → IdP → callback → /.

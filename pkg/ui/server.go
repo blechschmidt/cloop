@@ -1544,12 +1544,23 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Prevent MIME-type sniffing.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		// Deny framing to prevent clickjacking.
-		w.Header().Set("X-Frame-Options", "DENY")
+		// Deny framing to prevent clickjacking — except for the two documents
+		// of the silent sign-in renewal, which the dashboard frames itself
+		// (Task 20359). 'self' rather than a relaxation: only a page already
+		// on this origin may frame them, and neither holds a control anybody
+		// could be tricked into clicking.
+		frameAncestors := "'none'"
+		if s.framedBySelf(r.URL.Path) {
+			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+			frameAncestors = "'self'"
+		} else {
+			w.Header().Set("X-Frame-Options", "DENY")
+		}
 		// Strict CSP: only allow same-origin resources plus inline styles/scripts
 		// needed by the SPA. No external connections permitted.
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "+
+				s.frameSrcDirective()+"; frame-ancestors "+frameAncestors)
 		// Disable the Referrer header for privacy.
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		// HSTS, but only on responses the client received over TLS. Sending
@@ -1574,6 +1585,32 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// framedBySelf reports whether path is one of the documents the dashboard
+// loads into its silent-renewal frame: /auth/renew, and the OIDC callback the
+// provider sends that frame back to (Task 20359).
+func (s *Server) framedBySelf(path string) bool {
+	if !s.oidcEnabled() {
+		return false
+	}
+	return path == "/auth/renew" || path == s.oidcCallbackPath()
+}
+
+// frameSrcDirective is the CSP frame-src for this hub: 'self', plus the
+// identity provider when there is one.
+//
+// The provider has to be named because a renewal frame navigates there and
+// back, and a frame's navigations — redirects included — are checked against
+// the *framing* document's frame-src. Under a bare 'self' the hop to the
+// provider is blocked and every renewal fails as if the provider had timed out.
+// FrameOrigins is lock-free, which matters: this runs for every response.
+func (s *Server) frameSrcDirective() string {
+	origins := s.OIDC.FrameOrigins()
+	if len(origins) == 0 {
+		return "frame-src 'self'"
+	}
+	return "frame-src 'self' " + strings.Join(origins, " ")
 }
 
 // clientIP extracts the real client IP. X-Forwarded-For is only honoured

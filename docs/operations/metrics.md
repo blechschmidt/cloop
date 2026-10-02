@@ -269,6 +269,7 @@ min_over_time(cloop_secret_kek_rotation_active[30m]) == 1
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `cloop_oidc_login_total` | counter | `outcome` |
+| `cloop_oidc_renewal_total` | counter | `outcome` |
 | `cloop_oidc_discovery_failures_total` | counter | — |
 | `cloop_sessions_created_total` | counter | — |
 | `cloop_sessions_terminated_total` | counter | `reason` |
@@ -307,6 +308,32 @@ the gate stays open: existing sessions keep authenticating through a later
 provider outage, and dropping the hub from its Service over one would turn a
 login outage into a total one. Run `cloop hub doctor` for which of the two
 round trips failed and why.
+
+`cloop_oidc_renewal_total` counts *silent* renewals: the `prompt=none` round
+trip a signed-in dashboard makes from a hidden frame to re-assert its claims
+when the hub holds no refresh token to do it with (see
+[Silent renewal from the browser](../security/model.md#silent-renewal-from-the-browser)).
+It is kept apart from `cloop_oidc_login_total` because it runs every few minutes
+per open tab and would swamp the sign-in ratio. `outcome` is `ok`,
+`interaction_required`, `no_session`, `not_enabled`, `idp_error`,
+`discovery_failed`, `state_error`, `invalid_state`, `exchange_failed`,
+`token_invalid`, `subject_mismatch` or `store_error`.
+
+The ratio worth watching is `interaction_required` against `ok`. A hub where it
+climbs is one whose users are being asked to sign in again mid-session — most
+often because their browser keeps the provider's cookies out of frames, so the
+provider cannot see its own session there. The remedy is on the hub side: set
+`CLOOP_SECRET_KEY` and request `offline_access`, so the hub re-asserts claims
+itself and the browser never has to.
+
+```promql
+rate(cloop_oidc_renewal_total{outcome="interaction_required"}[15m])
+  / clamp_min(rate(cloop_oidc_renewal_total[15m]), 1e-9) > 0.2
+```
+
+A renewal that fails *inside the browser* — a provider that refuses to be
+framed, a frame that never answers — never reaches the hub and is not counted
+here; the dashboard shows the user a sign-in banner instead.
 
 **Credential stuffing** — a `bad_secret` spike is a token ID that exists being
 tried with wrong secrets:

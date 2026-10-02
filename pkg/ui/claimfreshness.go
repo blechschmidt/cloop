@@ -116,6 +116,7 @@ func (s *Server) writeClaimFreshnessError(w http.ResponseWriter, r *http.Request
 		// The provider withdrew the grant during the check. The session is
 		// already gone; say so rather than describing it as a permission
 		// problem, which would send the user to the wrong place.
+		setSignInHint(w)
 		apierror.WriteError(w, apierror.New(apierror.CodeUnauthorized,
 			"your session has ended: the identity provider no longer recognises it. Sign in again."))
 		return
@@ -127,6 +128,12 @@ func (s *Server) writeClaimFreshnessError(w http.ResponseWriter, r *http.Request
 		details["reason"] = cf.Reason
 		details["claim_age_seconds"] = int64(cf.Age.Seconds())
 		details["max_claim_age_seconds"] = int64(cf.Limit.Seconds())
+		// What the dashboard acts on (Task 20359): a refusal that is only
+		// about the hub being unable to *ask* can be cleared by the browser
+		// re-asserting the claims at the provider and retrying once, which is
+		// invisible when it works. A field of its own rather than the browser
+		// matching on reason, so which reasons qualify stays the hub's call.
+		details["renewable"] = cf.Renewable()
 	}
 
 	// Logged at warn: on a healthy hub this never fires, and when it does the

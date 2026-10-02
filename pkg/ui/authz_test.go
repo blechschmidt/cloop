@@ -64,6 +64,12 @@ var publicRouteAllowlist = map[string]string{
 	"GET /auth/login":    "login machinery — gating it would require being signed in to sign in",
 	"GET /auth/callback": "login machinery",
 	"POST /auth/logout":  "signing out must always be possible",
+	"GET /auth/renew": "silent claim renewal (Task 20359). Public for a reason no permission could stand in for: " +
+		"the flow ends with the identity provider sending a hidden frame back to the callback, and a cross-site " +
+		"navigation into a nested browsing context carries no cookie. It authenticates itself instead: " +
+		"BeginRenew requires a valid session cookie on the leg that does carry one and binds that session into " +
+		"the one-shot state, and the callback acts on that state alone. It sets no cookie on any path, so it " +
+		"can re-assert a session's claims and never establish, extend or re-key one",
 	"POST /api/session/logout-all": "ends only the caller's own sessions, scoped to their session's subject " +
 		"and taking no id — there is no parameter that could reach someone else's, and requiring a " +
 		"permission would put an operator in the path of the one action a user must be able to take " +

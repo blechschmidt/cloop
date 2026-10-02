@@ -472,6 +472,12 @@ func (s *Server) routeTable() []routeSpec {
 		// whole /auth/ subtree through unauthenticated.
 		{Pattern: "GET " + s.oidcCallbackPath(), Handler: s.handleOIDCCallback, Perm: public},
 		{Pattern: "POST /auth/logout", Handler: s.handleOIDCLogout, Perm: public},
+		// Silent claim renewal (Task 20359). Public like the rest of /auth/,
+		// and it has to be: it runs in a hidden frame whose callback leg
+		// carries no cookie. It authenticates itself — BeginRenew refuses
+		// without a valid session — and answers with a document rather than a
+		// status, because a frame cannot surface one.
+		{Pattern: "GET /auth/renew", Handler: s.handleOIDCRenew, Perm: public},
 
 		// Self-service "sign out everywhere" (Task 20176). Ungated on
 		// purpose: the handler scopes the deletion to the caller's own
