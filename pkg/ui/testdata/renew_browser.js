@@ -83,6 +83,12 @@ class CDP {
   }
 }
 
+function killChrome(proc) {
+  try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {
+    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+  }
+}
+
 async function launchChrome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloop-renew-'));
   const proc = spawn(CHROME, [
@@ -94,7 +100,10 @@ async function launchChrome() {
     '--disable-gpu',
     '--window-size=1280,900',
     'about:blank',
-  ], {stdio: ['ignore', 'ignore', 'pipe']});
+    // Its own process group, so killChrome can take every helper with it: a
+    // helper outliving the browser goes on writing into the profile while it
+    // is deleted, which is how earlier runs left profiles behind in /tmp.
+  ], {stdio: ['ignore', 'ignore', 'pipe'], detached: true});
   let stderr = '';
   proc.stderr.on('data', d => { stderr += d.toString(); });
   // A launch that fails after the spawn must take Chrome with it, or node never
@@ -123,7 +132,7 @@ async function launchChrome() {
     });
     return {cdp: new CDP(ws), proc, dir};
   } catch (e) {
-    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    killChrome(proc);
     throw e;
   }
 }
@@ -380,9 +389,9 @@ async function main() {
     process.stdout.write(JSON.stringify(out, null, 2));
   } finally {
     try { cdp.ws.close(); } catch (e) { /* already closed */ }
-    try { proc.kill('SIGKILL'); } catch (e) { /* already gone */ }
-    // Chrome's helpers go on writing into the profile while it dies; wait for
-    // the exit and retry, so removal does not race them. Best effort.
+    killChrome(proc);
+    // Wait for the exit and retry, so removal does not race a helper that has
+    // not noticed yet. Best effort.
     if (proc.exitCode === null && proc.signalCode === null) {
       await new Promise(r => { proc.once('exit', r); setTimeout(r, 5000).unref(); });
     }
