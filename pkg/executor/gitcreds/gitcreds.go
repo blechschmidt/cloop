@@ -119,9 +119,15 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 			"%s is not an owner/name repository URL, so no repository allowlist can authorise it", w.Repo))
 	}
 
+	// Leased as the project whose grants these are. For a feature (Task
+	// 20367) that is its parent: the grant chosen before the dispatch was
+	// matched against the parent, and the feature's own path holds none — so
+	// leasing as the path the run was dispatched for found nothing, and a
+	// feature whose branch rides on a private upstream clone was refused
+	// with "no active GitHub grant named …" while that grant was in force.
 	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
 		ExecutorID:    executorID,
-		ProjectID:     projectID,
+		ProjectID:     executor.PolicyProjectPath(projectID),
 		GitHubProxied: proxied,
 	}, s.Actor)
 	if err != nil {
