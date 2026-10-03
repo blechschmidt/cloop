@@ -118,9 +118,18 @@ func newFeatureScene(t *testing.T, bin, hubConfig string) *featureScene {
 		proj:   filepath.Join(root, "proj"),
 		hubDir: filepath.Join(root, "hub"),
 		marker: filepath.Join(root, "hook-ran"),
-		env: append(os.Environ(),
+		env: append(withoutCloopEnv(os.Environ()),
 			"HOME="+home,
 			"CLOOP_HOME="+filepath.Join(home, ".cloop"),
+			// The hub's secret broker, configured on purpose and the same way
+			// everywhere. With it, the parent's github.com origin — which
+			// only the hub can follow, through insteadOf, to the bare origin
+			// below — has no grant, so no run is told to fetch it and each
+			// ships the branch whole. Inherited, it made the test depend on
+			// the caller's environment: a hub's child process carries a key,
+			// a CI runner does not, and there the run after the pull request
+			// was sent to clone github.com.
+			"CLOOP_SECRET_KEY=e2e-features-isolated",
 			"GIT_CONFIG_NOSYSTEM=1",
 			"GIT_CONFIG_GLOBAL="+gitconfig,
 			"GIT_TERMINAL_PROMPT=0",
@@ -656,6 +665,17 @@ func stagedFeatureDirs(t *testing.T) []string {
 		}
 	}
 	return dirs
+}
+
+// withoutCloopEnv drops every variable cloop reads from env.
+func withoutCloopEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "CLOOP_") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func withPath(env []string, dir string) []string {

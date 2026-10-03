@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
+	"github.com/blechschmidt/cloop/pkg/executor/internal/gitforge"
 )
 
 const featureBranch = "cloop/feature/widget"
@@ -118,6 +120,66 @@ func TestProvisionFromABranchRebuildsTheTreeEveryTime(t *testing.T) {
 	}
 	if st := gitIn(t, dir, "status", "--porcelain"); st != "" {
 		t.Errorf("changes under .cloop/ show as changes to commit:\n%s", st)
+	}
+}
+
+// TestProvisionOverlayBuildsTheBranchOnTheUpstream: a feature of a parent with
+// an https upstream travels as its own commits only. The device fetches the
+// base from the upstream, with the project's credential, as it would fetch the
+// project, applies the bundle on top and is left on the feature's branch —
+// over the package's real TLS forge, with the leak checks every fetch here
+// gets.
+func TestProvisionOverlayBuildsTheBranchOnTheUpstream(t *testing.T) {
+	f := newFixture(t, gitforge.Options{})
+	base := f.forge.SHA(t, owner, repo, gitforge.DefaultBranch)
+
+	// The hub's side: the feature's commits on the upstream's base, bundled
+	// without it — the bundle names the base as its prerequisite.
+	hub := filepath.Join(t.TempDir(), "hub")
+	gitIn(t, filepath.Dir(hub), "clone", "-q", f.forge.Path(owner, repo), hub)
+	gitIn(t, hub, "checkout", "-q", "-b", featureBranch)
+	if err := os.WriteFile(filepath.Join(hub, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, hub, "add", "-A")
+	gitIn(t, hub, "commit", "-qm", "feature")
+	head := gitIn(t, hub, "rev-parse", "HEAD")
+	file := filepath.Join(t.TempDir(), "overlay.bundle")
+	gitIn(t, hub, "bundle", "create", "--quiet", file, base+"..refs/heads/"+featureBranch)
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	f.ws = executor.Workspace{Kind: executor.WorkspaceGit, Repo: f.forge.RepoURL(owner, repo), Ref: base,
+		Branch: &executor.BranchBundle{Branch: featureBranch, Head: head, Bytes: int64(len(data)),
+			SHA256: hex.EncodeToString(sum[:])}}
+	if err := f.ws.Validate(); err != nil {
+		t.Fatalf("the overlay workspace does not validate: %v", err)
+	}
+
+	req := f.request()
+	req.BranchBundleFile = file
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	err = gitprovision.Provision(ctx, req)
+	f.assertNoLeak(err)
+	if err != nil {
+		t.Fatalf("Provision: %v\n%s\nforge:\n%s", err, f.log(), f.forge.Log())
+	}
+	if f.forge.Count() == 0 {
+		t.Error("the base did not come from the upstream")
+	}
+	if got := gitIn(t, f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/"+featureBranch {
+		t.Errorf("HEAD = %s, want the feature's branch attached", got)
+	}
+	if got := gitIn(t, f.dir, "rev-parse", "HEAD"); got != head {
+		t.Errorf("HEAD at %s, want %s", got, head)
+	}
+	for _, name := range []string{"README.md", "feature.txt"} {
+		if _, err := os.Stat(filepath.Join(f.dir, name)); err != nil {
+			t.Errorf("the checkout lacks %s: %v", name, err)
+		}
 	}
 }
 
