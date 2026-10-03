@@ -1,10 +1,12 @@
 package verify
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 // makeTask is a helper to build a *pm.Task for tests.
@@ -156,5 +158,32 @@ func TestParseScript_TrailingWhitespace(t *testing.T) {
 	// TrimSpace on the extracted block.
 	if got != "ls -la" {
 		t.Errorf("ParseScript() = %q, want %q", got, "ls -la")
+	}
+}
+
+// ctxProvider answers with a script, unless the context it is handed has
+// already ended — as every real provider would.
+type ctxProvider struct{ script string }
+
+func (p ctxProvider) Complete(ctx context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &provider.Result{Output: "```bash\n" + p.script + "\n```"}, nil
+}
+func (ctxProvider) Name() string         { return "ctx" }
+func (ctxProvider) DefaultModel() string { return "ctx-model" }
+
+// No step timeout is the default (Task 20148), and it must mean no deadline —
+// not one that has passed before the script is even asked for. That error is
+// treated as a pass by the orchestrator, so the verification ran nothing.
+func TestGenerateAndRun_NoTimeoutMeansNoDeadline(t *testing.T) {
+	task := &pm.Task{ID: 1, Title: "write the file"}
+	res, err := GenerateAndRun(context.Background(), ctxProvider{script: "exit 3"}, "m", 0, t.TempDir(), task, "TASK_DONE")
+	if err != nil {
+		t.Fatalf("GenerateAndRun with no timeout: %v", err)
+	}
+	if res.Passed || res.ExitCode != 3 {
+		t.Fatalf("result = %+v, want the script's own failure", res)
 	}
 }

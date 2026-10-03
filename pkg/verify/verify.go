@@ -113,7 +113,13 @@ func GenerateAndRun(
 ) (*Result, error) {
 	// 1. Generate the script via the AI provider.
 	prompt := GenerateScriptPrompt(task, taskOutput)
-	genCtx, cancel := context.WithTimeout(ctx, timeout)
+	// No timeout means none (Task 20148): a zero-length deadline would expire
+	// before the provider is even called, and the error that follows is
+	// treated as a pass — so --script-verify silently verified nothing.
+	genCtx, cancel := ctx, context.CancelFunc(func() {})
+	if timeout > 0 {
+		genCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 
 	genResult, err := p.Complete(genCtx, prompt, provider.Options{
