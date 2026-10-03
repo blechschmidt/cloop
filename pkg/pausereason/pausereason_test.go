@@ -73,6 +73,7 @@ func TestAutoResumableOnlyForARolledOverUsageCap(t *testing.T) {
 		{"abort", ptr(NewUntil(CodeAbort, "credentials rejected", past)), false},
 		{"plan-only", ptr(NewUntil(CodePlanOnly, "plan only", past)), false},
 		{"idle", ptr(NewUntil(CodeIdle, "nothing to run", past)), false},
+		{"state not persisted", ptr(NewUntil(CodeStateNotPersisted, "could not save task #3's completion", past)), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

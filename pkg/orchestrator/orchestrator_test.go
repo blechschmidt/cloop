@@ -203,7 +203,9 @@ func TestSetAutoEvolve(t *testing.T) {
 	initState(t, dir, "goal", 0)
 	o := newOrchestrator(t, dir, Config{WorkDir: dir}, &mockProvider{name: "mock"})
 
-	o.SetAutoEvolve(true)
+	if err := o.SetAutoEvolve(true); err != nil {
+		t.Fatalf("SetAutoEvolve: %v", err)
+	}
 	if !o.state.AutoEvolve {
 		t.Error("expected AutoEvolve=true")
 	}
@@ -3451,7 +3453,9 @@ func TestRecoverStaleTasks_Annotated(t *testing.T) {
 	}
 
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, &mockProvider{name: "mock"})
-	o.recoverStaleTasks(s)
+	if err := o.recoverStaleTasks(s); err != nil {
+		t.Fatalf("recoverStaleTasks: %v", err)
+	}
 
 	for _, id := range []int{1, 2} {
 		task := s.Plan.TaskByID(id)

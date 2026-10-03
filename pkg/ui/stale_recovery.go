@@ -211,6 +211,10 @@ type runVerdict struct {
 	// chose and one that happened to them, and only the latter is worth
 	// flagging as something that went wrong (Task 20285).
 	Requested bool
+	// Unsaved reports that the run stopped itself because the project
+	// database refused its writes (Task 20362), and could not store even
+	// that: the hub records the same reason the run would have.
+	Unsaved bool
 }
 
 // deadRunPauseReason turns a verdict about a vanished run into the reason the
@@ -219,6 +223,9 @@ type runVerdict struct {
 func deadRunPauseReason(v runVerdict) pausereason.Reason {
 	if v.Requested {
 		return pausereason.New(pausereason.CodeOperator, "run stopped")
+	}
+	if v.Unsaved {
+		return pausereason.New(pausereason.CodeStateNotPersisted, v.Detail)
 	}
 	detail := "previous run ended without reporting an outcome"
 	if v.Detail != "" {
@@ -289,6 +296,14 @@ func workloadVerdict(ex executor.Executor, handleID string) runVerdict {
 			detail = "the executor lost track of it"
 		}
 		return runVerdict{Detail: "its executor reported a failure (" + detail + ")"}
+	case st.ExitCode == pausereason.ExitStateNotPersisted:
+		// The run stopped itself because the project database refused a
+		// write it could not do without, and could not store even that.
+		return runVerdict{
+			Detail: fmt.Sprintf("the run stopped because the project database refused its writes "+
+				"(exit status %d); its output names the write that failed", st.ExitCode),
+			Unsaved: true,
+		}
 	case st.ExitCode != 0:
 		return runVerdict{Detail: fmt.Sprintf("it exited with status %d", st.ExitCode)}
 	default:

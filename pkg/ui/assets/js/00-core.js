@@ -889,6 +889,7 @@ const pauseReasonLabels = {
   idle:         'no runnable tasks',
   operator:     'stopped by operator',
   stale:        'previous run ended unexpectedly',
+  state_not_persisted: 'progress not saved',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

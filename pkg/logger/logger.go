@@ -94,6 +94,13 @@ const (
 	// failure, so it gets its own name rather than EventTaskFailed.
 	EventTaskInterrupted Event = "task_interrupted"
 
+	// EventStateWrite tags a failure to persist project state (Task 20362).
+	// It is its own event because it means something different from every
+	// other failure here: not that the work went wrong, but that the record of
+	// it did — so what the operator was told and what the database holds may
+	// disagree, and the next run acts on the database.
+	EventStateWrite Event = "state_write"
+
 	// EventAuthz tags access-control decisions and failures of the
 	// authorization machinery itself (Task 20164). Decisions are also
 	// written to the tamper-evident audit log; these entries exist so an

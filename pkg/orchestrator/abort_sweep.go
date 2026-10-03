@@ -103,7 +103,8 @@ func (o *Orchestrator) sweepAbortedOutcomes(s *state.ProjectState) int {
 	if s == nil || s.Plan == nil {
 		return 0
 	}
-	reopened, changed := 0, false
+	changed := false
+	var reopened []reopening
 	for _, t := range s.Plan.Tasks {
 		if t == nil {
 			continue
@@ -128,19 +129,34 @@ func (o *Orchestrator) sweepAbortedOutcomes(s *state.ProjectState) int {
 			// so the bad ledger entry remains visible, but it does not reopen.
 			continue
 		}
-		o.reopenAbortedOutcome(s, t, rec)
-		reopened++
+		reopenAbortedOutcome(t, rec)
+		reopened = append(reopened, reopening{t, rec})
 		changed = true
 	}
 	if changed {
-		s.Save()
+		// Written before the reopenings are announced. Best-effort, because
+		// the sweep is a pure function of the stored summaries: one whose
+		// write does not land is made again, identically, at the next start,
+		// and a reopened task cannot run before its in-progress write stores
+		// the reopening too.
+		o.persistBestEffort(s, fmt.Sprintf("the ledger sweep's findings (%d task(s) reopened)", len(reopened)),
+			"the sweep recomputes them from the stored summaries, and a reopened task's start stores them before it runs")
 	}
-	return reopened
+	for _, r := range reopened {
+		o.reportReopening(r.task, r.rec)
+	}
+	return len(reopened)
+}
+
+// reopening is one task the sweep returned to pending, and why.
+type reopening struct {
+	task *pm.Task
+	rec  *pm.TaskAbort
 }
 
 // reopenAbortedOutcome returns one task recorded as done on a refusal to
-// pending, and says so loudly enough that the reason is not lost.
-func (o *Orchestrator) reopenAbortedOutcome(s *state.ProjectState, t *pm.Task, rec *pm.TaskAbort) {
+// pending; reportReopening says so, after the sweep has written it.
+func reopenAbortedOutcome(t *pm.Task, rec *pm.TaskAbort) {
 	t.Status = pm.TaskPending
 	// A run that produced nothing has no completion instant and no elapsed
 	// work; leaving these set would keep rendering the task as finished.
@@ -150,7 +166,11 @@ func (o *Orchestrator) reopenAbortedOutcome(s *state.ProjectState, t *pm.Task, r
 	pm.AddAnnotation(t, "cloop", fmt.Sprintf(
 		"Reopened by the ledger sweep: recorded done, but the stored summary is a %s (%s), not a description of work. "+
 			"Reset to pending — it never ran.", rec.Class, rec.Reason))
+}
 
+// reportReopening announces a reopened task loudly enough that the reason is
+// not lost: in the event journal, on the terminal and in the log.
+func (o *Orchestrator) reportReopening(t *pm.Task, rec *pm.TaskAbort) {
 	state.LogEventDetails(o.config.WorkDir, state.EventRow{
 		Type:      state.EventTaskAborted,
 		TaskID:    t.ID,

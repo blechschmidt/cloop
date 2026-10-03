@@ -531,7 +531,9 @@ Press Ctrl+C to pause gracefully.`,
 			orc.AddSteps(continueSteps)
 		}
 		if effectiveAutoEvolve {
-			orc.SetAutoEvolve(true)
+			if err := orc.SetAutoEvolve(true); err != nil {
+				return err
+			}
 		}
 
 		// Build context: support total session timeout via --timeout flag.

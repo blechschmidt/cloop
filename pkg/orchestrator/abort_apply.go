@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -85,9 +86,12 @@ func repoChanged(before, after string) bool {
 // reason lands in its own event type so the journal can distinguish "the agent
 // decided this was impossible" from "the agent was never allowed to try".
 //
+// The task is stored back at pending before the abort is journalled or
+// printed, so a write that fails reports nothing; the error must end the run.
+//
 // The caller must hold whatever lock guards task mutation (the parallel loop
 // holds mu).
-func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort, step int) {
+func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort, step int) error {
 	task.Status = pm.TaskPending
 	// A run that produced nothing has no completion instant and no elapsed
 	// work; leaving these set would render the task as a finished one.
@@ -106,6 +110,9 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 		note += fmt.Sprintf(" Retry scheduled after %s.", ab.RetryAfter.UTC().Format(time.RFC1123))
 	}
 	pm.AddAnnotation(task, "cloop", note)
+	if err := o.persistOutcome(s, task, fmt.Sprintf("abort (%s), back to pending", ab.Class)); err != nil {
+		return err
+	}
 
 	details := map[string]any{
 		"abort_class": string(ab.Class),
@@ -132,6 +139,7 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 			task.ID, ab.Class, ab.Reason)
 	}
 	o.log.Warn(logger.EventTaskAborted, task.ID, task.Title, details)
+	return nil
 }
 
 // abortWait decides how long to hold off after an abort, and whether to give
@@ -168,9 +176,18 @@ func abortWait(ab Abort, now time.Time, ceiling, backoff time.Duration) (wait ti
 // next iteration picks that same task and hits the same wall. The old code did
 // not spin — it marked the task done and moved on — which is how five
 // consecutive tasks were closed against a single limit message.
-func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectState, ab Abort) (stop bool) {
+//
+// A pause is stored before it is announced. err is non-nil only when it could
+// not be: the caller must return it, because carrying on would leave the
+// database saying running with the task pending — the very wall this exists to
+// stop the run hitting again. mu, when the parallel loop passes it, guards the
+// state while the pause is written; it is not held during the wait.
+func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectState, ab Abort, mu sync.Locker) (stop bool, err error) {
 	wait, pause := abortWait(ab, o.now(), o.abortWaitCeiling(), o.abortRetryBackoff())
 	if pause {
+		if err := o.pauseLocked(s, abortPauseReason(ab), "the pause ("+ab.Reason+")", mu); err != nil {
+			return true, err
+		}
 		if ab.RetryAfter.IsZero() {
 			color.New(color.FgYellow).Printf("⏸ Pausing run: %s. Resolve it and run cloop again.\n", ab.Reason)
 		} else {
@@ -178,12 +195,10 @@ func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectS
 				"⏸ Pausing run: %s; it does not reset until %s (%s away). Run cloop again after that.\n",
 				ab.Reason, ab.RetryAfter.UTC().Format(time.RFC1123), wait.Round(time.Minute))
 		}
-		s.SetPaused(abortPauseReason(ab))
-		s.Save()
-		return true
+		return true, nil
 	}
 	if wait <= 0 {
-		return false
+		return false, nil
 	}
 
 	color.New(color.FgYellow).Printf("⏳ Waiting %s before retrying: %s\n", wait.Round(time.Second), ab.Reason)
@@ -195,13 +210,22 @@ func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectS
 		// nothing to requeue; what is left is to record the stop, because the
 		// callers return straight out of the run and a status still saying
 		// "running" would outlive it (Task 20348).
-		s.SetPaused(pausereason.New(pausereason.CodeCancelled,
-			"run interrupted while waiting to retry: "+ab.Reason))
-		s.Save()
-		return true
+		return true, o.pauseLocked(s, pausereason.New(pausereason.CodeCancelled,
+			"run interrupted while waiting to retry: "+ab.Reason), "the pause (run interrupted while waiting to retry)", mu)
 	case <-timer.C:
-		return false
+		return false, nil
 	}
+}
+
+// pauseLocked parks the run and stores the pause, holding mu (when given)
+// across both.
+func (o *Orchestrator) pauseLocked(s *state.ProjectState, r pausereason.Reason, what string, mu sync.Locker) error {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	s.SetPaused(r)
+	return o.persist(s, what)
 }
 
 // abortWaitCeiling is maxAbortWait unless a test has narrowed it.

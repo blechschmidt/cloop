@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/reviewgate"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/fatih/color"
 )
 
 // gateRun is one task's passage through the review gate.
@@ -432,13 +433,14 @@ func (o *Orchestrator) logReviewEvent(s *state.ProjectState, task *pm.Task, out 
 
 // recordReviewCost bills the reviewer's tokens to the task in the cost ledger,
 // under the reviewer's own provider and model, so a gate on a more expensive
-// model shows up as what it costs.
+// model shows up as what it costs. Best-effort like the task's own ledger
+// entry: a failure is reported, not returned.
 func (o *Orchestrator) recordReviewCost(task *pm.Task, out *gateOutcome) {
 	if out == nil || (out.reviewIn == 0 && out.reviewOut == 0) {
 		return
 	}
 	usd, _ := cost.Estimate(strings.ToLower(out.reviewerModel), out.reviewIn, out.reviewOut)
-	_ = cost.AppendLedger(o.config.WorkDir, cost.LedgerEntry{
+	err := cost.AppendLedger(o.config.WorkDir, cost.LedgerEntry{
 		TaskID:       task.ID,
 		TaskTitle:    task.Title + " (review)",
 		Provider:     out.reviewerName,
@@ -448,6 +450,9 @@ func (o *Orchestrator) recordReviewCost(task *pm.Task, out *gateOutcome) {
 		EstimatedUSD: usd,
 		Identity:     resolveRunIdentity(o.config.WorkDir),
 	})
+	if err != nil {
+		color.New(color.Faint).Printf("  cost ledger write error for task %d's review (ignored): %v\n", task.ID, err)
+	}
 }
 
 // withGateSection puts the gate's section into a task prompt ahead of its

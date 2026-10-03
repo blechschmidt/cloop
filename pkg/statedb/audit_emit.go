@@ -685,6 +685,30 @@ func auditStateSave(d *DB, s *State) {
 	})
 }
 
+// auditRunStatus records a status-only write (SaveRunStatus) under the same
+// action as a full state save. It carries only the keys that write changed —
+// a subset of the registered payload — rather than a goal and counters it
+// never read, which would put zeroes in the trail that look like facts.
+func auditRunStatus(d *DB, status string, pr *pausereason.Reason) {
+	payload := map[string]any{"status": status}
+	if pr != nil {
+		payload["pause_code"] = string(pr.Code)
+		if pr.Detail != "" {
+			payload["pause_detail"] = pr.Detail
+		}
+		if pr.ResumesAt != nil {
+			payload["pause_resumes_at"] = pr.ResumesAt.UTC().Format(time.RFC3339)
+		}
+	}
+	emit(d, &AuditEvent{
+		Actor:      "system",
+		EventType:  string(auditaction.ActionStateSave),
+		EntityType: "plan",
+		EntityID:   "",
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
 // SecretAuditInput carries one secret-broker decision to the audit log
 // (Task 20159). It exists so pkg/secretstore does not have to construct an
 // AuditEvent — and, more to the point, so the entity_type is set in exactly

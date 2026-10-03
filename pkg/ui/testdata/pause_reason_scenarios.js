@@ -49,14 +49,27 @@ const PROJECT = {
   plan: {goal: 'evolve cloop', tasks: []},
 };
 
+// A run that stopped because the database refused a write it could not do
+// without (Task 20362): what the orchestrator stores as the pause, and the
+// session_failed row it journals beside it.
+const UNSAVED_DETAIL = "could not save task #3's completion (status done): database or disk is full";
+const UNSAVED_EVENT = {
+  id: -9, kind: 'session_failed', timestamp: new Date().toISOString(),
+  task_id: 3, task_title: 'Add login', step: -1,
+  message: 'Run stopped: ' + UNSAVED_DETAIL +
+    '. Nothing after that was recorded; the next run recovers the tasks this one left in progress.',
+  details: {cause: 'state_not_persisted', status_recorded: true},
+};
+
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
-async function boot(state, projects) {
+async function boot(state, projects, routes) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
   require(shimPath);
   const h = globalThis.__harness;
   h.states = {0: clone(state)};
   h.projects = projects || {multi_project: false, stats: {total_projects: 1}, projects: []};
+  h.routes = routes || {};
 
   require(bundlePath);
   await globalThis.__settle(5);
@@ -121,6 +134,30 @@ const scenarios = {
       code: 'usage_cap', detail: '5-hour cap reached',
       resumes_at: new Date(Date.now() - 60 * 1000).toISOString(),
     };
+    await boot(st);
+    const el = document.getElementById('statusBadge');
+    return {badge: el ? (el.innerHTML || '') : ''};
+  },
+
+  // A run that stopped because its progress could not be saved says what was
+  // lost — in the badge, and in the Event History beside it.
+  async unsaved_progress() {
+    const st = clone(PROJECT);
+    st.pause_reason = {code: 'state_not_persisted', detail: UNSAVED_DETAIL};
+    await boot(st, null, {'/api/event-history': {entries: [UNSAVED_EVENT], total: 1}});
+    const badge = document.getElementById('statusBadge');
+    const history = document.getElementById('stepList');
+    return {
+      badge: badge ? (badge.innerHTML || '') : '',
+      html: history ? (history.innerHTML || '') : '',
+    };
+  },
+
+  // The same stop recorded by the hub with no detail of its own still reads
+  // as prose.
+  async unsaved_progress_bare() {
+    const st = clone(PROJECT);
+    st.pause_reason = {code: 'state_not_persisted'};
     await boot(st);
     const el = document.getElementById('statusBadge');
     return {badge: el ? (el.innerHTML || '') : ''};

@@ -165,11 +165,14 @@ func (o *Orchestrator) handleKillRequest(req state.KillRequest) {
 	}
 
 	// Phase 2: worker has exited (status is terminal). Override with the
-	// operator's chosen target_status, persist, and clear the row.
+	// operator's chosen target_status, store it, and clear the row — in that
+	// order. A row cleared before the status it carries reached the database
+	// is the operator's decision silently undone, so a write that does not
+	// land (persistOutcome reports it) leaves the row, and this process's
+	// observation of the attempt, in place for the next tick to try again.
 	o.applyKillTargetStatus(task, req.TargetStatus)
-	if err := o.state.Save(); err != nil && o.log != nil {
-		o.log.Warn(eventManualKill, req.TaskID,
-			fmt.Sprintf("Task #%d: persist target status failed: %v", req.TaskID, err), nil)
+	if err := o.persistOutcome(o.state, task, "status chosen by the operator"); err != nil {
+		return
 	}
 	o.forgetKillObserved(req.TaskID)
 	if err := o.statedb.ClearKill(req.TaskID); err != nil && o.log != nil {

@@ -662,6 +662,29 @@ func SetReviewGate(workDir string, g *pm.ReviewGate) error {
 	return db.SaveReviewGate(g)
 }
 
+// SaveRunStatus writes the run's status and pause reason and nothing else —
+// no tasks, no steps, no merge (Task 20362). It is the last write an
+// orchestrator makes when it stops because a full Save failed, so it touches
+// as little as it can: the plan on disk stays as the last successful save
+// left it. It never creates a database; a project without one has nowhere to
+// record a status.
+func (s *ProjectState) SaveRunStatus() error {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+
+	s.UpdatedAt = time.Now()
+	dbPath := effectiveDBPath(s.WorkDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("no project database at %s: %w", dbPath, err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveRunStatus(s.Status, s.PauseReason, s.UpdatedAt)
+}
+
 // SetPaused parks the run and records why.
 //
 // This is the only sanctioned way to reach the "paused" status: a direct

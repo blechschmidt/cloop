@@ -33,6 +33,28 @@ func capOrchestrator(now time.Time) *Orchestrator {
 	}
 }
 
+// capState is a running project with a database of its own. The pause the cap
+// path records is a write the run cannot do without, so it needs somewhere to
+// land — a state with no WorkDir would put it in .cloop/ under the package's
+// own source directory.
+func capState(t *testing.T) *state.ProjectState {
+	t.Helper()
+	s := initState(t, tempDir(t), "cap goal", 0)
+	s.Status = "running"
+	return s
+}
+
+// mustHandleUsageCap runs handleUsageCap and fails the test if the pause it
+// records could not be stored, which none of these tests set out to provoke.
+func mustHandleUsageCap(t *testing.T, o *Orchestrator, s *state.ProjectState, capErr error) bool {
+	t.Helper()
+	stop, err := o.handleUsageCap(context.Background(), s, capErr)
+	if err != nil {
+		t.Fatalf("handleUsageCap: %v", err)
+	}
+	return stop
+}
+
 func capError(window string, resetsAt time.Time) error {
 	return &ratelimit.CapExceededError{Violations: []ratelimit.LimitViolation{{
 		Window:      window,
@@ -51,9 +73,9 @@ func TestDistantCapPausesAndRecordsWhenItResumes(t *testing.T) {
 	reset := now.Add(5 * 24 * time.Hour)
 
 	o := capOrchestrator(now)
-	s := &state.ProjectState{Status: "running"}
+	s := capState(t)
 
-	if stop := o.handleUsageCap(context.Background(), s, capError("weekly", reset)); !stop {
+	if stop := mustHandleUsageCap(t, o, s, capError("weekly", reset)); !stop {
 		t.Fatal("handleUsageCap returned stop=false for a window five days out")
 	}
 	if s.Status != "paused" {
@@ -82,9 +104,9 @@ func TestNearCapIsWaitedOutRatherThanEndingTheRun(t *testing.T) {
 	// the run carries straight on instead of stopping — the in-process half of
 	// auto-resume.
 	o := capOrchestrator(now)
-	s := &state.ProjectState{Status: "running"}
+	s := capState(t)
 
-	stop := o.handleUsageCap(context.Background(), s, capError("five_hour", now.Add(-time.Minute)))
+	stop := mustHandleUsageCap(t, o, s, capError("five_hour", now.Add(-time.Minute)))
 	if stop {
 		t.Error("handleUsageCap stopped the run for a window that had already reopened")
 	}
@@ -102,9 +124,9 @@ func TestCapWithNoKnownResetPausesWithoutInventingOne(t *testing.T) {
 	o := capOrchestrator(now)
 	o.testAbortWaitCeiling = time.Second
 	o.testAbortBackoff = time.Hour
-	s := &state.ProjectState{Status: "running"}
+	s := capState(t)
 
-	if stop := o.handleUsageCap(context.Background(), s, capError("five_hour", time.Time{})); !stop {
+	if stop := mustHandleUsageCap(t, o, s, capError("five_hour", time.Time{})); !stop {
 		t.Fatal("handleUsageCap did not stop the run despite a backoff beyond the ceiling")
 	}
 	if s.Status != "paused" || s.PauseReason == nil {
@@ -139,9 +161,9 @@ func TestStaleResetDoesNotHotLoop(t *testing.T) {
 	o := capOrchestrator(now)
 	o.testAbortWaitCeiling = time.Second
 	o.testAbortBackoff = time.Hour
-	s := &state.ProjectState{Status: "running"}
+	s := capState(t)
 
-	stop := o.handleUsageCap(context.Background(), s, capError("five_hour", now.Add(-10*time.Minute)))
+	stop := mustHandleUsageCap(t, o, s, capError("five_hour", now.Add(-10*time.Minute)))
 	if !stop {
 		t.Fatal("a stale reset was honoured as a real one — the run would spin re-checking the same snapshot")
 	}
@@ -158,12 +180,12 @@ func TestStaleResetDoesNotHotLoop(t *testing.T) {
 func TestUntypedCapErrorStillPauses(t *testing.T) {
 	now := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 	o := capOrchestrator(now)
-	s := &state.ProjectState{Status: "running"}
+	s := capState(t)
 
 	// If enforcement ever grows a failure mode that is not a CapExceededError,
 	// it must pause rather than be mistaken for a window that reopens on its
 	// own — a wrong guess here would auto-resume into a wall forever.
-	if stop := o.handleUsageCap(context.Background(), s, errors.New("usage API unreachable")); !stop {
+	if stop := mustHandleUsageCap(t, o, s, errors.New("usage API unreachable")); !stop {
 		t.Fatal("an untyped cap error did not stop the run")
 	}
 	if s.Status != "paused" || s.PauseReason == nil {

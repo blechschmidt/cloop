@@ -427,9 +427,11 @@ releasing the task early:
 task 7: column depends_on is not decodable JSON ("[1,2"): statedb: corrupt task column: unexpected end of JSON input
 ```
 
-A run in progress keeps going in memory but stops saving until the row is
-repaired, because a save replaces every stored task and would delete or
-overwrite the one the error names. Back up, then write the list you want:
+A save refuses to go ahead too, because it replaces every stored task and
+would delete or overwrite the one the error names — so a run in progress stops
+at its next write rather than carrying on with work it can no longer record
+(see "A run stopped: run progress could not be saved" below). Back up, then
+write the list you want:
 
 ```console
 $ cloop db backup
@@ -1659,6 +1661,29 @@ layer-7 question, and a host allowlist is only ever enforced there.
 WAL and `busy_timeout` are already configured, so this points at a second writer.
 Check for a stray `cloop` process on the same `.cloop` directory, or a shared
 volume.
+
+**A run stopped: "run progress could not be saved".**
+The project database refused a write the run could not do without — a task's
+outcome, a pause, a plan change — so the run stopped rather than report work
+the database does not hold. The badge, `cloop status` and the Event History
+name the write that failed and the database's own error:
+
+```
+Status:   paused
+Reason:   could not save task #12's completion (status done): database or disk is full
+```
+
+The usual causes are a full disk, a read-only mount or file permissions, a
+lock another process held past `busy_timeout`, and a damaged task row (see "A
+task row that will not load" above). Fix that first; `cloop db verify` checks
+the file itself. Then start the run again: the tasks the stopped run left in
+progress are recovered the usual way — an outcome its agent had already
+reported is adopted rather than run again, and anything else is re-queued.
+
+When the database took nothing at all, not even the stop, the run's exit
+status is 74 and its last lines of output say what failed. The hub reads that
+status, records the same pause on the run's behalf, and journals it, so the
+dashboard reads the same either way — provided the hub itself can write.
 
 **Nothing will schedule.**
 Read the placement error: it names the constraint and lists per-candidate

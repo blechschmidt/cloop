@@ -314,7 +314,15 @@ import (
 // The new slack is 11 B. The three features cost 2,619 B and the stripping
 // above freed 2,381 B, so the set is 238 B heavier than before this task. The
 // next addition has to trim, defer, or raise this with a reason.
-const eagerWireBudgetBytes = 215_700
+//
+// Task 20362 adds the label for the state_not_persisted pause code — a run
+// that stopped itself because the project database refused its writes. It is
+// one line of pauseReasonLabels, which TestEveryPauseReasonCodeIsRenderable
+// requires for every code, and it cannot be deferred: the status badge and the
+// project cards render pause reasons on first paint. 15 B with the label as
+// short as it still reads ("progress not saved"). Measured after: 215,704 B,
+// so the ceiling moves by 20 B.
+const eagerWireBudgetBytes = 215_720
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

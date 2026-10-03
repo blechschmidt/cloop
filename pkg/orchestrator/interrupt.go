@@ -63,9 +63,13 @@ func runInterrupted(ctx context.Context) bool {
 // the wait ended with the run, and a pending task shown as "still waiting for
 // background work" would be describing a wait that no longer exists.
 //
-// The caller persists the plan, and must hold whatever lock guards task
-// mutation (the parallel loop holds mu).
-func (o *Orchestrator) requeueInterrupted(task *pm.Task, stage string, step int) {
+// The return to pending is written before it is journalled. The write is
+// best-effort: the run is ending, the pause it records next stores the task
+// too and ends the run if it cannot, and should neither land, stale-task
+// recovery returns the task to pending at the next start — the same status
+// this records. The caller must hold whatever lock guards task mutation (the
+// parallel loop holds mu).
+func (o *Orchestrator) requeueInterrupted(s *state.ProjectState, task *pm.Task, stage string, step int) {
 	task.Status = pm.TaskPending
 	task.CompletedAt = nil
 	task.ActualMinutes = 0
@@ -76,6 +80,8 @@ func (o *Orchestrator) requeueInterrupted(task *pm.Task, stage string, step int)
 	pm.AddAnnotation(task, "cloop", fmt.Sprintf(
 		"Interrupted %s: the run stopped before the task finished. "+
 			"Returned to pending, so the next run starts it again.", stage))
+	o.persistBestEffort(s, fmt.Sprintf("task #%d's return to pending after the run stopped", task.ID),
+		"the pause the stopping run records next stores it too, and stale-task recovery reaches the same status if neither lands")
 
 	details := map[string]any{
 		"stage":         stage,

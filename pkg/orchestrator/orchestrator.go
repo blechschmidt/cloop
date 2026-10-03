@@ -519,11 +519,6 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if cfg.WorktreeParallel {
 		s.WorktreeParallel = true
 	}
-	// Persist CLI-driven overrides so the running loop's SyncFromDisk reads them
-	// back instead of overwriting the in-memory values from a stale on-disk state
-	// (mergeExternalTasks copies disk → memory for these toggles, so without this
-	// SaveDirect the overrides would be silently clobbered on the first Save).
-	_ = s.SaveDirect()
 	mem, _ := memory.Load(cfg.WorkDir)
 	if mem == nil {
 		mem = &memory.Memory{}
@@ -592,7 +587,32 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// task from the UI (Task 20140).
 	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry()}
 
+	// Persist the command line's overrides so the loop's SyncFromDisk reads
+	// them back rather than overwriting them from the stored state:
+	// mergeExternalTasks copies these toggles disk → memory, so a merging
+	// write — or none — would quietly put the run back on the stored settings.
+	// A run that cannot store them would not run as asked, so it does not
+	// start.
+	if err := o.persist(s, "this run's command-line settings (parallel, worktrees, innovate)", replacePlan); err != nil {
+		o.closeStores()
+		return nil, err
+	}
 	return o, nil
+}
+
+// closeStores releases the database handles New opened, for a New that fails
+// after opening them. Unlike Close it touches no queue entries: a run that
+// never started has nothing to settle, and the entries it would mark could
+// belong to a run that is very much alive.
+func (o *Orchestrator) closeStores() {
+	if o.statedb != nil {
+		_ = o.statedb.Close()
+		o.statedb = nil
+	}
+	if o.queue != nil {
+		_ = o.queue.Close()
+		o.queue = nil
+	}
 }
 
 // Close releases resources held by the orchestrator. Safe to call multiple times.
@@ -782,16 +802,23 @@ func isTimeoutErr(taskCtx context.Context, err error) bool {
 	return errors.Is(context.Cause(taskCtx), context.DeadlineExceeded)
 }
 
-// handleTaskTimeout marks the task as timed_out, fires desktop and webhook
-// notifications, and persists a final artifact line indicating the timeout
-// (Task 20108). Always writes an artifact entry even when the provider
-// returned no partial output, so post-mortem inspection always finds a
-// trace of the timeout. The effective budget is resolved via
-// effectiveTaskBudgetMinutes so the value reported to the user, the
-// annotation, and the webhook all match the deadline that actually fired —
-// task.MaxMinutes alone may be 0 when the cancellation was triggered by the
-// project-level or process-wide default.
-func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color) {
+// handleTaskTimeout marks the task as timed_out, stores that, and only then
+// fires the desktop and webhook notifications (Task 20108). It always writes
+// an artifact entry, even when the provider returned no partial output, so
+// post-mortem inspection always finds a trace of the timeout. The effective
+// budget is resolved via effectiveTaskBudgetMinutes so the value reported to
+// the user, the annotation, and the webhook all match the deadline that
+// actually fired — task.MaxMinutes alone may be 0 when the cancellation was
+// triggered by the project-level or process-wide default.
+//
+// mu guards the task in the parallel loop, where other workers save while this
+// runs; the sequential loop passes nil. It is held across the change and the
+// write, and released before the notifications, which go out over the network.
+// The returned error is the write's and must end the run.
+func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color, mu sync.Locker) error {
+	if mu != nil {
+		mu.Lock()
+	}
 	task.Status = pm.TaskTimedOut
 	completedAt := time.Now()
 	task.CompletedAt = &completedAt
@@ -830,6 +857,15 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 			dimColor.Printf("  timeout marker artifact: %s\n", ap)
 		}
 	}
+	err := o.persistOutcome(s, task, "timeout")
+	done, failed := s.Plan.CountByStatus()
+	total := len(s.Plan.Tasks)
+	if mu != nil {
+		mu.Unlock()
+	}
+	if err != nil {
+		return err
+	}
 
 	// Desktop notification.
 	if o.config.Notify {
@@ -841,7 +877,6 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 		fmt.Sprintf("Task #%d: %s\nGoal: %s\nBudget: %dm", task.ID, task.Title, s.Goal, budgetMin),
 	)
 	// Structured event webhook.
-	done, failed := s.Plan.CountByStatus()
 	o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
 		Goal: s.Goal,
 		Task: &webhook.TaskInfo{
@@ -849,13 +884,36 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 			Title:  task.Title,
 			Status: "timed_out",
 		},
-		Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+		Progress: &webhook.Progress{Done: done, Total: total, Failed: failed},
 		Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 	})
 	o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
 		"reason":         "timed_out",
 		"budget_minutes": budgetMin,
 	})
+	return nil
+}
+
+// failRun ends the run as failed: it stores the status, then announces it —
+// the session_failed webhook and a session_failed row in the event journal,
+// so the dashboard's history says why the run ended — and returns cause. A
+// status that cannot be stored ends the run all the same, with both errors.
+func (o *Orchestrator) failRun(s *state.ProjectState, cause error) error {
+	s.Status = "failed"
+	if err := o.persist(s, fmt.Sprintf("the run's status (failed: %v)", cause)); err != nil {
+		return errors.Join(cause, err)
+	}
+	o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+		Goal:    s.Goal,
+		Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+		Error:   webhook.TruncateError(cause.Error()),
+	})
+	state.LogEventDetails(o.config.WorkDir, state.EventRow{
+		Type:    state.EventSessionFailed,
+		Step:    state.NoStep,
+		Message: "Run failed: " + cause.Error(),
+	}, map[string]any{"error": cause.Error()})
+	return cause
 }
 
 // allEnvLines returns the combined KEY=value env lines from per-project env vars
@@ -944,7 +1002,8 @@ func (o *Orchestrator) RegisterRoute(role pm.AgentRole, prov provider.Provider) 
 
 func (o *Orchestrator) AddSteps(n int) {
 	o.state.MaxSteps += n
-	o.state.Save()
+	o.persistBestEffort(o.state, "a --continue raise of the step limit",
+		"this run already honours it, and every later write stores it too")
 }
 
 // logTaskOutcomeEvent appends one terminal event row to the events journal
@@ -1002,16 +1061,24 @@ func (o *Orchestrator) logTaskOutcomeEvent(task *pm.Task, taskDur string, step i
 	})
 }
 
-func (o *Orchestrator) SetAutoEvolve(enabled bool) {
+// SetAutoEvolve switches auto-evolve for this run and the ones after it.
+//
+// The write replaces rather than merges, for the reason New's does: a merging
+// write starts by copying the stored toggles over the ones in memory, so on a
+// project with a plan it stored the old setting straight back, and so does
+// every SyncFromDisk after it. The error matters for the same reason — a
+// setting that did not reach the database is gone at the loop's first sync.
+func (o *Orchestrator) SetAutoEvolve(enabled bool) error {
 	o.state.AutoEvolve = enabled
-	o.state.Save()
+	return o.persist(o.state, "the auto-evolve setting", replacePlan)
 }
 
 // SetProvider persists the provider name in state so subsequent runs default to the same provider.
 func (o *Orchestrator) SetProvider(name string) {
 	if name != "" {
 		o.state.Provider = name
-		o.state.Save()
+		o.persistBestEffort(o.state, "the provider later runs default to",
+			"this run already has its provider, and every later write stores it too")
 	}
 }
 
@@ -1104,7 +1171,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// in at New time), so closing here is safe.
 	defer o.Close()
 	defer pollCancel()
-	return o.runPM(ctx)
+	err := o.runPM(ctx)
+	if errors.Is(err, ErrStateNotPersisted) {
+		// The pollers write state too, so they stop before the last word.
+		pollCancel()
+		o.killWG.Wait()
+		o.recordAbort(err)
+	}
+	return err
 }
 
 // errSwitchMode is returned by the runPMSequential / runPMParallel loops when
@@ -1169,10 +1243,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	s := o.state
 
 	// Recover stale tasks from prior interrupted runs.
-	o.recoverStaleTasks(s)
+	if err := o.recoverStaleTasks(s); err != nil {
+		return err
+	}
 
 	s.Status = "running"
-	if err := s.Save(); err != nil {
+	if err := o.persist(s, "the run's status (running)"); err != nil {
 		return err
 	}
 
@@ -1227,7 +1303,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	if o.config.Replan && s.Plan != nil {
 		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
 		s.Plan = nil
-		s.Save()
+		if err := o.persist(s, "the plan cleared for --replan"); err != nil {
+			return err
+		}
 	}
 
 	// Phase 1: Decompose goal into tasks (if not already done)
@@ -1259,21 +1337,21 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Description: truncate(s.Goal, 300),
 			Source:      "orchestrator",
 		})
-		_ = o.queue.MarkRunning(decomposeQueueID)
+		o.queueRunning(decomposeQueueID)
 		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, clarifyCtx)
 		if err != nil {
-			_ = o.queue.MarkFailed(decomposeQueueID, truncate(err.Error(), 200))
+			o.queueFailed(decomposeQueueID, truncate(err.Error(), 200))
 			failColor.Printf("x Failed to decompose goal: %v\n", err)
-			s.Status = "failed"
-			s.Save()
-			return err
+			return o.failRun(s, fmt.Errorf("decomposing the goal: %w", err))
 		}
-		_ = o.queue.MarkDone(decomposeQueueID, fmt.Sprintf("decomposed into %d task(s)", len(plan.Tasks)))
 		if o.config.CalibrationFactor != 0 && o.config.CalibrationFactor != 1.0 {
 			pm.ApplyCalibrationFactor(plan, o.config.CalibrationFactor)
 		}
 		s.Plan = plan
-		s.Save()
+		if err := o.persist(s, "the plan decomposed from the goal"); err != nil {
+			return err
+		}
+		o.queueDone(decomposeQueueID, fmt.Sprintf("decomposed into %d task(s)", len(plan.Tasks)))
 
 		fmt.Printf("\n")
 		pmColor.Printf("Task Plan (%d tasks):\n", len(plan.Tasks))
@@ -1293,8 +1371,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 			}
 			if retried > 0 {
+				if err := o.persist(s, "failed tasks reset to pending by --retry-failed"); err != nil {
+					return err
+				}
 				pmColor.Printf("Retrying %d failed task(s).\n\n", retried)
-				s.Save()
 			}
 		}
 		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
@@ -1302,15 +1382,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 	// Optimization pass: AI reviews the plan before execution.
 	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
-		o.runOptimizer(ctx, s, pmColor, dimColor)
+		if err := o.runOptimizer(ctx, s, pmColor, dimColor); err != nil {
+			return err
+		}
 	}
 
 	// Plan-only mode: just show the plan, don't execute
 	if o.config.PlanOnly {
 		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
 			"plan-only mode: the plan was generated but not executed"))
-		s.Save()
-		return nil
+		return o.persist(s, "the pause (plan-only mode)")
 	}
 
 	// Stale in-progress recovery: a task still marked in_progress means the
@@ -1322,7 +1403,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	//
 	// This must happen before scheduling: NextTask() only returns pending
 	// tasks, so an in_progress task is otherwise skipped forever.
-	o.recoverStaleTasks(s)
+	if err := o.recoverStaleTasks(s); err != nil {
+		return err
+	}
 
 	// An operator at a terminal may prefer to skip a task that was re-queued
 	// rather than watch it fail again. Adopted tasks are not offered — there is
@@ -1340,7 +1423,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if answer := strings.ToLower(strings.TrimSpace(scanner.Text())); answer == "s" || answer == "skip" {
 				t.Status = pm.TaskSkipped
 				pm.AddAnnotation(t, "ai", "Task skipped at stale-task recovery (operator chose 'skip' after a previously interrupted run).")
-				s.Save()
+				if err := o.persistOutcome(s, t, "skip, chosen by the operator at stale-task recovery"); err != nil {
+					return err
+				}
 				dimColor.Printf("→ Task %d skipped.\n\n", t.ID)
 			}
 		}
@@ -1352,9 +1437,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		Total: len(s.Plan.Tasks),
 	}, o.allEnvLines()...); err != nil {
 		failColor.Printf("✗ pre_plan hook failed: %v — aborting plan execution.\n", err)
-		s.Status = "failed"
-		s.Save()
-		return err
+		return o.failRun(s, err)
 	}
 
 	// Post-plan hook: runs when plan finishes (done or paused).
@@ -1467,26 +1550,32 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.SetPaused(pausereason.New(pausereason.CodeCancelled, "run interrupted"))
-			s.Save()
+			if err := o.persist(s, "the pause (run interrupted)"); err != nil {
+				return errors.Join(ctx.Err(), err)
+			}
 			return ctx.Err()
 		default:
 		}
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
-			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
 			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
 				fmt.Sprintf("--steps limit of %d reached", o.config.StepsLimit)))
-			s.Save()
+			if err := o.persist(s, "the pause (--steps limit reached)"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
 			return nil
 		}
 
 		// Token budget check at the top of the loop so it fires during evolve cycles
 		// (where the work-execution path's check would otherwise be skipped).
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
-			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
 				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
-			s.Save()
+			if err := o.persist(s, "the pause (token budget reached)"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			return nil
 		}
 
@@ -1510,13 +1599,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				Description: truncate(t.Description, 300),
 				Source:      "external",
 			})
-			_ = o.queue.MarkDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
+			o.queueDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
 		}
 		// Reactivate recurring tasks whose schedule has fired.
 		for _, t := range s.Plan.Tasks {
 			if pm.ResetIfDue(t, time.Now()) {
 				dimColor.Printf("↺ Task %d recurring: reset to pending (%s)\n", t.ID, t.Recurrence)
-				s.Save()
+				o.persistBestEffort(s, "a recurring task's reset to pending",
+					"every later write stores it, and if none lands the schedule, still due on disk, fires again at the next start")
 			}
 		}
 		// Mid-run mode switch: if the user enabled parallel mode (or set
@@ -1537,6 +1627,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			continue
 		}
 		if s.Plan.IsComplete() {
+			// A run that ends here stores that it did before saying so. One
+			// that goes on to evolve announces only what the tasks already
+			// recorded.
+			if !s.AutoEvolve {
+				s.Status = "complete"
+				if err := o.persist(s, "the run's status (complete)"); err != nil {
+					return err
+				}
+			}
 			if !o.log.IsJSON() {
 				line, achieved := settlementLine(s.Plan, s.AutoEvolve)
 				banner := successColor
@@ -1583,24 +1682,34 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			})
 			if s.AutoEvolve {
 				s.Status = "evolving"
-				s.Save()
+				o.persistBestEffort(s, "the run's status (evolving)",
+					"it only tells the dashboard which phase is running, and the next write replaces it")
 				n, err := o.evolvePM(ctx)
 				if err != nil {
+					// The discovered tasks did not reach the database: the
+					// run stops on that, not on the evolve round.
+					if errors.Is(err, ErrStateNotPersisted) {
+						return err
+					}
 					// Cancellation (Ctrl-C, deadline) is an interruption, not a
 					// completed session — pause so the next run resumes evolving.
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
 						s.SetPaused(pausereason.New(pausereason.CodeCancelled,
 							"run interrupted while evolving the plan"))
-						s.Save()
+						if saveErr := o.persist(s, "the pause (run interrupted while evolving)"); saveErr != nil {
+							return errors.Join(err, saveErr)
+						}
+						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
 						if ctxErr := ctx.Err(); ctxErr != nil {
 							return ctxErr
 						}
 						return err
 					}
-					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					s.Status = "complete"
-					s.Save()
+					if saveErr := o.persist(s, "the run's status (complete: evolve stopped)"); saveErr != nil {
+						return saveErr
+					}
+					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					return nil
 				}
 				if n == 0 {
@@ -1612,9 +1721,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					// spin forever burning tokens.
 					hasBudget := o.config.TokenBudget > 0 || o.config.StepsLimit > 0
 					if !hasBudget && consecutiveEmptyEvolves >= maxEmptyEvolves {
-						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						s.Status = "complete"
-						s.Save()
+						if err := o.persist(s, "the run's status (complete: auto-evolve found nothing new)"); err != nil {
+							return err
+						}
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						return nil
 					}
 					if hasBudget {
@@ -1629,8 +1740,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				s.Status = "running"
 				continue
 			}
-			s.Status = "complete"
-			s.Save()
+			// Stored before the announcements above it ran (see the top of
+			// this block).
 			return nil
 		}
 
@@ -1639,7 +1750,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			results := pm.CheckAndBoostOverdue(s.Plan)
 			for _, r := range results {
 				if r.Boosted {
-					s.Save()
+					o.persistBestEffort(s, "an overdue task's priority boost",
+						"the deadline check recomputes it from the stored deadline every iteration")
 					color.New(color.FgRed, color.Bold).Printf("\u26a0 Task %d overdue and boosted to P1: %s\n", r.Task.ID, r.Task.Title)
 				}
 				if o.config.Notify {
@@ -1659,7 +1771,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.config.AutoPromote {
 			promotions := promote.Run(s.Plan, o.config.AutoPromoteThresholdDays, false)
 			if len(promotions) > 0 {
-				s.Save()
+				o.persistBestEffort(s, "auto-promoted task priorities",
+					"auto-promote recomputes them from the stored deadlines every iteration")
 				for _, p := range promotions {
 					color.New(color.FgYellow, color.Bold).Printf(
 						"\u2191 Task %d promoted P%d→P%d (%s): %s\n",
@@ -1673,10 +1786,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// the condition gate, all in GateTasks so this path and runPMParallel
 		// cannot disagree about the outcome or how it is worded.
 		gate := GateTasks(ctx, s.Plan, o.gateConfig(false))
-		printGateDecision(gate, failColor, dimColor)
 		if gate.Skipped() > 0 {
-			s.Save()
+			if err := o.persist(s, fmt.Sprintf("the execution gate's skips (tasks %v)", gate.SkippedIDs())); err != nil {
+				return err
+			}
 		}
+		printGateDecision(gate, failColor, dimColor)
 		if len(gate.Runnable) == 0 {
 			if gate.Exhausted {
 				break
@@ -1687,18 +1802,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Check max steps limit
 		if s.MaxSteps > 0 && s.CurrentStep >= s.MaxSteps {
-			color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue.\n", s.MaxSteps)
 			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
 				fmt.Sprintf("project max-steps limit of %d reached", s.MaxSteps)))
-			s.Save()
+			if err := o.persist(s, "the pause (project max-steps limit reached)"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue.\n", s.MaxSteps)
 			return nil
 		}
 
 		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
 		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
-			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
 			s.SetPaused(pausereason.New(pausereason.CodeBudget, budgetErr.Error()))
-			s.Save()
+			if err := o.persist(s, "the pause (budget limit reached)"); err != nil {
+				return errors.Join(budgetErr, err)
+			}
+			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
 			return budgetErr
 		}
 
@@ -1709,7 +1828,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// loops so the sequential and parallel paths cannot disagree about
 		// what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
-			if o.handleUsageCap(ctx, s, ccErr) {
+			stop, err := o.handleUsageCap(ctx, s, ccErr)
+			if err != nil {
+				return errors.Join(ccErr, err)
+			}
+			if stop {
 				return ccErr
 			}
 			continue
@@ -1744,10 +1867,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			} else if riskReport != nil && len(riskReport.Findings) > 0 {
 				printRiskBanner(riskReport)
 				if riskReport.HasCritical() && !o.config.RiskForce {
-					failColor.Printf("✗ Task %d aborted: CRITICAL risk finding(s). Use --force to override.\n\n", task.ID)
 					task.Status = pm.TaskFailed
 					pm.AddAnnotation(task, "ai", "Task failed: pre-execution risk assessment flagged CRITICAL finding(s); aborted before provider call. Use --force to override.")
-					s.Save()
+					if err := o.persistOutcome(s, task, "failure (CRITICAL pre-execution risk finding)"); err != nil {
+						return err
+					}
+					failColor.Printf("✗ Task %d aborted: CRITICAL risk finding(s). Use --force to override.\n\n", task.ID)
 					continue
 				}
 			}
@@ -1764,25 +1889,29 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			case res.Skipped:
 				task.Status = pm.TaskSkipped
 				pm.AddAnnotation(task, "ai", "Task skipped at human approval gate (operator declined to approve before execution).")
+				if err := o.persistOutcome(s, task, "skip at the approval gate"); err != nil {
+					return err
+				}
 				dimColor.Printf("→ Task %d skipped at approval gate.\n\n", task.ID)
-				s.Save()
 				continue
 			case res.Paused:
 				s.SetPaused(pausereason.New(pausereason.CodeApproval,
 					fmt.Sprintf("approval declined for task #%d", task.ID)))
-				s.Save()
+				if err := o.persist(s, "the pause (approval declined)"); err != nil {
+					return err
+				}
 				color.New(color.FgYellow).Printf("⏸ Approval gate: execution declined. Run 'cloop run' to resume.\n")
 				return nil
 			default:
 				// Approved (possibly with edited description)
 				if res.EditedDesc != "" {
 					task.Description = res.EditedDesc
-					s.Save()
 					dimColor.Printf("  Task %d description updated via editor.\n", task.ID)
 				}
 				// Mark as approved so unattended reruns skip the gate.
 				task.Approved = true
-				s.Save()
+				o.persistBestEffort(s, "the approval (and any edited description)",
+					"the next write — the task's start, or whatever ends the run first — stores it, and losing it only means the gate asks again")
 			}
 		}
 
@@ -1793,19 +1922,25 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			case "skip":
 				task.Status = pm.TaskSkipped
 				pm.AddAnnotation(task, "ai", "Task skipped by user in interactive review mode.")
+				if err := o.persistOutcome(s, task, "skip, chosen by the operator in review mode"); err != nil {
+					return err
+				}
 				dimColor.Printf("→ Task %d skipped by user.\n\n", task.ID)
-				s.Save()
 				continue
 			case "quit":
 				s.SetPaused(pausereason.New(pausereason.CodeApproval,
 					"interactive review: operator quit"))
-				s.Save()
+				if err := o.persist(s, "the pause (operator quit review mode)"); err != nil {
+					return err
+				}
 				color.New(color.FgYellow).Printf("⏸ Review mode: user quit. Run 'cloop run' to resume.\n")
 				return nil
 			case "no":
 				s.SetPaused(pausereason.New(pausereason.CodeApproval,
 					fmt.Sprintf("interactive review: operator declined task #%d", task.ID)))
-				s.Save()
+				if err := o.persist(s, "the pause (operator declined the task in review mode)"); err != nil {
+					return err
+				}
 				color.New(color.FgYellow).Printf("⏸ Task execution declined. Run 'cloop run' to resume.\n")
 				return nil
 			}
@@ -1838,10 +1973,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Status: "pending",
 			Role:   string(task.Role),
 		}, o.allEnvLines()...); hookErr != nil {
-			dimColor.Printf("⊘ pre_task hook failed for task %d (%s): %v — skipping task.\n", task.ID, task.Title, hookErr)
 			task.Status = pm.TaskSkipped
 			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: pre_task hook exited non-zero: %v", hookErr))
-			s.Save()
+			if err := o.persistOutcome(s, task, "skip (its pre_task hook failed)"); err != nil {
+				return err
+			}
+			dimColor.Printf("⊘ pre_task hook failed for task %d (%s): %v — skipping task.\n", task.ID, task.Title, hookErr)
 			continue
 		}
 
@@ -1856,7 +1993,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		execID, execKind, execIso := f.ExecutorID, f.ExecutorKind, f.Isolation
 		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started on executor %s (kind: %s, isolation: %s, provider: %s)",
 			attributionLabel(execID), execKind, execIso, o.provider.Name()))
-		s.Save()
+		// Stored before it is announced or run: a task the database does not
+		// show running cannot be stopped from the dashboard, and the start is
+		// what stale-task recovery reasons from if this process dies.
+		if err := o.persist(s, fmt.Sprintf("task #%d's start (in progress on %s)", task.ID, attributionLabel(execID))); err != nil {
+			return err
+		}
 
 		// Snapshot the repository so an unsignalled run can be judged on what
 		// it changed rather than on the agent process having exited (Task
@@ -1885,7 +2027,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Description: task.Description,
 			Source:      "orchestrator",
 		})
-		_ = o.queue.MarkRunning(queueID)
+		o.queueRunning(queueID)
 
 		if o.metrics != nil {
 			o.metrics.RecordTaskStarted()
@@ -1977,7 +2119,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.config.DryRun {
 			dimColor.Printf("[dry-run] Task prompt:\n%s\n\n", prompt)
 			task.Status = pm.TaskDone
-			s.Save()
+			if err := o.persistOutcome(s, task, "dry-run completion"); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -2005,14 +2149,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if !runInterrupted(ctx) {
 				return false
 			}
-			o.requeueInterrupted(task, stage, s.CurrentStep)
-			_ = o.queue.MarkFailed(queueID, interruptedQueueNote)
+			o.requeueInterrupted(s, task, stage, s.CurrentStep)
+			o.queueFailed(queueID, interruptedQueueNote)
 			if gitTaskBranch != "" {
 				if err := cloopgit.CheckoutBranch(o.config.WorkDir, gitOriginalBranch); err != nil {
 					dimColor.Printf("  git checkout original branch error (ignored): %v\n", err)
 				}
 			}
-			s.Save()
 			return true
 		}
 
@@ -2069,28 +2212,27 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				if isTimeoutErr(taskCtx, maErr) {
 					budgetMin := o.effectiveTaskBudgetMinutes(task)
+					if err := o.handleTaskTimeout(ctx, s, task, "", dimColor, nil); err != nil {
+						return err
+					}
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
-					o.handleTaskTimeout(ctx, s, task, "", dimColor)
-					_ = o.queue.MarkFailed(queueID, fmt.Sprintf("multi-agent timeout (%dm)", budgetMin))
+					o.queueFailed(queueID, fmt.Sprintf("multi-agent timeout (%dm)", budgetMin))
 					consecutiveErrors++
-					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 					}
 					continue
 				}
 				failColor.Printf("✗ Multi-agent error: %v\n", maErr)
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: multi-agent pipeline error — %s", truncate(maErr.Error(), 200)))
 				task.Status = pm.TaskFailed
-				_ = o.queue.MarkFailed(queueID, truncate(maErr.Error(), 200))
+				if err := o.persistOutcome(s, task, "failure (multi-agent pipeline error)"); err != nil {
+					return err
+				}
+				o.queueFailed(queueID, truncate(maErr.Error(), 200))
 				consecutiveErrors++
-				s.Save()
 				if consecutiveErrors >= maxConsecutiveErrors {
-					s.Status = "failed"
-					s.Save()
-					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 				}
 				continue
 			}
@@ -2133,28 +2275,27 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					if isTimeoutErr(taskCtx, cErr) {
 						budgetMin := o.effectiveTaskBudgetMinutes(task)
+						if err := o.handleTaskTimeout(ctx, s, task, "", dimColor, nil); err != nil {
+							return err
+						}
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
-						o.handleTaskTimeout(ctx, s, task, "", dimColor)
-						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("consensus timeout (%dm)", budgetMin))
+						o.queueFailed(queueID, fmt.Sprintf("consensus timeout (%dm)", budgetMin))
 						consecutiveErrors++
-						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
-							s.Status = "failed"
-							s.Save()
-							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+							return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 						}
 						continue
 					}
 					failColor.Printf("✗ Consensus error: %v\n", cErr)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: consensus error — %s", truncate(cErr.Error(), 200)))
 					task.Status = pm.TaskFailed
-					_ = o.queue.MarkFailed(queueID, truncate(cErr.Error(), 200))
+					if err := o.persistOutcome(s, task, "failure (consensus error)"); err != nil {
+						return err
+					}
+					o.queueFailed(queueID, truncate(cErr.Error(), 200))
 					consecutiveErrors++
-					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 					}
 					continue
 				}
@@ -2217,15 +2358,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					if isTimeoutErr(taskCtx, err) {
 						budgetMin := o.effectiveTaskBudgetMinutes(task)
+						if saveErr := o.handleTaskTimeout(ctx, s, task, "", dimColor, nil); saveErr != nil {
+							return saveErr
+						}
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
-						o.handleTaskTimeout(ctx, s, task, "", dimColor)
-						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("provider timeout (%dm)", budgetMin))
+						o.queueFailed(queueID, fmt.Sprintf("provider timeout (%dm)", budgetMin))
 						consecutiveErrors++
-						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
-							s.Status = "failed"
-							s.Save()
-							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+							return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 						}
 						continue
 					}
@@ -2235,29 +2375,29 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						// further attempts the budget already refused; instead the
 						// task is marked failed and the operator must raise
 						// task.RetryBudget or address the underlying flake.
-						failColor.Printf("✗ Task %d: retry budget exhausted — %v\n", task.ID, err)
 						pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: retry budget exhausted (limit reached) — %s", truncate(err.Error(), 200)))
 						task.Status = pm.TaskFailed
-						_ = o.queue.MarkFailed(queueID, "retry budget exhausted")
+						if saveErr := o.persistOutcome(s, task, "failure (retry budget exhausted)"); saveErr != nil {
+							return saveErr
+						}
+						failColor.Printf("✗ Task %d: retry budget exhausted — %v\n", task.ID, err)
+						o.queueFailed(queueID, "retry budget exhausted")
 						consecutiveErrors++
-						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
-							s.Status = "failed"
-							s.Save()
-							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+							return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 						}
 						continue
 					}
 					failColor.Printf("✗ Provider error: %v\n", err)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error — %s", truncate(err.Error(), 200)))
 					task.Status = pm.TaskFailed
-					_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
+					if saveErr := o.persistOutcome(s, task, "failure (provider error)"); saveErr != nil {
+						return saveErr
+					}
+					o.queueFailed(queueID, truncate(err.Error(), 200))
 					consecutiveErrors++
-					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 					}
 					continue
 				}
@@ -2289,19 +2429,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if strings.TrimSpace(taskOutput) == "" {
 			consecutiveErrors++
 			ab := Abort{Class: AbortEmptyOutput, Reason: fmt.Sprintf("provider returned empty output (consecutive errors: %d/%d)", consecutiveErrors, maxConsecutiveErrors)}
-			o.abortTask(s, task, ab, s.CurrentStep)
-			_ = o.queue.MarkFailed(queueID, abortSummaryForQueue(ab))
-			s.Save()
+			if err := o.abortTask(s, task, ab, s.CurrentStep); err != nil {
+				return err
+			}
+			o.queueFailed(queueID, abortSummaryForQueue(ab))
 			if consecutiveErrors >= maxConsecutiveErrors {
-				s.Status = "failed"
-				s.Save()
-				abortErr := fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
-				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
-					Goal:    s.Goal,
-					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-					Error:   webhook.TruncateError(abortErr.Error()),
-				})
-				return abortErr
+				return o.failRun(s, fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors))
 			}
 			continue
 		}
@@ -2345,18 +2478,23 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
-			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			// Mark the in-progress task as pending so it retries next time
 			task.Status = pm.TaskPending
 			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
 				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
-			s.Save()
+			if err := o.persist(s, "the pause (token budget reached), with the task back to pending"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			return nil
 		}
-		if o.checkCostLimit(s) {
+		if spent, over := o.costLimitReached(s); over {
 			task.Status = pm.TaskPending
-			s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached"))
-			s.Save()
+			s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached: "+spent))
+			if err := o.persist(s, "the pause (cost limit reached), with the task back to pending"); err != nil {
+				return err
+			}
+			color.New(color.FgRed).Printf("⏸ Cost limit reached (%s). Run 'cloop run' to continue.\n", spent)
 			return nil
 		}
 
@@ -2393,7 +2531,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					Description: fmt.Sprintf("Auto-heal retry triggered by TASK_FAILED signal. Diagnosing and re-prompting with mutated prompt."),
 					Source:      "orchestrator",
 				})
-				_ = o.queue.MarkRunning(healQueueID)
+				o.queueRunning(healQueueID)
 				if !o.log.IsJSON() {
 					healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
 				}
@@ -2416,11 +2554,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				diag, diagErr := diagnosis.AnalyzeFailure(taskCtx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
 					if runInterrupted(ctx) {
-						_ = o.queue.MarkFailed(healQueueID, interruptedQueueNote)
+						o.queueFailed(healQueueID, interruptedQueueNote)
 						healInterrupted = true
 						break
 					}
-					_ = o.queue.MarkFailed(healQueueID, fmt.Sprintf("diagnosis error: %v", diagErr))
+					o.queueFailed(healQueueID, fmt.Sprintf("diagnosis error: %v", diagErr))
 					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
 					// Audit-trail accuracy: without this annotation, operators
 					// see only the diagnosis stdout line — the task's history
@@ -2456,11 +2594,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					if runInterrupted(ctx) {
-						_ = o.queue.MarkFailed(healQueueID, interruptedQueueNote)
+						o.queueFailed(healQueueID, interruptedQueueNote)
 						healInterrupted = true
 						break
 					}
-					_ = o.queue.MarkFailed(healQueueID, truncate(healErr.Error(), 200))
+					o.queueFailed(healQueueID, truncate(healErr.Error(), 200))
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider error: %v", healAttempt, maxHealRetries, healErr))
 					continue
@@ -2474,7 +2612,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// task DONE with no audit trail of the empty hiccup. Treat
 				// empty/nil as the same kind of soft retry as healErr.
 				if healResult == nil || strings.TrimSpace(healResult.Output) == "" {
-					_ = o.queue.MarkFailed(healQueueID, "provider returned empty output")
+					o.queueFailed(healQueueID, "provider returned empty output")
 					healColor.Printf("[HEAL attempt %d/%d] Provider returned empty output — treating as transient failure\n", healAttempt, maxHealRetries)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider returned empty output", healAttempt, maxHealRetries))
 					continue
@@ -2494,11 +2632,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				signal = pm.CheckTaskSignal(taskOutput)
 				if signal != pm.TaskFailed {
-					_ = o.queue.MarkDone(healQueueID, fmt.Sprintf("healed: signal=%s", signal))
+					o.queueDone(healQueueID, fmt.Sprintf("healed: signal=%s", signal))
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Succeeded — task signal: %s", healAttempt, maxHealRetries, signal))
 					healColor.Printf("[HEAL attempt %d/%d] ✓ Task %d healed successfully (signal: %s)\n\n", healAttempt, maxHealRetries, task.ID, signal)
 				} else {
-					_ = o.queue.MarkFailed(healQueueID, "task still emitted TASK_FAILED")
+					o.queueFailed(healQueueID, "task still emitted TASK_FAILED")
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Still failing — task emitted TASK_FAILED again", healAttempt, maxHealRetries))
 					healColor.Printf("[HEAL attempt %d/%d] Task %d still failing — %s\n\n", healAttempt, maxHealRetries, task.ID, truncate(taskOutput, 120))
 				}
@@ -2671,8 +2809,6 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			task.Review = gateOut.review
 			pm.AddAnnotation(task, "reviewer", gateOut.note)
-			o.logReviewEvent(s, task, gateOut)
-			o.recordReviewCost(task, gateOut)
 			if gateOut.fail {
 				signal = pm.TaskFailed
 				reviewReroute = true
@@ -2680,15 +2816,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if !gateOut.review.Blocked {
 					task.FailureDiagnosis = gateOut.note
 				}
-				if !o.log.IsJSON() {
-					failColor.Printf("✗ %s\n", gateOut.note)
-				}
-			} else if !o.log.IsJSON() {
-				successColor.Printf("✓ %s\n", gateOut.note)
 			}
-			s.Save()
+			o.persistBestEffort(s, "the review gate's verdict",
+				"the task's outcome write below stores it as well, and the run stops there if it cannot")
+			o.logReviewEvent(s, task, gateOut)
+			o.recordReviewCost(task, gateOut)
+			if !o.log.IsJSON() {
+				if gateOut.fail {
+					failColor.Printf("✗ %s\n", gateOut.note)
+				} else {
+					successColor.Printf("✓ %s\n", gateOut.note)
+				}
+			}
 		}
 
+		// Each arm below stores the task's outcome before it announces it — the
+		// terminal line, the log, the notifications and webhooks, the queue and
+		// the journal after the switch — so a write that fails leaves nothing
+		// claiming a status the database does not hold.
 		switch signal {
 		case pm.TaskDone:
 			// Optionally verify the task was genuinely completed before accepting it.
@@ -2709,14 +2854,19 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					task.VerifyRetries++
 					if task.VerifyRetries <= maxRetries {
 						pm.AddAnnotation(task, "ai", fmt.Sprintf("AI verification failed — re-queuing (attempt %d/%d).", task.VerifyRetries, maxRetries))
-						failColor.Printf("✗ Verification FAILED for task %d (%s) — re-queuing (attempt %d/%d)\n\n", task.ID, task.Title, task.VerifyRetries, maxRetries)
 						task.Status = pm.TaskPending
-						s.Save()
+						if err := o.persistOutcome(s, task, "return to pending after a failed AI verification"); err != nil {
+							return err
+						}
+						failColor.Printf("✗ Verification FAILED for task %d (%s) — re-queuing (attempt %d/%d)\n\n", task.ID, task.Title, task.VerifyRetries, maxRetries)
 						continue
 					}
-					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("AI verification failed %d time(s) — exceeded retry budget, marking task failed.", task.VerifyRetries))
 					task.Status = pm.TaskFailed
+					if err := o.persistOutcome(s, task, "failure (AI verification exhausted its retries)"); err != nil {
+						return err
+					}
+					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
 					{
 						done, failed := s.Plan.CountByStatus()
 						o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
@@ -2727,17 +2877,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						})
 					}
 					consecutiveErrors++
-					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
-						s.Status = "failed"
-						s.Save()
-						abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
-						o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
-							Goal:    s.Goal,
-							Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-							Error:   webhook.TruncateError(abortErr.Error()),
-						})
-						return abortErr
+						return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
 					}
 					continue
 				}
@@ -2767,13 +2908,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					if !vr.Passed {
 						scriptVerifyFailed = true
+						pm.AddAnnotation(task, "ai", "Shell verification reported failure — marking task failed.")
+						task.Status = pm.TaskFailed
+						if err := o.persistOutcome(s, task, "failure (shell verification failed)"); err != nil {
+							return err
+						}
 						failColor.Printf("✗ Shell verification FAILED for task %d (%s)\n", task.ID, task.Title)
 						if vr.Output != "" {
 							failColor.Printf("  Script output:\n%s\n\n", vr.Output)
 						}
-						pm.AddAnnotation(task, "ai", "Shell verification reported failure — marking task failed.")
-						task.Status = pm.TaskFailed
-						// Trigger failure diagnosis so retry prompts can learn from the failure.
+						// Trigger failure diagnosis so retry prompts can learn from the
+						// failure. Stored by the write at the end of this step.
 						if o.config.DiagnoseFailures {
 							dimColor.Printf("  Diagnosing script-verify failure for task %d...\n", task.ID)
 							diagInput := "Shell verification script exited non-zero.\n\nScript output:\n" + vr.Output + "\n\nTask output:\n" + taskOutput
@@ -2796,22 +2941,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 							})
 						}
 						consecutiveErrors++
-						s.Save()
-						// Mirror the verify-failure path above (line ~1923) and the
-						// task-failed path below (line ~2117): script-verify failures
-						// must also trip MaxFailures, otherwise consecutive flaky or
-						// genuinely-broken script-verify runs would burn budget without
-						// the loop ever aborting.
+						// Mirror the verify-failure path above and the task-failed
+						// path below: script-verify failures must also trip
+						// MaxFailures, otherwise consecutive flaky or
+						// genuinely-broken script-verify runs would burn budget
+						// without the loop ever aborting.
 						if consecutiveErrors >= maxConsecutiveErrors {
-							s.Status = "failed"
-							s.Save()
-							abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
-							o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
-								Goal:    s.Goal,
-								Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-								Error:   webhook.TruncateError(abortErr.Error()),
-							})
-							return abortErr
+							return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
 						}
 					} else {
 						pmColor.Printf("✓ Shell verification PASSED for task %d: %s\n\n", task.ID, task.Title)
@@ -2822,6 +2958,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if !scriptVerifyFailed {
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
+				if err := o.persistOutcome(s, task, "completion"); err != nil {
+					return err
+				}
 				if !o.log.IsJSON() {
 					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 				}
@@ -2847,6 +2986,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
 			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
+			if err := o.persistOutcome(s, task, "skip"); err != nil {
+				return err
+			}
 			if !o.log.IsJSON() {
 				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
 			}
@@ -2866,10 +3008,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			task.FailCount++
 			// Skip the explicit-signal annotation when the failure came from the
 			// clarification reroute above — the auto-resolve loop's outcome
-			// annotation (line ~1993) already captures the real root cause, and
-			// claiming "per AI TASK_FAILED signal" would misattribute it.
+			// annotation already captures the real root cause, and claiming
+			// "per AI TASK_FAILED signal" would misattribute it.
 			if !clarificationReroute && !reviewReroute {
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
+			}
+			if err := o.persistOutcome(s, task, "failure"); err != nil {
+				return err
 			}
 			if !o.log.IsJSON() {
 				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
@@ -2908,7 +3053,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Failure diagnosis: %s", diag))
 					dimColor.Printf("  Diagnosis: %s\n\n", truncate(diag, 200))
 				}
-				s.Save()
+				o.persistBestEffort(s, "the AI's failure diagnosis",
+					"the failure itself is already stored, and the next write stores the diagnosis too")
 			}
 
 			// Auto-split: if a task has failed 2+ times, decompose it into smaller subtasks.
@@ -2923,11 +3069,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if splitErr != nil {
 					dimColor.Printf("  Auto-split error (ignored): %v\n", splitErr)
 				} else if len(subtasks) > 0 {
+					// Replacing: SplitTask removes the original task, and a
+					// merging write would read it back from disk and undo the
+					// split.
+					if err := o.persist(s, fmt.Sprintf("the plan with task #%d split into %d subtasks", task.ID, len(subtasks)), replacePlan); err != nil {
+						return err
+					}
 					pmColor.Printf("  Split into %d subtasks. Continuing plan...\n\n", len(subtasks))
 					consecutiveErrors = 0
-					// SaveDirect: SplitTask removes the original task; plain Save would
-					// re-merge it from disk and undo the split.
-					s.SaveDirect()
 					continue
 				}
 			}
@@ -2948,11 +3097,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						}
 					}
 					s.Plan.Tasks = append(kept, newTasks...)
+					// Replacing: the replan dropped the pending tasks, and a
+					// merging write would read them back from disk.
+					if err := o.persist(s, fmt.Sprintf("the replanned plan (%d revised task(s))", len(newTasks)), replacePlan); err != nil {
+						return err
+					}
 					pmColor.Printf("  Replanned: added %d revised task(s).\n\n", len(newTasks))
 					consecutiveErrors = 0 // reset after successful replan
-					// SaveDirect: AdaptiveReplan drops pending tasks and replaces them
-					// with new ones; plain Save would re-merge the dropped pendings from disk.
-					s.SaveDirect()
 					continue
 				} else {
 					pmColor.Printf("  Replan: no new tasks — plan is complete or blocked.\n\n")
@@ -2960,15 +3111,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 
 			if consecutiveErrors >= maxConsecutiveErrors {
-				s.Status = "failed"
-				s.Save()
-				abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
-				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
-					Goal:    s.Goal,
-					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-					Error:   webhook.TruncateError(abortErr.Error()),
-				})
-				return abortErr
+				return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
 			}
 		default:
 			// No signal found. Promotion to done needs positive evidence —
@@ -2979,29 +3122,29 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if ab, aborted := decideUnsignalled(o.config.WorkDir, task.ArtifactPath, taskOutput,
 				repoChanged(repoBefore, repoFingerprint(o.config.WorkDir))); aborted {
 				consecutiveErrors++
-				o.abortTask(s, task, ab, s.CurrentStep)
-				_ = o.queue.MarkFailed(queueID, abortSummaryForQueue(ab))
-				s.Save()
+				if err := o.abortTask(s, task, ab, s.CurrentStep); err != nil {
+					return err
+				}
+				o.queueFailed(queueID, abortSummaryForQueue(ab))
 				if consecutiveErrors >= maxConsecutiveErrors {
-					s.Status = "failed"
-					s.Save()
-					abortErr := fmt.Errorf("%d consecutive aborted tasks (last: %s)", consecutiveErrors, ab)
-					o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
-						Goal:    s.Goal,
-						Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-						Error:   webhook.TruncateError(abortErr.Error()),
-					})
-					return abortErr
+					return o.failRun(s, fmt.Errorf("%d consecutive aborted tasks (last: %s)", consecutiveErrors, ab))
 				}
 				// Wait out a usage window rather than picking the same
 				// now-pending task straight back up and hitting the same wall.
-				if o.scheduleAbortRetry(ctx, s, ab) {
+				stop, err := o.scheduleAbortRetry(ctx, s, ab, nil)
+				if err != nil {
+					return err
+				}
+				if stop {
 					return nil
 				}
 				continue
 			}
 			task.Status = pm.TaskDone
 			pm.AddAnnotation(task, "ai", "Task implicitly completed: AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
+			if err := o.persistOutcome(s, task, "completion (no explicit signal)"); err != nil {
+				return err
+			}
 			if !o.log.IsJSON() {
 				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
 			}
@@ -3029,15 +3172,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// pm.Task status so the queue stays consistent with the plan.
 		switch task.Status {
 		case pm.TaskDone:
-			_ = o.queue.MarkDone(queueID, stepSummaryLine(taskOutput, 200))
+			o.queueDone(queueID, stepSummaryLine(taskOutput, 200))
 		case pm.TaskFailed:
-			_ = o.queue.MarkFailed(queueID, stepSummaryLine(taskOutput, 200))
+			o.queueFailed(queueID, stepSummaryLine(taskOutput, 200))
 		case pm.TaskSkipped:
-			_ = o.queue.MarkSkipped(queueID, "AI emitted TASK_SKIPPED")
+			o.queueSkipped(queueID, "AI emitted TASK_SKIPPED")
 		default:
 			// Implicit-done / timed-out / other terminal states record as done
 			// to match the plan-task accounting above.
-			_ = o.queue.MarkDone(queueID, stepSummaryLine(taskOutput, 200))
+			o.queueDone(queueID, stepSummaryLine(taskOutput, 200))
 		}
 
 		// Unified event journal — one terminal event per task outcome (Task 20118).
@@ -3178,7 +3321,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// A task that ended without passing the review gate publishes nothing;
 		// say so when the agent had pushes waiting (Task 20357).
 		if activeGate != nil && gateOut == nil && activeGate.withheldNote(task) {
-			s.Save()
+			o.persistBestEffort(s, "the note that the review gate withheld the task's pushes",
+				"the write at the end of this step stores it too, and the pushes are dropped either way")
 		}
 
 		// Post-task AI code review: run on successful tasks when enabled.
@@ -3204,7 +3348,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						annotText = annotText[:2000] + "\n...(truncated)"
 					}
 					pm.AddAnnotation(task, review.Author, fmt.Sprintf("[%s] %s", verdict, annotText))
-					s.Save()
+					o.persistBestEffort(s, "the post-task code review",
+						"it is advisory, and the write at the end of this step stores it too")
 				}
 			}
 		}
@@ -3248,7 +3393,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		o.evaluateAlerts(s, task)
 
 		// Conditional branching: activate the matching branch, skip the other.
-		if activations := pm.ResolveBranch(s.Plan, task); len(activations) > 0 {
+		// Stored before it is announced, with the rest of this step: a branch
+		// that was skipped in memory only would run at the next start.
+		activations := pm.ResolveBranch(s.Plan, task)
+		if err := o.persistOutcome(s, task, "step record: artifact, notes and the branch it chose"); err != nil {
+			return err
+		}
+		if len(activations) > 0 {
 			branchColor := color.New(color.FgCyan)
 			for _, a := range activations {
 				if a.Activated {
@@ -3259,14 +3410,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
-		s.Save()
-
 		if o.config.StepDelay > 0 {
 			select {
 			case <-ctx.Done():
 				s.SetPaused(pausereason.New(pausereason.CodeCancelled,
 					"run interrupted between steps"))
-				s.Save()
+				if err := o.persist(s, "the pause (run interrupted between steps)"); err != nil {
+					return errors.Join(ctx.Err(), err)
+				}
 				return ctx.Err()
 			case <-time.After(o.config.StepDelay):
 			}
@@ -3278,7 +3429,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	// operator may add work to the same plan, so the project is not complete.
 	s.SetPaused(pausereason.New(pausereason.CodeIdle,
 		"every runnable task is finished"))
-	s.Save()
+	if err := o.persist(s, "the pause (every runnable task is finished)"); err != nil {
+		return err
+	}
 
 	// Distil cross-session learnings into .cloop/memory.md after the plan completes.
 	o.distillLearnings(ctx, s.Plan)
@@ -3326,9 +3479,13 @@ func reviewTask(task *pm.Task) string {
 //
 // Used by both runners: the parallel one before it schedules work, the
 // sequential one before its interactive skip prompt.
-func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
+//
+// The recovered statuses are stored before they are reported. An outcome
+// adopted in memory only would be adopted — and announced — again by the next
+// run, so a failed write is returned and ends this one.
+func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) error {
 	if s == nil || s.Plan == nil {
-		return
+		return nil
 	}
 	outcomes := taskrecover.Reconcile(o.config.WorkDir, s.Plan)
 	if len(outcomes) > 0 {
@@ -3342,10 +3499,6 @@ func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
 			}
 		}
 		o.requeuedMu.Unlock()
-
-		for _, oc := range outcomes {
-			o.reportRecovery(oc)
-		}
 	}
 
 	// Drop any checkpoint left behind — either it pointed at a task we just
@@ -3353,14 +3506,17 @@ func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
 	_ = checkpoint.Clear(o.config.WorkDir)
 
 	if len(outcomes) > 0 {
-		if err := s.Save(); err != nil {
-			color.New(color.Faint).Printf("(stale-task recovery save failed: %v)\n", err)
-			return
+		if err := o.persist(s, fmt.Sprintf("the outcome of %d task(s) recovered from an interrupted run", len(outcomes))); err != nil {
+			return err
+		}
+		for _, oc := range outcomes {
+			o.reportRecovery(oc)
 		}
 	}
 
 	// Also recover stale queue entries left in "running" from a prior crash.
 	o.recoverStaleQueueEntries()
+	return nil
 }
 
 // reportRecovery narrates one recovered task to the terminal and hands it to
@@ -3396,7 +3552,7 @@ func (o *Orchestrator) recoverStaleQueueEntries() {
 		return
 	}
 	for _, e := range entries {
-		_ = o.queue.MarkFailed(e.ID, "interrupted: previous run was killed or crashed")
+		o.queueFailed(e.ID, "interrupted: previous run was killed or crashed")
 	}
 	if len(entries) > 0 {
 		color.New(color.Faint).Printf("Recovered %d stale queue entries from prior run.\n", len(entries))
@@ -3434,7 +3590,7 @@ var parallelShutdownGracePeriod = 30 * time.Second
 func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	s := o.state
 	s.Status = "running"
-	if err := s.Save(); err != nil {
+	if err := o.persist(s, "the run's status (running)"); err != nil {
 		return err
 	}
 
@@ -3516,7 +3672,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	if o.config.Replan && s.Plan != nil {
 		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
 		s.Plan = nil
-		s.Save()
+		if err := o.persist(s, "the plan cleared for --replan"); err != nil {
+			return err
+		}
 	}
 
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
@@ -3542,15 +3700,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, clarifyCtx)
 		if err != nil {
 			failColor.Printf("x Failed to decompose goal: %v\n", err)
-			s.Status = "failed"
-			s.Save()
-			return err
+			return o.failRun(s, fmt.Errorf("decomposing the goal: %w", err))
 		}
 		if o.config.CalibrationFactor != 0 && o.config.CalibrationFactor != 1.0 {
 			pm.ApplyCalibrationFactor(plan, o.config.CalibrationFactor)
 		}
 		s.Plan = plan
-		s.Save()
+		if err := o.persist(s, "the plan decomposed from the goal"); err != nil {
+			return err
+		}
 		fmt.Printf("\n")
 		pmColor.Printf("Task Plan (%d tasks):\n", len(plan.Tasks))
 		for _, t := range plan.Tasks {
@@ -3568,8 +3726,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 			}
 			if retried > 0 {
+				if err := o.persist(s, "failed tasks reset to pending by --retry-failed"); err != nil {
+					return err
+				}
 				pmColor.Printf("Retrying %d failed task(s).\n\n", retried)
-				s.Save()
 			}
 		}
 		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
@@ -3577,19 +3737,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 	// Optimization pass (parallel mode).
 	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
-		o.runOptimizer(ctx, s, pmColor, dimColor)
+		if err := o.runOptimizer(ctx, s, pmColor, dimColor); err != nil {
+			return err
+		}
 	}
 
 	if o.config.PlanOnly {
 		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
 			"plan-only mode: the plan was generated but not executed"))
-		s.Save()
-		return nil
+		return o.persist(s, "the pause (plan-only mode)")
 	}
 
 	// Recover any tasks left in_progress from a prior crashed/killed run before
 	// scheduling work, so their slots in the dependency graph free up.
-	o.recoverStaleTasks(s)
+	if err := o.recoverStaleTasks(s); err != nil {
+		return err
+	}
 
 	consecutiveErrors := 0
 	maxConsecutiveErrors := o.config.MaxFailures
@@ -3612,26 +3775,32 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.SetPaused(pausereason.New(pausereason.CodeCancelled, "run interrupted"))
-			s.Save()
+			if err := o.persist(s, "the pause (run interrupted)"); err != nil {
+				return errors.Join(ctx.Err(), err)
+			}
 			return ctx.Err()
 		default:
 		}
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
-			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
 			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
 				fmt.Sprintf("--steps limit of %d reached", o.config.StepsLimit)))
-			s.Save()
+			if err := o.persist(s, "the pause (--steps limit reached)"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
 			return nil
 		}
 
 		// Token budget check at the top of the loop so it fires during evolve cycles
 		// (where the work-execution path's check would otherwise be skipped).
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
-			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
 				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
-			s.Save()
+			if err := o.persist(s, "the pause (token budget reached)"); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			return nil
 		}
 
@@ -3655,13 +3824,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				Description: truncate(t.Description, 300),
 				Source:      "external",
 			})
-			_ = o.queue.MarkDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
+			o.queueDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
 		}
 		// Reactivate recurring tasks whose schedule has fired.
 		for _, t := range s.Plan.Tasks {
 			if pm.ResetIfDue(t, time.Now()) {
 				dimColor.Printf("↺ Task %d recurring: reset to pending (%s)\n", t.ID, t.Recurrence)
-				s.Save()
+				o.persistBestEffort(s, "a recurring task's reset to pending",
+					"every later write stores it, and if none lands the schedule, still due on disk, fires again at the next start")
 			}
 		}
 		// Mid-run mode switch: if the user disabled parallel mode (and lowered
@@ -3682,6 +3852,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			continue
 		}
 		if s.Plan.IsComplete() {
+			// A run that ends here stores that it did before saying so. One
+			// that goes on to evolve announces only what the tasks already
+			// recorded.
+			if !s.AutoEvolve {
+				s.Status = "complete"
+				if err := o.persist(s, "the run's status (complete)"); err != nil {
+					return err
+				}
+			}
 			line, achieved := settlementLine(s.Plan, s.AutoEvolve)
 			banner := successColor
 			if !achieved {
@@ -3714,24 +3893,34 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 			if s.AutoEvolve {
 				s.Status = "evolving"
-				s.Save()
+				o.persistBestEffort(s, "the run's status (evolving)",
+					"it only tells the dashboard which phase is running, and the next write replaces it")
 				n, err := o.evolvePM(ctx)
 				if err != nil {
+					// The discovered tasks did not reach the database: the
+					// run stops on that, not on the evolve round.
+					if errors.Is(err, ErrStateNotPersisted) {
+						return err
+					}
 					// Cancellation (Ctrl-C, deadline) is an interruption, not a
 					// completed session — pause so the next run resumes evolving.
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
 						s.SetPaused(pausereason.New(pausereason.CodeCancelled,
 							"run interrupted while evolving the plan"))
-						s.Save()
+						if saveErr := o.persist(s, "the pause (run interrupted while evolving)"); saveErr != nil {
+							return errors.Join(err, saveErr)
+						}
+						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
 						if ctxErr := ctx.Err(); ctxErr != nil {
 							return ctxErr
 						}
 						return err
 					}
-					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					s.Status = "complete"
-					s.Save()
+					if saveErr := o.persist(s, "the run's status (complete: evolve stopped)"); saveErr != nil {
+						return saveErr
+					}
+					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					return nil
 				}
 				if n == 0 {
@@ -3743,9 +3932,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					// spin forever burning tokens.
 					hasBudget := o.config.TokenBudget > 0 || o.config.StepsLimit > 0
 					if !hasBudget && consecutiveEmptyEvolves >= maxEmptyEvolves {
-						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						s.Status = "complete"
-						s.Save()
+						if err := o.persist(s, "the run's status (complete: auto-evolve found nothing new)"); err != nil {
+							return err
+						}
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						return nil
 					}
 					if hasBudget {
@@ -3760,8 +3951,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				s.Status = "running"
 				continue
 			}
-			s.Status = "complete"
-			s.Save()
+			// Stored before the announcements above it ran (see the top of
+			// this block).
 			return nil
 		}
 
@@ -3771,10 +3962,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// worded. Parallel mode differs only in taking every eligible task
 		// rather than the single highest-priority one.
 		gate := GateTasks(ctx, s.Plan, o.gateConfig(true))
-		printGateDecision(gate, failColor, dimColor)
 		if gate.Skipped() > 0 {
-			s.Save()
+			if err := o.persist(s, fmt.Sprintf("the execution gate's skips (tasks %v)", gate.SkippedIDs())); err != nil {
+				return err
+			}
 		}
+		printGateDecision(gate, failColor, dimColor)
 		if len(gate.Runnable) == 0 {
 			if gate.Exhausted {
 				break
@@ -3785,9 +3978,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
 		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
-			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
 			s.SetPaused(pausereason.New(pausereason.CodeBudget, budgetErr.Error()))
-			s.Save()
+			if err := o.persist(s, "the pause (budget limit reached)"); err != nil {
+				return errors.Join(budgetErr, err)
+			}
+			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
 			return budgetErr
 		}
 
@@ -3798,7 +3993,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// loops so the sequential and parallel paths cannot disagree about
 		// what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
-			if o.handleUsageCap(ctx, s, ccErr) {
+			stop, err := o.handleUsageCap(ctx, s, ccErr)
+			if err != nil {
+				return errors.Join(ccErr, err)
+			}
+			if stop {
 				return ccErr
 			}
 			continue
@@ -3833,10 +4032,20 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// Each still gets its own dispatch row — they are separate units of
 		// work that end separately, and a batch-level row could not be joined
 		// to the task.finish rows that follow (Task 20282).
+		facts := make([]dispatchFacts, len(ready))
 		for i, t := range ready {
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
-			f := o.beginTaskExecution(t)
+			facts[i] = o.beginTaskExecution(t)
+		}
+		// Stored before the starts are announced or anything runs: a task the
+		// database does not show running cannot be stopped from the dashboard,
+		// and the start is what stale-task recovery reasons from.
+		if err := o.persist(s, fmt.Sprintf("the start of %d task(s) (in progress)", len(ready))); err != nil {
+			return err
+		}
+		for i, t := range ready {
+			f := facts[i]
 			queueIDs[i] = o.enqueueWork(taskqueue.Entry{
 				Kind:        taskqueue.KindTask,
 				TaskID:      t.ID,
@@ -3844,7 +4053,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				Description: t.Description,
 				Source:      "orchestrator",
 			})
-			_ = o.queue.MarkRunning(queueIDs[i])
+			o.queueRunning(queueIDs[i])
 			if o.metrics != nil {
 				o.metrics.RecordTaskStarted()
 			}
@@ -3864,7 +4073,6 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				"run_id":        f.RunID,
 			})
 		}
-		s.Save()
 
 		if len(ready) == 1 {
 			// One ready task may mean a 1-deep chain or simply that no other
@@ -3967,6 +4175,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			res taskResult
 		}
 		resultsCh := make(chan indexedResult, len(ready))
+		// roundCtx is what this round's workers run under, so a loop that
+		// leaves the round early can stop them (leaveRound, below) without
+		// cancelling the run: a cancelled run context is how the result
+		// handling recognises a stop, and leaving a round is not one.
+		roundCtx, cancelRound := context.WithCancel(ctx)
 		for i, task := range ready {
 			go func(idx int, t *pm.Task, prompt string, workDir string) {
 				// Send exactly one result whether the body completes normally
@@ -4003,7 +4216,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				prompt = withGateSection(prompt, gate.promptSection())
 				opts.Env = gate.env()
 				// Apply per-task time budget in parallel mode.
-				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
+				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(roundCtx, t)
 				defer tTaskCancel()
 				// Register the cancel with the watchdog registry so a manual
 				// abort from the UI (Task 20140) can cancel a wedged provider
@@ -4071,6 +4284,27 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		runDone := ctx.Done()
 		var grace *time.Timer
 		var graceC <-chan time.Time
+		// leaveRound stops the workers still running and waits — at most
+		// parallelShutdownGracePeriod — for them to report, for a loop that
+		// returns before its round is over: a pause, a failed run, a write
+		// that did not land. Their results are dropped; the run is ending,
+		// and whatever they leave in progress is recovered by the next one.
+		// Waiting means nothing of this round still touches the state once
+		// the run returns — Run's account of why it stopped included. Call it
+		// without mu held: a worker may need mu to finish.
+		leaveRound := func() {
+			cancelRound()
+			wait := time.NewTimer(parallelShutdownGracePeriod)
+			defer wait.Stop()
+			for parallelDone < parallelTotal {
+				select {
+				case <-resultsCh:
+					parallelDone++
+				case <-wait.C:
+					return
+				}
+			}
+		}
 		for parallelDone < parallelTotal {
 			var ir indexedResult
 			select {
@@ -4088,18 +4322,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// will finish their tasks, so they go back to pending now
 				// rather than waiting for the next run's recovery pass.
 				color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", parallelTotal-parallelDone, parallelShutdownGracePeriod)
+				cancelRound()
 				mu.Lock()
 				for i, t := range ready {
 					if t.Status != pm.TaskInProgress {
 						continue
 					}
-					o.requeueInterrupted(t, "while the agent was working on it", s.CurrentStep)
-					_ = o.queue.MarkFailed(queueIDs[i], interruptedQueueNote)
+					o.requeueInterrupted(s, t, "while the agent was working on it", s.CurrentStep)
+					o.queueFailed(queueIDs[i], interruptedQueueNote)
 				}
 				s.SetPaused(pausereason.New(pausereason.CodeCancelled,
 					"run interrupted while parallel tasks were in flight"))
-				s.Save()
+				err := o.persist(s, "the pause (run interrupted while parallel tasks were in flight)")
 				mu.Unlock()
+				if err != nil {
+					return errors.Join(ctx.Err(), err)
+				}
 				return ctx.Err()
 			}
 			parallelDone++
@@ -4138,62 +4376,63 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if runInterrupted(ctx) {
 					cleanupWorktree(task.ID)
 					mu.Lock()
-					o.requeueInterrupted(task, "while the agent was working on it", s.CurrentStep)
-					_ = o.queue.MarkFailed(parallelQueueID, interruptedQueueNote)
-					s.Save()
+					o.requeueInterrupted(s, task, "while the agent was working on it", s.CurrentStep)
+					o.queueFailed(parallelQueueID, interruptedQueueNote)
 					mu.Unlock()
 					continue
 				}
 				if res.timedOut {
 					budgetMin := o.effectiveTaskBudgetMinutes(task)
+					if err := o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor, &mu); err != nil {
+						leaveRound()
+						return err
+					}
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
-					o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor)
-					_ = o.queue.MarkFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", budgetMin))
+					o.queueFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", budgetMin))
 					cleanupWorktree(task.ID)
-					mu.Lock()
 					consecutiveErrors++
-					s.Save()
-					tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
-					mu.Unlock()
-					if tooManyErrors {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					if consecutiveErrors >= maxConsecutiveErrors {
+						leaveRound()
+						return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 					}
 					continue
 				}
 				if provider.IsRetryBudgetExhausted(res.err) {
-					failColor.Printf("✗ Task %d: retry budget exhausted (parallel) — %v\n", task.ID, res.err)
-					_ = o.queue.MarkFailed(parallelQueueID, "retry budget exhausted")
 					cleanupWorktree(task.ID)
 					mu.Lock()
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: retry budget exhausted (parallel mode) — %s", truncate(res.err.Error(), 200)))
 					task.Status = pm.TaskFailed
-					consecutiveErrors++
-					s.Save()
-					tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+					err := o.persistOutcome(s, task, "failure (retry budget exhausted)")
 					mu.Unlock()
-					if tooManyErrors {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					if err != nil {
+						leaveRound()
+						return err
+					}
+					failColor.Printf("✗ Task %d: retry budget exhausted (parallel) — %v\n", task.ID, res.err)
+					o.queueFailed(parallelQueueID, "retry budget exhausted")
+					consecutiveErrors++
+					if consecutiveErrors >= maxConsecutiveErrors {
+						leaveRound()
+						return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 					}
 					continue
 				}
-				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
-				_ = o.queue.MarkFailed(parallelQueueID, truncate(res.err.Error(), 200))
 				cleanupWorktree(task.ID)
 				mu.Lock()
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error (parallel mode) — %s", truncate(res.err.Error(), 200)))
 				task.Status = pm.TaskFailed
-				consecutiveErrors++
-				s.Save()
-				tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+				err := o.persistOutcome(s, task, "failure (provider error)")
 				mu.Unlock()
-				if tooManyErrors {
-					s.Status = "failed"
-					s.Save()
-					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+				if err != nil {
+					leaveRound()
+					return err
+				}
+				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
+				o.queueFailed(parallelQueueID, truncate(res.err.Error(), 200))
+				consecutiveErrors++
+				if consecutiveErrors >= maxConsecutiveErrors {
+					leaveRound()
+					return o.failRun(s, fmt.Errorf("%d consecutive errors", consecutiveErrors))
 				}
 				continue
 			}
@@ -4206,18 +4445,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// flaps, content-filtered completions, partial responses).
 			if result == nil || strings.TrimSpace(result.Output) == "" {
 				cleanupWorktree(task.ID)
-				mu.Lock()
 				consecutiveErrors++
 				ab := Abort{Class: AbortEmptyOutput, Reason: fmt.Sprintf("provider returned empty output (parallel mode, consecutive errors: %d/%d)", consecutiveErrors, maxConsecutiveErrors)}
-				o.abortTask(s, task, ab, s.CurrentStep)
-				_ = o.queue.MarkFailed(parallelQueueID, abortSummaryForQueue(ab))
-				s.Save()
-				tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+				mu.Lock()
+				err := o.abortTask(s, task, ab, s.CurrentStep)
 				mu.Unlock()
-				if tooManyErrors {
-					s.Status = "failed"
-					s.Save()
-					return fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
+				if err != nil {
+					leaveRound()
+					return err
+				}
+				o.queueFailed(parallelQueueID, abortSummaryForQueue(ab))
+				if consecutiveErrors >= maxConsecutiveErrors {
+					leaveRound()
+					return o.failRun(s, fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors))
 				}
 				continue
 			}
@@ -4262,17 +4502,30 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			dimColor.Printf("  [%s, provider: %s]\n\n", res.duration.Round(time.Second), result.Provider)
 
 			if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
-				color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+				mu.Lock()
 				task.Status = pm.TaskPending
 				s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
 					fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
-				s.Save()
+				err := o.persist(s, "the pause (token budget reached), with the task back to pending")
+				mu.Unlock()
+				leaveRound()
+				if err != nil {
+					return err
+				}
+				color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 				return nil
 			}
-			if o.checkCostLimit(s) {
+			if spent, over := o.costLimitReached(s); over {
+				mu.Lock()
 				task.Status = pm.TaskPending
-				s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached"))
-				s.Save()
+				s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached: "+spent))
+				err := o.persist(s, "the pause (cost limit reached), with the task back to pending")
+				mu.Unlock()
+				leaveRound()
+				if err != nil {
+					return err
+				}
+				color.New(color.FgRed).Printf("⏸ Cost limit reached (%s). Run 'cloop run' to continue.\n", spent)
 				return nil
 			}
 
@@ -4329,14 +4582,81 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					}
 				}
 			}
+			// Decide the outcome first, store it, and only then announce it, so
+			// a write that fails leaves nothing claiming a status the database
+			// does not hold.
+			implicitDone := false
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
-				if !o.log.IsJSON() {
-					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				consecutiveErrors = 0
+			case pm.TaskSkipped:
+				task.Status = pm.TaskSkipped
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
+				consecutiveErrors = 0
+			case pm.TaskFailed:
+				task.Status = pm.TaskFailed
+				task.FailCount++
+				// Skip the explicit-signal annotation when the failure came from
+				// the clarification reroute above — the reroute already added an
+				// accurate annotation, and claiming "per AI TASK_FAILED signal"
+				// would misattribute it. Likewise a review gate failure,
+				// annotated where the gate's outcome was applied.
+				if !clarificationReroute && !reviewReroute {
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
 				}
-				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{"duration_ms": taskDurMs})
+				consecutiveErrors++
+			default:
+				// Same evidence rule as the sequential loop — see the
+				// `default:` arm of runPMSequential. The diff half is not
+				// available here: several workers mutate the tree at once, so
+				// a repository fingerprint taken around one task would credit
+				// it with another's changes. The artifact and the classifier
+				// still apply, which is what catches provider refusals.
+				if ab, aborted := decideUnsignalled(o.config.WorkDir, task.ArtifactPath, result.Output, false); aborted {
+					consecutiveErrors++
+					abortedTask = &ab
+					break
+				}
+				task.Status = pm.TaskDone
+				implicitDone = true
+				pm.AddAnnotation(task, "ai", "Task implicitly completed (parallel mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
+				consecutiveErrors = 0
+			}
+			var err error
+			switch {
+			case abortedTask != nil:
+				// abortTask stores the task back at pending before it says so.
+				err = o.abortTask(s, task, *abortedTask, s.CurrentStep)
+			case implicitDone:
+				err = o.persistOutcome(s, task, "completion (no explicit signal)")
+			default:
+				err = o.persistOutcome(s, task, outcomeNoun(task.Status))
+			}
+			if err != nil {
+				mu.Unlock()
+				leaveRound()
+				return err
+			}
+
+			switch {
+			case abortedTask != nil:
+				// The run produced no work: abortTask has said so, and the
+				// task is pending — not an outcome to announce.
+			case task.Status == pm.TaskDone:
+				if !o.log.IsJSON() {
+					if implicitDone {
+						successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+					} else {
+						successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+					}
+				}
+				fields := map[string]interface{}{"duration_ms": taskDurMs}
+				if implicitDone {
+					fields["implicit"] = true
+				}
+				o.log.Info(logger.EventTaskDone, task.ID, task.Title, fields)
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
@@ -4350,10 +4670,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 					})
 				}
-				consecutiveErrors = 0
-			case pm.TaskSkipped:
-				task.Status = pm.TaskSkipped
-				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
+			case task.Status == pm.TaskSkipped:
 				if !o.log.IsJSON() {
 					dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
 				}
@@ -4367,18 +4684,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 					})
 				}
-				consecutiveErrors = 0
-			case pm.TaskFailed:
-				task.Status = pm.TaskFailed
-				task.FailCount++
-				// Skip the explicit-signal annotation when the failure came from
-				// the clarification reroute above — the reroute already added an
-				// accurate annotation (line ~3137), and claiming "per AI
-				// TASK_FAILED signal" would misattribute it. Likewise a review
-				// gate failure, annotated where the gate's outcome was applied.
-				if !clarificationReroute && !reviewReroute {
-					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
-				}
+			case task.Status == pm.TaskFailed:
 				if !o.log.IsJSON() {
 					failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 				}
@@ -4396,60 +4702,24 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 					})
 				}
-				consecutiveErrors++
-			default:
-				// Same evidence rule as the sequential loop — see the
-				// `default:` arm of runPMSequential. The diff half is not
-				// available here: several workers mutate the tree at once, so
-				// a repository fingerprint taken around one task would credit
-				// it with another's changes. The artifact and the classifier
-				// still apply, which is what catches provider refusals.
-				if ab, aborted := decideUnsignalled(o.config.WorkDir, task.ArtifactPath, result.Output, false); aborted {
-					consecutiveErrors++
-					o.abortTask(s, task, ab, s.CurrentStep)
-					_ = o.queue.MarkFailed(parallelQueueID, abortSummaryForQueue(ab))
-					abortedTask = &ab
-					break
-				}
-				task.Status = pm.TaskDone
-				pm.AddAnnotation(task, "ai", "Task implicitly completed (parallel mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
-				if !o.log.IsJSON() {
-					successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
-				}
-				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
-					"duration_ms": taskDurMs,
-					"implicit":    true,
-				})
-				if o.config.Notify {
-					notify.Send("cloop: Task Done", task.Title)
-				}
-				o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
-				{
-					done, failed := s.Plan.CountByStatus()
-					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
-						Goal:     s.Goal,
-						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
-						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
-						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-					})
-				}
-				consecutiveErrors = 0
 			}
 
 			// Central queue: mark this parallel work item terminal. An aborted
-			// run already marked its entry failed and left the task pending,
-			// which this switch's `default:` arm would otherwise record as
-			// done — the same fail-open shape the abort path exists to close.
-			if abortedTask == nil {
+			// run marks its entry failed and leaves the task pending, which the
+			// `default:` arm below would otherwise record as done — the same
+			// fail-open shape the abort path exists to close.
+			if abortedTask != nil {
+				o.queueFailed(parallelQueueID, abortSummaryForQueue(*abortedTask))
+			} else {
 				switch task.Status {
 				case pm.TaskDone:
-					_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+					o.queueDone(parallelQueueID, stepSummaryLine(result.Output, 200))
 				case pm.TaskFailed:
-					_ = o.queue.MarkFailed(parallelQueueID, stepSummaryLine(result.Output, 200))
+					o.queueFailed(parallelQueueID, stepSummaryLine(result.Output, 200))
 				case pm.TaskSkipped:
-					_ = o.queue.MarkSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
+					o.queueSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
 				default:
-					_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+					o.queueDone(parallelQueueID, stepSummaryLine(result.Output, 200))
 				}
 			}
 
@@ -4549,8 +4819,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// Persist full AI response as a Markdown artifact file.
 			o.writeTaskArtifact(task, result.Output)
 
-			// Conditional branching: activate the matching branch, skip the other.
-			if activations := pm.ResolveBranch(s.Plan, task); len(activations) > 0 {
+			// Conditional branching: activate the matching branch, skip the
+			// other. Stored before it is announced, with the rest of this
+			// result: a branch skipped in memory only would run at the next
+			// start.
+			activations := pm.ResolveBranch(s.Plan, task)
+			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+			err = o.persistOutcome(s, task, "step record: artifact, notes and the branch it chose")
+			mu.Unlock()
+			if err != nil {
+				leaveRound()
+				return err
+			}
+			if len(activations) > 0 {
 				branchColor := color.New(color.FgCyan)
 				for _, a := range activations {
 					if a.Activated {
@@ -4561,15 +4842,17 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 			}
 
-			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
-			s.Save()
-			mu.Unlock()
-
 			// Wait out a usage window (or pause on a quota/credential wall)
 			// before the next round picks the now-pending task straight back
 			// up. Done outside the lock: it sleeps.
 			if abortedTask != nil {
-				if o.scheduleAbortRetry(ctx, s, *abortedTask) {
+				stop, err := o.scheduleAbortRetry(ctx, s, *abortedTask, &mu)
+				if err != nil {
+					leaveRound()
+					return err
+				}
+				if stop {
+					leaveRound()
 					return nil
 				}
 			}
@@ -4582,11 +4865,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			if tooManyErrors {
-				s.Status = "failed"
-				s.Save()
-				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+				leaveRound()
+				return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
 			}
 		}
+		cancelRound()
 		// If the run was stopped, the whole batch reported back inside the
 		// grace period; the top of the loop sees the cancellation and pauses.
 		if grace != nil {
@@ -4599,7 +4882,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	// operator may add work to the same plan, so the project is not complete.
 	s.SetPaused(pausereason.New(pausereason.CodeIdle,
 		"every runnable task is finished"))
-	s.Save()
+	if err := o.persist(s, "the pause (every runnable task is finished)"); err != nil {
+		return err
+	}
 
 	// Distil cross-session learnings into .cloop/memory.md after the plan completes.
 	o.distillLearnings(ctx, s.Plan)
@@ -4822,7 +5107,8 @@ func (o *Orchestrator) withBackgroundWaitNotice(opts provider.Options, s *state.
 			mu.Lock()
 		}
 		task.Background = work
-		s.Save()
+		o.persistBestEffort(s, fmt.Sprintf("task #%d's wait on background work", task.ID),
+			"it only tells the dashboard why the task looks slow, and the task's outcome write replaces it")
 		if mu != nil {
 			mu.Unlock()
 		}
@@ -4957,13 +5243,13 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 		Description: "AI is reviewing the plan to discover improvement tasks",
 		Source:      "evolve",
 	})
-	_ = o.queue.MarkRunning(evolveQueueID)
+	o.queueRunning(evolveQueueID)
 
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
 	opts, _ := o.makeOpts(s.Model, s.LiveEffort(), true)
 	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
-		_ = o.queue.MarkFailed(evolveQueueID, truncate(err.Error(), 200))
+		o.queueFailed(evolveQueueID, truncate(err.Error(), 200))
 		return 0, err
 	}
 
@@ -4984,20 +5270,22 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	s.SyncFromDisk()
 	newTasks, err := pm.ParseEvolveTasks(s.Goal, result.Output, s.Plan)
 	if err != nil {
-		_ = o.queue.MarkFailed(evolveQueueID, fmt.Sprintf("parse error: %v", err))
+		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
+			"no task and no plan content changed, and the next write stores them too")
+		o.queueFailed(evolveQueueID, fmt.Sprintf("parse error: %v", err))
 		dimColor.Printf("  Task discovery parse error: %v\n", err)
-		s.Save()
 		return 0, nil
 	}
 	if len(newTasks) == 0 {
-		_ = o.queue.MarkDone(evolveQueueID, "no new tasks discovered")
+		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
+			"no task and no plan content changed, and the next write stores them too")
+		o.queueDone(evolveQueueID, "no new tasks discovered")
 		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveNoOp,
 			Step:    state.NoStep,
 			Message: fmt.Sprintf("Evolve round #%d found no new tasks", s.EvolveStep),
 		}, map[string]any{"evolve_step": s.EvolveStep})
-		s.Save()
 		return 0, nil
 	}
 
@@ -5017,20 +5305,27 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	}
 
 	if len(newTasks) == 0 {
-		_ = o.queue.MarkDone(evolveQueueID, "all candidates were duplicates")
+		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
+			"no task and no plan content changed, and the next write stores them too")
+		o.queueDone(evolveQueueID, "all candidates were duplicates")
 		dimColor.Printf("  No novel tasks after deduplication — project is fully evolved.\n")
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveNoOp,
 			Step:    state.NoStep,
 			Message: fmt.Sprintf("Evolve round #%d: all candidates duplicates", s.EvolveStep),
 		}, map[string]any{"evolve_step": s.EvolveStep})
-		s.Save()
 		return 0, nil
 	}
 
 	s.Plan.Tasks = append(s.Plan.Tasks, newTasks...)
-	s.Save()
-	_ = o.queue.MarkDone(evolveQueueID, fmt.Sprintf("discovered %d new task(s)", len(newTasks)))
+	// The discovered tasks are only real once they are stored. Reporting a
+	// count for tasks the next run will not find is how auto-evolve builds on
+	// work that never existed.
+	if err := o.persist(s, fmt.Sprintf("the %d task(s) auto-evolve discovered", len(newTasks))); err != nil {
+		o.queueFailed(evolveQueueID, "discovered tasks not saved")
+		return 0, err
+	}
+	o.queueDone(evolveQueueID, fmt.Sprintf("discovered %d new task(s)", len(newTasks)))
 
 	o.webhook.Send(webhook.EventEvolveDiscovered, webhook.Payload{
 		Goal: s.Goal,
@@ -5273,24 +5568,24 @@ func (o *Orchestrator) distillLearnings(ctx context.Context, plan *pm.Plan) {
 		Description: fmt.Sprintf("plan with %d task(s)", len(plan.Tasks)),
 		Source:      "orchestrator",
 	})
-	_ = o.queue.MarkRunning(queueID)
+	o.queueRunning(queueID)
 	summary, err := learning.Distill(ctx, o.provider, o.state.Model, plan)
 	if err != nil {
-		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
+		o.queueFailed(queueID, truncate(err.Error(), 200))
 		dimColor.Printf("  Memory distillation failed (ignored): %v\n", err)
 		return
 	}
 	if summary == "" {
-		_ = o.queue.MarkDone(queueID, "no memory update needed")
+		o.queueDone(queueID, "no memory update needed")
 		dimColor.Printf("  No memory update needed.\n")
 		return
 	}
 	if err := learning.SaveMemory(o.config.WorkDir, summary); err != nil {
-		_ = o.queue.MarkFailed(queueID, fmt.Sprintf("save memory: %v", err))
+		o.queueFailed(queueID, fmt.Sprintf("save memory: %v", err))
 		dimColor.Printf("  Failed to save memory (ignored): %v\n", err)
 		return
 	}
-	_ = o.queue.MarkDone(queueID, "memory updated")
+	o.queueDone(queueID, "memory updated")
 	dimColor.Printf("  Project memory updated (.cloop/memory.md).\n")
 }
 
@@ -5319,34 +5614,36 @@ func (o *Orchestrator) learnFromSession(ctx context.Context, steps []state.StepR
 		Description: fmt.Sprintf("%d step(s)", len(steps)),
 		Source:      "orchestrator",
 	})
-	_ = o.queue.MarkRunning(queueID)
+	o.queueRunning(queueID)
 
 	learnings, err := memory.ExtractLearnings(ctx, o.provider, o.state.Model, o.state.Goal, summary, o.memory)
 	if err != nil {
-		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
+		o.queueFailed(queueID, truncate(err.Error(), 200))
 		dimColor.Printf("  Memory extraction failed: %v\n", err)
 		return
 	}
 	if len(learnings) == 0 {
-		_ = o.queue.MarkDone(queueID, "no new learnings extracted")
+		o.queueDone(queueID, "no new learnings extracted")
 		dimColor.Printf("  No new learnings extracted.\n")
 		return
 	}
 	if err := o.memory.Save(o.config.WorkDir); err != nil {
-		_ = o.queue.MarkFailed(queueID, fmt.Sprintf("save memory: %v", err))
+		o.queueFailed(queueID, fmt.Sprintf("save memory: %v", err))
 		dimColor.Printf("  Failed to save memory: %v\n", err)
 		return
 	}
-	_ = o.queue.MarkDone(queueID, fmt.Sprintf("saved %d learning(s)", len(learnings)))
+	o.queueDone(queueID, fmt.Sprintf("saved %d learning(s)", len(learnings)))
 	dimColor.Printf("  Saved %d learning(s) to project memory.\n", len(learnings))
 }
 
-// checkCostLimit evaluates the current session cost against the configured
-// CostLimit. It logs a warning at 80% and returns true (stop) when the limit
-// is reached. model and provider come from state/config respectively.
-func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
+// costLimitReached evaluates the current session cost against the configured
+// CostLimit. It warns at 80% and reports over=true, with the spend formatted
+// against the limit, once the limit is reached. The caller pauses the run and
+// announces it — after the pause is stored. model and provider come from
+// state/config respectively.
+func (o *Orchestrator) costLimitReached(s *state.ProjectState) (spent string, over bool) {
 	if o.config.CostLimit <= 0 {
-		return false
+		return "", false
 	}
 	model := s.Model
 	if model == "" {
@@ -5354,11 +5651,7 @@ func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
 	}
 	usd := cost.EstimateSessionCost(o.config.ProviderName, model, s.TotalInputTokens, s.TotalOutputTokens)
 	if usd >= o.config.CostLimit {
-		color.New(color.FgRed).Printf(
-			"⏸ Cost limit reached (%s). Run 'cloop run' to continue.\n",
-			cost.FormatCostWithLimit(usd, o.config.CostLimit),
-		)
-		return true
+		return cost.FormatCostWithLimit(usd, o.config.CostLimit), true
 	}
 	if usd >= o.config.CostLimit*0.8 {
 		color.New(color.FgYellow).Printf(
@@ -5366,15 +5659,17 @@ func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
 			cost.FormatCost(usd), cost.FormatCost(o.config.CostLimit),
 		)
 	}
-	return false
+	return "", false
 }
 
 // printSessionSummary prints a one-line summary after a run session ends.
 // It is called via defer so it always runs, even on error paths.
 // runOptimizer calls the AI plan optimizer, prints suggestions, and applies
 // the reordering automatically (or interactively if OptimizeInteractive is set).
-// A snapshot of the pre-optimization plan is saved before any changes.
-func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, pmColor, dimColor *color.Color) {
+// A snapshot of the pre-optimization plan is saved before any changes. The
+// error is the reordered plan's write, which the run cannot carry on without:
+// it would execute in an order the database does not hold.
+func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, pmColor, dimColor *color.Color) error {
 	pmColor.Printf("Running AI plan optimizer...\n")
 
 	queueID := o.enqueueWork(taskqueue.Entry{
@@ -5383,13 +5678,13 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 		Description: fmt.Sprintf("optimize plan with %d task(s)", len(s.Plan.Tasks)),
 		Source:      "orchestrator",
 	})
-	_ = o.queue.MarkRunning(queueID)
+	o.queueRunning(queueID)
 
 	result, err := optimizer.Optimize(ctx, o.provider, s.Model, o.config.StepTimeout, s.Plan)
 	if err != nil {
-		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
+		o.queueFailed(queueID, truncate(err.Error(), 200))
 		fmt.Printf("  optimizer: %v (skipping)\n\n", err)
-		return
+		return nil
 	}
 
 	fmt.Printf("\n")
@@ -5440,9 +5735,9 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 	}
 
 	if len(result.ReorderedIDs) == 0 {
-		_ = o.queue.MarkDone(queueID, "no reordering suggested")
+		o.queueDone(queueID, "no reordering suggested")
 		dimColor.Printf("  No reordering suggested.\n\n")
-		return
+		return nil
 	}
 
 	// Show the reordering proposal.
@@ -5471,19 +5766,21 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 			fmt.Printf("  warning: could not save pre-optimization snapshot: %v\n", snapErr)
 		}
 		optimizer.ApplyReorder(s.Plan, result.ReorderedIDs)
-		if err := s.Save(); err != nil {
-			fmt.Printf("  warning: could not persist reordered plan: %v\n", err)
+		if err := o.persist(s, "the plan as the optimizer reordered it"); err != nil {
+			o.queueFailed(queueID, "reordered plan not saved")
+			return err
 		}
 		pmColor.Printf("Plan reordered. Updated Task Plan:\n")
 		for _, t := range s.Plan.Tasks {
 			fmt.Printf("  %d. [P%d] %s\n", t.ID, t.Priority, t.Title)
 		}
 		fmt.Println()
-		_ = o.queue.MarkDone(queueID, fmt.Sprintf("reordered %d task(s)", len(result.ReorderedIDs)))
+		o.queueDone(queueID, fmt.Sprintf("reordered %d task(s)", len(result.ReorderedIDs)))
 	} else {
 		dimColor.Printf("  Reordering skipped.\n\n")
-		_ = o.queue.MarkSkipped(queueID, "user declined reordering")
+		o.queueSkipped(queueID, "user declined reordering")
 	}
+	return nil
 }
 
 func printSessionSummary(start time.Time, startStep int, s *state.ProjectState) {

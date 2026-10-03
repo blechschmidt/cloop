@@ -28,6 +28,8 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/orchestrator"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 )
 
 var executorCmd = &cobra.Command{
@@ -401,6 +403,12 @@ func exitCodeFor(err error) int {
 	var ee errExit
 	if errors.As(err, &ee) {
 		return ee.code
+	}
+	// A run that stopped because the project database refused its writes
+	// says so in its exit status too: when the database took not even the
+	// run's own account of why it stopped, the status is what the hub reads.
+	if errors.Is(err, orchestrator.ErrStateNotPersisted) {
+		return pausereason.ExitStateNotPersisted
 	}
 	return 1
 }

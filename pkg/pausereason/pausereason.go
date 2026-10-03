@@ -57,22 +57,38 @@ const (
 	// CodeStale is a run that died without saying so — the process vanished
 	// and the hub reconciled its status on the way back up.
 	CodeStale Code = "stale"
+	// CodeStateNotPersisted is a run that stopped itself because the project
+	// database refused a write it could not do without: a task's outcome, a
+	// pause, a plan change. Carrying on would have reported work the database
+	// does not hold. Like CodeAbort it needs a human — free the disk, fix the
+	// permissions, repair the row — and the next run recovers the tasks this
+	// one left in progress.
+	CodeStateNotPersisted Code = "state_not_persisted"
 )
+
+// ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
+// CodeStateNotPersisted: 74, sysexits' EX_IOERR. It is the account that
+// survives when the database takes nothing at all — not even the run's own
+// pause — so the hub, reading it from the finished workload, can still say
+// why the run ended rather than only that it did. It lives here, beside the
+// code it stands for, so the hub need not import the orchestrator to read it.
+const ExitStateNotPersisted = 74
 
 // codeLabels is the operator-facing noun for each code, used when a Reason
 // carries no detail of its own.
 var codeLabels = map[Code]string{
-	CodeUsageCap:    "subscription usage cap reached",
-	CodeBudget:      "budget limit reached",
-	CodeTokenBudget: "token budget reached",
-	CodeStepLimit:   "step limit reached",
-	CodeApproval:    "waiting for approval",
-	CodeAbort:       "run aborted",
-	CodeCancelled:   "run interrupted",
-	CodePlanOnly:    "plan-only mode",
-	CodeIdle:        "no runnable tasks",
-	CodeOperator:    "stopped by operator",
-	CodeStale:       "previous run ended unexpectedly",
+	CodeUsageCap:          "subscription usage cap reached",
+	CodeBudget:            "budget limit reached",
+	CodeTokenBudget:       "token budget reached",
+	CodeStepLimit:         "step limit reached",
+	CodeApproval:          "waiting for approval",
+	CodeAbort:             "run aborted",
+	CodeCancelled:         "run interrupted",
+	CodePlanOnly:          "plan-only mode",
+	CodeIdle:              "no runnable tasks",
+	CodeOperator:          "stopped by operator",
+	CodeStale:             "previous run ended unexpectedly",
+	CodeStateNotPersisted: "run progress could not be saved",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -89,7 +105,7 @@ func Codes() []Code {
 	return []Code{
 		CodeUsageCap, CodeBudget, CodeTokenBudget, CodeStepLimit,
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
-		CodeIdle, CodeOperator, CodeStale,
+		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
 	}
 }
 

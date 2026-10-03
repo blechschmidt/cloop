@@ -1399,6 +1399,57 @@ func (d *DB) SaveReviewGate(g *pm.ReviewGate) error {
 	return nil
 }
 
+// SaveRunStatus stores the run's status and pause reason and nothing else
+// (Task 20362).
+//
+// It exists for the one write that has to land after a full SaveState has just
+// failed: an orchestrator that could not record a task's outcome stops, and
+// says why it stopped. A full save rewrites every task row and merges the plan
+// first — which is the very write that was refused when, say, a damaged row
+// makes the merge give up — while three metadata keys in one transaction are
+// the smallest change that tells the dashboard the run is no longer running.
+// It leaves the plan exactly as the last successful save left it, so the
+// outcome that was lost stays lost rather than half-written.
+func (d *DB) SaveRunStatus(status string, reason *pausereason.Reason, updatedAt time.Time) error {
+	pr := pausereason.Normalize(status, reason)
+	encoded := ""
+	if pr != nil {
+		b, err := json.Marshal(pr)
+		if err != nil {
+			return fmt.Errorf("statedb: encode pause reason: %w", err)
+		}
+		encoded = string(b)
+	}
+	if err := d.saveRunStatusLocked(status, encoded, updatedAt); err != nil {
+		return fmt.Errorf("statedb: save run status: %w", err)
+	}
+	// After the commit and outside the lock, as SaveState audits.
+	auditRunStatus(d, status, pr)
+	return nil
+}
+
+func (d *DB) saveRunStatusLocked(status, pauseReason string, updatedAt time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return classifyDriverErr(err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for _, kv := range [][2]string{
+		{"status", status},
+		{"pause_reason", pauseReason},
+		{"updated_at", updatedAt.Format(time.RFC3339Nano)},
+	} {
+		if err := d.setMeta(tx, kv[0], kv[1]); err != nil {
+			return fmt.Errorf("set metadata %q: %w", kv[0], classifyDriverErr(err))
+		}
+	}
+	return classifyDriverErr(tx.Commit())
+}
+
 // encodeReview serialises a task's review-gate record for the
 // plan_tasks.review column (Task 20357). Same shape as encodeBackground:
 // absent is the empty string, so a row written by this build reads the same

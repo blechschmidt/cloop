@@ -35,8 +35,10 @@ import (
 // It returns stop=true when the run should end, in which case the state has
 // already been paused with a reason and the audit row written. stop=false
 // means the window reopened while we waited and the caller should carry on
-// with its loop.
-func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState, capErr error) (stop bool) {
+// with its loop. err is non-nil only when the pause could not be stored; the
+// caller must return it rather than report a cap pause the database does not
+// hold.
+func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState, capErr error) (stop bool, err error) {
 	color.New(color.FgRed, color.Bold).Printf("\n✗ %v\n", capErr)
 
 	// The typed error is what carries the reset times. A plain error can still
@@ -45,8 +47,7 @@ func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState
 	var capped *ratelimit.CapExceededError
 	if !errors.As(capErr, &capped) {
 		s.SetPaused(pausereason.New(pausereason.CodeUsageCap, capErr.Error()))
-		s.Save()
-		return true
+		return true, o.persist(s, "the pause (subscription cap reached)")
 	}
 
 	resumesAt := capped.ResumesAt()
@@ -84,7 +85,13 @@ func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState
 	// pre-set the reason, which read two different clocks: at the exact
 	// ceiling boundary the first could say "pause" and the second "wait",
 	// leaving a run marked paused that then carried on.
-	stop = o.scheduleAbortRetry(ctx, s, ab)
+	//
+	// Called at the top of either loop, with no task in flight, so there is
+	// no lock to pass.
+	stop, err = o.scheduleAbortRetry(ctx, s, ab, nil)
+	if err != nil {
+		return stop, err
+	}
 
 	// Audit the pause from the state it actually produced, rather than from a
 	// prediction. stop is true for a cancelled wait as well, so it is not the
@@ -101,7 +108,7 @@ func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState
 				"run paused: subscription cap reached", fields)
 		}
 	}
-	return stop
+	return stop, nil
 }
 
 // auditCapPause writes the run.cap_paused row. Best-effort: a project whose DB

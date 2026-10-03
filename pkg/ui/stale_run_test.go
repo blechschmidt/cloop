@@ -14,6 +14,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -467,6 +468,12 @@ func TestWorkloadVerdict(t *testing.T) {
 			wantOOM:  false,
 			contains: "without recording an outcome",
 		},
+		{
+			name:     "a run that stopped because its writes were refused says so",
+			status:   executor.Status{State: executor.StateExited, ExitCode: pausereason.ExitStateNotPersisted},
+			wantOOM:  false,
+			contains: "refused its writes",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := workloadVerdict(&stubExecutor{status: tc.status}, "h1")
@@ -477,6 +484,30 @@ func TestWorkloadVerdict(t *testing.T) {
 				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.contains)
 			}
 		})
+	}
+}
+
+// Task 20362. A run that stopped because the project database refused its
+// writes, and could not store even that, is recorded by the hub with the same
+// pause code the run would have used — so the badge reads the same whichever
+// of them managed to write it.
+func TestDeadRunPauseReason_ARunThatCouldNotSave(t *testing.T) {
+	v := workloadVerdict(&stubExecutor{status: executor.Status{
+		State: executor.StateExited, ExitCode: pausereason.ExitStateNotPersisted,
+	}}, "h1")
+	if !v.Unsaved || v.OOM || v.Requested {
+		t.Fatalf("verdict = %+v, want an unsaved stop", v)
+	}
+	r := deadRunPauseReason(v)
+	if r.Code != pausereason.CodeStateNotPersisted {
+		t.Errorf("code = %q, want %q", r.Code, pausereason.CodeStateNotPersisted)
+	}
+	if !strings.Contains(r.Detail, "refused its writes") || !strings.Contains(r.Detail, "74") {
+		t.Errorf("detail = %q, want it to say the writes were refused and how the hub knows", r.Detail)
+	}
+	// Any other exit stays a stale run.
+	if r := deadRunPauseReason(runVerdict{Detail: "it exited with status 1"}); r.Code != pausereason.CodeStale {
+		t.Errorf("an ordinary failed exit became %q", r.Code)
 	}
 }
 

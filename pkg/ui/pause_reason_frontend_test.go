@@ -129,6 +129,33 @@ func TestDashboard_PauseReasonIsVisible(t *testing.T) {
 		}
 	})
 
+	// Task 20362: a run that stopped itself because the project database
+	// refused its writes. The badge and the Event History are where an
+	// operator learns the run did not merely pause, and what was lost.
+	t.Run("a run that could not save its progress says what was lost", func(t *testing.T) {
+		got := results["unsaved_progress"]
+		// esc() renders the apostrophe as &#39;.
+		if !strings.Contains(got.Badge, "could not save task #3&#39;s completion (status done)") {
+			t.Errorf("badge does not say what was lost: %q", got.Badge)
+		}
+		if !strings.Contains(got.Badge, "database or disk is full") {
+			t.Errorf("badge does not say why: %q", got.Badge)
+		}
+		if !strings.Contains(got.HTML, "Run stopped: could not save task #3") {
+			t.Errorf("the Event History does not show the stop:\n%s", got.HTML)
+		}
+		if !strings.Contains(got.HTML, "ev-session") {
+			t.Errorf("the stop is not rendered as a session event:\n%s", got.HTML)
+		}
+	})
+
+	t.Run("the hub's bare record of the same stop reads as prose", func(t *testing.T) {
+		got := results["unsaved_progress_bare"]
+		if !strings.Contains(got.Badge, "progress not saved") || strings.Contains(got.Badge, "state_not_persisted") {
+			t.Errorf("badge = %q, want the code's label rather than the identifier", got.Badge)
+		}
+	})
+
 	t.Run("a running project shows no pause text", func(t *testing.T) {
 		got := results["running_project"]
 		if strings.Contains(got.Badge, "cap reached") || strings.Contains(got.Badge, "resumes") {

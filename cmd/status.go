@@ -6,10 +6,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -54,6 +56,7 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("Goal:     %s\n", s.Goal)
 		fmt.Printf("Status:   ")
 		statusColor.Println(s.Status)
+		printPauseReason(s)
 
 		if activeProf := profile.GetActive(); activeProf != "" {
 			fmt.Printf("Profile:  %s\n", activeProf)
@@ -200,6 +203,21 @@ var statusCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// printPauseReason says why a paused run paused, under its status: until it
+// did, the reason was stored, shown on the dashboard and in `--json`, and left
+// out of the one view an operator at a terminal reads. A run that stopped
+// because its progress could not be saved also says what to do about it.
+func printPauseReason(s *state.ProjectState) {
+	if s.Status != "paused" || s.PauseReason == nil {
+		return
+	}
+	fmt.Printf("Reason:   %s\n", s.PauseReason.Summary(time.Local))
+	if s.PauseReason.Code == pausereason.CodeStateNotPersisted {
+		color.New(color.Faint).Printf("          Fix the project database (free space, permissions, the damaged row), then run again:\n" +
+			"          the next run recovers the tasks this one left in progress.\n")
+	}
 }
 
 func init() {
