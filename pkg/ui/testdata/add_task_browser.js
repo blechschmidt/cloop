@@ -215,10 +215,25 @@ async function fill(cdp, title, lines) {
 }
 
 // added waits for submitAddTask's success path, which empties both fields
-// only once the hub has answered ok.
+// only once the hub has answered ok. A timeout says what the page looked like
+// then — which element had the keys, what the fields held, whether the POST
+// went out and what the last toast said — because "the form did not clear"
+// alone cannot tell a key that never reached the form from a hub that never
+// answered (CI saw it once, at eb40abf, and nowhere else).
 async function added(cdp, what) {
-  await waitFor(cdp, `${valueOf('newTaskTitle')} === '' && ${valueOf('newTaskDesc')} === ''`,
-    'the form to clear after ' + what);
+  try {
+    await waitFor(cdp, `${valueOf('newTaskTitle')} === '' && ${valueOf('newTaskDesc')} === ''`,
+      'the form to clear after ' + what);
+  } catch (e) {
+    const seen = await cdp.eval(`JSON.stringify({
+      focused: (document.activeElement || {}).id || (document.activeElement || {}).tagName || '',
+      title: ${valueOf('newTaskTitle')},
+      desc: ${valueOf('newTaskDesc')},
+      posts: window.__addTaskPosts,
+      toast: ((document.getElementById('toast') || {}).textContent || '').slice(0, 200),
+    })`).catch(err => 'unreadable: ' + err.message);
+    throw new Error(e.message + ' — page: ' + seen);
+  }
 }
 
 // layout measures the form. visible_lines is the description box's content
