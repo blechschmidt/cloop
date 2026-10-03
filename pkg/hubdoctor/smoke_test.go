@@ -171,6 +171,14 @@ func (f *fakeSmokeExecutor) Start(ctx context.Context, spec executor.Spec) (exec
 	if f.startErr != nil {
 		return executor.Handle{}, f.startErr
 	}
+	// Every real driver refuses a spec that does not validate, so the fake
+	// does too: a smoke that only works against a fake proves nothing. (It
+	// asked every write-back-capable driver for a write-back on a workspace
+	// that cannot carry one, from Task 20274 until the flagship circuit met
+	// it in Task 20367.)
+	if err := spec.Validate(); err != nil {
+		return executor.Handle{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := fmt.Sprintf("h-%d", len(f.specs)+1)
@@ -1039,35 +1047,49 @@ func TestWriteBackSkippedWhereTheBackendHasNone(t *testing.T) {
 	}
 }
 
-// TestWriteBackAssertedWhereTheBackendAdvertisesIt.
-func TestWriteBackAssertedWhereTheBackendAdvertisesIt(t *testing.T) {
-	// Subtests rather than two worlds in one function: newSmokeWorld registers
-	// its executor for the lifetime of the *test*, so building two in one
-	// would leave both in the registry and smoke each of them twice.
-	t.Run("returns the changes", func(t *testing.T) {
-		w := newSmokeWorld(t)
-		w.ex.caps.SupportsWriteBack = true
-		w.ex.writeBack = &executor.WriteBackResult{
-			Mode: executor.WriteBackBundle, Branch: "cloop/smoke", CommitSHA: strings.Repeat("a", 40),
+// TestWriteBackOnABackendThatAdvertisesIt. The smoke runs in a plain
+// directory, which no write-back can be measured against, so it must not ask
+// for one: Spec.Validate refuses it, and asking failed the dispatch of every
+// such driver until Task 20367. The stage says why it was not exercised.
+func TestWriteBackOnABackendThatAdvertisesIt(t *testing.T) {
+	w := newSmokeWorld(t)
+	w.ex.caps.SupportsWriteBack = true
+	res := w.only(t, w.run(t, Options{}))
+	if got := stageOf(t, res, StageDispatch); got.Outcome != StagePass {
+		t.Fatalf("dispatch = %q on a write-back-capable backend: %s", got.Outcome, got.Message)
+	}
+	got := stageOf(t, res, StageWriteBack)
+	if got.Outcome != StageSkip || !strings.Contains(got.Message, "plain directory") {
+		t.Errorf("write-back = %q (%s), want a skip saying why", got.Outcome, got.Message)
+	}
+	for _, spec := range w.ex.specs {
+		if spec.WriteBack.Enabled() {
+			t.Errorf("the smoke asked for a write-back on a %q workspace", spec.Workspace.Kind)
 		}
-		res := w.only(t, w.run(t, Options{}))
-		if got := stageOf(t, res, StageWriteBack); got.Outcome != StagePass {
-			t.Errorf("write-back = %q, want pass: %s", got.Outcome, got.Message)
-		}
-	})
+	}
+}
 
+// TestWriteBackJudgedWhereTheSmokeAsksForIt: the judgement for a spec that
+// did ask, for the day the smoke stages a tree a write-back can be measured
+// against.
+func TestWriteBackJudgedWhereTheSmokeAsksForIt(t *testing.T) {
+	caps := executor.Capabilities{SupportsWriteBack: true}
+	spec := executor.Spec{
+		Workspace: executor.Workspace{Kind: executor.WorkspaceGit, Repo: "https://github.com/a/b", Ref: strings.Repeat("b", 40)},
+		WriteBack: executor.WriteBack{Mode: executor.WriteBackBundle, Branch: "cloop/smoke"},
+	}
+	returned := executor.RunResult{WriteBack: &executor.WriteBackResult{
+		Mode: executor.WriteBackBundle, Branch: "cloop/smoke", CommitSHA: strings.Repeat("a", 40),
+	}}
+	if got := smokeWriteBackStage(caps, spec, returned); got.Outcome != StagePass {
+		t.Errorf("returned changes = %q, want pass: %s", got.Outcome, got.Message)
+	}
 	// A driver that advertises the capability but returns nothing is a real
 	// failure: a task's commits would be produced in the sandbox and silently
 	// lost, which looks like an agent that did no work.
-	t.Run("advertised but returns nothing", func(t *testing.T) {
-		w := newSmokeWorld(t)
-		w.ex.caps.SupportsWriteBack = true
-		res := w.only(t, w.run(t, Options{}))
-		if got := stageOf(t, res, StageWriteBack); got.Outcome != StageFail {
-			t.Errorf("write-back = %q for a driver that advertised it and returned nothing",
-				got.Outcome)
-		}
-	})
+	if got := smokeWriteBackStage(caps, spec, executor.RunResult{}); got.Outcome != StageFail {
+		t.Errorf("nothing returned = %q, want fail", got.Outcome)
+	}
 }
 
 // --- exit codes --------------------------------------------------------

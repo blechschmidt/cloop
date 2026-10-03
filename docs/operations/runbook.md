@@ -189,7 +189,7 @@ DISPATCH SMOKE TEST
 | `lease` | a throwaway credential was minted, granted and delivered — a failure names the delivery path, not the grant |
 | `dispatch` | the workload did not start or exited non-zero; the last lines of its own output are in `--json` under `details.output` |
 | `logs` | output did not come back, was truncated, dropped chunks, or **carried another run's id** — the last is a confidentiality problem on a multi-tenant hub, not a logging bug |
-| `write_back` | a driver that advertises the capability produced no result, so a task's commits would be made in the sandbox and silently lost |
+| `write_back` | a driver asked for a write-back produced no result, so a task's commits would be made in the sandbox and silently lost |
 | `revocation` | the credential outlived its lease — verified by stat-ing the files and asking the broker to renew, not assumed |
 | `cleanup` | something this run created could not be removed |
 
@@ -197,6 +197,10 @@ A stage reports `skip`, never `pass`, when it does not apply to the backend or
 cannot be proved hermetically — `write_back` on a driver whose workspace *is*
 the hub's directory, `lease` on a driver that cannot take a credential back.
 "We did not look" and "we looked and it was fine" are different answers.
+Today `write_back` is skipped everywhere: a write-back is measured against the
+commit the sandbox's tree was built from, which needs a tree the driver built
+from git, and the smoke's workload runs in a plain directory. A run of a
+project with a git workspace — or of a feature — exercises it.
 
 **It is safe against production.** The workload touches no network, clones no
 repository and calls no model. The credential it mints is a kubeconfig pointing

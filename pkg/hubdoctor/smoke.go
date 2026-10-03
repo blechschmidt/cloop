@@ -473,7 +473,7 @@ func smokeOne(ctx context.Context, dir string, ex executor.Executor, opts Option
 	if dispatchStage.Outcome != StagePass && len(runRes.Output) == 0 {
 		res.Stages = append(res.Stages, unobservedStage(StageLogs,
 			"the workload did not run, so there was no output to stream"))
-		res.Stages = append(res.Stages, smokeWriteBackStage(caps, runRes))
+		res.Stages = append(res.Stages, smokeWriteBackStage(caps, spec, runRes))
 		res.Stages = append(res.Stages, smokeRevocation(context.WithoutCancel(ctx), lease))
 		res.FirstFailure = firstFailedStage(res.Stages)
 		return res
@@ -483,7 +483,7 @@ func smokeOne(ctx context.Context, dir string, ex executor.Executor, opts Option
 	res.Stages = append(res.Stages, smokeLogsStage(runRes, evidence, nonce))
 	res.Stages = append(res.Stages, smokeWorkspaceEvidence(caps, evidence))
 	res.Stages = append(res.Stages, smokeLeaseEvidence(lease, evidence))
-	res.Stages = append(res.Stages, smokeWriteBackStage(caps, runRes))
+	res.Stages = append(res.Stages, smokeWriteBackStage(caps, spec, runRes))
 
 	// --- revocation ---------------------------------------------------
 	//
@@ -936,10 +936,15 @@ func smokeSpec(ex executor.Executor, caps executor.Capabilities, workDir, nonce 
 	}
 	spec.Env = env
 
-	// Ask for write-back only where the driver says it can do it. Setting the
-	// field on a driver that cannot would be refused at placement, which would
-	// report a write-back problem as a placement one.
-	if caps.SupportsWriteBack {
+	// Ask for write-back only where the driver says it can do it — setting
+	// the field on a driver that cannot would be refused at placement, which
+	// would report a write-back problem as a placement one — and only for a
+	// workspace a write-back can be measured against. The smoke's throwaway
+	// directory is not one, so today it never asks: Spec.Validate refuses
+	// write-back on it, and asking anyway failed the dispatch stage of every
+	// driver advertising write-back, from Task 20274 until the container
+	// driver became one in Task 20367. smokeWriteBackStage says so.
+	if caps.SupportsWriteBack && writeBackMeasurable(spec.Workspace) {
 		spec.WriteBack = executor.WriteBack{
 			Mode:    executor.WriteBackBundle,
 			Branch:  "cloop/smoke-" + nonce,
@@ -947,6 +952,13 @@ func smokeSpec(ex executor.Executor, caps executor.Capabilities, workDir, nonce 
 		}
 	}
 	return spec
+}
+
+// writeBackMeasurable reports whether a write-back can be asked for on w: a
+// tree the driver built from git, at a commit the returned work is measured
+// against (Spec.Validate's rule).
+func writeBackMeasurable(w executor.Workspace) bool {
+	return w.Kind == executor.WorkspaceGit || w.Kind == executor.WorkspaceBundle
 }
 
 // smokeDispatch judges whether the workload started and exited cleanly.
@@ -1197,8 +1209,9 @@ func smokeLeaseEvidence(lease *smokeLeaseState, evidence map[string]string) Stag
 	return stage
 }
 
-// smokeWriteBackStage judges the return path, where the backend has one.
-func smokeWriteBackStage(caps executor.Capabilities, res executor.RunResult) StageResult {
+// smokeWriteBackStage judges the return path, where the backend has one and
+// the smoke could ask for it.
+func smokeWriteBackStage(caps executor.Capabilities, spec executor.Spec, res executor.RunResult) StageResult {
 	stage := StageResult{Stage: StageWriteBack}
 	if !caps.SupportsWriteBack {
 		// Not a gap. A driver whose /workspace *is* the hub's directory has
@@ -1207,6 +1220,18 @@ func smokeWriteBackStage(caps executor.Capabilities, res executor.RunResult) Sta
 		stage.Outcome = StageSkip
 		stage.Message = "this backend shares its workspace with the hub, so there is nothing to write back"
 		stage.Remediation = "Nothing to fix: the workload's file changes are already on the hub's filesystem"
+		return stage
+	}
+	if !spec.WriteBack.Enabled() {
+		// Not a gap either, and not a pass: the backend can return work, but
+		// only from a tree it built from git, and the smoke's is a plain
+		// directory.
+		stage.Outcome = StageSkip
+		stage.Message = "this backend can write back, but only from a tree it built from git, and the " +
+			"smoke runs in a plain directory"
+		stage.Remediation = "Nothing to fix here: a write-back is measured against the commit the " +
+			"sandbox's tree was built from, so a run of a project with a git workspace — or of a " +
+			"feature — on this backend is what exercises it"
 		return stage
 	}
 	wb := res.WriteBack
