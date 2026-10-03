@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -326,22 +327,59 @@ func TestFeatures_RunWhereTheirProjectRuns(t *testing.T) {
 		t.Fatalf("Resolve(feature) = %v, %v; want the parent's executor %s", ex, err, iso.id)
 	}
 
-	// Which it cannot run on: a linked worktree does not work there. The
-	// refusal is typed and reaches the browser as a 409 with a remediation.
+	// Which it cannot run on: a feature travels to an isolating executor as
+	// its branch (Task 20367), and this one can neither receive a branch nor
+	// return work. The refusal names what is missing, is typed, and reaches
+	// the browser as a 409 with a remediation.
 	_, _, err = startWorkload(dir, []string{"cloop", "run"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "feature login cannot run on executor "+iso.id) {
+	if err == nil || !strings.Contains(err.Error(), "feature login cannot run on executor "+iso.id) ||
+		!strings.Contains(err.Error(), "receive the feature's branch") {
 		t.Fatalf("startWorkload(feature on isolating executor) = %v", err)
 	}
 	code, body := f.do(t, "POST", "/api/run?project_idx=2", map[string]any{})
 	if code != http.StatusConflict || body["code"] != "feature_executor_unsupported" || body["remediation"] == "" {
 		t.Errorf("POST /api/run on the feature = %d %v", code, body)
 	}
-	// And a new feature of a project pinned there is refused before anything
-	// is created.
+
+	// A new feature of a project pinned there is made on the hub, where it
+	// lives — never dispatched to an executor that cannot see the hub's
+	// worktrees. The stub CLI would have answered a dispatch; nothing must.
+	realRepo(t, f.parent)
+	argv := stubCLI(t, f.srv, "", map[string]any{"ok": false, "error": "dispatched", "code": "failed"}, 3)
 	code, body = f.do(t, "POST", "/api/projects/1/features", map[string]any{"name": "x", "description": "y"})
-	if code != http.StatusConflict || body["code"] != "feature_executor_unsupported" {
-		t.Errorf("create on an isolated project = %d %v", code, body)
+	if code != http.StatusOK || body["slug"] != "x" {
+		t.Fatalf("create on an isolated project = %d %v", code, body)
 	}
+	if !feature.IsFeature(feature.Path(f.parent, "x")) {
+		t.Error("the hub reported the feature created, but there is none")
+	}
+	if _, err := os.Stat(argv); err == nil {
+		t.Error("creating a feature of an isolated project dispatched `cloop feature new` to its executor")
+	}
+}
+
+// realRepo turns the fixture's stand-in .git into a repository with a commit on
+// main, for a test in which the hub runs git itself.
+func realRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README.md")
+	run("commit", "-qm", "first")
 }
 
 func TestFeatures_AuthorizedAsTheirProject(t *testing.T) {

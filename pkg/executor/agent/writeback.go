@@ -232,7 +232,7 @@ func (a *Agent) planWriteBack(ctx context.Context, spec executor.Spec,
 			"it without a write-back and accept that its edits stay here",
 			executor.ErrWriteBackUnavailable, deviceName())
 	}
-	if spec.Workspace.Kind != executor.WorkspaceGit {
+	if spec.Workspace.Kind != executor.WorkspaceGit && spec.Workspace.Kind != executor.WorkspaceBundle {
 		// Unreachable through Spec.Validate, which enforces the same rule. Kept
 		// because this is the last place the assumption is still checkable, and
 		// the failure it prevents — committing in a directory that is not the

@@ -178,7 +178,16 @@ const (
 	// hub side like v14, and for the same reason: an older agent ignores both
 	// fields and would start the sandbox under the virtual executor's firewall
 	// alone, or under no firewall at all. See MinEgressRulesVersion.
-	ProtocolVersion = 15
+	//
+	// v16 adds shipped branches (Task 20367): the hub streams a git bundle to
+	// the device in branch_chunk frames ahead of a start frame whose workspace
+	// carries a branch_bundle, and the device builds the tree from it — how a
+	// feature, a branch of a repository on the hub, reaches a remote sandbox.
+	// The hello gains branch_bundles. Gated on the hub side: an older agent
+	// has no handler for the chunks and would ignore the workspace's branch,
+	// running the harness on the feature's base without any of its work. See
+	// MinBranchBundleVersion.
+	ProtocolVersion = 16
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -332,6 +341,18 @@ const (
 // SupportsEgressRules reports whether an agent speaking this protocol version
 // installs a workload's firewall rules and proves them against the device's.
 func SupportsEgressRules(version int) bool { return version >= MinEgressRulesVersion }
+
+// MinBranchBundleVersion is the first version whose agents receive a shipped
+// branch: branch_chunk frames ahead of the start, and a tree built from them.
+//
+// A placement rule like MinWorkspaceVersion, and for the reason stated at
+// ProtocolVersion: an older agent would not fail on the workspace's branch, it
+// would ignore it and start the harness on the base commit.
+const MinBranchBundleVersion = 16
+
+// SupportsBranchBundle reports whether an agent speaking this protocol version
+// can receive a shipped branch.
+func SupportsBranchBundle(version int) bool { return version >= MinBranchBundleVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
@@ -544,6 +565,18 @@ const (
 	// rather than splitting it. See executor.MaxProjectResultBytes.
 	TypeProjectResult FrameType = "project_result"
 
+	// TypeBranchChunk (control plane → agent) carries a slice of the git
+	// bundle a start frame's workspace names in branch_bundle, with the byte
+	// offset it starts at. Added in protocol v16 (Task 20367).
+	//
+	// All of a bundle's chunks are written before its start frame, on the same
+	// connection, so they have all arrived by the time the device handles the
+	// start; the start then names the bundle's size and digest, and the device
+	// refuses to build the tree from anything else. Like a result chunk it is
+	// offset-checked and bounded, because a bundle with a hole in it is not a
+	// smaller bundle.
+	TypeBranchChunk FrameType = "branch_chunk"
+
 	// TypeRevoke (control plane → agent) takes one secret lease back from a
 	// running task. Added in protocol v2.
 	TypeRevoke FrameType = "revoke"
@@ -739,6 +772,12 @@ type AgentCapabilities struct {
 	// same silent failure at the other end of the run: a device that cannot
 	// write back does not say so, it just keeps the work.
 	WriteBack bool `json:"write_back,omitempty"`
+	// BranchBundles reports that this device can build a workload's tree from
+	// a branch the hub ships with the start frame (protocol v16, Task 20367).
+	// It needs git, like WorkspaceProvisioning and WriteBack, and is
+	// advertised for the same reason: without it a feature placed here would
+	// run on its base commit with none of its work.
+	BranchBundles bool `json:"branch_bundles,omitempty"`
 	// MaxConcurrent is the agent's ceiling on simultaneous workloads.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 	// Virtualization reports that this device can actually start a
@@ -850,6 +889,10 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// version in Executor.Capabilities, because a device that can commit
 		// and bundle is no use if the session cannot carry the result frames.
 		SupportsWriteBack: c.WriteBack,
+		// The device advertised it; the hub narrows it by protocol version in
+		// Executor.Capabilities, because the frames that carry the bundle in
+		// only exist from v16.
+		SupportsBranchBundle: c.BranchBundles,
 		// Unconditionally true, and deliberately *not* an AgentCapabilities
 		// field — which is the difference between this capability and the two
 		// above it. Provisioning and write-back need git on the device, so
@@ -1619,6 +1662,52 @@ func DecodeResultChunk(f Frame) (ResultChunkPayload, error) {
 	case p.End() > executor.MaxWriteBackBundleBytes:
 		return p, fmt.Errorf("%w: result chunk ends at %d, past the %d-byte write-back ceiling",
 			ErrProtocol, p.End(), executor.MaxWriteBackBundleBytes)
+	}
+	return p, nil
+}
+
+// MaxBranchChunkBytes is the largest slice of a shipped branch one
+// branch_chunk frame carries. Half the frame limit, because JSON encodes []byte
+// as base64 and the envelope needs room besides.
+const MaxBranchChunkBytes = 512 << 10
+
+// BranchChunkPayload is one slice of a shipped branch's bundle.
+type BranchChunkPayload struct {
+	// Offset is where Data starts in the bundle.
+	Offset int64 `json:"offset"`
+	// Data is the slice.
+	Data []byte `json:"data"`
+	// Total is the bundle's full size, repeated on every chunk so a device can
+	// refuse an oversized transfer on its first frame instead of its last.
+	Total int64 `json:"total"`
+}
+
+// End is the offset just past this chunk.
+func (p BranchChunkPayload) End() int64 { return p.Offset + int64(len(p.Data)) }
+
+// DecodeBranchChunk decodes a slice of a shipped branch, refusing one no
+// well-behaved hub would send.
+func DecodeBranchChunk(f Frame) (BranchChunkPayload, error) {
+	var p BranchChunkPayload
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	switch {
+	case strings.TrimSpace(f.Handle) == "":
+		return p, fmt.Errorf("%w: branch chunk names no handle", ErrProtocol)
+	case p.Offset < 0:
+		return p, fmt.Errorf("%w: negative branch offset %d", ErrProtocol, p.Offset)
+	case len(p.Data) == 0:
+		return p, fmt.Errorf("%w: branch chunk carries no data", ErrProtocol)
+	case len(p.Data) > MaxBranchChunkBytes:
+		return p, fmt.Errorf("%w: branch chunk %d bytes exceeds %d",
+			ErrProtocol, len(p.Data), MaxBranchChunkBytes)
+	case p.Total <= 0 || p.Total > executor.MaxBranchBundleBytes:
+		return p, fmt.Errorf("%w: branch bundle of %d bytes is outside (0, %d]",
+			ErrProtocol, p.Total, executor.MaxBranchBundleBytes)
+	case p.End() > p.Total:
+		return p, fmt.Errorf("%w: branch chunk ends at %d, past the bundle's %d bytes",
+			ErrProtocol, p.End(), p.Total)
 	}
 	return p, nil
 }

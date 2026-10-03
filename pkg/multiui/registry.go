@@ -776,6 +776,9 @@ type FeatureStatus struct {
 	// can be told apart at a glance.
 	AutoEvolve bool `json:"auto_evolve,omitempty"`
 	Innovate   bool `json:"innovate,omitempty"`
+	// Return is what became of the last isolated run's work — a conflict
+	// is what the dashboard flags (Task 20367).
+	Return *feature.Return `json:"return,omitempty"`
 }
 
 // featureStatusFor reads a feature entry's record into a FeatureStatus. A
@@ -795,6 +798,7 @@ func featureStatusFor(entry ProjectEntry) *FeatureStatus {
 	fs.CreatedBy = m.CreatedBy
 	fs.AutoPR = m.AutoPR
 	fs.PR = m.PR
+	fs.Return = m.Return
 	return fs
 }
 

@@ -123,6 +123,11 @@ func TestWorkspaceStructurallyCannotCarryACredential(t *testing.T) {
 		// from. It is held to Repo's own rules — https only, no userinfo — so
 		// it can carry a credential no more than Repo can; asserted below.
 		"Upstream": true,
+		// Branch (Task 20367) describes a feature's branch shipped beside the
+		// Spec. Its fields are a branch name held to the write-back branch
+		// rules, two kinds of hex object id, a hex digest and a size —
+		// enumerated and asserted below, so it can hold no more than Ref can.
+		"Branch": true,
 	}
 	ty := reflect.TypeOf(executor.Workspace{})
 	for i := 0; i < ty.NumField(); i++ {
@@ -131,6 +136,31 @@ func TestWorkspaceStructurallyCannotCarryACredential(t *testing.T) {
 			t.Errorf("executor.Workspace gained field %q. A Spec is persisted, logged and "+
 				"shipped to remote agents, so any new field must be shown not to be able to "+
 				"carry credential material — then added to this list", name)
+		}
+	}
+	bundleFields := map[string]bool{"Branch": true, "Head": true, "Bytes": true, "SHA256": true, "Shallow": true}
+	bty := reflect.TypeOf(executor.BranchBundle{})
+	for i := 0; i < bty.NumField(); i++ {
+		if name := bty.Field(i).Name; !bundleFields[name] {
+			t.Errorf("executor.BranchBundle gained field %q; show it cannot carry credential material, "+
+				"then add it here", name)
+		}
+	}
+	// And the free-form-looking ones are not free-form: a token where a commit
+	// id or a digest belongs is refused.
+	const token = "ghp_conformance0123456789abcdefghijklmnopqr"
+	for _, b := range []executor.BranchBundle{
+		{Branch: "cloop/feature/x", Head: token, Bytes: 1, SHA256: strings.Repeat("a", 64)},
+		{Branch: "cloop/feature/x", Head: strings.Repeat("a", 40), Bytes: 1, SHA256: token},
+		{Branch: "cloop/feature/x", Head: strings.Repeat("a", 40), Bytes: 1, SHA256: strings.Repeat("a", 64),
+			Shallow: []string{token}},
+		{Branch: "https://x-access-token:" + token + "@github.com", Head: strings.Repeat("a", 40), Bytes: 1,
+			SHA256: strings.Repeat("a", 64)},
+	} {
+		b := b
+		w := executor.Workspace{Kind: executor.WorkspaceBundle, Branch: &b}
+		if err := w.Validate(); err == nil {
+			t.Errorf("a branch bundle carrying a token-shaped value validated: %+v", b)
 		}
 	}
 

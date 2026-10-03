@@ -178,6 +178,9 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 		name:      saved.ExternalID,
 		startedAt: saved.StartedAt,
 		state:     executor.StateRunning,
+		// A feature workload's output is where it was; the log follower
+		// replays the backlog, so its write-back report is found again.
+		feature: restoreFeature(saved.Meta),
 	}
 	// The bus is built under the lock because it is pure allocation, and doing
 	// it before the existence check would leave an orphaned bus on the

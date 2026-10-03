@@ -211,7 +211,15 @@ func APIBaseURL(host string) string {
 // stays in this process.
 func ResolveToken(ctx context.Context, dir string, remote Remote, explicit, apiOverride string) (token, source string) {
 	if t := strings.TrimSpace(explicit); t != "" {
+		if hubEnv(ctx) != nil {
+			return t, "hub"
+		}
 		return t, "flag"
+	}
+	if hubEnv(ctx) != nil {
+		// In hub mode the caller is the only source: every other one on this
+		// list belongs to the hub's own account. See WithHubEnv.
+		return "", ""
 	}
 	ambient := tokenMayReach(remote.Host, apiOverride)
 	if ambient {
@@ -566,6 +574,21 @@ func push(ctx context.Context, dir, remoteName, branch string, remote Remote, to
 	defer cancel()
 	ref := "refs/heads/" + branch
 	args := []string{"push", "--porcelain", remoteName, ref + ":" + ref}
+	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	header := [2]string{"http.https://" + remote.Host + "/.extraheader", "AUTHORIZATION: basic " + basic}
+	if hubEnv(ctx) != nil {
+		// In hub mode there is no credential of git's own to try first — the
+		// environment is closed — so the token the caller handed over is the
+		// push's only authority, and without one there is nothing to push with.
+		if !remote.HTTPS || token == "" {
+			return fmt.Errorf("push %s to %s: the hub has no credential for %s — grant the project the "+
+				"repository with write access", branch, remoteName, remote.Repo)
+		}
+		if _, err := runGitConfig(ctx, dir, [][2]string{header}, args...); err != nil {
+			return fmt.Errorf("push %s to %s: %w", branch, remoteName, err)
+		}
+		return nil
+	}
 	_, err := runGitEnv(ctx, dir, nil, args...)
 	if err == nil {
 		return nil
@@ -573,10 +596,7 @@ func push(ctx context.Context, dir, remoteName, branch string, remote Remote, to
 	if !remote.HTTPS || token == "" || source == "git credential helper" {
 		return fmt.Errorf("push %s to %s: %w", branch, remoteName, err)
 	}
-	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	env := appendGitConfigEnv(os.Getenv("GIT_CONFIG_COUNT"),
-		"http.https://"+remote.Host+"/.extraheader", "AUTHORIZATION: basic "+basic)
-	if _, err2 := runGitEnv(ctx, dir, env, args...); err2 != nil {
+	if _, err2 := runGitConfig(ctx, dir, [][2]string{header}, args...); err2 != nil {
 		return fmt.Errorf("push %s to %s: %w; and again with the token from %s: %v", branch, remoteName, err, source, err2)
 	}
 	return nil

@@ -41,6 +41,9 @@ import (
 // out: the provenance a merge stamps, which the device does not get a say in.
 type seededDispatch struct {
 	prov projectseed.Provenance
+	// feature is set for a feature's run on an isolating executor: what its
+	// returned work is landed against (Task 20367).
+	feature *featureReturn
 }
 
 // maxSeededDispatches bounds the registry. An entry lives from dispatch to
@@ -164,6 +167,13 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 	d, ok := takeSeededDispatch(ex, handleID)
 	if !ok {
 		return
+	}
+	// A feature's commits come back beside its project state, and are landed
+	// whatever became of the state — deferred so every early return below
+	// still reaches it, and after the state merge so the journal reads in the
+	// order things happened.
+	if d.feature != nil {
+		defer s.landFeatureWork(workDir, ex, handleID, d)
 	}
 
 	journal := func(msg string, details map[string]any) {

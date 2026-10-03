@@ -50,6 +50,16 @@ function featurePRBadge(f) {
     : '<span class="badge ' + cls + '">' + label + '</span>';
 }
 
+// What became of an isolated run's work when it was not applied to the feature
+// (Task 20367): kept on a branch of its own, or refused. The message is the
+// whole account, so it is the badge's title.
+function featureReturnBadge(f) {
+  const r = f && f.return;
+  if (!r || r.outcome === 'fast_forwarded' || r.outcome === 'nothing') return '';
+  return '<span class="badge failed" title="' + esc(r.message || '') + '">' +
+    (r.kept_on ? 'work kept on ' + esc(r.kept_on) : 'work not returned') + '</span>';
+}
+
 function featureOptionBadges(f) {
   let h = '';
   if (f && f.auto_evolve) h += '<span class="feat-opt" title="Auto-evolve">&#8635; evolve</span>';
@@ -121,7 +131,7 @@ function renderFeaturesList(cur) {
         '<strong>' + esc(f.title || f.slug) + '</strong>' +
         '<code class="feat-branch">' + esc(f.branch || '') + ' &rarr; ' + esc(f.base || '') + '</code>' +
         statusBadge(p.running && !isActiveRunStatus(p.status) ? 'running' : p.status, p.pause_reason) +
-        featureOptionBadges(f) + featurePRBadge(f) +
+        featureOptionBadges(f) + featurePRBadge(f) + featureReturnBadge(f) +
       '</div>' +
       '<div class="feat-progress"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:' + pct + '%"></div></div>' +
         '<span>' + (p.done_tasks | 0) + '/' + (p.total_tasks | 0) + ' tasks</span></div>' +

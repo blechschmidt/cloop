@@ -87,6 +87,37 @@ func gitEnv(extra ...string) []string {
 	return append(env, extra...)
 }
 
+// HubEnv renders the closed environment git runs with when the hub itself
+// performs a feature operation, with extra configuration pairs folded into the
+// one configuration block it carries (see executor.GitEnv for why there can
+// only be one).
+type HubEnv func(extra ...[2]string) []string
+
+type hubEnvKey struct{}
+
+// WithHubEnv makes every operation in this package run under ctx in hub mode
+// (Task 20367): the hub is managing a feature of a project that runs on an
+// isolating executor, so the git that runs is the hub's own, on the hub's
+// copy of the repository.
+//
+// Two things change, and both are about authority. Git runs with env rather
+// than the process's environment, so nothing configured for the hub's own
+// account — a credential helper, an insteadOf rewrite, a hook directory —
+// applies to a tenant's repository, and the repository's own hooks and
+// program-valued settings are switched off (executor.HardenedGitConfig). And
+// the API token comes only from the caller: the hub's credential helpers, its
+// gh login and its environment belong to the operator, not to the project
+// whose pull request is being opened.
+func WithHubEnv(ctx context.Context, env HubEnv) context.Context {
+	return context.WithValue(ctx, hubEnvKey{}, env)
+}
+
+// hubEnv returns the hub-mode environment renderer, or nil outside hub mode.
+func hubEnv(ctx context.Context) HubEnv {
+	env, _ := ctx.Value(hubEnvKey{}).(HubEnv)
+	return env
+}
+
 // runGit runs git in dir and returns its trimmed stdout.
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return runGitEnv(ctx, dir, nil, args...)
@@ -94,14 +125,39 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 
 // runGitEnv is runGit with additional environment entries.
 func runGitEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	return runGitWith(ctx, dir, gitEnv(extraEnv...), args...)
+}
+
+// runGitConfig is runGit with additional configuration pairs, delivered in the
+// environment so a value never appears on a command line.
+func runGitConfig(ctx context.Context, dir string, pairs [][2]string, args ...string) (string, error) {
+	if env := hubEnv(ctx); env != nil {
+		return runGitWith(ctx, dir, env(pairs...), args...)
+	}
+	var extra []string
+	count := os.Getenv("GIT_CONFIG_COUNT")
+	for _, kv := range pairs {
+		block := appendGitConfigEnv(count, kv[0], kv[1])
+		extra = append(extra, block...)
+		count = strings.TrimPrefix(block[0], "GIT_CONFIG_COUNT=")
+	}
+	return runGitEnv(ctx, dir, extra, args...)
+}
+
+// runGitWith runs git in dir with exactly env, or — in hub mode — with the
+// hub's environment, ignoring env.
+func runGitWith(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, gitTimeout)
 		defer cancel()
 	}
+	if hub := hubEnv(ctx); hub != nil {
+		env = append(hub(), "LC_ALL=C")
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = gitEnv(extraEnv...)
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

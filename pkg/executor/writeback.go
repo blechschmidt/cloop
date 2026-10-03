@@ -377,6 +377,16 @@ type WriteBackFetcher interface {
 	WriteBackBundle(handleID string) ([]byte, error)
 }
 
+// ResultReleaser is implemented by a driver that keeps a finished workload's
+// returned work on the control plane's disk until it is collected — the
+// container driver's feature mode stages a tree and an output directory per
+// workload (Task 20367). The hub calls ReleaseResults once it has taken what it
+// needs; a driver must also release on its own after a bounded time, because a
+// hub that crashed between the workload ending and the collection never will.
+type ResultReleaser interface {
+	ReleaseResults(handleID string)
+}
+
 // --- the output sentinel ----------------------------------------------------
 //
 // A driver whose only channel back from the sandbox is the workload's own

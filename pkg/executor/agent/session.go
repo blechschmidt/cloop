@@ -475,6 +475,14 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 		case remote.TypeAttachClose:
 			a.handleAttachClose(ctx, sess, frame)
 
+		case remote.TypeBranchChunk:
+			// Inline, on purpose: the chunks of a shipped branch precede their
+			// start frame on this connection, and handling them in order here
+			// is what guarantees the bundle is complete by the time the start
+			// — dispatched to its own goroutine only once it has been read —
+			// asks for it. See branch.go.
+			a.receiveBranchChunk(frame)
+
 		case remote.TypeSignal:
 			a.handleSignal(ctx, sess, frame)
 
@@ -655,12 +663,30 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// somewhere resolveWorkDir would have refused (Task 20265).
 	wl.recordAttachContext(workDir, spec.Redactor())
 
+	// A shipped branch — a feature's — arrived in branch_chunk frames ahead of
+	// this start. Claimed here, after the workload is reserved and before
+	// anything is built from it; the file is this function's to remove.
+	var branchFile string
+	if b := spec.Workspace.Branch; b != nil && b.Bytes > 0 {
+		path, err := a.takeBranchBundle(handleID)
+		if err != nil {
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error:    fmt.Sprintf("%s on %s: %v", b.Describe(), deviceName(), err),
+			})
+			return
+		}
+		defer os.Remove(path)
+		branchFile = path
+	}
+
 	// The tree has to be in place before the harness is, and only this device
 	// can put it there. A failure here fails the start rather than launching
 	// anyway: a harness started against an empty directory produces a run that
 	// looks healthy, streams a plausible transcript, and operated on no code —
 	// which is the exact outcome the workspace contract exists to remove.
-	if err := a.prepareWorkspace(ctx, wl, spec, payload.GitCredential()); err != nil {
+	if err := a.prepareWorkspace(ctx, wl, spec, payload.GitCredential(), branchFile); err != nil {
 		a.forget(handleID)
 		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
 			HandleID: handleID,
@@ -722,6 +748,13 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// an inner driver that shares this filesystem, so what it is handed must
 	// say the tree is already in place. See provisionedWorkspace.
 	spec.Workspace = provisionedWorkspace(spec.Workspace)
+	// And the write-back is this device's job too, done after the harness
+	// exits from the plan recorded above (performWriteBack). The inner driver
+	// has nothing to return — the tree is on its own filesystem — and a spec
+	// that still asked it to would be refused outright: a write-back on a bind
+	// workspace is a contradiction Spec.Validate rejects. Until a feature's run
+	// needed it (Task 20367) no real agent had carried a write-back this far.
+	spec.WriteBack = executor.WriteBack{}
 
 	// Which driver runs this payload — a host process, or a container on this
 	// device — is the control plane's decision, carried in the start frame
@@ -1204,6 +1237,8 @@ func (a *Agent) forget(handleID string) {
 	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
 	a.mu.Unlock()
+	// A shipped branch nobody will build from is just disk.
+	a.dropBranchTransfer(handleID)
 	if wl != nil {
 		// A workload dropped while its tree was still being fetched has nothing
 		// left to fetch for: the control plane has stopped tracking it, or the

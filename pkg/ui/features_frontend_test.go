@@ -48,6 +48,7 @@ type featureScenario struct {
 	UnsafeLink bool   `json:"unsafeLink"`
 	Options    bool   `json:"options"`
 	NewButton  string `json:"newButton"`
+	Kept       bool   `json:"kept"`
 	Says       bool   `json:"says"`
 	ParentIdx  []int  `json:"parentIdx"`
 	Updates    bool   `json:"updates"`
@@ -162,6 +163,9 @@ func TestDashboard_FeaturePanels(t *testing.T) {
 	}
 	if p.NewButton != "" {
 		t.Errorf("New feature button display %q on a git project", p.NewButton)
+	}
+	if !p.Kept {
+		t.Error("a feature whose returned work was kept on a branch of its own does not say so (or its message reached the page unescaped)")
 	}
 
 	n := res["non_git_project"]

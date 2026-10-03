@@ -387,6 +387,9 @@ func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr 
 		if !SupportsWriteBack(sess.Version()) {
 			caps.SupportsWriteBack = false
 		}
+		if !SupportsBranchBundle(sess.Version()) {
+			caps.SupportsBranchBundle = false
+		}
 		// Nothing about the device narrows this one — writing a file needs no
 		// tool — so the session's version is the whole question. A pre-v6 agent
 		// has no frame field to receive the bytes in, and placement must see
@@ -569,6 +572,25 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 				"(needs v%d); upgrade the agent with `cloop executor agent install --upgrade`, or "+
 				"run this project on an executor that shares the control plane's filesystem",
 			ErrProjectSeedUnsupported, e.id, e.name, sess.Version(), MinProjectSeedVersion)
+	}
+
+	// And for a shipped branch — a feature's. An older agent has no handler
+	// for the chunks that carry it and ignores the workspace field that names
+	// it, so the harness would start on the feature's base commit with none of
+	// the feature's work: a run on the wrong code that reports success.
+	if b := spec.Workspace.Branch; b != nil {
+		if !SupportsBranchBundle(sess.Version()) || !e.AgentCapabilities().BranchBundles {
+			return executor.Handle{}, fmt.Errorf(
+				"%w: agent %s (%s) speaks protocol v%d and cannot receive %s, which a feature's run "+
+					"needs (protocol v%d and git on the device); upgrade the agent with "+
+					"`cloop executor agent install --upgrade`",
+				ErrWorkspaceUnsupported, e.id, e.name, sess.Version(), b.Describe(), MinBranchBundleVersion)
+		}
+		if b.Bytes > 0 {
+			if err := b.VerifyFile(spec.BranchBundleFile); err != nil {
+				return executor.Handle{}, fmt.Errorf("remote: start on agent %s: %w", e.id, err)
+			}
+		}
 	}
 
 	// Where this payload runs on the device. Read before anything is leased or
@@ -837,6 +859,15 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	if err != nil {
 		e.dropHandle(handleID)
 		return executor.Handle{}, err
+	}
+
+	// The shipped branch goes first, on the same connection, so every chunk
+	// has arrived by the time the device reads the start frame that names it.
+	if b := spec.Workspace.Branch; b != nil && b.Bytes > 0 {
+		if err := sendBranchBundle(ctx, sess, handleID, spec.BranchBundleFile, b.Bytes); err != nil {
+			e.dropHandle(handleID)
+			return executor.Handle{}, fmt.Errorf("remote: send %s to agent %s: %w", b.Describe(), e.id, err)
+		}
 	}
 
 	reply, err := sess.request(ctx, frame, TypeStarted)

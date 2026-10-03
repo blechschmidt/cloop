@@ -189,168 +189,79 @@ func countWriteBack(res Result, err error) {
 	}
 }
 
+// RecordOutcome counts one landing in the hub's metrics, for a caller that
+// vets with Vet and lands the result itself (a feature's write-back, Task
+// 20367) rather than through Apply, which counts its own.
+func RecordOutcome(skipped bool, err error) { countWriteBack(Result{Skipped: skipped}, err) }
+
+// Vetted is a write-back that passed every check and sits in quarantine, not
+// yet reachable from any branch. The caller decides what becomes of it and
+// must call Discard when done, whatever it decided: the quarantine ref is not
+// meant to outlive the landing.
+type Vetted struct {
+	// Branch, CommitSHA and BaseSHA are what the executor reported and the
+	// checks confirmed.
+	Branch    string
+	CommitSHA string
+	BaseSHA   string
+	// Quarantine is the ref the objects were fetched into.
+	Quarantine string
+	// Commits and Entries describe the range base..commit; Entries is every
+	// changed path, as InspectWriteBack saw it.
+	Commits int
+	Entries []executor.BundleEntry
+
+	g *gitRunner
+}
+
+// Discard deletes the quarantine ref. Idempotent.
+func (v *Vetted) Discard() {
+	if v == nil || v.g == nil {
+		return
+	}
+	_, _ = v.g.run(context.Background(), "update-ref", "-d", v.Quarantine)
+	v.g = nil
+}
+
+// Vet lands a reported write-back in quarantine and runs every check Apply
+// runs, without promoting it to a branch or merging it. It returns nil and no
+// error when there is nothing to land (the executor skipped).
+//
+// A rejection leaves nothing behind, exactly as from Apply.
+func Vet(ctx context.Context, req Request) (*Vetted, error) {
+	v, err := vet(ctx, req)
+	if err != nil {
+		v.Discard()
+		return nil, err
+	}
+	return v, nil
+}
+
 func apply(ctx context.Context, req Request) (Result, error) {
 	emit := req.Emit
 	if emit == nil {
 		emit = func(string) {}
 	}
 	var res Result
-
-	rep := req.Reported
-	if rep.Err != "" {
-		return res, fmt.Errorf("%w: the executor reported: %s", executor.ErrWriteBackUnavailable, rep.Err)
+	v, err := Vet(ctx, req)
+	if err != nil {
+		return res, err
 	}
-	if rep.Skipped || !rep.Delivered() {
+	if v == nil {
 		res.Skipped = true
 		return res, nil
 	}
-
-	repo := strings.TrimSpace(req.RepoDir)
-	if repo == "" || !filepath.IsAbs(repo) {
-		return res, fmt.Errorf("%w: project directory %q is not an absolute path",
-			executor.ErrWriteBackUnavailable, req.RepoDir)
-	}
-
-	// Validate the sandbox's claims about itself before any of them reaches a
-	// git command line. Branch and both SHAs become argv elements and refspec
-	// components a moment from now.
-	branch := strings.TrimSpace(rep.Branch)
-	// reject takes the classification alongside the prose because the prose
-	// cannot be recovered into one: it interpolates SHAs and branch names, so
-	// counting refusals by message would mint a metric series per commit.
-	reject := func(code executor.WriteBackReason, reason string) (Result, error) {
-		return res, &executor.WriteBackRejection{
-			Branch: branch, CommitSHA: rep.CommitSHA, Reason: reason, Code: code,
-		}
-	}
-	if err := executor.ValidateWriteBackBranch(branch); err != nil {
-		return reject(executor.WriteBackReasonBadBranch, "the reported branch is not acceptable: "+err.Error())
-	}
-	if err := executor.ValidateCommitSHA(rep.CommitSHA); err != nil {
-		return reject(executor.WriteBackReasonBadCommit, "the reported commit is not acceptable: "+err.Error())
-	}
-	if err := executor.ValidateCommitSHA(rep.BaseSHA); err != nil {
-		return reject(executor.WriteBackReasonBadCommit, "the reported base commit is not acceptable: "+err.Error())
-	}
-	if rep.BaseSHA == rep.CommitSHA {
-		return reject(executor.WriteBackReasonEmptyRange, "the reported commit is the base it was built on, so nothing was produced")
-	}
-
-	g := &gitRunner{dir: repo, timeout: req.Timeout}
-	quarantine := QuarantineRefPrefix + branch
-
-	// The base has to be an object this repository already has. It is the
-	// anchor for everything below — the inspected range, the ancestry check,
-	// the bundle's own prerequisite — so a base the hub has never seen means
-	// the sandbox is describing history that did not come from here.
-	if _, err := g.run(ctx, "cat-file", "-e", rep.BaseSHA+"^{commit}"); err != nil {
-		return reject(executor.WriteBackReasonUnknownBase,
-			fmt.Sprintf("the base commit %s is not in this repository, so the reported "+
-				"work is not built on anything the hub knows", executor.ShortSHA(rep.BaseSHA)))
-	}
-
-	// Whatever happens below, the unvetted ref does not survive this function.
-	// It is deleted on rejection, on error, and on success alike — on success
-	// because by then the vetted ref exists under refs/heads and a second name
-	// for the same commit is just something to go stale.
-	defer func() {
-		_, _ = g.run(context.WithoutCancel(ctx), "update-ref", "-d", quarantine)
-	}()
-
-	// --- land the objects in quarantine -----------------------------------
-	switch rep.Mode {
-	case executor.WriteBackBundle:
-		if err := fetchFromBundle(ctx, g, req, rep, branch, quarantine, emit); err != nil {
-			return res, err
-		}
-	case executor.WriteBackPush:
-		remote := strings.TrimSpace(req.Remote)
-		if remote == "" {
-			remote = "origin"
-		}
-		if err := validateRemoteName(remote); err != nil {
-			return res, fmt.Errorf("%w: %v", executor.ErrWriteBackUnavailable, err)
-		}
-		// "--" before the remote so a name that somehow reached here starting
-		// with a dash is an unknown remote rather than an unknown flag.
-		if out, err := g.untrustedFetch(ctx, "--no-tags", "--", remote,
-			"+refs/heads/"+branch+":"+quarantine); err != nil {
-			if isFsckRefusal(out) {
-				// Git refused the content, not the transfer. That is a
-				// rejection and has to carry the rejection sentinel: a caller
-				// that retries on ErrWriteBackUnavailable — which is
-				// documented as "nothing about the task's code is implicated"
-				// — would otherwise retry a hostile write-back on a loop.
-				return res, &executor.WriteBackRejection{
-					Branch: branch, CommitSHA: rep.CommitSHA,
-					Code:   executor.WriteBackReasonFsck,
-					Reason: "git refused the pushed objects: " + collapse(out),
-				}
-			}
-			return res, fmt.Errorf("%w: the executor reported pushing %s to %s, but the hub "+
-				"cannot fetch it back: %v", executor.ErrWriteBackUnavailable, branch, remote, err)
-		}
-		emit("writeback: fetched " + branch + " from " + remote + "\n")
-	default:
-		return res, fmt.Errorf("%w: reported mode %q has no way to reach the hub",
-			executor.ErrWriteBackUnavailable, rep.Mode)
-	}
-
-	// --- verify it is what the executor said ------------------------------
-	landed, err := g.run(ctx, "rev-parse", "--verify", "--end-of-options", quarantine+"^{commit}")
-	if err != nil {
-		return res, fmt.Errorf("%w: nothing landed under %s: %v",
-			executor.ErrWriteBackUnavailable, quarantine, err)
-	}
-	landed = strings.TrimSpace(landed)
-	if landed != rep.CommitSHA {
-		// The whole point of reporting a SHA is that this comparison can be
-		// made. A mismatch means the ref moved between the sandbox reporting
-		// and the hub fetching — someone else pushed over it, or the report is
-		// not describing the objects that arrived.
-		return reject(executor.WriteBackReasonRefMoved,
-			fmt.Sprintf("the branch is at %s but the executor reported %s; "+
-				"the ref moved between being written and being fetched",
-				executor.ShortSHA(landed), executor.ShortSHA(rep.CommitSHA)))
-	}
-
-	// Ancestry, so the range base..commit is the whole of what arrived. Without
-	// it a bundle could carry a commit that is not descended from the checkout
-	// at all — rewritten history whose diff against base looks small while the
-	// merge replaces files nobody inspected.
-	if _, err := g.run(ctx, "merge-base", "--is-ancestor", rep.BaseSHA, rep.CommitSHA); err != nil {
-		return reject(executor.WriteBackReasonNotDescendant,
-			fmt.Sprintf("commit %s is not a descendant of the base %s it claims to "+
-				"build on", executor.ShortSHA(rep.CommitSHA), executor.ShortSHA(rep.BaseSHA)))
-	}
-
-	count, err := g.run(ctx, "rev-list", "--count", "--end-of-options",
-		rep.BaseSHA+".."+rep.CommitSHA)
-	if err != nil {
-		return res, fmt.Errorf("%w: cannot count the returned commits: %v",
-			executor.ErrWriteBackUnavailable, err)
-	}
-	commits, convErr := strconv.Atoi(strings.TrimSpace(count))
-	if convErr != nil || commits <= 0 {
-		return reject(executor.WriteBackReasonEmptyRange, "the returned range contains no commits")
-	}
-	if commits > executor.MaxWriteBackCommits {
-		return reject(executor.WriteBackReasonTooManyCommits,
-			fmt.Sprintf("the returned range contains %d commits, at most %d are allowed",
-				commits, executor.MaxWriteBackCommits))
-	}
-	res.Commits = commits
-
-	// --- inspect every changed path ---------------------------------------
-	entries, err := changedEntries(ctx, g, rep.BaseSHA, rep.CommitSHA)
-	if err != nil {
-		return res, fmt.Errorf("%w: cannot read the returned changes: %v",
-			executor.ErrWriteBackUnavailable, err)
-	}
-	if err := executor.InspectWriteBack(branch, rep.CommitSHA, entries); err != nil {
-		return res, err
-	}
-	res.FilesChanged = len(entries)
+	// The unvetted ref does not survive this function — on success because by
+	// then the vetted ref exists under refs/heads and a second name for the
+	// same commit is just something to go stale.
+	defer v.Discard()
+	g := v.g
+	branch := v.Branch
+	rep := req.Reported
+	res.Commits = v.Commits
+	res.FilesChanged = len(v.Entries)
+	commits := v.Commits
+	entries := v.Entries
 
 	// --- promote ----------------------------------------------------------
 	//
@@ -404,6 +315,172 @@ func apply(ctx context.Context, req Request) (Result, error) {
 		res.MergeErr = ctx.Err()
 	}
 	return res, nil
+}
+
+// vet is Vet's body. On error the returned Vetted, when non-nil, holds the
+// quarantine ref for the caller to discard.
+func vet(ctx context.Context, req Request) (*Vetted, error) {
+	emit := req.Emit
+	if emit == nil {
+		emit = func(string) {}
+	}
+
+	rep := req.Reported
+	if rep.Err != "" {
+		return nil, fmt.Errorf("%w: the executor reported: %s", executor.ErrWriteBackUnavailable, rep.Err)
+	}
+	if rep.Skipped || !rep.Delivered() {
+		return nil, nil
+	}
+
+	repo := strings.TrimSpace(req.RepoDir)
+	if repo == "" || !filepath.IsAbs(repo) {
+		return nil, fmt.Errorf("%w: project directory %q is not an absolute path",
+			executor.ErrWriteBackUnavailable, req.RepoDir)
+	}
+
+	// Validate the sandbox's claims about itself before any of them reaches a
+	// git command line. Branch and both SHAs become argv elements and refspec
+	// components a moment from now.
+	branch := strings.TrimSpace(rep.Branch)
+	// reject takes the classification alongside the prose because the prose
+	// cannot be recovered into one: it interpolates SHAs and branch names, so
+	// counting refusals by message would mint a metric series per commit.
+	var quarantined *Vetted
+	reject := func(code executor.WriteBackReason, reason string) (*Vetted, error) {
+		return quarantined, &executor.WriteBackRejection{
+			Branch: branch, CommitSHA: rep.CommitSHA, Reason: reason, Code: code,
+		}
+	}
+	if err := executor.ValidateWriteBackBranch(branch); err != nil {
+		return reject(executor.WriteBackReasonBadBranch, "the reported branch is not acceptable: "+err.Error())
+	}
+	if err := executor.ValidateCommitSHA(rep.CommitSHA); err != nil {
+		return reject(executor.WriteBackReasonBadCommit, "the reported commit is not acceptable: "+err.Error())
+	}
+	if err := executor.ValidateCommitSHA(rep.BaseSHA); err != nil {
+		return reject(executor.WriteBackReasonBadCommit, "the reported base commit is not acceptable: "+err.Error())
+	}
+	if rep.BaseSHA == rep.CommitSHA {
+		return reject(executor.WriteBackReasonEmptyRange, "the reported commit is the base it was built on, so nothing was produced")
+	}
+
+	g, err := newGitRunner(ctx, repo, req.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", executor.ErrWriteBackUnavailable, err)
+	}
+	quarantine := QuarantineRefPrefix + branch
+
+	// The base has to be an object this repository already has. It is the
+	// anchor for everything below — the inspected range, the ancestry check,
+	// the bundle's own prerequisite — so a base the hub has never seen means
+	// the sandbox is describing history that did not come from here.
+	if _, err := g.run(ctx, "cat-file", "-e", rep.BaseSHA+"^{commit}"); err != nil {
+		return reject(executor.WriteBackReasonUnknownBase,
+			fmt.Sprintf("the base commit %s is not in this repository, so the reported "+
+				"work is not built on anything the hub knows", executor.ShortSHA(rep.BaseSHA)))
+	}
+
+	// From here on the quarantine ref may exist, and whoever gets the Vetted
+	// back — Vet on a refusal, the caller on success — deletes it.
+	quarantined = &Vetted{Branch: branch, CommitSHA: rep.CommitSHA, BaseSHA: rep.BaseSHA,
+		Quarantine: quarantine, g: g}
+
+	// --- land the objects in quarantine -----------------------------------
+	switch rep.Mode {
+	case executor.WriteBackBundle:
+		if err := fetchFromBundle(ctx, g, req, rep, branch, quarantine, emit); err != nil {
+			return quarantined, err
+		}
+	case executor.WriteBackPush:
+		remote := strings.TrimSpace(req.Remote)
+		if remote == "" {
+			remote = "origin"
+		}
+		if err := validateRemoteName(remote); err != nil {
+			return quarantined, fmt.Errorf("%w: %v", executor.ErrWriteBackUnavailable, err)
+		}
+		// "--" before the remote so a name that somehow reached here starting
+		// with a dash is an unknown remote rather than an unknown flag.
+		if out, err := g.untrustedFetch(ctx, "--no-tags", "--", remote,
+			"+refs/heads/"+branch+":"+quarantine); err != nil {
+			if isFsckRefusal(out) {
+				// Git refused the content, not the transfer. That is a
+				// rejection and has to carry the rejection sentinel: a caller
+				// that retries on ErrWriteBackUnavailable — which is
+				// documented as "nothing about the task's code is implicated"
+				// — would otherwise retry a hostile write-back on a loop.
+				return quarantined, &executor.WriteBackRejection{
+					Branch: branch, CommitSHA: rep.CommitSHA,
+					Code:   executor.WriteBackReasonFsck,
+					Reason: "git refused the pushed objects: " + collapse(out),
+				}
+			}
+			return quarantined, fmt.Errorf("%w: the executor reported pushing %s to %s, but the hub "+
+				"cannot fetch it back: %v", executor.ErrWriteBackUnavailable, branch, remote, err)
+		}
+		emit("writeback: fetched " + branch + " from " + remote + "\n")
+	default:
+		return quarantined, fmt.Errorf("%w: reported mode %q has no way to reach the hub",
+			executor.ErrWriteBackUnavailable, rep.Mode)
+	}
+
+	// --- verify it is what the executor said ------------------------------
+	landed, err := g.run(ctx, "rev-parse", "--verify", "--end-of-options", quarantine+"^{commit}")
+	if err != nil {
+		return quarantined, fmt.Errorf("%w: nothing landed under %s: %v",
+			executor.ErrWriteBackUnavailable, quarantine, err)
+	}
+	landed = strings.TrimSpace(landed)
+	if landed != rep.CommitSHA {
+		// The whole point of reporting a SHA is that this comparison can be
+		// made. A mismatch means the ref moved between the sandbox reporting
+		// and the hub fetching — someone else pushed over it, or the report is
+		// not describing the objects that arrived.
+		return reject(executor.WriteBackReasonRefMoved,
+			fmt.Sprintf("the branch is at %s but the executor reported %s; "+
+				"the ref moved between being written and being fetched",
+				executor.ShortSHA(landed), executor.ShortSHA(rep.CommitSHA)))
+	}
+
+	// Ancestry, so the range base..commit is the whole of what arrived. Without
+	// it a bundle could carry a commit that is not descended from the checkout
+	// at all — rewritten history whose diff against base looks small while the
+	// merge replaces files nobody inspected.
+	if _, err := g.run(ctx, "merge-base", "--is-ancestor", rep.BaseSHA, rep.CommitSHA); err != nil {
+		return reject(executor.WriteBackReasonNotDescendant,
+			fmt.Sprintf("commit %s is not a descendant of the base %s it claims to "+
+				"build on", executor.ShortSHA(rep.CommitSHA), executor.ShortSHA(rep.BaseSHA)))
+	}
+
+	count, err := g.run(ctx, "rev-list", "--count", "--end-of-options",
+		rep.BaseSHA+".."+rep.CommitSHA)
+	if err != nil {
+		return quarantined, fmt.Errorf("%w: cannot count the returned commits: %v",
+			executor.ErrWriteBackUnavailable, err)
+	}
+	commits, convErr := strconv.Atoi(strings.TrimSpace(count))
+	if convErr != nil || commits <= 0 {
+		return reject(executor.WriteBackReasonEmptyRange, "the returned range contains no commits")
+	}
+	if commits > executor.MaxWriteBackCommits {
+		return reject(executor.WriteBackReasonTooManyCommits,
+			fmt.Sprintf("the returned range contains %d commits, at most %d are allowed",
+				commits, executor.MaxWriteBackCommits))
+	}
+	quarantined.Commits = commits
+
+	// --- inspect every changed path ---------------------------------------
+	entries, err := changedEntries(ctx, g, rep.BaseSHA, rep.CommitSHA)
+	if err != nil {
+		return quarantined, fmt.Errorf("%w: cannot read the returned changes: %v",
+			executor.ErrWriteBackUnavailable, err)
+	}
+	if err := executor.InspectWriteBack(branch, rep.CommitSHA, entries); err != nil {
+		return quarantined, err
+	}
+	quarantined.Entries = entries
+	return quarantined, nil
 }
 
 // fetchFromBundle writes the received bytes to a temporary file, checks them
@@ -555,6 +632,33 @@ func changedEntries(ctx context.Context, g *gitRunner, base, head string) ([]exe
 type gitRunner struct {
 	dir     string
 	timeout time.Duration
+	// env is the environment every command runs with; see newGitRunner.
+	env []string
+}
+
+// newGitRunner prepares the environment the hub's git commands run with in the
+// repository at dir.
+//
+// It is closed — no system or global configuration — and it carries
+// executor.HardenedGitConfig for the repository's own filter drivers. The
+// repository is the hub's, but not necessarily only the hub's to write: a
+// project bound to a container executor has its directory, .git included,
+// mounted into the sandbox, and a hook or a filter command left there would
+// otherwise run on the hub at the next landing — update-ref alone fires the
+// reference-transaction hook.
+func newGitRunner(ctx context.Context, dir string, timeout time.Duration) (*gitRunner, error) {
+	// safe.directory for the reason featurehub gives: a project bound to a
+	// container executor is owned by its sandbox's uid, not necessarily by the
+	// hub's account, and the configuration git's ownership check guards
+	// against is switched off below.
+	ownership := [2]string{"safe.directory", "*"}
+	drivers, err := gitprovision.FilterDrivers(ctx, dir, nil, ownership)
+	if err != nil {
+		return nil, err
+	}
+	pairs := append(executor.HardenedGitConfig(drivers), ownership)
+	env := append(executor.GitEnv(pairs...), gitprovision.TransportEnv()...)
+	return &gitRunner{dir: dir, timeout: timeout, env: append(env, "LC_ALL=C")}, nil
 }
 
 func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {
@@ -572,7 +676,10 @@ func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {
 	// ~/.gitconfig must not get a say in what a fetch from an untrusted source
 	// contacts. The hub's own remote credentials, when it needs them, come from
 	// the repository's config, which GIT_CONFIG_NOSYSTEM does not suppress.
-	cmd.Env = append(executor.GitBaseEnv(), gitprovision.TransportEnv()...)
+	cmd.Env = g.env
+	if cmd.Env == nil {
+		cmd.Env = append(executor.GitBaseEnv(), gitprovision.TransportEnv()...)
+	}
 	cmd.Dir = g.dir
 	// The fetch step execs git-remote-https, which inherits the captured pipes,
 	// so without this the timeout above is decorative: killing git leaves the

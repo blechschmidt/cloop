@@ -1863,7 +1863,7 @@ func (e *Executor) streamLogs(ctx context.Context, rec *record) {
 				// recorded even when nobody is subscribed to the log — an
 				// unwatched run's work product must not depend on someone
 				// having been watching. See writeback.go.
-				rec.writeBack.observe(chunk)
+				rec.writeBack.Observe(chunk)
 				rec.bus.Emit(chunk)
 			}
 			if readErr != nil {
@@ -2710,7 +2710,7 @@ func (r *record) leaseIDValue() string {
 func (r *record) snapshot(executorID string) executor.Status {
 	// Read before r.mu is taken: the scanner has its own lock and nesting the
 	// two would create an ordering the log pump could deadlock against.
-	wb := r.writeBack.snapshot()
+	wb := r.writeBack.Snapshot()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

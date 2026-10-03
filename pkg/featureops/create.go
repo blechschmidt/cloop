@@ -200,6 +200,9 @@ func Create(ctx context.Context, opts CreateOptions) (*feature.Info, error) {
 	if err := os.MkdirAll(filepath.Join(dest, feature.ControlDir), 0o755); err != nil {
 		return nil, fmt.Errorf("create the feature's control directory: %w", err)
 	}
+	if err := removeCheckedOutState(dest); err != nil {
+		return nil, err
+	}
 	if err := copyControlFiles(project, dest); err != nil {
 		return nil, err
 	}
@@ -329,6 +332,31 @@ func hideTrackedControlFiles(ctx context.Context, dest string) error {
 	args := append([]string{"update-index", "--skip-worktree", "--"}, paths...)
 	if _, err := runGit(ctx, dest, args...); err != nil {
 		return fmt.Errorf("hide the repository's committed %s files from the feature's changes: %w", feature.ControlDir, err)
+	}
+	return nil
+}
+
+// checkedOutStateFiles are the project-state files a repository may have
+// committed under .cloop/.
+var checkedOutStateFiles = []string{"state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.json"}
+
+// removeCheckedOutState deletes the project state the worktree's checkout put
+// in the feature's .cloop/.
+//
+// A repository that commits its .cloop/ — some do, state database and all —
+// checks the *parent's* state out into every feature. Seeding the feature's
+// own state on top of it would merge into that database instead of starting
+// one: the feature would inherit the parent's task list and, worse, its record
+// of which directory it belongs to, so a run's results could never be merged
+// back into it (Task 20367 found this). The files are skip-worktree by now
+// (hideTrackedControlFiles), so removing them changes nothing git reports.
+// A link is removed as a link.
+func removeCheckedOutState(dest string) error {
+	for _, name := range checkedOutStateFiles {
+		p := filepath.Join(dest, feature.ControlDir, name)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove the parent's state checked out at %s: %w", p, err)
+		}
 	}
 	return nil
 }

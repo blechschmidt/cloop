@@ -68,6 +68,14 @@ import (
 // a *executor.WorkspaceGrantError, each carrying its own Remediation() for
 // jsonWorkloadErr to render.
 func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, error) {
+	return applyWorkspaceFor(spec, ex, workDir, false)
+}
+
+// applyWorkspaceFor is applyWorkspace for a dispatch that may return work: a
+// feature's run on an isolating executor (returnWork) sends its commits back as
+// a bundle onto the feature's branch (Task 20367). Every other workload's tree
+// either is the hub's own directory or goes back out through its own pushes.
+func applyWorkspaceFor(spec executor.Spec, ex executor.Executor, workDir string, returnWork bool) (executor.Spec, error) {
 	if ex == nil {
 		// Unreachable from the two call sites, which both have a resolved
 		// executor. Fail closed anyway: the whole decision below is a function
@@ -77,6 +85,14 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 			ProjectPath: workDir,
 			Reason:      "no executor was resolved, so there is no way to tell whether the source tree is reachable",
 		}
+	}
+
+	// A feature on an executor that does not run on the hub's worktree
+	// travels as its branch. Before the bind decision below: a container
+	// shares the hub's filesystem, and binding a feature's worktree into one
+	// hands it a .git that only resolves on the hub. See features_isolated.go.
+	if featureRunsIsolated(workDir, ex) {
+		return applyFeatureWorkspace(spec, ex, workDir, returnWork)
 	}
 
 	// The disk bound is the sandbox's to set and ours to preserve. Every

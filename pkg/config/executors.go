@@ -209,6 +209,10 @@ func ValidateExecutors(e ExecutorsConfig) error {
 				"any agent", v)
 		}
 	}
+	if e.FeatureBundleMB < 0 || e.FeatureBundleMB > MaxFeatureBundleMB {
+		return fmt.Errorf("executors.feature_bundle_mb: %d is outside 0..%d (0 uses the default of 32)",
+			e.FeatureBundleMB, MaxFeatureBundleMB)
+	}
 	if err := ValidateExecutorLimits(e.Limits); err != nil {
 		return err
 	}

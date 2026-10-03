@@ -59,6 +59,7 @@ const (
 	EventFeatureCreated    = statedb.EventFeatureCreated
 	EventFeatureRemoved    = statedb.EventFeatureRemoved
 	EventFeaturePR         = statedb.EventFeaturePR
+	EventWriteBack         = statedb.EventWriteBack
 	EventFirewall          = statedb.EventFirewall
 )
 

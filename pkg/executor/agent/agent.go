@@ -148,6 +148,13 @@ type Agent struct {
 	// would stall heartbeats.
 	vault *vault
 
+	// branches holds the shipped branches being received ahead of their start
+	// frames (protocol v16, Task 20367), keyed by handle. Its own lock: a chunk
+	// write is disk I/O on the frame loop, and the workload table must not
+	// wait behind it. See branch.go.
+	branchMu sync.Mutex
+	branches map[string]*branchTransfer
+
 	mu        sync.Mutex
 	cred      Credential
 	workloads map[string]*workload
@@ -308,6 +315,7 @@ func New(cfg Config) (*Agent, error) {
 		local:     localprocess.New("agent-local"),
 		drivers:   newDriverCache(),
 		workloads: make(map[string]*workload),
+		branches:  make(map[string]*branchTransfer),
 		vault:     newVault(),
 	}
 
@@ -393,6 +401,7 @@ func New(cfg Config) (*Agent, error) {
 	}
 	a.root = root
 	a.cfg.WorkDirRoot = root
+	a.clearBranchIncoming()
 	return a, nil
 }
 

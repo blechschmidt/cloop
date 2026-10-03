@@ -49,7 +49,7 @@ const workspaceProvisionTimeout = 30 * time.Minute
 // start frame's Error field, so an operator watching the run panel reads "no
 // git on edge-3" or "the tree is 4 GB, over this workload's 512 MB limit"
 // rather than a generic refusal from the control plane.
-func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executor.Spec, cred executor.GitCredential) error {
+func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executor.Spec, cred executor.GitCredential, branchFile string) error {
 	if spec.Workspace.Kind == executor.WorkspaceBind {
 		// "bind" asserts that the executor shares the control plane's
 		// filesystem and the tree is already at WorkDir. A remote agent shares
@@ -92,7 +92,7 @@ func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executo
 	}
 
 	started := a.cfg.now()
-	err := provisionWorkspace(provCtx, spec.WorkDir, spec.Workspace, cred, emit)
+	err := provisionWorkspaceFrom(provCtx, spec.WorkDir, spec.Workspace, cred, branchFile, emit)
 	took := a.cfg.now().Sub(started).Round(time.Millisecond)
 	if err != nil {
 		// Already redacted by the provisioner; logging it here is what puts the
@@ -115,13 +115,21 @@ func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executo
 // go and fix, which a message from a generic provisioner could not tell them.
 func provisionWorkspace(ctx context.Context, dir string, w executor.Workspace,
 	cred executor.GitCredential, emit func(string)) error {
+	return provisionWorkspaceFrom(ctx, dir, w, cred, "", emit)
+}
+
+// provisionWorkspaceFrom is provisionWorkspace for a workspace that may carry a
+// shipped branch, whose bundle the control plane streamed to branchFile.
+func provisionWorkspaceFrom(ctx context.Context, dir string, w executor.Workspace,
+	cred executor.GitCredential, branchFile string, emit func(string)) error {
 
 	return gitprovision.Provision(ctx, gitprovision.Request{
-		Dir:        dir,
-		Workspace:  w,
-		Credential: cred,
-		Emit:       emit,
-		Host:       deviceName(),
+		Dir:              dir,
+		Workspace:        w,
+		Credential:       cred,
+		BranchBundleFile: branchFile,
+		Emit:             emit,
+		Host:             deviceName(),
 	})
 }
 

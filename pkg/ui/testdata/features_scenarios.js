@@ -32,7 +32,9 @@ function projectsPayload() {
       {name: 'alpha/login', path: LOGIN, parent: ALPHA, goal: 'Users sign in', total_tasks: 3, done_tasks: 3,
         health: 'complete', status: 'complete',
         feature: {slug: 'login', title: 'Login', branch: 'cloop/feature/login', base: 'main',
-          pr: {number: 12, url: 'https://github.com/acme/app/pull/12', state: 'open'}}},
+          pr: {number: 12, url: 'https://github.com/acme/app/pull/12', state: 'open'},
+          return: {outcome: 'conflict', kept_on: 'cloop/returned/login/run_1',
+            message: 'The run\'s work came back but was not applied: <uncommitted>'}}},
       {name: 'alpha/dark-mode', path: DARK, parent: ALPHA, goal: 'Dark theme', total_tasks: 2, done_tasks: 0,
         health: 'running', status: 'running', running: true,
         feature: {slug: 'dark-mode', title: 'Dark <mode>', branch: 'cloop/feature/dark-mode', base: 'main',
@@ -146,6 +148,7 @@ const scenarios = {
       unsafeLink: list.includes('javascript:'),
       options: list.includes('evolve') && list.includes('innovate'),
       newButton: document.getElementById('newFeatureBtn').style.display,
+      kept: list.includes('work kept on cloop/returned/login/run_1') && !list.includes('<uncommitted>'),
     };
   },
 

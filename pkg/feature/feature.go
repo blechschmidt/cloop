@@ -250,6 +250,26 @@ type PR struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Return is what became of the work of a feature's last run on an executor
+// that isolates from the hub (Task 20367): such a run works on a standalone
+// checkout of the feature's branch, and its commits come back as a bundle the
+// hub vets and applies to the worktree here — by fast-forward only.
+type Return struct {
+	At time.Time `json:"at"`
+	// Outcome is fast_forwarded, conflict (the work was kept on KeptOn
+	// rather than applied), nothing (the run made no commits), or failed
+	// (the work did not come back; Message says why).
+	Outcome string `json:"outcome"`
+	// Commit is the returned tip, when there was one.
+	Commit string `json:"commit,omitempty"`
+	// KeptOn is the branch conflicting work was kept on.
+	KeptOn string `json:"kept_on,omitempty"`
+	// Message is the operator-facing account.
+	Message string `json:"message,omitempty"`
+	// Executor is where the run happened.
+	Executor string `json:"executor,omitempty"`
+}
+
 // Meta is a feature's record, persisted as .cloop/feature.json inside the
 // feature's worktree.
 type Meta struct {
@@ -272,6 +292,9 @@ type Meta struct {
 	// feature's plan completes.
 	AutoPR bool `json:"auto_pr,omitempty"`
 	PR     *PR  `json:"pr,omitempty"`
+	// Return is the outcome of the last run's write-back, for a feature run
+	// on an isolating executor; nil for one that ran on the hub.
+	Return *Return `json:"return,omitempty"`
 }
 
 // Validate checks a record's invariants before it is written or trusted.

@@ -389,6 +389,39 @@ it is allowed to exist. `TestGatedListsAgree` fails if that list and the list of
 gated HTTP routes ever diverge, so a new gated handler cannot be added on one
 side only.
 
+### Git the hub runs for a feature
+
+A [feature](../guides/features.md) is a git worktree on the hub, and under strict
+mode it runs on an executor that cannot see it (Task 20367). Something has to
+turn the feature's branch into a bundle before the run and land the returned
+work on it afterwards, and only something that can read the hub's filesystem
+can — so the hub runs `git` for it. That is process execution on the hub's host,
+and it is sanctioned the way every driver is: it lives in
+`pkg/executor/featurehub`, inside the executor boundary the call-graph test
+stops at, and it runs nothing but `git`, with fixed subcommands, in the
+project's own repository.
+
+The repository is not trusted for it. A project bound to a container executor
+gets its tree mounted into the sandbox, `.git` included, so a workload can leave
+a hook, an `fsmonitor` command or a filter driver there, and the next git
+command on the hub would run it. Every invocation from `featurehub` therefore
+reads no system or global configuration and carries
+`executor.HardenedGitConfig` in its environment, which outranks the
+repository's: hooks point at `/dev/null`, `fsmonitor` is off, every filter
+driver the repository names has empty commands, signing and automatic
+maintenance are off. The same set is applied when a device commits and bundles
+a workload's work (`gitprovision.SandboxedRepoEnv`, which also refuses a `.git`
+that is a file or a link and drops `alternates`/`commondir`), because there the
+tree was the workload's to write.
+
+The returned work is the [write-back](#result-write-back--writeback_bundle_testgo)
+path's: vetted into a quarantine ref, then fast-forwarded into the feature's
+worktree only when that worktree is clean, on its branch, the work builds on its
+HEAD and touches nothing under `.cloop/`. Anything else is kept on a new
+`cloop/returned/…` branch, created only if the name is free, and reported as a
+conflict; it is never forced. The parent's `.git` is never mounted into a
+sandbox to make the feature's pointer resolve.
+
 ### No sandbox is reused across tasks
 
 Every task gets a container, or a Pod, that did not exist before it and does not
@@ -2859,6 +2892,19 @@ meaning *"infrastructure problem, retry it"*. This closes a finding: git's own
 refusal used to arrive as `ErrWriteBackUnavailable`, so a caller that retried on
 that sentinel would have retried a hostile write-back on a loop, and whether it
 did so depended on the git version installed on the hub.
+
+### Features on isolating executors — the package suites
+
+| Guarantee | Test |
+| --- | --- |
+| A commit that a workload's hooks, `fsmonitor`, filter driver or signing program would observe runs none of them when the device writes it back | `TestProduceRunsNothingTheWorkloadConfigured` (`pkg/executor/gitwriteback`) |
+| Every filter driver a repository configures is switched off, however many there are | `TestHardenedGitConfigCoversEveryDriver` |
+| A repository a sandbox wrote cannot redirect git elsewhere (`.git` file or link, `commondir`, `alternates`) | `TestSandboxedRepoEnvPinsTheRepository` |
+| A bundle that is not the one the Spec describes (size, digest, head) is refused before it is built | `TestProvisionFromABranchRefusesWhatWasNotSent`, `TestLoopbackRefusesABundleThatDoesNotMatch`, `TestBranchBundleVerifyFile` |
+| Returned work lands only on a clean worktree on the shipped head; a dirty one, a moved branch or work touching `.cloop/` is kept aside and reported | `TestLandFastForwardsACleanWorktree`, `TestLandKeepsWorkWhenTheWorktreeIsDirty`, `TestLandKeepsWorkWhenTheBranchMoved`, `TestLandKeepsWorkThatTouchesTheControlDirectory` |
+| Returned work is vetted as any write-back: an escaping symlink or an oversized bundle is refused | `TestLandRefusesAnEscapingSymlink`, `TestLandRefusesAnOversizedBundle` |
+| End to end, on a strict hub, through a real agent and a real container: the commit lands on the feature's branch, the parent's branch, `.git/config` and hooks are untouched, a dirty worktree yields a conflict, an oversized bundle is refused with a message | `TestE2EFeatureRunsOnARemoteAgent`, `TestE2EFeatureRunsInAContainer` (`tests/e2e`) |
+| `Workspace.Branch` cannot carry credential material | `TestWorkspaceStructurallyCannotCarryACredential` (`workspace_test.go`) |
 
 ### Sealing keys and rotation — `keyrotation_test.go`
 

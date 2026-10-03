@@ -91,6 +91,10 @@ type Request struct {
 	// provisioning shows up in the run's live log rather than as a silent pause
 	// before the harness starts. It may be nil.
 	Emit func(string)
+	// BranchBundleFile is where the bundle Workspace.Branch describes sits on
+	// this machine. Required when the shipped branch carries bytes; see
+	// branch.go.
+	BranchBundleFile string
 	// Host is how the machine names itself in a diagnostic: "this device
 	// (edge-3)". Empty falls back to HostLabel("machine").
 	//
@@ -146,6 +150,12 @@ func Provision(ctx context.Context, r Request) error {
 
 	if !w.NeedsProvisioning() {
 		return fail("workspace kind %q is not one this machine provisions", w.Kind)
+	}
+	if w.Branch != nil {
+		// A shipped branch — a feature — is rebuilt from the control plane's
+		// copy every time rather than fetched into a kept checkout. See
+		// branch.go for why the two are different operations.
+		return provisionBranch(ctx, r)
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		// Naming the machine matters: something else dispatched this, and the

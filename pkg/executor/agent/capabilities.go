@@ -101,6 +101,10 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 		// would otherwise accept the start and produce a transcript that looks
 		// exactly like a run that worked.
 		caps.WriteBack = true
+		// And a shipped branch is built with nothing but git too: a feature
+		// placed on a device without it would run on its base commit with
+		// none of its work (Task 20367).
+		caps.BranchBundles = true
 	}
 
 	switch {

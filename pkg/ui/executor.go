@@ -190,6 +190,9 @@ func applyHostExecutionPolicy(cfg *config.Config) {
 		return
 	}
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+	// How large a feature's branch, or the work its run returns, may be when
+	// it travels to and from an isolating executor (Task 20367).
+	installFeatureBundleCap(cfg)
 	// Same ratchet, same reason: a tenant's config.yaml must not be able to
 	// lower the fleet's minimum agent build.
 	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
@@ -488,10 +491,15 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	// It is before Start because a tree that cannot be materialised is a run
 	// that must not begin: a workload starting cleanly on an empty directory is
 	// the exact failure this subsystem exists to remove.
-	spec, err = applyWorkspace(spec, ex, workDir)
+	spec, err = applyWorkspaceFor(spec, ex, workDir, true)
 	if err != nil {
 		lease.Close()
 		return nil, executor.Handle{}, err
+	}
+	// A feature's branch, bundled for the executor to build its tree from
+	// (Task 20367). The driver has read it by the time Start returns.
+	if f := spec.BranchBundleFile; f != "" {
+		defer os.Remove(f)
 	}
 
 	// The operator's ceilings, last of the spec-shaping steps because they
@@ -540,6 +548,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 			RunID:        runID,
 			Identity:     payer,
 		})
+		// And for a feature, where its work is landed when it comes back.
+		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}
 
 	// Record the dispatch so the supervisor can fail it over if this executor
@@ -716,6 +726,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	spec, err = applyWorkspace(spec, ex, workDir)
 	if err != nil {
 		return nil, err
+	}
+	if f := spec.BranchBundleFile; f != "" {
+		defer os.Remove(f)
 	}
 	// The ceilings apply here too. A subcommand is a smaller workload than a
 	// harness, not an exempt one — `cloop suggest` on a repository whose

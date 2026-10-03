@@ -103,6 +103,13 @@ const (
 	//     the whole point, and it is the thing the operator has to understand
 	//     to reason about where their work lives.
 	WorkspaceExecutor WorkspaceKind = "executor"
+	// WorkspaceBundle: the executor builds the tree from a git bundle the
+	// control plane ships beside the Spec, described by Workspace.Branch
+	// (Task 20367). It is how a feature — a branch of a repository that may
+	// exist only on the hub — reaches a sandbox: there is no remote to clone
+	// from, and the hub's own worktree is not something to mount. See
+	// branchbundle.go.
+	WorkspaceBundle WorkspaceKind = "bundle"
 	// WorkspaceNone: an intentionally empty working tree.
 	WorkspaceNone WorkspaceKind = "none"
 )
@@ -110,7 +117,7 @@ const (
 // Valid reports whether k is one of the known kinds.
 func (k WorkspaceKind) Valid() bool {
 	switch k {
-	case WorkspaceUnspecified, WorkspaceBind, WorkspaceGit, WorkspaceExecutor, WorkspaceNone:
+	case WorkspaceUnspecified, WorkspaceBind, WorkspaceGit, WorkspaceExecutor, WorkspaceBundle, WorkspaceNone:
 		return true
 	}
 	return false
@@ -171,6 +178,12 @@ type Workspace struct {
 	// or off, or its advertise_url moved — rather than refusing it as some
 	// other repository (Task 20349).
 	Upstream string `json:"upstream,omitempty"`
+	// Branch is a git branch the control plane ships with the Spec to put on
+	// top of — or, for Kind bundle, in place of — the fetched tree, leaving
+	// the checkout on that branch (Task 20367). Nil for every workload but a
+	// feature's. Metadata only: the bundle's bytes travel beside the Spec, as
+	// Spec.BranchBundleFile on the hub and as chunk frames on the wire.
+	Branch *BranchBundle `json:"branch_bundle,omitempty"`
 }
 
 // UpstreamRepo returns the repository the workspace is a checkout of: Upstream
@@ -184,12 +197,20 @@ func (w Workspace) UpstreamRepo() string {
 
 // NeedsProvisioning reports whether the executor must do work before the
 // harness can start. This is the predicate that turns into a placement
-// requirement, so it is deliberately narrow: only git needs anything.
-func (w Workspace) NeedsProvisioning() bool { return w.Kind == WorkspaceGit }
+// requirement, so it is deliberately narrow: only a tree the executor has to
+// build — fetched with git, or unpacked from a shipped bundle — needs anything.
+func (w Workspace) NeedsProvisioning() bool {
+	return w.Kind == WorkspaceGit || w.Kind == WorkspaceBundle
+}
+
+// NeedsNetwork reports whether provisioning has to reach a remote. A bundle
+// workspace is built from bytes the control plane sent, so it is the one
+// provisioned kind a workload with no egress can still have.
+func (w Workspace) NeedsNetwork() bool { return w.Kind == WorkspaceGit }
 
 // RequiresCredential reports whether provisioning needs a leased credential.
 func (w Workspace) RequiresCredential() bool {
-	return w.NeedsProvisioning() && strings.TrimSpace(w.CredentialGrant) != ""
+	return w.Kind == WorkspaceGit && strings.TrimSpace(w.CredentialGrant) != ""
 }
 
 // IsZero reports whether the workspace says nothing at all.
@@ -204,8 +225,16 @@ func (w Workspace) IsZero() bool { return w == Workspace{} }
 // brokered token on the wire in cleartext.
 func (w Workspace) Validate() error {
 	if !w.Kind.Valid() {
-		return fmt.Errorf("%w: workspace kind %q is not one of bind, git, executor, none",
+		return fmt.Errorf("%w: workspace kind %q is not one of bind, git, executor, bundle, none",
 			ErrInvalidSpec, w.Kind)
+	}
+	if w.Branch != nil {
+		if err := w.Branch.validate(w); err != nil {
+			return err
+		}
+	} else if w.Kind == WorkspaceBundle {
+		return fmt.Errorf("%w: a bundle workspace needs branch_bundle to say what it is built from",
+			ErrInvalidSpec)
 	}
 	if w.SizeLimitMB < 0 {
 		return fmt.Errorf("%w: workspace size_limit_mb must be >= 0, got %d",
@@ -362,11 +391,16 @@ func (w Workspace) Describe() string {
 		if g := strings.TrimSpace(w.CredentialGrant); g != "" {
 			s += " using grant " + g
 		}
+		if w.Branch != nil {
+			s += ", then " + w.Branch.Describe()
+		}
 		return s
 	case WorkspaceBind:
 		return "bind (host filesystem)"
 	case WorkspaceExecutor:
 		return "executor (kept on the executor, seeded from the hub)"
+	case WorkspaceBundle:
+		return "bundle " + w.Branch.Describe()
 	case WorkspaceNone:
 		return "none (empty tree)"
 	default:
@@ -500,7 +534,15 @@ func (c GitCredential) Secrets() []string {
 // that read the executor's own ~/.gitconfig could pick up a credential helper,
 // an insteadOf rewrite pointing the fetch at another host, or a proxy — all
 // decided by whoever last touched that machine rather than by the grant.
-func GitBaseEnv() []string {
+func GitBaseEnv() []string { return GitEnv() }
+
+// GitEnv is GitBaseEnv with extra configuration folded into the same
+// GIT_CONFIG_COUNT block.
+//
+// One block, not two appended: the count is a single variable for the whole
+// environment, so a second block would silently drop every key of the first
+// that it did not repeat — including the redirect guard in baseGitConfig.
+func GitEnv(extra ...[2]string) []string {
 	return append([]string{
 		// No prompting, ever. A git that blocks on a terminal that will never
 		// answer turns a missing credential into a hung task.
@@ -514,7 +556,64 @@ func GitBaseEnv() []string {
 		// Advertise the workload, so a server-side log names cloop rather than
 		// an anonymous git.
 		"GIT_HTTP_USER_AGENT=cloop-workspace",
-	}, gitConfigEnv(baseGitConfig()...)...)
+	}, gitConfigEnv(append(baseGitConfig(), extra...)...)...)
+}
+
+// MaxFilterDrivers bounds how many filter drivers HardenedGitConfig will
+// neutralise. A repository configures a handful at most (git-lfs, a crypt
+// filter); one configuring thousands is not one git should be run in.
+const MaxFilterDrivers = 256
+
+// HardenedGitConfig is the configuration that stops a repository's own
+// settings from making git run a program, for a git command run *outside* the
+// sandbox that wrote the repository (Task 20367).
+//
+// A sandbox that can write a repository can write its .git: hooks, and config
+// keys whose values are commands. Every git command run in that repository
+// afterwards by anything with more authority than the sandbox — the device's
+// agent committing a write-back, the hub fast-forwarding a feature — would
+// execute them with that authority. Configuration passed through the
+// environment outranks the repository's own file, so these pairs close each
+// path for the commands cloop runs there:
+//
+//   - core.hooksPath=/dev/null: no hook runs, including the ones --no-verify
+//     does not cover (post-commit, post-checkout, reference-transaction);
+//   - core.fsmonitor=false: `git status` and `git add` would otherwise run
+//     the configured monitor program;
+//   - filter.<driver>.{clean,smudge,process} emptied for every driver the
+//     repository configures, which git treats as no filter at all; clean
+//     filters run on `git add`, smudge filters on checkout;
+//   - signing off, so a configured gpg.program is never invoked;
+//   - automatic gc and maintenance off, so nothing is spawned in the
+//     background of a command that is meant to finish;
+//   - submodules ignored, so `git status` does not descend into a nested
+//     repository and run git there under that repository's configuration.
+//
+// filterDrivers are the driver names the repository configures; see
+// gitprovision.SandboxedRepoEnv, which reads them.
+func HardenedGitConfig(filterDrivers []string) [][2]string {
+	pairs := [][2]string{
+		{"core.hooksPath", "/dev/null"},
+		{"core.fsmonitor", "false"},
+		{"commit.gpgSign", "false"},
+		{"tag.gpgSign", "false"},
+		{"gc.auto", "0"},
+		{"maintenance.auto", "false"},
+		{"submodule.recurse", "false"},
+		{"diff.ignoreSubmodules", "all"},
+		{"status.submoduleSummary", "false"},
+		{"credential.helper", ""},
+		{"protocol.ext.allow", "never"},
+	}
+	for _, d := range filterDrivers {
+		pairs = append(pairs,
+			[2]string{"filter." + d + ".clean", ""},
+			[2]string{"filter." + d + ".smudge", ""},
+			[2]string{"filter." + d + ".process", ""},
+			[2]string{"filter." + d + ".required", "false"},
+		)
+	}
+	return pairs
 }
 
 // baseGitConfig is the git configuration every child runs with, credential or
@@ -590,6 +689,17 @@ func gitConfigEnv(pairs ...[2]string) []string {
 // the challenge with a *different* credential, and the fetch would succeed
 // using authority the grant never issued.
 func GitCredentialEnv(w Workspace, c GitCredential) ([]string, error) {
+	pairs, err := GitCredentialConfig(w, c)
+	if err != nil || len(pairs) == 0 {
+		return nil, err
+	}
+	return gitConfigEnv(append(baseGitConfig(), pairs...)...), nil
+}
+
+// GitCredentialConfig is the configuration GitCredentialEnv delivers, as pairs,
+// for a caller that has more configuration to put in the same block — see
+// GitEnv for why there can only be one. Nil for an empty credential.
+func GitCredentialConfig(w Workspace, c GitCredential) ([][2]string, error) {
 	if c.Empty() {
 		return nil, nil
 	}
@@ -604,10 +714,10 @@ func GitCredentialEnv(w Workspace, c GitCredential) ([]string, error) {
 		// newline would be a header-injection primitive against the remote.
 		return nil, fmt.Errorf("%w: workspace credential encodes to a multi-line header", ErrInvalidSpec)
 	}
-	return gitConfigEnv(append(baseGitConfig(),
-		[2]string{"http." + base + ".extraHeader", "Authorization: " + header},
-		[2]string{"credential.helper", ""},
-	)...), nil
+	return [][2]string{
+		{"http." + base + ".extraHeader", "Authorization: " + header},
+		{"credential.helper", ""},
+	}, nil
 }
 
 // WorkspaceAccess is what one git workspace gets: the material, and the

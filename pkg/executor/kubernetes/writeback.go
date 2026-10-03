@@ -31,79 +31,14 @@ package kubernetes
 
 import (
 	"strings"
-	"sync"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
-// sentinelScanner finds the write-back line in a Pod's output stream.
-//
-// The stream arrives as arbitrary chunks — a line may be split across two of
-// them, and several lines may share one — so the scanner buffers a partial line
-// rather than assuming chunk boundaries mean anything. Only text that could
-// still become a sentinel is retained: the buffer is dropped the moment the
-// current line is longer than a sentinel could be, so a workload that prints a
-// gigabyte without a newline costs nothing.
-type sentinelScanner struct {
-	mu      sync.Mutex
-	partial []byte
-	// result is the last well-formed sentinel seen. Later ones replace
-	// earlier ones; see the package comment for why that direction.
-	result *executor.WriteBackResult
-}
-
-// maxSentinelLine bounds the partial-line buffer. Twice the encoded ceiling so
-// a sentinel that arrives split across chunks still fits while it is being
-// reassembled.
-const maxSentinelLine = 2 * executor.MaxWriteBackSentinelBytes
-
-// observe feeds one chunk of output to the scanner.
-func (s *sentinelScanner) observe(text string) {
-	if text == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for len(text) > 0 {
-		nl := strings.IndexByte(text, '\n')
-		if nl < 0 {
-			// No line ending yet. Keep it only while it could still be a
-			// sentinel — both in length and in prefix, since a line that has
-			// already diverged from the marker will never match it.
-			s.partial = append(s.partial, text...)
-			if len(s.partial) > maxSentinelLine || !couldBeSentinel(s.partial) {
-				s.partial = nil
-			}
-			return
-		}
-		line := append(s.partial, text[:nl]...)
-		s.partial = nil
-		text = text[nl+1:]
-		if r, ok := executor.ScanWriteBackSentinel(string(line)); ok {
-			r := r
-			s.result = &r
-		}
-	}
-}
-
-// couldBeSentinel reports whether b is still a viable prefix of a sentinel
-// line, so an ordinary line of harness output is discarded on its first bytes
-// rather than buffered to the length limit.
-func couldBeSentinel(b []byte) bool {
-	s := string(b)
-	if len(s) >= len(executor.WriteBackSentinel) {
-		return strings.HasPrefix(s, executor.WriteBackSentinel)
-	}
-	return strings.HasPrefix(executor.WriteBackSentinel, s)
-}
-
-// snapshot returns the last sentinel seen, or nil.
-func (s *sentinelScanner) snapshot() *executor.WriteBackResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.result
-}
+// sentinelScanner is the shared scanner; see executor.WriteBackScanner, which
+// both this driver and the container driver's feature mode read their
+// sandboxes' reports with.
+type sentinelScanner = executor.WriteBackScanner
 
 // missingWriteBack is what the driver reports when a Spec asked for a
 // write-back and the Pod's output never contained one.

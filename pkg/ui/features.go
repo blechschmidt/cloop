@@ -97,31 +97,36 @@ func appendFeatureEntries(entries []multiui.ProjectEntry, seen map[string]bool) 
 	return entries
 }
 
-// featureExecutorError refuses to run a feature on an executor that isolates
-// from the hub's filesystem.
+// featureExecutorError refuses to run a feature on an executor that cannot
+// carry one.
 //
 // A feature is a *linked* git worktree: its .git is a one-line file pointing at
-// the parent repository's .git/worktrees/<slug>, by absolute path. A container
-// mounts only the feature directory, at a different path; a remote device or a
-// Pod gets a fresh clone. In none of them does that pointer resolve, so the
-// harness would start in a directory git does not recognise, edit files it can
-// never commit, and report success. Refusing names the constraint instead.
+// the parent repository's .git/worktrees/<slug>, by absolute path, so the
+// worktree itself can only be used on the hub. On an executor that isolates
+// from the hub a feature therefore runs as a standalone checkout of its branch,
+// shipped from the hub, with its work returned as a bundle (Task 20367; see
+// features_isolated.go) — and an executor that cannot receive the branch, take
+// the feature's state, or return either cannot run one. Refusing names which,
+// instead of starting a harness on a tree that is not the feature's.
 type featureExecutorError struct {
 	FeaturePath  string
 	ExecutorID   string
 	ExecutorKind string
+	// Missing lists what the executor cannot do.
+	Missing string
 }
 
 func (e *featureExecutorError) Error() string {
-	return fmt.Sprintf("feature %s cannot run on executor %s (%s): a feature is a git worktree of its project's "+
-		"repository on this hub, and that executor does not share the hub's filesystem, so git would not work inside it",
-		filepath.Base(e.FeaturePath), e.ExecutorID, e.ExecutorKind)
+	return fmt.Sprintf("feature %s cannot run on executor %s (%s): a feature runs on an isolating executor as "+
+		"a standalone checkout of its branch shipped from the hub, and this executor cannot %s",
+		filepath.Base(e.FeaturePath), e.ExecutorID, e.ExecutorKind, e.Missing)
 }
 
 // Remediation says what to do about it.
 func (e *featureExecutorError) Remediation() string {
-	return "Run the project on an executor that shares this hub's filesystem (the local executor), " +
-		"or develop in the project itself rather than in a feature."
+	return "Bind the project to a container executor or a remote agent of protocol v16 or later " +
+		"(upgrade an older agent with `cloop executor agent install --upgrade`); a Kubernetes executor " +
+		"has no channel from the hub into a Pod to carry the branch through."
 }
 
 // errFeatureExecutor lets callers test for the refusal without the type.
@@ -130,16 +135,14 @@ var errFeatureExecutor = errors.New("feature executor unsupported")
 func (e *featureExecutorError) Is(target error) bool { return target == errFeatureExecutor }
 
 // checkFeatureExecutor refuses dispatching a feature's workload to ex when ex
-// isolates from the host. Non-feature paths always pass.
+// isolates from the host and cannot carry a feature there. Non-feature paths,
+// and executors that share the hub's filesystem, always pass.
 func checkFeatureExecutor(workDir string, ex executor.Executor) error {
-	if ex == nil {
+	if !featureRunsIsolated(workDir, ex) {
 		return nil
 	}
-	if _, _, ok := feature.ParentOf(workDir); !ok {
-		return nil
+	if gap := featureCapabilityGap(ex); gap != "" {
+		return &featureExecutorError{FeaturePath: workDir, ExecutorID: ex.ID(), ExecutorKind: string(ex.Kind()), Missing: gap}
 	}
-	if !executor.IsolatesFromHost(ex) {
-		return nil
-	}
-	return &featureExecutorError{FeaturePath: workDir, ExecutorID: ex.ID(), ExecutorKind: string(ex.Kind())}
+	return nil
 }

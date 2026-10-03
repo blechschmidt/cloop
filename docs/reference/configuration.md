@@ -953,6 +953,27 @@ fleet-wide floor. Lowering it means restarting with the looser config.
 See [Placement](../architecture/executors.md#placement) for how the constraint is
 ranked and enforced on both the scheduling and the project-binding paths.
 
+### Feature bundles
+
+A [feature](../guides/features.md) that runs on an executor isolating from the
+hub — a container, a remote device, a virtual executor — travels there as a git
+bundle of its branch, and its run's commits come back as another. This caps
+both:
+
+```yaml
+executors:
+  feature_bundle_mb: 32   # the default; at most 128
+```
+
+The hub applies it when it bundles the branch (falling back to the newest 50
+commits, then the newest one, before refusing), the sandbox applies it when it
+bundles its own work, and the hub applies it again when that work arrives. A
+refusal says which bundle was too large and names this setting. Values outside
+`0..128` are refused when the configuration is loaded; `0` means the default.
+
+It is a hub-scope key: read once at startup, from `config.yaml` with the hub's
+overlay merged in.
+
 ### Automatic harness installation
 
 A project driven by the `claudecode` provider needs the `claude` CLI on whatever
@@ -1585,6 +1606,7 @@ ui:
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
+| `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
 | `ui.*` | Sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
 | `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |

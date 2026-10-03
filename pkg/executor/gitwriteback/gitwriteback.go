@@ -186,20 +186,23 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 	if err := r.WriteBack.Validate(); err != nil {
 		return fail("%v", err)
 	}
-	if r.OnlyOnSuccess && r.ExitCode != 0 {
-		// The refusal is reported, not swallowed: an operator looking at a
-		// failed task must be able to see that its edits were deliberately
-		// discarded rather than lost.
+	// A harness that exited non-zero left its tree in whatever state it was in
+	// when it died, so its uncommitted edits are not written back. Commits it
+	// made are a different matter: each was a deliberate checkpoint, and a
+	// feature's run is a sequence of tasks that each commit — a run stopped or
+	// failing on its fifth task has four tasks' worth of commits that are
+	// exactly as good as they were before it failed. Those still go back.
+	failed := r.OnlyOnSuccess && r.ExitCode != 0
+	failedSkip := func() (Result, error) {
+		// Reported, not swallowed: an operator looking at a failed task must
+		// be able to see that its edits were deliberately discarded rather
+		// than lost.
 		return skip(fmt.Sprintf("the harness exited %d, so its partial changes were not written back",
 			r.ExitCode))
 	}
 	dir := strings.TrimSpace(r.Dir)
 	if dir == "" || !filepath.IsAbs(dir) {
 		return fail("write-back directory %q is not an absolute path", r.Dir)
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		return fail("%s is not a git repository on %s, so there is nothing to commit: %v",
-			dir, hostName, err)
 	}
 
 	timeout := r.Timeout
@@ -209,11 +212,27 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	g := &gitRunner{dir: dir, host: hostName, secrets: secrets, emit: emit}
+	// The tree was written by the workload, .git included, and this runs with
+	// more authority than the workload had — on a device's host, as its agent.
+	// So every git command here runs in an environment that ignores whatever
+	// the workload configured there; see gitprovision.SandboxedRepoEnv.
+	env, err := gitprovision.SandboxedRepoEnv(ctx, dir)
+	if err != nil {
+		if failed {
+			return failedSkip()
+		}
+		return fail("%s on %s has nothing to commit: %v", dir, hostName, err)
+	}
+	g := &gitRunner{dir: dir, host: hostName, secrets: secrets, emit: emit, env: env}
 
 	// --- the base --------------------------------------------------------
 	base := strings.TrimSpace(r.BaseSHA)
 	if base == "" {
+		if failed {
+			// With no recorded base there is nothing to tell the harness's
+			// own commits from the tree it was given.
+			return failedSkip()
+		}
 		out, err := g.run(ctx, "base", false, r, "rev-parse", "HEAD")
 		if err != nil {
 			return fail("%v", err)
@@ -227,6 +246,12 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 
 	// --- anything to do? -------------------------------------------------
 	//
+	// Two kinds of work count: files the harness left uncommitted, and commits
+	// it made itself. The second is the ordinary shape of a feature's run — its
+	// harness is told to commit to the feature's branch — and a check that
+	// only looked at the working tree would report such a run as having
+	// changed nothing and discard every commit it made.
+	//
 	// --porcelain covers tracked modifications and untracked files alike, and
 	// it is checked before the branch is created so a clean run leaves no ref
 	// behind for someone to wonder about later.
@@ -234,8 +259,22 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 	if err != nil {
 		return fail("%v", err)
 	}
-	if strings.TrimSpace(status) == "" {
+	dirty := strings.TrimSpace(status) != ""
+	start, err := g.run(ctx, "head", false, r, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return fail("%v", err)
+	}
+	start = strings.TrimSpace(start)
+	if failed && start == base {
+		return failedSkip()
+	}
+	if !dirty && start == base {
 		return skip("the harness changed no files")
+	}
+	if failed && dirty {
+		emit(fmt.Sprintf("writeback: the harness exited %d, so only the commits it made are written "+
+			"back; its uncommitted changes are not\n", r.ExitCode))
+		dirty = false
 	}
 
 	// --- commit ----------------------------------------------------------
@@ -244,39 +283,36 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 	// because the previous attempt's ref is still there would make a retry
 	// depend on cleanup that may never have run. The branch is namespaced
 	// under cloop/ (ValidateWriteBackBranch enforces it) so forcing it can
-	// only ever clobber cloop's own ref.
+	// only ever clobber cloop's own ref. When the harness is already on the
+	// branch — a feature's — this moves nothing.
 	if _, err := g.run(ctx, "branch", false, r, "checkout", "-B", branch, "--"); err != nil {
 		return fail("%v", err)
 	}
-	if _, err := g.run(ctx, "add", false, r, "add", "--all", "--", "."); err != nil {
-		return fail("%v", err)
+	if dirty {
+		if _, err := g.run(ctx, "add", false, r, "add", "--all", "--", "."); err != nil {
+			return fail("%v", err)
+		}
+		// Re-check after staging. `git add -A` can stage nothing when the only
+		// dirty paths were ignored ones, and committing then fails with a
+		// message about an empty commit that reads like a bug rather than like
+		// "nothing changed".
+		staged, err := g.run(ctx, "staged", false, r, "diff", "--cached", "--name-only")
+		if err != nil {
+			return fail("%v", err)
+		}
+		if strings.TrimSpace(staged) != "" {
+			msg := strings.TrimSpace(r.WriteBack.Message)
+			if msg == "" {
+				msg = "cloop: work produced by an isolated executor"
+			}
+			if _, err := g.run(ctx, "commit", false, r, "commit", "--no-verify", "--no-gpg-sign", "-m", msg); err != nil {
+				return fail("%v", err)
+			}
+		} else if start == base {
+			return skip("the harness changed only ignored files")
+		}
 	}
-	// Re-check after staging. `git add -A` can stage nothing when the only
-	// dirty paths were ignored ones, and committing then fails with a message
-	// about an empty commit that reads like a bug rather than like "nothing
-	// changed".
-	staged, err := g.run(ctx, "staged", false, r, "diff", "--cached", "--name-only")
-	if err != nil {
-		return fail("%v", err)
-	}
-	staged = strings.TrimSpace(staged)
-	if staged == "" {
-		return skip("the harness changed only ignored files")
-	}
-	res.FilesChanged = len(strings.Split(staged, "\n"))
-	if res.FilesChanged > executor.MaxWriteBackFiles {
-		return fail("the harness changed %d files, over the write-back limit of %d",
-			res.FilesChanged, executor.MaxWriteBackFiles)
-	}
-
-	msg := strings.TrimSpace(r.WriteBack.Message)
-	if msg == "" {
-		msg = "cloop: work produced by an isolated executor"
-	}
-	if _, err := g.run(ctx, "commit", false, r, "commit", "--no-verify", "--no-gpg-sign", "-m", msg); err != nil {
-		return fail("%v", err)
-	}
-	head, err := g.run(ctx, "head", false, r, "rev-parse", "HEAD")
+	head, err := g.run(ctx, "head", false, r, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -285,15 +321,44 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 		return fail("the commit this write-back produced is unusable: %v", err)
 	}
 	res.CommitSHA = head
-	res.Commits = 1
 	if head == base {
-		// Unreachable given the staged check above, but a write-back that
-		// reports the base as its tip would make the hub merge a no-op and
-		// report success for work that was never delivered.
+		// Unreachable given the checks above, but a write-back that reports
+		// the base as its tip would make the hub merge a no-op and report
+		// success for work that was never delivered.
 		return skip("the commit did not advance the branch")
 	}
-	emit(fmt.Sprintf("writeback: committed %d file(s) to %s at %s\n",
-		res.FilesChanged, branch, executor.ShortSHA(head)))
+	// The range has to start where the tree did. A harness that reset its
+	// branch to somewhere else left commits the hub never sent and cannot
+	// place; reporting it here names the cause, where the hub's ancestry check
+	// would only refuse.
+	if _, err := g.run(ctx, "ancestry", false, r, "merge-base", "--is-ancestor", base, head); err != nil {
+		return fail("the branch %s no longer descends from %s, the commit the workspace started at; "+
+			"the harness rewrote history the control plane cannot place", branch, executor.ShortSHA(base))
+	}
+	count, err := g.run(ctx, "count", false, r, "rev-list", "--count", base+".."+head)
+	if err != nil {
+		return fail("%v", err)
+	}
+	res.Commits, _ = strconv.Atoi(strings.TrimSpace(count))
+	if res.Commits > executor.MaxWriteBackCommits {
+		return fail("the harness made %d commits, over the write-back limit of %d",
+			res.Commits, executor.MaxWriteBackCommits)
+	}
+	changed, err := g.run(ctx, "changed", false, r, "diff", "--name-only", "--no-renames", "-z", base, head)
+	if err != nil {
+		return fail("%v", err)
+	}
+	for _, p := range strings.Split(changed, "\x00") {
+		if p != "" {
+			res.FilesChanged++
+		}
+	}
+	if res.FilesChanged > executor.MaxWriteBackFiles {
+		return fail("the harness changed %d files, over the write-back limit of %d",
+			res.FilesChanged, executor.MaxWriteBackFiles)
+	}
+	emit(fmt.Sprintf("writeback: %d commit(s) on %s, %d file(s) changed, at %s\n",
+		res.Commits, branch, res.FilesChanged, executor.ShortSHA(head)))
 
 	// --- deliver ---------------------------------------------------------
 	switch r.WriteBack.Mode {
@@ -382,6 +447,9 @@ type gitRunner struct {
 	host    string
 	secrets []string
 	emit    func(string)
+	// env is the hardened environment every child runs with; see
+	// gitprovision.SandboxedRepoEnv.
+	env []string
 }
 
 // run executes one git command in the repository.
@@ -393,7 +461,7 @@ type gitRunner struct {
 func (g *gitRunner) run(ctx context.Context, name string, authenticated bool, r Request,
 	args ...string) (string, error) {
 
-	env := append(executor.GitBaseEnv(), gitprovision.TransportEnv()...)
+	env := append(append([]string(nil), g.env...), gitprovision.TransportEnv()...)
 	env = append(env,
 		"GIT_AUTHOR_NAME="+commitAuthorName,
 		"GIT_AUTHOR_EMAIL="+commitAuthorEmail,
@@ -401,11 +469,22 @@ func (g *gitRunner) run(ctx context.Context, name string, authenticated bool, r 
 		"GIT_COMMITTER_EMAIL="+commitAuthorEmail,
 	)
 	if authenticated {
-		extra, err := executor.GitCredentialEnv(r.Workspace, r.Credential)
+		// The credential joins the hardened block rather than following it as
+		// a second one, which would replace it: see executor.GitEnv.
+		pairs, err := executor.GitCredentialConfig(r.Workspace, r.Credential)
 		if err != nil {
 			return "", err
 		}
-		env = append(env, extra...)
+		authEnv, err := gitprovision.SandboxedRepoEnv(ctx, g.dir, pairs...)
+		if err != nil {
+			return "", err
+		}
+		env = append(append(authEnv, gitprovision.TransportEnv()...),
+			"GIT_AUTHOR_NAME="+commitAuthorName,
+			"GIT_AUTHOR_EMAIL="+commitAuthorEmail,
+			"GIT_COMMITTER_NAME="+commitAuthorName,
+			"GIT_COMMITTER_EMAIL="+commitAuthorEmail,
+		)
 	}
 
 	argv := append([]string{"-C", g.dir}, args...)

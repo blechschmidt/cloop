@@ -55,10 +55,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/gitwriteback"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/spf13/cobra"
 )
 
@@ -70,6 +72,10 @@ var (
 	workspaceWriteBackMessage string
 	workspaceWriteBackPush    bool
 	workspaceWriteBackBundle  string
+	workspaceWriteBackMaxB    int64
+	workspaceWriteBackSeed    string
+	workspaceWriteBackResult  string
+	workspaceWriteBackPlace   bool
 )
 
 var workspaceWriteBackCmd = &cobra.Command{
@@ -91,6 +97,12 @@ through unchanged. Without one it writes back whatever is in --dir right now.
 
   cloop workspace writeback --dir /workspace/project --repo https://github.com/acme/app.git \
       --branch cloop/task-42-add-retry --base <sha> --bundle /tmp/out.bundle
+
+--repo may be left out with --bundle: a bundle goes nowhere but the file, which
+is how a feature built from a branch the hub shipped returns its work. With
+--seed and --project-result it also reads back what the run recorded in its
+.cloop/ — measured against the project state it was started with — and writes
+it to the second file, for the driver to hand to the hub.
 
 The credential for --push is read from the environment:
 
@@ -115,6 +127,10 @@ and no output of this command can contain either.`,
 			Message: workspaceWriteBackMessage,
 			Push:    workspaceWriteBackPush,
 			Bundle:  workspaceWriteBackBundle,
+			MaxB:    workspaceWriteBackMaxB,
+			Seed:    workspaceWriteBackSeed,
+			Result:  workspaceWriteBackResult,
+			Place:   workspaceWriteBackPlace,
 			Argv:    args,
 		}, cred, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	},
@@ -134,6 +150,15 @@ type workspaceWriteBackOptions struct {
 	Message string
 	Push    bool
 	Bundle  string
+	// MaxB caps the bundle; 0 is the write-back default.
+	MaxB int64
+	// Seed and Result name the project state the run started from and the
+	// file its read-back is written to; both or neither.
+	Seed   string
+	Result string
+	// Place writes Seed into Dir as the project's state before the harness
+	// starts — for a driver that keeps project state off its own host.
+	Place bool
 	// Argv is the harness command, or empty to write back immediately.
 	Argv []string
 }
@@ -153,8 +178,13 @@ func (o workspaceWriteBackOptions) plan() (executor.Workspace, executor.WriteBac
 	switch {
 	case strings.TrimSpace(o.Dir) == "":
 		return ws, wb, errors.New("--dir is required: name the tree whose changes are written back")
-	case strings.TrimSpace(o.Repo) == "":
-		return ws, wb, errors.New("--repo is required: a write-back needs the origin the tree came from")
+	case strings.TrimSpace(o.Repo) == "" && o.Push:
+		return ws, wb, errors.New("--repo is required with --push: a push goes to the origin the tree came from")
+	case (strings.TrimSpace(o.Seed) == "") != (strings.TrimSpace(o.Result) == ""):
+		return ws, wb, errors.New("--seed and --project-result go together: the run's changes are measured " +
+			"against the state it was started with")
+	case o.Place && strings.TrimSpace(o.Seed) == "":
+		return ws, wb, errors.New("--place-seed needs --seed: it is the seed that is placed")
 	case o.Push && strings.TrimSpace(o.Bundle) != "":
 		return ws, wb, errors.New("--push and --bundle are alternatives: one sends the commits to " +
 			"the origin, the other writes them to a file for a sandbox with no egress")
@@ -163,9 +193,11 @@ func (o workspaceWriteBackOptions) plan() (executor.Workspace, executor.WriteBac
 			"or --bundle FILE to write the commits out for a sandbox with no egress")
 	}
 
-	ws = executor.Workspace{Kind: executor.WorkspaceGit, Repo: strings.TrimSpace(o.Repo)}
-	if err := ws.Validate(); err != nil {
-		return ws, wb, fmt.Errorf("--repo: %w", err)
+	if repo := strings.TrimSpace(o.Repo); repo != "" {
+		ws = executor.Workspace{Kind: executor.WorkspaceGit, Repo: repo}
+		if err := ws.Validate(); err != nil {
+			return ws, wb, fmt.Errorf("--repo: %w", err)
+		}
 	}
 	wb = executor.WriteBack{
 		Mode:    executor.WriteBackPush,
@@ -174,6 +206,9 @@ func (o workspaceWriteBackOptions) plan() (executor.Workspace, executor.WriteBac
 	}
 	if !o.Push {
 		wb.Mode = executor.WriteBackBundle
+		wb.MaxBundleBytes = o.MaxB
+	} else if o.MaxB != 0 {
+		return ws, wb, errors.New("--max-bundle-bytes applies to --bundle, not --push")
 	}
 	if err := wb.Validate(); err != nil {
 		return ws, wb, err
@@ -194,10 +229,33 @@ func runWorkspaceWriteBack(ctx context.Context, o workspaceWriteBackOptions,
 		return err
 	}
 
+	// The project the harness is about to run, placed here — inside the
+	// sandbox — by a driver that does not write project state on its own host.
+	// A seed that cannot be placed fails the run before the harness starts: a
+	// `cloop run` with no project exits on its first line blaming the project.
+	if o.Place {
+		if err := placeSeed(strings.TrimSpace(o.Dir), strings.TrimSpace(o.Seed)); err != nil {
+			res := executor.WriteBackResult{Mode: wb.Mode, Branch: wb.Branch,
+				Err: "the project state could not be placed in the workspace, so nothing ran: " + err.Error()}
+			if line, lerr := executor.MarshalWriteBackSentinel(res); lerr == nil {
+				fmt.Fprintln(stdout, line)
+			}
+			return err
+		}
+	}
+
 	exitCode := 0
 	var harnessErr error
 	if len(o.Argv) > 0 {
 		exitCode, harnessErr = runHarness(ctx, o.Argv, stdout, stderr)
+	}
+
+	// The run's own account of what it did, read back in here — inside the
+	// sandbox — because the database it is read from was written by the
+	// workload, and parsing it is a job for something with no more authority
+	// than the workload had.
+	if seed := strings.TrimSpace(o.Seed); seed != "" {
+		harvestProjectResult(strings.TrimSpace(o.Dir), seed, strings.TrimSpace(o.Result), stderr)
 	}
 
 	res, wbErr := gitwriteback.Produce(ctx, gitwriteback.Request{
@@ -246,6 +304,47 @@ func runWorkspaceWriteBack(ctx context.Context, o workspaceWriteBackOptions,
 		return wbErr
 	}
 	return nil
+}
+
+// placeSeed writes the seed at seedPath into dir as the project's state.
+func placeSeed(dir, seedPath string) error {
+	seed, err := boundedread.ReadFile(seedPath, int64(executor.MaxProjectSeedBytes))
+	if err != nil {
+		return fmt.Errorf("the project state is unreadable: %w", err)
+	}
+	return projectseed.Write(dir, seed)
+}
+
+// harvestProjectResult reads back what the run changed in dir/.cloop against
+// the seed it started with, and writes the compressed result to out — or, when
+// it cannot, the reason to out+".err", so the driver can tell the hub why the
+// dashboard will not update. Never fatal: the harness's outcome and the
+// write-back stand on their own.
+func harvestProjectResult(dir, seedPath, out string, stderr io.Writer) {
+	report := func(reason string) {
+		if len(reason) > 2000 {
+			reason = reason[:2000]
+		}
+		if err := os.WriteFile(out+".err", []byte(reason), 0o600); err != nil {
+			fmt.Fprintf(stderr, "writeback: cannot record why the run's results were not read back: %v\n", err)
+		}
+		fmt.Fprintf(stderr, "writeback: the run's results could not be read back: %s\n", reason)
+	}
+	seed, err := boundedread.ReadFile(seedPath, int64(executor.MaxProjectSeedBytes))
+	if err != nil {
+		report(fmt.Sprintf("the project state the run started from is unreadable: %v", err))
+		return
+	}
+	data, err := projectseed.Harvest(dir, seed, nil)
+	if err != nil {
+		report(err.Error())
+		return
+	}
+	if err := os.WriteFile(out, data, 0o600); err != nil {
+		report(fmt.Sprintf("cannot write the read-back: %v", err))
+		return
+	}
+	fmt.Fprintf(stderr, "writeback: read back the run's results (%d bytes)\n", len(data))
 }
 
 // runHarness runs the wrapped command, forwarding its output and signals, and
@@ -328,6 +427,10 @@ func init() {
 	f.StringVar(&workspaceWriteBackMessage, "message", "", "commit message")
 	f.BoolVar(&workspaceWriteBackPush, "push", false, "push the branch to the origin")
 	f.StringVar(&workspaceWriteBackBundle, "bundle", "", "write the commits to this file instead of pushing")
+	f.Int64Var(&workspaceWriteBackMaxB, "max-bundle-bytes", 0, "refuse a bundle larger than this many bytes (default: the write-back limit)")
+	f.StringVar(&workspaceWriteBackSeed, "seed", "", "the project state the run was started with (with --project-result)")
+	f.StringVar(&workspaceWriteBackResult, "project-result", "", "write what the run changed in .cloop/ to this file")
+	f.BoolVar(&workspaceWriteBackPlace, "place-seed", false, "place --seed into --dir as the project's state before the command runs")
 
 	workspaceCmd.AddCommand(workspaceWriteBackCmd)
 }

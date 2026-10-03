@@ -408,8 +408,8 @@ func TestWriteBack_MalformedSentinelsAreIgnored(t *testing.T) {
 // chance that it eventually becomes a sentinel.
 func TestWriteBack_ScannerDropsOrdinaryOutputImmediately(t *testing.T) {
 	var s sentinelScanner
-	s.observe(strings.Repeat("compiling some very long line without any newline ", 10_000))
-	if got := len(s.partial); got != 0 {
+	s.Observe(strings.Repeat("compiling some very long line without any newline ", 10_000))
+	if got := s.Buffered(); got != 0 {
 		t.Errorf("buffered %d bytes of ordinary output; a line that cannot become a sentinel "+
 			"must be dropped on sight", got)
 	}
@@ -420,8 +420,8 @@ func TestWriteBack_ScannerDropsOrdinaryOutputImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.observe("\n" + line + "\n")
-	if got := s.snapshot(); got == nil || got.CommitSHA != wbTestCommit {
+	s.Observe("\n" + line + "\n")
+	if got := s.Snapshot(); got == nil || got.CommitSHA != wbTestCommit {
 		t.Errorf("the scanner did not recover after dropping a long line: %+v", got)
 	}
 }

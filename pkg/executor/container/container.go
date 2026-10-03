@@ -395,6 +395,10 @@ type record struct {
 	// firewall rules of its own (Task 20363), empty otherwise. See
 	// releaseRulesNetwork.
 	rulesNetwork string
+	// feature is the staged tree and output of a feature workload — one built
+	// from a branch the hub shipped (Task 20367) — and nil for every other
+	// workload. See feature.go.
+	feature *featureRun
 
 	mu         sync.Mutex
 	state      executor.State
@@ -556,6 +560,16 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// question, and a reader of this struct should not have to infer that
 		// from an absence.
 		SupportsWorkspaceProvisioning: false,
+		// Except for a feature (Task 20367): there the tree is a branch the
+		// hub ships, which this driver stages into a checkout of its own,
+		// seeds, and returns as a bundle together with the run's project
+		// state — so a feature's sandbox never sees the hub's worktree or its
+		// parent repository. Each of the four is true only of a feature
+		// workload; feature.go refuses the combinations it does not serve.
+		SupportsBranchBundle: true,
+		SupportsWriteBack:    true,
+		SupportsProjectSeed:  true,
+		ReturnsProjectState:  true,
 		// A per-project sandbox spec can pick its own image and bake its own
 		// setup: this driver has both a local image store to resolve against
 		// and a builder to derive from.
@@ -662,7 +676,14 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// outliving a start that never happened is the leak this ordering exists
 	// to prevent; the sandbox user is resolved the same way buildRequest does,
 	// because files the workload cannot read are not a delivery.
-	stage, err := stageSecretFiles(spec, e.sandboxUser(workDir))
+	// A feature's sandbox runs as its project's owner: the feature's own
+	// worktree may have been created by the hub's account (see feature.go),
+	// and the uid a workload gets is the project's decision, not the hub's.
+	owner := workDir
+	if isFeatureSpec(spec) {
+		owner = executor.PolicyProjectPath(workDir)
+	}
+	stage, err := stageSecretFiles(spec, e.sandboxUser(owner))
 	if err != nil {
 		return executor.Handle{}, err
 	}
@@ -673,9 +694,38 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		}
 	}()
 
-	req, err := e.buildRequest(spec, workDir, append(append([]mount(nil), extraMounts...), stage.mountList()...))
+	// A feature workload runs in a standalone checkout of its branch, staged
+	// here, rather than in the project directory; see feature.go.
+	tree := workDir
+	var feature *featureRun
+	var prelude strings.Builder
+	if isFeatureSpec(spec) {
+		feature, err = e.stageFeature(ctx, spec, e.sandboxUser(owner), func(text string) { prelude.WriteString(text) })
+		if err != nil {
+			return executor.Handle{}, err
+		}
+		defer func() {
+			if !started {
+				feature.remove()
+			}
+		}()
+		tree = feature.stage
+	} else if spec.WriteBack.Enabled() {
+		// Unreachable through Spec.Validate, which refuses a write-back on the
+		// bind workspace every other workload here has. Refused anyway at the
+		// one place that would otherwise silently drop it.
+		return executor.Handle{}, fmt.Errorf("%w: the %s executor returns work only for a feature, "+
+			"whose tree it stages itself; this workload's changes are already on the host",
+			executor.ErrUnsupported, executor.KindContainer)
+	}
+
+	req, err := e.buildRequestFor(spec, workDir, tree, append(append([]mount(nil), extraMounts...), stage.mountList()...))
 	if err != nil {
 		return executor.Handle{}, err
+	}
+	if feature != nil {
+		req.ExtraMounts = append(req.ExtraMounts, feature.outMount(e.opts.SELinuxLabel))
+		req.Argv = feature.wrap(spec)
 	}
 
 	// Provision and filter the network before anything can run on it. The
@@ -850,6 +900,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// The rules-keyed network this container joined, released by finish
 		// so the bridge and its ruleset go once the last workload on them has.
 		rulesNetwork: rulesNetwork,
+		feature:      feature,
 	}
 	started = true
 	// The spec is dropped, but the *values* it carried have to outlive it here.
@@ -858,6 +909,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// so the bus is where they stop being reproducible. Only the derived match
 	// set is retained — never the spec.
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
+	if prelude.Len() > 0 {
+		// How the feature's tree was built, at the top of its log, where an
+		// operator looking for why a run started on the wrong code will look.
+		rec.bus.Emit(prelude.String())
+	}
 
 	e.mu.Lock()
 	e.handles[rec.id] = rec
@@ -915,7 +971,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		Image:     req.Image,
 		StartedAt: rec.startedAt,
 		Deadline:  deadline,
-		Meta:      map[string]string{metaRuntime: e.rt.Name},
+		Meta:      handleMeta(e.rt.Name, feature),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this sandbox. Names and paths only — the credential
@@ -1096,6 +1152,13 @@ func grantedRepoMounts(spec executor.Spec) ([]mount, error) {
 
 // buildRequest turns a Spec plus this executor's options into a runRequest.
 func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts []mount) (runRequest, error) {
+	return e.buildRequestFor(spec, workDir, workDir, extraMounts)
+}
+
+// buildRequestFor is buildRequest with the tree mounted at /workspace named
+// separately from the project directory: they differ for a feature workload,
+// whose tree is the checkout stageFeature built (see feature.go).
+func (e *Executor) buildRequestFor(spec executor.Spec, workDir, tree string, extraMounts []mount) (runRequest, error) {
 	// Bind is this driver's answer to the workspace question, and it is a
 	// deliberate one rather than a missing feature.
 	//
@@ -1136,8 +1199,10 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		OCIRuntime: e.opts.OCIRuntime,
 		Image:      e.opts.Image,
 		Name:       name,
+		// The tree is the project directory, except for a feature workload,
+		// whose tree is the standalone checkout stageFeature built.
 		Workspace: mount{
-			HostPath:     workDir,
+			HostPath:     tree,
 			TargetPath:   ContainerWorkspace,
 			SELinuxLabel: e.opts.SELinuxLabel,
 		},
@@ -1160,7 +1225,7 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		}
 		req.ExtraMounts = append(req.ExtraMounts, m)
 	}
-	specMounts, err := sandboxMounts(spec, workDir, e.opts.SELinuxLabel)
+	specMounts, err := sandboxMounts(spec, tree, e.opts.SELinuxLabel)
 	if err != nil {
 		return runRequest{}, err
 	}
@@ -1270,6 +1335,9 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	// leaves files readable on the host afterwards.
 	if e.rt.Rootless {
 		req.KeepID = true
+	} else if tree != workDir {
+		// A feature workload, whose tree was staged for its project's owner.
+		req.User = e.sandboxUser(executor.PolicyProjectPath(workDir))
 	} else {
 		req.User = e.sandboxUser(workDir)
 	}
@@ -1366,6 +1434,11 @@ func (e *Executor) followLogs(ctx context.Context, rec *record) error {
 		n, readErr := pipeR.Read(buf)
 		if n > 0 {
 			rec.bus.Emit(string(buf[:n]))
+			if rec.feature != nil {
+				// A feature's write-back reports through its output, the one
+				// channel out of the sandbox; see feature.go.
+				rec.feature.scanner.Observe(string(buf[:n]))
+			}
 		}
 		if readErr != nil {
 			break
@@ -1612,7 +1685,7 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	return executor.Status{
+	st := executor.Status{
 		HandleID:   rec.id,
 		ExecutorID: e.id,
 		State:      rec.state,
@@ -1620,7 +1693,11 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 		StartedAt:  rec.startedAt,
 		FinishedAt: rec.finishedAt,
 		Error:      rec.errMsg,
-	}, nil
+	}
+	if rec.feature != nil && rec.state.Terminal() {
+		st.WriteBack = rec.feature.writeBack()
+	}
+	return st, nil
 }
 
 // HandleStatuses implements executor.Lister from the driver's own bookkeeping. It
@@ -2147,6 +2224,10 @@ func (e *Executor) pruneLocked() {
 		if len(e.handles) <= maxRetainedHandles {
 			return
 		}
+		if rec := e.handles[f.id]; rec != nil && rec.feature != nil {
+			// Nothing can ask for its output once the handle is gone.
+			rec.feature.remove()
+		}
 		delete(e.handles, f.id)
 	}
 }
@@ -2217,6 +2298,11 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// that survives one of those is a credential that survives on the host
 	// until the next reboot.
 	rec.secretStage.remove()
+	// A feature workload's tree and output wait for the hub to collect them,
+	// but not forever. See feature.go.
+	if rec.feature != nil && state.Terminal() {
+		rec.feature.expireAfter(featureRetention)
+	}
 	// And the lease attribution with it, but only for a workload that is
 	// actually over — the same gate ForgetHandle above carries. A handle
 	// retired while its container keeps running must stay bound, or it would

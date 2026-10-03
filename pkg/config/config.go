@@ -613,6 +613,17 @@ type ExecutorsConfig struct {
 	// silently re-enabling a sweep they had turned off.
 	OrphanSweepIntervalMinutes *int `yaml:"orphan_sweep_interval_minutes,omitempty"`
 
+	// FeatureBundleMB caps the git bundles a feature run on an isolating
+	// executor moves (Task 20367): the feature's branch shipped to the
+	// sandbox, and the work the run returns. 0 uses the default of 32; the
+	// most it may be is 128, the hard ceiling every receiver enforces.
+	//
+	// A hub setting rather than a sandbox.yaml one, because the receiving end
+	// of the second bundle is this hub's disk and memory, and the file a
+	// sandbox could have edited is the wrong authority on how much of either
+	// it may have.
+	FeatureBundleMB int `yaml:"feature_bundle_mb,omitempty"`
+
 	// Limits is the hub-wide ceiling on what any single workload may be given,
 	// whichever executor runs it.
 	//
@@ -870,6 +881,23 @@ func (e ExecutorsConfig) HostProcessAllowed() bool {
 // distinguish "permissive because nobody has decided yet" from "permissive on
 // purpose".
 func (e ExecutorsConfig) HostProcessExplicit() bool { return e.AllowHostProcess != nil }
+
+// MaxFeatureBundleMB is the most executors.feature_bundle_mb may be: the hard
+// ceiling on a branch or write-back bundle (executor.MaxBranchBundleBytes).
+const MaxFeatureBundleMB = 128
+
+// FeatureBundleBytes is executors.feature_bundle_mb in bytes, defaulted and
+// clamped to (0, MaxFeatureBundleMB].
+func (e ExecutorsConfig) FeatureBundleBytes() int64 {
+	mb := e.FeatureBundleMB
+	switch {
+	case mb <= 0:
+		mb = 32
+	case mb > MaxFeatureBundleMB:
+		mb = MaxFeatureBundleMB
+	}
+	return int64(mb) << 20
+}
 
 // AutoInstallHarnessAllowed reports the effective policy, applying the
 // permissive-by-default rule for an absent setting.

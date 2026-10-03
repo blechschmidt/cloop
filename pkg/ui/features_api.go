@@ -34,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/featurehub"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/featureops"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -240,17 +241,75 @@ func (s *Server) handleProjectFeatureCreate(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	registerBuiltinExecutors()
-	if ex, err := executor.ResolveBinding(parent.Path); err == nil && executor.IsolatesFromHost(ex) {
-		// Checked for the parent before anything is created: the worktree
-		// would be made on the hub, and then the feature could never run
-		// where its project does. See featureExecutorError.
-		jsonWorkloadErr(w, &featureExecutorError{
-			FeaturePath: feature.Path(parent.Path, slug), ExecutorID: ex.ID(), ExecutorKind: string(ex.Kind()),
+	var result struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Feature struct {
+			Slug   string `json:"slug"`
+			Branch string `json:"branch"`
+			Base   string `json:"base"`
+			Path   string `json:"path"`
+		} `json:"feature"`
+	}
+	if featureOpsOnHub(parent.Path) {
+		// The project runs on an executor that cannot see the hub's
+		// worktrees — a container sees the project at another path, a device
+		// not at all — so the feature is made here, on the hub, where it
+		// lives (Task 20367). Its runs then travel to that executor as a
+		// branch; see features_isolated.go.
+		if err := checkFeatureRepository(parent.Path); err != nil {
+			jsonErr(w, err.Error(), http.StatusConflict)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), featureCreateTimeout-time.Minute)
+		defer cancel()
+		info, err := featurehub.Create(ctx, featureops.CreateOptions{
+			ProjectDir: parent.Path, Name: req.Name, Description: req.Description, Base: req.Base,
+			AutoEvolve: req.AutoEvolve, Innovate: req.Innovate, Parallel: req.Parallel,
+			MaxParallel: req.MaxParallel, Tasks: req.Tasks, AutoPR: req.AutoPR, CreatedBy: s.auditActor(r),
 		})
+		if err != nil {
+			writeFeatureCommandError(w, err.Error(), featureOpsCode(err), nil)
+			return
+		}
+		result.OK = true
+		result.Feature.Slug, result.Feature.Branch = info.Meta.Slug, info.Meta.Branch
+		result.Feature.Base, result.Feature.Path = info.Meta.Base, info.Path
+	} else if !s.dispatchFeatureNew(w, r, parent.Path, req, &result) {
+		return
+	}
+	if !result.OK {
+		writeFeatureCommandError(w, result.Error, result.Code, nil)
 		return
 	}
 
+	path := feature.Path(parent.Path, result.Feature.Slug)
+	s.recordFeatureEvent(r, parent.Path, auditaction.ActionFeatureCreate, result.Feature.Slug, map[string]any{
+		"slug": result.Feature.Slug, "branch": result.Feature.Branch, "base": result.Feature.Base,
+		"path": path, "auto_evolve": req.AutoEvolve, "innovate": req.Innovate, "tasks": len(req.Tasks),
+	})
+	state.LogEvent(parent.Path, state.EventRow{
+		Type: state.EventFeatureCreated, Step: state.NoStep,
+		Message: fmt.Sprintf("Feature %q created on branch %s from %s", req.Name, result.Feature.Branch, result.Feature.Base),
+	})
+
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
+	jsonOK(w, map[string]any{
+		"ok":          true,
+		"slug":        result.Feature.Slug,
+		"branch":      result.Feature.Branch,
+		"base":        result.Feature.Base,
+		"path":        path,
+		"project_idx": s.indexOfPath(r, path),
+	})
+}
+
+// dispatchFeatureNew runs `cloop feature new` for a project the hub runs on
+// its own filesystem, decoding the framed result into out. It writes the
+// error response itself and returns false when there is no result to read.
+func (s *Server) dispatchFeatureNew(w http.ResponseWriter, r *http.Request, parentPath string, req createFeatureRequest, out any) bool {
 	// Values ride in the --flag=value form: user text must never be able to
 	// be read as a flag of its own.
 	args := []string{"feature", "new", "--json",
@@ -280,46 +339,7 @@ func (s *Server) handleProjectFeatureCreate(w http.ResponseWriter, r *http.Reque
 	// "--" before the name: a name is user input, and one starting with a
 	// dash must be a name rather than a flag.
 	args = append(args, "--", req.Name)
-
-	var result struct {
-		OK      bool   `json:"ok"`
-		Error   string `json:"error"`
-		Code    string `json:"code"`
-		Feature struct {
-			Slug   string `json:"slug"`
-			Branch string `json:"branch"`
-			Base   string `json:"base"`
-			Path   string `json:"path"`
-		} `json:"feature"`
-	}
-	if !s.dispatchFeatureCommand(w, r, parent.Path, featureCreateTimeout, nil, &result, args...) {
-		return
-	}
-	if !result.OK {
-		writeFeatureCommandError(w, result.Error, result.Code, nil)
-		return
-	}
-
-	path := feature.Path(parent.Path, result.Feature.Slug)
-	s.recordFeatureEvent(r, parent.Path, auditaction.ActionFeatureCreate, result.Feature.Slug, map[string]any{
-		"slug": result.Feature.Slug, "branch": result.Feature.Branch, "base": result.Feature.Base,
-		"path": path, "auto_evolve": req.AutoEvolve, "innovate": req.Innovate, "tasks": len(req.Tasks),
-	})
-	state.LogEvent(parent.Path, state.EventRow{
-		Type: state.EventFeatureCreated, Step: state.NoStep,
-		Message: fmt.Sprintf("Feature %q created on branch %s from %s", req.Name, result.Feature.Branch, result.Feature.Base),
-	})
-
-	s.refreshProjectStatuses()
-	s.broadcastProjectsUpdate()
-	jsonOK(w, map[string]any{
-		"ok":          true,
-		"slug":        result.Feature.Slug,
-		"branch":      result.Feature.Branch,
-		"base":        result.Feature.Base,
-		"path":        path,
-		"project_idx": s.indexOfPath(r, path),
-	})
+	return s.dispatchFeatureCommand(w, r, parentPath, featureCreateTimeout, nil, out, args...)
 }
 
 // handleProjectFeatureDelete serves DELETE /api/projects/{idx}/features/{slug}.
@@ -373,7 +393,21 @@ func (s *Server) handleProjectFeatureDelete(w http.ResponseWriter, r *http.Reque
 			BranchKept    string `json:"branch_kept"`
 		} `json:"removed"`
 	}
-	if !s.dispatchFeatureCommand(w, r, parent.Path, featureRemoveTimeout, nil, &result, args...) {
+	if featureOpsOnHub(parent.Path) {
+		// Made on the hub, so removed on the hub (Task 20367).
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), featureRemoveTimeout)
+		defer cancel()
+		res, err := featurehub.Remove(ctx, featureops.RemoveOptions{
+			ProjectDir: parent.Path, Slug: slug, DeleteBranch: deleteBranch, Force: force,
+		})
+		if err != nil {
+			writeFeatureCommandError(w, err.Error(), featureOpsCode(err), nil)
+			return
+		}
+		result.OK = true
+		result.Removed.Branch, result.Removed.BranchDeleted, result.Removed.BranchKept =
+			res.Branch, res.BranchDeleted, res.BranchKept
+	} else if !s.dispatchFeatureCommand(w, r, parent.Path, featureRemoveTimeout, nil, &result, args...) {
 		return
 	}
 	if !result.OK {
@@ -462,6 +496,13 @@ func (s *Server) handleProjectFeaturePR(w http.ResponseWriter, r *http.Request) 
 // non-zero status is a refusal decided here; status 0 with an error is a
 // dispatch failure for jsonWorkloadErr.
 func (s *Server) openFeaturePR(ctx context.Context, dir string, req featurePRRequest, actor string) (*featurePROutcome, int, error) {
+	if featureOpsOnHub(policyProjectPath(dir)) {
+		// From the branch the run's work was written back to, on the hub,
+		// with the project's own grant (Task 20367).
+		hctx, cancel := context.WithTimeout(ctx, featurePRTimeout)
+		defer cancel()
+		return s.openFeaturePROnHub(hctx, dir, req), 0, nil
+	}
 	args := []string{"feature", "pr", "--json"}
 	if req.Title != "" {
 		args = append(args, "--title="+req.Title)
@@ -555,15 +596,26 @@ func (s *Server) handleProjectFeaturePRRefresh(w http.ResponseWriter, r *http.Re
 		Code  string      `json:"code"`
 		PR    *feature.PR `json:"pr"`
 	}
-	raw, err := runCloopSubcommandFor(context.WithoutCancel(r.Context()), s.selfExe(), dir, featureRefreshTimout, s.featureTokenEnv(),
-		"feature", "pr-status", "--json")
-	if perr := clijson.Unmarshal(raw, &out); perr != nil {
+	if featureOpsOnHub(parent.Path) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), featureRefreshTimout)
+		defer cancel()
+		pr, err := s.refreshFeaturePROnHub(ctx, dir)
 		if err != nil {
-			jsonWorkloadErr(w, err)
+			out.Error, out.Code = err.Error(), featureOpsCode(err)
+		} else {
+			out.OK, out.PR = true, pr
+		}
+	} else {
+		raw, err := runCloopSubcommandFor(context.WithoutCancel(r.Context()), s.selfExe(), dir, featureRefreshTimout, s.featureTokenEnv(),
+			"feature", "pr-status", "--json")
+		if perr := clijson.Unmarshal(raw, &out); perr != nil {
+			if err != nil {
+				jsonWorkloadErr(w, err)
+				return
+			}
+			jsonErr(w, "could not read the pull request's state: "+perr.Error(), http.StatusInternalServerError)
 			return
 		}
-		jsonErr(w, "could not read the pull request's state: "+perr.Error(), http.StatusInternalServerError)
-		return
 	}
 	if !out.OK {
 		writeFeatureCommandError(w, out.Error, out.Code, nil)

@@ -41,7 +41,8 @@
 //
 //	executors.*            allow_host_process, min_agent_build, limits (the
 //	                       resource ceiling), container, kubernetes, git_proxy,
-//	                       kube_guard, auto_install_harness, the orphan sweep
+//	                       kube_guard, auto_install_harness, the orphan sweep,
+//	                       feature_bundle_mb
 //	sandbox.image_policy   the image trust policy, at the hub's early check
 //	                       and in the copy each driver takes at startup
 //	ui.*                   oidc, tls, the origin allowlists, the WebSocket

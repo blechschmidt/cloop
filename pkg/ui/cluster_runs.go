@@ -59,7 +59,10 @@ type runOwnerMeta struct {
 	// this provenance, which an adopting member must have to do the merge.
 	Seeded     bool                    `json:"seeded,omitempty"`
 	Provenance *projectseed.Provenance `json:"provenance,omitempty"`
-	Started    time.Time               `json:"started,omitzero"`
+	// Feature is, for a feature's run on an isolating executor, what its
+	// returned work is landed against (Task 20367).
+	Feature *featureReturn `json:"feature,omitempty"`
+	Started time.Time      `json:"started,omitzero"`
 	// Dispatching marks a claim taken before its workload exists. A member
 	// that dies inside that window leaves a claim with nothing behind it,
 	// which the leader clears rather than tries to adopt.
@@ -127,6 +130,7 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 	if d, ok := peekSeededDispatch(ex, handleID); ok {
 		prov := d.prov
 		meta.Seeded, meta.Provenance = true, &prov
+		meta.Feature = d.feature
 	}
 	if _, found, _ := n.Lookup(ownerRun, workDir); !found {
 		// Standalone-era callers and adoption paths reach here without a
@@ -490,6 +494,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		}
 		if meta.Seeded && meta.Provenance != nil {
 			rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
+			rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 			s.collectRunResult(workDir, ex, meta.Handle)
 		}
 		s.reconcileDeadRun(workDir, verdict)
@@ -497,6 +502,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	}
 	if meta.Seeded && meta.Provenance != nil {
 		rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
+		rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 	}
 	s.resumeRun(workDir, ex, meta.Handle)
 }

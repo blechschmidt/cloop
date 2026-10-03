@@ -1068,13 +1068,14 @@ about a repository it never read. Nothing in the hub's view distinguishes it
 from a real run — no error, no exit code, no missing artifact.
 
 So every dispatched `Spec` now carries an explicit `Workspace`, and there are
-exactly four answers to "where does the code come from":
+exactly five answers to "where does the code come from":
 
 | `Kind` | Meaning | Chosen when |
 | --- | --- | --- |
 | `bind` | the tree is already at `WorkDir`; the executor is looking at the same filesystem the hub is | `Capabilities().SharesHostFilesystem` |
 | `git` | the executor fetches it before the harness starts | the project is a checkout with a fetchable https remote |
 | `executor` | the directory belongs to the executor and is kept there between runs; only the project's state crosses | the project is not a git repository at all |
+| `bundle` | the executor builds it from a git bundle the hub ships beside the Spec, leaving the checkout on the shipped branch | a feature runs on an executor that isolates from the hub, and its branch cannot be shipped as commits on top of a `git` clone ([Features](#features-shipping-a-branch-task-20367)) |
 | `none` | the workload genuinely wants an empty directory | the workload has no project at all (the voice handler runs `cloop listen --file …`) |
 
 ### Projects with no repository of their own (Task 20324)
@@ -1607,6 +1608,63 @@ longer holds the dispatch record the merge needs, and does not merge that run's
 result. Helper subcommands dispatched to a device (`cloop reset` from the
 dashboard) are not merged either: they are not runs, and a reset expressed as a
 diff would not reset anything the diff cannot name.
+
+---
+
+## Features: shipping a branch (Task 20367)
+
+A [feature](../guides/features.md) is a linked git worktree on the hub, and its
+`.git` names the parent repository by an absolute host path, so the worktree
+itself cannot travel. Until Task 20367 a feature was therefore refused on every
+executor that isolates from the hub — which, on a hub with
+`executors.allow_host_process: false`, is every executor. Mounting the parent's
+`.git` into the sandbox to make the pointer resolve was never an option: hooks
+and configuration written there run on the hub at the next git command run in
+that repository.
+
+Instead a feature travels as its branch.
+
+| | |
+| --- | --- |
+| Shipped | `Workspace.Branch` (`executor.BranchBundle`): the branch, its head, the bundle's size and SHA-256, and for a shallow slice its boundary commits. On a `git` workspace pinned at the feature's base it is the feature's own commits (an *overlay*); on a `bundle` workspace it is the whole branch, or its newest 50 commits, or its newest one. The bytes ride beside the Spec — `Spec.BranchBundleFile` on the hub — never in it. |
+| Built by | `pkg/executor/featurehub.Ship` on the hub; `gitprovision` on the executor, always into an emptied directory, on the branch itself (attached), with `.cloop/` excluded from its commits |
+| Wire | `branch_chunk` frames (≤ 512 KiB each), protocol **v16**, written before the start frame on the same connection; the device checks size and digest before building anything |
+| Returned | a write-back bundle onto the same branch (`Spec.WriteBack`, mode `bundle`), plus the project result |
+| Landed by | `featurehub.Land`: `pkg/writeback.Vet` into quarantine, then a fast-forward of the hub's worktree — only when it is clean, on its branch, the work builds on its HEAD and touches nothing under `.cloop/` — else the work is kept on `cloop/returned/<slug>/<run>` and the feature records a conflict |
+| Capability | `supports_branch_bundle`; placement requirement `RequireBranchBundle` |
+| Cap | `executors.feature_bundle_mb` (default 32, at most 128), applied by the hub when shipping, by the sandbox when bundling its work, and by the hub again when landing it |
+
+**Per driver.**
+
+| Driver | Feature workloads |
+| --- | --- |
+| `container` | Stages a standalone checkout in a directory of its own (never the hub's worktree) and mounts it at `/workspace`, with an output directory at `/cloop-out`. The harness runs inside `cloop workspace writeback --place-seed …`, so the seed is placed, the run's state is read back and its work is committed and bundled *inside the container*; the host only reads two files out of `/cloop-out`, as bytes, refusing links, FIFOs and anything over the cap. The sandbox runs as the *parent* project's owner. Staging is removed when the hub has collected the result, or an hour after the workload ended. |
+| `remote` (incl. virtual executors) | Protocol v16 and git on the device. An overlay is cloned with the project's grant like any `git` workspace; the agent commits and bundles after the harness exits, in an environment that switches off whatever the workload configured in the tree (`gitprovision.SandboxedRepoEnv`). |
+| `kubernetes` | Not supported: a Pod has no channel from the hub to receive the bundle through. Refused at dispatch. |
+| `localprocess` | Not involved: on a hub that runs projects itself a feature runs in its worktree, as before. |
+
+**The hub runs git for this.** Only something that can read the hub's
+filesystem can bundle a feature's branch or land work onto it, and by
+construction that is never the executor the feature runs on. So the hub runs git
+— and only git, with fixed subcommands, in its own project repositories —
+through `pkg/executor/featurehub`, which is part of the executor boundary the
+[call-graph guarantee](../security/model.md#the-no-host-execution-guarantee)
+sanctions. Every invocation has no system or global configuration and carries
+`executor.HardenedGitConfig`: hooks, fsmonitor, every configured filter driver,
+signing and automatic maintenance are off, so a hook or filter left in the
+repository by a project's own container sandbox (which mounts the project,
+`.git` included) never runs on the hub. Creating, removing and publishing a
+feature of such a project go through it too (`featureops` in *hub mode*), with
+the API token taken only from the project's grant or, on a hub without sign-in,
+the hub's own.
+
+**A write-back through a real agent.** Building this found that no real agent
+had ever completed a write-back dispatch: after provisioning, the agent handed
+its inner driver a Spec that still asked for a write-back on what was now a
+`bind` workspace, which `Spec.Validate` refuses. The agent now strips the
+write-back before the inner driver sees it — the agent performs it itself, after
+the harness exits — and `TestLoopbackReturnsAFeatureRunsCommits` covers the
+round trip over a real session.
 
 ---
 

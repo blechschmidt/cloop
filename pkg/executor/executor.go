@@ -198,6 +198,20 @@ type Capabilities struct {
 	// quietly drop needs a flag that says so, and this is the one whose
 	// omission costs work rather than confusion.
 	SupportsWriteBack bool `json:"supports_write_back"`
+	// SupportsBranchBundle reports whether this driver can receive a git
+	// branch shipped beside the Spec (Workspace.Branch and
+	// Spec.BranchBundleFile) and build the workload's tree from it, leaving
+	// the checkout on that branch (Task 20367).
+	//
+	// It is what lets a feature — a branch of a repository on the hub — run
+	// in a sandbox at all, and it is separate from the provisioning and
+	// write-back flags because a driver can have those and still have no way
+	// to carry the bytes in: the Kubernetes driver clones and pushes, but a Pod
+	// has no channel from the hub to receive a bundle through. A driver that
+	// ignored the field would start the harness on the base commit, without
+	// any of the feature's work, which is the run-on-the-wrong-code failure
+	// this whole contract exists to refuse.
+	SupportsBranchBundle bool `json:"supports_branch_bundle"`
 	// SupportsSandboxMounts reports whether Spec.Mounts is honoured.
 	//
 	// It is tracked separately from SupportsImageOverride even though the same
@@ -501,6 +515,17 @@ type Spec struct {
 	// json:"-" for size rather than for secrecy; see seed.go.
 	ProjectSeed []byte `json:"-"`
 
+	// BranchBundleFile names the git bundle Workspace.Branch describes, as a
+	// path on the control plane's host, for the driver to read while it
+	// starts the workload: the container driver unpacks it into the tree it
+	// stages, the remote driver streams it to the device ahead of the start
+	// frame. Empty when the branch ships no bytes.
+	//
+	// json:"-" for the reason ProjectSeed is: a bundle is megabytes, and a
+	// Spec is persisted, audited and re-read after a restart. The caller owns
+	// the file and removes it once Start has returned.
+	BranchBundleFile string `json:"-"`
+
 	// Workspace says how the source tree gets into WorkDir. It carries no
 	// credential — only the name of a grant — for the reasons set out in
 	// workspace.go. The zero value is "unspecified", which leaves a driver's
@@ -687,7 +712,7 @@ func (s Spec) Validate() error {
 	// network is a contradiction, and the failure it produces otherwise —
 	// "could not resolve host" from a step nobody knew ran — points nowhere
 	// near the two settings that caused it.
-	if s.Workspace.NeedsProvisioning() && s.DisableNetwork {
+	if s.Workspace.NeedsNetwork() && s.DisableNetwork {
 		return fmt.Errorf("%w: workspace kind git needs to fetch %s, but this workload has "+
 			"network egress disabled; either pre-populate the tree or grant egress "+
 			"(.cloop/sandbox.yaml capabilities.network)", ErrInvalidSpec, s.Workspace.Host())
@@ -727,6 +752,10 @@ func (s Spec) Validate() error {
 					"commit so the returned changes can be measured against it, but the ref is "+
 					"%q: %v", ErrInvalidSpec, s.Workspace.Ref, err)
 			}
+		case WorkspaceBundle:
+			// Built from the shipped branch, so the base is its head — pinned
+			// by construction, which is the property the git case above has
+			// to insist on.
 		case WorkspaceBind:
 			return fmt.Errorf("%w: write_back is set on a bind workspace, whose changes are "+
 				"already on the control plane's filesystem", ErrInvalidSpec)
@@ -735,8 +764,30 @@ func (s Spec) Validate() error {
 				"and an origin, but the workspace kind is %q", ErrInvalidSpec, s.WriteBack.Mode,
 				s.Workspace.Kind)
 		}
+		// A shipped branch is the branch its work comes back on. Writing back
+		// anywhere else would land a feature's commits on a branch the hub
+		// never sent and never checks out — and a sandbox whose spec could
+		// name one would be choosing which of the hub's branches to extend.
+		if b := s.Workspace.Branch; b != nil && strings.TrimSpace(s.WriteBack.Branch) != strings.TrimSpace(b.Branch) {
+			return fmt.Errorf("%w: the workspace ships branch %s, so its work must be written back to "+
+				"it, not to %s", ErrInvalidSpec, b.Branch, s.WriteBack.Branch)
+		}
 	}
 	return s.ResourceLimits.Validate()
+}
+
+// WriteBackBase returns the commit a write-back of this Spec is measured
+// against: the head of a shipped branch, else the commit a git workspace is
+// pinned to. Empty when the Spec has neither.
+//
+// It exists so the drivers that run the write-back inside the sandbox (the
+// Kubernetes wrapper, the container driver's feature mode) cannot disagree with
+// the ones that read the base off the provisioned tree.
+func (s Spec) WriteBackBase() string {
+	if b := s.Workspace.Branch; b != nil {
+		return strings.TrimSpace(b.Head)
+	}
+	return strings.TrimSpace(s.Workspace.Ref)
 }
 
 // SandboxRequirements returns the placement constraints implied by the
@@ -759,12 +810,16 @@ func (s Spec) SandboxRequirements() Requirements {
 		// network away, which is every driver that has one, so requiring
 		// SupportsEgressScope for it would refuse executors that can in fact
 		// deliver exactly what was asked for.
-		RequireEgressScope:             s.EgressScope.NeedsFilter(),
-		RequireNetworkEgress:           s.EgressScope.NeedsFilter(),
-		RequireResourceLimits:          !s.ResourceLimits.IsZero(),
-		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
+		RequireEgressScope:    s.EgressScope.NeedsFilter(),
+		RequireNetworkEgress:  s.EgressScope.NeedsFilter(),
+		RequireResourceLimits: !s.ResourceLimits.IsZero(),
+		// Fetching is the capability a git workspace needs; a bundle
+		// workspace is built from bytes the hub ships, which is
+		// RequireBranchBundle's question, not this one's.
+		RequireWorkspaceProvisioning:   s.Workspace.NeedsNetwork(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 		RequireWriteBack:               s.WriteBack.Enabled(),
+		RequireBranchBundle:            s.Workspace.Branch != nil,
 		// The kind matters as much as the payload. An executor-owned workspace
 		// fetches nothing, so the seed is the *only* thing that can put a
 		// project on the far side — a driver that cannot place one would start

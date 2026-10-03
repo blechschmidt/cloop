@@ -244,6 +244,11 @@ type Requirements struct {
 	// the sandbox. The first is confusing on arrival, the second is invisible
 	// until someone goes looking for the commit.
 	RequireWriteBack bool
+	// RequireBranchBundle demands a node that can receive a git branch the
+	// control plane ships with the Spec, which is how a feature reaches a
+	// sandbox (Task 20367). Refusing is the only alternative to a harness
+	// that runs on the feature's base commit with none of its work.
+	RequireBranchBundle bool
 	// RequireProjectSeed demands a node that places the hub's `.cloop/` into
 	// the workspace it fetched, because a cloned tree carries a source
 	// repository and not a cloop project.
@@ -606,6 +611,12 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireWriteBack && !caps.SupportsWriteBack {
 		return no(ConstraintWriteBack, "cannot return the files a task changes, so the work "+
 			"would be discarded with the sandbox when the run ends")
+	}
+	if req.RequireBranchBundle && !caps.SupportsBranchBundle {
+		return no(ConstraintWorkspace, "cannot receive a branch shipped from the control plane, so "+
+			"a feature — a branch of a repository that lives on the hub — has no way into its "+
+			"sandbox; run the feature on a container executor or a remote agent of protocol v16 "+
+			"or later (`cloop executor agent install --upgrade`)")
 	}
 	if req.RequireProjectSeed && !caps.SupportsProjectSeed {
 		return no(ConstraintWorkspace, "cannot place the project's .cloop/ into the working "+
