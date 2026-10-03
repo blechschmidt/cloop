@@ -481,6 +481,14 @@
           </div>
         </div>
 
+        <!-- This project's firewall rule set beside the rules governing it (Task 20363). -->
+        <div class="section" id="projectFirewallPanel" style="display:none">
+          <div class="section-title">Network Firewall</div>
+          <div class="card">
+            <div id="projectFirewallBody"></div>
+          </div>
+        </div>
+
         <!-- Event history (Task 20118): step results merged with task starts,
              evolves, kills, skips, status changes, etc. The DOM id remains
              "stepList" so existing CSS keeps working; the renderer now paints
@@ -3466,6 +3474,14 @@
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:680px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:8px">Virtual executors <button class="btn" style="float:right" onclick="closeExecutorVirtual()">Close</button></h2>
     <div id="evxBody"></div>
+  </div>
+</div>
+
+<!-- A device's firewall rule set (Task 20363); the form is built by 23-firewall.js. -->
+<div id="executor-firewall-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorFirewall()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:8px">Device firewall</h2>
+    <div id="efwBody"></div>
   </div>
 </div>
 

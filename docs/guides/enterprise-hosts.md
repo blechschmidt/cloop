@@ -287,6 +287,14 @@ Two constraints to know about:
 interfaces away is not a filter. The strongest scope is available on the hosts
 least able to install a ruleset.
 
+A finer narrowing than the two scopes — "this project reaches our registry
+and GitHub, on 443, and nothing else" — is a rule set its maintainers save on
+the project's Overview page rather than in the repository, since a
+repository-committed file that could name addresses would put the network one
+pull request away. It may only narrow the executor's, and an admin can set a
+rule set on the executor itself that bounds every project on it. See
+[firewall rules](firewall.md).
+
 ### Reaching a specific internal service
 
 A project that genuinely needs one internal endpoint does **not** get it from

@@ -322,7 +322,21 @@ import (
 // project cards render pause reasons on first paint. 15 B with the label as
 // short as it still reads ("progress not saved"). Measured after: 215,704 B,
 // so the ceiling moves by 20 B.
-const eagerWireBudgetBytes = 215_720
+//
+// Task 20363 serves index.html without its comments (htmlstrip.go), the last
+// eager asset still shipping its prose: 162 comments, 7,283 B wire, and Chrome
+// builds the same document from the stripped page
+// (TestStripHTMLComments_MatchesChrome). Measured after: 208,421 B. The same
+// task then adds the firewall panels — a device's dialog, the device's rules
+// in the virtual-executor dialog, a project's card on the Overview — for
+// 3,023 B: 2,930 B of script (23-firewall.js and the dialog's lines in
+// 23-executors.js) and 93 B of markup. They are resident because the Overview
+// card renders on first paint. Measured after: 211,444 B.
+//
+// The ceiling comes down to 213,000 B rather than staying at 215,720: the
+// stripping is a saving, and keeping all of it as slack would let the next
+// several additions through without anyone having to look. 1,556 B of slack.
+const eagerWireBudgetBytes = 213_000
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

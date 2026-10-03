@@ -90,6 +90,9 @@ var bundleFiles = []string{
 	"assets/js/21-audit.js",
 	"assets/js/22-secrets.js",
 	"assets/js/23-executors.js",
+	// The firewall rule sets of devices and projects (Task 20363), after the
+	// executors fragment whose helpers it uses.
+	"assets/js/23-firewall.js",
 	"assets/js/24-mobile-nav.js",
 	"assets/js/25-replay.js",
 	// Loads after 22-secrets.js: the sessions panel reuses that file's
@@ -207,11 +210,13 @@ type assetSet struct {
 	// the stripper declined.
 	servedBoundary string
 	indexTmpl      string
-	// servedPage is the rendered page as it goes over the wire, its comments
-	// removed (htmlstrip.go), or the rendered page itself if the stripper
-	// declined.
-	servedPage  string
-	glassesTmpl string
+	// renderedPage is indexTmpl with its asset URLs filled in, comments and
+	// all, for the tests that read the front end as its source; servedPage is
+	// it as it goes over the wire, its comments removed (htmlstrip.go), or
+	// renderedPage itself if the stripper declined.
+	renderedPage string
+	servedPage   string
+	glassesTmpl  string
 }
 
 // loadAssets builds the asset set on first use and reuses it forever after.
@@ -301,6 +306,7 @@ func buildAssets() *assetSet {
 
 	// And the page's own comments, the last prose on the first paint: 22 KB
 	// of index.html, 7 KB gzipped (Task 20363). See htmlstrip.go.
+	set.renderedPage = page
 	servedPage, pageErr := stripHTMLComments(page)
 	if pageErr != nil {
 		fmt.Fprintf(os.Stderr, "ui: serving the dashboard page with its comments: %v\n", pageErr)

@@ -137,6 +137,11 @@ function clearProjectScopedPanels() {
 
   // AI suggestions are one project's proposals (Task 20342).
   try { resetSuggestPanel(); } catch(_) {}
+
+  // So is a firewall rule set, and its form must never be saved against the
+  // next project (Task 20363); loadProjectFirewall shows it again.
+  const fw = document.getElementById('projectFirewallPanel');
+  if (fw) fw.style.display = 'none';
 }
 
 // ── Deferred chart library (Task 20289) ─────────────────────────────────────

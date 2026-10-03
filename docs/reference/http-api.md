@@ -70,10 +70,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 |------------|-----------|
 | `public` (no permission) | 28 |
 | `audit.read` | 5 |
-| `config.write` | 16 |
+| `config.write` | 15 |
 | `executor.manage` | 28 |
 | `executor.read` | 3 |
-| `project.read` | 49 |
+| `project.read` | 50 |
 | `project.write` | 12 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
@@ -165,7 +165,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/executors/{id}/virtual` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/virtuals` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/virtuals` | `executor.manage` | executor |
-| GET | `/api/firewall` | `config.write` | project |
+| GET | `/api/firewall` | `project.read` | project |
 | POST | `/api/firewall` | `config.write` | project |
 | PUT | `/api/firewall` | `config.write` | project |
 | GET | `/api/fleet/autoupdate` | `executor.read` | global |

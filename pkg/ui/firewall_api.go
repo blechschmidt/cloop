@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -118,6 +119,9 @@ type deviceFirewallView struct {
 // projectFirewallView is the project card's GET body and the answer to a write.
 type projectFirewallView struct {
 	Project string `json:"project"`
+	// Visible is false for a reader who may not change the project's
+	// configuration, and then nothing else is filled in.
+	Visible bool `json:"visible"`
 	// PolicyProject is the project whose rule set this is when it is not the
 	// one asked about: a feature worktree runs under its parent's.
 	PolicyProject string                 `json:"policy_project,omitempty"`
@@ -483,10 +487,10 @@ func (s *Server) serveDeviceFirewallPut(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	detail := map[string]any{"from": fwpolicy.Describe(recRules(before, had))}
+	detail := map[string]any{"from": describeStored(before, had)}
 	if req.Clear {
 		detail["cleared"] = true
-		detail["to"] = "unbounded (only the executor's configuration applies)"
+		detail["to"] = "no rule set (only the executor's configuration bounds it)"
 	} else {
 		detail["to"] = fwpolicy.Describe(&want)
 		detail["fingerprint"] = fwpolicy.Fingerprint(want)
@@ -503,6 +507,17 @@ func (s *Server) serveDeviceFirewallPut(w http.ResponseWriter, r *http.Request, 
 	}
 	view.Constrained = changes
 	jsonOK(w, view)
+}
+
+// describeStored renders a stored rule set for an audit row. An absent one is
+// "no rule set": the level is left to the ones above it, which is not the same
+// as unfiltered — a project with no rules of its own is still bounded by its
+// executor's.
+func describeStored(rec statedb.FirewallRecord, ok bool) string {
+	if !ok {
+		return "no rule set"
+	}
+	return fwpolicy.Describe(&rec.Rules)
 }
 
 // recRules returns a stored rule set, or nil when there was none.
@@ -689,6 +704,13 @@ func (s *Server) handleProjectFirewall(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		// The route admits the project's readers so the card can ask quietly;
+		// the rules, and the device rules governing them, are only for those
+		// who may change them.
+		if !s.permissionsFor(r, s.projectScope(r)).Allows(authz.PermConfigWrite) {
+			jsonOK(w, map[string]any{"project": workDir, "visible": false})
+			return
+		}
 		view, err := s.projectFirewallView(db, workDir)
 		if err != nil {
 			jsonErr(w, "read firewall rules: "+err.Error(), http.StatusInternalServerError)
@@ -706,7 +728,7 @@ func (s *Server) handleProjectFirewall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) projectFirewallView(db *statedb.DB, workDir string) (projectFirewallView, error) {
 	policy := executor.PolicyProjectPath(workDir)
-	view := projectFirewallView{Project: workDir, Levels: []fwpolicy.Level{}, Fits: true}
+	view := projectFirewallView{Project: workDir, Visible: true, Levels: []fwpolicy.Level{}, Fits: true}
 	if policy != workDir {
 		view.PolicyProject = policy
 	}
@@ -809,11 +831,11 @@ func (s *Server) serveProjectFirewallPut(w http.ResponseWriter, r *http.Request,
 	}
 
 	in := statedb.ProjectFirewallAuditInput{Action: "set", ProjectPath: policy, ExecutorID: exID, Actor: actor,
-		Detail: map[string]any{"from": fwpolicy.Describe(recRules(before, had))}}
+		Detail: map[string]any{"from": describeStored(before, had)}}
 	if req.Clear {
 		in.Action = "clear"
 		in.Detail["cleared"] = true
-		in.Detail["to"] = "the executor's rules"
+		in.Detail["to"] = "no rule set (its executor's rules apply)"
 	} else {
 		in.Detail["to"] = fwpolicy.Describe(&want)
 		in.Detail["fingerprint"] = fwpolicy.Fingerprint(want)

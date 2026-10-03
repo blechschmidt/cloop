@@ -11,6 +11,9 @@ window.loadExecutors = function() {
     execData = d || {};
     _renderExecutors(execData);
     _renderExecutorCard(execData);
+    // The project's firewall card shows its executor's rules, so it moves with
+    // every fleet change the Overview hears about (Task 20363).
+    if (activeTab === 'overview') loadProjectFirewall();
     // Cached behind its own guard. loadExecutors runs on every executor event,
     // and a policy that re-fetched with it would put a second request behind
     // each one for a value that only changes when an admin edits it — the
@@ -427,6 +430,14 @@ function _renderExecutors(d) {
         + 'title="Sandboxes on this device with their own runtime, IP firewall and USB devices">'
         + (ex.kind === 'virtual' ? 'Edit' : 'Virtual' + (ex.virtual_count ? ' (' + esc(ex.virtual_count) + ')' : '')) + '</button>';
     }
+    // A device's firewall rule set (Task 20363): the superset its sandboxes
+    // and its virtual executors' must fit inside. Not for a virtual executor,
+    // whose firewall is part of its definition, nor the host-process driver,
+    // which has no network of a workload's own to filter.
+    if (ex.kind === 'remote' || ex.kind === 'container' || ex.kind === 'kubernetes') {
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="openExecutorFirewall(' + i + ')" '
+        + 'title="The most any sandbox here may reach">Firewall</button>';
+    }
     // Limits and Access apply to every executor kind, unlike Sandbox above: a
     // ceiling bounds whatever the driver hands out, and an access list names
     // who may reach the device at all. Neither is implied by the driver, so
@@ -841,9 +852,17 @@ function _evxRender() {
   let h = '<div class="form-hint" style="margin-bottom:10px">' + esc(d.name) + ' · '
     + (d.connected ? 'connected, protocol v' + esc(d.protocol_version) : 'offline — showing its last report')
     + (d.connected && !d.supported ? ' · <b>agent too old for firewalls and devices (needs v14)</b>' : '') + '</div>';
+  // The device's own rule set, read-only (Task 20363): every network chosen
+  // below has to fit inside it. It is edited from the device's Firewall button.
+  if (d.device_firewall) {
+    h += '<div class="form-hint" style="margin-bottom:10px"><b>Device firewall</b>: ' + esc(_fwSum(d.device_firewall))
+      + '. Each virtual executor’s network must fit inside it.</div>';
+  }
   h += (d.virtual_executors || []).map((v, i) => '<div class="exec-chips">'
     + '<span class="exec-chip' + (v.id === execVx.edit ? ' pos' : '') + '">' + esc(v.name) + ' · ' + esc(v.id) + '</span>'
     + (v.issue ? '<span class="exec-chip neg" title="' + esc(v.issue) + '">cannot apply</span>' : '')
+    + (v.exceeds_device ? '<span class="exec-chip neg" title="' + esc(v.exceeds_device.join('; '))
+      + '">exceeds device firewall</span>' : '')
     + '<button class="btn" style="padding:2px 8px;font-size:11px" onclick="editExecutorVirtual(' + i + ')">Edit</button></div>').join('');
   h += '<h3 style="font-size:13px;margin:12px 0 4px">USB devices on ' + esc(d.name)
     + ' <button class="btn" style="padding:2px 8px;font-size:11px" onclick="refreshExecutorVirtual()">Refresh</button></h3>';
@@ -893,11 +912,14 @@ function _evxRender() {
 // none.
 function _evxNet(d, sb, fw) {
   const net = sb.network || 'none', mode = fw ? 'fw' : net === 'none' ? 'none' : 'open';
-  const f = fw || {allow_public_internet: true, resolvers: ['1.1.1.1']};
+  // A new firewall starts as the device's own rules when it has some: the
+  // widest rule set that fits, for the admin to narrow (Task 20363).
+  const f = fw || d.device_firewall || {allow_public_internet: true, resolvers: ['1.1.1.1']};
   const lines = a => esc((a || []).join('\n'));
   const ev = ' oninput="evxSync()"';
-  const opt = (m, id, title, text) => '<label class="sec-own-opt"><input type="radio" name="evxNet" id="' + id + '"'
-    + (m === mode ? ' checked' : '') + ' onchange="evxSync()"><span><strong>' + title + '</strong> — ' + text + '</span></label>';
+  const opt = (m, id, title, text, off) => '<label class="sec-own-opt"><input type="radio" name="evxNet" id="' + id + '"'
+    + (m === mode ? ' checked' : '') + (off ? ' disabled' : '') + ' onchange="evxSync()"><span><strong>' + title
+    + '</strong> — ' + text + '</span></label>';
   // Rendered in the state evxSync would leave it in, so nothing flashes.
   const sub = (id, m, html) => '<div class="evx-sub" id="' + id + '"' + (m === mode ? '' : ' style="display:none"') + '>' + html + '</div>';
   return '<div class="form-group"><label class="form-label">Network access</label>'
@@ -923,8 +945,9 @@ function _evxNet(d, sb, fw) {
       + _evxField('DNS resolvers', '<input class="form-input" id="evxDns" value="' + esc((f.resolvers || []).join(', '))
         + '"' + ev + '>', 'Reachable for DNS over UDP and TCP, and what sandboxes resolve names through.') + '</div>'
       + '<div class="evx-sum" id="evxFwSum"></div>')
-    + opt('open', 'evxNetOpen', 'Unfiltered', 'a network of the engine’s, with no firewall. On <code>bridge</code>, sandboxes reach '
-      + 'whatever ' + esc(d.name) + ' can, private networks and the cloud metadata service included.')
+    + opt('open', 'evxNetOpen', 'Unfiltered', d.device_firewall ? 'not available: the device’s firewall bounds every sandbox on it.'
+      : 'a network of the engine’s, with no firewall. On <code>bridge</code>, sandboxes reach '
+      + 'whatever ' + esc(d.name) + ' can, private networks and the cloud metadata service included.', !!d.device_firewall)
     + sub('evxOpenNet', 'open', _evxField('Network', '<input class="form-input" id="evxNetName" list="evxNetNames" value="'
       + esc(mode === 'open' ? net : 'bridge') + '"><datalist id="evxNetNames"><option value="bridge"></datalist>',
       '<code>bridge</code>, or a network created on the device.'))

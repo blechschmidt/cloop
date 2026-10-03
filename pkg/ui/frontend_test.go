@@ -256,7 +256,11 @@ func allUISources() string {
 // between fragments and silently escape the check.
 var dashboardSource = func() string {
 	a := loadAssets()
-	return a.page.contents + "\n" + a.css + "\n" + a.boundary + "\n" + a.bundle
+	// The rendered page with its comments, like the script and stylesheet
+	// below: these tests read the front end as written (the served page has
+	// its comments stripped since Task 20363, and several tests here use one
+	// as a landmark).
+	return a.renderedPage + "\n" + a.css + "\n" + a.boundary + "\n" + a.bundle
 }()
 
 // Frontend behaviour is impossible to assert

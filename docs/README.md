@@ -187,6 +187,12 @@ Six pages in order, indexed at
   vendor, product and serial. What the agent needs (the installer's
   `CAP_NET_ADMIN` grant, and how it stays out of workloads), udev groups for
   device access, and why hardware and gVisor do not combine.
+- **[Firewall rules: devices, virtual executors and projects](guides/firewall.md)**
+  — an admin's rule set per device as the superset of what any sandbox on it may
+  reach, and the virtual executors' firewalls and projects' rule sets that may
+  only narrow it: how containment is decided and where it is checked, what
+  tightening a device does to what was saved under it, and which executors can
+  enforce rules.
 
 ## Operations
 

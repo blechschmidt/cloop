@@ -36,6 +36,7 @@ filter — nor its device list, since the host already has every device.
 |---|---|
 | any virtual executor | a container engine (`docker`, `podman` or `nerdctl`) on the agent's PATH, and an agent speaking protocol v8 |
 | a firewall or devices | an agent speaking protocol **v14** — the Executors panel shows the version |
+| a device or project [firewall rule set](firewall.md) | an agent speaking protocol **v15** |
 | a firewall | `nft(8)` on the device, and the agent holding `CAP_NET_ADMIN` and the netlink socket family — which `cloop executor agent install` grants by default |
 
 The hardened service unit `cloop executor agent install` writes grants the agent
@@ -181,10 +182,18 @@ ever runs unfiltered, whatever the OCI runtime. On the device:
 sudo nft list table inet cloop_sbx_vx_abcdefghij
 ```
 
-A project can narrow its virtual executor's firewall further with
-`capabilities.egress` in `.cloop/sandbox.yaml`, and never widen it: `egress:
-public` on a virtual executor whose firewall allows only a private range is
-refused rather than handed the public Internet.
+A project can narrow its virtual executor's firewall further — with
+`capabilities.egress` in `.cloop/sandbox.yaml`, or with a rule set its
+maintainers save on its Overview page — and never widen it: `egress: public` on
+a virtual executor whose firewall allows only a private range is refused rather
+than handed the public Internet.
+
+And the firewall itself must fit inside **the device's rule set**, when an admin
+has set one (the device's card → **Firewall**). The dialog shows it read-only at
+the top, starts a new firewall from it, and offers no **Unfiltered** network
+under it; a save reaching further is refused, naming what is outside. Tightening
+the device narrows every virtual executor on it to fit. See
+[firewall rules](firewall.md).
 
 ## Devices
 

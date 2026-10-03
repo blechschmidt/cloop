@@ -98,7 +98,7 @@ func TestStripHTMLComments_MatchesChrome(t *testing.T) {
 		t.Skip("node not installed")
 	}
 	a := loadAssets()
-	raw := renderedPage(a)
+	raw := a.renderedPage
 	dir := t.TempDir()
 	rawPath, strippedPath := filepath.Join(dir, "raw.html"), filepath.Join(dir, "stripped.html")
 	if err := os.WriteFile(rawPath, []byte(raw), 0o644); err != nil {
@@ -142,21 +142,4 @@ func TestStripHTMLComments_MatchesChrome(t *testing.T) {
 			res.CommentsLeft, res.Diff)
 	}
 	t.Logf("%d comments removed, %d elements identical (%s)", res.Comments, res.Elements, res.UserAgent)
-}
-
-// renderedPage is the page as served before stripping: the template with its
-// asset placeholders filled the way buildAssets fills them.
-func renderedPage(a *assetSet) string {
-	page := a.indexTmpl
-	re := regexp.MustCompile(`\{\{asset:([^}]+)\}\}`)
-	return re.ReplaceAllStringFunc(page, func(m string) string {
-		token := re.FindStringSubmatch(m)[1]
-		for url := range a.byPath {
-			stem := strings.SplitN(strings.TrimPrefix(url, "/assets/"), ".", 2)[0]
-			if strings.HasPrefix(token, stem+".") && strings.HasSuffix(url, filepath.Ext(token)) {
-				return url
-			}
-		}
-		return m
-	})
 }

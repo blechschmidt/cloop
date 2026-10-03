@@ -315,3 +315,27 @@ func TestFirewall_DeviceRulesSaveValidatesAndRefusesTheWrongExecutors(t *testing
 		t.Errorf("device_firewall = %+v, want the empty rule set", pv.DeviceFirewall)
 	}
 }
+
+// TestFirewall_ProjectRulesAreForItsMaintainers: a project's readers can ask
+// the card's route without drawing a refusal, and learn nothing from it — the
+// governing device rules are not theirs to see — while saving takes
+// config.write, which neither a viewer nor an operator holds.
+func TestFirewall_ProjectRulesAreForItsMaintainers(t *testing.T) {
+	f := newRBACFixture(t)
+	for name, c := range map[string]*http.Client{"viewer": f.viewer, "operator": f.operator} {
+		code, body := do(t, c, http.MethodGet, f.ts.URL+"/api/firewall", "")
+		if code != http.StatusOK || !strings.Contains(body, `"visible":false`) || strings.Contains(body, "levels") {
+			t.Errorf("%s GET /api/firewall = %d %s, want 200 and an empty view", name, code, body)
+		}
+		if code, body := do(t, c, http.MethodPut, f.ts.URL+"/api/firewall", `{"allow_public_internet":true}`); code != http.StatusForbidden {
+			t.Errorf("%s PUT /api/firewall = %d %s, want 403", name, code, body)
+		}
+		if code, _ := do(t, c, http.MethodGet, f.ts.URL+"/api/executors/local/firewall", ""); code != http.StatusForbidden {
+			t.Errorf("%s GET a device's firewall = %d, want 403", name, code)
+		}
+	}
+	code, body := do(t, f.admin, http.MethodGet, f.ts.URL+"/api/firewall", "")
+	if code != http.StatusOK || !strings.Contains(body, `"visible":true`) {
+		t.Errorf("admin GET /api/firewall = %d %s, want the full view", code, body)
+	}
+}
