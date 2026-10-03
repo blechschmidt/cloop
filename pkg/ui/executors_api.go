@@ -1493,6 +1493,9 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 			Detail: map[string]any{"project": entry.Name, "project_path": entry.Path},
 		})
 		s.broadcastAuditAppend("unbind")
+		// Its runs now go to the default executor, whose firewall its rules
+		// must fit as well (Task 20363).
+		s.constrainProjectToExecutor(r, db, entry.Path)
 		s.broadcastExecutorUpdate("unbound", "")
 		jsonOK(w, map[string]any{"ok": true, "project": entry.Name, "executor_id": ""})
 		return
@@ -1576,6 +1579,9 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 		},
 	})
 	s.broadcastAuditAppend("bind")
+	// A project's firewall rule set always fits the executor its runs go to
+	// (Task 20363): moved to a narrower one, it narrows with it.
+	s.constrainProjectToExecutor(r, db, entry.Path)
 	s.broadcastExecutorUpdate("bound", id)
 	jsonOK(w, map[string]any{"ok": true, "project": entry.Name, "executor_id": id})
 }

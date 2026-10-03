@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
@@ -244,37 +245,80 @@ func (f EgressFilter) Validate() error {
 	return nil
 }
 
-// networkName derives the runtime network a filter needs.
+// confinement is everything one workload asked for about its own reach: the
+// coarse scope from its repo-committed sandbox spec, and the firewall rules the
+// hub composed for it from the levels stored in the control plane (Task 20363).
 //
-// It is keyed by executor *and* by scope, because those are exactly the two
-// things that decide which ruleset applies. Deriving the name rather than
-// accepting one keeps an operator from pointing two differently-filtered
-// executors at the same bridge, where the second Apply would silently replace
-// the first's rules; adding the scope extends the same guarantee to two
-// differently-confined projects on one executor.
-//
-// Projects that requested the same scope do share a bridge. That is the
-// pre-existing model — every project on an executor shared one — and the
-// sharing is bounded by the policy itself: under EgressScopePublic the bridge
-// subnet is private address space, so a sandbox's neighbours are on the far
-// side of a drop rule rather than merely uninteresting to it.
-func networkName(executorID string, scope executor.EgressScope) string {
-	base := "cloop-sbx-" + sanitizeNetworkPart(executorID)
-	if scope == executor.EgressScopeUnset {
-		// Unsuffixed, so every deployment predating per-project scopes keeps
-		// the bridge it already has and no running sandbox is orphaned.
-		return base
-	}
-	return base + "-" + sanitizeNetworkPart(string(scope))
+// The two travel together because they answer the same question and because
+// the bridge a workload lands on has to be keyed by both. When the rules are
+// present they win: the hub folds the scope into them before dispatch, and they
+// are the more specific statement, made by identities the hub authenticated.
+type confinement struct {
+	scope executor.EgressScope
+	rules *executor.FirewallRules
 }
 
-// firewallTable derives the nftables table name for one (executor, scope) pair,
-// matching networkName so that a bridge and its ruleset are never mismatched.
-func firewallTable(executorID string, scope executor.EgressScope) string {
-	if scope == executor.EgressScopeUnset {
+// confineTo reads the pair out of a Spec.
+func confineTo(spec executor.Spec) confinement {
+	return confinement{scope: spec.EgressScope, rules: spec.EgressRules}
+}
+
+// scoped is the confinement of a workload that carries only a scope.
+func scoped(scope executor.EgressScope) confinement { return confinement{scope: scope} }
+
+// key distinguishes one confinement's bridge and ruleset from another's; empty
+// means "the executor's own policy, unmodified".
+//
+// Rules are keyed by their fingerprint rather than by anything an admin typed,
+// so two workloads granted identical reach share one bridge and two granted
+// different reach can never share one — the second Apply would replace the
+// first's ruleset, and one of them would run under the other's firewall. The
+// "r" prefix keeps a fingerprint from ever colliding with a scope name.
+func (c confinement) key() string {
+	switch {
+	case c.rules != nil:
+		return "r" + fwpolicy.Fingerprint(*c.rules)
+	case c.scope != executor.EgressScopeUnset:
+		return string(c.scope)
+	default:
+		return ""
+	}
+}
+
+// networkName derives the runtime network a filter needs.
+//
+// It is keyed by executor *and* by confinement, because those are exactly the
+// two things that decide which ruleset applies. Deriving the name rather than
+// accepting one keeps an operator from pointing two differently-filtered
+// executors at the same bridge, where the second Apply would silently replace
+// the first's rules; adding the confinement extends the same guarantee to two
+// differently-confined workloads on one executor.
+//
+// Workloads confined identically do share a bridge. That is the pre-existing
+// model — every project on an executor shared one — and the sharing is bounded
+// by the policy itself: under a filter that drops private space the bridge
+// subnet is private, so a sandbox's neighbours are on the far side of a drop
+// rule rather than merely uninteresting to it.
+func networkName(executorID string, c confinement) string {
+	base := "cloop-sbx-" + sanitizeNetworkPart(executorID)
+	k := c.key()
+	if k == "" {
+		// Unsuffixed, so every deployment predating per-workload confinement
+		// keeps the bridge it already has and no running sandbox is orphaned.
+		return base
+	}
+	return base + "-" + sanitizeNetworkPart(k)
+}
+
+// firewallTable derives the nftables table name for one (executor,
+// confinement) pair, matching networkName so that a bridge and its ruleset are
+// never mismatched.
+func firewallTable(executorID string, c confinement) string {
+	k := c.key()
+	if k == "" {
 		return netfilter.TableName("sbx", executorID)
 	}
-	return netfilter.TableName("sbx", executorID+"-"+string(scope))
+	return netfilter.TableName("sbx", executorID+"-"+k)
 }
 
 func sanitizeNetworkPart(s string) string {
@@ -471,8 +515,8 @@ func validateNetworkName(name string) error {
 // queries from the container's own namespace, through this filter. Opening
 // the configured resolvers without also pointing the sandbox at them would
 // leave every lookup going somewhere the filter drops.
-func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressScope) (string, []string, error) {
-	f, err := e.effectiveFilter(scope)
+func (e *Executor) installFirewall(ctx context.Context, c confinement) (string, []string, error) {
+	f, err := e.effectiveFilter(c)
 	if err != nil {
 		return "", nil, err
 	}
@@ -492,7 +536,7 @@ func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressSco
 			"root) for a filtered sandbox, or remove the filter", executor.ErrUnsupported, e.id, e.rt.Name)
 	}
 
-	name := networkName(e.id, scope)
+	name := networkName(e.id, c)
 	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
 	if err != nil {
 		return "", nil, err
@@ -509,7 +553,7 @@ func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressSco
 		// the same bridge. Removing an absent table is success, so this
 		// costs one nft call on the common path and closes the case where
 		// the configuration moved and the kernel did not.
-		if err := e.removeFirewall(ctx, scope); err != nil {
+		if err := e.removeFirewall(ctx, c); err != nil {
 			return "", nil, err
 		}
 		return name, nil, nil
@@ -524,7 +568,7 @@ func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressSco
 		return "", nil, err
 	}
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
-		Table:  firewallTable(e.id, scope),
+		Table:  firewallTable(e.id, c),
 		Bridge: bridge,
 	}); err != nil {
 		return "", nil, err
@@ -558,8 +602,14 @@ func sandboxResolvers(resolvers []string) []string {
 // it is one sentence: a scope may only ever *remove* reach. Everything below is
 // that sentence applied to the three shapes an executor's own configuration can
 // take.
-func (e *Executor) effectiveFilter(scope executor.EgressScope) (EgressFilter, error) {
+func (e *Executor) effectiveFilter(c confinement) (EgressFilter, error) {
 	f := e.opts.EgressFilter
+	// Rules from the hub are the more specific statement and supersede the
+	// scope; filterForRules proves them against this executor once more.
+	if c.rules != nil {
+		return e.filterForRules(*c.rules)
+	}
+	scope := c.scope
 	// EgressScopeNone never reaches here needing a filter — buildRequest has
 	// already set --network=none — and an unset scope is "no opinion", which
 	// leaves the executor's configuration exactly as it was.
@@ -667,7 +717,7 @@ func (e *Executor) effectiveFilter(scope executor.EgressScope) (EgressFilter, er
 // an internal network — a table that survives is a *wider* policy than the
 // configuration says, and swallowing that would be the same class of silent
 // over-permission this package exists to remove.
-func (e *Executor) removeFirewall(ctx context.Context, scope executor.EgressScope) error {
+func (e *Executor) removeFirewall(ctx context.Context, c confinement) error {
 	applier, err := netfilter.NewApplier()
 	if err != nil {
 		if errors.Is(err, netfilter.ErrUnavailable) {
@@ -675,7 +725,7 @@ func (e *Executor) removeFirewall(ctx context.Context, scope executor.EgressScop
 		}
 		return err
 	}
-	return applier.Remove(ctx, firewallTable(e.id, scope))
+	return applier.Remove(ctx, firewallTable(e.id, c))
 }
 
 // preflightEgressFilter reports what the configured filter will and will not
@@ -742,5 +792,190 @@ func (e *Executor) preflightEgressFilter(ctx context.Context, add func(name, lev
 	for _, w := range policy.Warnings {
 		add("egress-scope", LevelWarn, w,
 			"route the sandbox through the egress broker to have the host allowlist enforced")
+	}
+}
+
+// ─── firewall rules from the hub (Task 20363) ──────────────────────────────
+
+// FilterFromRules translates a firewall rule set into this driver's filter and
+// the network a sandbox under it joins.
+//
+// A nil rule set is no filter on the given network; one that reaches nothing
+// is no filter and no network, rather than an enabled filter with no
+// destination, which Validate refuses as a configuration mistake — "no
+// interfaces at all" is the same policy without needing nft, a bridge or a
+// privilege. An empty port list next to a destination means every port: the
+// form says so, so the omission is the request, where in config.yaml it is
+// usually a forgotten line and stays refused.
+func FilterFromRules(fw *executor.FirewallRules, network string) (EgressFilter, string) {
+	if fw == nil {
+		return EgressFilter{}, network
+	}
+	if !fw.HasDestination() {
+		return EgressFilter{}, NetworkNone
+	}
+	allowsDestinations := fw.AllowPublicInternet || len(fw.AllowCIDRs) > 0
+	return EgressFilter{
+		Enabled:             true,
+		AllowPublicInternet: fw.AllowPublicInternet,
+		AllowCIDRs:          append([]string(nil), fw.AllowCIDRs...),
+		DenyCIDRs:           append([]string(nil), fw.DenyCIDRs...),
+		AllowPorts:          append([]int(nil), fw.AllowPorts...),
+		AllowAllPorts:       allowsDestinations && len(fw.AllowPorts) == 0,
+		Resolvers:           append([]string(nil), fw.Resolvers...),
+	}, NetworkBridge
+}
+
+// OwnRules reports, as a rule set, what this executor's own configuration lets
+// a sandbox reach: nil when it does not filter, an empty rule set when its
+// sandboxes get no network or reach only through the broker.
+//
+// Three configurations collapse onto "reaches nothing", and all three are
+// honest: network "none"; an --internal bridge with no direct rules, whose only
+// way out is the broker's hostname allowlist — an L7 construct no rule set can
+// name; and a filter that allows nothing. A configuration this binary cannot
+// read back as rules also reads as "reaches nothing", the fail-closed answer.
+func (e *Executor) OwnRules() *executor.FirewallRules {
+	if e.opts.Network == NetworkNone {
+		return &executor.FirewallRules{}
+	}
+	f := e.opts.EgressFilter
+	if !f.Enabled {
+		return nil
+	}
+	if !f.filtersDirectly() {
+		return &executor.FirewallRules{}
+	}
+	r := executor.FirewallRules{
+		AllowPublicInternet: f.AllowPublicInternet,
+		AllowCIDRs:          append([]string(nil), f.AllowCIDRs...),
+		DenyCIDRs:           append([]string(nil), f.DenyCIDRs...),
+		Resolvers:           append([]string(nil), f.Resolvers...),
+	}
+	if !f.AllowAllPorts {
+		r.AllowPorts = append([]int(nil), f.AllowPorts...)
+	}
+	n, err := r.Normalize()
+	if err != nil {
+		return &executor.FirewallRules{}
+	}
+	return &n
+}
+
+// EgressPosture implements executor.EgressPostured for the hub's own container
+// executor: its configuration is the outermost level, and it can install rules
+// for one workload on a bridge of their own unless its engine is rootless.
+func (e *Executor) EgressPosture() executor.EgressPosture {
+	p := executor.EgressPosture{
+		DeviceID:       e.id,
+		Config:         e.OwnRules(),
+		RemovesNetwork: true,
+	}
+	if e.rootless() {
+		p.Reason = fmt.Sprintf("executor %s runs %s rootless, and a rootless engine's networks live where "+
+			"the host's packet filter cannot see them", e.id, e.rt.Name)
+		return p
+	}
+	p.Enforceable = true
+	return p
+}
+
+// checkRules is the driver's own proof that the rules a workload carries fit
+// inside this executor's configured firewall and the device's — and, in a
+// process holding the control plane, inside the device's rules as stored now.
+func (e *Executor) checkRules(spec executor.Spec) error {
+	return fwpolicy.CheckAtDriver(spec, e.OwnRules(), "executor "+e.id+"'s own firewall", e.id)
+}
+
+// filterForRules builds the filter for one workload's rules, proving once more
+// that they fit inside this executor's configuration.
+//
+// What the configuration says about the bridge rather than about reach is kept:
+// Internal, the broker and the host patterns are the operator's, none of them is
+// a workload's to choose, and dropping Internal alone would put the sandbox on a
+// bridge with a route off the host.
+func (e *Executor) filterForRules(want executor.FirewallRules) (EgressFilter, error) {
+	if reasons := fwpolicy.Permits(e.OwnRules(), want); len(reasons) > 0 {
+		return EgressFilter{}, &fwpolicy.ExceedsError{Level: "this workload's firewall rules",
+			Bound: "executor " + e.id + "'s own firewall", Reasons: reasons}
+	}
+	n, err := want.Normalize()
+	if err != nil {
+		return EgressFilter{}, err
+	}
+	if !n.HasDestination() {
+		// Start gives such a workload no network and never asks for a filter;
+		// an enabled filter allowing nothing would read as an unfiltered bridge
+		// below, so refuse rather than build one.
+		return EgressFilter{}, fmt.Errorf("%w: firewall rules that reach nothing take the network away; "+
+			"they need no filter", executor.ErrInvalidSpec)
+	}
+	f, _ := FilterFromRules(&n, NetworkBridge)
+	cfg := e.opts.EgressFilter
+	f.Internal, f.Broker, f.HostPatterns = cfg.Internal, cfg.Broker, cfg.HostPatterns
+	return f, nil
+}
+
+// rulesNetUse counts the live workloads on one rules-keyed network.
+type rulesNetUse struct {
+	refs  int
+	table string
+}
+
+// installRulesAware installs the firewall for a confinement, and for one
+// carrying rules records the workload on its network under rulesMu.
+func (e *Executor) installRulesAware(ctx context.Context, c confinement) (string, []string, error) {
+	if c.rules == nil {
+		return e.installFirewall(ctx, c)
+	}
+	e.rulesMu.Lock()
+	defer e.rulesMu.Unlock()
+	network, dns, err := e.installFirewall(ctx, c)
+	if err != nil {
+		return "", nil, err
+	}
+	if e.rulesNets == nil {
+		e.rulesNets = map[string]*rulesNetUse{}
+	}
+	u := e.rulesNets[network]
+	if u == nil {
+		u = &rulesNetUse{table: firewallTable(e.id, c)}
+		e.rulesNets[network] = u
+	}
+	u.refs++
+	return network, dns, nil
+}
+
+// releaseRulesNetwork drops one workload from a rules-keyed network and, when
+// it was the last this executor knows of, removes the network and its ruleset.
+//
+// The scope networks and a virtual executor's own bridge are kept for the
+// executor's life, because there are a handful of them. Rules networks are
+// keyed by a fingerprint, so every edit to a rule set mints a new one, and an
+// engine has a finite pool of subnets to give bridges: kept forever, they
+// would exhaust it. Removal is best-effort — a network another process's
+// workload still uses refuses to go, and is left with its ruleset intact.
+func (e *Executor) releaseRulesNetwork(name string) {
+	if name == "" {
+		return
+	}
+	e.rulesMu.Lock()
+	defer e.rulesMu.Unlock()
+	u := e.rulesNets[name]
+	if u == nil {
+		return
+	}
+	if u.refs--; u.refs > 0 {
+		return
+	}
+	delete(e.rulesNets, name)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*shortCmdTimeout)
+	defer cancel()
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, "network", "rm", name)
+	if err != nil || res.ExitCode != 0 {
+		return
+	}
+	if applier, err := netfilter.NewApplier(); err == nil {
+		_ = applier.Remove(ctx, u.table)
 	}
 }

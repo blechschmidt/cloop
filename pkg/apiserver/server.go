@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
+	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -971,6 +972,15 @@ func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor
 	// way to start an unbounded workload on a hub whose Web UI caps every one
 	// of them. Exactly the failure the comment above predicts.
 	executor.BoundSpec(&spec, s.WorkDir, ex.ID())
+
+	// The firewall levels stored in a hub's control plane, by the same
+	// argument (Task 20363). `cloop serve` holds no control plane, so with no
+	// store installed this changes nothing — but it is the call, not a
+	// remembered absence of one, that keeps this path from becoming the way
+	// around a device's firewall in a process that has one.
+	if _, err := fwpolicy.Resolve(&spec, ex, s.WorkDir); err != nil {
+		return nil, executor.Handle{}, err
+	}
 
 	// Start is given a context detached from the request: the run outlives
 	// the HTTP call that asked for it, and tying it to r.Context() would kill

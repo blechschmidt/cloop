@@ -77,6 +77,9 @@ func registerBuiltinExecutors() {
 	// (features.go). Installed here because this is the one function every
 	// dispatch path calls first, including on Servers built as struct literals.
 	installFeaturePolicy()
+	// The stored firewall levels, for the same reason: every driver's own
+	// check reads them too (firewall_dispatch.go).
+	installFirewallSource()
 	builtinExecutorsOnce.Do(func() {
 		err := localprocess.Ensure(executor.DefaultRegistry)
 		// Under strict mode this refusal is the designed outcome, not a
@@ -453,6 +456,16 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		return nil, executor.Handle{}, err
 	}
 
+	// The firewall levels stored in the hub — a device's rule set, the
+	// project's — after the sandbox, whose scope and DisableNetwork they fold
+	// in, and before the workspace, whose capability gate then sees the
+	// network the workload will really have (Task 20363).
+	spec, err = applyFirewall(spec, ex, workDir)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	// Then the source tree — after the sandbox, never before. The sandbox is
 	// what sets Workspace.SizeLimitMB (from resources.disk) and what refuses a
 	// spec the executor cannot honour; applyWorkspace fills in the rest and
@@ -671,6 +684,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	spec, _, err = applySandbox(spec, ex, workDir)
 	if err != nil {
 		auditImageDenial(workDir, err)
+		return nil, err
+	}
+	if spec, err = applyFirewall(spec, ex, workDir); err != nil {
 		return nil, err
 	}
 	// Same order and the same reasons as startWorkload, and deliberately not

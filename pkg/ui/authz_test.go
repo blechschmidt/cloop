@@ -259,7 +259,10 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		// virtual_executors_api.go holds handleVirtualExecutors and
 		// handleVirtualExecutor, prefix-less for the sandbox route's reason
 		// (Task 20345).
-		"\n" + virtualExecutorsAPISource
+		"\n" + virtualExecutorsAPISource +
+		// firewall_api.go holds handleExecutorFirewall and
+		// handleProjectFirewall, prefix-less for the same reason (Task 20363).
+		"\n" + firewallAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -327,6 +330,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"executor_sandbox_api.go", executorSandboxAPISource},
 		{"executor_policy_api.go", executorPolicyAPISource},
 		{"virtual_executors_api.go", virtualExecutorsAPISource},
+		{"firewall_api.go", firewallAPISource},
 		{"suggest_api.go", suggestAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {

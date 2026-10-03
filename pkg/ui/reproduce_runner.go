@@ -200,6 +200,9 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	if spec, _, err = applySandbox(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}
+	if spec, err = applyFirewall(spec, ex, rs.ProjectDir); err != nil {
+		return nil, err
+	}
 	if spec, err = applyWorkspace(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}

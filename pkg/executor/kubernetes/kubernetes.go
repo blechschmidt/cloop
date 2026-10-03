@@ -924,6 +924,9 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	if err := spec.Validate(); err != nil {
 		return executor.Handle{}, err
 	}
+	if err := e.checkRules(spec); err != nil {
+		return executor.Handle{}, err
+	}
 
 	e.mu.Lock()
 	if e.closed {
@@ -1357,6 +1360,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		SandboxHash:           spec.SandboxHash,
 		DisableNetwork:        spec.DisableNetwork || spec.EgressScope.RemovesNetwork(),
 		EgressScope:           spec.EgressScope,
+		EgressRules:           spec.EgressRules,
 		Workspace:             spec.Workspace,
 		WriteBack:             spec.WriteBack,
 		WorkspaceSecretName:   workspaceSecret,

@@ -59,6 +59,7 @@ const (
 	EventFeatureCreated    = statedb.EventFeatureCreated
 	EventFeatureRemoved    = statedb.EventFeatureRemoved
 	EventFeaturePR         = statedb.EventFeaturePR
+	EventFirewall          = statedb.EventFirewall
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

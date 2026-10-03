@@ -55,7 +55,7 @@ func TestEgressScopeKeepsTheDenyList(t *testing.T) {
 		Resolvers:           []string{"1.1.1.1:53"},
 		DenyCIDRs:           []string{"203.0.113.0/24"},
 	})
-	f, err := ex.effectiveFilter(executor.EgressScopePublic)
+	f, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err != nil {
 		t.Fatalf("effectiveFilter: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestEgressScopePublicRefusedWhenTheExecutorHasNoInternet(t *testing.T) {
 		AllowPorts: []int{443},
 		Resolvers:  []string{"10.8.0.53:53"},
 	})
-	_, err := ex.effectiveFilter(executor.EgressScopePublic)
+	_, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err == nil {
 		t.Fatal("a project scope widened a private-only executor to the public Internet")
 	}
@@ -188,7 +188,7 @@ func TestRootlessEngineCannotFilter(t *testing.T) {
 	if caps.FilteredEgress || caps.SupportsEgressScope {
 		t.Errorf("a rootless engine advertises filtering: %+v", caps)
 	}
-	if _, _, err := ex.installFirewall(context.Background(), executor.EgressScopeUnset); err == nil ||
+	if _, _, err := ex.installFirewall(context.Background(), scoped(executor.EgressScopeUnset)); err == nil ||
 		!errors.Is(err, executor.ErrUnsupported) || !strings.Contains(err.Error(), "rootless") {
 		t.Fatalf("installFirewall on a rootless engine = %v", err)
 	}

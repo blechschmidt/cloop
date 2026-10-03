@@ -35,7 +35,7 @@ func TestEgressScopePublicDropsPrivateSpace(t *testing.T) {
 	// and the one an operator gets by default.
 	ex := scopedExecutor(t, EgressFilter{Resolvers: []string{"9.9.9.9:53"}})
 
-	f, err := ex.effectiveFilter(executor.EgressScopePublic)
+	f, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err != nil {
 		t.Fatalf("effectiveFilter: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestEgressScopePublicDropsPrivateSpace(t *testing.T) {
 // would be a restriction finer than the one requested.
 func TestEgressScopePublicAllowsEveryPort(t *testing.T) {
 	ex := scopedExecutor(t, EgressFilter{Resolvers: []string{"9.9.9.9:53"}})
-	f, err := ex.effectiveFilter(executor.EgressScopePublic)
+	f, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err != nil {
 		t.Fatalf("effectiveFilter: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestEgressScopeNarrowsAnOperatorsCIDRGrant(t *testing.T) {
 
 	// Without a scope the executor's own grant stands — the control, without
 	// which the assertion below could pass on a policy that allows nothing.
-	base, err := ex.effectiveFilter(executor.EgressScopeUnset)
+	base, err := ex.effectiveFilter(scoped(executor.EgressScopeUnset))
 	if err != nil {
 		t.Fatalf("effectiveFilter(unset): %v", err)
 	}
@@ -132,7 +132,7 @@ func TestEgressScopeNarrowsAnOperatorsCIDRGrant(t *testing.T) {
 			"narrowing assertion below would be vacuous", got)
 	}
 
-	scoped, err := ex.effectiveFilter(executor.EgressScopePublic)
+	scoped, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err != nil {
 		t.Fatalf("effectiveFilter(public): %v", err)
 	}
@@ -157,7 +157,7 @@ func TestEgressScopeNarrowsAnOperatorsCIDRGrant(t *testing.T) {
 func TestEgressScopePublicRefusedOnABrokerOnlyExecutor(t *testing.T) {
 	ex := scopedExecutor(t, EgressFilter{Enabled: true, Internal: true})
 
-	_, err := ex.effectiveFilter(executor.EgressScopePublic)
+	_, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err == nil {
 		t.Fatal("accepted the public scope on an internal-network executor, which would " +
 			"widen the sandbox's reach on the strength of a repo-committed file")
@@ -174,7 +174,7 @@ func TestEgressScopePublicRefusedOnABrokerOnlyExecutor(t *testing.T) {
 func TestEgressScopePublicNeedsResolvers(t *testing.T) {
 	ex := scopedExecutor(t, EgressFilter{})
 
-	_, err := ex.effectiveFilter(executor.EgressScopePublic)
+	_, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err == nil {
 		t.Fatal("accepted the public scope with no resolvers configured, producing a " +
 			"sandbox with working IP egress and no working DNS")
@@ -189,7 +189,7 @@ func TestEgressScopePublicNeedsResolvers(t *testing.T) {
 // server on 10.0.0.53 is in private space by address and infrastructure by role.
 func TestEgressScopeResolversStayReachable(t *testing.T) {
 	ex := scopedExecutor(t, EgressFilter{Resolvers: []string{"10.0.0.53:53"}})
-	f, err := ex.effectiveFilter(executor.EgressScopePublic)
+	f, err := ex.effectiveFilter(scoped(executor.EgressScopePublic))
 	if err != nil {
 		t.Fatalf("effectiveFilter: %v", err)
 	}
@@ -232,8 +232,8 @@ func TestEgressScopeNoneNeedsNoFilter(t *testing.T) {
 // confinement from becoming its neighbour's. Two scopes sharing a bridge would
 // share a ruleset, and the second Apply would replace the first's.
 func TestEgressScopeGetsItsOwnBridgeAndTable(t *testing.T) {
-	unscopedNet := networkName("sbx-a", executor.EgressScopeUnset)
-	publicNet := networkName("sbx-a", executor.EgressScopePublic)
+	unscopedNet := networkName("sbx-a", scoped(executor.EgressScopeUnset))
+	publicNet := networkName("sbx-a", scoped(executor.EgressScopePublic))
 	if unscopedNet == publicNet {
 		t.Fatalf("a scoped and an unscoped project share the bridge %q, so they would "+
 			"share one nftables ruleset", unscopedNet)
@@ -248,8 +248,8 @@ func TestEgressScopeGetsItsOwnBridgeAndTable(t *testing.T) {
 		t.Errorf("scoped network name %q is not a valid network name: %v", publicNet, err)
 	}
 
-	unscopedTable := firewallTable("sbx-a", executor.EgressScopeUnset)
-	publicTable := firewallTable("sbx-a", executor.EgressScopePublic)
+	unscopedTable := firewallTable("sbx-a", scoped(executor.EgressScopeUnset))
+	publicTable := firewallTable("sbx-a", scoped(executor.EgressScopePublic))
 	if unscopedTable == publicTable {
 		t.Fatalf("both scopes compile into the nftables table %q", unscopedTable)
 	}

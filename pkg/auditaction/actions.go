@@ -111,6 +111,17 @@ const (
 	// the configuration before and after, so a widened firewall or an added
 	// device is legible from the trail alone.
 	ActionExecutorVirtual Action = "executor.virtual"
+	// ActionExecutorFirewall records a device's firewall rule set being set or
+	// cleared (Task 20363): the admin's superset of what any sandbox on that
+	// device — on the device itself or on any of its virtual executors — may
+	// reach.
+	//
+	// Auditable for the reason the sandbox action is, and one more: tightening
+	// a device rewrites the rule sets saved underneath it, and each of those
+	// rewrites is recorded too (executor.virtual with action "constrain",
+	// project.firewall with action "constrain"), so this row carries how many
+	// there were and a reviewer can find all of them from it.
+	ActionExecutorFirewall Action = "executor.firewall"
 	// ActionExecutorUpgrade records the control plane asking a device to
 	// replace its own binary and restart (Task 20331).
 	//
@@ -392,6 +403,14 @@ const (
 	ActionUserOffboardTask Action = "user.offboard_task"
 	// ActionUserOffboardProject records projects reported as needing a new owner.
 	ActionUserOffboardProject Action = "user.offboard_project"
+
+	// ── project ────────────────────────────────────────────────────────────
+
+	// ActionProjectFirewall records a project's firewall rule set being set,
+	// cleared, or narrowed to fit a tightened executor (Task 20363) — the
+	// innermost level, which a project's maintainers edit and which may only
+	// narrow the executor's.
+	ActionProjectFirewall Action = "project.firewall"
 
 	// ── project.member ─────────────────────────────────────────────────────
 

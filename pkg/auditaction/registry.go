@@ -329,10 +329,26 @@ var registry = []Entry{
 		Payload:   []string{"action", "executor_id", "parent_id", "name", "from", "to", "reason"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note: "`action` is \"create\", \"update\" or \"delete\". `from` and `to` describe the whole " +
-			"configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an " +
-			"added device is visible from this row alone. `reason` is set when the deletion was not asked " +
-			"for directly: a device's virtual executors are deleted with it when it is revoked.",
+		Note: "`action` is \"create\", \"update\", \"delete\" or \"constrain\". `from` and `to` describe the " +
+			"whole configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an " +
+			"added device is visible from this row alone. `reason` is set when the change was not asked for " +
+			"directly: a device's virtual executors are deleted with it when it is revoked, and narrowed " +
+			"(\"constrain\") when its firewall is tightened below what they allowed.",
+	},
+	{
+		Action:    ActionExecutorFirewall,
+		Home:      HomeControlPlane,
+		Entity:    "executor",
+		Trigger:   "An admin sets or clears a device's firewall rule set, the superset every sandbox on it must fit inside.",
+		Payload:   []string{"action", "executor_id", "from", "to", "fingerprint", "cleared", "constrained"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`from` and `to` describe the whole rule set — allowlist, denylist, ports, resolvers and the " +
+			"public-Internet switch — so a widened device is legible from this row alone. `cleared` is true " +
+			"when the rule set was removed, which leaves the device bounded only by its configuration. " +
+			"`constrained` counts the virtual executors and project rule sets the save narrowed to fit; " +
+			"each of those has its own row (`executor.virtual` with action \"constrain\", " +
+			"`project.firewall` with action \"constrain\").",
 	},
 	{
 		Action:    ActionExecutorStateChange,
@@ -1325,6 +1341,20 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note:      "Deliberately a report rather than a mutation — picking a project's next owner is not a decision an offboarding script should make.",
+	},
+
+	// ── project ────────────────────────────────────────────────────────────
+	{
+		Action:    ActionProjectFirewall,
+		Home:      HomeControlPlane,
+		Entity:    "project",
+		Trigger:   "A project's maintainer sets or clears its firewall rule set, or a tightened executor narrows it.",
+		Payload:   []string{"action", "project_path", "executor_id", "from", "to", "fingerprint", "cleared", "reason"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`action` is \"set\", \"clear\" or \"constrain\". A constrain row is written by the save that " +
+			"tightened a device or a virtual executor, against the identity that saved it, and `reason` names " +
+			"the executor and what had to be taken away. Stored in the control plane, where the rule set is.",
 	},
 
 	// ── project.member ─────────────────────────────────────────────────────

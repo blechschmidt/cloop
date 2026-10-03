@@ -340,6 +340,12 @@ type Executor struct {
 
 	mu      sync.Mutex
 	handles map[string]*record
+	// rulesNets counts the live workloads on each network this executor made
+	// for a workload's own firewall rules (Task 20363), under rulesMu, which
+	// is held across creating, joining and removing one so a network is never
+	// removed between another workload finding it and joining it.
+	rulesMu   sync.Mutex
+	rulesNets map[string]*rulesNetUse
 	// store is the durable handle table, nil when the embedder has none. It
 	// lives under mu rather than being set once at construction because
 	// AttachHandleStore can install one long after New has returned, while the
@@ -385,6 +391,10 @@ type record struct {
 	// rather than returning it. Empty for every workload without an
 	// interface grant, which is nearly all of them.
 	interfaces []executor.HostInterface
+	// rulesNetwork is the network this container joined because it carried
+	// firewall rules of its own (Task 20363), empty otherwise. See
+	// releaseRulesNetwork.
+	rulesNetwork string
 
 	mu         sync.Mutex
 	state      executor.State
@@ -636,6 +646,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	if err := spec.Validate(); err != nil {
 		return executor.Handle{}, err
 	}
+	// The authoritative proof that the rules this workload carries fit inside
+	// this executor's own firewall and the device's (Task 20363) — made here,
+	// before anything is staged, because nothing below may run outside them.
+	if err := e.checkRules(spec); err != nil {
+		return executor.Handle{}, err
+	}
 	workDir, err := e.resolveWorkDir(spec.WorkDir)
 	if err != nil {
 		return executor.Handle{}, err
@@ -677,10 +693,31 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// executor that has none configured — that is the point of it. Both are
 	// passed on so the network and the table are keyed by the pair; see
 	// networkName.
-	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter()) && req.Network != NetworkNone {
-		network, dns, ferr := e.installFirewall(ctx, spec.EgressScope)
+	//
+	// spec.EgressRules is in the disjunction for the same reason, and it is the
+	// term that fails open if it is left out: rules on an executor with no
+	// filter of its own are precisely the configuration in which nothing else
+	// here is true, so omitting it would start the sandbox on an unfiltered
+	// network while the dashboard showed a firewall. Rules that reach nothing
+	// take the network away instead, which needs no filter at all.
+	if spec.EgressRules != nil && !spec.EgressRules.HasDestination() {
+		req.Network = NetworkNone
+	}
+	var rulesNetwork string
+	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter() || spec.EgressRules != nil) &&
+		req.Network != NetworkNone {
+		c := confineTo(spec)
+		network, dns, ferr := e.installRulesAware(ctx, c)
 		if ferr != nil {
 			return executor.Handle{}, ferr
+		}
+		if c.rules != nil {
+			rulesNetwork = network
+			defer func() {
+				if !started {
+					e.releaseRulesNetwork(rulesNetwork)
+				}
+			}()
 		}
 		req.Network = network
 		req.DNS = dns
@@ -810,6 +847,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// handles and host device names with no credential in it, and
 		// without it a graceful stop could not return the interfaces.
 		interfaces: append([]executor.HostInterface(nil), spec.Interfaces...),
+		// The rules-keyed network this container joined, released by finish
+		// so the bridge and its ruleset go once the last workload on them has.
+		rulesNetwork: rulesNetwork,
 	}
 	started = true
 	// The spec is dropped, but the *values* it carried have to outlive it here.
@@ -2183,6 +2223,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// stop answering HoldsLease while still holding the credential.
 	if state.Terminal() {
 		e.leases.Release(rec.id)
+		e.releaseRulesNetwork(rec.rulesNetwork)
 	}
 
 	// Close the bus only after the status is final; see pump's doc comment.

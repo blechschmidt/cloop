@@ -61,6 +61,13 @@ var executorPolicyAPISource string
 //go:embed virtual_executors_api.go
 var virtualExecutorsAPISource string
 
+// firewallAPISource is pkg/ui/firewall_api.go (Task 20363), embedded for the
+// same two reasons: it broadcasts `executor_update` when a device's firewall
+// changes, and its two handlers are registered without a method prefix.
+//
+//go:embed firewall_api.go
+var firewallAPISource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
@@ -233,6 +240,7 @@ func allUISources() string {
 		"\n" + ciAPISource +
 		"\n" + executorSandboxAPISource +
 		"\n" + executorPolicyAPISource +
+		"\n" + firewallAPISource +
 		"\n" + suggestAPISource
 }
 

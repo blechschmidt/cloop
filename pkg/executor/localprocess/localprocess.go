@@ -318,6 +318,17 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	if err := spec.Validate(); err != nil {
 		return executor.Handle{}, err
 	}
+	if spec.EgressRules != nil {
+		// Fail closed, for the reason the resource limits below are refused: a
+		// host process shares the host's network namespace, so there is no
+		// bridge of its own to install firewall rules on, and starting it would
+		// leave the dashboard showing a firewall the workload is not under
+		// (Task 20363). The dispatch step refuses this first; this is the
+		// backstop for a caller holding the driver directly.
+		return executor.Handle{}, fmt.Errorf("%w: localprocess executor %q runs payloads in the host's own "+
+			"network namespace and cannot confine one to firewall rules; bind the project to a container "+
+			"executor, or clear the rules", executor.ErrUnsupported, e.id)
+	}
 	if !spec.ResourceLimits.IsZero() {
 		// Fail closed. A caller that asked for a 512 MB cap and silently
 		// received none would believe it had a guarantee it does not have.

@@ -64,14 +64,14 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-216 endpoints, by the permission each one requires:
+222 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 28 |
 | `audit.read` | 5 |
-| `config.write` | 13 |
-| `executor.manage` | 25 |
+| `config.write` | 16 |
+| `executor.manage` | 28 |
 | `executor.read` | 3 |
 | `project.read` | 49 |
 | `project.write` | 12 |
@@ -149,6 +149,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/executors/{id}/audience` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/cordon` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/drain` | `executor.manage` | executor |
+| GET | `/api/executors/{id}/firewall` | `executor.manage` | executor |
+| POST | `/api/executors/{id}/firewall` | `executor.manage` | executor |
+| PUT | `/api/executors/{id}/firewall` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/limits` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/limits` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/limits` | `executor.manage` | executor |
@@ -162,6 +165,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/executors/{id}/virtual` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/virtuals` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/virtuals` | `executor.manage` | executor |
+| GET | `/api/firewall` | `config.write` | project |
+| POST | `/api/firewall` | `config.write` | project |
+| PUT | `/api/firewall` | `config.write` | project |
 | GET | `/api/fleet/autoupdate` | `executor.read` | global |
 | PUT | `/api/fleet/autoupdate` | `executor.manage` | global |
 | POST | `/api/github-app/installations` | `secret.grant` | global |

@@ -596,6 +596,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	if err := e.checkVirtual(sess, virtual); err != nil {
 		return executor.Handle{}, err
 	}
+	if err := e.checkEgressRules(sess, spec, sandbox, virtual); err != nil {
+		return executor.Handle{}, err
+	}
 
 	// And the same placement rule as the three above, for the same reason and
 	// with the least visible failure of the four: a pre-v8 agent does not reject

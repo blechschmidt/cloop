@@ -128,34 +128,11 @@ func nodeGID(devRoot, node string) *int {
 }
 
 // egressFilterFor translates a virtual executor's firewall into the container
-// driver's filter.
-//
-// A firewall that reaches nothing becomes no filter and no network, rather
-// than an enabled filter with no destination: the container driver refuses the
-// latter as a configuration mistake, and "no interfaces at all" is the same
-// policy expressed without needing nft, a bridge or a privilege.
-//
-// An empty port list means every port. The container driver keeps that switch
-// off its config file on purpose — an operator naming CIDRs in YAML with no
-// ports has usually forgotten them — but here the admin is looking at a form
-// whose port field says "empty = all ports", so the omission is the request.
+// driver's filter. The translation is container.FilterFromRules, shared with
+// the driver's own path for a workload's firewall rules (Task 20363) so the two
+// cannot drift; an empty network means "the sandbox's own".
 func egressFilterFor(fw *executor.FirewallRules) (container.EgressFilter, string) {
-	if fw == nil {
-		return container.EgressFilter{}, ""
-	}
-	if !fw.HasDestination() {
-		return container.EgressFilter{}, container.NetworkNone
-	}
-	allowsDestinations := fw.AllowPublicInternet || len(fw.AllowCIDRs) > 0
-	return container.EgressFilter{
-		Enabled:             true,
-		AllowPublicInternet: fw.AllowPublicInternet,
-		AllowCIDRs:          append([]string(nil), fw.AllowCIDRs...),
-		DenyCIDRs:           append([]string(nil), fw.DenyCIDRs...),
-		AllowPorts:          append([]int(nil), fw.AllowPorts...),
-		AllowAllPorts:       allowsDestinations && len(fw.AllowPorts) == 0,
-		Resolvers:           append([]string(nil), fw.Resolvers...),
-	}, container.NetworkBridge
+	return container.FilterFromRules(fw, "")
 }
 
 // virtualDriverKey identifies one virtual executor's driver configuration. The

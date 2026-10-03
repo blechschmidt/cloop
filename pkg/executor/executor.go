@@ -450,6 +450,26 @@ type Spec struct {
 	// Requirements.RequireNetworkEgress, which refuses placement instead of
 	// quietly turning the network on).
 	DisableNetwork bool `json:"disable_network,omitempty"`
+	// EgressRules is the IP-layer firewall this workload runs under when a
+	// rule set stored in the hub applies to it: a device's, a project's, or
+	// both, composed with the executor's own by pkg/fwpolicy (Task 20363).
+	//
+	// It is the opposite kind of input from EgressScope. It can name
+	// 10.0.0.0/8, so it is never read from the repository: it comes from rule
+	// sets an admin or the project's maintainers saved through the hub, and it
+	// has already been proven, at dispatch, to fit inside every level above it.
+	// Drivers prove it again before installing it, because a guarantee only the
+	// caller enforces holds until the second caller.
+	//
+	// nil means no stored rule set applies, and the executor's own
+	// configuration decides exactly as before. A zero rule set means the
+	// workload reaches nothing — the opposite of nil.
+	EgressRules *FirewallRules `json:"egress_rules,omitempty"`
+	// EgressBound is the device-level rule set EgressRules was proven against —
+	// the admin's superset for the machine the workload lands on — carried so
+	// that a driver on that machine can check the containment itself. nil when
+	// the device has no rule set; never set without EgressRules.
+	EgressBound *FirewallRules `json:"egress_bound,omitempty"`
 	// SandboxHash identifies the sandbox spec this workload was built from,
 	// for the audit trail. Drivers surface it as a label; it never affects
 	// execution.
@@ -637,6 +657,9 @@ func (s Spec) Validate() error {
 	if !s.EgressScope.Valid() {
 		return fmt.Errorf("%w: egress_scope %q is not a known scope (want one of: %s)",
 			ErrInvalidSpec, s.EgressScope, joinEgressScopes())
+	}
+	if err := s.validateEgressRules(); err != nil {
+		return err
 	}
 	// Checked here as well as by the driver that writes them, and for the same
 	// reason: a bare file name is what stops a crafted secret from becoming an

@@ -170,7 +170,15 @@ const (
 	// pre-v14 agent ignores the Virtual section like any unknown key and would
 	// start the sandbox unfiltered and without its hardware, so the hub refuses
 	// such a dispatch instead. See MinVirtualExecutorVersion.
-	ProtocolVersion = 14
+	//
+	// v15 adds firewall rules stored in the hub (Task 20363): Spec.EgressRules,
+	// the firewall the hub composed for one workload from the device's rule set
+	// and the project's, and Spec.EgressBound, the device's rule set itself, so
+	// the agent proves the containment before installing anything. Gated on the
+	// hub side like v14, and for the same reason: an older agent ignores both
+	// fields and would start the sandbox under the virtual executor's firewall
+	// alone, or under no firewall at all. See MinEgressRulesVersion.
+	ProtocolVersion = 15
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -311,7 +319,19 @@ const (
 	// picks an engine and a runtime is fully described by Sandbox, which v8
 	// agents already obey.
 	MinVirtualExecutorVersion = 14
+	// MinEgressRulesVersion is the first version whose agents install
+	// Spec.EgressRules and check them against Spec.EgressBound (Task 20363).
+	//
+	// Required for every dispatch that carries either field, including one
+	// whose rules reach nothing: the agent's own containment check is the
+	// authoritative one, and an agent that cannot make it is not handed rules it
+	// would silently drop.
+	MinEgressRulesVersion = 15
 )
+
+// SupportsEgressRules reports whether an agent speaking this protocol version
+// installs a workload's firewall rules and proves them against the device's.
+func SupportsEgressRules(version int) bool { return version >= MinEgressRulesVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

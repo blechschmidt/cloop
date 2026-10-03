@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 123 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 125 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 108 |
+| `control-plane` | the hub's own state.db | 110 |
 | `project` | the project's .cloop/state.db | 13 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-123 actions in 35 families. Every action is listed: this section is the whole
+125 actions in 36 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (15) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -186,6 +186,7 @@ Payload keys, on every action above: `yaml`
 | `executor.drain` | `executor` | control-plane | stable | An executor is set to shed in-flight work as well as refuse new work. |
 | `executor.enroll` | `executor` | control-plane | stable | A remote agent completes outbound enrolment and joins the fleet. |
 | `executor.failover` | `executor_session` | control-plane | stable | A session is moved off an executor that stopped answering, or fails to be placed anywhere. |
+| `executor.firewall` | `executor` | control-plane | stable | An admin sets or clears a device's firewall rule set, the superset every sandbox on it must fit inside. |
 | `executor.limits` | `executor` | control-plane | stable | An admin sets the most CPU, memory, disk and processes any one workload on an executor may be given. |
 | `executor.revoke` | `executor` | control-plane | stable | An enrolled agent's credential is revoked and it is removed from the fleet. |
 | `executor.sandbox` | `executor` | control-plane | stable | An admin sets where an executor's payloads run: the device's host, or a container on it. |
@@ -204,6 +205,7 @@ Payload keys:
 - `executor.drain` — `action`, `executor_id`, `reason`, `state`
 - `executor.enroll` — `action`, `executor_id`, `name`, `expires_at`, `workdir_root`, `labels`
 - `executor.failover` — `session_id`, `from`, `to`, `attempt`, `project_path`, `task_id`, `placed`, `error`
+- `executor.firewall` — `action`, `executor_id`, `from`, `to`, `fingerprint`, `cleared`, `constrained`
 - `executor.limits` — `action`, `executor_id`, `from`, `to`, `cleared`
 - `executor.revoke` — `action`, `executor_id`, `name`, `kind`
 - `executor.sandbox` — `action`, `executor_id`, `from`, `to`, `mode`, `cleared`
@@ -217,9 +219,10 @@ Payload keys:
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.
 - `executor.enroll` — `action` repeats the verb without the family prefix — `enroll`, not `executor.enroll`.
 - `executor.failover` — `placed` distinguishes a successful move from an exhausted one; on failure `to` is empty and `error` says why.
+- `executor.firewall` — `from` and `to` describe the whole rule set — allowlist, denylist, ports, resolvers and the public-Internet switch — so a widened device is legible from this row alone. `cleared` is true when the rule set was removed, which leaves the device bounded only by its configuration. `constrained` counts the virtual executors and project rule sets the save narrowed to fit; each of those has its own row (`executor.virtual` with action "constrain", `project.firewall` with action "constrain").
 - `executor.limits` — Records its previous ceiling as well as the new one. A raised cap is the change worth reviewing, and it is invisible in the new value alone. `cleared` is true when the ceiling was removed, which makes the executor uncapped rather than capped at zero.
 - `executor.sandbox` — One of two executor actions that record their previous value: it changes a containment boundary, so `from` is what makes "when did this device stop isolating its workloads" answerable from the trail alone. `cleared` is true when the configuration was removed rather than replaced.
-- `executor.virtual` — `action` is "create", "update" or "delete". `from` and `to` describe the whole configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an added device is visible from this row alone. `reason` is set when the deletion was not asked for directly: a device's virtual executors are deleted with it when it is revoked.
+- `executor.virtual` — `action` is "create", "update", "delete" or "constrain". `from` and `to` describe the whole configuration — sandbox, firewall allow and deny lists, devices — so a widened firewall or an added device is visible from this row alone. `reason` is set when the change was not asked for directly: a device's virtual executors are deleted with it when it is revoked, and narrowed ("constrain") when its firewall is tightened below what they allowed.
 
 ### workspace.*
 
@@ -601,6 +604,16 @@ Payload keys:
 - `user.offboard_token` — `count`, `tokens`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 
 - `user.offboard_project` — Deliberately a report rather than a mutation — picking a project's next owner is not a decision an offboarding script should make.
+
+### project.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `project.firewall` | `project` | control-plane | stable | A project's maintainer sets or clears its firewall rule set, or a tightened executor narrows it. |
+
+Payload keys, on every action above: `action`, `project_path`, `executor_id`, `from`, `to`, `fingerprint`, `cleared`, `reason`
+
+- `project.firewall` — `action` is "set", "clear" or "constrain". A constrain row is written by the save that tightened a device or a virtual executor, against the identity that saved it, and `reason` names the executor and what had to be taken away. Stored in the control plane, where the rule set is.
 
 ### project.member.*
 

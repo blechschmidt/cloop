@@ -838,6 +838,17 @@ func (s *Server) routeTable() []routeSpec {
 		// reconnaissance.
 		{Pattern: "/api/executors/{id}/virtuals", Handler: s.handleVirtualExecutors, Methods: []string{"GET", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "/api/executors/{id}/virtual", Handler: s.handleVirtualExecutor, Methods: []string{"GET", "PUT", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+		// A device's firewall rule set (Task 20363): the superset every sandbox
+		// on it must fit inside, its virtual executors' included. execMgmt on
+		// the read for the sandbox route's reason — it says what the fleet's
+		// sandboxes can reach and why a rule set would not hold on a device.
+		{Pattern: "/api/executors/{id}/firewall", Handler: s.handleExecutorFirewall, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		// A project's own rule set, which may only narrow its executor's.
+		// config.write — a project's maintainers — evaluated against this
+		// project, so a maintainer of one project cannot reach another's. The
+		// read takes it too: the view shows the governing device's rules, which
+		// is fleet reconnaissance for anyone who cannot change the project.
+		{Pattern: "/api/firewall", Handler: s.handleProjectFirewall, Methods: []string{"GET", "PUT", "POST"}, Perm: cfgWrite, Scope: scopeProject},
 
 		// ── Compliance audit trail ───────────────────────────────────
 		// Admin-only, and global: the trail records the actions of every

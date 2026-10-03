@@ -208,6 +208,47 @@ func AuditExecutorLifecycle(d *DB, in ExecutorAuditInput) {
 	})
 }
 
+// ProjectFirewallAuditInput carries one change to a project's firewall rule set
+// (Task 20363).
+type ProjectFirewallAuditInput struct {
+	// Action is "set", "clear" or "constrain".
+	Action      string
+	ProjectPath string
+	// ExecutorID is the executor the project resolved to when the rules were
+	// written, so a reviewer can see which device's rules they were checked
+	// against.
+	ExecutorID string
+	Actor      string
+	Detail     map[string]any
+}
+
+// AuditProjectFirewall records a project's firewall rule set changing, on the
+// control plane's chain, where the rule set is stored. Best-effort like every
+// emitter in this file.
+func AuditProjectFirewall(d *DB, in ProjectFirewallAuditInput) {
+	if strings.TrimSpace(in.ProjectPath) == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"action": in.Action, "project_path": in.ProjectPath}
+	if in.ExecutorID != "" {
+		payload["executor_id"] = in.ExecutorID
+	}
+	for k, v := range in.Detail {
+		payload[k] = v
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionProjectFirewall),
+		EntityType: "project",
+		EntityID:   in.ProjectPath,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
 // ImagePolicyDenialInput carries one refused container image to the audit log
 // (Task 20177).
 //

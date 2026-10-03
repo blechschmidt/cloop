@@ -140,6 +140,15 @@ const (
 	// EventFeaturePR records a feature's pull request being opened or updated,
 	// on the feature's journal and its parent's.
 	EventFeaturePR EventType = "feature_pr"
+
+	// EventFirewall records which stored firewall levels shaped a run — a
+	// device's rule set, a project's — and what came of them, or why they
+	// refused it (Task 20363).
+	//
+	// On the project's journal for the reason the ceiling is: a fetch that
+	// times out inside a sandbox reads as a broken network, and the rules that
+	// dropped it live on the hub where the developer cannot see them.
+	EventFirewall EventType = "firewall"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
@@ -122,6 +123,12 @@ type EgressFilter struct {
 	// a port list, and demanding a port list there would force a project that
 	// said "the public Internet" to enumerate every port it might ever use.
 	AllowAllPorts bool
+
+	// DenyCIDRs are ranges the Pod may never reach, carved out of every allow
+	// that covers them (Task 20363). No config key sets it: it arrives with a
+	// firewall rule set composed by the hub — a device's or a project's
+	// denylist — through forRules.
+	DenyCIDRs []string
 }
 
 // ClusterDNSAllowed reports the effective setting, applying the on-by-default
@@ -176,9 +183,76 @@ func (f EgressFilter) Input() (netfilter.Input, error) {
 		}
 		in.Resolvers = append(in.Resolvers, ap)
 	}
+	for i, raw := range f.DenyCIDRs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return netfilter.Input{}, fmt.Errorf("deny_cidrs[%d]: %q is not a CIDR: %w", i, raw, err)
+		}
+		in.DenyCIDRs = append(in.DenyCIDRs, p)
+	}
 	in.AllowPublicInternet = f.AllowPublicInternet
 	in.AllowAllPorts = f.AllowAllPorts
 	return in, nil
+}
+
+// OwnRules reports, as a rule set, what this filter lets a Pod reach: nil when
+// it is off, which bounds nothing (Task 20363). Cluster DNS is not in it: it is
+// the executor's infrastructure, which a Pod under rules keeps exactly as the
+// configuration says, the way the container driver keeps its broker.
+//
+// A filter this binary cannot read back as rules reads as reaching nothing —
+// the fail-closed answer, since it bounds every rule set handed to it.
+func (f EgressFilter) OwnRules() *executor.FirewallRules {
+	if !f.Enabled {
+		return nil
+	}
+	r := executor.FirewallRules{
+		AllowPublicInternet: f.AllowPublicInternet,
+		AllowCIDRs:          append([]string(nil), f.CIDRs...),
+		DenyCIDRs:           append([]string(nil), f.DenyCIDRs...),
+		Resolvers:           append([]string(nil), f.Resolvers...),
+	}
+	if !f.AllowAllPorts {
+		r.AllowPorts = append([]int(nil), f.Ports...)
+	}
+	n, err := r.Normalize()
+	if err != nil {
+		return &executor.FirewallRules{}
+	}
+	return &n
+}
+
+// forConfinement resolves the filter for one Pod: its firewall rules when the
+// hub composed some, its scope otherwise. Rules win, because the hub has
+// already folded the scope into them.
+func (f EgressFilter) forConfinement(scope executor.EgressScope, rules *executor.FirewallRules) (EgressFilter, error) {
+	if rules != nil {
+		return f.forRules(*rules)
+	}
+	return f.forScope(scope)
+}
+
+// forRules builds the filter for one Pod's firewall rules, proving once more
+// that they fit inside this executor's configured filter.
+func (f EgressFilter) forRules(want executor.FirewallRules) (EgressFilter, error) {
+	if reasons := fwpolicy.Permits(f.OwnRules(), want); len(reasons) > 0 {
+		return EgressFilter{}, &fwpolicy.ExceedsError{Level: "this workload's firewall rules",
+			Bound: "this executor's egress_filter", Reasons: reasons}
+	}
+	n, err := want.Normalize()
+	if err != nil {
+		return EgressFilter{}, err
+	}
+	return EgressFilter{
+		Enabled:             true,
+		AllowPublicInternet: n.AllowPublicInternet,
+		CIDRs:               n.AllowCIDRs,
+		DenyCIDRs:           n.DenyCIDRs,
+		Ports:               n.AllowPorts,
+		AllowAllPorts:       (n.AllowPublicInternet || len(n.AllowCIDRs) > 0) && len(n.AllowPorts) == 0,
+		Resolvers:           n.Resolvers,
+		AllowClusterDNS:     f.AllowClusterDNS,
+	}, nil
 }
 
 // forScope resolves this executor's configured filter against one project's
@@ -376,7 +450,7 @@ func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.Network
 	// no egress_filter still owes a per-project `egress: public` an actual
 	// policy object, and that is exactly the case SupportsEgressScope now
 	// advertises. Resolution can also refuse — see forScope.
-	filter, err := filter.forScope(req.EgressScope)
+	filter, err := filter.forConfinement(req.EgressScope, req.EgressRules)
 	if err != nil {
 		return nil, err
 	}

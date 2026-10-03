@@ -65,6 +65,10 @@ type virtualParentView struct {
 	USBError   string               `json:"usb_error,omitempty"`
 	// VirtualExecutors are this device's sub-executors.
 	VirtualExecutors []virtualExecutorView `json:"virtual_executors"`
+	// DeviceFirewall is the device's firewall rule set (Task 20363), shown
+	// read-only in the dialog: every virtual executor's firewall must fit
+	// inside it. Null when the device has none, which bounds nothing.
+	DeviceFirewall *executor.FirewallRules `json:"device_firewall"`
 }
 
 // virtualExecutorView is one virtual executor in full.
@@ -82,6 +86,12 @@ type virtualExecutorView struct {
 	Registered bool     `json:"registered"`
 	Issue      string   `json:"issue,omitempty"`
 	Projects   []string `json:"projects,omitempty"`
+	// ExceedsDevice says why this configuration no longer fits inside its
+	// device's firewall, when it does not; dispatch refuses it until it does.
+	ExceedsDevice []string `json:"exceeds_device,omitempty"`
+	// Constrained lists the project rule sets a save narrowed to fit, on an
+	// update's answer.
+	Constrained []firewallChange `json:"constrained,omitempty"`
 }
 
 // virtualExecutorRequest is the POST/PUT body.
@@ -170,12 +180,18 @@ func (s *Server) virtualParent(ctx context.Context, db *statedb.DB, parent *remo
 		view.USBDevices = []executor.USBDevice{}
 	}
 
+	if rec, ok, err := db.ExecutorFirewall(parent.ID()); err == nil && ok {
+		fw := rec.Rules
+		view.DeviceFirewall = &fw
+	}
 	rows, _ := db.ListVirtualExecutors()
 	bindings := projectsByExecutor(db)
 	view.VirtualExecutors = []virtualExecutorView{}
 	for _, v := range rows {
 		if v.ParentID == parent.ID() {
-			view.VirtualExecutors = append(view.VirtualExecutors, viewVirtualExecutor(v, bindings[v.ID]))
+			vv := viewVirtualExecutor(v, bindings[v.ID])
+			vv.ExceedsDevice = virtualExceeds(view.DeviceFirewall, parent.ID(), v.Spec)
+			view.VirtualExecutors = append(view.VirtualExecutors, vv)
 		}
 	}
 	return view
@@ -229,8 +245,16 @@ func (s *Server) createVirtualExecutor(w http.ResponseWriter, r *http.Request, d
 	if row.Name == "" {
 		row.Name = id
 	}
-	if err := db.CreateVirtualExecutor(row); err != nil {
-		writeVirtualExecutorErr(w, err)
+	// Created only if it fits inside the device's firewall, checked and
+	// written in one transaction so a device tightened at the same moment
+	// cannot be missed (Task 20363).
+	if err := db.UpdateFirewalls(func(tx *statedb.FirewallTx) error {
+		if err := checkVirtualFitsDevice(tx, parent.ID(), spec); err != nil {
+			return err
+		}
+		return tx.CreateVirtualExecutor(row)
+	}); err != nil {
+		writeFirewallErr(w, err)
 		return
 	}
 	stored, _, err := db.VirtualExecutor(id)
@@ -290,8 +314,32 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = cur.Name
 		}
-		if err := db.UpdateVirtualExecutor(id, name, req.Spec, s.auditActor(r)); err != nil {
-			writeVirtualExecutorErr(w, err)
+		spec, err := req.Spec.Normalize()
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Saved only if it fits inside the device's firewall; and the projects
+		// that run on it are narrowed to what it now allows, in the same
+		// transaction (Task 20363).
+		var changes []firewallChange
+		actor := s.auditActor(r)
+		if err := db.UpdateFirewalls(func(tx *statedb.FirewallTx) error {
+			if err := checkVirtualFitsDevice(tx, cur.ParentID, spec); err != nil {
+				return err
+			}
+			if err := tx.UpdateVirtualExecutor(id, name, spec, actor); err != nil {
+				return err
+			}
+			rec, ok, err := tx.ExecutorFirewall(cur.ParentID)
+			if err != nil {
+				return err
+			}
+			changes, err = constrainProjects(tx, func(_ string, pex executor.Executor) bool { return pex.ID() == id },
+				recRules(rec, ok), map[string]executor.VirtualSpec{id: spec}, actor)
+			return err
+		}); err != nil {
+			writeFirewallErr(w, err)
 			return
 		}
 		updated, _, err := db.VirtualExecutor(id)
@@ -312,8 +360,11 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 			"from":      cur.Spec.Describe(),
 			"to":        updated.Spec.Describe(),
 		})
+		s.auditFirewallChanges(r, db, "virtual executor "+id, changes)
 		s.broadcastExecutorUpdate("virtual", id)
-		jsonOK(w, viewVirtualExecutor(updated, projectsByExecutor(db)[id]))
+		view := viewVirtualExecutor(updated, projectsByExecutor(db)[id])
+		view.Constrained = changes
+		jsonOK(w, view)
 	case http.MethodDelete:
 		// A running task keeps running: its handle belongs to the parent
 		// device, which still addresses it. What stops is new dispatch.
@@ -456,4 +507,21 @@ func (s *Server) deleteVirtualExecutorsOf(r *http.Request, db *statedb.DB, paren
 		removed++
 	}
 	return removed
+}
+
+// checkVirtualFitsDevice refuses a virtual executor configuration that reaches
+// further than its device's firewall rule set (Task 20363). Read inside the
+// save's transaction, so the check and the write see the same device rules.
+func checkVirtualFitsDevice(tx *statedb.FirewallTx, deviceID string, spec executor.VirtualSpec) error {
+	rec, ok, err := tx.ExecutorFirewall(deviceID)
+	if err != nil {
+		return err
+	}
+	device := recRules(rec, ok)
+	if reasons := virtualExceeds(device, deviceID, spec); len(reasons) > 0 {
+		return &errFirewallExceeds{what: "this virtual executor's network", bound: device, reasons: reasons,
+			remedy: "a virtual executor can only narrow its device's firewall: remove what is listed, or ask " +
+				"an admin to widen the device's rules (Executors → the device → Firewall)"}
+	}
+	return nil
 }

@@ -614,6 +614,12 @@ type podRequest struct {
 	// arrives here the object about to be built is known to bite.
 	EgressScope executor.EgressScope
 
+	// EgressRules is the firewall the hub composed for this Pod from the rule
+	// sets stored in the control plane (Task 20363); it supersedes EgressScope.
+	// Start has proven it fits inside this executor's filter and the device's,
+	// and refused it unless the cluster is known to enforce NetworkPolicy.
+	EgressRules *executor.FirewallRules
+
 	// Workspace says how the source tree gets into the workspace volume. It
 	// never holds a credential — only the name of a grant — so it is safe to
 	// keep in a struct that ends up in an annotation and a log line.

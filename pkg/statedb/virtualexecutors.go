@@ -75,6 +75,24 @@ func normalizeVirtualExecutor(v VirtualExecutor) (VirtualExecutor, error) {
 // bindings, ceiling and access list, and a binding meant for one would run on
 // the other.
 func (d *DB) CreateVirtualExecutor(v VirtualExecutor) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: create virtual executor %q: begin: %w", v.ID, classifyDriverErr(err))
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	if err := createVirtualExecutorOn(tx, v); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: create virtual executor %q: commit: %w", v.ID, classifyDriverErr(err))
+	}
+	return nil
+}
+
+// createVirtualExecutorOn records v and its executors-table row inside tx.
+func createVirtualExecutorOn(tx *sql.Tx, v VirtualExecutor) error {
 	v, err := normalizeVirtualExecutor(v)
 	if err != nil {
 		return err
@@ -88,14 +106,6 @@ func (d *DB) CreateVirtualExecutor(v VirtualExecutor) error {
 		v.CreatedAt = now
 	}
 	stamp := v.CreatedAt.UTC().Format(time.RFC3339Nano)
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	tx, err := d.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("statedb: create virtual executor %q: begin: %w", v.ID, classifyDriverErr(err))
-	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
 
 	var one int
 	switch err := tx.QueryRow(`SELECT 1 FROM executors WHERE id = ?
@@ -126,15 +136,15 @@ func (d *DB) CreateVirtualExecutor(v VirtualExecutor) error {
 		v.ID, v.Name, executor.KindVirtual, ExecutorStatusUnknown, string(labels), stamp, v.CreatedBy); err != nil {
 		return fmt.Errorf("statedb: record virtual executor %q: %w", v.ID, classifyDriverErr(err))
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("statedb: create virtual executor %q: commit: %w", v.ID, classifyDriverErr(err))
-	}
 	return nil
 }
 
 // UpdateVirtualExecutor replaces a virtual executor's name and configuration.
 // The parent is fixed at creation: moving a sub-executor to another machine
 // would carry its bindings and access list to hardware nobody approved them for.
+//
+// It does not check the configuration against the device's firewall; the
+// dashboard's save goes through UpdateFirewalls for that (Task 20363).
 func (d *DB) UpdateVirtualExecutor(id, name string, spec executor.VirtualSpec, by string) error {
 	cur, ok, err := d.VirtualExecutor(id)
 	if err != nil {
@@ -144,15 +154,6 @@ func (d *DB) UpdateVirtualExecutor(id, name string, spec executor.VirtualSpec, b
 		return fmt.Errorf("%w: %q", ErrVirtualExecutorNotFound, id)
 	}
 	cur.Name, cur.Spec = name, spec
-	v, err := normalizeVirtualExecutor(cur)
-	if err != nil {
-		return err
-	}
-	specJSON, err := json.Marshal(v.Spec)
-	if err != nil {
-		return fmt.Errorf("statedb: encode virtual executor %q: %w", id, err)
-	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -161,6 +162,27 @@ func (d *DB) UpdateVirtualExecutor(id, name string, spec executor.VirtualSpec, b
 		return fmt.Errorf("statedb: update virtual executor %q: begin: %w", id, classifyDriverErr(err))
 	}
 	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	if err := updateVirtualExecutorOn(tx, cur, by); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: update virtual executor %q: commit: %w", id, classifyDriverErr(err))
+	}
+	return nil
+}
+
+// updateVirtualExecutorOn writes v's name and configuration inside tx.
+func updateVirtualExecutorOn(tx *sql.Tx, v VirtualExecutor, by string) error {
+	id := v.ID
+	v, err := normalizeVirtualExecutor(v)
+	if err != nil {
+		return err
+	}
+	specJSON, err := json.Marshal(v.Spec)
+	if err != nil {
+		return fmt.Errorf("statedb: encode virtual executor %q: %w", id, err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.Exec(`UPDATE virtual_executors SET name = ?, spec_json = ?, updated_at = ?, updated_by = ?
 		WHERE id = ?`, v.Name, string(specJSON), stamp, by, v.ID)
 	if err != nil {
@@ -171,9 +193,6 @@ func (d *DB) UpdateVirtualExecutor(id, name string, spec executor.VirtualSpec, b
 	}
 	if _, err := tx.Exec(`UPDATE executors SET name = ? WHERE id = ?`, v.Name, v.ID); err != nil {
 		return fmt.Errorf("statedb: rename virtual executor %q: %w", id, classifyDriverErr(err))
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("statedb: update virtual executor %q: commit: %w", id, classifyDriverErr(err))
 	}
 	return nil
 }
@@ -197,7 +216,13 @@ func (d *DB) ListVirtualExecutors() ([]VirtualExecutor, error) {
 }
 
 func (d *DB) queryVirtualExecutors(where string, args ...any) ([]VirtualExecutor, error) {
-	rows, err := d.conn.Query(`SELECT id, parent_id, name, spec_json, created_at, created_by,
+	return queryVirtualExecutorsOn(d.conn, where, args...)
+}
+
+// queryVirtualExecutorsOn reads virtual executors through q, which is the
+// database or a transaction.
+func queryVirtualExecutorsOn(q sqlQueryer, where string, args ...any) ([]VirtualExecutor, error) {
+	rows, err := q.Query(`SELECT id, parent_id, name, spec_json, created_at, created_by,
 		updated_at, updated_by FROM virtual_executors `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: read virtual executors: %w", classifyDriverErr(err))
