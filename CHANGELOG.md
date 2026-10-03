@@ -105,6 +105,11 @@ schema and the hub's HTTP API may change in any release.
 - Revoking a device deletes its virtual executors, each with an audit row.
 - The Executors panel's sandbox chip always described a container-mode device's
   network as `none`: the card read a field the API never filled in.
+- A run on a hub in strict mode with no isolating executor answered `500` "no
+  default executor configured". Strict mode evicts the host driver, which was
+  the registry's default, and the empty registry was reported as a broken
+  install. It is now the policy refusal: a `409` `host_execution_denied` that
+  names the setting and what to configure.
 
 ## [0.0.4] - 2026-09-27
 

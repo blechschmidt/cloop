@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -271,6 +272,19 @@ func (r *Registry) IsolatedIDs() []string {
 func (r *Registry) Resolve(projectPath string) (Executor, error) {
 	ex, err := r.resolveBinding(projectPath)
 	if err != nil {
+		// Under strict mode an empty registry is the policy's own doing:
+		// ApplyHostExecutionPolicy evicted the host driver, which was the
+		// default, and nothing isolating is registered to take its place
+		// (Unregister hands the default to any executor that remains). "No
+		// default executor configured" would describe a broken install, and a
+		// hub renders it as a server fault (500). It is the policy refusal,
+		// and says what to configure.
+		if errors.Is(err, ErrNoDefault) && !HostExecutionAllowed() {
+			return nil, &HostExecutionDeniedError{
+				ProjectPath:  projectPath,
+				Alternatives: r.IsolatedIDs(),
+			}
+		}
 		return nil, err
 	}
 	if !HostExecutionAllowed() && !isolatesFromHost(ex) {

@@ -180,3 +180,44 @@ func TestIsolatedIDs(t *testing.T) {
 		t.Fatalf("IsolatedIDs = %v, want [vm] — the host driver advertises no isolation", got)
 	}
 }
+
+// TestResolve_EmptyRegistryUnderStrictModeIsThePolicyRefusal: strict mode
+// evicts the host driver, and with nothing isolating registered the registry
+// has no default. That is the policy refusing the run, not a broken install.
+// Reported as ErrNoDefault, a hub rendered it as a 500 reading "no default
+// executor configured", which names neither the policy nor the fix (found
+// end to end in Task 20364).
+func TestResolve_EmptyRegistryUnderStrictModeIsThePolicyRefusal(t *testing.T) {
+	restorePolicy(t)
+	reg := NewRegistry()
+
+	SetAllowHostExecution(true)
+	if _, err := reg.Resolve("/srv/proj"); !errors.Is(err, ErrNoDefault) {
+		t.Fatalf("an empty registry with host execution permitted: err = %v, want ErrNoDefault", err)
+	}
+
+	SetAllowHostExecution(false)
+	_, err := reg.Resolve("/srv/proj")
+	var denied *HostExecutionDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("an empty registry under strict mode: err = %v, want *HostExecutionDeniedError", err)
+	}
+	if !errors.Is(err, ErrHostExecutionDenied) {
+		t.Error("the refusal does not match ErrHostExecutionDenied, which is what the hub maps to 409")
+	}
+	if denied.ProjectPath != "/srv/proj" || len(denied.Alternatives) != 0 {
+		t.Errorf("denial = %+v, want the project and no alternatives", denied)
+	}
+	if !strings.Contains(denied.Remediation(), "Enable executors.container") {
+		t.Errorf("remediation %q does not say what to configure", denied.Remediation())
+	}
+
+	// A binding to an executor that is not registered is a different fault,
+	// and keeps its own message even under strict mode.
+	if err := reg.Bind("/srv/bound", "edge-01"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if _, err := reg.Resolve("/srv/bound"); errors.Is(err, ErrHostExecutionDenied) || !errors.Is(err, ErrExecutorNotFound) {
+		t.Errorf("a project bound to an absent executor: err = %v, want ErrExecutorNotFound", err)
+	}
+}
