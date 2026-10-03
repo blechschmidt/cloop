@@ -658,6 +658,21 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		return
 	}
 	spec.WorkDir = workDir
+	// A host-mode payload carrying its own environment gets a home beside its
+	// tree, not the tree itself; see payloadhome.go. A container's home is the
+	// image's, inside the container, and never the mounted tree.
+	if payload.Virtual == nil && payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer {
+		env, err := withPayloadHome(spec.Env, a.root, workDir)
+		if err != nil {
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error:    err.Error(),
+			})
+			return
+		}
+		spec.Env = env
+	}
 	// Remember what an interactive session will need, now that the path has
 	// been resolved and confined: attach must never be able to open a terminal
 	// somewhere resolveWorkDir would have refused (Task 20265).
