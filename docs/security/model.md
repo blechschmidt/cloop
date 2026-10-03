@@ -2567,6 +2567,26 @@ What none of this checks is whether the kernel or the CNI honours what was
 installed. `nft -f` either commits the whole ruleset or fails, so the container
 path is verifiable from the exit status; a `NetworkPolicy` is not.
 
+### Firewall levels — `fwcontainment_test.go` and the package suites
+
+A device's rule set bounds every sandbox on it; a virtual executor's firewall
+and a project's rule set may only narrow it ([firewall rules](../guides/firewall.md)).
+
+| Guarantee | Test |
+| --- | --- |
+| A project rule set reaching past its device — a private range, the metadata endpoint, a supernet of public space, another port, every port, its own resolver — is refused, naming what is outside | `TestProjectRulesCannotEscapeTheDevice` |
+| A range the device denies stays unreachable through any rule set below it: the denylist is inherited | `TestTheDeviceDenylistBindsEveryLevelBelow` |
+| Whatever fits inside a device still drops the metadata endpoint, private space and loopback on the wire | `TestPermittedRulesStillDropBlockedSpace` |
+| No rule set bounds nothing; an empty one bounds everything down to nothing; an unreadable one refuses | `TestAbsentAndEmptyBoundsAreOpposites` |
+| A store that cannot be read refuses the run, at dispatch and in the driver — never "no rules" | `TestAnUnreadableStoreRefusesTheRun` |
+| The host-process driver, which has no network of a run's own, refuses a run carrying rules | `TestTheHostProcessDriverRefusesRules` |
+| Every dispatch path composes the firewall (pkg/ui's three, `cloop serve`), and the container, Kubernetes and remote drivers check the rules in their start path | `TestEveryDispatchPathResolvesTheFirewall` |
+| Containment agrees with the compiled filter: no packet a permitted rule set lets out is one its bound drops, and what tightening writes back fits and never reaches further than before | `pkg/fwpolicy: TestPermitsAgreesWithTheCompiledFilter` |
+| The driver's check reads the device's rules as stored now, so a dispatch that skipped the firewall step, or carried a stale bound, is refused | `pkg/fwpolicy: TestCheckAtDriverIsAuthoritative` |
+| Tightening a device narrows its virtual executors (an unfiltered one becomes firewalled) and the project rule sets under it, and audits each | `pkg/ui: TestFirewall_DeviceRulesBoundVirtualExecutorsAndProjects`, `TestFirewall_TighteningReplacesAnUnfilteredVirtualNetwork` |
+| Kubernetes installs rules only on a cluster whose NetworkPolicy enforcement is proven or asserted | `pkg/executor/kubernetes: TestRulesNeedAClusterThatEnforcesNetworkPolicy` |
+| A device agent too old to check the rules itself is never handed them | `pkg/executor/remote: TestEgressRulesNeedAProtocolV15Agent` |
+
 ### Per-project sandbox specs — `sandbox_test.go`
 
 [`.cloop/sandbox.yaml`](../reference/sandbox.md) is the input with the least

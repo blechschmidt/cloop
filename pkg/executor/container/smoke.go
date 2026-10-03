@@ -140,6 +140,14 @@ func (e *Executor) SmokeTest(ctx context.Context, workDir string) (SmokeTestResu
 		// Deliberately no Env: the smoke test must prove the sandbox runs a
 		// binary, and doing it with an empty environment also proves no
 		// host credentials are needed to get that far.
+		//
+		// And no network, stated as an empty firewall rule set (Task 20363):
+		// running a binary needs none, and a rule set that reaches nothing fits
+		// inside any an admin set for this executor — where a workload carrying
+		// no rules at all would be refused by checkRules as one dispatched past
+		// them.
+		DisableNetwork: true,
+		EgressRules:    &executor.FirewallRules{},
 	}
 
 	started := time.Now()

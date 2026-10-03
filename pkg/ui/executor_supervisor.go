@@ -375,6 +375,16 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 	logResourceClamps(spec.WorkDir, clamps)
 	logUnenforceableCeiling(target, spec.WorkDir, clamps)
 
+	// And the firewall levels, composed again for the replacement (Task
+	// 20363). The spec's rules were composed for the executor it stranded on,
+	// under that device's rule set; the replacement may be another device with
+	// rules of its own, and its driver refuses a spec that does not carry them.
+	spec.EgressRules, spec.EgressBound = nil, nil
+	spec, err = applyFirewall(spec, target, spec.WorkDir)
+	if err != nil {
+		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
+	}
+
 	// Detached from ctx: ctx belongs to the probe round that noticed the
 	// failure, and the replacement run must outlive it exactly as the
 	// original outlived the HTTP request that started it.

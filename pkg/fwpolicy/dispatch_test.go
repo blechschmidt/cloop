@@ -116,8 +116,15 @@ func TestResolveComposesDeviceVirtualAndProject(t *testing.T) {
 	if !Equal(*spec.EgressBound, device) {
 		t.Errorf("EgressBound = %v, want the device's rules", spec.EgressBound.Describe())
 	}
-	if spec.EgressScope != executor.EgressScopeUnset {
-		t.Error("the scope must be folded into the rules, not left for the driver to apply twice")
+	if spec.EgressScope != executor.EgressScopePublic {
+		t.Error("the scope must stay on the spec, so a re-composition can fold it in again")
+	}
+	// Composing again — a failover — gives the same rules.
+	again := spec
+	again.EgressRules, again.EgressBound = nil, nil
+	if _, err := Resolve(&again, virtualOn("sgx", &vxFirewall), "/srv/p"); err != nil ||
+		!Equal(*again.EgressRules, *spec.EgressRules) {
+		t.Errorf("re-composing gave %v, want %v (%v)", again.EgressRules, spec.EgressRules, err)
 	}
 	if len(res.Levels) != 4 || !strings.Contains(res.Describe(), "this project's firewall") {
 		t.Errorf("resolution = %+v", res)

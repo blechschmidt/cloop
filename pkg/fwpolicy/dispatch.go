@@ -191,7 +191,9 @@ func Resolve(spec *executor.Spec, ex executor.Executor, projectPath string) (Res
 			return Resolution{}, err
 		}
 	}
-	spec.EgressScope = executor.EgressScopeUnset
+	// The scope stays on the spec: the drivers let the rules win over it, and
+	// a later re-composition — a failover onto another device — folds it in
+	// again rather than losing the project's own narrowing.
 
 	if len(spec.Interfaces) > 0 {
 		return Resolution{}, fmt.Errorf("%w: this run is bounded by firewall rules stored in the hub, but "+
