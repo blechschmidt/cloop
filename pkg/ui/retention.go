@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/janitor"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -151,7 +150,10 @@ func (s *Server) maybeRunRetention(workDir string, running multiui.RunningDirs) 
 		return
 	}
 
-	cfg, err := config.Load(workDir)
+	// The hub's own directory is governed by the hub's effective
+	// configuration, overlay included; every other project by its own
+	// config.yaml (Task 20364).
+	cfg, err := s.governingConfig(workDir)
 	if err != nil {
 		// A project whose config will not parse still grows on disk, and the
 		// default policy is the safe one — it prunes derived data only. Say so
@@ -269,8 +271,10 @@ func installSnapshotRetentionResolver() {
 		}
 		// A project whose config will not parse falls back to the process
 		// default rather than to "unbounded": the failure that brought this
-		// package into being was a directory nothing bounded.
-		cfg, err := config.Load(workDir)
+		// package into being was a directory nothing bounded. The control
+		// plane's own directory reads the hub's effective configuration, as
+		// maybeRunRetention does (Task 20364).
+		cfg, err := governingConfigFor(workDir)
 		if err != nil {
 			cfg = nil
 		}

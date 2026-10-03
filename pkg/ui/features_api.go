@@ -500,7 +500,9 @@ func (s *Server) featureTokenEnv() func(executor.Executor) []string {
 		if ex == nil || executor.IsolatesFromHost(ex) || s.oidcEnabled() {
 			return nil
 		}
-		cfg, err := config.Load(s.WorkDir)
+		// The hub's token, so its effective configuration: a token this hub's
+		// overlay states (or withholds with an empty value) is the one meant.
+		cfg, err := s.loadHubConfig()
 		if err != nil || cfg == nil || strings.TrimSpace(cfg.GitHub.Token) == "" {
 			return nil
 		}

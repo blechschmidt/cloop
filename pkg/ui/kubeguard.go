@@ -79,7 +79,11 @@ var (
 // activeKubeGuard returns the running monitor, or nil.
 func activeKubeGuard() *kubeGuardService { return kubeGuardSingleton.Load() }
 
-// ensureKubeGuard starts the monitor configured in dir, once per process.
+// ensureKubeGuard starts the monitor cfg configures for the control plane in
+// dir, once per process.
+//
+// cfg is the hub's effective configuration, overlay included, for the reason
+// ensureGitProxy gives (Task 20364). A nil cfg starts nothing.
 //
 // Called from the top of bootstrapExecutors alongside ensureGitProxy, and for
 // the same ordering reason: the broker is constructed per lease but the
@@ -91,10 +95,9 @@ func activeKubeGuard() *kubeGuardService { return kubeGuardSingleton.Load() }
 // delivered at all, because attachKubeGuard installs a refusing guard rather
 // than letting the cluster credential through while the config says it
 // cannot.
-func ensureKubeGuard(dir string) {
+func ensureKubeGuard(cfg *config.Config, dir string) {
 	kubeGuardOnce.Do(func() {
-		cfg, err := config.Load(dir)
-		if err != nil || cfg == nil {
+		if cfg == nil {
 			return
 		}
 		kubeGuardRequired.Store(cfg.Executors.KubeGuard.Enabled)

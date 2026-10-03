@@ -35,10 +35,39 @@
 //
 // # What belongs in it
 //
-// Settings that are true of this hub rather than of this project: OIDC, TLS,
-// the origin allowlist, the WebSocket caps, telemetry collection. Not API keys or budgets, which
-// belong to the project and should stay in config.yaml where every command
-// reads them — the overlay is read by `cloop ui`, and by nothing else.
+// Settings that are true of this hub rather than of this project. These are
+// the hub-scope keys, and `cloop ui` reads every one of them with the overlay
+// merged in (Task 20364; pkg/ui/hubconfig.go is the one reader):
+//
+//	executors.*            allow_host_process, min_agent_build, limits (the
+//	                       resource ceiling), container, kubernetes, git_proxy,
+//	                       kube_guard, auto_install_harness, the orphan sweep
+//	sandbox.image_policy   the image trust policy, at the hub's early check
+//	                       and in the copy each driver takes at startup
+//	ui.*                   oidc, tls, the origin allowlists, the WebSocket
+//	                       caps, quotas, cluster, ci, telemetry,
+//	                       auto_resume_on_cap_reset
+//	stt                    the hub's dictation settings and key; a project's
+//	                       own stt section still overrides them for requests
+//	                       about that project
+//	retention, audit       the janitor's policy for the hub's own directory
+//	backup                 auto-backup of the hub's own directory
+//	github.token           the token the hub hands a host-run pull request
+//
+// executors.allow_host_process, min_agent_build and limits are ratchets
+// across everything a hub reads (they only ever tighten), but the overlay
+// takes part as the hub's own file. So an overlay that says
+// allow_host_process: true does relax a shared config.yaml that says false,
+// for this hub alone, as its key-by-key merge promises.
+//
+// Not API keys, budgets, the provider or the model, which belong to the
+// project and stay in config.yaml where every command reads them. The overlay
+// is read by `cloop ui`, and by nothing else, so `cloop run` would never see
+// a provider written there.
+//
+// A settings panel writes the keys it edits into the overlay once one exists
+// (ui.oidc, ui.telemetry, ui.ci, stt.groq_api_key), and leaves config.yaml
+// byte for byte as it was.
 
 package config
 
@@ -48,7 +77,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -57,6 +88,34 @@ import (
 // listening on port. It does not check whether the file exists.
 func UIInstanceConfigPath(workdir string, port int) string {
 	return filepath.Join(workdir, ".cloop", fmt.Sprintf("config.ui-%d.yaml", port))
+}
+
+// UIInstancePorts returns the port of every per-instance overlay in workdir,
+// in ascending order: the hubs in that directory that have settings of their
+// own.
+//
+// It exists for code that runs beside the hubs rather than as one of them,
+// such as `cloop hub doctor`, and has to answer for all of them. A file whose
+// name does not end in a port `cloop ui` could listen on is not an overlay any
+// hub reads, and is skipped.
+func UIInstancePorts(workdir string) ([]int, error) {
+	matches, err := filepath.Glob(filepath.Join(workdir, ".cloop", "config.ui-*.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	var ports []int
+	for _, m := range matches {
+		num := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(m), "config.ui-"), ".yaml")
+		port, err := strconv.Atoi(num)
+		// Round-tripped so "08081" and "+8081" are refused: neither is the
+		// name UIInstanceConfigPath would give the hub on that port.
+		if err != nil || port <= 0 || port > 65535 || strconv.Itoa(port) != num {
+			continue
+		}
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	return ports, nil
 }
 
 // LoadUIInstance loads the project configuration and then merges the overlay
@@ -149,12 +208,61 @@ func SaveUIInstanceTelemetry(path string, t TelemetryConfig) error {
 	return saveUIInstanceBlock(path, "telemetry", block)
 }
 
+// SaveUIInstanceCI writes the ui.ci keys the Settings panel edits into an
+// overlay file, leaving every other key in it untouched (Task 20364).
+//
+// All six are written even at their zero value, for the reason
+// SaveUIInstanceTelemetry gives: the overlay is merged over config.yaml key by
+// key, so a key left out would let config.yaml's value show through a save
+// that set it. upstream_auth_token and exchange_keep_records are not written.
+// The panel cannot edit them, and copying the token out of config.yaml would
+// put a credential in a second file for no reason, so whichever file states
+// them still does.
+func SaveUIInstanceCI(path string, c CIConfig) error {
+	models := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+	for _, m := range c.DefaultModels {
+		models.Content = append(models.Content, yamlScalar("!!str", m))
+	}
+	return saveUIInstanceKeys(path, []string{"ui", "ci"}, []overlayKey{
+		{"enabled", yamlScalar("!!bool", strconv.FormatBool(c.Enabled))},
+		{"issuer", yamlScalar("!!str", c.Issuer)},
+		{"audience", yamlScalar("!!str", c.Audience)},
+		{"clock_skew_seconds", yamlScalar("!!int", strconv.Itoa(c.ClockSkewSeconds))},
+		{"default_models", models},
+		{"upstream_base_url", yamlScalar("!!str", c.UpstreamBaseURL)},
+	})
+}
+
+// SaveUIInstanceSTTKey writes stt.groq_api_key into an overlay file, leaving
+// every other key in it untouched (Task 20364). An empty key is written as an
+// empty string rather than removed: clearing the credential for this hub must
+// not let a key in the shared config.yaml show through.
+func SaveUIInstanceSTTKey(path, key string) error {
+	return saveUIInstanceKeys(path, []string{"stt"}, []overlayKey{
+		{"groq_api_key", yamlScalar("!!str", key)},
+	})
+}
+
 func yamlScalar(tag, value string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value}
 }
 
+// overlayKey is one key an overlay save sets.
+type overlayKey struct {
+	name  string
+	value *yaml.Node
+}
+
 // saveUIInstanceBlock replaces ui.<key> in the overlay at path with block.
 func saveUIInstanceBlock(path, key string, block *yaml.Node) error {
+	return saveUIInstanceKeys(path, []string{"ui"}, []overlayKey{{key, block}})
+}
+
+// saveUIInstanceKeys sets keys in the mapping reached by following parents
+// from the root of the overlay at path. It creates any mapping on the way
+// that is missing, and leaves every other key in the file, and its comments,
+// as they were.
+func saveUIInstanceKeys(path string, parents []string, keys []overlayKey) error {
 	var doc yaml.Node
 	data, err := os.ReadFile(path)
 	switch {
@@ -169,9 +277,13 @@ func saveUIInstanceBlock(path, key string, block *yaml.Node) error {
 		}
 	}
 
-	root := documentRoot(&doc)
-	ui := mappingValue(root, "ui")
-	setMappingValue(ui, key, block)
+	m := documentRoot(&doc)
+	for _, parent := range parents {
+		m = mappingValue(m, parent)
+	}
+	for _, k := range keys {
+		setMappingValue(m, k.name, k.value)
+	}
 
 	out, err := yaml.Marshal(&doc)
 	if err != nil {

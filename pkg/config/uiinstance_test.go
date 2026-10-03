@@ -300,3 +300,145 @@ func TestBaseSaveDoesNotDisturbTheOverlay(t *testing.T) {
 		t.Errorf("Provider = %q, want the base edit to still be visible through the overlay", after.Provider)
 	}
 }
+
+// TestSaveUIInstanceCIWritesThePanelKeysOnly: the CI block the panel edits
+// lands in the overlay, the operator's comments survive, and the relay's
+// upstream token, which the panel cannot edit, is not copied out of
+// config.yaml into a second file (Task 20364).
+func TestSaveUIInstanceCIWritesThePanelKeysOnly(t *testing.T) {
+	base := baseWithoutSSO + "    ci:\n        issuer: https://shared.example\n        upstream_auth_token: sk-ant-oat-shared\n"
+	dir := writeConfigs(t, base, "# :8081 only.\nui:\n    allowed_origins: [https://hub.example:8888]\n", 8081)
+	path := UIInstanceConfigPath(dir, 8081)
+
+	cfg, _, err := LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance: %v", err)
+	}
+	cfg.UI.CI.Enabled = true
+	cfg.UI.CI.Audience = "cloop-8081"
+	cfg.UI.CI.DefaultModels = []string{"claude-sonnet-*"}
+	if err := SaveUIInstanceCI(path, cfg.UI.CI); err != nil {
+		t.Fatalf("SaveUIInstanceCI: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), "# :8081 only.") {
+		t.Error("the operator's comment was lost")
+	}
+	if strings.Contains(string(raw), "sk-ant-oat-shared") {
+		t.Errorf("the upstream token was copied into the overlay:\n%s", raw)
+	}
+
+	after, _, err := LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance after save: %v", err)
+	}
+	c := after.UI.CI
+	if !c.Enabled || c.Audience != "cloop-8081" || len(c.DefaultModels) != 1 || c.DefaultModels[0] != "claude-sonnet-*" {
+		t.Errorf("after the save: %+v", c)
+	}
+	// The issuer was shown by the panel and saved unchanged, so it is pinned
+	// in the overlay. The token was never the panel's, so it still comes from
+	// config.yaml.
+	if c.Issuer != "https://shared.example" || c.UpstreamAuthToken != "sk-ant-oat-shared" {
+		t.Errorf("issuer=%q upstream_auth_token=%q after the save", c.Issuer, c.UpstreamAuthToken)
+	}
+	if len(after.UI.AllowedOrigins) != 1 {
+		t.Errorf("AllowedOrigins = %v, want the untouched sibling key intact", after.UI.AllowedOrigins)
+	}
+}
+
+// TestSaveUIInstanceCIZeroValuesShadowConfigYAML: a save that turns
+// federation off, or clears the issuer, has to say so in the overlay.
+// Leaving a zero value out would let config.yaml's value show through, and
+// the hub would keep federating after a save that said stop.
+func TestSaveUIInstanceCIZeroValuesShadowConfigYAML(t *testing.T) {
+	base := baseWithoutSSO + "    ci:\n        enabled: true\n        issuer: https://shared.example\n"
+	dir := writeConfigs(t, base, "", 0)
+	path := UIInstanceConfigPath(dir, 8081)
+
+	if err := SaveUIInstanceCI(path, CIConfig{}); err != nil {
+		t.Fatalf("SaveUIInstanceCI: %v", err)
+	}
+	after, _, err := LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance: %v", err)
+	}
+	if after.UI.CI.Enabled || after.UI.CI.Issuer != "" {
+		t.Errorf("enabled=%v issuer=%q: config.yaml showed through the overlay's zero values",
+			after.UI.CI.Enabled, after.UI.CI.Issuer)
+	}
+}
+
+// TestSaveUIInstanceSTTKey: the dictation key goes into the overlay, and an
+// empty key shadows the one in config.yaml instead of letting it show through.
+func TestSaveUIInstanceSTTKey(t *testing.T) {
+	base := baseWithoutSSO + "stt:\n    groq_api_key: gsk_shared\n    language: de\n"
+	dir := writeConfigs(t, base, "", 0)
+	path := UIInstanceConfigPath(dir, 8081)
+
+	if err := SaveUIInstanceSTTKey(path, "gsk_this_hub"); err != nil {
+		t.Fatalf("SaveUIInstanceSTTKey: %v", err)
+	}
+	after, _, err := LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance: %v", err)
+	}
+	if after.STT.GroqAPIKey != "gsk_this_hub" {
+		t.Errorf("GroqAPIKey = %q, want the overlay's", after.STT.GroqAPIKey)
+	}
+	if after.STT.Language != "de" {
+		t.Errorf("Language = %q: writing the key replaced the rest of the stt section", after.STT.Language)
+	}
+
+	if err := SaveUIInstanceSTTKey(path, ""); err != nil {
+		t.Fatalf("SaveUIInstanceSTTKey(\"\"): %v", err)
+	}
+	after, _, err = LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance: %v", err)
+	}
+	if after.STT.GroqAPIKey != "" {
+		t.Errorf("GroqAPIKey = %q after clearing: the shared key showed through", after.STT.GroqAPIKey)
+	}
+	shared, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if shared.STT.GroqAPIKey != "gsk_shared" {
+		t.Errorf("config.yaml's key is %q, want it untouched", shared.STT.GroqAPIKey)
+	}
+}
+
+// TestUIInstancePorts lists the hubs in a directory that have overlays, and
+// nothing that merely looks like one.
+func TestUIInstancePorts(t *testing.T) {
+	dir := writeConfigs(t, baseWithoutSSO, "ui: {}\n", 8081)
+	for _, name := range []string{
+		"config.ui-8080.yaml",  // a second hub
+		"config.ui-08082.yaml", // not a name UIInstanceConfigPath produces
+		"config.ui-99999.yaml", // not a port
+		"config.ui-x.yaml",
+		"config.ui-.yaml",
+		"config.ui-8083.yml",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, ".cloop", name), []byte("ui: {}\n"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	ports, err := UIInstancePorts(dir)
+	if err != nil {
+		t.Fatalf("UIInstancePorts: %v", err)
+	}
+	if len(ports) != 2 || ports[0] != 8080 || ports[1] != 8081 {
+		t.Errorf("UIInstancePorts = %v, want [8080 8081]", ports)
+	}
+
+	none, err := UIInstancePorts(t.TempDir())
+	if err != nil || len(none) != 0 {
+		t.Errorf("a directory with no .cloop: ports=%v err=%v, want none and no error", none, err)
+	}
+}

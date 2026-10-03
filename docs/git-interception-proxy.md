@@ -662,7 +662,10 @@ and the request context already ends when the peer hangs up.
 
 ### Turning it on
 
-One section in the hub's `.cloop/config.yaml`:
+One section in the hub's `.cloop/config.yaml`. Where two dashboards share a
+working directory, put it in the overlay of the hub that should run the proxy,
+`.cloop/config.ui-<port>.yaml`, so the other dashboard is unaffected (see
+[two dashboards in one directory](reference/configuration.md#two-dashboards-in-one-directory)):
 
 ```yaml
 executors:

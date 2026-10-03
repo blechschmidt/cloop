@@ -847,12 +847,20 @@ func (s *Server) handleCISettingsSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hubConfigMu.Lock()
-	cfg, err := config.Load(s.WorkDir)
-	if err != nil || cfg == nil {
+	// Write where this hub reads (Task 20364). ciEnabled and the relay read
+	// the hub's effective configuration, so with an overlay a save into
+	// config.yaml would be shadowed by it, and the panel would report a
+	// change the hub is not running under. It would also hand the setting
+	// to any other dashboard sharing the directory. The destination is
+	// chosen before loading, so config.yaml is only ever rewritten from
+	// itself.
+	save, err := s.beginHubSettingsSave()
+	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "load hub config"))
 		return
 	}
+	cfg := save.Config
 	was := cfg.UI.CI.Enabled
 	if req.Enabled != nil {
 		cfg.UI.CI.Enabled = *req.Enabled
@@ -900,7 +908,9 @@ func (s *Server) handleCISettingsSave(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := config.Save(s.WorkDir, cfg); err != nil {
+	if err := save.commit(func(overlay string) error {
+		return config.SaveUIInstanceCI(overlay, cfg.UI.CI)
+	}); err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
 		return

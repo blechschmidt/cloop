@@ -56,6 +56,24 @@ Commands are grouped below. Every group has more in it than the examples show â€
 	SilenceErrors: true,
 }
 
+// loadCommandConfig reads the configuration cmd runs under in dir.
+//
+// For `cloop ui` that is config.yaml with the hub's per-instance overlay
+// merged over it, the same view ui_cmd.go and pkg/ui start the hub from (Task
+// 20364). The policies applied from it below are ratchets, so reading only
+// config.yaml here would let a shared file that forbids host execution
+// override an overlay that allows it for this one hub. That contradicts the
+// overlay's documented merge, in which a key it states replaces config.yaml's.
+// Every other command reads config.yaml alone, because nothing but `cloop ui`
+// reads an overlay.
+func loadCommandConfig(cmd *cobra.Command, dir string) (*config.Config, error) {
+	if cmd == uiCmd {
+		cfg, _, err := config.LoadUIInstance(dir, uiPort)
+		return cfg, err
+	}
+	return config.Load(dir)
+}
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		// The one place a command error is rendered. "Error:" matches the
@@ -97,7 +115,7 @@ func init() {
 		// just changed. The host driver is registered by executors.go's
 		// init(); this adds the isolated backends the operator opted into.
 		if cwd, err := os.Getwd(); err == nil {
-			if cfg, cfgErr := config.Load(cwd); cfgErr == nil {
+			if cfg, cfgErr := loadCommandConfig(cmd, cwd); cfgErr == nil {
 				// Bound plan-history at write time (Task 20229). Applied for
 				// every command, not just the server, because the writer that
 				// grew .cloop/plan-history to 2 GB is the orchestrator â€” which

@@ -329,7 +329,9 @@ func (s *Server) controlPlaneDB() (*statedb.DB, error) {
 // re-read from disk: that switch is what Resolve actually consults, and a
 // banner that disagreed with enforcement would be worse than no banner.
 // Config is consulted only for the things the switch does not carry — whether
-// the value was explicit, and the advisory warnings.
+// the value was explicit, and the advisory warnings — and it is the hub's
+// effective config, so a policy stated in the per-instance overlay is reported
+// as the explicit choice it is (Task 20364).
 func (s *Server) executorPolicy() executorPolicyView {
 	allowed := executor.HostExecutionAllowed()
 	view := executorPolicyView{
@@ -337,7 +339,7 @@ func (s *Server) executorPolicy() executorPolicyView {
 		StrictMode:       !allowed,
 		Alternatives:     executor.IsolatedIDs(),
 	}
-	if cfg, err := config.Load(s.WorkDir); err == nil && cfg != nil {
+	if cfg, err := s.loadHubConfig(); err == nil && cfg != nil {
 		view.Explicit = cfg.Executors.HostProcessExplicit()
 		view.Warnings = config.ExecutorWarnings(cfg.Executors)
 	}

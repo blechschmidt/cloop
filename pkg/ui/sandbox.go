@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
-	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
@@ -78,7 +77,9 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 //
 // Read per call rather than cached, so an operator who tightens the policy sees
 // it apply to the next run instead of after a restart — the same expectation
-// every other section of config.yaml sets.
+// every other section of config.yaml sets. Read from the hub's effective
+// configuration, so a policy written in the per-instance overlay is enforced
+// here as well as in the drivers' bootstrap copy (Task 20364).
 //
 // A config that will not load yields the zero policy, which constrains nothing.
 // That is not a fail-open hole: this is the *early* check, and the executors
@@ -86,11 +87,7 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 // bootstrap. A hub whose config.yaml became unreadable mid-flight therefore
 // loses the friendly error, not the enforcement.
 func hubImagePolicy() imagepolicy.Policy {
-	dir := controlPlaneDir()
-	if dir == "" {
-		return imagepolicy.Policy{}
-	}
-	cfg, err := config.Load(dir)
+	cfg, err := controlPlaneConfig()
 	if err != nil || cfg == nil {
 		return imagepolicy.Policy{}
 	}

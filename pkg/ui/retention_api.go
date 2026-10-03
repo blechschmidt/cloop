@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/janitor"
 )
@@ -60,8 +59,9 @@ func (s *Server) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A project whose config will not parse still has a disk; report the
-	// default policy rather than failing the whole panel.
-	cfg, cfgErr := config.Load(workDir)
+	// default policy rather than failing the whole panel. Resolved the way the
+	// sweep resolves it, so the panel shows the policy that will run.
+	cfg, cfgErr := s.governingConfig(workDir)
 	if cfgErr != nil {
 		cfg = nil
 	}

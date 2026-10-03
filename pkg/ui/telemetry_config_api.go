@@ -166,7 +166,9 @@ func (s *Server) telemetryViewOf(t config.TelemetryConfig) telemetrySettingsView
 // this panel say "0 days" on the overwhelmingly common hub that configured
 // nothing — which is both wrong and alarming.
 func (s *Server) telemetryRetentionDays() int {
-	cfg, err := config.Load(s.WorkDir)
+	// The hub's effective configuration, because that is what the janitor
+	// prunes the hub's telemetry table under (governingConfig).
+	cfg, err := s.loadHubConfig()
 	if err != nil || cfg == nil {
 		return int(janitor.DefaultTelemetryMaxAge / (24 * time.Hour))
 	}
@@ -268,30 +270,22 @@ func (s *Server) handleTelemetrySettingsSave(w http.ResponseWriter, r *http.Requ
 	// here. The destination is chosen before loading, so config.yaml is only
 	// ever rewritten from itself — never from a view merged with the overlay,
 	// which would copy this hub's SSO block into the shared file.
-	overlay := s.hubConfigOverlay()
-	var cfg *config.Config
-	var err error
-	if overlay != "" {
-		cfg, err = s.loadHubConfig()
-	} else {
-		cfg, err = config.Load(s.WorkDir)
-	}
-	if err != nil || cfg == nil {
+	save, err := s.beginHubSettingsSave()
+	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "load hub config"))
 		return
 	}
+	cfg := save.Config
 	was := cfg.UI.Telemetry
 	if err := applyTelemetryRequest(&cfg.UI.Telemetry, req); err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 		return
 	}
-	if overlay != "" {
-		err = config.SaveUIInstanceTelemetry(overlay, cfg.UI.Telemetry)
-	} else {
-		err = config.Save(s.WorkDir, cfg)
-	}
+	err = save.commit(func(overlay string) error {
+		return config.SaveUIInstanceTelemetry(overlay, cfg.UI.Telemetry)
+	})
 	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))

@@ -81,6 +81,13 @@ schema and the hub's HTTP API may change in any release.
 - **The error boundary ships without its comments too.** `errboundary.js`, the
   one first-paint script still served as written, goes through the bundle's
   line-preserving comment stripper: 4.9 KB → 2.6 KB on the wire.
+- **`cloop ui --port N` applies its executor policy with its overlay merged.**
+  `executors.allow_host_process`, `min_agent_build` and `limits` were applied
+  at startup from `config.yaml` alone, before the hub read its overlay. They
+  only ever tighten, so the shared file's value always won. An overlay that
+  says `allow_host_process: true` now relaxes a shared `config.yaml` that says
+  `false`, for that hub alone, as the overlay's per-key merge has always been
+  documented to do.
 
 ### Fixed
 
@@ -111,6 +118,26 @@ schema and the hub's HTTP API may change in any release.
   install. It is now the policy refusal: a `409` `host_execution_denied` that
   names the setting and what to configure.
 
+### Security
+
+- **Hub-scope settings in a per-instance overlay now govern the hub.** `cloop ui
+  --port N` merged `.cloop/config.ui-N.yaml` over `config.yaml` for its `ui.*`
+  settings, but read every other hub-scope setting from `config.yaml` alone. An
+  overlay that set `executors.allow_host_process: false` still let the dashboard
+  spawn harnesses on its host. An image allowlist there admitted any image.
+  `executors.git_proxy` there started no proxy, so forge credentials went into
+  sandboxes as if none were configured. `min_agent_build`, `limits`,
+  `auto_install_harness`, the container and Kubernetes drivers, retention,
+  backup, dictation and the hub's `github.token` were ignored the same way.
+  Every hub-scope read now goes through one overlay-aware accessor, and a source
+  gate fails on any new `config.Load` in `pkg/ui` that is not on its
+  project-scope allowlist. The configuration reference lists the hub-scope keys.
+- **Settings saves no longer leak between dashboards.** On a hub with an
+  overlay, saving CI federation or the dictation key rewrote the shared
+  `config.yaml`. The overlay hid the change from this hub, and the other
+  dashboard reading that file picked it up. Saves now write the overlay when one
+  exists (`ui.ci`, `stt.groq_api_key`) and leave `config.yaml` byte for byte as
+  it was. Without one, `config.yaml` is rewritten only from itself.
 ## [0.0.4] - 2026-09-27
 
 The first release that ships 0.0.2's installer fix. 0.0.2 was tagged on

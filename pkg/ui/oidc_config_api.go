@@ -343,12 +343,21 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 	}
 
 	hubConfigMu.Lock()
-	cfg, err := s.loadHubConfig()
-	if err != nil || cfg == nil {
+	// Write where this hub reads (Task 20318). On a host where a second
+	// dashboard shares the working directory, saving SSO into the shared
+	// config.yaml would be wrong in both directions at once: this hub would
+	// not pick the change up, because its own overlay still shadows it, and
+	// the other hub would pick up a redirect_url naming an origin it does not
+	// serve. So an overlay, once it exists, is what the panel maintains. The
+	// destination is chosen before loading (Task 20364), so config.yaml is
+	// only ever rewritten from itself.
+	save, err := s.beginHubSettingsSave()
+	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "load hub config"))
 		return
 	}
+	cfg := save.Config
 	was := cfg.UI.OIDC
 	applyOIDCRequest(&cfg.UI.OIDC, req)
 
@@ -365,17 +374,9 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 		writeOIDCProblem(w, err)
 		return
 	}
-	// Write where this hub read (Task 20318). On a host where a second
-	// dashboard shares the working directory, saving SSO into the shared
-	// config.yaml would be wrong in both directions at once: this hub would
-	// not pick the change up, because its own overlay still shadows it, and
-	// the other hub would pick up a redirect_url naming an origin it does not
-	// serve. So an overlay, once it exists, is what the panel maintains.
-	if overlay := s.hubConfigOverlay(); overlay != "" {
-		err = config.SaveUIInstanceOIDC(overlay, cfg.UI.OIDC)
-	} else {
-		err = config.Save(s.WorkDir, cfg)
-	}
+	err = save.commit(func(overlay string) error {
+		return config.SaveUIInstanceOIDC(overlay, cfg.UI.OIDC)
+	})
 	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))

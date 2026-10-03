@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -104,7 +103,9 @@ func (s *Server) runAutoBackupSweep() {
 // All file operations are best-effort with errors logged via the server
 // logger when present.
 func (s *Server) maybeAutoBackup(workDir string) {
-	cfg, err := config.Load(workDir)
+	// The hub's own directory takes its backup policy from the hub's
+	// effective configuration, overlay included (Task 20364).
+	cfg, err := s.governingConfig(workDir)
 	if err != nil {
 		s.logAutoBackup(workDir, "load config: "+err.Error())
 		return

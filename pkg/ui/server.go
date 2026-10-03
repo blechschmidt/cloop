@@ -797,8 +797,10 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	setProcessCluster(node)
 	// Register the built-in execution drivers and point the registry at
 	// this control plane's persisted project→executor bindings, so every
-	// handler can call executor.Resolve (Task 20156).
-	bootstrapExecutors(workdir)
+	// handler can call executor.Resolve (Task 20156). The port names this
+	// hub's per-instance overlay, whose hub-scope settings the executors are
+	// started from (Task 20364).
+	bootstrapExecutors(workdir, port)
 	return &Server{
 		Cluster:         node,
 		WorkDir:         workdir,

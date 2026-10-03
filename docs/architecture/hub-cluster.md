@@ -78,6 +78,12 @@ take a member out of rotation). Each member advertises
 
 Per-member settings, if a member needs any, go in its instance overlay
 (`.cloop/config.ui-<port>.yaml`); `.cloop/config.yaml` is shared by all of them.
+Each member enforces its own merged view of the
+[hub-scope keys](../reference/configuration.md#two-dashboards-in-one-directory),
+so a policy written into one member's overlay (`executors.allow_host_process`,
+`sandbox.image_policy`, `executors.git_proxy`) binds that member only. The load
+balancer would then decide per request which policy applies. Put policy that
+every member must enforce in `config.yaml`.
 
 ### In containers on one host
 

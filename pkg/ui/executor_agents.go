@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
@@ -102,10 +101,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			SandboxSource: sandboxSettingsFactory(db),
 			// Whether a device may be asked to install a harness it lacks
 			// (Task 20336). Read per dispatch, not captured here, so an
-			// operator who turns it off in config.yaml governs the next task
-			// rather than the next restart of this process.
+			// operator who turns it off in config.yaml or in this hub's
+			// overlay governs the next task rather than the next restart of
+			// this process.
 			AutoInstallHarness: func() bool {
-				cfg, err := config.Load(s.WorkDir)
+				cfg, err := s.loadHubConfig()
 				if err != nil || cfg == nil {
 					// An unreadable config states no policy, and the default
 					// policy is permissive. Failing closed here would be the

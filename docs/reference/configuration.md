@@ -1555,16 +1555,39 @@ ui:
   `config.yaml`, so a limit cannot be escaped by writing it one file over.
 - **A parse error is fatal**, for the same reason it is in `config.yaml`: the
   file decides whether anyone has to log in.
-- **Only `cloop ui` reads it.** Put settings that describe *this hub* in it —
-  `ui.oidc`, `ui.tls`, the origin allowlist, the WebSocket caps,
-  `ui.telemetry`. Leave API keys and budgets in `config.yaml`, where every other
-  command reads them.
-- **The Settings panel follows the hub.** Once an overlay exists, `PUT
-  /api/config/oidc` and `PUT /api/config/telemetry` maintain the `ui.oidc` and
-  `ui.telemetry` blocks *in the overlay*, preserving the rest of the file and
-  its comments. Without one they write `config.yaml` as before.
+- **Only `cloop ui` reads it.** Put settings that describe *this hub* in it:
+  the hub-scope keys below. Leave API keys, budgets, the provider and the model
+  in `config.yaml`, where every other command reads them. `cloop run` never
+  reads an overlay, so a provider written there would describe a run that
+  never happens.
+- **The Settings panel follows the hub.** Once an overlay exists, the panels
+  that save hub settings (`PUT /api/config/oidc`, `/api/config/telemetry`,
+  `/api/ci/config` and `/api/config/stt`) write the keys they edit *into the
+  overlay*. They keep the rest of that file and its comments, and leave
+  `config.yaml` byte for byte as it was. Without an overlay they write
+  `config.yaml` as before.
 - Give it mode `0600`: it can hold a client secret, and `cloop ui` warns if it
   is readable by anyone else.
+
+**Hub-scope keys.** `cloop ui` reads each of these with its overlay merged in:
+
+| Key | What the hub does with it |
+| --- | --- |
+| `executors.allow_host_process` | Whether a harness may run on this host at all. `false` in the overlay puts this hub in strict mode; `true` there relaxes a shared `config.yaml` that says `false`, for this hub alone. |
+| `executors.min_agent_build`, `executors.limits` | The oldest agent build the hub will place work on, and the fleet resource ceiling. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can lower either one. |
+| `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
+| `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
+| `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
+| `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
+| `ui.*` | Sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
+| `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |
+| `retention`, `audit` | The janitor's policy for the hub's own directory. Every other project keeps its own. |
+| `backup` | Auto-backup of the hub's own directory. |
+| `github.token` | The token the hub hands a pull request that runs on its own host. |
+
+Settings read at startup (the drivers, the git proxy, the Kubernetes monitor,
+the three executor ratchets) take effect at the next restart, whichever file
+they are in. The rest are read on each use.
 
 It is a separate file rather than a port-keyed section of `config.yaml` because
 of what an older binary sharing the directory does with a key it does not know:

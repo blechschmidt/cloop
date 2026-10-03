@@ -92,7 +92,15 @@ var (
 // activeGitProxy returns the running proxy, or nil.
 func activeGitProxy() *gitProxyService { return gitProxySingleton.Load() }
 
-// ensureGitProxy starts the proxy configured in dir, once per process.
+// ensureGitProxy starts the proxy cfg configures for the control plane in dir,
+// once per process.
+//
+// cfg is the hub's effective configuration, handed down by bootstrapExecutors
+// rather than re-read here, so an executors.git_proxy section in the hub's
+// per-instance overlay starts the proxy (Task 20364). Reading the bare
+// config.yaml instead made the proxy impossible to enable for one of two
+// dashboards sharing a directory without enabling it for both. A nil cfg is a
+// configuration that could not be read, and starts nothing.
 //
 // It must run before any executor is registered: the Kubernetes driver is
 // given its credential source during reconciliation, which happens in New,
@@ -105,10 +113,9 @@ func activeGitProxy() *gitProxyService { return gitProxySingleton.Load() }
 // certificate would be a poor trade — but a hub that silently dropped a
 // security control its config asked for would be worse, so the message says
 // exactly what is not in effect.
-func ensureGitProxy(dir string) {
+func ensureGitProxy(cfg *config.Config, dir string) {
 	gitProxyOnce.Do(func() {
-		cfg, err := config.Load(dir)
-		if err != nil || cfg == nil {
+		if cfg == nil {
 			return
 		}
 		gitProxyRequired.Store(cfg.Executors.GitProxy.Enabled)

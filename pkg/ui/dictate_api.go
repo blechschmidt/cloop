@@ -120,13 +120,18 @@ func (s *Server) sttConfig(r *http.Request) stt.Config {
 // "what does the hub itself have?" — which is the one that matters, because
 // dictation is only ever called without a project index. See the settings
 // section at the bottom of this file.
+//
+// Each directory is read through governingConfig, so the hub's own directory
+// answers with its per-instance overlay merged in (Task 20364): stt is a hub
+// setting, and on a host where two dashboards share config.yaml the key one
+// of them dictates with belongs in that hub's overlay.
 func (s *Server) sttConfigFrom(dirs ...string) stt.Config {
 	merged := config.STTConfig{}
 	for _, dir := range dirs {
 		if dir == "" {
 			continue
 		}
-		cfg, err := config.Load(dir)
+		cfg, err := s.governingConfig(dir)
 		if err != nil || cfg == nil {
 			continue
 		}
@@ -353,9 +358,10 @@ type sttSettings struct {
 	// HasKey is whether dictation has a key from anywhere at all.
 	HasKey bool `json:"has_key"`
 
-	// Stored is whether the hub's own config.yaml holds one. It is what makes
-	// "Clear" meaningful: a key arriving from the environment is not ours to
-	// remove, and a button offering to would be lying.
+	// Stored is whether the hub's own configuration (config.yaml, or this
+	// hub's overlay where it has one) holds one. It is what makes "Clear"
+	// meaningful: a key arriving from the environment is not ours to remove,
+	// and a button offering to would be lying.
 	Stored bool `json:"stored"`
 
 	// FromEnv is whether GROQ_API_KEY is currently the one in force, so the
@@ -465,19 +471,25 @@ func (s *Server) handleSTTSettingsClear(w http.ResponseWriter, r *http.Request) 
 
 // writeHubSTTKey stores key as the hub's dictation credential, or removes it
 // when key is empty.
+//
+// It writes where this hub reads (Task 20364). With an overlay, the key goes
+// into the overlay and config.yaml is left byte for byte as it was. That file
+// is shared with any other dashboard in the directory, which would otherwise
+// start dictating with this hub's key, and an older one rewriting it would
+// drop keys it does not know. Clearing writes an empty key into the overlay,
+// so a key in config.yaml does not show through a Clear.
 func (s *Server) writeHubSTTKey(key string) error {
 	hubConfigMu.Lock()
 	defer hubConfigMu.Unlock()
 
-	cfg, err := config.Load(s.WorkDir)
+	save, err := s.beginHubSettingsSave()
 	if err != nil {
-		return fmt.Errorf("load hub config: %w", err)
+		return err
 	}
-	if cfg == nil {
-		return errors.New("load hub config: no configuration")
-	}
-	cfg.STT.GroqAPIKey = key
-	if err := config.Save(s.WorkDir, cfg); err != nil {
+	save.Config.STT.GroqAPIKey = key
+	if err := save.commit(func(overlay string) error {
+		return config.SaveUIInstanceSTTKey(overlay, key)
+	}); err != nil {
 		return fmt.Errorf("save hub config: %w", err)
 	}
 	return nil

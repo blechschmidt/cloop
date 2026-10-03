@@ -53,6 +53,12 @@ var builtinExecutorsOnce sync.Once
 var (
 	controlPlaneDirMu    sync.RWMutex
 	controlPlaneDirValue string
+	// controlPlanePortValue is the listen port of the hub that bootstrapped
+	// the control plane, which names its per-instance overlay (Task 20364).
+	// Zero means none, so config.yaml alone applies. That is what an
+	// embedder or a test building a Server on port 0 gets. Set together with
+	// controlPlaneDirValue and read together through controlPlaneSource.
+	controlPlanePortValue int
 )
 
 // controlPlaneDir returns the directory holding the control plane's own
@@ -98,24 +104,32 @@ func registerBuiltinExecutors() {
 // configured isolating ones, applies the host-execution policy, points the
 // registry at this control plane's persisted project→executor bindings, and
 // records a row for every backend that can run work.
-func bootstrapExecutors(dir string) {
+//
+// port is the hub's listen port, which names its per-instance overlay. The
+// effective configuration (config.yaml with that overlay merged over it) is
+// read once, here, and handed to every process singleton started below.
+// Before Task 20364 each of them re-read the bare config.yaml, so an overlay
+// that set allow_host_process: false, an image policy or a git proxy was
+// merged for the startup banner and ignored by the code that enforces it.
+func bootstrapExecutors(dir string, port int) {
+	cfg := bootstrapHubConfig(dir, port)
 	// The git interception proxy before anything that could be handed a
 	// credential source. Reconciliation below gives the Kubernetes driver its
 	// source once and keeps it for the process's life, so a proxy started
 	// after this point would route the edge devices that connect later and
 	// silently miss every Pod. See gitproxy.go.
-	ensureGitProxy(dir)
+	ensureGitProxy(cfg, dir)
 	// The Kubernetes access monitor, for the same reason and at the same
 	// point: a broker built before it exists would deliver an unmonitored
 	// kubeconfig. See kubeguard.go.
-	ensureKubeGuard(dir)
+	ensureKubeGuard(cfg, dir)
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
 	// driver in through the door the policy exists to close. (The eviction
 	// sweep in ApplyHostExecutionPolicy covers the reverse order too, since
 	// other entry points also register; doing it in the right order here
 	// means the refusal is the normal path rather than the repair.)
-	applyHostExecutionPolicy(dir)
+	applyHostExecutionPolicy(cfg)
 	// Host driver before the configured ones so it keeps being the registry
 	// default on a permissive single-machine install — Register makes the
 	// first executor the default, and an operator who enabled a container
@@ -124,9 +138,10 @@ func bootstrapExecutors(dir string) {
 	// refused and the first isolating driver below becomes the default,
 	// which is exactly what that mode is asking for.
 	registerBuiltinExecutors()
-	reconcileConfiguredExecutors(dir)
+	reconcileConfiguredExecutors(dir, cfg)
 	controlPlaneDirMu.Lock()
 	controlPlaneDirValue = dir
+	controlPlanePortValue = port
 	controlPlaneDirMu.Unlock()
 	executor.SetBindingLookup(func(projectPath string) (string, bool) {
 		return lookupProjectExecutor(dir, projectPath)
@@ -150,9 +165,9 @@ func bootstrapExecutors(dir string) {
 	startExecutorSupervisor(dir)
 }
 
-// applyHostExecutionPolicy reads executors.allow_host_process and installs it
-// on the process-wide switch that executor.Resolve and the localprocess driver
-// both consult (Task 20160).
+// applyHostExecutionPolicy installs cfg's executors.allow_host_process on the
+// process-wide switch that executor.Resolve and the localprocess driver both
+// consult (Task 20160), along with the build floor and the resource ceiling.
 //
 // The `cloop ui` command reaches here through cmd/root.go's PersistentPreRunE,
 // which has already applied the same setting. Doing it again is deliberate:
@@ -166,15 +181,12 @@ func bootstrapExecutors(dir string) {
 // single-project mode, so a symmetric apply would let a managed project's own
 // config.yaml re-enable host execution for the whole control plane.
 //
-// A config that cannot be read leaves the switch untouched — the setting lives
-// in that file, so an unreadable one means "no policy stated here", not
-// "policy withdrawn".
-func applyHostExecutionPolicy(dir string) {
-	if strings.TrimSpace(dir) == "" {
-		return
-	}
-	cfg, err := config.Load(dir)
-	if err != nil || cfg == nil {
+// cfg is the hub's effective configuration, overlay included (Task 20364).
+// A config that cannot be read arrives as nil and leaves the switch untouched
+// — the setting lives in that file, so an unreadable one means "no policy
+// stated here", not "policy withdrawn".
+func applyHostExecutionPolicy(cfg *config.Config) {
+	if cfg == nil {
 		return
 	}
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
@@ -199,15 +211,13 @@ func applyHostExecutionPolicy(dir string) {
 // with allow_host_process: false therefore had the host driver correctly
 // refused and no isolating driver registered, and nothing anywhere said so.
 //
-// A config that cannot be read is not an error: single-project `cloop ui`
+// cfg is the hub's effective configuration, so the drivers take their copy of
+// the image trust policy from the overlay too (Task 20364). A config that
+// cannot be read arrives as nil and is not an error: single-project `cloop ui`
 // runs in directories that have no executors section at all, and the host
 // driver registered above is the whole configuration those deployments need.
-func reconcileConfiguredExecutors(dir string) {
-	if strings.TrimSpace(dir) == "" {
-		return
-	}
-	cfg, err := config.Load(dir)
-	if err != nil || cfg == nil {
+func reconcileConfiguredExecutors(dir string, cfg *config.Config) {
+	if strings.TrimSpace(dir) == "" || cfg == nil {
 		return
 	}
 	node := currentCluster()

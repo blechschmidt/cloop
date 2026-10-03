@@ -51,8 +51,8 @@ Three facts carry most of it:
  hub process: cloop ui
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │ bootstrapExecutors                                                          │
- │  └─ ensureGitProxy(dir)   once per process, before any executor exists      │
- │       reads executors.git_proxy from .cloop/config.yaml                     │
+ │  └─ ensureGitProxy(cfg, dir)  once per process, before any executor exists  │
+ │       cfg: config.yaml with this hub's config.ui-<port>.yaml merged in      │
  │       └─ startGitProxy ─▶ gitProxyService  (process singleton)              │
  │            ├─ TLS listener (pkg/tlsconf) ◀─────────────── sandboxes' git    │
  │            ├─ gitproxy.Proxy     smart-HTTP handler, policy per ref ─▶ forge│
@@ -75,7 +75,7 @@ Three facts carry most of it:
 
 | Piece | Where | Role |
 | --- | --- | --- |
-| `executors.git_proxy` | `pkg/config/gitproxy.go` | The section. `GitProxyConfig.Policy()` turns it into the hub's policy: `allowed_refs` (default `refs/heads/cloop/**`), create and update, delete only with `allow_delete`, fetch always. Read from `.cloop/config.yaml` only — not from a per-instance `config.ui-<port>.yaml` overlay — and only at startup. There is no dashboard setting for it. See [turning it on](../git-interception-proxy.md#turning-it-on). |
+| `executors.git_proxy` | `pkg/config/gitproxy.go` | The section. `GitProxyConfig.Policy()` turns it into the hub's policy: `allowed_refs` (default `refs/heads/cloop/**`), create and update, delete only with `allow_delete`, fetch always. Read once, at startup, from the hub's effective configuration: `.cloop/config.yaml` with the hub's per-instance `config.ui-<port>.yaml` overlay merged in (Task 20364), so one of two dashboards sharing a directory can run the proxy without the other. There is no dashboard setting for it. See [turning it on](../git-interception-proxy.md#turning-it-on). |
 | `ensureGitProxy`, `startGitProxy` | `pkg/ui/gitproxy.go` | Start the proxy once per process. Record separately whether the configuration *asked* for one (`gitProxyRequired`), so "wanted" and "running" are never the same fact. |
 | `gitproxy.Registry` | `pkg/gitproxy/session.go` | Sessions keyed by id, each holding `sha256(token)` — never the token — beside the upstream credential and the policy. No HTTP in it. |
 | `gitproxy.Proxy` | `pkg/gitproxy/proxy.go` | The three smart-HTTP routes. Authenticates, checks the repository, parses a push's command list, decides, and only then attaches the forge credential. |
