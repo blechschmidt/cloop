@@ -32,19 +32,29 @@ import (
 
 // definitionFields are the pm.Task fields a person edits, as opposed to the
 // ones the executing run writes. The names must match pm.Task's fields;
-// TestDefinitionFieldsExist pins that.
+// TestDefinitionFieldsExist pins that, and TestEveryTaskFieldIsClassified
+// makes every new pm.Task field land here or on the run's side on purpose.
 //
-// Only fields the database persists belong here. plan_tasks has no column for
-// Assignee, Links, SprintID, StoryPoints, OnSuccess/OnFailure, RetryBudget and
-// a few others, so they read back as zero; the merge would take that zero for
-// another process's edit and clear the value this process holds — the
-// OnSuccess branches of the plan it is running, say — at its first sync after
-// a save. TestDefinitionFieldsRoundTrip pins that every field listed here
-// survives a save and a load; give plan_tasks a column before adding one.
+// The second group are the fields Task 20361 gave plan_tasks columns: who a
+// task is assigned to and where it links, its sprint, its estimates and
+// scores, its branches and its retry budget. All are set from outside a run —
+// the dashboard, `cloop team assign`, `cloop task link` and `task branch`,
+// sprint planning, the AI analysis commands — and none by the run itself, so
+// an edit made while a run holds the plan has to survive that run's next save.
+//
+// Only fields the database persists belong here. One that read back as zero
+// would be taken for another process's edit, and the merge would clear the
+// value this process holds — the OnSuccess branches of the plan it is running,
+// say — at its first sync after a save. TestDefinitionFieldsRoundTrip pins
+// that every field listed here survives a save and a load.
 var definitionFields = []string{
 	"Title", "Description", "Priority", "Role", "DependsOn", "Deadline",
 	"EstimatedMinutes", "Tags", "Condition", "Recurrence", "RequiresApproval",
 	"Approved", "MaxMinutes", "Pinned", "GitHubIssue",
+
+	"Assignee", "ExternalURL", "Links", "SprintID", "ComplexitySize",
+	"StoryPoints", "OnSuccess", "OnFailure", "RiskScore", "ImpactScore",
+	"RetryBudget",
 }
 
 // definitionIndex holds each definition field's index in pm.Task, resolved

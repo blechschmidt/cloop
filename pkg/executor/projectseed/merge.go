@@ -229,26 +229,27 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		if tc.Before == nil || tc.After == nil {
 			continue
 		}
-		id := tc.After.ID
+		after := keepUnstoredVerdict(tc.Before, tc.After)
+		id := after.ID
 		h := byID[id]
 		switch {
 		case h == nil:
-			if outcomeChanged(tc.Before, tc.After) {
+			if outcomeChanged(tc.Before, after) {
 				rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d was deleted on the hub, so the run's outcome for it (%s) was not restored.",
-					id, statusWord(tc.After.Status)))
+					id, statusWord(after.Status)))
 			}
 			continue
 		case h.Title != tc.Before.Title:
-			if outcomeChanged(tc.Before, tc.After) {
+			if outcomeChanged(tc.Before, after) {
 				rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d is now %q on the hub, not the %q the run worked on, so the run's outcome (%s) was not applied to it.",
-					id, clip(h.Title, 80), clip(tc.Before.Title, 80), statusWord(tc.After.Status)))
+					id, clip(h.Title, 80), clip(tc.Before.Title, 80), statusWord(after.Status)))
 			}
 			continue
 		}
-		if !outcomeChanged(tc.Before, tc.After) {
+		if !outcomeChanged(tc.Before, after) {
 			// The run touched the task without changing its outcome — a note
 			// added, say. Notes are history, and history is kept.
-			if appendAnnotations(h, tc.Before, tc.After, scrub) {
+			if appendAnnotations(h, tc.Before, after, scrub) {
 				rep.Updated = append(rep.Updated, id)
 				rep.Outcomes[id] = h.Status
 			}
@@ -256,16 +257,16 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		}
 		if !sameOutcome(h, tc.Before) {
 			rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d was set to %s on the hub while the run was out; the run reported %s.",
-				id, statusWord(h.Status), statusWord(tc.After.Status)))
+				id, statusWord(h.Status), statusWord(after.Status)))
 			continue
 		}
-		if !validStatus(tc.After.Status) {
-			rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d came back with an unknown status %q.", id, clip(string(tc.After.Status), 32)))
+		if !validStatus(after.Status) {
+			rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d came back with an unknown status %q.", id, clip(string(after.Status), 32)))
 			continue
 		}
-		startedByRun := !sameTime(tc.Before.StartedAt, tc.After.StartedAt) || tc.Before.Status != tc.After.Status
-		applyOutcome(h, tc.After, scrub)
-		appendAnnotations(h, tc.Before, tc.After, scrub)
+		startedByRun := !sameTime(tc.Before.StartedAt, after.StartedAt) || tc.Before.Status != after.Status
+		applyOutcome(h, after, scrub)
+		appendAnnotations(h, tc.Before, after, scrub)
 		if startedByRun {
 			stamp(h, prov)
 		}
@@ -539,6 +540,26 @@ func mergeStatus(st *state.ProjectState, r *Result, scrub func(string) string, r
 	if st.Status != from {
 		rep.StatusFrom, rep.StatusTo = from, st.Status
 	}
+}
+
+// keepUnstoredVerdict gives back a TDD verdict the device dropped because it
+// could not store it (Task 20361).
+//
+// plan_tasks had no column for TDDStatus or TDDScore before migration 0054, so
+// a device whose cloop predates it reads every task back without them — and
+// both are outcome fields, which this merge takes from the run. Taken at its
+// word, such a device would report a changed outcome for every verified task it
+// was sent and wipe the hub's verdicts. A run never clears a verdict: `cloop
+// task tdd --verify` is the only writer, and it records pass or fail. So a
+// verdict that went from set to nothing was lost in storage, not decided, and
+// the hub's stands. after is not modified; the copy carries the hub's verdict.
+func keepUnstoredVerdict(before, after *pm.Task) *pm.Task {
+	if after.TDDStatus != "" || after.TDDScore != 0 || (before.TDDStatus == "" && before.TDDScore == 0) {
+		return after
+	}
+	c := *after
+	c.TDDStatus, c.TDDScore = before.TDDStatus, before.TDDScore
+	return &c
 }
 
 // outcomeChanged reports whether the run changed a task's outcome.

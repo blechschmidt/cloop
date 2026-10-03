@@ -220,6 +220,9 @@ func additiveAlter(f []string, created map[string]bool) bool {
 	if len(rest) > 0 && strings.EqualFold(rest[0], "COLUMN") {
 		rest = rest[1:]
 	}
+	// The runner's idempotent form (addcolumn.go). It adds the same column as
+	// the plain statement or nothing at all, so it classifies the same way.
+	rest = skipIfNotExists(rest)
 	if len(rest) < 2 {
 		// A bare name with no type is a form this function did not anticipate.
 		return false

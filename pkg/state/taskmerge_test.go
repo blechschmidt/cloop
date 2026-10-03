@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -208,6 +209,8 @@ func TestDefinitionFieldsRoundTrip(t *testing.T) {
 			f.Set(reflect.ValueOf([]int{1}))
 		case f.Type() == reflect.TypeOf([]string(nil)):
 			f.Set(reflect.ValueOf([]string{"set-" + name}))
+		case f.Type() == reflect.TypeOf([]pm.Link(nil)):
+			f.Set(reflect.ValueOf([]pm.Link{{URL: "https://example.com/" + name, Label: name, Kind: pm.LinkKindDoc}}))
 		case f.Type() == reflect.TypeOf((*time.Time)(nil)):
 			f.Set(reflect.ValueOf(&deadline))
 		default:
@@ -227,11 +230,12 @@ func TestDefinitionFieldsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAFieldTheDatabaseDropsStaysInMemory: a value the running process holds in
-// a field plan_tasks has no column for — the OnSuccess branch of a plan it
-// made, say — is still there after its own save and its next sync, as it was
-// before the merge existed.
-func TestAFieldTheDatabaseDropsStaysInMemory(t *testing.T) {
+// TestTheRunKeepsItsOwnBranchesAcrossASync: values the running process set
+// itself — the OnSuccess branch of a plan it made, an assignee — are still
+// there after its own save and its next sync. Until Task 20361 the database
+// dropped these fields, and this test pinned that the merge at least did not
+// make that worse; now they are stored and merged like any definition field.
+func TestTheRunKeepsItsOwnBranchesAcrossASync(t *testing.T) {
 	dir := planProject(t)
 	run := mustLoad(t, dir)
 	task := run.Plan.TaskByID(1)
@@ -246,6 +250,88 @@ func TestAFieldTheDatabaseDropsStaysInMemory(t *testing.T) {
 	if !reflect.DeepEqual(task.OnSuccess, []string{"2"}) || task.Assignee != "alice" {
 		t.Errorf("on_success = %v, assignee = %q after a sync; the run lost its own values",
 			task.OnSuccess, task.Assignee)
+	}
+	if got := mustLoad(t, dir).Plan.TaskByID(1); !reflect.DeepEqual(got.OnSuccess, []string{"2"}) {
+		t.Errorf("on_success on disk = %v; a branched plan would stop branching at the next load", got.OnSuccess)
+	}
+}
+
+// TestAPlanningEditDuringARunSurvivesTheRunsSave is the case the new columns
+// exist for: sprint planning, an assignment and a branch set from outside
+// while a run holds the plan must outlive the run's next save, as an edited
+// description already does.
+func TestAPlanningEditDuringARunSurvivesTheRunsSave(t *testing.T) {
+	dir := planProject(t)
+	run := mustLoad(t, dir)
+
+	ui := mustLoad(t, dir)
+	edited := ui.Plan.TaskByID(2)
+	edited.Assignee = "bob"
+	edited.SprintID = 3
+	edited.StoryPoints = 5
+	edited.OnFailure = []string{"1"}
+	edited.RetryBudget = 4
+	edited.Links = []pm.Link{{URL: "https://tracker.example/T-7", Kind: pm.LinkKindTicket}}
+	if err := ui.SaveDirect(); err != nil {
+		t.Fatalf("the edit's SaveDirect: %v", err)
+	}
+
+	run.Plan.TaskByID(1).Status = pm.TaskInProgress
+	if err := run.Save(); err != nil {
+		t.Fatalf("the run's Save: %v", err)
+	}
+
+	got := mustLoad(t, dir).Plan.TaskByID(2)
+	if got.Assignee != "bob" || got.SprintID != 3 || got.StoryPoints != 5 || got.RetryBudget != 4 ||
+		!reflect.DeepEqual(got.OnFailure, []string{"1"}) || len(got.Links) != 1 {
+		t.Errorf("task 2 after the run's save = %+v; the run wrote its stale copy over the edit", got)
+	}
+	if d := run.Plan.TaskByID(2); d.Assignee != "bob" || d.RetryBudget != 4 {
+		t.Errorf("the run's in-memory task 2 did not adopt the edit: %+v", d)
+	}
+}
+
+// runFields are the pm.Task fields the executing run owns: status, outcome,
+// timing, counters and where it ran. They are not merged, so a writer holding a
+// stale copy cannot undo what a worker recorded (see taskmerge.go). The TDD
+// verdict is an outcome of the same kind — projectseed's merge takes it from
+// the run that produced it — and is listed here with them.
+var runFields = []string{
+	"Status", "Result", "StartedAt", "CompletedAt", "VerifyRetries", "ActualMinutes",
+	"ArtifactPath", "FailureDiagnosis", "FailCount", "HealAttempts", "Annotations",
+	"NextRunAt", "TDDStatus", "TDDScore", "WriteBackBranch", "WriteBackCommit",
+	"ExecutorID", "ExecutorKind", "Isolation", "Background", "Abort", "Review",
+}
+
+// derivedFields are not stored as themselves: RunID is read from task_runs, and
+// ChainInput is rebuilt from the chained predecessor's output at dispatch.
+var derivedFields = []string{"ID", "RunID", "ChainInput"}
+
+// TestEveryTaskFieldIsClassified: a new pm.Task field has to be put on one
+// side on purpose. Left off both lists, it would be written back from a
+// stale copy by every save of a running process — the bug Task 20349 fixed
+// for the fields it knew about.
+func TestEveryTaskFieldIsClassified(t *testing.T) {
+	class := map[string]string{}
+	for list, names := range map[string][]string{
+		"definitionFields": definitionFields, "runFields": runFields, "derivedFields": derivedFields,
+	} {
+		for _, name := range names {
+			if prev, dup := class[name]; dup {
+				t.Errorf("%s is in both %s and %s", name, prev, list)
+			}
+			class[name] = list
+		}
+	}
+	for _, name := range taskfill.Fields() {
+		if _, ok := class[name]; !ok {
+			t.Errorf("pm.Task.%s is in none of definitionFields, runFields or derivedFields: "+
+				"decide whether a run's save may write a stale copy of it back", name)
+		}
+		delete(class, name)
+	}
+	for name, list := range class {
+		t.Errorf("%s names %s, which pm.Task does not have", list, name)
 	}
 }
 

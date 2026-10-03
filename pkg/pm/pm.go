@@ -200,7 +200,10 @@ type Task struct {
 	ComplexitySize   string       `json:"complexity_size,omitempty"`   // T-shirt size: XS/S/M/L/XL (set by ai-complexity)
 	StoryPoints      int          `json:"story_points,omitempty"`      // Fibonacci story points: 1/2/3/5/8/13 (set by ai-complexity)
 	// ChainInput holds the previous task's output when this task is part of a pipeline
-	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted.
+	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted: it is a
+	// copy of up to 16 MiB of transcript, so the orchestrator derives it again from
+	// the stored predecessor when it dispatches the task (ensureChainInput) rather
+	// than writing it into every save.
 	ChainInput string `json:"-"`
 	// OnSuccess lists task IDs to activate (keep pending) when this task succeeds.
 	// Tasks in OnFailure are skipped when the success branch is taken.

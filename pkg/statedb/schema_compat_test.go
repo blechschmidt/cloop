@@ -491,6 +491,16 @@ func TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt(t *testing.T) {
 		sql:  `ALTER TABLE costs ADD identity TEXT NOT NULL DEFAULT '';`,
 		want: CompatAdditive,
 	}, {
+		// The migration runner's idempotent form (addcolumn.go, Task 20361)
+		// adds the same column or nothing, so it classifies the same way.
+		name: "the runner's IF NOT EXISTS form is additive on the same terms",
+		sql:  `ALTER TABLE plan_tasks ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';`,
+		want: CompatAdditive,
+	}, {
+		name: "and breaking on the same terms",
+		sql:  `ALTER TABLE plan_tasks ADD IF NOT EXISTS links TEXT NOT NULL;`,
+		want: CompatBreaking,
+	}, {
 		// The whole point: an older binary's INSERT names its columns and will
 		// never name this one, so the row it writes would violate NOT NULL.
 		name: "NOT NULL without a default breaks every older INSERT",

@@ -436,10 +436,8 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
 			return nil, nil, nil, classifyDriverErr(err)
 		}
-		for _, t := range s.Plan.Tasks {
-			if err := insertTask(tx, t); err != nil {
-				return nil, nil, nil, fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
-			}
+		if err := insertTasks(tx, s.Plan.Tasks); err != nil {
+			return nil, nil, nil, err
 		}
 	}
 
@@ -717,16 +715,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	rows, err := d.conn.Query(`
-		SELECT id, title, description, priority, status, role, depends_on, result,
-			started_at, completed_at, deadline, verify_retries, github_issue,
-			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
-			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned, review,
-			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
-		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
+	rows, err := d.conn.Query(taskSelect+` WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -737,54 +726,9 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		}
 		return nil, fmt.Errorf("task %d: %w", id, ErrTaskNotFound)
 	}
-	t := &pm.Task{}
-	var (
-		status, role, depsJSON, tagsJSON, annJSON   string
-		bgJSON, abortJSON, reviewJSON               string
-		startedAt, completedAt, deadline, nextRunAt sql.NullString
-		reqApproval, approved, pinned               int
-	)
-	if err := rows.Scan(
-		&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
-		&depsJSON, &t.Result,
-		&startedAt, &completedAt, &deadline,
-		&t.VerifyRetries, &t.GitHubIssue,
-		&t.EstimatedMinutes, &t.ActualMinutes,
-		&t.ArtifactPath, &t.FailureDiagnosis,
-		&tagsJSON, &t.FailCount, &t.HealAttempts,
-		&annJSON, &t.Condition, &t.Recurrence,
-		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &reviewJSON, &t.RunID,
-	); err != nil {
+	t, err := newTaskScanner().scan(rows)
+	if err != nil {
 		return nil, classifyDriverErr(err)
-	}
-	t.Status = pm.TaskStatus(status)
-	t.Role = pm.AgentRole(role)
-	_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
-	_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
-	_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
-	t.Background = decodeBackground(bgJSON)
-	t.Abort = decodeAbort(abortJSON)
-	t.Review = decodeReview(reviewJSON)
-	t.RequiresApproval = reqApproval == 1
-	t.Approved = approved == 1
-	t.Pinned = pinned == 1
-	if startedAt.Valid {
-		ts, _ := time.Parse(time.RFC3339Nano, startedAt.String)
-		t.StartedAt = &ts
-	}
-	if completedAt.Valid {
-		ts, _ := time.Parse(time.RFC3339Nano, completedAt.String)
-		t.CompletedAt = &ts
-	}
-	if deadline.Valid {
-		ts, _ := time.Parse(time.RFC3339Nano, deadline.String)
-		t.Deadline = &ts
-	}
-	if nextRunAt.Valid {
-		ts, _ := time.Parse(time.RFC3339Nano, nextRunAt.String)
-		t.NextRunAt = &ts
 	}
 	return t, nil
 }
@@ -857,152 +801,217 @@ func (d *DB) AppendStep(row StepRow) error {
 // Internal helpers
 // ────────────────────────────────────────────────────────────
 
-func insertTask(tx *sql.Tx, t *pm.Task) error {
-	return upsertTaskTx(tx, t)
+// insertTasks writes every task of a plan through one prepared statement.
+//
+// Preparing it once rather than per row is most of the cost of a save: the
+// statement names every column, and an unprepared Exec has SQLite compile it
+// afresh for each task — 70% of SaveState's time for a 400-task plan, measured
+// when 0054 made the statement a third longer (Task 20361).
+func insertTasks(tx *sql.Tx, tasks []*pm.Task) error {
+	stmt, err := tx.Prepare(upsertTaskSQL)
+	if err != nil {
+		return fmt.Errorf("prepare task insert: %w", classifyDriverErr(err))
+	}
+	defer stmt.Close()
+	for _, t := range tasks {
+		if _, err := stmt.Exec(taskValues(t)...); err != nil {
+			return fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
+		}
+	}
+	return nil
 }
 
-func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
-	depsJSON, _ := json.Marshal(t.DependsOn)
-	tagsJSON, _ := json.Marshal(t.Tags)
-	annJSON, _ := json.Marshal(t.Annotations)
+// taskColumns are plan_tasks' columns in the order upsertTaskTx writes them and
+// taskScanner reads them back.
+//
+// One list for both directions, from which the INSERT, its ON CONFLICT update
+// and the SELECT are all built. The writer and the two readers used to carry a
+// hand-written copy each, and all three had missed the same fourteen pm.Task
+// fields since the move from state.json to SQLite (Task 20361): an assignee, a
+// sprint, a plan's on_success branches all read back as zero after the next
+// load. TestEveryTaskFieldSurvivesTheDatabase in taskroundtrip_test.go is what
+// keeps this list complete; the order here has to match taskValues and
+// newTaskScanner, which the same test checks by giving every field its own value.
+var taskColumns = []string{
+	"id", "title", "description", "priority", "status", "role", "depends_on", "result",
+	"started_at", "completed_at", "deadline", "verify_retries", "github_issue",
+	"estimated_minutes", "actual_minutes", "artifact_path", "failure_diagnosis",
+	"tags", "fail_count", "heal_attempts", "annotations", "condition_expr",
+	"recurrence", "next_run_at", "requires_approval", "approved", "max_minutes",
+	"write_back_branch", "write_back_commit", "background", "abort",
+	"executor_id", "executor_kind", "isolation", "pinned", "review",
+	// 0054_task_fields (Task 20361).
+	"assignee", "external_url", "links", "tdd_status", "tdd_score",
+	"sprint_id", "complexity_size", "story_points", "on_success", "on_failure",
+	"risk_score", "impact_score", "retry_budget",
+}
 
-	var startedAt, completedAt, deadline, nextRunAt sql.NullString
-	if t.StartedAt != nil {
-		startedAt = sql.NullString{String: t.StartedAt.Format(time.RFC3339Nano), Valid: true}
-	}
-	if t.CompletedAt != nil {
-		completedAt = sql.NullString{String: t.CompletedAt.Format(time.RFC3339Nano), Valid: true}
-	}
-	if t.Deadline != nil {
-		deadline = sql.NullString{String: t.Deadline.Format(time.RFC3339Nano), Valid: true}
-	}
-	if t.NextRunAt != nil {
-		nextRunAt = sql.NullString{String: t.NextRunAt.Format(time.RFC3339Nano), Valid: true}
-	}
+// taskSelect reads every task column, then the task's run id. The run id is not
+// a plan_tasks column: it lives in task_runs, which SaveState's lifecycle diff
+// maintains (Task 20282).
+var taskSelect = `SELECT ` + strings.Join(taskColumns, ", ") + `,
+		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
+	FROM plan_tasks`
 
-	_, err := tx.Exec(`
-		INSERT INTO plan_tasks(
-			id, title, description, priority, status, role, depends_on, result,
-			started_at, completed_at, deadline, verify_retries, github_issue,
-			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
-			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned, review
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET
-			title=excluded.title, description=excluded.description,
-			priority=excluded.priority, status=excluded.status, role=excluded.role,
-			depends_on=excluded.depends_on, result=excluded.result,
-			started_at=excluded.started_at, completed_at=excluded.completed_at,
-			deadline=excluded.deadline, verify_retries=excluded.verify_retries,
-			github_issue=excluded.github_issue,
-			estimated_minutes=excluded.estimated_minutes,
-			actual_minutes=excluded.actual_minutes,
-			artifact_path=excluded.artifact_path,
-			failure_diagnosis=excluded.failure_diagnosis,
-			tags=excluded.tags, fail_count=excluded.fail_count,
-			heal_attempts=excluded.heal_attempts, annotations=excluded.annotations,
-			condition_expr=excluded.condition_expr, recurrence=excluded.recurrence,
-			next_run_at=excluded.next_run_at,
-			requires_approval=excluded.requires_approval,
-			approved=excluded.approved, max_minutes=excluded.max_minutes,
-			write_back_branch=excluded.write_back_branch,
-			write_back_commit=excluded.write_back_commit,
-			background=excluded.background, abort=excluded.abort,
-			executor_id=excluded.executor_id,
-			executor_kind=excluded.executor_kind,
-			isolation=excluded.isolation, pinned=excluded.pinned,
-			review=excluded.review`,
+// upsertTaskSQL writes every column of taskColumns, replacing all but the id
+// on conflict.
+var upsertTaskSQL = func() string {
+	updates := make([]string, 0, len(taskColumns)-1)
+	for _, c := range taskColumns[1:] {
+		updates = append(updates, c+"=excluded."+c)
+	}
+	return `INSERT INTO plan_tasks(` + strings.Join(taskColumns, ", ") + `) VALUES (` +
+		strings.TrimSuffix(strings.Repeat("?,", len(taskColumns)), ",") + `)
+		ON CONFLICT(id) DO UPDATE SET ` + strings.Join(updates, ", ")
+}()
+
+// taskValues returns t's values in taskColumns order.
+func taskValues(t *pm.Task) []any {
+	return []any{
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
-		string(depsJSON), t.Result,
-		startedAt, completedAt, deadline,
+		listText(t.DependsOn), t.Result,
+		timeText(t.StartedAt), timeText(t.CompletedAt), timeText(t.Deadline),
 		t.VerifyRetries, t.GitHubIssue,
 		t.EstimatedMinutes, t.ActualMinutes,
 		t.ArtifactPath, t.FailureDiagnosis,
-		string(tagsJSON), t.FailCount, t.HealAttempts,
-		string(annJSON), t.Condition, t.Recurrence,
-		nextRunAt,
+		listText(t.Tags), t.FailCount, t.HealAttempts,
+		listText(t.Annotations), t.Condition, t.Recurrence,
+		timeText(t.NextRunAt),
 		boolInt(t.RequiresApproval), boolInt(t.Approved),
 		t.MaxMinutes,
 		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
 		encodeAbort(t.Abort),
 		t.ExecutorID, t.ExecutorKind, t.Isolation, boolInt(t.Pinned),
 		encodeReview(t.Review),
-	)
+		t.Assignee, t.ExternalURL, listText(t.Links), t.TDDStatus, t.TDDScore,
+		t.SprintID, t.ComplexitySize, t.StoryPoints, listText(t.OnSuccess), listText(t.OnFailure),
+		t.RiskScore, t.ImpactScore, t.RetryBudget,
+	}
+}
+
+func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
+	_, err := tx.Exec(upsertTaskSQL, taskValues(t)...)
 	return err
 }
 
+// taskScanner reads rows selected by taskSelect. It is the only reader of a
+// task row, so LoadTask and loadTasks cannot disagree about what one holds.
+//
+// Rows are scanned into one reusable set of destinations and then copied out,
+// so a load does not allocate Scan's argument list — one pointer per column,
+// some fifty of them — once for every task. The plan is read on every
+// dashboard request.
+type taskScanner struct {
+	row                                         pm.Task
+	status, role                                string
+	lists                                       taskListColumns
+	bgJSON, abortJSON, reviewJSON               string
+	startedAt, completedAt, deadline, nextRunAt sql.NullString
+	reqApproval, approved, pinned               int
+	dest                                        []any
+}
+
+func newTaskScanner() *taskScanner {
+	sc := &taskScanner{}
+	t := &sc.row
+	sc.dest = []any{
+		&t.ID, &t.Title, &t.Description, &t.Priority, &sc.status, &sc.role,
+		&sc.lists.DependsOn, &t.Result,
+		&sc.startedAt, &sc.completedAt, &sc.deadline,
+		&t.VerifyRetries, &t.GitHubIssue,
+		&t.EstimatedMinutes, &t.ActualMinutes,
+		&t.ArtifactPath, &t.FailureDiagnosis,
+		&sc.lists.Tags, &t.FailCount, &t.HealAttempts,
+		&sc.lists.Annotations, &t.Condition, &t.Recurrence,
+		&sc.nextRunAt, &sc.reqApproval, &sc.approved, &t.MaxMinutes,
+		&t.WriteBackBranch, &t.WriteBackCommit, &sc.bgJSON, &sc.abortJSON,
+		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &sc.pinned, &sc.reviewJSON,
+		&t.Assignee, &t.ExternalURL, &sc.lists.Links, &t.TDDStatus, &t.TDDScore,
+		&t.SprintID, &t.ComplexitySize, &t.StoryPoints, &sc.lists.OnSuccess, &sc.lists.OnFailure,
+		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
+		&t.RunID,
+	}
+	return sc
+}
+
+// scan reads the current row into a new task.
+//
+// A list column that is damaged in a way that would change what runs fails
+// the read with ErrCorruptTaskColumn; see decodeTaskColumns.
+func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
+	sc.row = pm.Task{}
+	if err := rows.Scan(sc.dest...); err != nil {
+		return nil, err
+	}
+	t := new(pm.Task)
+	*t = sc.row
+	t.Status = pm.TaskStatus(sc.status)
+	t.Role = pm.AgentRole(sc.role)
+	if err := decodeTaskColumns(t, sc.lists); err != nil {
+		return nil, err
+	}
+	t.Background = decodeBackground(sc.bgJSON)
+	t.Abort = decodeAbort(sc.abortJSON)
+	t.Review = decodeReview(sc.reviewJSON)
+	t.RequiresApproval = sc.reqApproval == 1
+	t.Approved = sc.approved == 1
+	t.Pinned = sc.pinned == 1
+	t.StartedAt = parseTimeText(sc.startedAt)
+	t.CompletedAt = parseTimeText(sc.completedAt)
+	t.Deadline = parseTimeText(sc.deadline)
+	t.NextRunAt = parseTimeText(sc.nextRunAt)
+	return t, nil
+}
+
 func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
-	rows, err := conn.Query(`
-		SELECT id, title, description, priority, status, role, depends_on, result,
-			started_at, completed_at, deadline, verify_retries, github_issue,
-			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
-			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation, pinned, review,
-			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
-		FROM plan_tasks ORDER BY id`)
+	rows, err := conn.Query(taskSelect + ` ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var tasks []*pm.Task
+	sc := newTaskScanner()
 	for rows.Next() {
-		t := &pm.Task{}
-		var (
-			status, role, depsJSON, tagsJSON, annJSON   string
-			bgJSON, abortJSON, reviewJSON               string
-			startedAt, completedAt, deadline, nextRunAt sql.NullString
-			reqApproval, approved, pinned               int
-		)
-		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
-			&depsJSON, &t.Result,
-			&startedAt, &completedAt, &deadline,
-			&t.VerifyRetries, &t.GitHubIssue,
-			&t.EstimatedMinutes, &t.ActualMinutes,
-			&t.ArtifactPath, &t.FailureDiagnosis,
-			&tagsJSON, &t.FailCount, &t.HealAttempts,
-			&annJSON, &t.Condition, &t.Recurrence,
-			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &reviewJSON, &t.RunID,
-		); err != nil {
+		t, err := sc.scan(rows)
+		if err != nil {
 			return nil, err
-		}
-		t.Pinned = pinned == 1
-		t.Status = pm.TaskStatus(status)
-		t.Role = pm.AgentRole(role)
-		_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
-		_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
-		_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
-		t.Background = decodeBackground(bgJSON)
-		t.Abort = decodeAbort(abortJSON)
-		t.Review = decodeReview(reviewJSON)
-		t.RequiresApproval = reqApproval == 1
-		t.Approved = approved == 1
-		if startedAt.Valid {
-			ts, _ := time.Parse(time.RFC3339Nano, startedAt.String)
-			t.StartedAt = &ts
-		}
-		if completedAt.Valid {
-			ts, _ := time.Parse(time.RFC3339Nano, completedAt.String)
-			t.CompletedAt = &ts
-		}
-		if deadline.Valid {
-			ts, _ := time.Parse(time.RFC3339Nano, deadline.String)
-			t.Deadline = &ts
-		}
-		if nextRunAt.Valid {
-			ts, _ := time.Parse(time.RFC3339Nano, nextRunAt.String)
-			t.NextRunAt = &ts
 		}
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
+}
+
+// listText encodes a list column exactly as json.Marshal does — a nil list as
+// the literal null, an empty one as [] — without calling it for those two,
+// which is what nearly every list of nearly every task is on every save.
+func listText[T any](v []T) string {
+	switch {
+	case v == nil:
+		return "null"
+	case len(v) == 0:
+		return "[]"
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// timeText encodes an optional timestamp column; nil is SQL NULL.
+func timeText(t *time.Time) sql.NullString {
+	if t == nil {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: t.Format(time.RFC3339Nano), Valid: true}
+}
+
+// parseTimeText decodes an optional timestamp column. A value that does not
+// parse reads as the zero time, as it always has.
+func parseTimeText(v sql.NullString) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	ts, _ := time.Parse(time.RFC3339Nano, v.String)
+	return &ts
 }
 
 func upsertStep(tx *sql.Tx, row StepRow) error {

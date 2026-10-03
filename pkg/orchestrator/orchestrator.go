@@ -1941,6 +1941,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if keptResults < totalResults {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
 		}
+		o.ensureChainInput(s.Plan, task)
 		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, o.config.NoCodeContextInject, projCtx)
 		// Check for a user-edited context override. If one exists, use it instead.
 		if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, task.ID); overrideErr == nil && override != "" {
@@ -3896,6 +3897,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// touch no shared plan state during the provider call.
 		prebuiltPrompts := make([]string, len(ready))
 		for i, t := range ready {
+			o.ensureChainInput(s.Plan, t)
 			prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
 			if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {
 				prompt = override
@@ -4632,6 +4634,52 @@ func (o *Orchestrator) injectChainOutput(plan *pm.Plan, completedTask *pm.Task, 
 		}
 		dimColor.Printf("  chain: injecting output of task %d → task %d\n", completedTask.ID, t.ID)
 	}
+}
+
+// ensureChainInput gives a chained task its predecessor's output if nothing in
+// this process has yet (Task 20361).
+//
+// injectChainOutput hands the output over the moment the predecessor finishes,
+// but only in memory: ChainInput is not stored, because it is a copy of up to
+// 16 MiB of transcript that every save would otherwise rewrite. So a run that
+// stopped between the two tasks, a resumed project, and a parallel run (whose
+// completion path never calls injectChainOutput) all dispatched the chained
+// task without its input. Everything the hand-over needs is stored — the
+// chain tag, DependsOn, the predecessor's status and its artifact or summary —
+// so it is done again here, at dispatch, under the same rule: a predecessor
+// that is done and whose chain tag this task carries. When several qualify,
+// the one that finished last wins, as it does when injectChainOutput runs once
+// per completion.
+func (o *Orchestrator) ensureChainInput(plan *pm.Plan, task *pm.Task) {
+	if task.ChainInput != "" || plan == nil {
+		return
+	}
+	var from *pm.Task
+	for _, id := range task.DependsOn {
+		dep := plan.TaskByID(id)
+		if dep == nil || dep.Status != pm.TaskDone {
+			continue
+		}
+		if tag := chainTagOf(dep.Tags); tag == "" || !hasChainTag(task.Tags, tag) {
+			continue
+		}
+		if from == nil || finishedAfter(dep, from) {
+			from = dep
+		}
+	}
+	if from == nil {
+		return
+	}
+	task.ChainInput = artifact.ReadTaskOutput(o.config.WorkDir, from)
+}
+
+// finishedAfter reports whether a completed after b. A task with no completion
+// time sorts first, so a recorded finish is preferred over a missing one.
+func finishedAfter(a, b *pm.Task) bool {
+	if a.CompletedAt == nil {
+		return false
+	}
+	return b.CompletedAt == nil || a.CompletedAt.After(*b.CompletedAt)
 }
 
 // chainTagOf returns the first "chain:<uuid>" tag found in tags, or "".

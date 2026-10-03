@@ -50,6 +50,28 @@ type TaskFile struct {
 	MaxMinutes       int      `json:"max_minutes,omitempty"       yaml:"max_minutes,omitempty"       toml:"max_minutes,omitempty"`
 	ExternalURL      string   `json:"external_url,omitempty"      yaml:"external_url,omitempty"      toml:"external_url,omitempty"`
 	Result           string   `json:"result,omitempty"            yaml:"result,omitempty"            toml:"result,omitempty"`
+
+	// The fields statedb began storing in Task 20361. A plan exported before
+	// then simply lacks them, and imports as it always did.
+	Links          []LinkFile `json:"links,omitempty"           yaml:"links,omitempty"           toml:"links,omitempty"`
+	SprintID       int        `json:"sprint_id,omitempty"       yaml:"sprint_id,omitempty"       toml:"sprint_id,omitempty"`
+	ComplexitySize string     `json:"complexity_size,omitempty" yaml:"complexity_size,omitempty" toml:"complexity_size,omitempty"`
+	StoryPoints    int        `json:"story_points,omitempty"    yaml:"story_points,omitempty"    toml:"story_points,omitempty"`
+	OnSuccess      []string   `json:"on_success,omitempty"      yaml:"on_success,omitempty"      toml:"on_success,omitempty"`
+	OnFailure      []string   `json:"on_failure,omitempty"      yaml:"on_failure,omitempty"      toml:"on_failure,omitempty"`
+	RiskScore      int        `json:"risk_score,omitempty"      yaml:"risk_score,omitempty"      toml:"risk_score,omitempty"`
+	ImpactScore    int        `json:"impact_score,omitempty"    yaml:"impact_score,omitempty"    toml:"impact_score,omitempty"`
+	RetryBudget    int        `json:"retry_budget,omitempty"    yaml:"retry_budget,omitempty"    toml:"retry_budget,omitempty"`
+	TDDStatus      string     `json:"tdd_status,omitempty"      yaml:"tdd_status,omitempty"      toml:"tdd_status,omitempty"`
+	TDDScore       int        `json:"tdd_score,omitempty"       yaml:"tdd_score,omitempty"       toml:"tdd_score,omitempty"`
+}
+
+// LinkFile is the portable representation of a task link. pm.Link is tagged
+// for JSON only, and TOML would otherwise spell its keys URL, Label and Kind.
+type LinkFile struct {
+	URL   string `json:"url"             yaml:"url"             toml:"url"`
+	Label string `json:"label,omitempty" yaml:"label,omitempty" toml:"label,omitempty"`
+	Kind  string `json:"kind,omitempty"  yaml:"kind,omitempty"  toml:"kind,omitempty"`
 }
 
 // DetectFormat infers the serialization format from the file extension.
@@ -215,6 +237,19 @@ func planToFile(plan *pm.Plan) PlanFile {
 			MaxMinutes:       t.MaxMinutes,
 			ExternalURL:      t.ExternalURL,
 			Result:           t.Result,
+			SprintID:         t.SprintID,
+			ComplexitySize:   t.ComplexitySize,
+			StoryPoints:      t.StoryPoints,
+			OnSuccess:        t.OnSuccess,
+			OnFailure:        t.OnFailure,
+			RiskScore:        t.RiskScore,
+			ImpactScore:      t.ImpactScore,
+			RetryBudget:      t.RetryBudget,
+			TDDStatus:        t.TDDStatus,
+			TDDScore:         t.TDDScore,
+		}
+		for _, l := range t.Links {
+			tf.Links = append(tf.Links, LinkFile{URL: l.URL, Label: l.Label, Kind: string(l.Kind)})
 		}
 		if t.Deadline != nil {
 			tf.Deadline = t.Deadline.UTC().Format(time.RFC3339)
@@ -244,6 +279,19 @@ func fileToTask(tf TaskFile) *pm.Task {
 		MaxMinutes:       tf.MaxMinutes,
 		ExternalURL:      tf.ExternalURL,
 		Result:           tf.Result,
+		SprintID:         tf.SprintID,
+		ComplexitySize:   tf.ComplexitySize,
+		StoryPoints:      tf.StoryPoints,
+		OnSuccess:        tf.OnSuccess,
+		OnFailure:        tf.OnFailure,
+		RiskScore:        tf.RiskScore,
+		ImpactScore:      tf.ImpactScore,
+		RetryBudget:      tf.RetryBudget,
+		TDDStatus:        tf.TDDStatus,
+		TDDScore:         tf.TDDScore,
+	}
+	for _, l := range tf.Links {
+		t.Links = append(t.Links, pm.Link{URL: l.URL, Label: l.Label, Kind: pm.LinkKind(l.Kind)})
 	}
 	if tf.Deadline != "" {
 		if parsed, err := time.Parse(time.RFC3339, tf.Deadline); err == nil {
@@ -327,7 +375,12 @@ func doMerge(pf *PlanFile, existing *pm.Plan) *ImportResult {
 
 		// Remap depends_on IDs — they refer to the source plan so we clear them
 		// rather than import potentially broken references into the merged plan.
+		// Branches name task IDs of the source plan the same way, and a sprint
+		// names an entry in the source project's .cloop/sprints.json.
 		newTask.DependsOn = nil
+		newTask.OnSuccess = nil
+		newTask.OnFailure = nil
+		newTask.SprintID = 0
 
 		existing.Tasks = append(existing.Tasks, newTask)
 		existingTitles[key] = true

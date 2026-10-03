@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -421,7 +422,9 @@ func (s *ProjectState) Save() error {
 	// being saved, and taking the order from disk here would make every writer
 	// that goes through Save — `cloop task edit --priority`, `task pin`,
 	// `task reorder` — silently discard its own edit.
-	s.mergeExternalTasks(keepQueueOrder)
+	if err := s.mergeExternalTasks(keepQueueOrder); err != nil {
+		return err
+	}
 
 	// Ensure the parent directory of state.db exists.
 	dbPath := effectiveDBPath(s.WorkDir)
@@ -494,7 +497,10 @@ func (s *ProjectState) SaveDirect() error {
 func (s *ProjectState) SyncFromDisk() {
 	liveMu.Lock()
 	defer liveMu.Unlock()
-	s.mergeExternalTasks(adoptQueueOrder)
+	// A plan that cannot be read is left alone here: this side only reads, so
+	// skipping the merge loses nothing, and the damaged row is reported by
+	// every load — and refused by Save — until it is repaired.
+	_ = s.mergeExternalTasks(adoptQueueOrder)
 }
 
 // RequireTask returns the task with the given ID, wrapping
@@ -527,17 +533,30 @@ const (
 // ID is not present in the in-memory plan is appended, preserving its full
 // content. This is an ID-set merge — it does NOT rely on maxInMemID comparisons,
 // so externally-added tasks are never silently dropped due to ID ordering.
-func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
+//
+// The only error it returns is a stored task row too damaged to read
+// (statedb.ErrCorruptTaskColumn, Task 20297). Save stops on it: it replaces
+// the stored plan with the one in memory, which without the merge is missing
+// whatever was added on disk — so going ahead would delete the very task the
+// error names, or overwrite the value an operator needs to see to repair it.
+// Any other read failure is ignored as it always was.
+func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 	// Read via LoadFromDir so the merge reads the exact same database Save
 	// writes (effectiveDBPath(s.WorkDir)). Going through Load would resolve
 	// .cloop/active_session, so a session activated mid-run would merge tasks
 	// from a different project into this one.
 	disk, err := LoadFromDir(s.WorkDir)
-	if err != nil || disk == nil || disk.Plan == nil || len(disk.Plan.Tasks) == 0 {
-		return
+	if err != nil {
+		if errors.Is(err, statedb.ErrCorruptTaskColumn) {
+			return fmt.Errorf("state: not saving over a plan that cannot be read back: %w", err)
+		}
+		return nil
+	}
+	if disk == nil || disk.Plan == nil || len(disk.Plan.Tasks) == 0 {
+		return nil
 	}
 	if s.Plan == nil {
-		return
+		return nil
 	}
 	// Build set of in-memory task IDs.
 	inMemIDs := make(map[int]struct{}, len(s.Plan.Tasks))
@@ -621,6 +640,7 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	// Task 20357: the review gate is switched and reconfigured from the
 	// dashboard while a run is going; the next task's review uses the change.
 	s.ReviewGate = disk.ReviewGate
+	return nil
 }
 
 // SetReviewGate stores a project's review gate settings (Task 20357) without

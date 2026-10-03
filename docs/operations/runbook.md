@@ -415,6 +415,38 @@ since the last vacuum, which is what you want in a cron entry:
 
 `VACUUM` rewrites the database and needs free space roughly equal to its size.
 
+### A task row that will not load
+
+Three task columns decide what runs: `depends_on`, `on_success` and
+`on_failure`. If one of them holds something that is not a JSON list — a
+truncated write, a restored backup, a hand edit — every load of the project
+fails and names the row, instead of reading the value as "no dependencies" and
+releasing the task early:
+
+```
+task 7: column depends_on is not decodable JSON ("[1,2"): statedb: corrupt task column: unexpected end of JSON input
+```
+
+A run in progress keeps going in memory but stops saving until the row is
+repaired, because a save replaces every stored task and would delete or
+overwrite the one the error names. Back up, then write the list you want:
+
+```console
+$ cloop db backup
+$ sqlite3 .cloop/state.db "UPDATE plan_tasks SET depends_on = '[1,2]' WHERE id = 7"
+```
+
+A damaged `tags`, `annotations` or `links` value does not stop the load: the
+field reads as empty and the hub logs `statedb: task N: column C is not
+decodable JSON, field dropped` once per damaged value.
+
+Migration 0054 adds columns that `cloop migrate` or a development build may
+already have created. It adopts one only if it matches the declared column
+exactly; otherwise startup fails with `plan_tasks.<column> already exists as
+<what is there>, but this migration declares it <what 0054 wants>`. Check what
+the column holds, then drop it (`ALTER TABLE plan_tasks DROP COLUMN <column>`)
+or rebuild it to match, and start cloop again.
+
 ---
 
 ## Audit chain verification

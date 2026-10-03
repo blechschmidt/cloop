@@ -13,6 +13,7 @@
 //	ErrStaleVersion    → 409 Conflict
 //	ErrDBLocked        → 503 Service Unavailable
 //	ErrSchemaMismatch  → 500 Internal Server Error
+//	ErrCorruptTaskColumn → 500 Internal Server Error
 //
 // All these errors are safe targets for errors.Is. Internal helpers wrap
 // driver errors with %w so the sentinel survives across package boundaries.
@@ -132,6 +133,20 @@ var (
 	// table — so callers should surface it instead of absorbing it.
 	ErrRoleBindingNotFound = errors.New("statedb: role binding not found")
 
+	// ErrCorruptTaskColumn indicates a task row holds a JSON-encoded column
+	// that could not be decoded (Task 20297).
+	//
+	// Only raised for columns where dropping the value would change what the
+	// program does rather than what it displays: depends_on, whose empty value
+	// pm.DepsReady reads as "no prerequisites, may run", and on_success and
+	// on_failure, whose empty value lets both branches of a branched plan run
+	// (Task 20361). Fatal to the load on purpose: the alternative is admitting
+	// a task ahead of work it depends on, and the error names the task and
+	// column so the row can be repaired. Columns that are safe to drop are
+	// reported through the sink in taskcolumns.go instead and do not produce
+	// this error.
+	ErrCorruptTaskColumn = errors.New("statedb: corrupt task column")
+
 	// ErrCIPipelineRuleNotFound indicates no ci_pipeline_rules row carries the
 	// requested id (Task 20278).
 	//
@@ -162,7 +177,13 @@ func classifyDriverErr(err error) error {
 		errors.Is(err, ErrTaskNotFound) ||
 		errors.Is(err, ErrProjectNotFound) ||
 		errors.Is(err, ErrStaleVersion) ||
-		errors.Is(err, ErrExecutorNotFound) {
+		errors.Is(err, ErrExecutorNotFound) ||
+		// A decode failure is not a driver failure: the row came back
+		// intact and SQLite is fine. Without this it would match the
+		// "malformed" arm below and be reported as a schema problem,
+		// sending the operator to migrate a database that needs one
+		// column repaired.
+		errors.Is(err, ErrCorruptTaskColumn) {
 		return err
 	}
 	lower := strings.ToLower(err.Error())
@@ -217,7 +238,7 @@ func HTTPStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrDBLocked):
 		return http.StatusServiceUnavailable
-	case errors.Is(err, ErrSchemaMismatch):
+	case errors.Is(err, ErrSchemaMismatch), errors.Is(err, ErrCorruptTaskColumn):
 		return http.StatusInternalServerError
 	default:
 		return http.StatusInternalServerError

@@ -19,6 +19,13 @@
 //     executing multiple statements with the binding parameter API; the
 //     migration runner therefore splits on `;` boundaries before exec.
 //  3. NEVER edit a shipped migration file. Roll forward with another file.
+//  4. To add a column a database may already have — one `cloop migrate` or a
+//     development build created outside this sequence — write
+//     `ALTER TABLE t ADD COLUMN IF NOT EXISTS c <declaration>`. SQLite has no
+//     such statement; applyOne runs it as a plain ADD COLUMN when the column
+//     is missing and otherwise checks that the existing column is the one
+//     declared (see addcolumn.go). A plain ADD COLUMN on such a database fails
+//     with "duplicate column name" and stops every start that opens it.
 //
 // Existing databases (pre-framework) are detected at boot: if all the 0001
 // tables already exist but schema_migrations is empty, version 1 is recorded
@@ -567,6 +574,14 @@ func applyOne(db *sql.DB, m migration) error {
 
 	stmts := splitStatements(m.SQL)
 	for i, stmt := range stmts {
+		// The one statement form SQLite lacks and the runner supplies; see
+		// addcolumn.go.
+		if add, ok := parseAddColumnIfNotExists(stmt); ok {
+			if err := add.apply(tx); err != nil {
+				return fmt.Errorf("statement %d: %w\n--- SQL ---\n%s", i+1, err, stmt)
+			}
+			continue
+		}
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("statement %d: %w\n--- SQL ---\n%s", i+1, err, stmt)
 		}
