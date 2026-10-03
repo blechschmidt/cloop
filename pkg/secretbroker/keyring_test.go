@@ -573,9 +573,11 @@ func TestRotationUnderConcurrentReadWriteLoad(t *testing.T) {
 	// operator re-minting a credential looks like from here.
 	rewritten := map[string]string{}
 	var rwmu sync.Mutex
+	writerDone := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(writerDone)
 		for i, id := range ids {
 			if i%3 != 0 {
 				continue
@@ -608,7 +610,12 @@ func TestRotationUnderConcurrentReadWriteLoad(t *testing.T) {
 		t.Fatalf("rotate under load: %v", err)
 	}
 	// A second pass mops up rows the writer touched mid-flight, exactly as
-	// `cloop hub key rotate --continue` would.
+	// `cloop hub key rotate --continue` would — once the writes are over. A
+	// write still in flight can land after any pass, sealed under the key it
+	// sampled before the first pass moved the primary; that is what retirement
+	// refuses on, and why the mop-up waits for the writer rather than racing
+	// it, which failed about one run in six.
+	<-writerDone
 	report, err := rot.Rotate(context.Background(), RotateOptions{NewKey: false})
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
