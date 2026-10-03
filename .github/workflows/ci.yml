@@ -224,7 +224,16 @@ jobs:
         # pkg/ui/main_test.go), which put the package at ~10m and failed this
         # step outright. That is fixed, and the cliff should not be somewhere a
         # merely slower runner can fall off.
-        run: go test -race -timeout 20m -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
+        #
+        # 30m since Task 20361. By then pkg/ui took ~17.5 min here (1034 s at
+        # d033caa) and 20m was no margin at all. Migration 0054 then added
+        # thirteen plan_tasks columns, and SQLite re-parses the whole schema
+        # after every ADD COLUMN: under -race that costs +0.46 s (1.0 s to
+        # 1.47 s) for every database a test creates from scratch, which took
+        # pkg/ui past 20m and pkg/orchestrator to ~18. Production pays ~17 ms
+        # once per new project. pkg/ui/dbtemplate_test.go is how a package
+        # takes that cost back out of its own tests.
+        run: go test -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
 
       - name: End-to-end integration tests
         run: |
