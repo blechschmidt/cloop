@@ -77,6 +77,12 @@ including ctrl-C.
 
 Every finding that is not a pass carries a one-line remediation.
 
+Where two dashboards share a directory, each reads its own
+.cloop/config.ui-<port>.yaml over config.yaml. --port names the hub to
+diagnose, so its overlay is merged as ` + "`cloop ui --port`" + ` merges it.
+Without --port only config.yaml is read, and the report names any overlay it
+did not merge.
+
 Exit codes. Warnings never fail the command — several are legitimate
 deployment choices, and a CI gate that goes red on choices gets disabled,
 taking the real failures with it.
@@ -90,6 +96,7 @@ taking the real failures with it.
   cloop hub doctor
   cloop hub doctor --json | jq '.findings[] | select(.severity=="fail")'
   cloop hub doctor --offline     # config only; contacts nothing
+  cloop hub doctor --port 8081   # the hub on :8081, with its overlay
   cloop hub doctor --smoke       # every non-cordoned executor
   cloop hub doctor --smoke --executor edge-01 --json`,
 	Args:         cobra.NoArgs,
@@ -108,9 +115,13 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	probeTimeout, _ := cmd.Flags().GetDuration("probe-timeout")
 	smoke, _ := cmd.Flags().GetBool("smoke")
 	smokeTimeout, _ := cmd.Flags().GetDuration("smoke-timeout")
+	port, _ := cmd.Flags().GetInt("port")
 
 	if timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive (got %s)", timeout)
+	}
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("--port must be a TCP port (got %d)", port)
 	}
 	if probeNetpol && probeTimeout <= 0 {
 		return fmt.Errorf("--probe-timeout must be positive (got %s)", probeTimeout)
@@ -137,10 +148,16 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	// A config that fails to load is diagnosed, not fatal: Run reports the
 	// absence as its own finding, and a hub whose config.yaml is unparseable
 	// is precisely the case someone runs this command for.
-	cfg, cfgErr := config.Load(dir)
+	//
+	// The hub on --port is diagnosed with its per-instance overlay merged, as
+	// `cloop ui --port` runs (Task 20364). Otherwise a policy stated only in
+	// the overlay (strict mode, an image allowlist, the git proxy) would be
+	// reported as missing from the hub that enforces it.
+	cfg, overlay, cfgErr := config.LoadUIInstance(dir, port)
 	if cfgErr != nil {
 		cfg = nil
 	}
+	reportOverlays(cmd, dir, port, overlay)
 
 	rep := hubdoctor.Run(cmd.Context(), dir, cfg, hubdoctor.Options{
 		Offline:            offline,
@@ -169,6 +186,35 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 
 	renderHubDoctor(rep)
 	return exitFor(rep, strict)
+}
+
+// reportOverlays says which configuration files the diagnosis read. It writes
+// to stderr so --json output stays clean.
+//
+// It names the overlay that was merged. Without --port it lists the overlays
+// that were not, because a doctor that silently diagnosed config.yaml alone,
+// on a host where the hub in question takes its policy from an overlay, would
+// report on a hub nobody runs.
+func reportOverlays(cmd *cobra.Command, dir string, port int, merged string) {
+	out := cmd.ErrOrStderr()
+	if merged != "" {
+		fmt.Fprintf(out, "Instance config: %s merged over %s\n", merged, config.ConfigPath(dir))
+		return
+	}
+	if port > 0 {
+		return
+	}
+	ports, err := config.UIInstancePorts(dir)
+	if err != nil || len(ports) == 0 {
+		return
+	}
+	names := make([]string, 0, len(ports))
+	for _, p := range ports {
+		names = append(names, fmt.Sprint(p))
+	}
+	fmt.Fprintf(out, "Note: diagnosed %s alone; this directory also has instance overlays "+
+		"for port(s) %s. Pass --port <n> to diagnose that hub with its overlay merged.\n",
+		config.ConfigPath(dir), strings.Join(names, ", "))
 }
 
 // renderHubDoctor prints the report with colour, falling back to the plain
@@ -385,6 +431,9 @@ func init() {
 			"each stage (default: every non-cordoned executor)")
 	hubDoctorCmd.Flags().Duration("smoke-timeout", hubdoctor.DefaultSmokeTimeout,
 		"time budget for one executor's --smoke run")
+	hubDoctorCmd.Flags().Int("port", 0,
+		"diagnose the hub listening on this port, merging its .cloop/config.ui-<port>.yaml "+
+			"overlay as `cloop ui --port` does (default: config.yaml alone)")
 
 	hubCmd.AddCommand(hubDoctorCmd)
 }

@@ -1589,6 +1589,10 @@ Settings read at startup (the drivers, the git proxy, the Kubernetes monitor,
 the three executor ratchets) take effect at the next restart, whichever file
 they are in. The rest are read on each use.
 
+`cloop hub doctor --port N` diagnoses the hub on port `N` with its overlay
+merged. Without `--port` it reads `config.yaml` alone and names any overlay it
+did not merge.
+
 It is a separate file rather than a port-keyed section of `config.yaml` because
 of what an older binary sharing the directory does with a key it does not know:
 not ignore it, but drop it, the next time anything calls `Save()`. A block whose

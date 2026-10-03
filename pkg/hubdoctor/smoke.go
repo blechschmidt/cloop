@@ -728,7 +728,7 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	// Refuse that one kind rather than deliver it unguarded. The smoke test's
 	// own credential is a kubeconfig and is unaffected, so the diagnostic still
 	// exercises the whole path it exists to check.
-	if cfg, cerr := config.Load(dir); cerr == nil && cfg != nil && cfg.Executors.GitProxy.Enabled {
+	if smokeGitProxyRequired(dir) {
 		broker.GitGuard = secretbroker.UnavailableGitGuard{
 			Reason: "cloop hub doctor runs outside the hub process and has no git proxy to " +
 				"hold this token; executors.git_proxy is enabled, so it is refused rather " +
@@ -838,6 +838,37 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 
 // smokeContext is the single context name the throwaway kubeconfig carries.
 const smokeContext = "cloop-smoke"
+
+// smokeGitProxyRequired reports whether any hub serving the control plane at
+// dir routes git through its interception proxy. If one does, the smoke lease
+// must not materialise a git token.
+//
+// Every hub in the directory is asked, not just the one being diagnosed. The
+// hubs share one grant store, so a token granted for any of them can come out
+// of this lease. Where two dashboards share a directory, the proxy is enabled
+// in a hub's per-instance overlay (Task 20364), and reading config.yaml alone
+// would deliver the token the overlay keeps out of sandboxes.
+//
+// A configuration that cannot be read counts as requiring the proxy. Refusing
+// a git token costs the smoke run nothing, while delivering one that should
+// have stayed on the hub cannot be taken back.
+func smokeGitProxyRequired(dir string) bool {
+	cfg, err := config.Load(dir)
+	if err != nil || cfg == nil || cfg.Executors.GitProxy.Enabled {
+		return true
+	}
+	ports, err := config.UIInstancePorts(dir)
+	if err != nil {
+		return true
+	}
+	for _, port := range ports {
+		hub, _, err := config.LoadUIInstance(dir, port)
+		if err != nil || hub == nil || hub.Executors.GitProxy.Enabled {
+			return true
+		}
+	}
+	return false
+}
 
 // smokeKubeconfig renders the throwaway credential.
 //

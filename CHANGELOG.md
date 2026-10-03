@@ -138,6 +138,11 @@ schema and the hub's HTTP API may change in any release.
   dashboard reading that file picked it up. Saves now write the overlay when one
   exists (`ui.ci`, `stt.groq_api_key`) and leave `config.yaml` byte for byte as
   it was. Without one, `config.yaml` is rewritten only from itself.
+- **`cloop hub doctor --smoke` keeps git tokens out of its sandbox** when any hub
+  sharing the directory runs the git proxy, including one enabled only in an
+  overlay. A configuration it cannot read counts as enabled. `cloop hub doctor
+  --port N` diagnoses the hub on port N with its overlay merged.
+
 ## [0.0.4] - 2026-09-27
 
 The first release that ships 0.0.2's installer fix. 0.0.2 was tagged on

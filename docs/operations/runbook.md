@@ -108,7 +108,14 @@ whose RBAC policy nobody is an admin is green on both probes and broken.
 $ cloop hub doctor                    # in the hub's directory
 $ cloop hub doctor --json | jq '.findings[] | select(.severity=="fail")'
 $ cloop hub doctor --offline          # config only; contacts nothing
+$ cloop hub doctor --port 8081        # the hub on :8081, with its overlay
 ```
+
+Where two dashboards share a directory, each takes its hub-scope settings
+from its own `.cloop/config.ui-<port>.yaml` merged over `config.yaml`. Pass
+`--port` to diagnose one of them as it runs. Without it the doctor reads
+`config.yaml` alone, and names on stderr any overlay it did not merge. See
+[two dashboards in one directory](../reference/configuration.md#two-dashboards-in-one-directory).
 
 What it checks, and what each one catches that nothing else does:
 
