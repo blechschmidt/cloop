@@ -51,9 +51,14 @@ import (
 // stubClaude stands in for Claude Code. It commits whatever it writes, on the
 // branch its checkout is on. A prompt mentioning BIG-OUTPUT makes it write 2 MB
 // of incompressible data, for the bundle cap.
+//
+// Each run's file names carry a random part: busybox date (the container
+// image's) has no %N, and a fast runner starts two runs within one second —
+// the second then wrote the first one's file again, had nothing to commit,
+// and returned no work for the dirty-worktree check to be about.
 const stubClaude = `#!/bin/sh
 prompt=$(cat)
-n=$(date +%s%N)
+n=$(date +%s)-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 case "$prompt" in
 *BIG-OUTPUT*) head -c 2097152 /dev/urandom > "big-$n.bin" ;;
 esac
@@ -63,7 +68,7 @@ echo "work $n" > "work-$n.txt"
 { [ -d .git ] && echo "git-dir: directory" || echo "git-dir: other"
   echo "common-dir: $(git rev-parse --git-common-dir)"; } > "evidence-$n.txt"
 git add -A
-git commit -qm "stub claude: work $n"
+git commit -qm "stub claude: work $n" || { echo "stub claude: nothing was committed" >&2; exit 1; }
 echo "Done: committed work-$n.txt."
 echo TASK_DONE
 `
