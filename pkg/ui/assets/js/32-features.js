@@ -120,7 +120,7 @@ function renderFeaturesList(cur) {
         '<span class="proj-health-dot ' + esc(p.health || 'unknown') + '"></span>' +
         '<strong>' + esc(f.title || f.slug) + '</strong>' +
         '<code class="feat-branch">' + esc(f.branch || '') + ' &rarr; ' + esc(f.base || '') + '</code>' +
-        statusBadge(p.running ? 'running' : p.status, p.pause_reason) +
+        statusBadge(p.running && !isActiveRunStatus(p.status) ? 'running' : p.status, p.pause_reason) +
         featureOptionBadges(f) + featurePRBadge(f) +
       '</div>' +
       '<div class="feat-progress"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:' + pct + '%"></div></div>' +

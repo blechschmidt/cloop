@@ -373,6 +373,29 @@ const cardsExpr = expW => `(() => {
   };
 })()`;
 
+// The Tasks tab's run bar (Task 20358): whether the status fits inside it, and
+// how much of the Evolve Mode chip a phone draws. The status is the project's
+// own, pause reason included, and that is an error message of any length.
+const RUN_BAR = `(() => {
+  const bar = document.getElementById('tasksRunBar');
+  const st = document.getElementById('tasksRunStatus');
+  const chip = document.getElementById('tasksRunEvolve');
+  const label = chip && chip.querySelector('.tasks-run-evolve-label');
+  if (!bar || !st || bar.offsetParent === null) return {present: false};
+  const b = bar.getBoundingClientRect(), r = st.getBoundingClientRect();
+  const l = label ? label.getBoundingClientRect() : null;
+  return {
+    present: true,
+    status: st.textContent.trim(),
+    status_overflow_px: Math.max(0, Math.round(r.right - b.right), st.scrollWidth - st.clientWidth),
+    bar_overflow_px: bar.scrollWidth - bar.clientWidth,
+    chip_shown: !!chip && chip.offsetParent !== null,
+    chip_width: chip ? Math.round(chip.getBoundingClientRect().width) : 0,
+    chip_label_area_px: l ? Math.round(l.width * l.height) : -1,
+    chip_text: chip ? chip.textContent.trim() : '',
+  };
+})()`;
+
 (async () => {
   const out = {};
   let chrome;
@@ -578,6 +601,46 @@ const cardsExpr = expW => `(() => {
         }
         return {present: true, count: names.length, worst_overflow_px: worst, worst_name: who};
       })()`),
+    };
+
+    // ── 7. The paused project, opened (Task 20358) ─────────────────────────
+    // Its status says why it paused, in words no phone fits on one line: on
+    // the Overview's badge, and since Task 20358 on the Tasks tab's run bar
+    // too. Both must wrap rather than push the page sideways. The project is
+    // in Evolve Mode as well, which a phone's run bar draws as the chip's icon
+    // alone, or its status and button cannot share a row.
+    //
+    // At 360px, the width this hub's own telemetry reports for its users'
+    // phones. Not at 320px: there the header alone is 3px too wide once a
+    // project with a long name is open — its selector button, whatever the
+    // tab — which is a separate fault and would hide this one behind it.
+    await cdp.eval(`closeHiddenProjectsModal()`);
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 360, height: 780, deviceScaleFactor: 3, mobile: true,
+    });
+    await cdp.eval(`switchTab('projects')`);
+    await waitFor(cdp, `!!document.querySelector('#projList .proj-pause')`);
+    await cdp.eval(`document.querySelector('#projList .proj-pause').closest('.proj-card').click()`);
+    await waitFor(cdp, `(document.getElementById('statusBadge') || {}).textContent.includes('Paused')`);
+    await cdp.eval(`window.scrollTo(0, 0)`);
+    await settled(cdp);
+    out.paused_overview = {
+      page: await cdp.eval(pageExpr(360)),
+      widest: await cdp.eval(widestExpr(360)),
+      status: await cdp.eval(`document.getElementById('statusBadge').textContent.trim()`),
+    };
+    await cdp.eval(`switchTab('tasks')`);
+    await waitFor(cdp, `(() => {
+      const bar = document.getElementById('tasksRunBar');
+      const st = document.getElementById('tasksRunStatus');
+      return !!bar && bar.offsetParent !== null && !!st && st.textContent.includes('Paused');
+    })()`);
+    await cdp.eval(`window.scrollTo(0, 0)`);
+    await settled(cdp);
+    out.run_bar = {
+      page: await cdp.eval(pageExpr(360)),
+      widest: await cdp.eval(widestExpr(360)),
+      bar: await cdp.eval(RUN_BAR),
     };
   } catch (e) {
     out.error = {message: e && e.message ? e.message : String(e)};

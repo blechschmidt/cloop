@@ -251,9 +251,25 @@ function updateRunButtonState(running) {
   // already, since this page shows no project status of its own.
   const status = document.getElementById('tasksRunStatus');
   if (status) {
-    status.className = running ? 'badge running' : 'badge unknown';
-    status.innerHTML = '<span class="badge-dot"></span>' + (running ? 'Running' : 'Not running');
+    const p = runBarStatus(running);
+    status.className = 'badge ' + p.cls;
+    status.innerHTML = '<span class="badge-dot"></span>' + esc(p.label);
   }
+}
+
+// runBarStatus is what the Tasks tab's run bar says beside its button: the
+// project's own status in the Overview's words, so an evolve round reads
+// "Evolving" there too and a paused run says why (Task 20358). Where the status
+// and `running` (what the button was just positioned from) disagree, the
+// button wins, or the two would contradict each other side by side: a run that
+// has started but not yet written its status is Running, and a stored
+// running/evolving claim the button no longer believes (a stop just sent, a run
+// that died without saying so) is only "Not running".
+function runBarStatus(running) {
+  const st = appState ? appState.status : '';
+  if (running) return statusParts(isActiveRunStatus(st) ? st : 'running');
+  if (!st || isActiveRunStatus(st)) return {cls: 'unknown', label: 'Not running'};
+  return statusParts(st, appState.pause_reason);
 }
 
 // Run-state changes are pushed by the server as 'run_state' WebSocket events

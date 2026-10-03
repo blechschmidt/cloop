@@ -94,7 +94,7 @@ function render(s) {
 
   // Sync Run/Stop button state from project status.
   if (typeof updateRunButtonState === 'function') {
-    updateRunButtonState(s.status === 'running');
+    updateRunButtonState(isActiveRunStatus(s.status));
   }
 
   // In multi-project mode with no project selected, don't overwrite the UI
@@ -141,7 +141,7 @@ function render(s) {
   // buttons rely on WebSocket 'run_state' events, which may not have arrived
   // yet on initial render, page refresh, or project tab switch — leaving
   // both buttons visible (default HTML state).
-  updateRunButtonState(s.status === 'running');
+  updateRunButtonState(isActiveRunStatus(s.status));
 
   // Stats
   // Task 20125: backend now ships steps_count instead of the full steps[]
@@ -225,8 +225,8 @@ function updateBrowserTitle() {
     const inProg = appState.plan.tasks.find(t => t && t.status === 'in_progress');
     if (inProg) title = inProg.title || ('Task #' + inProg.id);
   }
-  if (!title && appState && appState.status === 'running') {
-    title = 'Running…';
+  if (!title && appState && isActiveRunStatus(appState.status)) {
+    title = appState.status === 'evolving' ? 'Evolving the plan…' : 'Running…';
   }
   const prev = _runningTaskTitle;
   _runningTaskTitle = title;
@@ -569,7 +569,7 @@ function renderStepListPanel() {
   const stepListEl = document.getElementById('stepList');
   if (!stepListEl) return;
   const s = appState || {};
-  const isRunning = s.status === 'running';
+  const isRunning = isActiveRunStatus(s.status);
 
   if (!stepsState.loaded.length && !isRunning && !stepsState.loading) {
     stepListEl.innerHTML = '<div class="empty-state"><h3>No events yet</h3><p>Start a run to see history here.</p></div>';
@@ -592,7 +592,7 @@ function renderStepListPanel() {
       const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
       if (inProg) runningTitle = '#' + inProg.id + ' ' + (inProg.title || '');
     }
-    if (!runningTitle) runningTitle = 'Running…';
+    if (!runningTitle) runningTitle = s.status === 'evolving' ? 'Evolving the plan…' : 'Running…';
     const runningOut = (typeof liveLogText !== 'undefined' && liveLogText) ? liveLogText.slice(-4000) : '(awaiting output…)';
     html += '<div class="step-item step-running'+runningExp+'" data-idx="running" onclick="toggleStep(this)">'+
       '<div class="step-header">'+

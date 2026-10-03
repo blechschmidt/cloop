@@ -17,7 +17,7 @@ function renderLiveLog() {
   box.textContent = liveLogText;
   // Blinking cursor appended when running.
   const wrap = document.getElementById('liveOutputWrap');
-  const isRunning = appState && appState.status === 'running';
+  const isRunning = !!appState && isActiveRunStatus(appState.status);
   if (wrap) wrap.classList.toggle('live-output-running', isRunning);
   if (isRunning) {
     const cur = document.createElement('span');

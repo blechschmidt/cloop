@@ -75,6 +75,20 @@ func pauseForUsageCap(t *testing.T, dir, detail string) {
 	}
 }
 
+// setAutoEvolve turns Evolve Mode on for the project in dir, as the Overview's
+// toggle does.
+func setAutoEvolve(t *testing.T, dir string) {
+	t.Helper()
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	ps.AutoEvolve = true
+	if err := ps.Save(); err != nil {
+		t.Fatalf("save %s: %v", dir, err)
+	}
+}
+
 // hideProjectAt hides the project at path for this hub's (anonymous) viewer,
 // addressing it by its index in /api/projects as the dashboard does.
 func hideProjectAt(t *testing.T, ts *httptest.Server, path string) {
@@ -225,6 +239,30 @@ type mobileOverflowResults struct {
 		Page  overflowPage `json:"page"`
 		Strip tabStrip     `json:"strip"`
 	} `json:"tab_strip"`
+
+	PausedOverview struct {
+		Page   overflowPage    `json:"page"`
+		Widest *overflowWidest `json:"widest"`
+		Status string          `json:"status"`
+	} `json:"paused_overview"`
+
+	RunBar struct {
+		Page   overflowPage    `json:"page"`
+		Widest *overflowWidest `json:"widest"`
+		Bar    runBar          `json:"bar"`
+	} `json:"run_bar"`
+}
+
+// runBar is RUN_BAR in testdata/mobile_overflow_browser.js.
+type runBar struct {
+	Present          bool   `json:"present"`
+	Status           string `json:"status"`
+	StatusOverflowPx int    `json:"status_overflow_px"`
+	BarOverflowPx    int    `json:"bar_overflow_px"`
+	ChipShown        bool   `json:"chip_shown"`
+	ChipWidth        int    `json:"chip_width"`
+	ChipLabelAreaPx  int    `json:"chip_label_area_px"`
+	ChipText         string `json:"chip_text"`
 }
 
 // tabStrip is TAB_STRIP in testdata/mobile_overflow_browser.js.
@@ -278,6 +316,9 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 	// without it (Task 20344).
 	pauseForUsageCap(t, primary,
 		"weekly subscription cap reached at 98% of the five-hour window")
+	// And in Evolve Mode, for the Tasks tab's run bar, which names it (Task
+	// 20358). Nothing else the driver measures draws the option.
+	setAutoEvolve(t, primary)
 	others := make([]string, 0, mobileProjectCount)
 	for i := 1; i < mobileProjectCount-1; i++ {
 		goal := fmt.Sprintf("goal for project %d — long enough to need truncating on a narrow screen", i)
@@ -399,6 +440,64 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 					"make it fit, shrinking every control on screen",
 					c.name, c.page.InnerWidth, c.page.ExpectedWidth)
 			}
+		}
+	})
+
+	t.Run("a paused project's status wraps", func(t *testing.T) {
+		// A paused project's status carries its reason — an error message of
+		// any length, which no phone fits on one line. The Overview's badge
+		// used to refuse to wrap, so the page zoomed out on any phone up to
+		// 360px wide; since Task 20358 the Tasks tab's run bar shows the same
+		// status, so both are held here.
+		ov, rb := got.PausedOverview, got.RunBar
+		if !strings.Contains(ov.Status, "weekly subscription cap") {
+			t.Fatalf("the Overview's status reads %q, without the pause reason — "+
+				"nothing long was laid out, so a fit would prove nothing", ov.Status)
+		}
+		if !rb.Bar.Present {
+			t.Fatal("the Tasks tab's run bar never rendered for the paused project")
+		}
+		if !strings.Contains(rb.Bar.Status, "weekly subscription cap") {
+			t.Fatalf("the run bar reads %q, without the pause reason — nothing long "+
+				"was laid out, so a fit would prove nothing", rb.Bar.Status)
+		}
+		for _, c := range []struct {
+			name string
+			page overflowPage
+			who  *overflowWidest
+		}{
+			{"Overview", ov.Page, ov.Widest},
+			{"Tasks tab", rb.Page, rb.Widest},
+		} {
+			if c.page.OverflowPx > 1 || c.page.InnerWidth > c.page.ExpectedWidth+1 {
+				t.Errorf("%s at %dpx: the document overflows by %dpx and the layout "+
+					"viewport is %dpx wide. Widest offender: %s", c.name,
+					c.page.ExpectedWidth, c.page.OverflowPx, c.page.InnerWidth, c.who.String())
+			}
+		}
+		if rb.Bar.StatusOverflowPx > 1 || rb.Bar.BarOverflowPx > 1 {
+			t.Errorf("the run bar's status spills %dpx past the bar and the bar scrolls "+
+				"by %dpx: a pause reason has to wrap inside it",
+				rb.Bar.StatusOverflowPx, rb.Bar.BarOverflowPx)
+		}
+	})
+
+	t.Run("a phone's run bar names Evolve Mode with its icon", func(t *testing.T) {
+		// With its words the chip is ~105px instead of ~35px, and on a 360px
+		// screen the run bar's status and its Stop button then no longer share
+		// a row (Task 20358).
+		rb := got.RunBar.Bar
+		if !rb.ChipShown {
+			t.Fatal("the project is in Evolve Mode but the run bar shows no Evolve Mode chip")
+		}
+		if rb.ChipLabelAreaPx > 1 {
+			t.Errorf("the Evolve Mode chip draws its label on a %dpx phone (chip %dpx "+
+				"wide); a phone should get the icon alone",
+				got.RunBar.Page.ExpectedWidth, rb.ChipWidth)
+		}
+		if !strings.Contains(rb.ChipText, "Evolve Mode") {
+			t.Errorf("the Evolve Mode chip's text is %q — the label is hidden from "+
+				"view, not removed, so a screen reader still has a name for it", rb.ChipText)
 		}
 	})
 

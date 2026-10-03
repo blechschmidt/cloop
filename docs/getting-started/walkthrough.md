@@ -265,7 +265,9 @@ and evolve cycle per task).
 
 **Start run** sits at the top of the Tasks tab, so you can start the plan from
 the page you just edited it on. The same button is on Overview and on every row
-of the Projects tab; they all call the same thing.
+of the Projects tab; they all call the same thing. Beside it is the project's
+status in Overview's words (a paused project says why) and, when that option is
+on, an **Evolve Mode** chip.
 
 ![The Event History panel: rows for "Run started", then per task a start and a "completed in 0s" entry, interleaved with the task titles and their durations, ending in "All 16 events loaded".](../screenshots/11-event-history.png)
 
@@ -288,7 +290,9 @@ to report back gets a row naming the upgrade; **Upgrade** on its card is the fix
 When every task is done, an idle plan stops there. With **Evolve Mode** on, the
 agent proposes new work instead — and that work arrives as tasks you can read
 and reject, not as more transcript. [How cloop works](concepts.md#auto-evolve)
-covers what it looks at when deciding.
+covers what it looks at when deciding. While it does, the project reads
+**Evolving** and the run is still live: **Pause / Stop** ends the round, and the
+next start picks it up again.
 
 ---
 

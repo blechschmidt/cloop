@@ -299,6 +299,9 @@
   .badge.unknown    { background:rgba(139,148,158,.15); color:var(--muted);  border:1px solid rgba(139,148,158,.3);}
   .badge-dot { width:5px; height:5px; border-radius:50%; background:currentColor; }
   .badge.running .badge-dot { animation: pulse 1.5s infinite; }
+  /* A project's status carries its pause reason, which can be an error message
+     of any length: it wraps rather than widening the page (Task 20358). */
+  #statusBadge .badge, .tasks-run-bar .badge { white-space:normal; overflow-wrap:anywhere; flex-shrink:1; }
   .task-tags { display:inline-flex; flex-wrap:wrap; gap:3px; margin-left:4px; }
   .task-tag  { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; background:rgba(139,148,158,.15); color:var(--muted); border:1px solid rgba(139,148,158,.3); }
   .pin-badge { font-size:14px; vertical-align:middle; }
@@ -913,6 +916,9 @@
     background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
   }
   .tasks-run-hint { font-size:11px; color:var(--muted); }
+  /* Evolve Mode (Task 20358): the Overview's option badge at the status badge's size. */
+  .tasks-run-bar .option-badge { padding:3px 9px; gap:5px; font-size:11px; white-space:nowrap; }
+  .tasks-run-bar .option-badge .opt-icon { font-size:12px; }
 
   /* ── Add task form ── */
   .add-task-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
@@ -2116,8 +2122,11 @@
        priority field's 140px would both be taken as one. */
     .add-task-bar textarea, #newTaskPriority { flex-basis: auto; }
 
-    /* Run bar: drop the hint so the status and the button stay on one row. */
+    /* Run bar: drop the hint so the status and the button stay on one row,
+       and say Evolve Mode with its icon alone (its words stay for screen
+       readers): with them the button wraps on a 360px phone. */
     .tasks-run-hint { display: none; }
+    .tasks-run-evolve-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
     /* Form rows: stack */
     .form-row { flex-direction: column; }

@@ -20,7 +20,8 @@ import (
 	"testing"
 )
 
-// runPair is every copy of the Run/Stop affordance, as the user sees it.
+// runPair is every copy of the Run/Stop affordance, as the user sees it, and
+// what the Tasks tab's run bar says beside it.
 type runPair struct {
 	OverviewRun  bool   `json:"overviewRun"`
 	OverviewStop bool   `json:"overviewStop"`
@@ -28,21 +29,35 @@ type runPair struct {
 	TasksStop    bool   `json:"tasksStop"`
 	BarVisible   bool   `json:"barVisible"`
 	Status       string `json:"status"`
+	StatusClass  string `json:"statusClass"`
+	EvolveChip   bool   `json:"evolveChip"`
+	Title        string `json:"title"`
 }
 
 type tasksRunResult struct {
 	// Flat scenarios report one snapshot.
 	runPair
-	// Paired scenarios report two.
-	Started *runPair `json:"started"`
-	Stopped *runPair `json:"stopped"`
-	After   *runPair `json:"after"`
+	// Sequenced scenarios report one per step.
+	Started    *runPair `json:"started"`
+	Stopped    *runPair `json:"stopped"`
+	After      *runPair `json:"after"`
+	Running    *runPair `json:"running"`
+	Evolving   *runPair `json:"evolving"`
+	Discovered *runPair `json:"discovered"`
+	Replayed   *runPair `json:"replayed"`
+	Resumed    *runPair `json:"resumed"`
+	Finished   *runPair `json:"finished"`
+	Paused     *runPair `json:"paused"`
+	Complete   *runPair `json:"complete"`
 
 	Posts         []string `json:"posts"`
 	WhileSelected *bool    `json:"whileSelected"`
 	AfterClearing *bool    `json:"afterClearing"`
 	WithGoal      *bool    `json:"withGoal"`
 	WithoutGoal   *bool    `json:"withoutGoal"`
+	Off           *bool    `json:"off"`
+	On            *bool    `json:"on"`
+	ToggledOff    *bool    `json:"toggledOff"`
 	Error         string   `json:"error"`
 }
 
@@ -91,8 +106,9 @@ func runTasksRunScenarios(t *testing.T) map[string]tasksRunResult {
 	return results
 }
 
-// wantPair asserts exactly one of Start/Stop is offered, in both places.
-func wantPair(t *testing.T, what string, got runPair, running bool) {
+// wantPair asserts exactly one of Start/Stop is offered, in both places, and
+// that the run bar's status says word.
+func wantPair(t *testing.T, what string, got runPair, running bool, word string) {
 	t.Helper()
 
 	if got.TasksRun == running {
@@ -111,13 +127,17 @@ func wantPair(t *testing.T, what string, got runPair, running bool) {
 			what, got.OverviewRun, got.OverviewStop, got.TasksRun, got.TasksStop)
 	}
 	// A lone button says nothing about which state it belongs to; the page
-	// carries no other status of its own.
-	wantWord := "Not running"
-	if running {
-		wantWord = "Running"
+	// carries no other status of its own. Since Task 20358 that status is the
+	// project's own, in the Overview's words, so the word differs by state.
+	if !strings.Contains(got.Status, word) {
+		t.Errorf("%s: run bar status reads %q, want it to say %q", what, got.Status, word)
 	}
-	if !strings.Contains(got.Status, wantWord) {
-		t.Errorf("%s: run bar status reads %q, want it to say %q", what, got.Status, wantWord)
+	// And never the opposite of the button beside it.
+	if running && strings.Contains(got.Status, "Not running") {
+		t.Errorf("%s: run bar says %q beside a Stop button", what, got.Status)
+	}
+	if !running && (strings.Contains(got.Status, ">Running") || strings.Contains(got.Status, ">Evolving")) {
+		t.Errorf("%s: run bar says %q beside a Start button", what, got.Status)
 	}
 }
 
@@ -133,7 +153,8 @@ func TestDashboard_TasksTabStartsRuns(t *testing.T) {
 		t.Fatal("the Tasks tab shows no run bar for a loaded project — starting a run " +
 			"still means navigating back to the Overview tab or the Projects grid")
 	}
-	wantPair(t, "idle project", idle.runPair, false)
+	// An initialised project that has never run is "Ready", as on the Overview.
+	wantPair(t, "idle project", idle.runPair, false, "Ready")
 }
 
 // TestDashboard_TasksRunBarFollowsRunState covers the live path. A bar that
@@ -148,13 +169,13 @@ func TestDashboard_TasksRunBarFollowsRunState(t *testing.T) {
 	if flip.Started == nil || flip.Stopped == nil {
 		t.Fatal("scenario returned no snapshots")
 	}
-	wantPair(t, "after run_state{running:true}", *flip.Started, true)
-	wantPair(t, "after run_state{running:false}", *flip.Stopped, false)
+	wantPair(t, "after run_state{running:true}", *flip.Started, true, "Running")
+	wantPair(t, "after run_state{running:false}", *flip.Stopped, false, "Ready")
 
 	// And on first paint, where the status rides in on the hydrating frame
 	// rather than on a run_state event.
 	wantPair(t, "project already running when opened",
-		results["running_project_offers_stop_on_arrival"].runPair, true)
+		results["running_project_offers_stop_on_arrival"].runPair, true, "Running")
 }
 
 // TestDashboard_TasksStartActsOnTheViewedProject is the scoping guard. Every
@@ -186,7 +207,7 @@ func TestDashboard_TasksRunBarBelievesTheServersRefusal(t *testing.T) {
 
 	results := runTasksRunScenarios(t)
 	wantPair(t, "after the server refused a second run",
-		results["refusal_corrects_the_button"].runPair, true)
+		results["refusal_corrects_the_button"].runPair, true, "Running")
 }
 
 // TestDashboard_TasksRunBarHidesWithoutAProject checks the bar disappears when
@@ -218,5 +239,101 @@ func TestDashboard_TasksRunBarHidesWithoutAProject(t *testing.T) {
 	}
 	if *init.WithoutGoal {
 		t.Error("the run bar is offered on a project with no goal, where Start can only fail")
+	}
+}
+
+// TestDashboard_EvolvingRunOffersStop is Task 20358: a run in an evolve round is
+// a running run. The hub has always counted 'evolving' as in flight — stale
+// recovery, health, the quota sweep — but the dashboard keyed on 'running'
+// alone, so every evolve round offered Start on a live harness (one click from
+// the duplicate dispatch handleRun refuses) and the Tasks tab read
+// "Not running".
+func TestDashboard_EvolvingRunOffersStop(t *testing.T) {
+	t.Parallel()
+
+	results := runTasksRunScenarios(t)
+
+	arrival := results["evolving_project_offers_stop_on_arrival"].runPair
+	wantPair(t, "project opened mid evolve round", arrival, true, "Evolving")
+	if !strings.Contains(arrival.StatusClass, "evolving") {
+		t.Errorf("run bar status class is %q, want the Overview's evolving badge", arrival.StatusClass)
+	}
+	if !strings.Contains(arrival.Title, "Evolving") {
+		t.Errorf("browser title is %q while the run evolves, want it to say so", arrival.Title)
+	}
+
+	// The frames a live run produces. None of the round's redraws comes with a
+	// run_state, so this is the sequence that used to flip the pair to Start.
+	round := results["evolve_round_keeps_stop"]
+	steps := []struct {
+		name    string
+		got     *runPair
+		running bool
+		word    string
+	}{
+		{"running its last task", round.Running, true, "Running"},
+		{"status turned evolving", round.Evolving, true, "Evolving"},
+		{"evolve round added a task", round.Discovered, true, "Evolving"},
+		{"run_state replayed mid round", round.Replayed, true, "Evolving"},
+		{"run picked up the new task", round.Resumed, true, "Running"},
+		{"run finished", round.Finished, false, "Complete"},
+	}
+	for _, st := range steps {
+		if st.got == nil {
+			t.Fatalf("evolve round: no snapshot for %q", st.name)
+		}
+		wantPair(t, "evolve round, "+st.name, *st.got, st.running, st.word)
+	}
+
+	// Stop answered before the process exits: the stored status still says
+	// evolving, but the bar must not name it beside the Start button.
+	wantPair(t, "after Stop during an evolve round",
+		results["stop_during_evolve"].runPair, false, "Not running")
+}
+
+// TestDashboard_TasksRunBarShowsEvolveMode checks the Tasks tab says when the
+// project is in Evolve Mode (Task 20358). It decides whether a run stops when
+// the plan drains or keeps adding tasks, and it was set and shown only on the
+// Overview.
+func TestDashboard_TasksRunBarShowsEvolveMode(t *testing.T) {
+	t.Parallel()
+
+	results := runTasksRunScenarios(t)
+
+	if !results["evolving_project_offers_stop_on_arrival"].EvolveChip {
+		t.Error("a project in Evolve Mode shows no Evolve Mode chip on the Tasks tab")
+	}
+	chip := results["evolve_chip_follows_the_option"]
+	if chip.Off == nil || chip.On == nil || chip.ToggledOff == nil {
+		t.Fatal("scenario returned no chip readings")
+	}
+	if *chip.Off {
+		t.Error("the Evolve Mode chip shows on a project with Evolve Mode off")
+	}
+	if !*chip.On {
+		t.Error("the Evolve Mode chip stays hidden after the project's state turned Evolve Mode on")
+	}
+	if *chip.ToggledOff {
+		t.Error("the Evolve Mode chip outlives the Overview toggle turning it off — " +
+			"the two copies of the option disagree until the server's next frame")
+	}
+}
+
+// TestDashboard_TasksRunBarNamesTheIdleStatus checks an idle project's bar says
+// which kind of idle (Task 20358): a paused run says why, as on the Overview,
+// and a finished plan says so, instead of one "Not running" for both.
+func TestDashboard_TasksRunBarNamesTheIdleStatus(t *testing.T) {
+	t.Parallel()
+
+	results := runTasksRunScenarios(t)
+
+	idle := results["idle_bar_names_the_status"]
+	if idle.Paused == nil || idle.Complete == nil {
+		t.Fatal("scenario returned no snapshots")
+	}
+	wantPair(t, "paused by the operator", *idle.Paused, false, "Paused: stopped by operator")
+	wantPair(t, "plan complete", *idle.Complete, false, "Complete")
+	if idle.Complete.EvolveChip {
+		t.Error("the Evolve Mode chip shows on a project with Evolve Mode off")
 	}
 }

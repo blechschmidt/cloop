@@ -12,7 +12,9 @@
 //     the dispatch handleRun now refuses;
 //   * Start acts on the project being *viewed*, not on the hub's default;
 //   * with no project selected there is no button at all, because there is no
-//     project for it to act on.
+//     project for it to act on;
+//   * a run in an evolve round is a running run (Task 20358): Stop, and a bar
+//     that says "Evolving", for as long as the round lasts.
 //
 // Run by TestDashboard_TasksTabStartsRuns. Each scenario returns a flat object
 // and the Go side asserts on it. Printed as one JSON document on stdout.
@@ -84,6 +86,9 @@ function pair() {
     tasksStop:    vis('tasksCtrlStop'),
     barVisible:   vis('tasksRunBar'),
     status:       document.getElementById('tasksRunStatus').innerHTML || '',
+    statusClass:  document.getElementById('tasksRunStatus').className || '',
+    evolveChip:   vis('tasksRunEvolve'),
+    title:        document.title || '',
   };
 }
 
@@ -102,6 +107,30 @@ async function openBeta(h) {
   window.switchTab('tasks');
   await globalThis.__settle(2);
   return ws;
+}
+
+// openBetaAs is openBeta with beta's state replaced, for a scenario about what
+// the first paint of a project in some particular state offers.
+async function openBetaAs(h, st) {
+  h.states[1] = st;
+  window.openProject(1, 'beta');
+  await globalThis.__settle();
+  const ws = currentSocket(h);
+  ws.open();
+  ws.deliver('task_update', clone(st));
+  window.switchTab('tasks');
+  await globalThis.__settle(2);
+  return ws;
+}
+
+// evolvingBeta is beta mid evolve round (Task 20358): auto-evolve on, its only
+// task done, and the run asking the provider for the next ones.
+function evolvingBeta() {
+  const st = clone(BETA);
+  st.status = 'evolving';
+  st.auto_evolve = true;
+  st.plan.tasks[0].status = 'done';
+  return st;
 }
 
 const scenarios = {
@@ -198,6 +227,116 @@ const scenarios = {
     ws.deliver('task_update', {goal: '', status: 'initialized', plan: {tasks: []}});
     await globalThis.__settle(2);
     return {withGoal, withoutGoal: vis('tasksRunBar')};
+  },
+
+  // ── Evolve rounds (Task 20358) ─────────────────────────────────────────────
+
+  // A project opened mid evolve round. Its harness is alive, so the page must
+  // offer Stop, and say what the run is doing rather than "Not running".
+  async evolving_project_offers_stop_on_arrival() {
+    const h = await boot();
+    await openBetaAs(h, evolvingBeta());
+    return pair();
+  },
+
+  // The frames an auto-evolve run produces while the user sits on the Tasks
+  // tab: its last task finishes and the status turns 'evolving', the round
+  // adds a task, the run picks it up, the run ends. No run_state frame marks
+  // the round, because the process never stops — every redraw in it comes from
+  // a state_diff, and each one used to put the Start button back.
+  async evolve_round_keeps_stop() {
+    const h = await boot();
+    const st = clone(BETA);
+    st.status = 'running';
+    st.auto_evolve = true;
+    st.plan.tasks[0].status = 'in_progress';
+    const ws = await openBetaAs(h, st);
+    ws.deliver('run_state', {running: true});
+    await globalThis.__settle(2);
+    const running = pair();
+
+    ws.deliver('state_diff', {
+      tasks_changed: [{id: 201, status: 'done'}],
+      state_changed: {status: 'evolving'},
+    });
+    await globalThis.__settle(2);
+    const evolving = pair();
+
+    ws.deliver('state_diff', {
+      tasks_added: [{id: 202, title: 'beta two', status: 'pending', priority: 1}],
+    });
+    await globalThis.__settle(2);
+    const discovered = pair();
+
+    // A reconnecting socket is sent run_state again. The badge must keep
+    // naming the phase, not fall back to a generic "Running".
+    ws.deliver('run_state', {running: true});
+    await globalThis.__settle(2);
+    const replayed = pair();
+
+    ws.deliver('state_diff', {
+      tasks_changed: [{id: 202, status: 'in_progress'}],
+      state_changed: {status: 'running'},
+    });
+    await globalThis.__settle(2);
+    const resumed = pair();
+
+    ws.deliver('state_diff', {
+      tasks_changed: [{id: 202, status: 'done'}],
+      state_changed: {status: 'complete'},
+    });
+    ws.deliver('run_state', {running: false});
+    await globalThis.__settle(2);
+    const finished = pair();
+
+    return {running, evolving, discovered, replayed, resumed, finished};
+  },
+
+  // Stop pressed during an evolve round. The reply comes before the process
+  // has exited, so the stored status still says 'evolving' — and naming that
+  // beside the Start button the reply has just put up would have the bar
+  // contradict itself.
+  async stop_during_evolve() {
+    const h = await boot();
+    await openBetaAs(h, evolvingBeta());
+    h.routes['/api/stop'] = {ok: true, message: 'pause signal sent', signalled: 1};
+    window.apiStop();
+    await globalThis.__settle(3);
+    return pair();
+  },
+
+  // The Evolve Mode chip follows the option: absent while it is off, shown
+  // once a state_diff turns it on, and gone the moment the Overview's badge is
+  // clicked, before the server has answered.
+  async evolve_chip_follows_the_option() {
+    const h = await boot();
+    const ws = await openBeta(h);
+    const off = vis('tasksRunEvolve');
+
+    ws.deliver('state_diff', {state_changed: {auto_evolve: true}});
+    await globalThis.__settle(2);
+    const on = vis('tasksRunEvolve');
+
+    h.routes['/api/options/toggle'] = {ok: true};
+    window.toggleOption('auto_evolve', false);
+    const toggledOff = vis('tasksRunEvolve');
+    await globalThis.__settle(3);
+    return {off, on, toggledOff};
+  },
+
+  // An idle project's bar says which kind of idle, in the Overview's words: a
+  // run stopped by hand reads differently from a finished plan.
+  async idle_bar_names_the_status() {
+    const h = await boot();
+    const st = clone(BETA);
+    st.status = 'paused';
+    st.pause_reason = {code: 'operator'};
+    const ws = await openBetaAs(h, st);
+    const paused = pair();
+
+    ws.deliver('state_diff', {state_changed: {status: 'complete', pause_reason: null}});
+    await globalThis.__settle(2);
+    return {paused, complete: pair()};
   },
 };
 

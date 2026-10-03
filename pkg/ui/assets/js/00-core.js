@@ -420,6 +420,13 @@ function prepopulateAdvancedRunOptions(s) {
 // human label, and the corresponding CLI flag name. Disabled options are shown
 // muted so the user can see which features are available but inactive.
 function renderActiveOptions(s) {
+  // The Tasks tab's run bar names Evolve Mode too (Task 20358). It decides
+  // whether a run stops when the plan drains or keeps adding tasks, which is
+  // what someone about to press Start there needs to know. Set here rather
+  // than in render() so the optimistic toggle below moves both copies at once.
+  const evo = document.getElementById('tasksRunEvolve');
+  if (evo) evo.style.display = s.auto_evolve ? '' : 'none';
+
   const grid = document.getElementById('activeOptionsGrid');
   if (!grid) return;
   // Each entry: [enabled, icon, label, flag, tooltip, toggleKey]
@@ -918,11 +925,20 @@ function pauseReasonText(pr) {
   return label + ', resumes ' + hh + ':' + mm;
 }
 
-// statusBadge renders the run status. A paused run carries why it paused when
-// the caller has it, so the dashboard distinguishes a run waiting on a human
-// from one that restarts by itself at 14:50 — before this the two were the
-// same word.
-function statusBadge(status, pauseReason) {
+// isActiveRunStatus reports whether a project's stored status says a run is in
+// flight. 'evolving' does: an auto-evolve run whose plan has drained is asking
+// the provider for its next tasks, and its harness is as alive then as during
+// any task. The hub has always counted both (stale recovery, the health rules,
+// the quota sweep). The dashboard keyed on 'running' alone, so for the whole of
+// every evolve round it offered Start on a live run and the Tasks tab said
+// "Not running" (Task 20358).
+function isActiveRunStatus(status) {
+  return status === 'running' || status === 'evolving';
+}
+
+// statusParts is statusBadge's class and wording, for a caller that restyles
+// an element it already has rather than inserting markup.
+function statusParts(status, pauseReason) {
   const s = status || 'unknown';
   const labels = {running:'Running',complete:'Complete',failed:'Failed',
                   paused:'Paused',initialized:'Ready',evolving:'Evolving'};
@@ -931,7 +947,16 @@ function statusBadge(status, pauseReason) {
     const why = pauseReasonText(pauseReason);
     if (why) label += ': ' + why;
   }
-  return '<span class="badge '+esc(s)+'"><span class="badge-dot"></span>'+esc(label)+'</span>';
+  return {cls: s, label: label};
+}
+
+// statusBadge renders the run status. A paused run carries why it paused when
+// the caller has it, so the dashboard distinguishes a run waiting on a human
+// from one that restarts by itself at 14:50 — before this the two were the
+// same word.
+function statusBadge(status, pauseReason) {
+  const p = statusParts(status, pauseReason);
+  return '<span class="badge '+esc(p.cls)+'"><span class="badge-dot"></span>'+esc(p.label)+'</span>';
 }
 
 function taskIcon(status) {

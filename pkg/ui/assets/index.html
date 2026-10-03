@@ -516,6 +516,9 @@
            Hidden until a project is loaded: there is nothing to start. -->
       <div class="tasks-run-bar" id="tasksRunBar" style="display:none">
         <span id="tasksRunStatus"></span>
+        <!-- Shown while Evolve Mode is on (Task 20358); renderActiveOptions toggles it. -->
+        <span id="tasksRunEvolve" class="option-badge on" style="display:none"
+              title="Evolve Mode is on: when the plan runs out of tasks, the run asks for new ones instead of stopping."><span class="opt-icon" aria-hidden="true">🧬</span><span class="tasks-run-evolve-label">Evolve Mode</span></span>
         <span class="tasks-run-hint">Options are set in <strong>Active Options</strong> on the Overview tab.</span>
         <span class="spacer"></span>
         <button id="tasksCtrlRun" class="btn success" data-perm="run.start" onclick="apiRun()"
