@@ -163,6 +163,15 @@ type ProjectState struct {
 	// running orchestrator picks up changes at its next sync.
 	ReviewGate *pm.ReviewGate `json:"review_gate,omitempty"`
 
+	// CommitPolicy is the opt-in "done means committed" post-condition (Task
+	// 20370): with it on, a task whose agent says it is done is accepted only
+	// once the changes it made are committed — and, with Pushed, on their
+	// branch's upstream. Nil or disabled means the agent's word stands. Set
+	// from the dashboard, `cloop run --require-committed[=pushed]` or `cloop
+	// require-committed`; a running orchestrator picks up changes at its next
+	// sync.
+	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
+
 	// StepCount is the total number of step rows in the database. Always
 	// populated: Load mirrors len(Steps); LoadLite fills it from a cheap
 	// SELECT COUNT(*) while Steps is nil. Read it instead of len(Steps)
@@ -640,6 +649,8 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 	// Task 20357: the review gate is switched and reconfigured from the
 	// dashboard while a run is going; the next task's review uses the change.
 	s.ReviewGate = disk.ReviewGate
+	// Task 20370: so is "done means committed"; the next task's check uses it.
+	s.CommitPolicy = disk.CommitPolicy
 	return nil
 }
 
@@ -660,6 +671,25 @@ func SetReviewGate(workDir string, g *pm.ReviewGate) error {
 	}
 	defer db.Close()
 	return db.SaveReviewGate(g)
+}
+
+// SetCommitPolicy stores a project's "done means committed" setting (Task
+// 20370) without rewriting anything else in its state. A run in progress picks
+// the change up at its next sync, and checks the next task it starts with it.
+func SetCommitPolicy(workDir string, p *pm.CommitPolicy) error {
+	if p == nil {
+		return fmt.Errorf("state: no commit policy to store")
+	}
+	dbPath := effectiveDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("no cloop project in %s: %w", workDir, err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveCommitPolicy(p)
 }
 
 // SaveRunStatus writes the run's status and pause reason and nothing else —
@@ -769,6 +799,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		RetryFailed:       s.RetryFailed,
 		DryRun:            s.DryRun,
 		ReviewGate:        s.ReviewGate.Clone(),
+		CommitPolicy:      s.CommitPolicy.Clone(),
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -817,6 +848,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		RetryFailed:       r.RetryFailed,
 		DryRun:            r.DryRun,
 		ReviewGate:        r.ReviewGate,
+		CommitPolicy:      r.CommitPolicy,
 		StepCount:         r.StepCount,
 		LastStepTime:      r.LastStepTime,
 	}
@@ -959,6 +991,10 @@ type legacyState struct {
 	// (pkg/executor/projectseed), so a run on a remote device reviews its
 	// tasks exactly as a run on the hub would (Task 20357).
 	ReviewGate *pm.ReviewGate `json:"review_gate,omitempty"`
+	// CommitPolicy travels the same way, so a run on an isolating executor
+	// holds its tasks to "done means committed" inside the sandbox, where the
+	// work is (Task 20370).
+	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -1007,6 +1043,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		RetryFailed:       legacy.RetryFailed,
 		DryRun:            legacy.DryRun,
 		ReviewGate:        legacy.ReviewGate,
+		CommitPolicy:      legacy.CommitPolicy,
 	}
 
 	db, err := statedb.Open(dbPath)

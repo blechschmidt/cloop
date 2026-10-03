@@ -99,10 +99,13 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 	task.ActualMinutes = 0
 
 	outcome := "it never ran, so it is not done"
-	if ab.Class == AbortUnfinishedTurn {
+	switch ab.Class {
+	case AbortUnfinishedTurn:
 		// It did run — it stopped before the end, which is a different thing
 		// to tell the person reading the task.
 		outcome = "it stopped before finishing, so it is not done; the next attempt starts from the tree it left"
+	case AbortUncommittedWork:
+		outcome = "its changes are still in the working tree, untouched; the next attempt starts from them and is held to them"
 	}
 	note := fmt.Sprintf("Task aborted before completion (%s): %s. Reset to pending — %s.",
 		ab.Class, ab.Reason, outcome)
@@ -124,6 +127,11 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 	}
 	if !ab.RetryAfter.IsZero() {
 		details["retry_after"] = ab.RetryAfter.UTC().Format(time.RFC3339)
+	}
+	for k, v := range ab.Details {
+		if _, taken := details[k]; !taken {
+			details[k] = v
+		}
 	}
 	state.LogEventDetails(o.config.WorkDir, state.EventRow{
 		Type:      state.EventTaskAborted,

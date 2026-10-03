@@ -111,3 +111,35 @@ func TestSaveReviewGateTouchesNothingElse(t *testing.T) {
 		t.Errorf("disabled gate = %+v", got.ReviewGate)
 	}
 }
+
+// "Done means committed" is written on its own too (Task 20370), and a save
+// from a copy that never saw it leaves it alone.
+func TestSaveCommitPolicyTouchesNothingElse(t *testing.T) {
+	db := openTestDB(t)
+	plan := &pm.Plan{Goal: "g", Tasks: []*pm.Task{{ID: 1, Title: "t", Status: pm.TaskInProgress}}}
+	if err := db.SaveState(&State{Goal: "g", PMMode: true, Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveCommitPolicy(&pm.CommitPolicy{Enabled: true, Pushed: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CommitPolicy.RequiresPush() || got.Plan.TaskByID(1).Status != pm.TaskInProgress || got.Goal != "g" {
+		t.Fatalf("after saving the policy: %+v, task %s", got.CommitPolicy, got.Plan.TaskByID(1).Status)
+	}
+	if err := db.SaveState(&State{Goal: "g2", PMMode: true, Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.LoadStateLite(); !got.CommitPolicy.RequiresPush() {
+		t.Error("a save without the policy switched it off")
+	}
+	if err := db.SaveCommitPolicy(&pm.CommitPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.LoadState(); got.CommitPolicy == nil || got.CommitPolicy.Active() {
+		t.Errorf("disabled policy = %+v", got.CommitPolicy)
+	}
+}

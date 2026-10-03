@@ -32,6 +32,7 @@ func sampleState(t *testing.T) *state.ProjectState {
 		InnovateMode: true,
 		Parallel:     true,
 		MaxParallel:  4,
+		CommitPolicy: &pm.CommitPolicy{Enabled: true, Pushed: true},
 		MaxSteps:     50,
 		Status:       "running",
 		CreatedAt:    time.Now().Add(-time.Hour).UTC(),
@@ -96,6 +97,11 @@ func TestSeedRoundTripsThroughStateLoad(t *testing.T) {
 	if !got.AutoEvolve || !got.InnovateMode || !got.Parallel || got.MaxParallel != 4 {
 		t.Errorf("run options lost: autoEvolve=%v innovate=%v parallel=%v maxParallel=%d",
 			got.AutoEvolve, got.InnovateMode, got.Parallel, got.MaxParallel)
+	}
+	// "Done means committed" is checked inside the sandbox, where the work
+	// is (Task 20370), so it has to arrive with the project.
+	if !got.CommitPolicy.RequiresPush() {
+		t.Errorf("CommitPolicy = %+v — the seed dropped it", got.CommitPolicy)
 	}
 	if got.Plan == nil || len(got.Plan.Tasks) != 2 {
 		t.Fatalf("plan did not survive: %+v", got.Plan)

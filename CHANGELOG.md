@@ -12,6 +12,24 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Done means committed.** An opt-in, per-project post-condition: a task
+  whose agent says it is done is accepted only once the changes it made are
+  committed — and, with *pushed*, on its branch's upstream. When a turn ends
+  with this attempt's changes uncommitted (or its commits unpushed), the turn
+  is handed back in the same conversation naming the paths and commits, at
+  most twice; a task that still ends that way goes back to `pending` as an
+  `uncommitted_work` abort with its work left in the tree, the next attempt is
+  held to it, and the run pauses (reason `uncommitted_work`) at the
+  consecutive-abort ceiling. What was already dirty when the task started,
+  and `.cloop/`, are never blamed; a push the review gate holds counts as
+  pending. Set it with the Overview's *Done = Committed* / *…and Pushed*
+  badges, `cloop run --require-committed[=pushed]` or `cloop
+  require-committed`; `cloop status` shows it. It travels to isolating
+  executors with the project. See `docs/guides/done-means-committed.md`.
+  The unfinished-turn detector also recognises the ending that stranded Task
+  20368 ("the only thing still running is …, then commit and push"), re-checked
+  against the project's 314-message ledger with no signalled turn matching.
+
 - **Project sharing.** On a hub with single sign-on, a project's maintainer
   adds named people to it at a role — never above their own role there — from
   the Overview's **Members** card or `cloop project members add`. A membership

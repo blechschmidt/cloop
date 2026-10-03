@@ -37,8 +37,13 @@ const maxTurnContinuations = 2
 // unfinishedTurnPatterns match a final message saying that the turn is ending
 // with work still outstanding: first-person waiting, a monitor left armed, a
 // promise to act once something reports. They were calibrated against every
-// final message this project's ledger holds: they match 38 of the 55 turns
-// that ended without a signal, and none of the 204 that ended with one.
+// final message this project's ledger holds: they matched 38 of the 55 turns
+// that ended without a signal, and none of the 204 that ended with one. Task
+// 20370 re-checked them against the 314 the ledger holds now
+// (TestUnfinishedTurnLedger): 45 of the 95 unsignalled — the rest are
+// questions, refusals, empty outputs and finished summaries — and none of the
+// 219 signalled. Phrase matching will keep missing wordings, which is why a
+// project can also make the tree itself the signal (committed.go).
 var unfinishedTurnPatterns = compileUnfinishedTurnPatterns(
 	`\bi(?:'ll| will| am going to|'m going to) (?:wait|hold)\b`,
 	`\bi(?:'m| am) (?:waiting|holding)\b`,
@@ -56,6 +61,12 @@ var unfinishedTurnPatterns = compileUnfinishedTurnPatterns(
 	`\bstatus while\b`,
 	`\bwhile i wait\b`,
 	`\bverification is (?:still )?in progress\b`,
+	// Task 20368's ending: a noun, not "is", before "still running" — "the
+	// only thing still running is the review agent" — and a promise to
+	// commit or push after more work, with no "once it reports" to key on.
+	`\b(?:thing|job|step|agent|subagent|review|process|suite|run|build|check|test|task)s? (?:that (?:is|are) |that's )?still (?:running|in progress|going|pending)\b`,
+	`\bi(?:'ll| will| am going to|'m going to)\b[^.\n]{0,160}?\bthen (?:commit|push)`,
+	`(?:^|[.!?]\s+|\*\*)(?:the |a |my )?(?:monitors?|waiters?|watchers?|wakeups?) (?:(?:is|are) )?armed\b`,
 )
 
 func compileUnfinishedTurnPatterns(exprs ...string) []*regexp.Regexp {
@@ -144,41 +155,62 @@ const continueTurnInstruction = "Your turn ended before the task was finished: y
 	"- Do not end your turn while anything you depend on is still running.\n\n" +
 	"End with TASK_DONE, TASK_FAILED or TASK_SKIPPED on the last line."
 
+// turnStats counts the times completeTask handed a task's turn back, by why.
+type turnStats struct {
+	// unfinished counts turns the agent ended waiting on its own work.
+	unfinished int
+	// uncommitted counts turns that left the attempt's changes uncommitted,
+	// or unpushed, under the project's commit policy (Task 20370).
+	uncommitted int
+}
+
+func (t turnStats) total() int { return t.unfinished + t.uncommitted }
+
 // completeTask runs a task's provider call and hands the turn back, up to
-// maxTurnContinuations times, while the agent ends it waiting on its own work.
-// It returns the final result, with the token counts of every turn summed,
-// and how many times the turn was handed back.
+// maxTurnContinuations times in all, while the agent ends it waiting on its own
+// work — or, with guard set, while the turn would be accepted as done but has
+// left the attempt's changes uncommitted (or unpushed). It returns the final
+// result, with the token counts of every turn summed, and how often and why
+// the turn was handed back.
 //
 // A provider that reports a SessionID is resumed in that conversation, so the
 // agent keeps everything it knew; one that does not is re-prompted with its
 // previous answer, and finds the rest in the working tree. A continuation
 // that fails leaves the previous result to be judged as it stands — where
-// decideUnsignalled refuses to promote an unfinished turn — except that a
-// cancelled run returns the cancellation, so the caller can tell a stop from
-// an outcome.
-func completeTask(ctx context.Context, p provider.Provider, prompt string, opts provider.Options) (*provider.Result, int, error) {
+// decideUnsignalled refuses to promote an unfinished turn, and the guard's
+// final check refuses outstanding work — except that a cancelled run returns
+// the cancellation, so the caller can tell a stop from an outcome.
+func completeTask(ctx context.Context, p provider.Provider, prompt string, opts provider.Options, guard *commitGuard) (*provider.Result, turnStats, error) {
 	result, err := safeComplete(ctx, p, prompt, opts)
-	continued := 0
-	for err == nil && result != nil && continued < maxTurnContinuations {
-		if pm.CheckTaskSignal(result.Output) != pm.TaskInProgress || !looksLikeUnfinishedTurn(result.Output) {
-			break
+	var turns turnStats
+	for err == nil && result != nil && turns.total() < maxTurnContinuations {
+		unfinished := pm.CheckTaskSignal(result.Output) == pm.TaskInProgress && looksLikeUnfinishedTurn(result.Output)
+		instruction := continueTurnInstruction
+		if !unfinished {
+			if instruction = guard.handBackFor(ctx, result); instruction == "" {
+				break
+			}
 		}
 		next := opts
 		var nextPrompt string
 		if result.SessionID != "" {
 			next.ResumeSession = result.SessionID
-			nextPrompt = continueTurnInstruction
+			nextPrompt = instruction
 		} else {
 			next.ResumeSession = ""
 			nextPrompt = prompt + "\n\n--- YOUR PREVIOUS RESPONSE ---\n" + result.Output +
-				"\n--- END OF PREVIOUS RESPONSE ---\n\n" + continueTurnInstruction +
+				"\n--- END OF PREVIOUS RESPONSE ---\n\n" + instruction +
 				"\n\nThe working directory still holds everything that attempt changed."
 		}
-		continued++
+		if unfinished {
+			turns.unfinished++
+		} else {
+			turns.uncommitted++
+		}
 		more, moreErr := safeComplete(ctx, p, nextPrompt, next)
 		if moreErr != nil {
 			if ctx.Err() != nil {
-				return nil, continued, moreErr
+				return nil, turns, moreErr
 			}
 			break
 		}
@@ -191,7 +223,7 @@ func completeTask(ctx context.Context, p provider.Provider, prompt string, opts 
 		more.Duration += result.Duration
 		result = more
 	}
-	return result, continued, err
+	return result, turns, err
 }
 
 // continuedTurnNote is the task annotation recording that its turn was handed

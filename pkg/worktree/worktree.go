@@ -108,6 +108,14 @@ func Create(repoDir string, task *pm.Task) (*Worktree, error) {
 	wtPath := Path(repoDir, task)
 	branch := branchNameIn(repoDir, task)
 
+	// A worktree kept for this task's next attempt holds work that exists
+	// nowhere else (Task 20370). Re-creating would destroy it; Reopen is how
+	// it is picked up again.
+	if reg, ok := keptRegistration(repoDir, wtPath); ok {
+		return nil, fmt.Errorf("worktree: %s is kept for task %d's next attempt (%s); reopen it rather than re-creating it",
+			wtPath, task.ID, reg.lockReason)
+	}
+
 	// If a worktree already exists at this path (from a crashed prior run or a
 	// stale entry in .git/worktrees), tear it down before re-creating.
 	_ = forceRemoveWorktree(repoDir, wtPath)
@@ -189,6 +197,86 @@ func (w *Worktree) Commit(task *pm.Task) (string, error) {
 		return "", fmt.Errorf("worktree rev-parse HEAD: %w", err)
 	}
 	return strings.TrimSpace(sha), nil
+}
+
+// keptLockReason starts the git lock reason of a worktree kept for its task's
+// next attempt. The lock is what keeps it: `git worktree prune`, the hub's
+// startup sweep and Create all leave a locked worktree alone.
+const keptLockReason = "cloop: kept for the task's next attempt"
+
+// Keep locks the worktree so it survives until its task's next attempt reopens
+// it, instead of being removed. An attempt that ended with its changes still
+// uncommitted — or that stopped before it finished — leaves its work here, and
+// removing the worktree would discard that work: the branch keeps only what
+// was committed (Task 20370). why is added to the lock reason, for whoever
+// lists the worktrees meanwhile.
+func (w *Worktree) Keep(repoDir, why string) error {
+	if w == nil {
+		return errors.New("worktree: nil receiver")
+	}
+	reason := keptLockReason
+	if why = strings.Join(strings.Fields(why), " "); why != "" {
+		if len(why) > 200 {
+			why = why[:200]
+		}
+		reason += ": " + why
+	}
+	if _, err := runGit(repoDir, "worktree", "lock", "--reason", reason, w.Path); err != nil {
+		return fmt.Errorf("worktree: keep %s: %w", w.Path, err)
+	}
+	return nil
+}
+
+// Reopen returns the worktree an earlier attempt at task kept (see Keep),
+// unlocked and exactly as that attempt left it, or nil when there is none. The
+// next attempt then starts from that tree rather than from a fresh checkout.
+func Reopen(repoDir string, task *pm.Task) (*Worktree, error) {
+	if task == nil {
+		return nil, errors.New("worktree: nil task")
+	}
+	wtPath := Path(repoDir, task)
+	reg, ok := keptRegistration(repoDir, wtPath)
+	if !ok {
+		return nil, nil
+	}
+	branch := branchNameIn(repoDir, task)
+	if fi, err := os.Stat(wtPath); err != nil || !fi.IsDir() || reg.branch != branch {
+		// Not what Keep left: its directory is gone, or it is on another
+		// branch. Leave it to Create to report.
+		return nil, nil
+	}
+	baseBranch, err := currentBranch(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("worktree: determine current branch: %w", err)
+	}
+	if _, err := runGit(repoDir, "worktree", "unlock", wtPath); err != nil {
+		return nil, fmt.Errorf("worktree: reopen %s: %w", wtPath, err)
+	}
+	return &Worktree{Path: wtPath, Branch: branch, BaseBranch: baseBranch, TaskID: task.ID}, nil
+}
+
+// keptRegistration finds a worktree registered at wtPath and locked by Keep.
+func keptRegistration(repoDir, wtPath string) (registration, bool) {
+	regs, err := gitWorktreeList(repoDir)
+	if err != nil {
+		return registration{}, false
+	}
+	want := resolvedPath(wtPath)
+	for _, r := range regs {
+		if r.locked && strings.HasPrefix(r.lockReason, keptLockReason) && resolvedPath(r.path) == want {
+			return r, true
+		}
+	}
+	return registration{}, false
+}
+
+// resolvedPath is p with symbolic links resolved where it exists, so a path
+// git printed and one cloop built compare equal.
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
 }
 
 // Remove tears down the worktree directory and prunes git's bookkeeping. The

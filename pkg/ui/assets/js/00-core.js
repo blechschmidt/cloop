@@ -431,6 +431,8 @@ function renderActiveOptions(s) {
   if (!grid) return;
   // Each entry: [enabled, icon, label, flag, tooltip, toggleKey]
   // toggleKey (optional) makes the badge clickable and POSTs to /api/options/toggle.
+  // commit_policy is "done means committed" (Task 20370).
+  const cp = s.commit_policy || {};
   const opts = [
     [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
@@ -439,6 +441,8 @@ function renderActiveOptions(s) {
     [!!s.plan_only,     '📝', 'Plan Only',     '--plan-only',    'Click to toggle. Decompose goal into tasks but do not execute', 'plan_only'],
     [!!s.retry_failed,  '🔁', 'Retry Failed',  '--retry-failed', 'Click to toggle. Reset previously-failed tasks to pending before the next run', 'retry_failed'],
     [!!s.dry_run,       '🧪', 'Dry Run',       '--dry-run',      'Click to toggle. Show prompts without invoking the provider (no API calls, no side effects)', 'dry_run'],
+    [!!cp.enabled, '📌', 'Done = Committed', '--require-committed', 'Click to toggle. A task is done only once the changes it made are committed; otherwise its turn is handed back', 'require_committed'],
+    [!!(cp.enabled && cp.pushed), '🚀', '…and Pushed', '--require-committed=pushed', 'Click to toggle. Also require its commits on the branch upstream', 'require_pushed'],
   ];
   const mp = parseInt(s.max_parallel, 10);
   const mpVal = (Number.isFinite(mp) && mp >= 1 && mp <= 64) ? mp : 1;
@@ -616,8 +620,9 @@ window.toggleOption = function(flag, value) {
   }
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run', require_committed: 'Done = Committed', require_pushed: 'Done = Pushed'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
+      if (d.commit_policy && appState) { appState.commit_policy = d.commit_policy; renderActiveOptions(appState); }
       // No explicit /api/state refetch — the backend's task_update WebSocket
       // broadcast (or the next render trigger) carries authoritative state.
     } else {
@@ -907,6 +912,7 @@ const pauseReasonLabels = {
   operator:     'stopped by operator',
   stale:        'previous run ended unexpectedly',
   state_not_persisted: 'progress not saved',
+  uncommitted_work: 'work left uncommitted',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

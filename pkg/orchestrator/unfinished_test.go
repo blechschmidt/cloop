@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +28,10 @@ func TestLooksLikeUnfinishedTurn(t *testing.T) {
 		"**Status while `pkg/ui` runs.** Here's where things stand.",
 		"Verification is in progress. Status while the full `pkg/ui` suite runs in an isolated worktree:",
 		"Nothing further to do until the suite lands. The monitor is armed and will report the result; I\u2019ll then clear the build cache, push, and confirm the deploy.",
+		// Task 20368, recorded done with 24 changed paths uncommitted
+		// (Task 20370): nothing in the original sixteen patterns matched it.
+		task20368FinalMessage,
+		"Monitor armed for the full run conclusion. The eval-stack job itself is already verified green on the runner.",
 	}
 	for _, out := range unfinished {
 		if !looksLikeUnfinishedTurn(out) {
@@ -40,6 +46,10 @@ func TestLooksLikeUnfinishedTurn(t *testing.T) {
 		"The deploy timer is armed, the hub answers 200, and my commit changes zero production files.",
 		"The CI run for my push was still in progress when I finished and will likely stay red on these; they need their own fix.",
 		"Committed and pushed as `d32919a`. The agent now waits on the hub's reply before it retries.",
+		"Nothing still running — every test run has finished, and the work is committed and pushed as a5a45c5.",
+		"No review agent is still running, and the commit is pushed.",
+		"I committed the fix, then pushed it to main, and CI passed.",
+		"The timer that deploys main is armed for 04:30; everything is committed and pushed.",
 		"",
 	}
 	for _, out := range finished {
@@ -59,6 +69,70 @@ func TestLooksLikeUnfinishedTurn(t *testing.T) {
 	if looksLikeUnfinishedTurn(long) {
 		t.Error("a finished summary was read as unfinished from words in its middle")
 	}
+}
+
+// task20368FinalMessage is how Task 20368's turn ended, verbatim.
+const task20368FinalMessage = "The commit message is drafted. The only thing still running is the adversarial " +
+	"review agent. I'll address what it finds, re-run `-race` on the touched packages, then commit and push."
+
+// TestTask20368EndingIsCaughtTwice: the message that stranded Task 20368 is
+// matched by two patterns independently — the "still running" after a noun,
+// and the promise to commit and push afterwards — so loosening either one
+// alone does not let it through again.
+func TestTask20368EndingIsCaughtTwice(t *testing.T) {
+	hits := 0
+	for _, rx := range unfinishedTurnPatterns {
+		if rx.MatchString(task20368FinalMessage) {
+			hits++
+		}
+	}
+	if hits < 2 {
+		t.Errorf("Task 20368's ending matches %d pattern(s), want at least 2", hits)
+	}
+}
+
+// TestUnfinishedTurnLedger re-checks the patterns against a project's ledger
+// of final messages: the task artifacts in <project>/.cloop/tasks, one per
+// task, the frontmatter followed by the agent's final message. No message that
+// ended with a TASK_* signal may match — those are never handed back, and a
+// pattern that matches finished work is a pattern that will hand back a
+// finished turn without one. It runs only when CLOOP_LEDGER_DIR names such a
+// directory, since a ledger is a project's history and not the repository's.
+func TestUnfinishedTurnLedger(t *testing.T) {
+	dir := os.Getenv("CLOOP_LEDGER_DIR")
+	if dir == "" {
+		t.Skip("set CLOOP_LEDGER_DIR to a project's .cloop/tasks to re-check the patterns against its ledger")
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no task artifacts in %s (%v)", dir, err)
+	}
+	var signalled, unsignalled, caught int
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(b)
+		if strings.HasPrefix(body, "---\n") {
+			if i := strings.Index(body[4:], "\n---\n"); i >= 0 {
+				body = body[4+i+5:]
+			}
+		}
+		ev, hit := unfinishedTurnEvidence(body)
+		if pm.CheckTaskSignal(body) != pm.TaskInProgress {
+			signalled++
+			if hit {
+				t.Errorf("%s ended with a signal, but reads as unfinished (matched %q)", filepath.Base(f), ev)
+			}
+			continue
+		}
+		unsignalled++
+		if hit {
+			caught++
+		}
+	}
+	t.Logf("%d signalled, none matched; %d of %d unsignalled read as unfinished", signalled, caught, unsignalled)
 }
 
 // turnProvider plays a scripted conversation and records what each call asked.
@@ -95,12 +169,12 @@ func TestCompleteTaskResumesAnUnfinishedTurn(t *testing.T) {
 		{Output: waitingTurn, SessionID: "0b1f0a9e-9a2f-4f3c-8d0e-6f4a3b2c1d0e", InputTokens: 100, OutputTokens: 10},
 		{Output: "Suite green, committed and pushed.\nTASK_DONE", SessionID: "0b1f0a9e-9a2f-4f3c-8d0e-6f4a3b2c1d0e", InputTokens: 7, OutputTokens: 3},
 	}}
-	res, continued, err := completeTask(context.Background(), prov, "do the task", provider.Options{})
+	res, turns, err := completeTask(context.Background(), prov, "do the task", provider.Options{}, nil)
 	if err != nil {
 		t.Fatalf("completeTask: %v", err)
 	}
-	if continued != 1 {
-		t.Fatalf("continued = %d, want 1", continued)
+	if turns.unfinished != 1 || turns.total() != 1 {
+		t.Fatalf("turns = %+v, want one unfinished hand-back", turns)
 	}
 	if pm.CheckTaskSignal(res.Output) != pm.TaskDone {
 		t.Fatalf("the continued turn's answer was not returned: %q", res.Output)
@@ -121,9 +195,9 @@ func TestCompleteTaskRepromptsWithoutASession(t *testing.T) {
 		{Output: waitingTurn},
 		{Output: "All done.\nTASK_DONE"},
 	}}
-	_, continued, err := completeTask(context.Background(), prov, "do the task", provider.Options{})
-	if err != nil || continued != 1 {
-		t.Fatalf("completeTask: continued=%d err=%v", continued, err)
+	_, turns, err := completeTask(context.Background(), prov, "do the task", provider.Options{}, nil)
+	if err != nil || turns.unfinished != 1 {
+		t.Fatalf("completeTask: turns=%+v err=%v", turns, err)
 	}
 	if prov.resumes[1] != "" {
 		t.Errorf("asked to resume %q from a provider that reported no conversation", prov.resumes[1])
@@ -143,9 +217,9 @@ func TestCompleteTaskLeavesFinishedAndSignalledTurnsAlone(t *testing.T) {
 		"Committed and pushed as d32919a.",
 	} {
 		prov := &turnProvider{results: []*provider.Result{{Output: out}}}
-		_, continued, err := completeTask(context.Background(), prov, "p", provider.Options{})
-		if err != nil || continued != 0 || len(prov.prompts) != 1 {
-			t.Errorf("output %q: continued=%d calls=%d err=%v, want one call", out, continued, len(prov.prompts), err)
+		_, turns, err := completeTask(context.Background(), prov, "p", provider.Options{}, nil)
+		if err != nil || turns.total() != 0 || len(prov.prompts) != 1 {
+			t.Errorf("output %q: turns=%+v calls=%d err=%v, want one call", out, turns, len(prov.prompts), err)
 		}
 	}
 }
@@ -154,12 +228,12 @@ func TestCompleteTaskHandsTheTurnBackAtMostTwice(t *testing.T) {
 	prov := &turnProvider{results: []*provider.Result{
 		{Output: waitingTurn}, {Output: waitingTurn}, {Output: waitingTurn}, {Output: waitingTurn},
 	}}
-	res, continued, err := completeTask(context.Background(), prov, "p", provider.Options{})
+	res, turns, err := completeTask(context.Background(), prov, "p", provider.Options{}, nil)
 	if err != nil {
 		t.Fatalf("completeTask: %v", err)
 	}
-	if continued != maxTurnContinuations || len(prov.prompts) != maxTurnContinuations+1 {
-		t.Fatalf("continued=%d after %d calls, want %d continuations", continued, len(prov.prompts), maxTurnContinuations)
+	if turns.unfinished != maxTurnContinuations || len(prov.prompts) != maxTurnContinuations+1 {
+		t.Fatalf("turns=%+v after %d calls, want %d continuations", turns, len(prov.prompts), maxTurnContinuations)
 	}
 	// Still unfinished, so the task is not accepted as done even with a diff.
 	ab, aborted := decideUnsignalled(t.TempDir(), "", res.Output, true)
@@ -174,7 +248,7 @@ func TestCompleteTaskHandsTheTurnBackAtMostTwice(t *testing.T) {
 func TestCompleteTaskReturnsTheStopDuringAContinuation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	prov := &cancellingTurnProvider{cancel: cancel}
-	res, _, err := completeTask(ctx, prov, "p", provider.Options{})
+	res, _, err := completeTask(ctx, prov, "p", provider.Options{}, nil)
 	if err == nil || res != nil {
 		t.Fatalf("got result=%v err=%v; a stop during the continuation must surface as the error", res, err)
 	}

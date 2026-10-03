@@ -206,3 +206,66 @@ func TestBranchNameInAFeature(t *testing.T) {
 		t.Error("a feature's task branch matches the project's task-branch pattern, so the project's cleanup would claim it")
 	}
 }
+
+// TestKeepAndReopen: an attempt that ended with its changes uncommitted keeps
+// its worktree for the next attempt (Task 20370). Nothing that reclaims
+// worktrees may take it meanwhile, and the next attempt gets it back exactly
+// as it was left.
+func TestKeepAndReopen(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repo := initRepo(t)
+	task := &pm.Task{ID: 9, Title: "half done"}
+
+	if wt, err := Reopen(repo, task); wt != nil || err != nil {
+		t.Fatalf("Reopen with nothing kept = %+v, %v", wt, err)
+	}
+	w, err := Create(repo, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "half.go"), []byte("package half\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Keep(repo, "task 9 left 1 path uncommitted"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create refuses rather than wiping it.
+	if _, err := Create(repo, task); err == nil || !strings.Contains(err.Error(), "kept for task 9") {
+		t.Fatalf("Create over a kept worktree = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Path, "half.go")); err != nil {
+		t.Fatalf("the kept work is gone: %v", err)
+	}
+	// A sweep leaves it alone, whatever its age.
+	res, err := Prune(repo, PruneOptions{MinAge: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 0 || len(res.Kept) != 1 || res.Kept[0].Code != KeepLocked {
+		t.Fatalf("prune = removed %+v kept %+v", res.Removed, res.Kept)
+	}
+
+	got, err := Reopen(repo, task)
+	if err != nil || got == nil {
+		t.Fatalf("Reopen = %+v, %v", got, err)
+	}
+	if got.Path != w.Path || got.Branch != w.Branch || got.BaseBranch != w.BaseBranch {
+		t.Errorf("reopened %+v, kept %+v", got, w)
+	}
+	if b, err := os.ReadFile(filepath.Join(got.Path, "half.go")); err != nil || string(b) != "package half\n" {
+		t.Errorf("reopened worktree lost its work: %q, %v", b, err)
+	}
+	if dirty, _ := got.HasChanges(); !dirty {
+		t.Error("the reopened worktree is clean")
+	}
+	// Reopened means unlocked: the attempt's own end decides its fate again.
+	if again, _ := Reopen(repo, task); again != nil {
+		t.Error("a reopened worktree is still kept")
+	}
+	if err := got.Remove(repo); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -92,6 +92,8 @@ var rootCommandGroups = map[string]string{
 	"clean":  groupCore,
 	// Parallel features are a way of running the core loop, several at once.
 	"feature": groupCore,
+	// What "done" requires of a task's git work (Task 20370).
+	"require-committed": groupCore,
 
 	// Plan and tasks — everything that shapes or displays the task plan.
 	"task":       groupPlan,

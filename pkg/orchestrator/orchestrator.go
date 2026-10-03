@@ -2023,6 +2023,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// task's outcome — not even to a recovery after the run dies.
 			o.awaitReview(task)
 		}
+		// Done means committed (Task 20370): record what the repository holds
+		// before the agent touches it, so that what it leaves behind can be
+		// told apart from what was already there.
+		commit, commitNote := o.openCommitGuard(ctx, s.CommitPolicy, o.config.WorkDir, task, activeGate)
+		if commitNote != "" {
+			dimColor.Printf("  %s\n", commitNote)
+		}
 		var gateOut *gateOutcome
 		// taskSessionID is the conversation the agent's latest turn ran in,
 		// which a review sending it back resumes.
@@ -2365,10 +2372,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				auditCtx := provideraudit.WithTaskContext(taskExecCtx, task.ID, task.Title)
 				// completeTask hands the turn back when the agent ends it
 				// waiting on its own work (Task 20349); see unfinished.go.
-				result, continued, err := completeTask(auditCtx, taskProvider, prompt, opts)
+				result, turns, err := completeTask(auditCtx, taskProvider, prompt, opts, commit)
 				taskExecSpan.End()
-				if continued > 0 {
-					pm.AddAnnotation(task, "cloop", continuedTurnNote(continued))
+				if turns.unfinished > 0 {
+					pm.AddAnnotation(task, "cloop", continuedTurnNote(turns.unfinished))
+				}
+				if turns.uncommitted > 0 {
+					pm.AddAnnotation(task, "cloop", uncommittedTurnNote(turns.uncommitted, commit.pushed()))
 				}
 				if liveFile != nil {
 					if err == nil && !wasStreamed() {
@@ -2799,9 +2809,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if signal != beforeBackground {
 			decided = backgroundWhy(task.Background)
 		}
+		// Done means committed (Task 20370): a turn about to be accepted as
+		// done that left this attempt's changes uncommitted — or unpushed — is
+		// not done, whatever it said. Checked before the decision is written
+		// down, which it overrides, and before the review gate, which must not
+		// publish work the task has not finished.
+		var commitAbort *Abort
+		if signal == pm.TaskDone || signal == pm.TaskInProgress {
+			commitAbort = commit.abortFor(ctx, taskOutput, taskBackground)
+		}
 		// The decision so far is written down before anything announces it: a
 		// run whose control plane has gone dies on its next line of output.
-		o.noteDecision(task, signal, decided, activeGate != nil)
+		if commitAbort == nil {
+			o.noteDecision(task, signal, decided, activeGate != nil)
+		}
 		if task.Background != nil {
 			o.logBackgroundEvent(s, task, task.Background)
 			if abandoned {
@@ -2816,7 +2837,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// has its changes reviewed before anything leaves the machine. What
 		// the gate does not approve fails here, before any merge or push.
 		reviewReroute := false
-		if activeGate != nil && (signal == pm.TaskDone || signal == pm.TaskInProgress) {
+		if activeGate != nil && commitAbort == nil && (signal == pm.TaskDone || signal == pm.TaskInProgress) {
 			if requeueIfInterrupted("before the review gate ran") {
 				continue
 			}
@@ -2829,7 +2850,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			gateOut = o.passGate(provideraudit.WithTaskContext(taskCtx, task.ID, task.Title), activeGate, gateInput{
 				task: task, goal: s.Goal, conventions: s.Instructions, prompt: prompt,
 				output: taskOutput, signal: signal, sessionID: taskSessionID, background: taskBackground,
-				worker: taskProvider, workerOpts: fixOpts, model: s.Model,
+				worker: taskProvider, workerOpts: fixOpts, model: s.Model, commit: commit,
 			})
 			if requeueIfInterrupted("while the review gate was running") {
 				continue
@@ -2886,6 +2907,40 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					successColor.Printf("✓ %s\n", gateOut.note)
 				}
 			}
+		}
+
+		// The review gate's fix turns are the agent's turns too: what they left
+		// is held to the same rule.
+		if commitAbort == nil && gateOut != nil && len(gateOut.steps) > 0 && !gateOut.fail &&
+			(signal == pm.TaskDone || signal == pm.TaskInProgress) {
+			commitAbort = commit.abortFor(ctx, taskOutput, taskBackground)
+		}
+		if note := commit.passNote(); note != "" && commitAbort == nil {
+			pm.AddAnnotation(task, "cloop", note)
+		}
+		// Done means committed (Task 20370): the attempt left work outstanding,
+		// so it goes back to pending with that work where the agent left it,
+		// bounded like every abort by the run's consecutive-abort ceiling.
+		if commitAbort != nil {
+			consecutiveErrors++
+			if gateOut == nil {
+				activeGate.withheldNote(task)
+			}
+			if err := o.abortTask(s, task, *commitAbort, s.CurrentStep); err != nil {
+				return err
+			}
+			o.queueFailed(queueID, abortSummaryForQueue(*commitAbort))
+			if consecutiveErrors >= maxConsecutiveErrors {
+				return o.pauseForUncommittedWork(s, task, *commitAbort, consecutiveErrors, nil)
+			}
+			stop, err := o.scheduleAbortRetry(ctx, s, *commitAbort, nil)
+			if err != nil {
+				return err
+			}
+			if stop {
+				return nil
+			}
+			continue
 		}
 
 		// Each arm below stores the task's outcome before it announces it — the
@@ -3640,6 +3695,16 @@ type taskResult struct {
 	// continued is how many times the agent's turn was handed back because
 	// it ended waiting on its own work (Task 20349).
 	continued int
+	// uncommitted is how many times it was handed back because the attempt's
+	// changes were not committed (or pushed), and commitAbort the abort the
+	// turn it ended with warrants under the project's commit policy (Task
+	// 20370); pushed reports that the policy required pushes.
+	uncommitted int
+	commitAbort *Abort
+	pushed      bool
+	// commitNote says what the policy's check could not check, for a turn
+	// it otherwise let through.
+	commitNote string
 	// gate is what the review gate decided (Task 20357); nil when the gate
 	// is off or the task did not reach it.
 	gate *gateOutcome
@@ -3697,7 +3762,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		worktreeMode    bool
 		worktreeBase    string
 		activeWorktrees = map[int]*worktree.Worktree{}
-		worktreeMu      sync.Mutex
+		// reopenedWorktrees marks the worktrees an earlier attempt kept for
+		// its task (Task 20370). They hold work that exists nowhere else, so
+		// an early exit keeps them again instead of removing them.
+		reopenedWorktrees = map[int]bool{}
+		worktreeMu        sync.Mutex
 	)
 	if o.config.WorktreeParallel {
 		if !worktree.IsGitRepo(o.config.WorkDir) {
@@ -3727,7 +3796,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					// branch's working dir on disk.
 					mergeQ.Stop()
 					worktreeMu.Lock()
-					for _, w := range activeWorktrees {
+					for id, w := range activeWorktrees {
+						if reopenedWorktrees[id] {
+							_ = w.Keep(o.config.WorkDir, "the run ended while it held an earlier attempt's work")
+							continue
+						}
 						_ = w.Remove(o.config.WorkDir)
 					}
 					activeWorktrees = nil
@@ -4203,7 +4276,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 		if worktreeMode {
 			for i, t := range ready {
-				wt, wErr := worktree.Create(o.config.WorkDir, t)
+				// A worktree an earlier attempt kept — it ended with its work
+				// uncommitted (Task 20370) — is where this attempt starts.
+				wt, wErr := worktree.Reopen(o.config.WorkDir, t)
+				reopened := wt != nil
+				if wErr == nil && wt == nil {
+					wt, wErr = worktree.Create(o.config.WorkDir, t)
+				}
 				if wErr != nil {
 					dimColor.Printf("  worktree create failed for task %d (%v) — using shared workdir\n", t.ID, wErr)
 					continue
@@ -4211,8 +4290,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				taskWorkDirs[i] = wt.Path
 				worktreeMu.Lock()
 				activeWorktrees[t.ID] = wt
+				reopenedWorktrees[t.ID] = reopened
 				worktreeMu.Unlock()
-				dimColor.Printf("  worktree[task %d]: %s (branch %s)\n", t.ID, wt.Path, wt.Branch)
+				if reopened {
+					dimColor.Printf("  worktree[task %d]: %s (branch %s), reopened as its last attempt left it\n", t.ID, wt.Path, wt.Branch)
+				} else {
+					dimColor.Printf("  worktree[task %d]: %s (branch %s)\n", t.ID, wt.Path, wt.Branch)
+				}
 			}
 		}
 
@@ -4231,6 +4315,32 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 		}
 		gateGoal, gateConventions, gateModel := s.Goal, s.Instructions, s.Model
+
+		// Done means committed (Task 20370): one baseline per task, in its
+		// own directory, before any agent in the round starts. Tasks that
+		// share a working tree cannot have their changes told apart — each
+		// would be blamed for the others' — so they are not checked; worktree
+		// mode gives each task a tree of its own.
+		roundGuards := make([]*commitGuard, len(ready))
+		if s.CommitPolicy.Active() {
+			sharing := map[string]int{}
+			for _, d := range taskWorkDirs {
+				sharing[d]++
+			}
+			for i, t := range ready {
+				if n := sharing[taskWorkDirs[i]]; n > 1 {
+					note := fmt.Sprintf("Done means committed was not checked: %d tasks shared one working tree in this round, so their changes could not be told apart (--worktree-parallel gives each its own).", n)
+					pm.AddAnnotation(t, "cloop", note)
+					dimColor.Printf("  done means committed: not checked for task %d — %d tasks share its working tree\n", t.ID, n)
+					continue
+				}
+				g, note := o.openCommitGuard(ctx, s.CommitPolicy, taskWorkDirs[i], t, roundGates[i])
+				if note != "" {
+					dimColor.Printf("  %s\n", note)
+				}
+				roundGuards[i] = g
+			}
+		}
 
 		// Launch goroutines for each ready task and stream their results back
 		// through resultsCh as each one finishes (Task 20129) so a fast task's
@@ -4303,7 +4413,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				o.watchdog.Register(t.ID, tTaskCancel)
 				// Tag context for the audit log so the call lands against this task.
 				tAuditCtx := provideraudit.WithTaskContext(tTaskCtx, t.ID, t.Title)
-				result, continued, err := completeTask(tAuditCtx, taskProvider, prompt, opts)
+				guard := roundGuards[idx]
+				result, turns, err := completeTask(tAuditCtx, taskProvider, prompt, opts, guard)
 				// Write live artifact for parallel task (non-streaming).
 				if err == nil {
 					if lf, lfErr := artifact.OpenLiveArtifact(o.config.WorkDir, t.ID); lfErr == nil {
@@ -4317,6 +4428,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if err == nil && result != nil {
 					o.noteEarlyVerdict(taskID, startedAt, result.Output, result.Background, false)
 				}
+				// Done means committed (Task 20370), decided here for the
+				// same reason the review gate runs here, and before it: the
+				// gate must not publish work the task has not finished.
+				var commitAbort *Abort
+				if err == nil && result != nil {
+					commitAbort = guard.abortFor(tAuditCtx, result.Output, result.Background)
+				}
 				// The review gate runs here, in the worker, so reviews of a
 				// round's tasks proceed side by side rather than one after
 				// another in the consumer below. It sees what the consumer
@@ -4324,14 +4442,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// not a clarification question, not unfinished background
 				// work.
 				var gateOut *gateOutcome
-				if err == nil && result != nil && gate != nil {
+				if err == nil && result != nil && gate != nil && commitAbort == nil {
 					sig := pm.CheckTaskSignal(result.Output)
 					if (sig == pm.TaskDone || sig == pm.TaskInProgress) &&
 						!looksLikeClarificationQuestion(result.Output) && !result.Background.Incomplete() {
 						gateOut = o.passGate(tAuditCtx, gate, gateInput{
 							task: t, goal: gateGoal, conventions: gateConventions, prompt: prompt,
 							output: result.Output, signal: sig, sessionID: result.SessionID, background: result.Background,
-							worker: taskProvider, workerOpts: opts, model: gateModel,
+							worker: taskProvider, workerOpts: opts, model: gateModel, commit: guard,
 						})
 						if len(gateOut.steps) > 0 {
 							// The agent's last word is its fix turn's.
@@ -4341,11 +4459,17 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 							result.ThinkingTokens += gateOut.workThinking
 						}
 						o.noteGateVerdict(taskID, startedAt, gateOut, result.Output, result.Background)
+						// The gate's fix turns are the agent's too.
+						if len(gateOut.steps) > 0 && !gateOut.fail {
+							commitAbort = guard.abortFor(tAuditCtx, result.Output, result.Background)
+						}
 					}
 				}
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
-				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut, continued: continued, gate: gateOut}
+				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut,
+					continued: turns.unfinished, uncommitted: turns.uncommitted, commitAbort: commitAbort,
+					pushed: guard.pushed(), commitNote: guard.passNote(), gate: gateOut}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 
@@ -4442,11 +4566,21 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				worktreeMu.Lock()
 				wt, ok := activeWorktrees[taskID]
+				reopened := reopenedWorktrees[taskID]
 				if ok {
 					delete(activeWorktrees, taskID)
+					delete(reopenedWorktrees, taskID)
 				}
 				worktreeMu.Unlock()
 				if ok && wt != nil {
+					// A reopened worktree holds an earlier attempt's work
+					// that exists nowhere else (Task 20370): kept again.
+					if reopened {
+						if kErr := wt.Keep(o.config.WorkDir, "an attempt that ended early held an earlier attempt's work"); kErr != nil {
+							dimColor.Printf("  worktree keep task %d: %v\n", taskID, kErr)
+						}
+						return
+					}
 					if rmErr := wt.Remove(o.config.WorkDir); rmErr != nil {
 						dimColor.Printf("  worktree remove task %d: %v\n", taskID, rmErr)
 					}
@@ -4563,6 +4697,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.AddStep(stepResult)
 			if res.continued > 0 {
 				pm.AddAnnotation(task, "cloop", continuedTurnNote(res.continued))
+			}
+			if res.uncommitted > 0 {
+				pm.AddAnnotation(task, "cloop", uncommittedTurnNote(res.uncommitted, res.pushed))
+			}
+			if res.commitNote != "" && res.commitAbort == nil {
+				pm.AddAnnotation(task, "cloop", res.commitNote)
 			}
 			mu.Unlock()
 			if err := replay.Append(o.config.WorkDir, replay.Entry{
@@ -4685,16 +4825,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// a write that fails leaves nothing claiming a status the database
 			// does not hold.
 			implicitDone := false
-			switch signal {
-			case pm.TaskDone:
+			switch {
+			case res.commitAbort != nil && (signal == pm.TaskDone || signal == pm.TaskInProgress):
+				// Done means committed (Task 20370): the worker found the
+				// attempt's work outstanding. Back to pending, the work left
+				// where the agent put it.
+				consecutiveErrors++
+				abortedTask = res.commitAbort
+			case signal == pm.TaskDone:
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
 				consecutiveErrors = 0
-			case pm.TaskSkipped:
+			case signal == pm.TaskSkipped:
 				task.Status = pm.TaskSkipped
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
 				consecutiveErrors = 0
-			case pm.TaskFailed:
+			case signal == pm.TaskFailed:
 				task.Status = pm.TaskFailed
 				task.FailCount++
 				// Skip the explicit-signal annotation when the failure came from
@@ -4872,12 +5018,33 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					case pm.TaskFailed, pm.TaskSkipped:
 						dimColor.Printf("  worktree: keeping branch %s for inspection (task %s)\n", wt.Branch, task.Status)
 					}
-					// Always remove the on-disk worktree (branch ref survives).
-					if rmErr := wt.Remove(o.config.WorkDir); rmErr != nil {
+					worktreeMu.Lock()
+					reopened := reopenedWorktrees[task.ID]
+					worktreeMu.Unlock()
+					// An attempt that stopped short, or left its work
+					// uncommitted, keeps its worktree for the next attempt:
+					// removing it would discard that work, since the branch
+					// holds only what was committed (Task 20370). So does one
+					// that held an earlier attempt's work and ended any way
+					// but done.
+					if keepsWorktree(abortedTask) || (reopened && task.Status != pm.TaskDone) {
+						why := fmt.Sprintf("the task's attempt ended %s", task.Status)
+						if abortedTask != nil {
+							why = string(abortedTask.Class) + ": " + abortedTask.Reason
+						}
+						if kErr := wt.Keep(o.config.WorkDir, why); kErr != nil {
+							dimColor.Printf("  worktree keep task %d: %v\n", task.ID, kErr)
+						} else {
+							dimColor.Printf("  worktree: kept %s for task %d's next attempt\n", wt.Path, task.ID)
+						}
+					} else if rmErr := wt.Remove(o.config.WorkDir); rmErr != nil {
+						// Otherwise the on-disk worktree goes (the branch ref
+						// survives).
 						dimColor.Printf("  worktree remove task %d: %v\n", task.ID, rmErr)
 					}
 					worktreeMu.Lock()
 					delete(activeWorktrees, task.ID)
+					delete(reopenedWorktrees, task.ID)
 					worktreeMu.Unlock()
 				}
 			}
@@ -4944,7 +5111,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// Wait out a usage window (or pause on a quota/credential wall)
 			// before the next round picks the now-pending task straight back
 			// up. Done outside the lock: it sleeps.
-			if abortedTask != nil {
+			if abortedTask != nil && !(tooManyErrors && abortedTask.Class == AbortUncommittedWork) {
 				stop, err := o.scheduleAbortRetry(ctx, s, *abortedTask, &mu)
 				if err != nil {
 					leaveRound()
@@ -4965,6 +5132,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 			if tooManyErrors {
 				leaveRound()
+				if abortedTask != nil && abortedTask.Class == AbortUncommittedWork {
+					return o.pauseForUncommittedWork(s, task, *abortedTask, consecutiveErrors, &mu)
+				}
 				return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
 			}
 		}

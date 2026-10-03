@@ -72,6 +72,20 @@ const (
 	// Retryable: the next attempt starts from the tree this one left, and the
 	// run's consecutive-abort ceiling stops a task that never finishes.
 	AbortUnfinishedTurn AbortClass = "unfinished_turn"
+	// AbortUncommittedWork is a task whose agent said it was done — or
+	// finished without a signal — while the changes it made were still
+	// uncommitted, or committed but not on their branch's upstream, under a
+	// project's "done means committed" setting (Task 20370), and that did not
+	// finish them when given the turn back. It is the symptom-side companion
+	// of AbortUnfinishedTurn: phrase matching cannot catch every wording of
+	// "I'll commit once it reports", but the tree it leaves behind is the same
+	// whatever the wording.
+	//
+	// Retryable: the work stays exactly where the agent left it — nothing is
+	// reverted or stashed — and the next attempt starts from it, held to it.
+	// The run's consecutive-abort ceiling stops a task that never finishes,
+	// pausing the run with the matching pause reason.
+	AbortUncommittedWork AbortClass = "uncommitted_work"
 )
 
 // Retryable reports whether waiting is likely to make the next attempt
@@ -97,6 +111,9 @@ type Abort struct {
 	// RetryAfter is when the limit lifts, when the message says so. Zero
 	// otherwise.
 	RetryAfter time.Time
+	// Details are extra fields for the abort's event-journal row: what an
+	// uncommitted_work abort found outstanding, for one.
+	Details map[string]any
 }
 
 func (a Abort) String() string {

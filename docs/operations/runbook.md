@@ -1170,6 +1170,14 @@ delete it yourself.
 A non-zero exit from `prune` means some worktree could not be removed — a
 permission error, a busy mount — and names it. The rest were still collected.
 
+A worktree **locked** with the reason `cloop: kept for the task's next attempt` is
+not a leak. Under [done means committed](../guides/done-means-committed.md), an
+attempt that left its changes uncommitted (or stopped before it finished) keeps
+its worktree for the next attempt at the task, which reopens it; neither `prune`
+nor the startup sweep touches a locked worktree. If the task will never run
+again, look at what it left (`git -C <path> status`), keep what you want, then
+`git worktree unlock <path>` and prune.
+
 ---
 
 ## Incident playbooks

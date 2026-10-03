@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/donecheck"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskrecover"
@@ -53,14 +55,19 @@ func pruneVerdicts(opts Options) StepResult {
 	res, err := taskrecover.PruneVerdicts(opts.WorkDir,
 		func(id int) bool { return statuses[id] == pm.TaskInProgress },
 		opts.now().Add(-VerdictMaxAge), opts.DryRun)
+	// The records "done means committed" keeps beside them for a task's next
+	// attempt (Task 20370) are ignored after donecheck.CarryMaxAge; past it
+	// they go too.
+	carries, carryBytes, carryErr := donecheck.PruneCarries(artifact.LiveArtifactDir(opts.WorkDir),
+		opts.now().Add(-donecheck.CarryMaxAge), opts.DryRun)
 	out := StepResult{
 		Ran:        true,
-		Deleted:    res.Deleted,
-		BytesFreed: res.Bytes,
+		Deleted:    res.Deleted + carries,
+		BytesFreed: res.Bytes + carryBytes,
 		Reason: fmt.Sprintf("kept %d; a verdict is removed %s after its task leaves in-progress",
 			res.Kept, humanDays(VerdictMaxAge)),
 	}
-	if err != nil {
+	if err = errors.Join(err, carryErr); err != nil {
 		out.Err = fmt.Errorf("janitor: prune task verdicts: %w", err)
 	}
 	return out

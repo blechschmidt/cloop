@@ -70,6 +70,10 @@ type State struct {
 	// ReviewGate is the project's review-gate configuration (Task 20357),
 	// stored as JSON under the review_gate meta key. Nil when never set.
 	ReviewGate *pm.ReviewGate
+	// CommitPolicy is the project's "done means committed" setting (Task
+	// 20370), stored as JSON under the commit_policy meta key. Nil when never
+	// set.
+	CommitPolicy *pm.CommitPolicy
 }
 
 // StepRow represents one recorded step result.
@@ -389,6 +393,12 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		b, _ := json.Marshal(s.ReviewGate)
 		meta["review_gate"] = string(b)
 	}
+	// The same rule for "done means committed" (Task 20370): changed through
+	// SaveCommitPolicy, and never switched off by a copy that predates it.
+	if s.CommitPolicy != nil {
+		b, _ := json.Marshal(s.CommitPolicy)
+		meta["commit_policy"] = string(b)
+	}
 
 	// workdir is write-once: it records where the project was created, and the
 	// process saving is not always in a position to know that. An isolating
@@ -600,6 +610,13 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 		var g pm.ReviewGate
 		if err := json.Unmarshal([]byte(v), &g); err == nil {
 			s.ReviewGate = &g
+		}
+	}
+
+	if v := metaMap["commit_policy"]; v != "" {
+		var p pm.CommitPolicy
+		if err := json.Unmarshal([]byte(v), &p); err == nil {
+			s.CommitPolicy = &p
 		}
 	}
 
@@ -1422,6 +1439,29 @@ func (d *DB) SaveReviewGate(g *pm.ReviewGate) error {
 		value,
 	); err != nil {
 		return fmt.Errorf("statedb: save review gate: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
+// SaveCommitPolicy stores the project's "done means committed" setting and
+// nothing else (Task 20370), for the same reason as SaveReviewGate: the
+// dashboard and the CLI change it while a run may be saving its tasks.
+func (d *DB) SaveCommitPolicy(p *pm.CommitPolicy) error {
+	value := ""
+	if p != nil {
+		b, err := json.Marshal(p)
+		if err != nil {
+			return fmt.Errorf("statedb: encode commit policy: %w", err)
+		}
+		value = string(b)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec(
+		`INSERT INTO metadata(key,value) VALUES('commit_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		value,
+	); err != nil {
+		return fmt.Errorf("statedb: save commit policy: %w", classifyDriverErr(err))
 	}
 	return nil
 }

@@ -74,6 +74,14 @@ var statusCmd = &cobra.Command{
 
 		if s.PMMode {
 			fmt.Printf("Mode:     product manager\n")
+			// Done means committed (Task 20370), shown once it has been set.
+			if s.CommitPolicy != nil {
+				if s.CommitPolicy.Active() {
+					fmt.Printf("Done:     only once %s (cloop require-committed)\n", s.CommitPolicy.Describe())
+				} else {
+					fmt.Printf("Done:     on the agent's word (cloop require-committed is off)\n")
+				}
+			}
 			if s.Plan != nil {
 				fmt.Printf("Tasks:    %s\n", s.Plan.Summary())
 				// Sort tasks by priority (ascending) for consistent display.

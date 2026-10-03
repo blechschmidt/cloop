@@ -8372,7 +8372,7 @@ func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run"|"require_committed"|"require_pushed","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -8387,6 +8387,33 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	ps, err := state.Load(workDir)
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	// Done means committed (Task 20370) is stored on its own, the way the
+	// review gate is: a run may be saving its tasks right now, and a full
+	// save from this handler's copy would write stale tasks back over them.
+	// Pushing implies committing, so asking for it switches the check on.
+	if req.Flag == "require_committed" || req.Flag == "require_pushed" {
+		p := ps.CommitPolicy.Clone()
+		if p == nil {
+			p = &pm.CommitPolicy{}
+		}
+		if req.Flag == "require_committed" {
+			p.Enabled = req.Value
+		} else {
+			p.Pushed = req.Value
+			if req.Value {
+				p.Enabled = true
+			}
+		}
+		if err := state.SetCommitPolicy(workDir, p); err != nil {
+			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if fresh, err := state.LoadLite(workDir); err == nil {
+			s.broadcastStateDiff(workDir, fresh)
+		}
+		jsonOK(w, map[string]interface{}{"ok": true, "commit_policy": p})
 		return
 	}
 	// PM mode is always on (Task 20067 removed non-PM mode); force-true on every save.

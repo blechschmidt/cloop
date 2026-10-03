@@ -161,6 +161,12 @@ Six pages in order, indexed at
   pushed or merged. How the agent's pushes are held and replayed only at
   reviewed commits, the `fix`, `block` and `advisory` modes, why it fails
   closed, what the reviewer sees, and the limits of a guardrail.
+- **[Done means committed](guides/done-means-committed.md)** — holding every
+  task to something cloop can check instead of the agent's word: its changes
+  committed, and optionally pushed. How the turn is handed back naming the
+  paths and commits, what is never blamed on a task (what was already in the
+  tree, `.cloop/`), how retries are bounded, held review-gate pushes, and where
+  the check runs in parallel, feature and sandboxed runs.
 - **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT (for
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress

@@ -245,6 +245,16 @@ ends waiting is an `unfinished_turn` abort — back to `pending`, not `done` —
 because the work it describes was never finished, and was often left
 uncommitted (`pkg/orchestrator/unfinished.go`).
 
+Phrase matching keeps missing new wordings, so a project can also make the
+working tree itself the signal: with **[done means
+committed](../guides/done-means-committed.md)** on (`cloop require-committed`,
+or the Overview's *Done = Committed* badge), a turn that ends — `TASK_DONE` or
+unsignalled — with changes this attempt made still uncommitted, or with
+*pushed* its commits not on the branch's upstream, is handed back naming them,
+sharing the same limit of two. One that still ends that way is an
+`uncommitted_work` abort: back to `pending` with the work left in the tree,
+untouched, and the next attempt held to it (`pkg/orchestrator/committed.go`).
+
 One rule overrides even an explicit `TASK_DONE`. If the agent left processes
 running — a build, a test suite, a training job — cloop waits for them, and a
 task whose background work never drained is **not** accepted as complete

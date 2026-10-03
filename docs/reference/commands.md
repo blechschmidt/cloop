@@ -90,6 +90,7 @@ cloop run --dry-run           # show prompts without executing
 cloop run --plan-only         # decompose goal into tasks, then stop
 cloop run --retry-failed      # retry previously failed tasks
 cloop run --replan            # discard plan and re-decompose
+cloop run --require-committed=pushed   # done means committed and pushed (stored with the project)
 ```
 
 | Flag | Default | Description |
@@ -113,13 +114,37 @@ cloop run --replan            # discard plan and re-decompose
 | `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
 | `--token-budget` | `0` | Stop when cumulative tokens reach this limit (0 = unlimited) |
 | `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
+| `--require-committed[=VALUE]` | | Set [done means committed](../guides/done-means-committed.md) for the project, then run: `committed` (the bare flag), `pushed`, or `off`. Stored with the project, like `cloop require-committed` |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
 
+### `cloop require-committed`
+
+Show or set **done means committed**: a task whose agent says it is done is
+accepted only once the changes it made are committed — with `pushed`, also on
+the upstream of the branch they are on. Paths the attempt left uncommitted (or
+commits not pushed) hand the turn back, naming them, at most twice; a task that
+still ends that way goes back to `pending` as an `uncommitted_work` abort, its
+work left in the tree. See [Done means committed](../guides/done-means-committed.md).
+
+```bash
+cloop require-committed              # show the setting
+cloop require-committed committed    # on
+cloop require-committed pushed       # on, and pushed
+cloop require-committed off          # off (remembers "pushed" for next time)
+cloop require-committed --json
+```
+
+The setting lives in the project's state, travels to isolating executors with
+it, and reaches a running `cloop run` at its next task. The dashboard sets it
+with the *Done = Committed* and *…and Pushed* badges on a project's Overview.
+
 ### `cloop status`
 
-Show current project status including provider, progress, and token usage.
+Show current project status including provider, progress, and token usage —
+and, once it has been set, what "done" requires (`Done:     only once committed
+and pushed`; see `cloop require-committed`).
 
 ```
 Goal:     Build a REST API with auth

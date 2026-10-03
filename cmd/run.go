@@ -101,6 +101,7 @@ var (
 	autoPromote              bool
 	autoPromoteThresholdDays int
 	coachMode                bool
+	requireCommitted         string
 )
 
 var runCmd = &cobra.Command{
@@ -156,6 +157,23 @@ Press Ctrl+C to pause gracefully.`,
 
 		// Load state to check for persisted provider/mode settings
 		projectState, _ := state.Load(workdir)
+
+		// Done means committed (Task 20370): the flag sets the project's own
+		// setting, which this run — and every later one, and the dashboard —
+		// then reads from the project.
+		if cmd.Flags().Changed("require-committed") {
+			policy, err := pm.ParseCommitRequirement(requireCommitted)
+			if err != nil {
+				return fmt.Errorf("invalid --require-committed: %w", err)
+			}
+			if projectState == nil {
+				return fmt.Errorf("--require-committed: no cloop project in %s (run 'cloop init' first)", workdir)
+			}
+			if err := state.SetCommitPolicy(workdir, policy); err != nil {
+				return fmt.Errorf("--require-committed: %w", err)
+			}
+			projectState.CommitPolicy = policy
+		}
 
 		// Apply CLOOP_* environment variable overrides to config (env > config file).
 		applyEnvOverrides(cfg)
@@ -796,6 +814,8 @@ func init() {
 	runCmd.Flags().IntVar(&thinkingBudget, "think-budget", 8000, "Token budget for reasoning content (--think); maps to budget_tokens for Anthropic, reasoning_effort for OpenAI o-series")
 	runCmd.Flags().BoolVar(&autoPromote, "auto-promote", false, "PM mode: automatically escalate task priorities when deadlines are within the threshold (see --promote-threshold)")
 	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
+	runCmd.Flags().StringVar(&requireCommitted, "require-committed", "", "PM mode: a task is done only once the changes it made are committed: --require-committed, --require-committed=pushed (and on the branch's upstream), --require-committed=off. Stored with the project")
+	runCmd.Flags().Lookup("require-committed").NoOptDefVal = pm.CommitRequireCommitted
 	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
 	rootCmd.AddCommand(runCmd)
 }

@@ -126,6 +126,9 @@ type gateInput struct {
 	worker      provider.Provider
 	workerOpts  provider.Options // for fix turns: model, effort, workdir, env
 	model       string           // the project's model
+	// commit holds fix turns to the project's commit policy, as it holds the
+	// task's own (Task 20370). Nil when the policy is off.
+	commit *commitGuard
 }
 
 // gateStep is one fix turn, for the step log.
@@ -232,7 +235,7 @@ func (o *Orchestrator) passGate(ctx context.Context, g *gateRun, in gateInput) *
 		resumed := out.sessionID != ""
 		prompt := reviewgate.FixPrompt(reviewer.Label(), v, rec.FixRounds, maxFix, g.holding(), resumed, in.prompt, out.output)
 		start := time.Now()
-		res, _, ferr := completeTask(ctx, in.worker, prompt, fixOpts)
+		res, _, ferr := completeTask(ctx, in.worker, prompt, fixOpts, in.commit)
 		if ferr != nil || res == nil || strings.TrimSpace(res.Output) == "" {
 			why := "it returned nothing"
 			if ferr != nil {

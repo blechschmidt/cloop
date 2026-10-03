@@ -64,6 +64,13 @@ const (
 	// permissions, repair the row — and the next run recovers the tasks this
 	// one left in progress.
 	CodeStateNotPersisted Code = "state_not_persisted"
+	// CodeUncommittedWork is a run that stopped because its tasks kept ending
+	// with their changes uncommitted — or committed but not pushed — under a
+	// project's "done means committed" setting (Task 20370): each such attempt
+	// goes back to pending with its work left in the tree, and after the run's
+	// consecutive-abort ceiling it stops rather than loop. A human decides: the
+	// work is there to finish, commit or revert.
+	CodeUncommittedWork Code = "uncommitted_work"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -89,6 +96,7 @@ var codeLabels = map[Code]string{
 	CodeOperator:          "stopped by operator",
 	CodeStale:             "previous run ended unexpectedly",
 	CodeStateNotPersisted: "run progress could not be saved",
+	CodeUncommittedWork:   "work left uncommitted",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -106,6 +114,7 @@ func Codes() []Code {
 		CodeUsageCap, CodeBudget, CodeTokenBudget, CodeStepLimit,
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
+		CodeUncommittedWork,
 	}
 }
 
