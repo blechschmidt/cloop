@@ -56,7 +56,8 @@ type Route struct {
 	Public bool
 
 	// Scope names what the permission is evaluated against ("global",
-	// "project", "project-index", "executor"). Empty when not applicable.
+	// "project", "project-index", "executor", "project-list", "stream").
+	// Empty when not applicable.
 	Scope string
 
 	// Summary is a one-line description, shown in both renderings.
@@ -296,7 +297,7 @@ func responses(rt Route) map[string]any {
 		// A project the caller cannot see is reported as absent rather
 		// than forbidden, so the 404 is part of the access-control
 		// contract and not only a routing outcome.
-		if rt.Scope == "project" || rt.Scope == "project-index" || rt.Scope == "executor" {
+		if rt.Scope == "project" || rt.Scope == "project-index" || rt.Scope == "executor" || rt.Scope == "stream" {
 			out["404"] = map[string]any{"description": "The resource does not exist, or is not visible to this caller"}
 		}
 	}

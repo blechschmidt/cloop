@@ -46,7 +46,35 @@ const (
 
 	// scopeExecutor derives the executor from the {id} path segment.
 	scopeExecutor
+
+	// scopeProjectList is for the routes that list the caller's own projects
+	// (Task 20366). Their permission is project.read hub-wide, or, for a
+	// caller who holds it on no more than some projects — a member on a hub
+	// whose default role is "none" — project.read on the first project they
+	// can read. The list itself is then only the projects they can read
+	// (narrowToReadable), so passing this gate discloses nothing else, and a
+	// signed-in caller who can read nothing is answered with an empty list
+	// rather than refused: there is nothing in it to withhold, and a member
+	// who just lost their last project needs a list that says so. Declared
+	// only on project.read routes; validate() enforces it.
+	scopeProjectList
+
+	// scopeStream is for the realtime streams: scopeProject, unless the client
+	// asks for ?scope=global — the projects landing page — in which case the
+	// stream carries no project and is authorized like scopeProjectList.
+	scopeStream
 )
+
+// isGlobalStream reports whether a realtime stream asked for no project.
+func isGlobalStream(r *http.Request) bool {
+	return r.URL.Query().Get("scope") == globalStreamScope
+}
+
+// projectScoped reports whether this request is authorized against the
+// project ?project_idx names.
+func (k scopeKind) projectScoped(r *http.Request) bool {
+	return k == scopeProject || (k == scopeStream && !isGlobalStream(r))
+}
 
 // routeSpec declares one route and the permission needed to reach it.
 type routeSpec struct {
@@ -143,6 +171,12 @@ func (rs routeSpec) validate() error {
 			return fmt.Errorf("route %q declares unknown permission %q for %s", rs.Pattern, p, method)
 		}
 	}
+	if (rs.Scope == scopeProjectList || rs.Scope == scopeStream) &&
+		(rs.Perm != authz.PermProjectRead || len(rs.MethodPerms) > 0) {
+		// The project-list scope admits a caller by the projects they can
+		// read, which only says something about project.read.
+		return fmt.Errorf("route %q uses a project-list scope with a permission other than project.read", rs.Pattern)
+	}
 	if method, _, ok := splitPattern(rs.Pattern); ok {
 		if len(rs.Methods) > 0 {
 			return fmt.Errorf("route %q carries the method prefix %s and must not also declare Methods", rs.Pattern, method)
@@ -180,8 +214,32 @@ func (s *Server) scopeFor(kind scopeKind, r *http.Request) (authz.Scope, bool) {
 		return s.projectScopeFromIdx(r)
 	case scopeExecutor:
 		return executorScope(r), true
+	case scopeProjectList:
+		scope, _ := s.projectListScope(r)
+		return scope, true
+	case scopeStream:
+		if isGlobalStream(r) {
+			scope, _ := s.projectListScope(r)
+			return scope, true
+		}
+		return s.projectScope(r), true
 	}
 	return authz.GlobalScope, true
+}
+
+// projectListScope is the scope a request for the caller's own project list is
+// authorized in: the global scope when they may read projects hub-wide, and
+// otherwise the first project they can read. readable is false when there is
+// neither; the scope is then the global one, which such a caller is refused on.
+func (s *Server) projectListScope(r *http.Request) (scope authz.Scope, readable bool) {
+	if s.grantFor(r).decide(authz.GlobalScope).Allows(authz.PermProjectRead) {
+		return authz.GlobalScope, true
+	}
+	// Already narrowed to the projects this caller can read.
+	if entries := s.visibleProjectEntries(r); len(entries) > 0 {
+		return s.entryScope(entries[0]), true
+	}
+	return authz.GlobalScope, false
 }
 
 // projectScopeFromIdx resolves the {idx} path segment against the caller's
@@ -307,9 +365,21 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 			rs.Handler(w, r)
 			return
 		}
+		// The caller's own project list, when they can read no project at
+		// all: an empty list is theirs to have (see scopeProjectList). The
+		// refusal behind it is still recorded, and the handler answers it
+		// without the work a real list costs — a signed-in identity with no
+		// role must not be able to make the hub reload every project.
+		if rs.Scope == scopeProjectList {
+			if _, readable := s.projectListScope(r); !readable {
+				s.auditAuthz(r, s.grantFor(r).decide(authz.GlobalScope), perm, authz.GlobalScope, false)
+				rs.Handler(w, r.WithContext(context.WithValue(r.Context(), emptyListKey{}, true)))
+				return
+			}
+		}
 		// A project_idx the caller cannot see is indistinguishable from a
 		// project that does not exist.
-		if rs.Scope == scopeProject && !s.requireVisibleProject(w, r) {
+		if rs.Scope.projectScoped(r) && !s.requireVisibleProject(w, r) {
 			return
 		}
 		pinned, scope, ok := s.pinProject(rs.Scope, r)
@@ -321,8 +391,14 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 				"the requested resource does not exist"))
 			return
 		}
-		if !s.require(w, r, perm, scope) {
+		g, ok := s.authorize(w, r, perm, scope)
+		if !ok {
 			return
+		}
+		// The handler decides on the claims the gate did: when they were
+		// just re-asserted, that grant replaces the request's.
+		if g != nil && g != s.grantFor(pinned) {
+			pinned = pinned.WithContext(context.WithValue(pinned.Context(), authzCtxKey{}, g))
 		}
 		rs.Handler(w, pinned)
 	}
@@ -332,7 +408,16 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 type (
 	pinnedWorkDirKey struct{}
 	pinnedEntryKey   struct{}
+	// emptyListKey marks a list request from a caller who can read no
+	// project (scopeProjectList): the handler answers with nothing.
+	emptyListKey struct{}
 )
+
+// emptyList reports whether the gate admitted r only to an empty list.
+func emptyList(r *http.Request) bool {
+	v, _ := r.Context().Value(emptyListKey{}).(bool)
+	return v
+}
 
 // pinProject resolves the project a request names — once — and returns the
 // request carrying that resolution along with the scope it is authorized in.
@@ -347,10 +432,11 @@ type (
 // answers with the project that was authorized, and projectAtIdx refuses a
 // request whose index now names a different project.
 func (s *Server) pinProject(kind scopeKind, r *http.Request) (*http.Request, authz.Scope, bool) {
-	switch kind {
-	case scopeProject:
+	if kind.projectScoped(r) {
 		dir := s.resolveWorkDir(r)
 		return r.WithContext(context.WithValue(r.Context(), pinnedWorkDirKey{}, dir)), s.workDirScope(dir), true
+	}
+	switch kind {
 	case scopeProjectIdx:
 		e, ok := s.entryAtIdx(r)
 		if !ok {
@@ -421,6 +507,7 @@ func (s *Server) routeTable() []routeSpec {
 	const (
 		read       = authz.PermProjectRead
 		write      = authz.PermProjectWrite
+		share      = authz.PermProjectShare
 		task       = authz.PermTaskMutate
 		start      = authz.PermRunStart
 		stop       = authz.PermRunStop
@@ -519,7 +606,10 @@ func (s *Server) routeTable() []routeSpec {
 		// ── Project state (read) ─────────────────────────────────────
 		{Pattern: "/api/state", Handler: s.handleState, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/steps", Handler: s.handleSteps, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/ws", Handler: s.handleWS, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		// The realtime streams. scopeStream, because the projects landing page
+		// opens one with ?scope=global and no project: a member whose only
+		// authority is a shared project must still get its live list.
+		{Pattern: "/api/ws", Handler: s.handleWS, Methods: []string{"GET"}, Perm: read, Scope: scopeStream},
 
 		// ── Live sandbox attach (Task 20265) ─────────────────────────
 		// Both routes carry sandbox.attach, which no default role below
@@ -539,7 +629,7 @@ func (s *Server) routeTable() []routeSpec {
 		// session to read-only when it is absent; see attach_api.go.
 		{Pattern: "GET /api/tasks/{id}/attach/info", Handler: s.handleAttachInfo, Perm: attach, Scope: scopeProject},
 		{Pattern: "/api/tasks/{id}/attach", Handler: s.handleAttachWS, Methods: []string{"GET"}, Perm: attach, Scope: scopeProject},
-		{Pattern: "/api/events", Handler: s.handleEvents, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/events", Handler: s.handleEvents, Methods: []string{"GET"}, Perm: read, Scope: scopeStream},
 		{Pattern: "/api/event-history", Handler: s.handleEventHistory, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/livelog", Handler: s.handleLiveLog, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/timeline", Handler: s.handleTimeline, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
@@ -739,14 +829,27 @@ func (s *Server) routeTable() []routeSpec {
 
 		// ── Multi-project registry ───────────────────────────────────
 		// The list itself is already filtered per identity by
-		// visibleProjectEntries; project.read gates seeing the tab at all.
-		{Pattern: "/api/projects", Handler: s.handleProjects, Methods: []string{"GET"}, Perm: read, Scope: scopeGlobal},
-		{Pattern: "GET /api/projects/events", Handler: s.handleProjectsEvents, Perm: read, Scope: scopeGlobal},
+		// visibleProjectEntries; project.read gates seeing the tab at all —
+		// hub-wide, or on a project shared with the caller (scopeProjectList).
+		{Pattern: "/api/projects", Handler: s.handleProjects, Methods: []string{"GET"}, Perm: read, Scope: scopeProjectList},
+		{Pattern: "GET /api/projects/events", Handler: s.handleProjectsEvents, Perm: read, Scope: scopeProjectList},
 		{Pattern: "POST /api/projects/new", Handler: s.handleProjectNew, Perm: write, Scope: scopeGlobal},
 		{Pattern: "POST /api/projects/{idx}/run", Handler: s.handleProjectRun, Perm: start, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/stop", Handler: s.handleProjectStop, Perm: stop, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}", Handler: s.handleProjectDelete, Perm: write, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/hidden", Handler: s.handleProjectHidden, Perm: viewPrefs, Scope: scopeProjectIdx},
+		// Who besides its owner may reach a project (Task 20366). The roster
+		// is a read: everyone on a project may see who else is. Changing it
+		// takes project.share, a maintainer's permission, on *this* project,
+		// and the handler also caps every grant at the caller's own role
+		// there. Leaving is the one change a member makes about themselves,
+		// so it sits at view.prefs, the weakest permission a member holds.
+		// See members_api.go.
+		{Pattern: "GET /api/projects/{idx}/members", Handler: s.handleProjectMembers, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/members", Handler: s.handleProjectMemberAdd, Perm: share, Scope: scopeProjectIdx},
+		{Pattern: "PATCH /api/projects/{idx}/members", Handler: s.handleProjectMemberChange, Perm: share, Scope: scopeProjectIdx},
+		{Pattern: "DELETE /api/projects/{idx}/members", Handler: s.handleProjectMemberRemove, Perm: share, Scope: scopeProjectIdx},
+		{Pattern: "DELETE /api/projects/{idx}/members/self", Handler: s.handleProjectMemberLeave, Perm: viewPrefs, Scope: scopeProjectIdx},
 		// Parallel features (Task 20341): git worktrees of the project, each
 		// with its own task list and run settings. Addressed through the
 		// parent project, so each is authorized against it; see
@@ -1008,7 +1111,7 @@ func (s *Server) routeTable() []routeSpec {
 		// point. The credential is narrow; the endpoints are not
 		// privileged. Since Task 20238 a default link also carries
 		// task.mutate, reachable only on the two dictation rows below.
-		{Pattern: "GET /api/glasses/projects", Handler: s.handleGlassesProjects, Perm: read, Scope: scopeGlobal},
+		{Pattern: "GET /api/glasses/projects", Handler: s.handleGlassesProjects, Perm: read, Scope: scopeProjectList},
 		{Pattern: "GET /api/glasses/tasks", Handler: s.handleGlassesTasks, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/glasses/tasks/{id}", Handler: s.handleGlassesTaskDetail, Perm: read, Scope: scopeProject},
 

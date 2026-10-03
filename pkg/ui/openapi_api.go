@@ -48,6 +48,10 @@ func scopeName(k scopeKind) string {
 		return "project-index"
 	case scopeExecutor:
 		return "executor"
+	case scopeProjectList:
+		return "project-list"
+	case scopeStream:
+		return "stream"
 	default:
 		return "global"
 	}

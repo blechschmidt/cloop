@@ -147,6 +147,19 @@ var bundleFiles = []string{
 	"assets/js/33-glasses.js",
 }
 
+// deferredScripts are served as assets of their own and loaded only when a
+// panel needs them (Task 20366). Each is named in a <meta> on the page by its
+// token and fetched by the code that draws the panel — chart.js's arrangement
+// (Task 20289) — so it costs a first paint nothing. A deferred script runs
+// outside the bundle's IIFE: it sees none of the bundle's helpers unless the
+// loader hands them over, and it must put nothing on window but its entry
+// point. They live in assets/js/deferred/, which
+// TestStaticAssets_BundleCoversEveryFragment does not read as bundle fragments.
+var deferredScripts = []struct{ token, path string }{
+	// The Members card on a project's Overview (Task 20366).
+	{"members.js", "assets/js/deferred/members.js"},
+}
+
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
 // so the response for a given URL can be cached forever; the HTML that names
 // those URLs must be revalidated on every load or a deploy would never be
@@ -209,7 +222,9 @@ type assetSet struct {
 	// whole-line comments removed like the bundle's, or boundary itself if
 	// the stripper declined.
 	servedBoundary string
-	indexTmpl      string
+	// deferred holds each deferred script as written and as served, by token.
+	deferred  map[string]deferredScript
+	indexTmpl string
 	// renderedPage is indexTmpl with its asset URLs filled in, comments and
 	// all, for the tests that read the front end as its source; servedPage is
 	// it as it goes over the wire, its comments removed (htmlstrip.go), or
@@ -217,6 +232,12 @@ type assetSet struct {
 	renderedPage string
 	servedPage   string
 	glassesTmpl  string
+}
+
+// deferredScript is one of deferredScripts, as written and as served (its
+// whole-line comments removed, or as written if the stripper declined).
+type deferredScript struct {
+	raw, served string
 }
 
 // loadAssets builds the asset set on first use and reuses it forever after.
@@ -294,6 +315,22 @@ func buildAssets() *assetSet {
 		{"app.js", "app", "js", jsContentType, []byte(served)},
 		{"errboundary.js", "errboundary", "js", jsContentType, []byte(servedBoundary)},
 		{"chart.js", "chart", "js", jsContentType, chart},
+	}
+	set.deferred = make(map[string]deferredScript, len(deferredScripts))
+	for _, d := range deferredScripts {
+		raw := string(read(d.path))
+		served, err := stripJSLineComments(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ui: serving %s with its comments: %v\n", d.path, err)
+		}
+		set.deferred[d.token] = deferredScript{raw: raw, served: served}
+		hashed = append(hashed, struct {
+			token string
+			stem  string
+			ext   string
+			ctype string
+			body  []byte
+		}{d.token, strings.TrimSuffix(d.token, ".js"), "js", jsContentType, []byte(served)})
 	}
 
 	page := set.indexTmpl

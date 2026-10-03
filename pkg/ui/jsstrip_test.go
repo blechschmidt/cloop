@@ -221,11 +221,15 @@ func TestStripJSLineComments_MatchesAcorn(t *testing.T) {
 	}
 	a := loadAssets()
 	// Both scripts the page loads; errboundary.js is served stripped too
-	// since Task 20360.
-	for _, js := range []struct{ name, raw, served string }{
+	// since Task 20360, and every deferred script since Task 20366.
+	scripts := []struct{ name, raw, served string }{
 		{"app.js", a.bundle, a.served},
 		{"errboundary.js", a.boundary, a.servedBoundary},
-	} {
+	}
+	for token, d := range a.deferred {
+		scripts = append(scripts, struct{ name, raw, served string }{token, d.raw, d.served})
+	}
+	for _, js := range scripts {
 		dir := t.TempDir()
 		rawPath, strippedPath := filepath.Join(dir, "raw.js"), filepath.Join(dir, "stripped.js")
 		if err := os.WriteFile(rawPath, []byte(js.raw), 0o644); err != nil {

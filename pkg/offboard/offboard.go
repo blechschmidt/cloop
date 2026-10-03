@@ -183,6 +183,19 @@ type ProjectRef struct {
 	Owner string `json:"owner,omitempty"`
 }
 
+// MembershipRef is one project the identity was admitted to without owning it
+// (Task 20366). The opposite disposition from ProjectRef: an owned project is
+// reported and left alone, because deleting somebody's work is not offboarding,
+// while a membership is removed outright — it is access to a project that
+// belongs to someone else, and ending that access is the point.
+type MembershipRef struct {
+	Path string `json:"path"`
+	Role string `json:"role"`
+	// Identity is the spelling the grant was recorded under. Worth keeping: a
+	// grant found under "sub:…" is the one an email-only sweep would miss.
+	Identity string `json:"identity"`
+}
+
 // Failure records a surface that could not be severed, so a partial run is
 // legible instead of being reported as a success.
 type Failure struct {
@@ -206,6 +219,11 @@ type Plan struct {
 	Tasks    []TaskRef    `json:"tasks"`
 	Projects []ProjectRef `json:"projects"`
 
+	// Memberships are projects this identity can reach without owning them
+	// (Task 20366). Unlike Projects these are removed, in the credential
+	// transaction.
+	Memberships []MembershipRef `json:"memberships"`
+
 	// Warnings name things the run cannot be sure about — most importantly
 	// tokens whose owner binding did not decode, which cannot be proven *not*
 	// to belong to this person.
@@ -217,7 +235,8 @@ type Plan struct {
 // legitimate pre-emptive offboarding.
 func (p Plan) Empty() bool {
 	return len(p.Sessions) == 0 && len(p.Tokens) == 0 && len(p.Glasses) == 0 &&
-		len(p.Denies) == 0 && len(p.Leases) == 0 && len(p.Tasks) == 0
+		len(p.Denies) == 0 && len(p.Leases) == 0 && len(p.Tasks) == 0 &&
+		len(p.Memberships) == 0
 }
 
 // Report is the outcome of a run. A dry run returns the Plan with DryRun set
@@ -235,6 +254,10 @@ type Report struct {
 	DeniesWritten   []string  `json:"denies_written,omitempty"`
 	LeasesReleased  []string  `json:"leases_released,omitempty"`
 	TasksStopped    []TaskRef `json:"tasks_stopped,omitempty"`
+
+	// MembershipsRevoked are the project memberships actually removed, in
+	// the same transaction as the credentials (Task 20366).
+	MembershipsRevoked []MembershipRef `json:"memberships_revoked,omitempty"`
 
 	// Failures is non-empty when a surface could not be severed. The run does
 	// not abort on one: a lease that will not release is not a reason to leave
@@ -418,7 +441,11 @@ func Run(o Options) (Report, error) {
 		TokenIDs:     tokenIDs(plan.Tokens),
 		GlassesIDs:   tokenIDs(plan.Glasses),
 		DenyBindings: denyRows(plan, o, now),
-		At:           now,
+		// Every spelling of the person rather than the paths the plan listed:
+		// the sweep is by identity, so a grant written since the plan was
+		// read is removed too.
+		MemberKeys: plan.Target.OwnerKeys(),
+		At:         now,
 		Audit: func(a statedb.OffboardApplied) ([]*statedb.AuditEvent, error) {
 			// a is a copy, so folding the already-revoked sessions in here
 			// shapes the audit record without disturbing what the transaction
@@ -434,6 +461,11 @@ func Run(o Options) (Report, error) {
 	rep.TokensRevoked = applied.Tokens
 	rep.GlassesRevoked = applied.Glasses
 	rep.DeniesWritten = applied.DenyBindingIDs
+	for _, m := range applied.Members {
+		rep.MembershipsRevoked = append(rep.MembershipsRevoked, MembershipRef{
+			Path: m.ProjectPath, Role: m.Role, Identity: m.IdentityKey,
+		})
+	}
 
 	// 2. Leases. Released after the credentials so a task that reacts to losing
 	//    its secrets cannot re-authenticate to get them back.
@@ -511,14 +543,15 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 	// The summary comes first so a reviewer reading the chain in order meets
 	// the operation before its parts.
 	if err := add(auditaction.ActionUserOffboard, map[string]any{
-		"sessions": len(a.Sessions),
-		"tokens":   len(a.Tokens),
-		"glasses":  len(a.Glasses),
-		"denies":   len(a.DenyBindingIDs),
-		"leases":   len(plan.Leases),
-		"tasks":    len(plan.Tasks),
-		"projects": len(plan.Projects),
-		"warnings": plan.Warnings,
+		"sessions":    len(a.Sessions),
+		"tokens":      len(a.Tokens),
+		"glasses":     len(a.Glasses),
+		"denies":      len(a.DenyBindingIDs),
+		"leases":      len(plan.Leases),
+		"tasks":       len(plan.Tasks),
+		"projects":    len(plan.Projects),
+		"memberships": len(a.Members),
+		"warnings":    plan.Warnings,
 	}); err != nil {
 		return nil, err
 	}
@@ -544,6 +577,19 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 		if err := add(auditaction.ActionUserOffboardDeny, map[string]any{
 			"count": len(a.DenyBindingIDs), "bindings": a.DenyBindingIDs,
 			"claims": plan.Denies}); err != nil {
+			return nil, err
+		}
+	}
+	if len(a.Members) > 0 {
+		// The projects, not only a count: "whose projects could this person
+		// reach" is the question asked here, and once the rows are gone the
+		// table no longer holds the answer.
+		projects := make([]string, 0, len(a.Members))
+		for _, m := range a.Members {
+			projects = append(projects, m.ProjectPath+" ("+m.Role+")")
+		}
+		if err := add(auditaction.ActionUserOffboardMembership, map[string]any{
+			"count": len(a.Members), "projects": projects}); err != nil {
 			return nil, err
 		}
 	}

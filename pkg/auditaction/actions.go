@@ -416,6 +416,8 @@ const (
 
 	// ActionProjectMemberGrant records an identity joining a project's roster.
 	ActionProjectMemberGrant Action = "project.member.grant"
+	// ActionProjectMemberChange records a member's role on a project changing.
+	ActionProjectMemberChange Action = "project.member.change"
 	// ActionProjectMemberRevoke records a maintainer removing a member.
 	ActionProjectMemberRevoke Action = "project.member.revoke"
 	// ActionProjectMemberLeave records a member removing themselves.

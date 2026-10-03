@@ -379,6 +379,16 @@ function handleRealtimeMsg(type, data, scope) {
         }
       } catch(_) {}
       break;
+    case 'members_update':
+      // Who may reach this project changed (Task 20366).
+      if (activeTab === 'overview') loadProjectMembers();
+      break;
+    case 'access_withdrawn':
+      // The hub is closing this socket: the project was unshared from this
+      // user (Task 20366). Back to the projects that remain.
+      toast((data && data.reason) || 'Your access to this project was withdrawn', 'error');
+      if (selectedProjectIdx !== null) clearProjectSelection();
+      break;
     case 'error':
       console.warn('cloop ws error:', data);
       break;
@@ -445,6 +455,7 @@ function connectWS() {
   ws.onopen = () => {
     wsBackoff = 1000; // reset on successful connect
     sseUsed = false;
+
     if (dot) dot.classList.add('connected');
     // Re-check which build is serving us (Task 20249). A hub restart drops
     // every socket, so this is the precise moment the server may have been
@@ -483,8 +494,12 @@ function connectWS() {
     if (intentional) return;
     // If the close was a normal shutdown or we haven't tried SSE yet on the
     // first connection, probe the state endpoint to detect auth failures.
-    fetch('/api/state', {headers: authHeaders()}).then(r => {
+    fetch(pUrl('/api/state'), {headers: authHeaders()}).then(r => {
       if (r.status === 401) { handleUnauthorized(r); return; }
+      // The project itself is gone from this user's reach — unshared or
+      // removed while the socket was down — so reconnecting would only be
+      // refused (Task 20366).
+      if (r.status === 404 && selectedProjectIdx !== null) { clearProjectSelection(); return; }
       // Exponential backoff reconnect (cap at 30 s).
       const delay = Math.min(wsBackoff, 30000);
       wsBackoff = Math.min(wsBackoff * 2, 30000);

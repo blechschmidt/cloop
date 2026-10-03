@@ -14,7 +14,7 @@ groups, and what belongs in each:
 | **Core workflow** | `init`, `run`, `status`, `log`, `goal`, `queue`, `watch`, `reset`, `clean` |
 | **Plan and tasks** | `task`, `plan`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
 | **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session` |
-| **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events` |
+| **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events`, `project` |
 | **Insight and reporting** | `report`, `retro`, `standup`, `insights`, `metrics`, `search`, `trace`, and other read-only views |
 | **AI assistants** | `ask`, `chat`, `shell`, `do`, `ai-pair`, `kb`, `memory`, `skill`, `recipe`, `flow` |
 | **Providers and models** | `providers`, `profile`, `router`, `tune`, `bench`, `compare`, `cache` |
@@ -1102,6 +1102,38 @@ and take no lease.
 The three incident playbooks these compose into — stolen session, runaway
 tenant, compromised admin — are in the
 [runbook](../operations/runbook.md#access-emergencies).
+
+### `cloop project members`
+
+Who besides its owner may reach a project on a hub with single sign-on — the
+CLI side of the Members card on a project's Overview. It writes the hub's
+control-plane database directly, like `cloop hub role`, so it works while the
+listener does not, and it checks no role: whoever can run it can already write
+that database.
+
+```bash
+cloop project members list                                   # every membership on the hub
+cloop project members list payments --json
+cloop project members add payments bob@example.com --role operator --reason "pairing on the ledger"
+cloop project members add payments bob@example.com --role viewer --reason "read-only from now on"
+cloop project members remove payments bob@example.com --reason "moved teams"
+```
+
+`<project>` is a registered project's name or its directory; a feature is shared
+with its project and is refused. `<identity>` is an email or `sub:<subject>`.
+`add` on an existing member changes their role. A membership only adds access —
+see [Project members](../security/model.md#project-members) for what a role means
+with and without role mappings. Each change commits with its audit row and is
+announced on the hub cluster's bus, so running hub processes apply it at once
+and close a removed member's open dashboards; they re-read the table every few
+seconds regardless.
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--role` | `add` | `viewer` (default), `operator`, `maintainer` or `admin` |
+| `--reason` | `add`, `remove` | Required. Stored with the membership and recorded in the audit trail |
+| `--workdir` | all | Hub directory holding `.cloop/state.db` |
+| `--json` | `list` | Machine-readable output |
 
 ### `cloop hub telemetry`
 

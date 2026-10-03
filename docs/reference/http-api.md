@@ -45,6 +45,12 @@ permission is evaluated against — and the distinction matters: a project-scope
 grant does **not** satisfy a route scoped `global`, so a user who can administer
 one project still cannot read the fleet.
 
+Two scopes are about the caller's own list of projects. `project-list` admits a
+caller who holds `project.read` hub-wide, or on at least one project — someone a
+project was shared with, on a hub whose default role is `none` — and lists such a
+caller only the projects they can read. `stream` is a realtime stream: scoped to the
+project `?project_idx` names, or, with `?scope=global`, to the caller's project list.
+
 Endpoints marked `public` require no permission. On the hub that does not mean
 unauthenticated — the authentication middleware has already run, and only the
 login flow, the SPA shell and the static assets bypass it — it means no *role*
@@ -64,7 +70,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-222 endpoints, by the permission each one requires:
+227 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -73,7 +79,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 15 |
 | `executor.manage` | 28 |
 | `executor.read` | 3 |
-| `project.read` | 50 |
+| `project.read` | 51 |
+| `project.share` | 3 |
 | `project.write` | 12 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
@@ -86,7 +93,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `task.mutate` | 27 |
 | `token.admin` | 3 |
 | `user.manage` | 9 |
-| `view.prefs` | 1 |
+| `view.prefs` | 2 |
 
 | Method | Path | Permission | Scope |
 |--------|------|------------|-------|
@@ -139,7 +146,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/disk-usage` | `project.read` | project |
 | GET | `/api/epics` | `project.read` | project |
 | GET | `/api/event-history` | `project.read` | project |
-| GET | `/api/events` | `project.read` | project |
+| GET | `/api/events` | `project.read` | stream |
 | GET | `/api/executors` | `executor.read` | global |
 | POST | `/api/executors/enroll` | `executor.manage` | global |
 | GET | `/api/executors/{id}` | `executor.read` | executor |
@@ -175,7 +182,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/glasses/link` | `public` | global |
 | POST | `/api/glasses/link` | `public` | global |
 | DELETE | `/api/glasses/link` | `public` | global |
-| GET | `/api/glasses/projects` | `project.read` | global |
+| GET | `/api/glasses/projects` | `project.read` | project-list |
 | GET | `/api/glasses/tasks` | `project.read` | project |
 | POST | `/api/glasses/tasks` | `task.mutate` | project |
 | GET | `/api/glasses/tasks/{id}` | `project.read` | project |
@@ -214,8 +221,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/options/step-timeout` | `config.write` | project |
 | POST | `/api/options/task-timeout` | `config.write` | project |
 | POST | `/api/options/toggle` | `config.write` | project |
-| GET | `/api/projects` | `project.read` | global |
-| GET | `/api/projects/events` | `project.read` | global |
+| GET | `/api/projects` | `project.read` | project-list |
+| GET | `/api/projects/events` | `project.read` | project-list |
 | POST | `/api/projects/new` | `project.write` | global |
 | DELETE | `/api/projects/{idx}` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/executor` | `executor.manage` | project-index |
@@ -225,6 +232,11 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/projects/{idx}/features/{slug}/pr` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/features/{slug}/pr/refresh` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
+| GET | `/api/projects/{idx}/members` | `project.read` | project-index |
+| POST | `/api/projects/{idx}/members` | `project.share` | project-index |
+| PATCH | `/api/projects/{idx}/members` | `project.share` | project-index |
+| DELETE | `/api/projects/{idx}/members` | `project.share` | project-index |
+| DELETE | `/api/projects/{idx}/members/self` | `view.prefs` | project-index |
 | GET | `/api/projects/{idx}/repositories` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/repositories` | `secret.grant` | project-index |
 | DELETE | `/api/projects/{idx}/repositories` | `secret.revoke` | project-index |
@@ -296,7 +308,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/users/offboard` | `user.manage` | global |
 | GET | `/api/version` | `public` | global |
 | POST | `/api/voice` | `task.mutate` | project |
-| GET | `/api/ws` | `project.read` | project |
+| GET | `/api/ws` | `project.read` | stream |
 | GET | `/apple-touch-icon.png` | `public` | global |
 | GET | `/assets/` *(subtree)* | `public` | global |
 | GET | `/auth/callback` | `public` | global |

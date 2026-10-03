@@ -622,6 +622,11 @@ type glassesProject struct {
 // namespace resolveWorkDir maps ?project_idx through — so a link cannot reach
 // a project by index that it could not see in this response.
 func (s *Server) handleGlassesProjects(w http.ResponseWriter, r *http.Request) {
+	if emptyList(r) {
+		// The link's owner can read no project (Task 20366).
+		jsonOK(w, map[string]any{"projects": []glassesProject{}, "dictation": s.dictationStatusFor(r)})
+		return
+	}
 	s.refreshProjectStatuses()
 	entries, statuses := s.cachedProjectView()
 	statuses, _ = s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)

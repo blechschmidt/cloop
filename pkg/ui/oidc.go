@@ -445,10 +445,18 @@ func permissionStrings(perms []authz.Permission) []string {
 // ── Per-user project scoping ────────────────────────────────────────────────
 
 // identityCanSeeEntry reports whether user may see entry. Shared projects
-// (no owner) are visible to everyone; owned projects only to their owner
-// and admins. A nil user means either OIDC is off or the caller
-// authenticated via the static bearer token — both see everything.
+// (no owner) are visible to everyone; owned projects to their owner, the hub's
+// admins, and the identities the project was shared with (Task 20366). A nil
+// user means either OIDC is off or the caller authenticated via the static
+// bearer token — both see everything.
 func (s *Server) identityCanSeeEntry(user *oidcauth.Identity, entry multiui.ProjectEntry) bool {
+	return s.identityCanSeeWithoutMembership(user, entry) || s.identityHoldsMembership(user, entry)
+}
+
+// identityCanSeeWithoutMembership is identityCanSeeEntry before memberships:
+// ownership and admin_emails alone. A feature carries its project's owner, so
+// it answers for the project.
+func (s *Server) identityCanSeeWithoutMembership(user *oidcauth.Identity, entry multiui.ProjectEntry) bool {
 	if !s.oidcEnabled() || user == nil || entry.Owner == "" {
 		return true
 	}
@@ -492,7 +500,9 @@ func (s *Server) visibleProjectEntries(r *http.Request) []multiui.ProjectEntry {
 	if !s.oidcEnabled() {
 		return entries
 	}
-	return s.filterEntriesForIdentity(s.recipientIdentity(r), entries)
+	// A caller with no project.read hub-wide sees the projects they can read
+	// and no others (narrowToReadable, members.go).
+	return s.narrowToReadable(s.grantFor(r), s.filterEntriesForIdentity(s.recipientIdentity(r), entries))
 }
 
 // filterEntriesForToken narrows entries to a token's ProjectScope. A nil token
@@ -605,6 +615,13 @@ func (s *Server) filterStatusesForRecipient(user *oidcauth.Identity, tok *apitok
 		statuses = scoped
 	}
 	statuses, stats := s.filterStatusesForIdentity(user, entries, statuses)
+	// The same narrowing visibleProjectEntries applies, so the list a
+	// recipient is pushed has the indices their requests resolve against.
+	if s.oidcEnabled() {
+		if narrowed, changed := s.narrowStatusesToReadable(s.recipientGrant(user, tok), entries, statuses); changed {
+			statuses, stats = narrowed, multiui.Aggregate(narrowed)
+		}
+	}
 	// Marking runs last, over the set this recipient may actually see, and
 	// re-derives the stats because Aggregate discounts hidden projects.
 	marked, changed := markHiddenFor(viewerKeyFor(user), entries, statuses)

@@ -1313,7 +1313,7 @@ usage. The other ceilings only bound the next request.
 #### Somebody leaves
 
 **One command.** Disabling an account at the identity provider does not, on its
-own, sever anything this hub has already issued. Six surfaces outlive it:
+own, sever anything this hub has already issued. Seven surfaces outlive it:
 
 | Surface | What survives an IdP disablement |
 | --- | --- |
@@ -1323,8 +1323,9 @@ own, sever anything this hub has already issued. Six surfaces outlive it:
 | Deny binding | Does not exist until somebody writes it |
 | Secret leases | Real credentials, materialised inside a running sandbox |
 | Running tasks | Still executing, in their name |
+| Project memberships | Other people's projects shared with them by name — until a maintainer removes them |
 
-`cloop hub user offboard` severs all six, and reports a seventh — the projects
+`cloop hub user offboard` severs all seven, and reports an eighth — the projects
 they own — without touching it.
 
 ```bash
@@ -1336,8 +1337,9 @@ cloop hub user offboard alice@example.com --dry-run
 cloop hub user offboard alice@example.com --reason "left the company, HR-882"
 ```
 
-Sessions, API tokens, glasses links and the deny binding are written in **one
-transaction**: either the person is out of all four or nothing changed. There is
+Sessions, API tokens, glasses links, project memberships and the deny binding
+are written in **one transaction**: either the person is out of all five or
+nothing changed. There is
 no half-offboarded state to discover a month later. Leases and running tasks
 cannot join that transaction — they are broker memory and other databases — so
 they are applied after it, and any failure is reported rather than rolled back

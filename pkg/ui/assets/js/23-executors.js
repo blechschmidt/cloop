@@ -7,6 +7,9 @@
 let execData = null;
 
 window.loadExecutors = function() {
+  // The fleet is not a project's to read: a member whose only role is on a
+  // shared project would draw a refusal on every Overview (Task 20366).
+  if (!canGlobal('executor.read')) return Promise.resolve(null);
   return api(pUrl('/api/executors')).then(d => {
     execData = d || {};
     _renderExecutors(execData);

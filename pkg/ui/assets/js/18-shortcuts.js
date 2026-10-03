@@ -489,8 +489,10 @@ function checkAuthAndInit() {
           updateScopeHint(activeTab || 'overview');
           resumeView(null);
           // Overview is the landing tab here, so its Executor card needs its
-          // one non-state-diff field (Task 20160).
+          // one non-state-diff field (Task 20160), and its Members card its
+          // roster (Task 20366).
           loadExecutors();
+          loadProjectMembers();
         });
     });
     // Initial run state arrives as a 'run_state' WebSocket event on connect

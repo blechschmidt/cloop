@@ -91,6 +91,11 @@ type sseClient struct {
 	// the hubClients room key. Without it the SSE fallback path fanned
 	// every project's events to every listener (Task 20189).
 	workDir string
+
+	// kick ends the stream: its identity can no longer read workDir (Task
+	// 20366). Buffered (cap 1). Whoever sends it has already removed the
+	// client from s.clients, so nothing new is queued for it.
+	kick chan struct{}
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -210,6 +215,17 @@ type hubClient struct {
 	// otherwise. Captured at upgrade time for the same reason as on
 	// sseClient (Task 20175).
 	token *apitoken.Token
+
+	// kick closes the socket with the reason it carries: its identity can no
+	// longer read the project it is attached to (Task 20366). Buffered (cap
+	// 1). Whoever sends it has already taken the client out of its room, and
+	// the writer checks it ahead of anything still queued.
+	kick chan string
+
+	// limited marks a projects-page socket whose identity reads projects only
+	// where they were shared with it, not hub-wide (Task 20366). Who else is
+	// on that page is hub-wide knowledge, so it is not told (deliverPresence).
+	limited bool
 }
 
 // hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
@@ -717,6 +733,17 @@ type Server struct {
 	// constructed, because the resolver takes it as a fixed reference. Zero
 	// value means this hub resolves from configured bindings alone.
 	roles roleStoreState
+
+	// members holds the per-project membership store and its database handle
+	// (Task 20366). Opened when single sign-on is on; nil means no project on
+	// this hub can be shared, and every membership check answers "none".
+	members memberStoreState
+
+	// streamJoinHook, when set, runs after a realtime stream has passed the
+	// gate and before it joins its room — the window a revocation can land
+	// in unseen by the eviction pass. Tests set it to land one there (Task
+	// 20366); nil in production.
+	streamJoinHook func(workDir string)
 
 	// Cluster is this hub's membership of a control plane served by several
 	// `cloop ui` processes (Task 20354). Nil means standalone: this process
@@ -1253,6 +1280,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
+	// Every member re-reads the project memberships on its own, so a removed
+	// member's streams close here too when the change came from somewhere the
+	// bus does not reach (Task 20366).
+	go s.watchMemberships(watcherCtx)
 	s.runLeaderDuty(watcherCtx, "autobackup", s.watchAutoBackup)
 	// Bounds .cloop on a timer. Started after the lease for the same reason
 	// the other sweeps are: its VACUUM step rewrites the control-plane file,
@@ -1390,6 +1421,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And for the runtime role bindings, which are read only from the request
 	// path the listener has already stopped serving.
 	s.closeRoleStore()
+	// And the project memberships, read from the same path.
+	s.closeMemberStore()
 	// Stop the git interception proxy and close every live session, so the
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
@@ -2016,7 +2049,21 @@ func (s *Server) broadcastPresence(workDir string) {
 func (s *Server) deliverPresence(workDir string) {
 	users := s.presenceUsers(workDir)
 	raw, _ := json.Marshal(map[string]interface{}{"users": users})
-	s.deliverToProject(workDir, wsMessage{Type: "presence", Data: raw})
+	msg := wsMessage{Type: "presence", Data: raw}
+	if workDir != hubRoomGlobal {
+		s.deliverToProject(workDir, msg)
+		return
+	}
+	// The projects page's room. Who is on it is hub-wide knowledge, so a
+	// socket that reads projects only where they were shared with it is not
+	// told (Task 20366).
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+	for hc := range s.hubClients[workDir] {
+		if !hc.limited {
+			s.sendOrLag(hc, msg)
+		}
+	}
 }
 
 // checkAndRecordEdit records that clientID edited the given fields of taskID in
@@ -2761,6 +2808,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
 		workDir: streamWorkDir,
+		kick:    make(chan struct{}, 1),
+	}
+	if s.streamJoinHook != nil {
+		s.streamJoinHook(c.workDir)
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -2770,6 +2821,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		delete(s.clients, c)
 		s.mu.Unlock()
 	}()
+	// As on the WebSocket path: a revocation between the gate and now was
+	// evicted before this stream was registered to be found (Task 20366).
+	if projectScoped && s.streamWithdrawn(c.user, c.token, c.workDir) {
+		return
+	}
 
 	// The connect burst, under the same rule as the WebSocket path: a
 	// ?scope=global stream is not subscribed to a project and is primed with
@@ -2811,6 +2867,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	keepalive := time.NewTicker(sseKeepaliveInterval)
 	defer keepalive.Stop()
 	for {
+		// A withdrawn stream ends before anything still queued is written.
+		select {
+		case <-c.kick:
+			return
+		default:
+		}
 		// Resync takes priority — drain stale events and emit a single
 		// "resync" SSE directive so the client knows to refetch /api/state.
 		select {
@@ -2824,6 +2886,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
+			return
+		case <-c.kick:
 			return
 		case <-c.resync:
 			drainSSE(c.ch)
@@ -3085,6 +3149,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	workDir, projectScoped := s.resolveStreamScope(r)
 	user := s.recipientIdentity(r)
+	// A projects-page socket whose identity reads projects only where they
+	// were shared with it (Task 20366); decided before hubMu is taken, since
+	// the answer can read the role and membership tables.
+	limited := !projectScoped && s.oidcEnabled() &&
+		!s.grantFor(r).decide(authz.GlobalScope).Allows(authz.PermProjectRead)
+	if s.streamJoinHook != nil {
+		s.streamJoinHook(workDir)
+	}
 
 	// Assign a unique id, color-coded name and accent color to this connection.
 	connID := fmt.Sprintf("%x", time.Now().UnixNano())
@@ -3124,14 +3196,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		color = qc
 	}
 	hc := &hubClient{
-		ch:     make(chan wsMessage, hubClientBufferSize),
-		resync: make(chan struct{}, 1),
-		id:     connID,
-		name:   name,
-		color:  color,
-		conn:   conn,
-		user:   user,
-		token:  tokenFromRequest(r),
+		ch:      make(chan wsMessage, hubClientBufferSize),
+		resync:  make(chan struct{}, 1),
+		id:      connID,
+		name:    name,
+		color:   color,
+		conn:    conn,
+		user:    user,
+		token:   tokenFromRequest(r),
+		kick:    make(chan string, 1),
+		limited: limited,
 	}
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})
@@ -3149,6 +3223,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		// Broadcast updated presence list after disconnection.
 		s.broadcastPresence(workDir)
 	}()
+
+	// Authorized at the gate and in the room only now: a revocation that
+	// landed in between was evicted before this client could be found there
+	// (Task 20366). Asked again, now that the next one will find it.
+	if projectScoped && s.streamWithdrawn(user, hc.token, workDir) {
+		s.hubMu.Lock()
+		delete(s.hubClients[workDir], hc)
+		s.hubMu.Unlock()
+		closeWithdrawn(ctx, conn, "access to this project was withdrawn")
+		return
+	}
 
 	// The connect burst — state snapshot, live-log backlog, run flag, in-flight
 	// suggest job — is every per-project frame this stream is primed with. A
@@ -3208,7 +3293,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial presence list to this client, then announce to everyone.
-	if users := s.presenceUsers(workDir); len(users) > 0 {
+	if users := s.presenceUsers(workDir); len(users) > 0 && !hc.limited {
 		if raw, err := json.Marshal(map[string]interface{}{"users": users, "you": connID}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "presence", Data: raw}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
@@ -3287,6 +3372,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer pingTicker.Stop()
 
 	for {
+		// A withdrawn socket closes before anything still queued for it is
+		// written (Task 20366).
+		select {
+		case reason := <-hc.kick:
+			closeWithdrawn(ctx, conn, reason)
+			return
+		default:
+		}
 		// Resync takes priority: if the broadcaster signaled lag, drain any
 		// stale events and emit a single resync directive. The client will
 		// re-fetch /api/state to recover; subsequent events flow normally.
@@ -3310,6 +3403,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// handler is shutting down or the drain detected abuse,
 			// in which case the drain has already kicked off the
 			// status-coded close frame asynchronously.)
+			return
+		case reason := <-hc.kick:
+			closeWithdrawn(ctx, conn, reason)
 			return
 		case <-pingTicker.C:
 			// Authorization for this connection was decided once, at
@@ -6030,20 +6126,50 @@ func (s *Server) broadcastProjectsUpdate() {
 		return
 	}
 
+	// The payloads are worked out with no client lock held: filtering per
+	// recipient can read the membership and role tables (Task 20366), and a
+	// broadcast must not hold every socket hostage to a database wait. The
+	// clients are listed, then sent to under the lock if they are still there.
 	s.mu.Lock()
+	sse := make([]*sseClient, 0, len(s.clients))
 	for c := range s.clients {
-		if p := payloadFor(c.user, c.token); p != nil {
-			s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(p)})
+		sse = append(sse, c)
+	}
+	s.mu.Unlock()
+	s.hubMu.Lock()
+	hubs := make([]*hubClient, 0, 8)
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			hubs = append(hubs, hc)
+		}
+	}
+	s.hubMu.Unlock()
+	ssePayloads := make([][]byte, len(sse))
+	for i, c := range sse {
+		ssePayloads[i] = payloadFor(c.user, c.token)
+	}
+	hubPayloads := make([][]byte, len(hubs))
+	for i, hc := range hubs {
+		hubPayloads[i] = payloadFor(hc.user, hc.token)
+	}
+
+	s.mu.Lock()
+	for i, c := range sse {
+		if _, still := s.clients[c]; still && ssePayloads[i] != nil {
+			s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(ssePayloads[i])})
 		}
 	}
 	s.mu.Unlock()
-
 	s.hubMu.Lock()
+	present := make(map[*hubClient]bool, len(hubs))
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			if p := payloadFor(hc.user, hc.token); p != nil {
-				s.sendOrLag(hc, wsMessage{Type: "projects", Data: json.RawMessage(p)})
-			}
+			present[hc] = true
+		}
+	}
+	for i, hc := range hubs {
+		if present[hc] && hubPayloads[i] != nil {
+			s.sendOrLag(hc, wsMessage{Type: "projects", Data: json.RawMessage(hubPayloads[i])})
 		}
 	}
 	s.hubMu.Unlock()
@@ -6390,6 +6516,16 @@ func splitProviderModelToken(s string) (string, string, bool) {
 
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	if emptyList(r) {
+		// Signed in, but no project to read (Task 20366): nothing to list,
+		// and nothing worth reloading every project's state to find out.
+		jsonOK(w, map[string]interface{}{
+			"projects":      []multiui.ProjectStatus{},
+			"stats":         multiui.Aggregate(nil),
+			"multi_project": true,
+		})
+		return
+	}
 	s.refreshProjectStatuses()
 	// With OIDC enabled, scope the list (and the aggregate stats) to the
 	// projects the session user may see; in every mode, flag the ones this
@@ -6399,7 +6535,15 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	statuses, stats := s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
-	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0
+	//
+	// Also whenever the caller's list lacks this hub's own project (Task
+	// 20366). Single-project mode sends no index, and an index-less request
+	// resolves to the hub's own directory — so a member whose one shared
+	// project is somebody else's, or who has none left, would have their
+	// whole dashboard read a project they cannot see. With the flag set they
+	// get the projects page, and address theirs by index.
+	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0 ||
+		!statusesInclude(statuses, s.primaryProjectPath())
 	jsonOK(w, map[string]interface{}{
 		"projects":      statuses,
 		"stats":         stats,
@@ -6409,6 +6553,12 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectsEvents is an SSE endpoint for multi-project updates.
 func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
+	if emptyList(r) {
+		// A stream, unlike the list: it would hold a connection open to push
+		// nothing to a caller with no project, as /api/ws refuses to.
+		jsonErr(w, "your role does not permit this action", http.StatusForbidden)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
@@ -6418,12 +6568,19 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// No project: this stream carries the project list, which every client
+	// receives whatever room it is in. It used to be filed under
+	// resolveWorkDir, which with no index is the hub's own project, so it was
+	// also sent that project's per-project events — and since Task 20366 a
+	// caller can reach this route on a project shared with them without being
+	// able to read the hub's own.
 	c := &sseClient{
 		ch:      make(chan sseEvent, sseClientBufferSize),
 		resync:  make(chan struct{}, 1),
 		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
-		workDir: s.resolveWorkDir(r),
+		workDir: hubRoomGlobal,
+		kick:    make(chan struct{}, 1),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -6966,6 +7123,16 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Its members first (Task 20366). Memberships are keyed by path, so a
+	// roster that outlived the project would admit those people to whatever is
+	// registered here next. Before the registry change, and fatal to the
+	// delete: a failure leaves the project listed with its roster, rather than
+	// unlisted with the roster still waiting at its path.
+	if err := s.dropProjectMembers(r, entry); err != nil {
+		jsonErr(w, "could not remove the project's members, so it was not removed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	// Remove from the persistent registry. This is a no-op for entries that
 	// only live in the in-process Projects slice or are derived from
 	// s.WorkDir, but we already refused the latter above.
@@ -6973,6 +7140,9 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to update registry: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Its open streams go with it (Task 20366): rooms are keyed by path, so a
+	// socket left in this one would be sent whatever is registered here next.
+	s.closeProjectStreams(entry.Path, "this project was removed from the hub")
 	// Give the owner their project slot back (Task 20182). Keyed on the
 	// entry's recorded owner rather than on the caller, so an admin
 	// deleting somebody else's project credits the right tenant.

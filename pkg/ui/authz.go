@@ -91,8 +91,13 @@ func (s *Server) authzActiveFor(r *http.Request) bool {
 // registered project — is therefore paid on hubs that have runtime bindings
 // and only on those. A hub with a live deny is mid-incident; correctness there
 // is worth a stat.
+//
+// Memberships (Task 20366) join for the same reason and with the same limit:
+// once a project has been shared, "nobody asked cloop to decide" is no longer
+// true of the identity it was shared with, so the gate has to reach decide()
+// and let it apply the granted role. authzActiveFor keeps its narrower meaning.
 func (s *Server) authzGateFor(r *http.Request) bool {
-	return s.authzActiveFor(r) || s.runtimeBindingsExist()
+	return s.authzActiveFor(r) || s.runtimeBindingsExist() || s.membersExist()
 }
 
 // runtimeBindingsExist reports whether an operator has written any runtime role
@@ -178,8 +183,18 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		// delegated from. With RBAC inactive there is no policy to resolve
 		// against and every identity holds everything, so the intersection
 		// would be a no-op — skipped rather than computed.
+		//
+		// The owner's authority includes their project memberships (Task
+		// 20366): a link minted by a member reaches the shared project, and
+		// stops reaching it the moment the membership is revoked. Where RBAC
+		// is off the owner holds everything they can see, so only a project
+		// they reach by membership alone bounds the link.
 		if owner := g.token.Owner; owner != nil && g.server.authzActive() {
-			d = authz.Intersect(d, g.server.Authz.Resolve(subjectFromOwner(owner), scope))
+			d = authz.Intersect(d, g.server.subjectAuthority(subjectFromOwner(owner), scope))
+		} else if owner != nil {
+			if m, ok := g.server.membershipBinds(subjectFromOwner(owner), scope); ok {
+				d = authz.Intersect(d, m)
+			}
 		}
 		// A delegated token outlives the demotion of the person it was minted
 		// for unless this is checked outside the authzActive guard above.
@@ -207,6 +222,17 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		}
 	}
 	if g.bypass != "" {
+		// A project membership (Task 20366) is consulted ahead of the bypass,
+		// for the deny's reason turned around: the bypass says this deployment
+		// has not asked cloop to decide, and for this identity on this project
+		// a maintainer did decide — they wrote down a name and a role. It binds
+		// only where the identity could not see the project without it, so it
+		// never takes away an allow-all anybody held.
+		if g.subject != nil {
+			if m, ok := g.server.membershipBinds(g.subject, scope); ok {
+				return m
+			}
+		}
 		return authz.AllowAll(g.bypass, g.subjectLabel())
 	}
 	g.mu.Lock()
@@ -214,7 +240,8 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 	if d, ok := g.cache[scope]; ok {
 		return d
 	}
-	d := g.server.Authz.Resolve(g.subject, scope)
+	// The policy's answer, unioned with any membership: never a demotion.
+	d := g.server.subjectAuthority(g.subject, scope)
 	if g.cache == nil {
 		g.cache = make(map[authz.Scope]authz.Decision, 4)
 	}
@@ -274,7 +301,11 @@ func (s *Server) newGrant(r *http.Request) *grant {
 		// guard is a slice length behind a mutex, so the overwhelmingly common
 		// case — no incident has ever happened here — pays nothing, and the
 		// session lookup it gates is itself served from pkg/oidcauth's cache.
-		if len(s.Authz.RuntimeBindings()) > 0 {
+		//
+		// Memberships need the subject for the same reason (Task 20366):
+		// decide() looks one up before taking the bypass. Same cost profile —
+		// a cached slice length.
+		if s.Authz.HasRuntimeBindings() || s.membersExist() {
 			if id := s.sessionIdentity(r); id != nil {
 				g.subject = subjectFromIdentity(id)
 			}
@@ -432,8 +463,19 @@ func executorScope(r *http.Request) authz.Scope {
 //   - The caller can read the scope but not perform this action → 403
 //     FORBIDDEN, naming the permission so the UI can explain it.
 func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Permission, scope authz.Scope) bool {
+	_, ok := s.authorize(w, r, perm, scope)
+	return ok
+}
+
+// authorize is require, also returning the grant the decision was made with:
+// the request's own, or — for a permission above operator whose claims the
+// provider has just re-asserted — one re-derived from them. The route gate
+// hands that grant to the handler, so a check the handler makes after the
+// gate (the membership ceiling, Task 20366) is made on the same claims and
+// cannot read authority the provider has already withdrawn.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, perm authz.Permission, scope authz.Scope) (*grant, bool) {
 	if perm == authz.PermPublic {
-		return true
+		return s.grantFor(r), true
 	}
 	g := s.grantFor(r)
 	// Above the operator tier, the claims this decision is about to be made
@@ -443,14 +485,14 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Perm
 	if fresh, err := s.freshClaimGrant(r, perm); err != nil {
 		s.auditAuthz(r, g.decide(scope), perm, scope, false)
 		s.writeClaimFreshnessError(w, r, perm, err)
-		return false
+		return nil, false
 	} else if fresh != nil {
 		g = fresh
 	}
 	d := g.decide(scope)
 	if d.Allows(perm) {
 		s.auditAuthz(r, d, perm, scope, true)
-		return true
+		return g, true
 	}
 	s.auditAuthz(r, d, perm, scope, false)
 
@@ -458,7 +500,7 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Perm
 	if !scope.IsGlobal() && !d.Allows(authz.PermProjectRead) {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
 			"the requested resource does not exist"))
-		return false
+		return nil, false
 	}
 	apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
 		"your role does not permit this action").
@@ -467,7 +509,7 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Perm
 			"role":                string(d.Role),
 			"scope":               scope.String(),
 		}))
-	return false
+	return nil, false
 }
 
 // requireVisibleProject rejects a request that names a project index the
@@ -533,7 +575,12 @@ func (s *Server) auditAuthz(r *http.Request, d authz.Decision, perm authz.Permis
 	// API-token callers are recorded whether or not RBAC is configured: a
 	// non-interactive credential acting on the hub is exactly the thing an
 	// auditor cannot reconstruct from anywhere else.
-	if !s.authzActiveFor(r) {
+	//
+	// A decision a project membership made is recorded on every hub (Task
+	// 20366): on one without role mappings it is the only decision there is,
+	// and "a viewer member tried to start a run" is exactly the event worth
+	// keeping.
+	if !s.authzActiveFor(r) && d.Source != authz.SourceProjectMember {
 		return
 	}
 	if allowed && !isPrivileged(perm) {

@@ -541,5 +541,20 @@ func sameProjectPath(a, b string) bool {
 // try to open. That costs a session lookup every 30 seconds per open terminal —
 // affordable precisely because the concurrency ceiling is four.
 func (s *Server) attachStillAuthorized(r *http.Request) bool {
-	return s.newGrant(r).decide(s.projectScope(r)).Allows(authz.PermSandboxAttach)
+	if !s.newGrant(r).decide(s.projectScope(r)).Allows(authz.PermSandboxAttach) {
+		return false
+	}
+	// And the project is still one the caller can see. On a hub without role
+	// mappings that is the only thing a revoked membership changes (Task
+	// 20366): the decision above falls back to the allow-all, and visibility
+	// is what the membership was granting.
+	if user := s.recipientIdentity(r); user != nil {
+		dir := s.resolveWorkDir(r)
+		for _, e := range s.allProjectEntries() {
+			if e.Path == dir {
+				return s.identityCanSeeEntry(user, e)
+			}
+		}
+	}
+	return true
 }

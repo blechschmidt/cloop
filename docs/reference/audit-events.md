@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 125 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 126 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 110 |
+| `control-plane` | the hub's own state.db | 111 |
 | `project` | the project's .cloop/state.db | 13 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-125 actions in 36 families. Every action is listed: this section is the whole
+126 actions in 36 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -619,11 +619,15 @@ Payload keys, on every action above: `action`, `project_path`, `executor_id`, `f
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
-| `project.member.grant` | `project_member` | control-plane | beta | An identity is added to a project's roster. |
+| `project.member.change` | `project_member` | control-plane | beta | A member's role on a project is changed. |
+| `project.member.grant` | `project_member` | control-plane | beta | An identity is added to a project's members at a role. |
 | `project.member.leave` | `project_member` | control-plane | beta | A member removes themselves from a project. |
-| `project.member.revoke` | `project_member` | control-plane | beta | A maintainer removes an identity from a project's roster. |
+| `project.member.revoke` | `project_member` | control-plane | beta | A member is removed from a project, or the project itself is removed from the hub. |
 
-Payload keys, on every action above: `project`, `project_path`, `identity`, `left`
+Payload keys, on every action above: `project`, `project_path`, `identity`, `role`, `previous_role`, `reason`, `via`, `left`
 
+- `project.member.change` — `previous_role` is the role replaced; a change in either direction is recorded.
+- `project.member.grant` — `via` is "api" or "cli". A membership only adds access: the hub unions its role with whatever the identity already holds.
 - `project.member.leave` — Separate from project.member.revoke so "was this person removed or did they leave" stays answerable.
+- `project.member.revoke` — `role` is the role the member held. A project removed from the hub drops its whole roster, one row per member, with `reason` saying so.
 

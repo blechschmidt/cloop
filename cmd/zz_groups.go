@@ -140,6 +140,8 @@ var rootCommandGroups = map[string]string{
 	"audit":     groupAccess,
 	"audit-log": groupAccess,
 	"events":    groupAccess,
+	// Who besides its owner may reach a project (Task 20366).
+	"project": groupAccess,
 
 	// Insight and reporting — read-only views over work already done.
 	"report":       groupInsight,

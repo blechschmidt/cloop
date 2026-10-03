@@ -1358,23 +1358,39 @@ var registry = []Entry{
 	},
 
 	// ── project.member ─────────────────────────────────────────────────────
+	// Who besides its owner may reach a project (Task 20366). Each row is
+	// committed in the same transaction as the membership change it records,
+	// so the roster and the trail cannot disagree. entity_id is
+	// "<project path>|<identity>", so a reader filtering on either half finds it.
 	{
 		Action:    ActionProjectMemberGrant,
 		Home:      HomeControlPlane,
 		Entity:    "project_member",
-		Trigger:   "An identity is added to a project's roster.",
+		Trigger:   "An identity is added to a project's members at a role.",
 		Payload:   projectMemberPayload,
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
+		Note:      "`via` is \"api\" or \"cli\". A membership only adds access: the hub unions its role with whatever the identity already holds.",
+	},
+	{
+		Action:    ActionProjectMemberChange,
+		Home:      HomeControlPlane,
+		Entity:    "project_member",
+		Trigger:   "A member's role on a project is changed.",
+		Payload:   projectMemberPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "`previous_role` is the role replaced; a change in either direction is recorded.",
 	},
 	{
 		Action:    ActionProjectMemberRevoke,
 		Home:      HomeControlPlane,
 		Entity:    "project_member",
-		Trigger:   "A maintainer removes an identity from a project's roster.",
+		Trigger:   "A member is removed from a project, or the project itself is removed from the hub.",
 		Payload:   projectMemberPayload,
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
+		Note:      "`role` is the role the member held. A project removed from the hub drops its whole roster, one row per member, with `reason` saying so.",
 	},
 	{
 		Action:    ActionProjectMemberLeave,
@@ -1452,5 +1468,5 @@ var (
 	// on top of its own counts.
 	offboardPayload = []string{"identity", "identity_input", "subjects", "emails", "reason", "via"}
 
-	projectMemberPayload = []string{"project", "project_path", "identity", "left"}
+	projectMemberPayload = []string{"project", "project_path", "identity", "role", "previous_role", "reason", "via", "left"}
 )

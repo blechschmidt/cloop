@@ -91,6 +91,12 @@ permission is evaluated against — and the distinction matters: a project-scope
 grant does **not** satisfy a route scoped ` + "`global`" + `, so a user who can administer
 one project still cannot read the fleet.
 
+Two scopes are about the caller's own list of projects. ` + "`project-list`" + ` admits a
+caller who holds ` + "`project.read`" + ` hub-wide, or on at least one project — someone a
+project was shared with, on a hub whose default role is ` + "`none`" + ` — and lists such a
+caller only the projects they can read. ` + "`stream`" + ` is a realtime stream: scoped to the
+project ` + "`?project_idx`" + ` names, or, with ` + "`?scope=global`" + `, to the caller's project list.
+
 Endpoints marked ` + "`public`" + ` require no permission. On the hub that does not mean
 unauthenticated — the authentication middleware has already run, and only the
 login flow, the SPA shell and the static assets bypass it — it means no *role*

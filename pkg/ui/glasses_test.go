@@ -528,17 +528,39 @@ func TestGlassesLinkNeverExceedsItsOwner(t *testing.T) {
 		defer resp.Body.Close()
 		return resp.StatusCode
 	}
-	call := func(tok string) int { return callPath(tok, "/api/glasses/projects") }
 
-	mapped := mintFor(&apitoken.Owner{Sub: "sub-alice", Email: "alice@example.com", Groups: []string{"readers"}})
-	if got := call(mapped); got != http.StatusOK {
-		t.Errorf("a link owned by a mapped viewer = %d, want 200", got)
+	// listed is how many projects a link's list names, and the status.
+	listed := func(tok string) (int, int) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/glasses/projects", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, cerr := http.DefaultClient.Do(req)
+		if cerr != nil {
+			t.Fatalf("GET: %v", cerr)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Projects []json.RawMessage `json:"projects"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return len(body.Projects), resp.StatusCode
 	}
 
+	mapped := mintFor(&apitoken.Owner{Sub: "sub-alice", Email: "alice@example.com", Groups: []string{"readers"}})
+	if n, got := listed(mapped); got != http.StatusOK || n == 0 {
+		t.Errorf("a link owned by a mapped viewer = %d listing %d project(s), want 200 and the hub's own", got, n)
+	}
+
+	// The unmapped owner's link reads nothing. Its list is empty — a caller
+	// who can read no project is answered with an empty list rather than a
+	// refusal since Task 20366, which discloses nothing — and the project a
+	// viewer reads is refused to it.
 	unmapped := mintFor(&apitoken.Owner{Sub: "sub-mallory", Email: "mallory@example.com", Groups: []string{"contractors"}})
-	if got := call(unmapped); got == http.StatusOK {
-		t.Error("a link owned by a user with no role binding was allowed to read — the token's " +
-			"roles must be intersected with its owner's live authority, not granted outright")
+	if n, got := listed(unmapped); got == http.StatusOK && n != 0 {
+		t.Errorf("a link owned by a user with no role binding was listed %d project(s) — the token's "+
+			"roles must be intersected with its owner's live authority, not granted outright", n)
+	}
+	if got := callPath(unmapped, "/api/glasses/tasks?project_idx=0"); got == http.StatusOK {
+		t.Error("a link owned by a user with no role binding read a project's tasks")
 	}
 
 	// The control: the same roles, with no owner to be bounded by, read

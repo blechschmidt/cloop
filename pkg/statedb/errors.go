@@ -156,6 +156,12 @@ var (
 	// and a PUT that silently recreated it would resurrect an allowlist entry
 	// somebody had just decided to remove.
 	ErrCIPipelineRuleNotFound = errors.New("statedb: ci pipeline rule not found")
+
+	// ErrProjectMemberNotFound indicates no project_members row names the
+	// requested identity on the requested project (Task 20366). An ordinary
+	// answer — "that person is not on this project" — which the REST layer
+	// reports as 404 and the CLI as a plain sentence.
+	ErrProjectMemberNotFound = errors.New("statedb: project member not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite

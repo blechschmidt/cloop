@@ -768,3 +768,51 @@ func warnsAbout(warnings []string, substr string) bool {
 	}
 	return false
 }
+
+// TestRunRemovesProjectMemberships: a departing identity loses every project
+// shared with it, under each spelling it was recorded by — including the
+// subject key an email-only sweep would miss — in the credential transaction,
+// with a row naming the projects. A colleague's membership stays.
+func TestRunRemovesProjectMemberships(t *testing.T) {
+	db := testDB(t)
+	putSession(t, db, "s1", "sub-dana", "dana@example.com")
+	for _, r := range []statedb.ProjectMemberRow{
+		{ProjectPath: "/srv/payments", IdentityKey: "dana@example.com", Role: "operator"},
+		{ProjectPath: "/srv/infra", IdentityKey: "sub:sub-dana", Role: "viewer"},
+		{ProjectPath: "/srv/payments", IdentityKey: "erin@example.com", Role: "viewer"},
+	} {
+		if _, _, err := db.PutProjectMember(r, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dry, err := Run(func() Options { o := baseOptions(db, "dana@example.com"); o.DryRun = true; return o }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dry.Memberships) != 2 || dry.Empty() {
+		t.Fatalf("the plan lists memberships %+v, want dana's two", dry.Memberships)
+	}
+	if rows, _ := db.ListProjectMembers(); len(rows) != 3 {
+		t.Fatalf("a dry run removed memberships: %d left", len(rows))
+	}
+
+	rep, err := Run(baseOptions(db, "dana@example.com"))
+	if err != nil || !rep.OK() {
+		t.Fatalf("Run: %v %+v", err, rep.Failures)
+	}
+	if len(rep.MembershipsRevoked) != 2 {
+		t.Fatalf("removed %+v, want dana's two memberships", rep.MembershipsRevoked)
+	}
+	rows, _ := db.ListProjectMembers()
+	if len(rows) != 1 || rows[0].IdentityKey != "erin@example.com" {
+		t.Fatalf("after offboarding dana the table holds %+v", rows)
+	}
+	evs, _, err := db.ListAuditEvents(statedb.AuditFilter{EventType: "user.offboard_membership"})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("membership audit rows: %d (%v), want 1", len(evs), err)
+	}
+	if !strings.Contains(evs[0].Payload, "/srv/infra (viewer)") || !strings.Contains(evs[0].Payload, "/srv/payments (operator)") {
+		t.Errorf("the audit row does not name the projects: %s", evs[0].Payload)
+	}
+}

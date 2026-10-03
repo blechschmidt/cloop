@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/projectmember"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -105,6 +106,29 @@ func BuildPlan(o Options) (Plan, error) {
 	denies, denyWarnings := plannedDenies(target)
 	plan.Denies = denies
 	plan.Warnings = append(plan.Warnings, denyWarnings...)
+
+	// Project memberships (Task 20366): projects this person can reach but
+	// does not own. Read from the table itself — it is the authority; every
+	// reader, the hub's request path included, caches exactly these rows. A
+	// failure is a warning: Run removes memberships by identity, not by the
+	// paths listed here, so what is lost is the preview, and that must not
+	// be a reason to refuse to offboard somebody.
+	if members, err := o.DB.ListProjectMembers(); err != nil {
+		plan.Warnings = append(plan.Warnings,
+			fmt.Sprintf("could not enumerate project memberships: %v", err))
+	} else {
+		keys := map[string]bool{}
+		for _, k := range target.OwnerKeys() {
+			keys[k] = true
+		}
+		for _, m := range members {
+			if keys[projectmember.NormalizeKey(m.IdentityKey)] {
+				plan.Memberships = append(plan.Memberships, MembershipRef{
+					Path: m.ProjectPath, Role: m.Role, Identity: m.IdentityKey,
+				})
+			}
+		}
+	}
 
 	// Projects — reported, never deleted.
 	ownerKeys := target.OwnerKeys()

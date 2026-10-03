@@ -214,6 +214,13 @@ var ciAPISource string
 //go:embed suggest_api.go
 var suggestAPISource string
 
+// membersSource is pkg/ui/members.go (Task 20366): the members_update
+// broadcast an open Members card refreshes on, and the access_withdrawn
+// message a socket is closed with when its identity loses the project.
+//
+//go:embed members.go
+var membersSource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -241,7 +248,8 @@ func allUISources() string {
 		"\n" + executorSandboxAPISource +
 		"\n" + executorPolicyAPISource +
 		"\n" + firewallAPISource +
-		"\n" + suggestAPISource
+		"\n" + suggestAPISource +
+		"\n" + membersSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

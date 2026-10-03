@@ -47,6 +47,15 @@ type OffboardWrite struct {
 	TokenIDs   []string
 	GlassesIDs []string
 
+	// MemberKeys are the identity keys whose project memberships are dropped
+	// (Task 20366): every spelling of the person, because a grant recorded
+	// under "sub:<subject>" survives a sweep by email, and a surviving
+	// membership is live access to a colleague's project. Severed in this
+	// transaction for the reason the transaction exists — "their sessions are
+	// gone but they are still on three projects" is exactly the
+	// partially-offboarded state nobody would discover.
+	MemberKeys []string
+
 	// DenyBindings are written in the same transaction. They are what keep the
 	// account out if the IdP later hands it a fresh session: revoking sessions
 	// alone is undone by the next successful sign-in.
@@ -88,6 +97,11 @@ type OffboardApplied struct {
 	// DenyBindingIDs are the ids of the bindings written.
 	DenyBindingIDs []string
 
+	// Members are the project memberships actually dropped (Task 20366), as
+	// rows rather than ids: the report names the projects the person was
+	// removed from, which an id cannot be read back to.
+	Members []ProjectMemberRow
+
 	// At is the timestamp stamped on the revocations.
 	At time.Time
 }
@@ -95,7 +109,7 @@ type OffboardApplied struct {
 // Severed reports whether anything at all changed.
 func (a OffboardApplied) Severed() bool {
 	return len(a.Sessions) > 0 || len(a.Tokens) > 0 ||
-		len(a.Glasses) > 0 || len(a.DenyBindingIDs) > 0
+		len(a.Glasses) > 0 || len(a.DenyBindingIDs) > 0 || len(a.Members) > 0
 }
 
 // OffboardIdentity severs the listed sessions and tokens and writes the deny
@@ -143,6 +157,10 @@ func (d *DB) OffboardIdentity(w OffboardWrite) (OffboardApplied, error) {
 		return OffboardApplied{}, err
 	}
 	applied.Glasses, err = revokeAPITokensTx(tx, w.GlassesIDs, at)
+	if err != nil {
+		return OffboardApplied{}, err
+	}
+	applied.Members, err = deleteProjectMembersForIdentityTx(tx, w.MemberKeys)
 	if err != nil {
 		return OffboardApplied{}, err
 	}

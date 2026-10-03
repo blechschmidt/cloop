@@ -30,6 +30,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/offboard"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
 var hubUserCmd = &cobra.Command{
@@ -49,8 +50,8 @@ var hubUserOffboardCmd = &cobra.Command{
 	Short: "Sever every credential surface an identity holds",
 	Long: `End everything one identity can still do on this hub.
 
-Six surfaces outlive an account disabled at the identity provider, and all six
-are severed here:
+Seven surfaces outlive an account disabled at the identity provider, and all
+seven are severed here:
 
   sessions   every signed-in dashboard session
   tokens     every API token whose owner binding is this person
@@ -58,8 +59,9 @@ are severed here:
   deny       a runtime deny binding, so a *new* sign-in gets nothing either
   leases     secret leases held by their running tasks, released at the broker
   tasks      those tasks, stopped
+  members    every project shared with them by name, removed
 
-and a seventh is reported but never touched:
+and an eighth is reported but never touched:
 
   projects   the projects they own, listed so an operator can reassign them
 
@@ -73,8 +75,8 @@ same person, because the surfaces are keyed inconsistently — a session carries
 an email, a token's owner may carry only a subject, and matching literally on
 what you typed would leave that token live.
 
-Sessions, tokens, glasses links and the deny binding are written in ONE
-transaction: either the person is out of all four or nothing changed. Leases
+Sessions, tokens, glasses links, memberships and the deny binding are written
+in ONE transaction: either the person is out of all five or nothing changed. Leases
 and tasks cannot join that transaction — they are broker memory and other
 databases — so they are applied after it, and any failure is reported rather
 than rolled back over a severing that already succeeded.
@@ -153,6 +155,15 @@ Examples:
 		if err != nil {
 			return err
 		}
+		// Memberships went in the credential transaction (Task 20366); tell
+		// running hubs, so they apply it — and close this person's open
+		// dashboards on those projects — now rather than at their next refresh.
+		for _, m := range rep.MembershipsRevoked {
+			if err := ui.AnnounceMembershipChange(db, fmt.Sprintf("cli-%d", os.Getpid()), m.Path); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the removed memberships: %v\n", err)
+				break
+			}
+		}
 
 		if asJSON {
 			enc := json.NewEncoder(os.Stdout)
@@ -209,6 +220,7 @@ func printOffboardReport(rep offboard.Report) {
 	row("deny bindings", len(rep.Denies), done(len(rep.DeniesWritten)))
 	row("secret leases", len(rep.Leases), done(len(rep.LeasesReleased)))
 	row("running tasks", len(rep.Tasks), done(len(rep.TasksStopped)))
+	row("project memberships", len(rep.Memberships), done(len(rep.MembershipsRevoked)))
 	fmt.Fprintf(w, "projects\t%d\t%s\n", len(rep.Projects), "reported only (never deleted)")
 	_ = w.Flush()
 
@@ -237,6 +249,12 @@ func printOffboardReport(rep offboard.Report) {
 		tokens = append(tokens, fmt.Sprintf("%s  %-8s %s", truncateField(t.ID, 16), kind, t.Name))
 	}
 	detail("Tokens:", tokens)
+
+	var memberships []string
+	for _, m := range rep.Memberships {
+		memberships = append(memberships, fmt.Sprintf("%s  %-10s as %s", m.Path, m.Role, m.Identity))
+	}
+	detail("Project memberships (removed, not reported):", memberships)
 
 	var tasks []string
 	for _, t := range rep.Tasks {

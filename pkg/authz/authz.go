@@ -269,6 +269,21 @@ const (
 	// project out of someone's reach.
 	PermViewPrefs Permission = "view.prefs"
 
+	// PermProjectShare is the right to decide who else may work on a project:
+	// to add an identity to its members at a role, change that role, and
+	// remove it (Task 20366).
+	//
+	// Its own permission rather than a reuse of project.write, which sits on
+	// the same rung today. Every other project permission is about the work;
+	// this one is about who can reach it, and a reader of the route table or
+	// the audit trail should be able to tell the two apart without knowing
+	// which routes happen to share a rung. Held from maintainer up.
+	//
+	// Holding it is necessary but not sufficient: the hub also refuses to grant
+	// a role above the granter's own on that project, so this permission
+	// delegates authority and never mints it (see pkg/ui/members_api.go).
+	PermProjectShare Permission = "project.share"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -304,6 +319,7 @@ var AllPermissions = []Permission{
 	PermSandboxAttachWrite,
 	PermSecretRequest,
 	PermSecretOwn,
+	PermProjectShare,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a
@@ -333,9 +349,9 @@ const (
 	// and mutate the task plan. This is the day-to-day engineer role.
 	RoleOperator Role = "operator"
 
-	// RoleMaintainer may additionally reshape a project and broker
-	// credentials to executors: project write, config write, secret
-	// grant/revoke.
+	// RoleMaintainer may additionally reshape a project, decide who else may
+	// work on it, and broker credentials to executors: project write, project
+	// share, config write, secret grant/revoke.
 	RoleMaintainer Role = "maintainer"
 
 	// RoleAdmin holds every permission, including managing the executor
@@ -367,6 +383,21 @@ func (r Role) rank() int {
 // Valid reports whether r is a known role.
 func (r Role) Valid() bool { return r.rank() >= 0 }
 
+// AtLeast reports whether r is at least as strong as other on the ladder.
+//
+// The exported form of the rank comparison, so a caller outside this package
+// can ask "is this role within that ceiling?" without a second copy of the
+// ordering — capping a membership at the granter's own role is that question.
+// An unknown role is never at least anything, itself included: a name this
+// binary does not recognise has no place on the ladder, and guessing one is how
+// a downgrade turns into an escalation.
+func (r Role) AtLeast(other Role) bool {
+	if !r.Valid() || !other.Valid() {
+		return false
+	}
+	return r.rank() >= other.rank()
+}
+
 // rolePermissions is the single source of truth for what each role may do.
 // Roles are cumulative by construction — each tier embeds the one below —
 // so the table reads as a ladder and cannot drift out of order.
@@ -383,6 +414,7 @@ var rolePermissions = map[Role][]Permission{
 		PermRunStart, PermRunStop, PermTaskMutate,
 		PermSecretRequest, PermSecretOwn,
 		PermProjectWrite, PermConfigWrite, PermSecretGrant, PermSecretRevoke,
+		PermProjectShare,
 	},
 	RoleAdmin: AllPermissions,
 }
@@ -632,6 +664,14 @@ const (
 	// took it away, deliberately, and there is a reason on file".
 	SourceRuntimeDeny Source = "runtime_deny"
 
+	// SourceProjectMember means a project membership is what granted the
+	// caller this decision (Task 20366). Distinct from SourceBinding because
+	// the two are withdrawn in different places — a binding is policy an
+	// operator edits, a membership is a row the project's maintainers remove
+	// from its own page — and "why could they do that?" has to name the one
+	// to change.
+	SourceProjectMember Source = "project_member"
+
 	// SourceDefaultRole means no binding matched and oidc.default_role
 	// applied.
 	SourceDefaultRole Source = "default_role"
@@ -759,6 +799,49 @@ func Intersect(a, b Decision) Decision {
 	if !out.allowAll && len(out.perms) == 0 {
 		out.Role = RoleNone
 	}
+	return out
+}
+
+// Union returns the decision granting everything either input grants.
+//
+// The mirror of Intersect, for the opposite kind of authority. Intersect bounds
+// a delegated credential, which must never outrank the person it was minted
+// for. Union combines an additive one: a project membership says "this person
+// is also admitted here, at this role", and admitting somebody must never take
+// away anything they already held. That is also why a membership is not a
+// runtime binding, the obvious alternative: a project-pinned binding wins its
+// tier outright even when it grants less, so sharing a project with an admin
+// at viewer would demote them there. Union cannot demote anyone — the result
+// allows everything a allowed.
+//
+// Over permission sets rather than role ranks, for Intersect's reason. The
+// result keeps a's Scope; its Source, SubjectLabel and Binding are a's unless b
+// is what raised the answer, so an audit row names the grant that decided the
+// request — the record somebody can revoke.
+func Union(a, b Decision) Decision {
+	if a.allowAll {
+		return a
+	}
+	out := a
+	if b.allowAll || b.Role.rank() > a.Role.rank() {
+		out = b
+		out.Scope = a.Scope
+	}
+	if out.allowAll {
+		return out
+	}
+	perms := make(map[Permission]struct{}, len(a.perms)+len(b.perms))
+	for p := range a.perms {
+		perms[p] = struct{}{}
+	}
+	for p := range b.perms {
+		perms[p] = struct{}{}
+	}
+	if len(perms) == 0 {
+		perms = nil
+		out.Role = RoleNone
+	}
+	out.perms = perms
 	return out
 }
 

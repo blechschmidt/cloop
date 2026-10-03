@@ -102,6 +102,18 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteFromError(w, err)
 		return
 	}
+	// Memberships went in the credential transaction, behind the store's
+	// back: bring this hub's cache up to date now — which also closes the
+	// person's open streams on those projects — and tell the other members.
+	if len(rep.MembershipsRevoked) > 0 {
+		if store := s.memberStore(); store != nil {
+			store.Invalidate()
+			_ = store.Refresh()
+		}
+		for _, m := range rep.MembershipsRevoked {
+			s.announceMembershipChange(m.Path)
+		}
+	}
 
 	// A partial run is reported with 200 and failures attached rather than as
 	// an error status. The caller needs the report either way — it names what

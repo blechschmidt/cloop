@@ -1,5 +1,34 @@
 // ── Render overview ─────────────────────────────────────────────────────────
 
+// ── Members card (Task 20366) ────────────────────────────────────────────────
+// Fetched the first time an Overview needs it rather than bundled: most
+// sessions never share a project, and first paint has no room for a panel
+// they do not use. The script runs outside this IIFE, so it is handed the few
+// helpers it calls; the one global it defines is its factory.
+let _membersPanel = null;
+// No project on screen: none selected, or in single-project mode none loaded.
+const _membersOff = () => !myOIDC || (isMultiProject ? selectedProjectIdx === null : !appState);
+function loadProjectMembers() {
+  if (_membersOff()) return;
+  if (!_membersPanel) {
+    _membersPanel = new Promise((ok, no) => {
+      const m = document.querySelector('meta[name="cloop-members-src"]');
+      const el = document.createElement('script');
+      el.src = m ? m.getAttribute('content') : '';
+      el.onload = () => window.cloopMembersPanel ? ok(window.cloopMembersPanel({
+        api, apiMethod, esc, toast, left: clearProjectSelection,
+        idx: () => selectedProjectIdx === null ? 0 : selectedProjectIdx,
+        hidden: _membersOff,
+      })) : no();
+      el.onerror = no;
+      document.head.appendChild(el);
+    });
+    // A failed fetch is retried by the next Overview, not replayed forever.
+    _membersPanel.catch(() => { _membersPanel = null; });
+  }
+  return _membersPanel.then(p => p.load()).catch(() => {});
+}
+
 // applyStateDiff merges a server-side state_diff envelope into the local
 // appState and then re-renders. The envelope shape (Task 20132):
 //

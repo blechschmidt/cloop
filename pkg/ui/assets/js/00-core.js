@@ -262,7 +262,7 @@ window.switchTab = function(name) {
     // bindings live in the control plane's database rather than in project
     // state.
     if (name === 'overview') loadExecutors();
-    if (name === 'overview') loadProjectRepositories();
+    if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
@@ -270,7 +270,7 @@ window.switchTab = function(name) {
   } else {
     if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadTelemetryPolicy(); loadCIPanel(); loadGitHubApps(); loadUSBSettings(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
-    if (name === 'overview') loadProjectRepositories();
+    if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
     if (name === 'tasks'  && appState) renderTasks(appState);
     if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();
@@ -749,6 +749,8 @@ function toast(msg, type) {
 let myPerms = null;
 let myGlobalPerms = null;
 let myRole = '';
+// Whether the hub has single sign-on: project sharing exists only there.
+let myOIDC = false;
 
 function can(perm) {
   return myPerms === null || myPerms.indexOf(perm) !== -1;
@@ -798,7 +800,10 @@ function refreshPermissions() {
       myPerms = Array.isArray(me.permissions) ? me.permissions : null;
       myGlobalPerms = Array.isArray(me.global_permissions) ? me.global_permissions : null;
       myRole = me.role || '';
+      myOIDC = !!me.oidc_enabled;
       applyPermissionGating();
+      // The Members card's controls depend on the role just read (Task 20366).
+      if (activeTab === 'overview') loadProjectMembers();
       // The same answer re-arms the silent sign-in renewal (32-renew.js): every
       // reason to re-read permissions is a reason the session's clocks moved.
       noteSessionSchedule(me);

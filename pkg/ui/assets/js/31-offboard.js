@@ -60,6 +60,7 @@ function _offbRenderPreview(rep) {
     ['Deny bindings', n('denies'),   'written'],
     ['Secret leases', n('leases'),   'released'],
     ['Running tasks', n('tasks'),    'stopped'],
+    ['Project memberships', n('memberships'), 'removed'],
   ].map(r =>
     '<tr><td>' + esc(r[0]) + '</td><td style="text-align:right"><strong>' + r[1] +
     '</strong></td><td class="sec-count">' + esc(r[2]) + '</td></tr>').join('');
@@ -143,6 +144,7 @@ function _offbRenderResult(rep) {
     ['Deny bindings written', n('denies_written')],
     ['Secret leases released', n('leases_released')],
     ['Running tasks stopped', n('tasks_stopped')],
+    ['Project memberships removed', n('memberships_revoked')],
   ].map(r => '<tr><td>' + esc(r[0]) + '</td><td style="text-align:right"><strong>' +
     r[1] + '</strong></td></tr>').join('');
 

@@ -62,6 +62,16 @@ func (s *Server) freshClaimGrant(r *http.Request, perm authz.Permission) (*grant
 		// intersection in grant.decide.
 		return nil, nil
 	}
+	if g.bypass != "" && !s.Authz.HasRuntimeBindings() {
+		// A hub without role mappings grants by deployment, not by claims:
+		// the subject is attached only so a project membership can name the
+		// caller (Task 20366), and a membership is keyed by email or subject,
+		// which re-asserting the claims does not narrow. Demanding fresh
+		// claims here would refuse everyone's privileged actions on every
+		// such hub the moment one project was shared. A runtime deny binding
+		// may match a group, so with those the check still runs.
+		return nil, nil
+	}
 	rec, ok := s.OIDC.SessionFromRequest(r)
 	if !ok {
 		return nil, nil
@@ -77,7 +87,10 @@ func (s *Server) freshClaimGrant(r *http.Request, perm authz.Permission) (*grant
 	// Narrowed (or widened) at the provider. A new grant rather than a mutated
 	// one: the old grant memoizes decisions per scope, and those were computed
 	// under claims that no longer hold.
-	return &grant{server: s, subject: subjectFromIdentity(&fresh.Identity)}, nil
+	// The bypass carries over: on a hub without role mappings the refreshed
+	// claims change what a deny binding matches, not the deployment's
+	// allow-all.
+	return &grant{server: s, subject: subjectFromIdentity(&fresh.Identity), bypass: g.bypass}, nil
 }
 
 // sameClaims reports whether two identities carry the same groups and roles.

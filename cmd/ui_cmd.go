@@ -235,6 +235,13 @@ but not for anything reachable from a network.`,
 				if roleErr != nil {
 					return fmt.Errorf("could not open runtime role bindings: %w", roleErr)
 				}
+				// Project memberships (Task 20366): who besides its owner may
+				// reach a project. Fatal like the role store: a hub that cannot
+				// read this table would come up having silently un-shared every
+				// project on it.
+				if _, memberErr := srv.OpenMemberStore(); memberErr != nil {
+					return fmt.Errorf("could not open project memberships: %w", memberErr)
+				}
 				resolver, authzErr := authz.New(ui.OIDCAuthzConfig(cfg.UI.OIDC, roleSource))
 				if authzErr != nil {
 					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)

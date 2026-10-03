@@ -12,6 +12,18 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Project sharing.** On a hub with single sign-on, a project's maintainer
+  adds named people to it at a role — never above their own role there — from
+  the Overview's **Members** card or `cloop project members add`. A membership
+  only adds: someone who already holds more keeps it. A member sees the project
+  in their list, on their glasses link and through tokens minted on their
+  behalf, including on a hub whose `default_role` is `none`, and its features
+  come with it. A removal takes effect on every hub within seconds and closes
+  the member's open dashboard on the project; members can also leave. API:
+  `/api/projects/{idx}/members`, permission `project.share` (maintainer and
+  up); audit actions `project.member.grant`, `.change`, `.revoke` and `.leave`.
+  Offboarding a user removes their memberships, and removing a project drops
+  its roster. See *Project members* in `docs/security/model.md`.
 - **Settings → Telemetry.** An admin switches front-end telemetry on and off
   from the dashboard, optionally for one front end only
   (`ui.telemetry.sources`), and sees what is already stored and for how long;
@@ -140,6 +152,11 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Removing a project closes the dashboards still attached to it.** Live
+  streams are filed by project path, so a socket left open on a removed
+  project went on receiving whatever was registered at that path next —
+  possibly somebody else's project. They are now told the project is gone and
+  closed.
 - **Hub-scope settings in a per-instance overlay now govern the hub.** `cloop ui
   --port N` merged `.cloop/config.ui-N.yaml` over `config.yaml` for its `ui.*`
   settings, but read every other hub-scope setting from `config.yaml` alone. An
