@@ -105,23 +105,117 @@ func TestScrub(t *testing.T) {
 	}
 }
 
-// TestScrub_Terminates guards the rewrite loops. scrubPrefixed replaces a match
-// with text of its own and re-searches from the start; if the replacement ever
-// contained a prefix it looks for, the loop would never end.
+// TestScrub_Terminates guards the rewrite loops on a large field dense with
+// things to rewrite. A replacement that could itself be matched again — the
+// marker following "token=" or "Bearer " — would loop forever, or grow the
+// field until the clamp cut it.
+//
+// The token is shaped like one, cloop_pat_ with both halves: a real token has a
+// 16-character id and a 64-character secret, and a bare "cloop_pat_aaaa" with
+// no secret half is not one.
 func TestScrub_Terminates(t *testing.T) {
 	t.Parallel()
 
+	const tok = "cloop_pat_0123456789abcdef_" +
+		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 	done := make(chan string, 1)
 	go func() {
-		done <- Scrub(strings.Repeat("cloop_pat_aaaa bearer bbbb tok=cc ", 200))
+		done <- Scrub(strings.Repeat(tok+" bearer bbbb tok=cc token=dd ", 200))
 	}()
 	select {
 	case got := <-done:
-		if strings.Contains(got, "cloop_pat_aaaa") {
+		if strings.Contains(got, tok) || strings.Contains(got, "token=dd") {
 			t.Errorf("credential survived: %q", got)
+		}
+		if n := strings.Count(got, "[redacted]"); n != 400 {
+			t.Errorf("got %d markers, want 400 (one per token, one per token= value)", n)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Scrub did not terminate — a replacement re-matched its own pattern")
+	}
+}
+
+// TestScrub_IsStableOnItsOwnOutput: a value an earlier layer already redacted
+// is left alone — it used to gain a bracket on every pass — but text glued to
+// the end of a marker is still a value and still goes.
+func TestScrub_IsStableOnItsOwnOutput(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]string{
+		"/glasses?token=[redacted]#tasks":         "/glasses?token=[redacted]#tasks",
+		"/glasses?token=[redacted]":               "/glasses?token=[redacted]",
+		"/glasses?token=[redacted]opaque1234#top": "/glasses?token=[redacted]#top",
+	} {
+		if got := Scrub(in); got != want {
+			t.Errorf("Scrub(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestScrub_SharesTheCredentialRegistry is the defect that made the registry:
+// this scrubber knew cloop's two prefixes and nothing else, so a browser error
+// quoting a GitHub token or an Anthropic key was stored as it arrived. One
+// shape per family is enough here — tests/security runs every scanner over
+// the whole corpus.
+func TestScrub_SharesTheCredentialRegistry(t *testing.T) {
+	t.Parallel()
+
+	for _, secret := range []string{
+		"ghs_1234567_" + strings.Repeat("Ab3", 12) + "." + strings.Repeat("Cd4", 84) + "." + strings.Repeat("eF5_", 21) + "gh",
+		"sk-ant-api03-" + strings.Repeat("Zz9-", 23) + "AA",
+		"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJlYnl0ZXM",
+	} {
+		in := "TypeError: fetch failed with " + secret + " at app.js:12:3"
+		got := Scrub(in)
+		if strings.Contains(got, secret) {
+			t.Errorf("Scrub kept a credential cloop audit would report:\n%s", got)
+		}
+		if !strings.Contains(got, "TypeError: fetch failed with ") || !strings.Contains(got, " at app.js:12:3") {
+			t.Errorf("Scrub(%q) destroyed the message around the credential: %q", in, got)
+		}
+	}
+}
+
+// TestScrub_RegistryRunsBeforeTheParameterPass: the parameter pass ends a
+// value at a space, so run first over "authorization=Bearer <token>" it
+// replaced the scheme alone — the word the registry needed to recognise the
+// token behind it — and stored the token.
+func TestScrub_RegistryRunsBeforeTheParameterPass(t *testing.T) {
+	t.Parallel()
+
+	const tok = "Zx81kQm2Lp9vTn4bWc7dRf3hYj6s"
+	for _, in := range []string{
+		"headers: authorization=Bearer " + tok + ", accept=*/*",
+		"token=Bearer " + tok,
+		"{Authorization=Bearer " + tok + "}",
+	} {
+		if got := Scrub(in); strings.Contains(got, tok) {
+			t.Errorf("Scrub(%q) = %q — the token survived", in, got)
+		}
+	}
+}
+
+// TestNormalizeScrubsAFullBodyInLinearTime is the denial of service the
+// shared registry's first version opened at ingest: a detail field of
+// "ghs_a." repeated made every candidate a rescan to the field's end, and the
+// scrub runs before the clamp. 64 KiB took 15 s; the 2 MiB a body may carry
+// would have held a core for hours, from any session that may report.
+func TestNormalizeScrubsAFullBodyInLinearTime(t *testing.T) {
+	t.Parallel()
+
+	detail := strings.Repeat("ghs_a.", (2<<20)/6)
+	done := make(chan []Event, 1)
+	go func() {
+		done <- Normalize(Batch{Session: "s", Events: []WireEvent{{Kind: "error", Seq: 1, Detail: detail}}},
+			ctxFor(SourceDashboard))
+	}()
+	select {
+	case evs := <-done:
+		if len(evs) != 1 || len(evs[0].Detail) > MaxDetail {
+			t.Errorf("got %d events, the first with a %d-byte detail", len(evs), len(evs[0].Detail))
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Normalize of a 2 MiB field ran past 30s: the scrub is not linear")
 	}
 }
 

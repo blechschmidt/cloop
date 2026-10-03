@@ -35,8 +35,9 @@
 // an unscrubbed `url` field would copy a live credential out of a URL bar and
 // into a database table that a different permission can read.
 //
-// Stdlib-only, so both pkg/statedb and pkg/ui can depend on it without either
-// depending on the other.
+// It depends on nothing in cloop but pkg/redact, which is itself stdlib-only,
+// so both pkg/statedb and pkg/ui can depend on it without either depending on
+// the other.
 package telemetry
 
 import (
@@ -44,6 +45,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // Source names the front end an event came from. Kept to a closed set because
@@ -306,15 +309,6 @@ func Normalize(b Batch, ctx Context) []Event {
 	return out
 }
 
-// credentialPrefixes are the literal credential shapes cloop mints. Matched as
-// substrings anywhere in a field, not just in query strings: a stack trace or
-// an error message can quote a whole URL, and a message like `401 for
-// cloop_pat_ab_cd` is exactly the kind of thing a page helpfully reports.
-var credentialPrefixes = []string{
-	"cloop_pat_",
-	"cloop_glasses_",
-}
-
 // sensitiveParams are query-string keys whose values never belong in storage.
 // Matched case-insensitively against the key only, so a URL *path* containing
 // the word "token" survives intact.
@@ -334,18 +328,33 @@ var sensitiveParams = []string{
 // recorded from many places and one of them will eventually capture the
 // original. Scrubbing at ingest is the boundary that holds regardless.
 //
-// Deliberately conservative: it over-redacts rather than reasoning about
-// whether a particular `key=` is sensitive. A redacted field a human can ask
-// about is recoverable; a leaked credential in a table is not.
+// Two passes. The first is pkg/redact's credential registry, shared with
+// cloop audit and the two audit trails: cloop's own tokens anywhere in a
+// field, and every third-party shape a page might quote — a GitHub token in a
+// failed fetch's URL, an Anthropic key in an error body, a JWT in a stack
+// frame. Before it, this scrubber knew only cloop_pat_ and cloop_glasses_, so
+// a browser error carrying any other credential was stored as it came.
+//
+// The second is this package's own: the value of any sensitive query
+// parameter, which is how the glasses link arrives. It is deliberately
+// conservative — it over-redacts rather than reasoning about whether a
+// particular `key=` is sensitive, because a redacted field a human can ask
+// about is recoverable and a leaked credential in a table is not.
+//
+// The registry goes first because the parameter pass ends a value at a space:
+// run first over "authorization=Bearer <token>", it replaced "Bearer" alone,
+// the word the registry needs to recognise the token behind it, and the token
+// was stored. Run second, it finds the registry's marker and leaves it.
 func Scrub(s string) string {
 	if s == "" {
 		return s
 	}
-	s = scrubQueryParams(s)
-	s = scrubBearer(s)
-	s = scrubPrefixed(s)
-	return s
+	s = redact.ScrubFunc(s, func(redact.Match) string { return redacted })
+	return scrubQueryParams(s)
 }
+
+// redacted replaces whatever Scrub removes.
+const redacted = "[redacted]"
 
 // scrubQueryParams replaces the value of any sensitive key in a `k=v` pair.
 // Operates on raw text rather than a parsed URL because the input is often not
@@ -377,8 +386,15 @@ func scrubQueryParams(s string) string {
 			i = eq + 1
 			continue
 		}
-		// Consume the value: up to the next delimiter.
+		// Consume the value: up to the next delimiter. A value that starts with
+		// the marker an earlier pass left is read past the marker's own closing
+		// bracket, which would otherwise end it: "token=[redacted]" has to come
+		// out as it went in rather than gain a bracket per pass, and in
+		// "token=[redacted]abc" the "abc" is still part of the value.
 		ve := eq + 1
+		if strings.HasPrefix(s[ve:], redacted) {
+			ve += len(redacted)
+		}
 		for ve < len(s) && !isParamValueTerminator(s[ve]) {
 			ve++
 		}
@@ -389,7 +405,7 @@ func scrubQueryParams(s string) string {
 			i = eq + 1
 			continue
 		}
-		b.WriteString("=[redacted]")
+		b.WriteString("=" + redacted)
 		i = ve
 	}
 	return b.String()
@@ -423,67 +439,8 @@ func isParamValueTerminator(c byte) bool {
 	return false
 }
 
-// scrubBearer redacts the credential in an Authorization-style value.
-func scrubBearer(s string) string {
-	const marker = "bearer "
-	lower := strings.ToLower(s)
-	idx := strings.Index(lower, marker)
-	if idx < 0 {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	i := 0
-	for {
-		rel := strings.Index(strings.ToLower(s[i:]), marker)
-		if rel < 0 {
-			b.WriteString(s[i:])
-			break
-		}
-		start := i + rel + len(marker)
-		b.WriteString(s[i:start])
-		end := start
-		for end < len(s) && !isSpaceOrQuote(s[end]) {
-			end++
-		}
-		if end == start {
-			i = start
-			continue
-		}
-		b.WriteString("[redacted]")
-		i = end
-	}
-	return b.String()
-}
-
-func isSpaceOrQuote(c byte) bool {
-	switch c {
-	case ' ', '\t', '\n', '\r', '"', '\'', ',', ';':
-		return true
-	}
-	return false
-}
-
-// scrubPrefixed redacts any run that begins with a cloop credential prefix,
-// wherever it appears.
-func scrubPrefixed(s string) string {
-	for _, prefix := range credentialPrefixes {
-		for {
-			idx := strings.Index(s, prefix)
-			if idx < 0 {
-				break
-			}
-			end := idx + len(prefix)
-			for end < len(s) && isCredentialByte(s[end]) {
-				end++
-			}
-			s = s[:idx] + "[redacted]" + s[end:]
-		}
-	}
-	return s
-}
-
-func isCredentialByte(c byte) bool {
+// isIdentByte is a byte an identifier may contain.
+func isIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
@@ -511,7 +468,7 @@ func sanitizeToken(s string, max int) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s) && b.Len() < max; i++ {
 		c := s[i]
-		if isCredentialByte(c) || c == '.' || c == ':' || c == '+' {
+		if isIdentByte(c) || c == '.' || c == ':' || c == '+' {
 			b.WriteByte(c)
 		}
 	}

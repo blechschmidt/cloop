@@ -672,7 +672,10 @@ func TestRequestAuditCarriesNoMaterial(t *testing.T) {
 	b, _, audit, _ := newTestBroker(t)
 	seedSecret(t, b, "deploy-pat")
 
-	token := "ghp_" + strings.Repeat("Z", 36)
+	// Shaped like a real classic PAT, because one repeated character is what
+	// documentation prints in its place and the registry leaves that alone;
+	// split, so the source holds no credential-shaped literal.
+	token := "ghp_" + "Zq3kV9mPx2Lw7RtB4nYcQ8sD1fGh6jKl0aEu"
 	if _, err := b.RequestAccess(context.Background(), AccessRequestInput{
 		SecretRef:     "deploy-pat",
 		Subject:       Subject{Type: SubjectProject, Value: "/srv/app"},

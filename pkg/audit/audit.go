@@ -4,11 +4,13 @@ package audit
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/env"
@@ -71,10 +73,10 @@ func Audit(workDir string, cfg *config.Config, opts Options) ([]Finding, error) 
 	var findings []Finding
 	add := func(f Finding) { findings = append(findings, f) }
 
-	checkAPIKeysInGit(workDir, cfg, add)
+	checkCredentialsInGit(workDir, cfg, add)
 	checkWebhookHTTP(cfg, add)
 	checkUIToken(workDir, add)
-	checkEnvSecretsInArtifacts(workDir, add)
+	checkSecretsInArtifacts(workDir, add)
 	checkHookPermissions(cfg, add)
 	checkSnapshotSize(workDir, opts.SnapshotSizeThresholdMB, add)
 
@@ -82,22 +84,15 @@ func Audit(workDir string, cfg *config.Config, opts Options) ([]Finding, error) 
 }
 
 // ---------------------------------------------------------------------------
-// Check 1: API keys accidentally committed to git
+// Check 1: credentials committed to git
 // ---------------------------------------------------------------------------
 
-// apiKeyPattern matches common API key prefixes found in plaintext.
-var apiKeyPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{20,}`),    // Anthropic
-	regexp.MustCompile(`sk-proj-[A-Za-z0-9_-]{20,}`),   // OpenAI project key
-	regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),          // OpenAI legacy
-	regexp.MustCompile(`ghp_[A-Za-z0-9]{30,}`),         // GitHub PAT classic
-	regexp.MustCompile(`ghs_[A-Za-z0-9]{30,}`),         // GitHub App token
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{50,}`), // GitHub fine-grained PAT
-	regexp.MustCompile(`AIzaSy[A-Za-z0-9_-]{33}`),      // Google API key
-	regexp.MustCompile(`AKIA[A-Z0-9]{16}`),             // AWS access key
-}
+// gitHistoryCheck names the finding. It reads "credentials" rather than "API
+// keys" because the scan covers every shape in pkg/redact's registry: private
+// keys, JWTs, kubeconfig keys and URL passwords as well as API keys.
+const gitHistoryCheck = "Credentials in git history"
 
-func checkAPIKeysInGit(workDir string, cfg *config.Config, add addFn) {
+func checkCredentialsInGit(workDir string, cfg *config.Config, add addFn) {
 	// Is this even a git repo?
 	if _, err := exec.LookPath("git"); err != nil {
 		return
@@ -107,41 +102,102 @@ func checkAPIKeysInGit(workDir string, cfg *config.Config, add addFn) {
 		return // not a git repo — nothing to scan
 	}
 
-	// Collect non-empty API key values from the loaded config so we can look
-	// for the actual secrets verbatim, in addition to pattern-based scanning.
-	verbatim := collectConfigSecrets(cfg)
+	// Every registry shape, plus the configured secrets themselves verbatim:
+	// a key with no recognisable shape is still a leak if it is the key.
+	scan := newLeakScan(collectConfigSecrets(cfg))
 
-	// Scan git log of .cloop/ for key patterns and verbatim secrets.
-	// We use --all to cover every branch/tag.
-	gitLog := exec.Command("git", "-C", workDir, "log", "--all", "-p",
-		"--diff-filter=ACDM", "--", ".cloop/")
-	out, err := gitLog.Output()
+	// --all covers every branch and tag. The history is streamed rather than
+	// read whole: -p over a long-lived .cloop/ can be gigabytes. --no-color,
+	// --no-ext-diff and --no-textconv keep a repository's git config from
+	// putting escape codes, a third-party renderer or a conversion filter
+	// between the scan and the bytes that were committed.
+	//
+	// The rest are there because the repository decides what git shows, and
+	// an agent working in the tree can write both .git/config and a committed
+	// .gitattributes:
+	//
+	//   - log.showSignature hands every signed commit to gpg.program, a
+	//     program of the repository's choosing: --no-show-signature.
+	//   - A partial clone fetches a missing blob the moment -p needs it, by
+	//     running the remote's upload-pack, which .git/config names:
+	//     GIT_NO_LAZY_FETCH and protocol.allow=never fetch nothing, and an
+	//     unreadable history is reported as one, below.
+	//   - A replace ref shows git a substitute wherever it reads the original,
+	//     so one ref swapping the commit that leaked for a clean copy would
+	//     hide the leak: --no-replace-objects reads what was committed.
+	//   - "-diff" in .gitattributes, or one NUL byte, makes a file's diff
+	//     "Binary files differ": --text.
+	//   - A merge commit has no diff of its own by default, so a credential
+	//     added while resolving a conflict is in no commit the scan reads:
+	//     --cc shows what the merge itself introduced.
+	//   - A file moved and changed in one commit is a rename, which the
+	//     filter would drop with whatever the move added: --no-renames turns
+	//     it into a deletion and an addition, and T keeps a type change.
+	gitLog := exec.Command("git", "--no-replace-objects", "-c", "protocol.allow=never",
+		"-C", workDir, "log", "--all", "-p", "--cc", "--text", "--no-renames",
+		"--no-color", "--no-ext-diff", "--no-textconv", "--no-show-signature",
+		"--diff-filter=ACDMT", "--", ".cloop/")
+	gitLog.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
+	var stderr headBuffer
+	gitLog.Stderr = &stderr
+	stdout, err := gitLog.StdoutPipe()
+	if err == nil {
+		err = gitLog.Start()
+	}
 	if err != nil {
-		// git log failing (e.g. no commits) is not an error worth surfacing.
 		add(Finding{
-			Name:    "API keys in git history",
-			Level:   Pass,
-			Message: "No git history for .cloop/ to scan",
+			Name:    gitHistoryCheck,
+			Level:   Warn,
+			Message: fmt.Sprintf("Could not run git log to scan .cloop/ history: %v", err),
 		})
 		return
 	}
+	readErr := scan.readFrom(stdout)
+	if readErr != nil {
+		// Stop git rather than leave it blocked on a pipe nobody drains.
+		_ = gitLog.Process.Kill()
+	}
+	waitErr := gitLog.Wait()
 
-	leaks := scanForLeaks(string(out), verbatim)
-	if len(leaks) == 0 {
+	if scan.found() {
+		// Reported even when git failed part-way: what was read was read.
 		add(Finding{
-			Name:    "API keys in git history",
-			Level:   Pass,
-			Message: ".cloop/ git history contains no detected API key patterns",
+			Name:  gitHistoryCheck,
+			Level: Fail,
+			Message: fmt.Sprintf("Possible credential(s) in .cloop/ git history: %s",
+				strings.Join(scan.labels(), ", ")),
+			Fix: "Rotate every credential listed first — once pushed, a secret is public whatever the " +
+				"history says later — then purge it with 'git filter-repo' or BFG Repo-Cleaner",
 		})
 		return
 	}
-
-	add(Finding{
-		Name:    "API keys in git history",
-		Level:   Fail,
-		Message: fmt.Sprintf("Possible API key(s) detected in .cloop/ git history: %s", strings.Join(leaks, ", ")),
-		Fix:     "Use 'git filter-repo' or BFG Repo-Cleaner to purge secrets, then rotate the affected keys immediately",
-	})
+	switch {
+	case readErr != nil:
+		add(Finding{
+			Name:    gitHistoryCheck,
+			Level:   Warn,
+			Message: fmt.Sprintf("Scan of .cloop/ git history stopped early: %v", readErr),
+		})
+	case waitErr != nil:
+		// With --all, a repository with no commits is an empty log and exit
+		// 0, so a failure here is a history git could not show whole: a
+		// partial clone whose blobs it was not allowed to fetch, a corrupt
+		// object. Clean is not a conclusion that can be drawn from part of it.
+		add(Finding{
+			Name:  gitHistoryCheck,
+			Level: Warn,
+			Message: fmt.Sprintf("Could not read all of .cloop/ git history (%s); what was read "+
+				"holds no detected credentials", stderr.firstLine(waitErr)),
+			Fix: "In a partial clone, fetch the missing objects (git fetch --refetch, or a full clone) " +
+				"and run cloop audit again",
+		})
+	default:
+		add(Finding{
+			Name:    gitHistoryCheck,
+			Level:   Pass,
+			Message: ".cloop/ git history contains no detected credentials",
+		})
+	}
 }
 
 // collectConfigSecrets returns non-empty, non-trivial secret values from cfg.
@@ -159,54 +215,6 @@ func collectConfigSecrets(cfg *config.Config) []string {
 	add(cfg.Webhook.Secret)
 	add(cfg.STT.GroqAPIKey)
 	return secrets
-}
-
-// scanForLeaks returns descriptive labels for each leak found in text.
-func scanForLeaks(text string, verbatim []string) []string {
-	seen := map[string]bool{}
-	var labels []string
-
-	record := func(label string) {
-		if !seen[label] {
-			seen[label] = true
-			labels = append(labels, label)
-		}
-	}
-
-	for _, pat := range apiKeyPatterns {
-		if pat.MatchString(text) {
-			record(describePattern(pat.String()))
-		}
-	}
-	for _, secret := range verbatim {
-		if strings.Contains(text, secret) {
-			record("configured-secret")
-		}
-	}
-	return labels
-}
-
-func describePattern(pat string) string {
-	switch {
-	case strings.Contains(pat, "sk-ant"):
-		return "Anthropic API key"
-	case strings.Contains(pat, "sk-proj"):
-		return "OpenAI project key"
-	case strings.Contains(pat, "sk-"):
-		return "OpenAI API key"
-	case strings.Contains(pat, "ghp_"):
-		return "GitHub classic PAT"
-	case strings.Contains(pat, "ghs_"):
-		return "GitHub app token"
-	case strings.Contains(pat, "github_pat"):
-		return "GitHub fine-grained PAT"
-	case strings.Contains(pat, "AIzaSy"):
-		return "Google API key"
-	case strings.Contains(pat, "AKIA"):
-		return "AWS access key"
-	default:
-		return "unknown key pattern"
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +302,7 @@ func checkUIToken(workDir string, add addFn) {
 }
 
 // ---------------------------------------------------------------------------
-// Check 4: Env var secrets exposed in task output artifacts
+// Check 4: secrets exposed in task output artifacts
 // ---------------------------------------------------------------------------
 
 // secretKeyPattern matches env var names that likely hold secrets.
@@ -302,19 +310,166 @@ var secretKeyPattern = regexp.MustCompile(
 	`(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|auth|credential|passwd)`,
 )
 
-func checkEnvSecretsInArtifacts(workDir string, add addFn) {
-	vars, err := env.Load(workDir)
-	if err != nil || len(vars) == 0 {
+// artifactDirs are where a task's output comes to rest: the permanent task
+// artifact, and the live output and verdict files beside it. Relative to the
+// project root, slash-separated for messages.
+var artifactDirs = []string{".cloop/tasks", ".cloop/artifacts"}
+
+// checkSecretsInArtifacts scans task output for two different things and
+// reports them separately, because they have different remedies. A value from
+// .cloop/env.yaml is a credential the project handed the harness. A shape from
+// the registry is a credential nobody told cloop about — the agent's own, a
+// token it read off disk, one a tool printed — and exact-value redaction could
+// not have caught it.
+func checkSecretsInArtifacts(workDir string, add addFn) {
+	envSecrets, envNote := artifactEnvSecrets(workDir)
+
+	var files []string
+	for _, dir := range artifactDirs {
+		root := filepath.Join(workDir, filepath.FromSlash(dir))
+		// Regular files only, at any depth: a symlink planted in an artifact
+		// directory must not turn the audit into a reader of whatever it
+		// points at. WalkDir follows none it finds, but it does walk a root
+		// that is one, so a symlinked root is refused here.
+		if info, err := os.Lstat(root); err != nil || !info.IsDir() {
+			continue
+		}
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || !entry.Type().IsRegular() {
+				return nil
+			}
+			if rel, rerr := filepath.Rel(workDir, path); rerr == nil {
+				files = append(files, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+	}
+	if len(files) == 0 {
 		add(Finding{
 			Name:    "Env secrets in task artifacts",
 			Level:   Pass,
-			Message: "No env vars configured in .cloop/env.yaml",
+			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/) to scan",
+		})
+		add(Finding{
+			Name:    "Credentials in task artifacts",
+			Level:   Pass,
+			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/) to scan",
 		})
 		return
 	}
 
-	// Build list of secret values to search for.
-	var secretValues []string
+	var exposed, shaped []string
+	var unreadable int
+	scan := newLeakScan(envSecrets)
+	for _, rel := range files {
+		scan.reset()
+		f, err := openArtifact(filepath.Join(workDir, filepath.FromSlash(rel)))
+		if err != nil {
+			unreadable++
+			continue
+		}
+		err = scan.readFrom(f)
+		f.Close()
+		if err != nil {
+			unreadable++
+		}
+		if scan.configured {
+			exposed = append(exposed, rel)
+		}
+		if labels := scan.shapeLabels(); len(labels) > 0 {
+			shaped = append(shaped, fmt.Sprintf("%s (%s)", rel, strings.Join(labels, ", ")))
+		}
+	}
+	scanned := fmt.Sprintf("Scanned %d artifact file(s)", len(files)-unreadable)
+	if unreadable > 0 {
+		scanned += fmt.Sprintf(", %d unreadable", unreadable)
+	}
+
+	switch {
+	case len(exposed) > 0:
+		add(Finding{
+			Name:    "Env secrets in task artifacts",
+			Level:   Fail,
+			Message: fmt.Sprintf("Secret env var values found in %d artifact file(s): %s", len(exposed), strings.Join(exposed, ", ")),
+			Fix:     "Remove or redact secrets from task artifacts in .cloop/tasks/; consider marking sensitive vars with --secret",
+		})
+	case envNote != "":
+		add(Finding{Name: "Env secrets in task artifacts", Level: Pass, Message: envNote})
+	default:
+		add(Finding{
+			Name:    "Env secrets in task artifacts",
+			Level:   Pass,
+			Message: scanned + " — no secret values detected",
+		})
+	}
+
+	if len(shaped) > 0 {
+		add(Finding{
+			Name:    "Credentials in task artifacts",
+			Level:   Fail,
+			Message: fmt.Sprintf("Credential-shaped values found in %d artifact file(s): %s", len(shaped), strings.Join(shaped, "; ")),
+			Fix: "Rotate each credential, then delete the artifact or redact the value in place; " +
+				"a credential that reached the agent through a grant should have been redacted at capture, so check how this one arrived",
+		})
+		return
+	}
+	add(Finding{
+		Name:    "Credentials in task artifacts",
+		Level:   Pass,
+		Message: scanned + " — no credential shapes detected",
+	})
+}
+
+// openArtifact opens a file the walk found to be regular, and refuses whatever
+// it has become since — the directory is the agent's to write. O_NOFOLLOW
+// fails on a symlink rather than following it out of the directory,
+// O_NONBLOCK keeps a FIFO from blocking the open until a writer appears, and
+// the type is checked again on the open file.
+func openArtifact(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", path)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// headBuffer keeps the start of what a child process writes to stderr, enough
+// to name a failure, however much it writes.
+type headBuffer struct{ b []byte }
+
+func (h *headBuffer) Write(p []byte) (int, error) {
+	if room := 4096 - len(h.b); room > 0 {
+		h.b = append(h.b, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
+}
+
+// firstLine is the first line of what was kept, or err when nothing was.
+func (h *headBuffer) firstLine(err error) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(string(h.b)), "\n")
+	if line == "" {
+		return err.Error()
+	}
+	return line
+}
+
+// artifactEnvSecrets returns the plaintext of every .cloop/env.yaml variable
+// that is marked secret or named like one, or a note saying why there are
+// none.
+func artifactEnvSecrets(workDir string) ([]string, string) {
+	vars, err := env.Load(workDir)
+	if err != nil || len(vars) == 0 {
+		return nil, "No env vars configured in .cloop/env.yaml"
+	}
+	var values []string
 	for _, v := range vars {
 		if !v.Secret && !secretKeyPattern.MatchString(v.Key) {
 			continue
@@ -323,63 +478,12 @@ func checkEnvSecretsInArtifacts(workDir string, add addFn) {
 		if len(plain) < 8 {
 			continue // too short to be meaningful
 		}
-		secretValues = append(secretValues, plain)
+		values = append(values, plain)
 	}
-
-	if len(secretValues) == 0 {
-		add(Finding{
-			Name:    "Env secrets in task artifacts",
-			Level:   Pass,
-			Message: "No secret env vars found in .cloop/env.yaml",
-		})
-		return
+	if len(values) == 0 {
+		return nil, "No secret env vars found in .cloop/env.yaml"
 	}
-
-	// Scan task artifact files.
-	tasksDir := filepath.Join(workDir, ".cloop", "tasks")
-	entries, err := os.ReadDir(tasksDir)
-	if err != nil {
-		add(Finding{
-			Name:    "Env secrets in task artifacts",
-			Level:   Pass,
-			Message: "No task artifact directory (.cloop/tasks/) to scan",
-		})
-		return
-	}
-
-	var exposed []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(tasksDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		content := string(data)
-		for _, secret := range secretValues {
-			if strings.Contains(content, secret) {
-				exposed = append(exposed, entry.Name())
-				break
-			}
-		}
-	}
-
-	if len(exposed) == 0 {
-		add(Finding{
-			Name:    "Env secrets in task artifacts",
-			Level:   Pass,
-			Message: fmt.Sprintf("Scanned %d artifact file(s) — no secret values detected", len(entries)),
-		})
-	} else {
-		add(Finding{
-			Name:    "Env secrets in task artifacts",
-			Level:   Fail,
-			Message: fmt.Sprintf("Secret env var values found in %d artifact file(s): %s", len(exposed), strings.Join(exposed, ", ")),
-			Fix:     "Remove or redact secrets from task artifacts in .cloop/tasks/; consider marking sensitive vars with --secret",
-		})
-	}
+	return values, ""
 }
 
 // ---------------------------------------------------------------------------

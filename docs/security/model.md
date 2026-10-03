@@ -765,10 +765,12 @@ output the other does not:
 | the executor driver's emit path, on the hub | `LogLine.Text` and `RunResult.Output`, before a frame is broadcast or persisted | `executor.Spec.Redactor` — what the hub injected |
 
 Matching is against **known values only** — the material a lease actually
-delivered. There is no entropy heuristic and no "looks like a token" regex:
-both would cost on every streamed token, and both would mangle a legitimate
-base64 blob in a diff. A value shorter than `redact.MinLen` (8) is never
-matched, for the same reason.
+delivered. On this path there is no entropy heuristic and no "looks like a
+token" regex: both would cost on every streamed token, and both would mangle a
+legitimate base64 blob in a diff. A value shorter than `redact.MinLen` (8) is
+never matched, for the same reason. Credential *shapes* are recognised
+elsewhere, by the scanners that handle text whose values nobody can know in
+advance — see [What is scrubbed where](#what-is-scrubbed-where).
 
 The distinction that makes this usable is that a lease injects credentials *and*
 the constraints they were narrowed to — `GITHUB_TOKEN` beside
@@ -783,6 +785,160 @@ to protect it.
 A credential split across two chunks is still caught: both paths withhold a
 trailing fragment that could begin a known value, and only such a fragment, so
 ordinary output reaches the live panel with no added latency.
+
+---
+
+## What is scrubbed where
+
+> A credential a lease delivered is removed by value wherever task output is
+> captured. A credential nobody told cloop about is recognised by its shape,
+> by one registry that every pattern scanner shares — so a shape is caught
+> everywhere or nowhere.
+
+Two mechanisms, in different places, for different text.
+
+**Exact values** are the defence. The material a lease delivered is matched
+byte for byte where task output is captured, inside the sandbox and on the hub
+— [the section above](#the-harness-echoing-its-own-credential). Nothing about
+it depends on what the credential looks like.
+
+**Shapes** are the backstop, for four places that handle text whose secrets
+they cannot know in advance: an error message wrapped three packages down, a
+browser's stack trace, a commit made last year. All four ask
+[`pkg/redact`'s registry](../reference/credential-patterns.md); what stays
+their own is what they do with a match.
+
+| Scanner | Runs | Sees | On a match |
+| --- | --- | --- | --- |
+| `cloop audit` (`pkg/audit`) | on demand, in a project checkout | `git log --all -p` over `.cloop/`, streamed; every file in `.cloop/tasks/` and `.cloop/artifacts/` | reports the detector's label — never the value — as **Credentials in git history** or **Credentials in task artifacts** (FAIL) |
+| Provider-call audit (`pkg/provideraudit`) | every failed provider call, before its row is stored | the error message | keeps the credential's public lead: `sk-ant-api03-[REDACTED]`, `ghs_[REDACTED]`, `Bearer [REDACTED]` |
+| Secret broker (`pkg/secretbroker`) | every audit event, at emission and again on the way into the store; the egress proxy's error replies | the free-text `reason`, cut to 8 KiB | `[redacted]` |
+| Browser telemetry (`pkg/telemetry`) | ingest, before anything reaches `telemetry_events` | message, stack, URL and detail | `[redacted]` |
+
+Each also keeps one rule of its own, because it is about the scanner's input
+rather than about credentials. `cloop audit` matches the API keys in
+`config.yaml` and the secret variables in `.cloop/env.yaml` verbatim, since a
+key with no recognisable shape is still a leak if it is the key. Telemetry
+redacts the value of any sensitive query parameter (`token`, `code`,
+`id_token`, `key`, …), because the display-glasses link carries its bearer
+token in the page URL — after the registry, because run first it took the
+`Bearer` of `authorization=Bearer <token>` and left the token behind it. The
+broker cuts a reason to 8 KiB, after scrubbing a margin past the cut: a reason
+quotes text a stranger chose — a secret reference from a request body, a URI
+the egress proxy refused — and is scrubbed twice on its way to the store.
+
+`cloop audit` reads the history through git, in a checkout whose `.git/config`
+and committed `.gitattributes` it does not control — an agent working in the
+tree can write both. So the scan asks git for what was committed and nothing
+else: no external diff drivers or text conversion (`--no-ext-diff`,
+`--no-textconv`); no signature checks, which hand every signed commit to
+`gpg.program` (`--no-show-signature`); no lazy fetch in a partial clone, which
+runs the remote's `upload-pack` (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`;
+a history it cannot read whole is a warning, not a pass); no replace refs, one
+of which is enough to show git a clean commit in place of the one that leaked
+(`--no-replace-objects`). And it has git show what git would otherwise hide: a
+file marked binary by `-diff` or by a NUL byte (`--text`), a merge's own
+changes (`--cc`), a file moved and changed in one commit (`--no-renames`).
+Artifacts are read at any depth below `.cloop/tasks/` and `.cloop/artifacts/`,
+regular files only, opened without following a symlink or waiting on a FIFO.
+
+The registry recognises GitHub tokens in both forms and for all five prefixes
+(`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) plus `github_pat_`; Anthropic API and
+OAuth tokens; OpenAI keys; AWS access key IDs and secret access keys; Google API
+keys; Slack tokens; JWTs; PEM private-key blocks; kubeconfig `client-key-data`
+and token fields; Authorization headers and bearer values; credentials in URL
+userinfo; and cloop's own minted credentials — `cloop_pat_`, `cloop_ci_`,
+`clet1.`, `cloopenroll1.` and `clac1.` (and `cloop_glasses_`, which no build has
+minted). [The reference page](../reference/credential-patterns.md) is generated
+from the registry and says what each detector matches.
+
+The long form is the one that made the registry. GitHub has issued
+installation tokens since September 2026 as 390 characters —
+`ghs_<7 digits>_<36>.<254>.<86>`, the last segment base64url, so it may contain
+and end in `-` or `_`. The audit's old `ghs_[A-Za-z0-9]{30,}` stopped at the
+underscore seven characters in and matched nothing, and `cloop audit` reported
+a clean history over a real leak; telemetry knew only `cloop_pat_` and
+`cloop_glasses_`; the broker's prefix list knew none of cloop's own prefixes,
+turned `risk-free` into `ri[redacted]` on its bare `sk-`, and removed only the
+`-----BEGIN` of a private key while the key went into the log.
+
+### Precision is part of the guarantee
+
+A marker over a commit hash teaches a reader to ignore markers, so every shape
+is anchored on something a credential has and prose does not: a distinctive
+prefix, a fixed length, a header keyword. The looser ones must also look
+generated — a digit, an interior capital, or 32 characters — and not be a
+placeholder (`$TOKEN`, `YOUR_API_TOKEN`, `%s`, a marker). The shared corpus
+holds every scanner to a negative set as well as a positive one: base64 in a
+diff, go.sum hashes, commit SHAs, UUIDs, image digests, public keys and
+certificates, kubeconfig CA data, metric names, prose about token formats, and
+the scanners' own output.
+
+Precision is not bought with recall. Where a shape needs a boundary — `sk-`
+must not end a word, as it does in `task-…` — the byte in front of it is read
+as what it encodes: the `\n` of a quoted string is a newline and the `%3D` of a
+URL carried inside another is an `=`, so a key after either is still a key,
+and a field whose `=` is percent-encoded is still a field. A field's value is
+removed to the next delimiter, punctuation and percent escapes included, and a
+field detector leaves a value alone only when it runs into a redaction marker —
+the lead a scanner kept, `sk-ant-oat01-[REDACTED]` — or into `(`, which makes
+it a call in code.
+
+The review that landed the registry found ordinary text it matched, and each is
+now a negative fixture: a private-key header with no key after it, a field
+whose value is on the next line, a name in code where a value would be
+(`Token: cfg.APIToken`, `the Bearer TokenSource`), an `Authorization:` with no
+scheme and a word after it (`authorization: forbidden`), documentation's
+placeholders (`ghp_xxxx…`, AWS's `…EXAMPLE` keys), and URL templates
+(`${DB_PASSWORD}`, `$PASSWORD`, `%s`).
+
+Deliberately not matched:
+
+- **Public halves** — certificates, public keys, `certificate-authority-data`,
+  `client-certificate-data`. They are what makes a diagnostic readable.
+- **`cloop_sbx_`.** It looks like one of cloop's prefixes and is an nftables
+  table and NetworkPolicy name (`cloop_sbx_<executor>`), printed by
+  `cloop egress firewall preview` and by `nft list table`. Matching it would
+  redact firewall diagnostics and protect nothing.
+- **Shapeless credentials.** Git-proxy and kubeguard session tokens are opaque
+  base64url, a registry `auth` blob is plain base64, an AWS secret key has no
+  prefix outside a named field. No shape can tell these from a hash; the lease
+  that carries them is redacted by value, and nothing else can be.
+- **Encoded forms.** A credential base64-encoded into a Basic header is caught
+  as a header value; base64 of a token in free text is not. Exact-value
+  redaction adds the base64 form where a provisioner knows it will be used.
+  Percent-encoding is read through where it decides whether something is a
+  credential — the byte before a key, a field's `=` — and a value's own
+  escapes are removed with it, but a credential percent-encoded from its first
+  byte is not recognised.
+- **The tail of a broken token.** A long-form GitHub token broken across lines
+  loses its first line, lead included — the digits and the underscore after
+  them are distinctive on their own. What is left on the next lines is no
+  credential without that lead, and is not matched. A break inside the first
+  dozen characters leaves both halves.
+- **Chance shapes in base64url.** The GitHub and Google detectors read a
+  prefix with no boundary, which the long form's recall is not traded for, so
+  random base64url holds a GitHub-shaped run a few times in ten mebibytes.
+  Standard base64 and hex, measured over 16 MiB each, held none.
+
+The registry is not on the streaming path. A live log runs through a `Set` and
+nothing else: a shape scan per streamed token would cost on every chunk of
+every run, for credentials that — having been leased — are already matched by
+value.
+
+Its cost is linear in its input. A candidate rejected for its value is not
+read again from inside, and the three detectors whose body can hold their own
+prefix resume past a rejected candidate rather than one byte into it, which
+the registry's first version did — quadratic time, which a 2 MiB telemetry
+field turned into hours of CPU. The scanners that read text a stranger chose
+also bound it: provider errors at 64 KiB, broker reasons at 8 KiB plus a
+margin, telemetry at its 2 MiB request.
+
+Adding a shape is three steps: a detector in `pkg/redact/patterns.go`, at least
+one positive fixture (with the context around it that must survive) and any
+new near-miss as a negative in `pkg/redact/redacttest`, and `make
+docs-credentials` to regenerate the reference page.
+`TestEveryDetectorIsHeldToTheCorpus` fails until the fixture exists.
 
 ---
 
@@ -2520,6 +2676,32 @@ out of the **workload's** output — see
 | A credential split across two writes is still matched, and a trailing fragment that never becomes one is released rather than swallowed | `pkg/redact`: `TestWriter_CatchesASecretSplitAcrossWrites`, `TestWriter_FlushReleasesATrailingPartial` |
 | Delivery of a credential file into a container and onto an edge device is now proven *by* the marker — the same run asserts the sandbox read the file and that the value did not come back out | `pkg/executor/container`: `TestSecretFilesReachTheContainer`; `pkg/executor/remote`: `TestLoopbackWorkloadReadsItsPlacedCredential` |
 
+### Credential shapes — `credentialpatterns_test.go` and the package suites
+
+The rows above remove a credential by value. These hold the four pattern
+scanners to one registry and one corpus — see
+[What is scrubbed where](#what-is-scrubbed-where).
+
+| Guarantee | Test |
+| --- | --- |
+| Every pattern scanner — `cloop audit`, the provider-call audit, the broker's audit reasons, browser telemetry — reports or removes every credential in the shared corpus, keeps the context around it, and is stable under a second pass | `TestEveryScannerCoversEveryCredential` |
+| No scanner reports or rewrites ordinary output: base64 in a diff, commit SHAs, UUIDs, digests, public keys, metric and nftables names, prose about token formats, placeholders, the scanners' own markers | `TestNoScannerTouchesOrdinaryOutput` |
+| A detector cannot join the registry without a fixture, and a fixture cannot name a secret its own text lacks | `TestEveryDetectorIsHeldToTheCorpus`; `pkg/redact`: `TestCorpusIsWellFormed` |
+| Telemetry ingest stores no corpus credential in any field — not whole, and not as the prefix a clamp would leave | `TestTelemetryIngestStoresNoCorpusCredential` |
+| `cloop audit` reports a long-form installation token committed to `.cloop/` history and later removed, and passes a history of ordinary output | `TestCloopAuditFindsALongFormInstallationTokenInHistory` |
+| Long-form GitHub tokens of every prefix are matched exactly — not a character short, not one long — whatever punctuation surrounds them | `pkg/redact`: `TestGitHubLongFormTokensOfEveryShape` |
+| A planted corpus credential never survives arbitrary surrounding text | `pkg/redact`: `FuzzScrubNeverEmitsAPlantedCredential` |
+| A long history is scanned in bounded windows, and a credential cut by a window boundary is still found | `pkg/audit`: `TestLeakScanCatchesWhatAChunkBoundaryCuts` |
+| The provider-call audit stores the redacted error and returns the original, through the real wrapper and database | `pkg/provideraudit`: `TestWithAuditStoresOnlyTheRedactedError` |
+| Audit reasons keep words that end in `sk-`, lose a private key's body and not only its header, and recognise cloop's own credentials | `pkg/secretbroker`: `TestRedactStringLeavesWordsEndingInSkAlone`, `TestRedactStringRemovesThePrivateKeyNotJustItsHeader`, `TestRedactStringKnowsCloopsOwnCredentials` |
+| Scanning is linear in its input: a candidate the registry rejects is not rescanned to a far end, so a 2 MiB telemetry field is scrubbed in well under a second | `pkg/redact`: `TestScrubTimeIsLinearInRejectedCandidates`; `pkg/telemetry`: `TestNormalizeScrubsAFullBodyInLinearTime` |
+| Fields as programs print them — behind a prefix (`GITHUB_TOKEN=`), as escaped JSON, as Go headers — are recognised; a value is removed whole, to its delimiter; and a key after an escape (`%3D`, `\n`) or running into a bracket other than a redaction marker is still a key | `pkg/redact`: `TestTokenFieldForms`, `TestAValueIsRemovedWhole`, `TestShapesThatEndAWordAreNotCredentials`, `TestAValueRunningIntoABracketIsStillACredential`; the corpus fixtures under `TestEveryScannerCoversEveryCredential` |
+| A URL's password is one unless it is a template; a long-form token cut by a line break loses its lead; a credential glued to another is removed by the same call | `pkg/redact`: `TestAURLPasswordIsAPasswordUnlessItIsATemplate`, `TestALongFormTokenCutByALineBreakLosesItsLead`, `TestOneScrubRemovesACredentialGluedToAnother` |
+| Telemetry runs the registry before its own parameter pass, which would take the `Bearer` the registry reads | `pkg/telemetry`: `TestScrub_RegistryRunsBeforeTheParameterPass` |
+| A broker reason is cut to 8 KiB after a scrub that reads past the cut, and the store's second pass leaves it alone | `pkg/secretbroker`: `TestRedactStringBoundsWhatItReads` |
+| `cloop audit`'s history scan runs no program a repository's own config names, reads what was committed rather than a replace ref's substitute, reads a merge's own changes, files marked binary and moved files, and warns on a history it could not read whole | `pkg/audit`: `TestGitHistoryScanRunsNoProgramTheRepositoryNames`, `TestGitHistoryScanFetchesNothing`, `TestGitHistoryScanSeesThroughReplaceRefs`, `TestGitHistoryScanReadsAMergesOwnChanges`, `TestGitHistoryScanReadsFilesMarkedBinary`, `TestGitHistoryScanFollowsAMovedFile` |
+| `cloop audit`'s artifact scan reaches subdirectories, and at open refuses — without blocking — what is no longer a regular file | `pkg/audit`: `TestArtifactScanReachesSubdirectories`, `TestOpenArtifactRefusesWhatIsNotARegularFile` |
+
 ### Lease revocation — `revocation_test.go`
 
 | Guarantee | Test |
@@ -3035,9 +3217,18 @@ reach.
 
 **A workload can disclose its own credentials.** The suite asserts non-disclosure
 by *cloop's* surfaces. It cannot assert that a workload never prints its own
-token to stdout — the workload holds the plaintext by design, and task output is
-not redacted (`tests/security/secrets_test.go:13-20`). Scope grants so that the
-blast radius of such a disclosure is a single repo for a few hours.
+token to stdout — the workload holds the plaintext by design. Task output is
+redacted of the values a lease delivered, not of a credential the workload
+obtained some other way or derived from a leased one; `cloop audit` reports the
+shapes it recognises in artifacts afterwards, which is detection, not
+prevention. Scope grants so that the blast radius of such a disclosure is a
+single repo for a few hours.
+
+**Shape matching knows only the shapes it was given.** A credential format the
+registry has not heard of — a new vendor's key, or a reshaped token like
+GitHub's long form before the registry learned it — passes every pattern
+scanner until a detector and a fixture are added. The registry is the place
+to add it, once; the corpus is what proves all four scanners then agree.
 
 **A daily budget bounds honest overspend, not a hostile workload.** The hub
 charges the identity it resolved at dispatch, which the workload cannot

@@ -16,10 +16,15 @@ var auditCmd = &cobra.Command{
 	Long: `Run a security and compliance audit on the cloop project.
 
 Checks performed:
-  • API keys present in config accidentally committed to git history
+  • Credentials committed to .cloop/ git history: every shape in cloop's
+    credential registry (GitHub, Anthropic, OpenAI, AWS, Google and Slack
+    keys, cloop's own tokens, JWTs, private keys, kubeconfig keys, URL
+    passwords), plus the API keys in config.yaml verbatim
   • Webhook URLs using plain HTTP instead of HTTPS
   • Web UI configured to start without an authentication token
   • Env var secrets (.cloop/env.yaml) exposed in task output artifacts
+  • Credential-shaped values in task output artifacts (.cloop/tasks/,
+    .cloop/artifacts/)
   • Hook scripts with world-writable permissions or running as root
   • Snapshot directory size exceeding a configurable threshold
 

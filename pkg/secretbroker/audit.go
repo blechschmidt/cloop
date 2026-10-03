@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // Decision is the outcome recorded for every brokered operation.
@@ -184,8 +187,9 @@ type nopAuditor struct{}
 
 func (nopAuditor) Audit(Event) {}
 
-// redactionMarker replaces anything scrubbed out of an audit reason.
-const redactionMarker = "[redacted]"
+// redactionMarker replaces anything scrubbed out of an audit reason. It is
+// redact.Marker, so a reason reads the same whichever layer caught the value.
+const redactionMarker = redact.Marker
 
 // Redact returns a copy of ev safe to persist.
 //
@@ -205,86 +209,55 @@ func Redact(ev Event) Event {
 	return ev
 }
 
-// credentialPrefixes are the leading substrings of well-known credential
-// formats. A token in a string is replaced from its prefix to the next
-// whitespace or quote.
-var credentialPrefixes = []string{
-	"ghp_", "ghs_", "gho_", "ghu_", "ghr_", "github_pat_",
-	"sk-ant-", "sk-proj-", "sk-",
-	"AKIA", "ASIA",
-	"AIzaSy",
-	"xoxb-", "xoxp-", "xoxa-", "xoxs-",
-	"eyJhbGciO", // JWT header, base64 of {"alg":"
-	"-----BEGIN",
-}
-
 // RedactString removes credential-shaped substrings from s.
 //
-// Two classes are handled: known token prefixes, and URL userinfo
-// ("https://user:password@host"), which is how an egress_proxy secret would
-// leak if its URL ended up in an error message.
+// The shapes are pkg/redact's registry — GitHub tokens in both forms, cloop's
+// own tokens, cloud and model-provider keys, JWTs, PEM private keys, kubeconfig
+// credentials, Authorization values and URL userinfo — so an audit reason is
+// scrubbed of exactly what cloop audit would report in it. This package keeps
+// only its replacement: every credential becomes "[redacted]", with whatever
+// identified it ("Bearer ", a URL's host) left readable around the marker.
+//
+// It used to carry its own prefix list, scrubbing from a prefix to the next
+// delimiter. That knew none of cloop's own prefixes, turned "risk-free" into
+// "ri[redacted]" on the bare "sk-", and removed only the "-----BEGIN" of a
+// private key while the key itself went into the log.
 func RedactString(s string) string {
 	if s == "" {
 		return s
 	}
-	out := redactURLCredentials(s)
-	for _, prefix := range credentialPrefixes {
-		out = redactPrefixed(out, prefix)
+	mark := func(redact.Match) string { return redactionMarker }
+	if len(s) <= maxReasonBytes+reasonScanMargin {
+		return redact.ScrubFunc(s, mark)
 	}
-	return out
+	s = redact.ScrubFunc(clipUTF8(s, maxReasonBytes+reasonScanMargin), mark)
+	return clipUTF8(s, maxReasonBytes) + reasonTruncated
 }
 
-// redactPrefixed replaces every run starting with prefix and ending at the
-// next delimiter. Matching is case-sensitive because every prefix above has
-// a fixed case, and lowering the haystack would corrupt the surviving text.
-func redactPrefixed(s, prefix string) string {
-	var b strings.Builder
-	for {
-		i := strings.Index(s, prefix)
-		if i < 0 {
-			b.WriteString(s)
-			return b.String()
-		}
-		b.WriteString(s[:i])
-		b.WriteString(redactionMarker)
-		rest := s[i+len(prefix):]
-		// Consume to the next delimiter: the credential body.
-		end := strings.IndexAny(rest, " \t\n\r\"'`,;)]}")
-		if end < 0 {
-			return b.String()
-		}
-		s = rest[end:]
-	}
-}
+// maxReasonBytes is how much of a long reason RedactString keeps. A reason is
+// a sentence for a person, but it quotes text a stranger chose — a secret
+// reference from a request body, a URI the egress proxy refused — and it is
+// scrubbed twice on its way to the store, so unbounded, both the cost of the
+// scrubbing and the size of the row were the stranger's to pick.
+//
+// reasonScanMargin is read past the cut before it is made, so a credential the
+// cut would halve is scrubbed whole; and a reason already cut is short enough
+// not to be cut again, which keeps the store's second pass from changing it.
+const (
+	maxReasonBytes   = 8 << 10
+	reasonScanMargin = 4 << 10
+	reasonTruncated  = "…[truncated]"
+)
 
-// redactURLCredentials rewrites "scheme://user:pass@host" to
-// "scheme://[redacted]@host". The password is the sensitive half, but the
-// username in a proxy URL is often a token too, so both go.
-func redactURLCredentials(s string) string {
-	var b strings.Builder
-	rest := s
-	for {
-		i := strings.Index(rest, "://")
-		if i < 0 {
-			b.WriteString(rest)
-			return b.String()
-		}
-		b.WriteString(rest[:i+3])
-		rest = rest[i+3:]
-		// The authority ends at the first '/', '?', '#', or whitespace.
-		authEnd := strings.IndexAny(rest, "/?# \t\n\r\"'")
-		if authEnd < 0 {
-			authEnd = len(rest)
-		}
-		authority := rest[:authEnd]
-		if at := strings.LastIndex(authority, "@"); at >= 0 {
-			b.WriteString(redactionMarker)
-			b.WriteString(authority[at:])
-		} else {
-			b.WriteString(authority)
-		}
-		rest = rest[authEnd:]
+// clipUTF8 returns at most the first n bytes of s, cut on a rune boundary.
+func clipUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // emit redacts and forwards an event, stamping the time if unset.

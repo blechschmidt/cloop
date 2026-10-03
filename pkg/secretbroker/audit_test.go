@@ -9,7 +9,11 @@ import (
 
 // TestRedactStringScrubsCredentials covers the token formats most likely to
 // end up spliced into an error message by a well-meaning fmt.Errorf three
-// packages down.
+// packages down. Each stand-in is shaped like the real thing: a body of one
+// repeated character, AWS's documentation key and a private-key header with
+// no key after it are what documentation prints, and the shared registry
+// leaves them alone. The realistic ones are split, so the source holds no
+// credential-shaped literal for a push-protection scanner to stop.
 func TestRedactStringScrubsCredentials(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -17,21 +21,21 @@ func TestRedactStringScrubsCredentials(t *testing.T) {
 		secret string
 	}{
 		{"github classic pat", `failed for ghp_abcdefghijklmnop1234, retrying`, "ghp_abcdefghijklmnop1234"},
-		{"github app token", `token ghs_zzzzzzzzzzzzzzzzzzzz expired`, "ghs_zzzzzzzzzzzzzzzzzzzz"},
+		{"github app token", "token ghs_" + "Zq3kV9mPx2Lw7RtB4nYc expired", "ghs_" + "Zq3kV9mPx2Lw7RtB4nYc"},
 		{"github fine grained", `bad github_pat_11ABCDEFG0abcdefghij here`, "github_pat_11ABCDEFG0abcdefghij"},
 		{"github oauth", `gho_0123456789abcdef rejected`, "gho_0123456789abcdef"},
 		{"anthropic", `key sk-ant-api03-abcdef123456 invalid`, "sk-ant-api03-abcdef123456"},
 		{"openai project", `sk-proj-abcdefghijklmnop failed`, "sk-proj-abcdefghijklmnop"},
 		{"openai legacy", `sk-abcdefghijklmnopqrst bad`, "sk-abcdefghijklmnopqrst"},
-		{"aws access key", `AKIAIOSFODNN7EXAMPLE denied`, "AKIAIOSFODNN7EXAMPLE"},
+		{"aws access key", "AKIA" + "Q3EGTWQ7ZK2RVM4X denied", "AKIA" + "Q3EGTWQ7ZK2RVM4X"},
 		{"google", `AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz01234 nope`, "AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz01234"},
 		{"slack bot", `xoxb-123456-abcdef rejected`, "xoxb-123456-abcdef"},
 		{"jwt", `bearer eyJhbGciOiJIUzI1NiJ9.payload.sig failed`, "eyJhbGciOiJIUzI1NiJ9"},
-		{"private key header", `-----BEGIN RSA PRIVATE KEY----- oops`, "BEGIN RSA PRIVATE KEY"},
+		{"private key", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "u1SU1LfVLPHCozMxH2Mo4lgO oops", "MIIEowIBAAKCAQEA" + "u1SU1LfVLPHCozMxH2Mo4lgO"},
 		// Quoted and punctuated contexts, because that is how errors are
 		// actually formatted.
 		{"quoted", `bad token "ghp_abcdefghijklmnop1234" seen`, "ghp_abcdefghijklmnop1234"},
-		{"trailing comma", `tokens: ghp_abcdefghijklmnop1234, ghs_zzzzzzzzzzzzzzzzzzzz`, "ghp_abcdefghijklmnop1234"},
+		{"trailing comma", "tokens: ghp_abcdefghijklmnop1234, ghs_" + "Zq3kV9mPx2Lw7RtB4nYc", "ghp_abcdefghijklmnop1234"},
 		{"parenthesised", `(ghp_abcdefghijklmnop1234)`, "ghp_abcdefghijklmnop1234"},
 	}
 
@@ -101,6 +105,79 @@ func TestRedactStringPreservesOrdinaryText(t *testing.T) {
 		if got := RedactString(s); got != s {
 			t.Errorf("RedactString(%q) = %q — must be unchanged", s, got)
 		}
+	}
+}
+
+// TestRedactStringKnowsCloopsOwnCredentials: the prefix list this replaced
+// had none of them, so a reason quoting a hub token, a CI relay token or an
+// agent credential went into the audit trail verbatim.
+func TestRedactStringKnowsCloopsOwnCredentials(t *testing.T) {
+	for _, secret := range []string{
+		"cloop_pat_0123456789abcdef_" + strings.Repeat("0a", 32),
+		"cloop_ci_" + strings.Repeat("1b", 12) + "." + strings.Repeat("2c", 32),
+		"clac1.Ab3dEf6hIj9lMn0p.qR5tUv8xYz1bCd4fGh7jKl0nOp3rSt6vWx9zAb2dEf5.0123456789abcdef0123456789abcdef",
+		"clet1.Ab3dEf6hIj9lMn0p.qR5tUv8xYz1bCd4fGh7jKl0nOp3rSt6vWx9zAb2dEf5.0123456789abcdef0123456789abcdef",
+	} {
+		got := RedactString("agent rejected credential " + secret + " (revoked)")
+		if strings.Contains(got, secret) || !strings.Contains(got, "(revoked)") {
+			t.Errorf("RedactString kept %q or lost the reason around it: %q", secret[:12], got)
+		}
+	}
+}
+
+// TestRedactStringLeavesWordsEndingInSkAlone: the old list scrubbed from a
+// bare "sk-" to the next delimiter, wherever it occurred, so a reason
+// mentioning a risk-free rollout or task-42 lost the word.
+func TestRedactStringLeavesWordsEndingInSkAlone(t *testing.T) {
+	for _, s := range []string{
+		"risk-free rollout approved",
+		"lease for task-42 denied: grant expired",
+		"disk-full on edge-01",
+		"worktree task-0f8fad5bd9cb469fa16570867728950e removed",
+	} {
+		if got := RedactString(s); got != s {
+			t.Errorf("RedactString(%q) = %q — must be unchanged", s, got)
+		}
+	}
+}
+
+// TestRedactStringRemovesThePrivateKeyNotJustItsHeader: the old list held
+// "-----BEGIN" as a prefix and stopped at the next space, which removed that
+// one word and kept the key.
+func TestRedactStringRemovesThePrivateKeyNotJustItsHeader(t *testing.T) {
+	const body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun"
+	in := "kubeconfig rejected: -----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY----- (namespace apps)"
+	got := RedactString(in)
+	if strings.Contains(got, body) {
+		t.Fatalf("the key body survived redaction: %q", got)
+	}
+	if !strings.Contains(got, "kubeconfig rejected: ") || !strings.Contains(got, "(namespace apps)") {
+		t.Errorf("the reason around the key was lost: %q", got)
+	}
+	cert := "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUDtlv\n-----END CERTIFICATE-----"
+	if got := RedactString(cert); got != cert {
+		t.Errorf("a certificate is public and must be left readable: %q", got)
+	}
+}
+
+// TestRedactStringBoundsWhatItReads: a reason quotes text a stranger chose — a
+// secret reference from a request body of up to ten megabytes, a URI the
+// egress proxy refused — and is scrubbed twice on its way to the store. It is
+// cut to a sentence's worth, so neither the cost of scrubbing it nor the row
+// that keeps it is the stranger's to choose; a credential near the start is
+// still removed, and the second pass changes nothing.
+func TestRedactStringBoundsWhatItReads(t *testing.T) {
+	const tok = "ghp_" + "Zq3kV9mPx2Lw7RtB4nYcQ8sD1fGh6jKl0aEu"
+	in := "resolve \"" + tok + "\": " + strings.Repeat("xtoken=aaaaaaaaaaaa ", 200_000)
+	got := RedactString(in)
+	if strings.Contains(got, tok) {
+		t.Fatalf("the credential at the start of a long reason survived: %.120q", got)
+	}
+	if len(got) > 16<<10 {
+		t.Fatalf("a %d-byte reason came back %d bytes long", len(in), len(got))
+	}
+	if again := Redact(Event{Reason: got}).Reason; again != got {
+		t.Errorf("the store's second pass changed a cut reason:\n first: %.80q…\nsecond: %.80q…", got, again)
 	}
 }
 

@@ -152,6 +152,41 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **One credential registry for every scanner; `cloop audit` sees the tokens
+  GitHub issues now.** Four places recognise credentials by shape and each kept
+  its own list. `cloop audit` matched `ghp_`/`ghs_` followed by 30 letters and
+  digits, so it missed `gho_`, `ghu_` and `ghr_` and every installation token
+  minted since September 2026 (390 characters, an underscore seven in): it
+  reported a clean history over a real leak. Browser telemetry knew only
+  `cloop_pat_` and `cloop_glasses_` and stored a GitHub token or an Anthropic
+  key in a page's error verbatim; the broker's audit-reason scrubber knew none
+  of cloop's prefixes, turned `risk-free` into `ri[redacted]`, and removed only
+  the `-----BEGIN` line of a private key; the provider-call audit knew `sk-`
+  keys and `Bearer`. All four now use the registry in `pkg/redact` — GitHub
+  tokens in both forms for all five prefixes and `github_pat_`, Anthropic,
+  OpenAI, AWS, Google and Slack keys, JWTs, PEM private keys, kubeconfig keys
+  and tokens, Authorization values, URL passwords, and cloop's own tokens — each
+  keeping its own replacement style. `cloop audit` streams the history instead
+  of reading it whole and also reports credential shapes in task artifacts
+  (*Credentials in task artifacts*); the git-history finding is now named
+  *Credentials in git history*. Exact-value redaction of leased material is
+  unchanged and still the primary defence. The shapes are listed in
+  `docs/reference/credential-patterns.md`.
+
+  An adversarial review before landing (Task 20369) found more, all fixed:
+  the first registry rescanned rejected candidates, which made one 2 MiB
+  telemetry POST hold a core for hours, and it is linear now; it missed keys
+  behind a prefix (`GITHUB_TOKEN=`), escaped JSON, Go headers, `sk-None-` keys,
+  URL passwords led by `%`, `$` or `*`, credentials after a percent-encoded
+  `=`, and values that run into `[` or hold `!`, `|` or `%2B`; and it matched a
+  private-key header with no key, fields across a line break, names in code and
+  documentation placeholders. `cloop audit`'s history scan no longer runs
+  programs a repository's config names (`gpg.program`, a partial clone's
+  `upload-pack`) and now reads replace refs' originals, merges' own changes,
+  files marked binary and moved files; its artifact scan reaches
+  subdirectories. Broker audit reasons are cut to 8 KiB, and telemetry runs the
+  registry before its query-parameter pass.
+
 - **Removing a project closes the dashboards still attached to it.** Live
   streams are filed by project path, so a socket left open on a removed
   project went on receiving whatever was registered at that path next —

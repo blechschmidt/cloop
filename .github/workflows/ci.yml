@@ -487,11 +487,16 @@ jobs:
         # random — which is what it was doing. The script fails on a written
         # reproducer and tolerates only the deadline artifact; the reasoning is
         # in its header.
+        #
+        # The last target is the shared credential registry every pattern
+        # scanner uses (pkg/redact): a corpus credential planted in arbitrary
+        # text must never come out the other side.
         run: |
           ./scripts/fuzz-ci.sh \
             FuzzFrameDecoding \
             FuzzFrameTruncation \
-            FuzzRedactStringNeverEmitsACredentialBody
+            FuzzRedactStringNeverEmitsACredentialBody \
+            ./pkg/redact/:FuzzScrubNeverEmitsAPlantedCredential
 
       - name: Upload fuzz failure corpus
         # A crash writes its reproducer into testdata/fuzz/. Without this it
@@ -500,7 +505,9 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: fuzz-corpus
-          path: tests/security/testdata/fuzz/
+          path: |
+            tests/security/testdata/fuzz/
+            pkg/redact/testdata/fuzz/
           retention-days: 30
           if-no-files-found: ignore
 

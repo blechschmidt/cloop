@@ -134,17 +134,31 @@ natural value for an event's URL field, so without scrubbing the first trail a
 wearer produced would copy a live credential into a table that a different
 permission can read.
 
-Scrubbing is deliberately over-eager. It redacts the value of any sensitive
-query parameter (`token`, `code`, `id_token`, `secret`, `key`, `password`,
-`authorization`, and others), anything following `Bearer `, and any run
-beginning with a cloop credential prefix — wherever they appear, including
-inside a message or a stack frame, not only in a well-formed URL.
+Scrubbing runs in two passes, over the message, the stack, the URL and the
+detail alike — inside a message or a stack frame as much as in a well-formed
+URL.
+
+The first is the credential registry `cloop audit` and both audit trails use
+too: cloop's own tokens, GitHub tokens in both forms, Anthropic and OpenAI keys,
+JWTs, private keys, Authorization values, passwords in URLs — every shape on the
+[credential patterns](../reference/credential-patterns.md) page. Until it
+was shared, this scrubber knew only cloop's two prefixes, and a page that
+reported a failed fetch with a GitHub token in its URL had that token stored.
+
+The second is telemetry's own, and deliberately over-eager: the value of any
+sensitive query parameter (`token`, `code`, `id_token`, `secret`, `key`,
+`password`, `authorization`, and others) is replaced without asking whether it
+looks like a credential. It runs second because it ends a value at a space:
+run first over `authorization=Bearer <token>`, it replaced `Bearer` alone — the
+word the registry needs to find the token behind it.
 
 ```
-/glasses?token=cloop_glasses_7f3a_2b91  →  /glasses?token=[redacted]
+/glasses?token=cloop_pat_0f3a…_9c1d…            →  /glasses?token=[redacted]
+fetch failed: 401 for Bearer eyJhbGciOiJSUzI1…  →  fetch failed: 401 for Bearer [redacted]
 ```
 
-The path survives, because the path is the part worth reading.
+The path survives, and so does whatever identified the credential, because
+that is the part worth reading.
 
 A redacted field you can ask a colleague about is recoverable. A leaked
 credential in a table is not.

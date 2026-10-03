@@ -539,15 +539,25 @@ func TestBrokerErrorsDoNotEchoCredentials(t *testing.T) {
 
 // TestRedactStringRemovesKnownCredentialShapes pins the redactor's contract
 // for each shape the broker deals in.
+//
+// The AWS key is not AWS's documentation key (AKIAIOSFODNN7EXAMPLE), and the
+// PEM block carries a line of key: the shared registry leaves both of those
+// alone, because neither is a credential — see "documentation placeholders"
+// and "a private-key header with no key after it" in pkg/redact/redacttest,
+// which TestNoScannerTouchesOrdinaryOutput holds every scanner to. What must
+// not survive a PEM block is the key, not the line that announces it. Both
+// stand-ins are split, so the source holds no credential-shaped literal for a
+// push-protection scanner to stop.
 func TestRedactStringRemovesKnownCredentialShapes(t *testing.T) {
 	for _, tc := range []struct{ name, in, mustNotContain string }{
 		{"classic PAT", "failed to auth with ghp_abcdefghij0123456789 when cloning", "ghp_abcdefghij0123456789"},
 		{"fine-grained PAT", "token github_pat_11ABC_secretbody rejected", "github_pat_11ABC_secretbody"},
 		{"anthropic key", "key sk-ant-api03-abcdef was refused", "sk-ant-api03-abcdef"},
-		{"aws access key", "using AKIAIOSFODNN7EXAMPLE for s3", "AKIAIOSFODNN7EXAMPLE"},
+		{"aws access key", "using AKIA" + "Q3EGTWQ7ZK2RVM4X for s3", "AKIA" + "Q3EGTWQ7ZK2RVM4X"},
 		{"slack bot token", "posting with xoxb-1234-5678-abcdef failed", "xoxb-1234-5678-abcdef"},
 		{"jwt", "bearer eyJhbGciOiJIUzI1NiJ9.body.sig expired", "eyJhbGciOiJIUzI1NiJ9.body.sig"},
-		{"pem block", "parsing -----BEGIN RSA PRIVATE KEY----- failed", "-----BEGIN RSA PRIVATE KEY-----"},
+		{"pem block", "parsing -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "u1SU1LfVLPHCozMxH2Mo4lgO failed",
+			"MIIEowIBAAKCAQEA" + "u1SU1LfVLPHCozMxH2Mo4lgO"},
 		{"url userinfo", "proxy https://user:hunter2@proxy.example.com/ unreachable", "hunter2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-api docs-audit docs-check docs-stage docs-site docs-serve release-dist \
+        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve release-dist \
         terraform-test terraform-validate
 
 BINARY := cloop
@@ -166,6 +166,16 @@ docs-api:
 docs-audit:
 	@$(GO) test ./tests/docs -run TestAuditEventsReference -update-audit -count=1
 	@echo "==> regenerated docs/reference/audit-events.md"
+
+## docs-credentials: regenerate docs/reference/credential-patterns.md from the
+## credential registry
+#
+# Same arrangement again: the page lists what pkg/redact's detectors match, so
+# it is rendered from them, and `go test ./tests/docs` fails when the checked-in
+# copy stops matching.
+docs-credentials:
+	@$(GO) test ./tests/docs -run TestCredentialPatternsReference -update-credentials -count=1
+	@echo "==> regenerated docs/reference/credential-patterns.md"
 
 ## docs-check: structural check — every page indexed, every relative link resolves
 docs-check:

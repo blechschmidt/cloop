@@ -14,13 +14,21 @@
 // and only reported afterwards. This package prevents it instead, at the point
 // output is captured.
 //
-// # What it is not
+// # Two halves, and which one is the defence
 //
-// It does not hunt for secret-shaped strings. There is no entropy heuristic and
-// no regex for "looks like a token", because both are on a hot streaming path
-// and both mangle ordinary text — a base64 blob in a diff is not a credential.
-// It matches only values the caller already knows are secret, which for cloop
-// means the material a lease just injected.
+// A Set matches exact values: the material a lease just injected. It is the
+// primary defence and the only thing on the streaming path. A Set does not
+// hunt for secret-shaped strings — no entropy heuristic, no "looks like a
+// token" regex — because both would cost on every streamed token and both
+// mangle ordinary text: a base64 blob in a diff is not a credential.
+//
+// The second half, in patterns.go, is a registry of credential shapes for the
+// places that cannot know the values: an error message from three packages
+// down, a browser's stack trace, a commit made last year. cloop audit, the
+// provider-call audit, the secret broker's audit reasons and the telemetry
+// scrubber all ask it, so a credential shape is recognised everywhere or
+// nowhere. It is a backstop for text that never passed through a Set, not a
+// substitute for one, and nothing on the streaming path calls it.
 //
 // # The short-value guard
 //

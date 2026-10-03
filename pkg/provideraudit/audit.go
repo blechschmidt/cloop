@@ -22,12 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -175,7 +175,7 @@ func buildRow(workDir string, ctx context.Context, prompt string, opts provider.
 	}
 	if err != nil {
 		status = classifyError(err)
-		errMsg = redactErrorMessage(err.Error())
+		errMsg = RedactErrorMessage(err.Error())
 		output = ""
 	}
 
@@ -271,21 +271,17 @@ func buildHeadersJSON(opts provider.Options) string {
 	return string(b)
 }
 
-// secretKeyPattern matches Anthropic (sk-ant-*) and OpenAI-style (sk-*) API
-// keys. Used to mask any accidental key leakage in error messages bubbled
-// up from third-party SDKs that include the key in their error text.
-var secretKeyPattern = regexp.MustCompile(`sk-(?:ant-)?[A-Za-z0-9_\-]{20,}`)
-
-// bearerPattern catches "Authorization: Bearer ..." tokens that some
-// providers echo verbatim into their error responses.
-var bearerPattern = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]+`)
-
-// redactErrorMessage strips known secret shapes (API keys, bearer tokens)
-// from a free-form error message before persisting it. Defensive — most
-// provider SDKs don't include the credential, but we'd rather not ship the
-// one that does.
-func redactErrorMessage(msg string) string {
-	msg = secretKeyPattern.ReplaceAllString(msg, "sk-[REDACTED]")
-	msg = bearerPattern.ReplaceAllString(msg, "Bearer [REDACTED]")
-	return msg
+// RedactErrorMessage strips credentials from a free-form error message before
+// it is persisted. Defensive — most provider SDKs don't include the credential,
+// but we'd rather not ship the one that does.
+//
+// The shapes are pkg/redact's registry, the same ones cloop audit reports and
+// the audit trails scrub, so a GitHub token in a tool error or a cloop CI token
+// in a relay error is caught here too; this package used to know only sk- keys
+// and Bearer values. What it keeps is its own replacement style: a credential
+// becomes its public lead followed by [REDACTED] — "sk-ant-api03-[REDACTED]",
+// "ghs_[REDACTED]", "Bearer [REDACTED]" — which says what kind of key the
+// provider rejected and nothing about its value.
+func RedactErrorMessage(msg string) string {
+	return redact.ScrubFunc(msg, func(m redact.Match) string { return m.Kind + "[REDACTED]" })
 }

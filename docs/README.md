@@ -108,6 +108,12 @@ Six pages in order, indexed at
   write down. Generated from the registry the emitters reference and gated
   against it, so an action cannot ship undocumented — and an action name cited
   anywhere else in these docs cannot outlive the code that emits it.
+- **[Credential patterns](reference/credential-patterns.md)** — every
+  credential shape `cloop audit`, the provider-call audit, the secret broker's
+  audit reasons and browser telemetry recognise, from one registry: GitHub
+  tokens in both forms, cloop's own tokens, cloud and model-provider keys,
+  JWTs, private keys, kubeconfig credentials. Generated from the registry and
+  gated against it.
 
 ## Security
 
