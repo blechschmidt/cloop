@@ -207,7 +207,11 @@ type assetSet struct {
 	// the stripper declined.
 	servedBoundary string
 	indexTmpl      string
-	glassesTmpl    string
+	// servedPage is the rendered page as it goes over the wire, its comments
+	// removed (htmlstrip.go), or the rendered page itself if the stripper
+	// declined.
+	servedPage  string
+	glassesTmpl string
 }
 
 // loadAssets builds the asset set on first use and reuses it forever after.
@@ -295,7 +299,14 @@ func buildAssets() *assetSet {
 		page = strings.ReplaceAll(page, "{{asset:"+h.token+"}}", url)
 	}
 
-	set.page = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(page))
+	// And the page's own comments, the last prose on the first paint: 22 KB
+	// of index.html, 7 KB gzipped (Task 20363). See htmlstrip.go.
+	servedPage, pageErr := stripHTMLComments(page)
+	if pageErr != nil {
+		fmt.Fprintf(os.Stderr, "ui: serving the dashboard page with its comments: %v\n", pageErr)
+	}
+	set.servedPage = servedPage
+	set.page = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(servedPage))
 	// no-cache with an ETag, like index.html: the glasses re-open the saved
 	// URL on every glance, and a 304 is the cheapest possible answer to "is
 	// this still the page I have" without ever serving a stale one.
