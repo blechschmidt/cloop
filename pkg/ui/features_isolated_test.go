@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -149,5 +150,56 @@ func TestFeatures_AProjectWithNoRepositoryOnTheHubIsRefusedWithTheReason(t *test
 	}
 	if _, err := os.Stat(feature.Dir(f.parent)); err == nil {
 		t.Error("something was created for a feature that was refused")
+	}
+}
+
+// releasingStub is an executor keeping a feature run's output for the hub:
+// it reports a write-back and notes whether the feature already showed its
+// outcome when the hub let go of that output.
+type releasingStub struct {
+	capableStub
+	featureDir    string
+	released      bool
+	recordedFirst bool
+}
+
+func (s *releasingStub) Status(context.Context, string) (executor.Status, error) {
+	return executor.Status{State: executor.StateExited, WriteBack: &executor.WriteBackResult{
+		Mode: executor.WriteBackBundle, Branch: feature.BranchName("widget"),
+		Skipped: true, SkipReason: "the harness changed no files",
+	}}, nil
+}
+
+func (s *releasingStub) ReleaseResults(string) {
+	s.released = true
+	if m, err := feature.LoadMeta(s.featureDir); err == nil && m.Return != nil {
+		s.recordedFirst = true
+	}
+}
+
+// TestLandingReleasesTheRunsOutputBeforeShowingItsOutcome: once a feature
+// shows how its run came back, nothing of that run is left on the executor's
+// host — the order a reader of the outcome (CI's e2e among them) relies on.
+func TestLandingReleasesTheRunsOutputBeforeShowingItsOutcome(t *testing.T) {
+	f := newFeatureFixture(t)
+	dir := hubFeature(t, f)
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(string(out))
+	ex := &releasingStub{capableStub: capableStub{readyzStubExecutor: readyzStubExecutor{id: "keeper"}}, featureDir: dir}
+	f.srv.landFeatureWork(dir, ex, "h1", seededDispatch{feature: &featureReturn{
+		Branch: feature.BranchName("widget"), Head: head, MaxBytes: 1 << 20,
+	}})
+	if !ex.released {
+		t.Fatal("the executor was never told the hub was done with the run's output")
+	}
+	if ex.recordedFirst {
+		t.Error("the feature showed its outcome while the run's output was still kept")
+	}
+	m, err := feature.LoadMeta(dir)
+	if err != nil || m.Return == nil || m.Return.Outcome != string(featurehub.LandNothing) {
+		t.Errorf("recorded return = %+v, %v", m.Return, err)
 	}
 }

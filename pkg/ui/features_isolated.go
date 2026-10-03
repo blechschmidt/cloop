@@ -252,13 +252,6 @@ func (s *Server) landFeatureWork(workDir string, ex executor.Executor, handleID 
 	if fr == nil {
 		return
 	}
-	// The executor may be keeping the run's output for us; tell it we are
-	// done with it whatever happens below.
-	defer func() {
-		if r, ok := ex.(executor.ResultReleaser); ok {
-			r.ReleaseResults(handleID)
-		}
-	}()
 	ctx, cancel := context.WithTimeout(context.Background(), featureLandTimeout)
 	defer cancel()
 
@@ -268,6 +261,13 @@ func (s *Server) landFeatureWork(workDir string, ex executor.Executor, handleID 
 		details["run_id"] = d.prov.RunID
 	}
 	finish := func() {
+		// The executor may be keeping the run's output for us; it is told we
+		// are done with it whatever happened, and before the outcome is
+		// recorded, so a feature that shows how its run came back has nothing
+		// of that run left on the executor's host.
+		if r, ok := ex.(executor.ResultReleaser); ok {
+			r.ReleaseResults(handleID)
+		}
 		s.recordFeatureReturn(workDir, ret, details)
 	}
 	defer finish()
