@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,16 +23,33 @@ import (
 // nothing but a dashboard's page load landing on two processes.
 func TestRefreshLockSerialisesRedemptionsAcrossProcesses(t *testing.T) {
 	idp := newFakeIdP(t)
-	idp.refreshIDToken = adminThenDemoted(idp)
 	clk := newClock()
 	store := NewMemorySessionStore(0)
 
 	var lockMu sync.Mutex
 	var acquired int
+	var arrived atomic.Int32
+	bothArrived := make(chan struct{})
 	lock := func(ctx context.Context, id string) (func(), error) {
+		if arrived.Add(1) == 2 {
+			close(bothArrived)
+		}
 		lockMu.Lock()
 		acquired++
 		return lockMu.Unlock, nil
+	}
+	// The first redemption is held until the other process has reached the
+	// lock. Otherwise, on a slow runner, one process can finish its whole
+	// refresh before the other looks at the session, find the claims fresh,
+	// and never need the lock: correct, but not the race this test is about,
+	// and it failed CI as "lock taken 1 times".
+	demote := adminThenDemoted(idp)
+	idp.refreshIDToken = func(n int) map[string]any {
+		select {
+		case <-bothArrived:
+		case <-time.After(10 * time.Second):
+		}
+		return demote(n)
 	}
 	mk := func() *Authenticator {
 		return newLifecycleAuth(t, idp, store, clk, func(c *Config) {
