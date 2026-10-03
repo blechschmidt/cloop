@@ -132,7 +132,12 @@ func runGitEnv(ctx context.Context, dir string, extraEnv []string, args ...strin
 // environment so a value never appears on a command line.
 func runGitConfig(ctx context.Context, dir string, pairs [][2]string, args ...string) (string, error) {
 	if env := hubEnv(ctx); env != nil {
-		return runGitWith(ctx, dir, env(pairs...), args...)
+		// Rendered with the pairs folded in and run exactly as rendered.
+		// Handing it to runGitWith would have that replace it with the bare
+		// hub environment, and the pairs — the push's Authorization header —
+		// were dropped: every hub-mode push of a feature went out
+		// unauthenticated and GitHub refused it (Task 20371).
+		return runGitExact(ctx, dir, append(env(pairs...), "LC_ALL=C"), args...)
 	}
 	var extra []string
 	count := os.Getenv("GIT_CONFIG_COUNT")
@@ -147,13 +152,18 @@ func runGitConfig(ctx context.Context, dir string, pairs [][2]string, args ...st
 // runGitWith runs git in dir with exactly env, or — in hub mode — with the
 // hub's environment, ignoring env.
 func runGitWith(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+	if hub := hubEnv(ctx); hub != nil {
+		env = append(hub(), "LC_ALL=C")
+	}
+	return runGitExact(ctx, dir, env, args...)
+}
+
+// runGitExact runs git in dir with exactly env.
+func runGitExact(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, gitTimeout)
 		defer cancel()
-	}
-	if hub := hubEnv(ctx); hub != nil {
-		env = append(hub(), "LC_ALL=C")
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
