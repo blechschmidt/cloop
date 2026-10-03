@@ -7,6 +7,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 	"github.com/fatih/color"
 )
 
@@ -80,6 +81,11 @@ func (o *Orchestrator) requeueInterrupted(s *state.ProjectState, task *pm.Task, 
 	pm.AddAnnotation(task, "cloop", fmt.Sprintf(
 		"Interrupted %s: the run stopped before the task finished. "+
 			"Returned to pending, so the next run starts it again.", stage))
+	// The verdict is what makes "stale-task recovery reaches the same status"
+	// true when the agent had already said TASK_DONE — stopped while its work
+	// was being reviewed or verified, say (Task 20365).
+	o.noteVerdict(task, pm.TaskPending, decidedBy(taskrecover.SourceInterrupted, "run_stopped",
+		"the run stopped "+stage))
 	o.persistBestEffort(s, fmt.Sprintf("task #%d's return to pending after the run stopped", task.ID),
 		"the pause the stopping run records next stores it too, and stale-task recovery reaches the same status if neither lands")
 

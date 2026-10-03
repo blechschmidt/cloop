@@ -14,6 +14,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
 
 // Options controls compaction behaviour.
@@ -44,12 +45,22 @@ type Summary struct {
 	CheckpointsDeleted    int
 	ArtifactsDeleted      int
 	StepLogTruncated      bool
+	// VerdictsDeleted and VerdictsBytesFreed count the orchestrator's verdict
+	// sidecars removed from .cloop/artifacts (Task 20365).
+	VerdictsDeleted    int
+	VerdictsBytesFreed int64
 }
 
 // TotalBytesFreed returns total bytes freed across all categories.
 func (s Summary) TotalBytesFreed() int64 {
-	return s.SnapshotsBytesFreed + s.CheckpointsBytesFreed + s.ArtifactsBytesFreed + s.StepLogBytesFreed
+	return s.SnapshotsBytesFreed + s.CheckpointsBytesFreed + s.ArtifactsBytesFreed + s.StepLogBytesFreed +
+		s.VerdictsBytesFreed
 }
+
+// verdictGrace is the least age a verdict sidecar must have before it is
+// pruned, whatever KeepArtifactsDays says: a run may be writing one for a task
+// the plan loaded here still shows finished from an earlier attempt.
+const verdictGrace = time.Hour
 
 // Run executes compaction with the given options and returns a summary.
 func Run(workDir string, opts Options) (Summary, error) {
@@ -58,12 +69,17 @@ func Run(workDir string, opts Options) (Summary, error) {
 	// Load current plan to know which task IDs are active.
 	activeTasks := map[int]bool{}
 	completedTasks := map[int]bool{}
+	inProgress := map[int]bool{}
 	st, err := state.Load(workDir)
+	planKnown := err == nil
 	if err == nil && st.Plan != nil {
 		for _, t := range st.Plan.Tasks {
 			activeTasks[t.ID] = true
 			if t.Status == pm.TaskDone || t.Status == pm.TaskSkipped {
 				completedTasks[t.ID] = true
+			}
+			if t.Status == pm.TaskInProgress {
+				inProgress[t.ID] = true
 			}
 		}
 	}
@@ -76,6 +92,14 @@ func Run(workDir string, opts Options) (Summary, error) {
 	}
 	if err := compactArtifacts(workDir, opts, completedTasks, &sum); err != nil {
 		return sum, fmt.Errorf("artifacts: %w", err)
+	}
+	// Verdict sidecars only where the plan could be read: one is needed
+	// exactly when its task is in progress, and an unreadable plan cannot say
+	// which are.
+	if planKnown {
+		if err := compactVerdicts(workDir, opts, inProgress, &sum); err != nil {
+			return sum, fmt.Errorf("verdicts: %w", err)
+		}
 	}
 	if opts.TruncateStepLog > 0 {
 		if err := truncateStepLog(workDir, opts, &sum); err != nil {
@@ -248,6 +272,23 @@ func compactArtifacts(workDir string, opts Options, completedTasks map[int]bool,
 		}
 	}
 	return nil
+}
+
+// ─── verdict sidecars ────────────────────────────────────────────────────────
+
+// compactVerdicts removes the orchestrator's verdict sidecars that recovery can
+// no longer need (Task 20365): a sidecar is read only for a task left in
+// progress, so one whose task is in any other state — or gone from the plan —
+// is redundant once it is as old as the artifacts this pass prunes.
+func compactVerdicts(workDir string, opts Options, inProgress map[int]bool, sum *Summary) error {
+	cutoff := time.Now().AddDate(0, 0, -opts.KeepArtifactsDays)
+	if latest := time.Now().Add(-verdictGrace); cutoff.After(latest) {
+		cutoff = latest
+	}
+	res, err := taskrecover.PruneVerdicts(workDir, func(id int) bool { return inProgress[id] }, cutoff, opts.DryRun)
+	sum.VerdictsDeleted += res.Deleted
+	sum.VerdictsBytesFreed += res.Bytes
+	return err
 }
 
 // ─── step log (replay.jsonl) truncation ──────────────────────────────────────

@@ -32,29 +32,67 @@ func LogOutcome(workDir string, oc Outcome) {
 	if workDir == "" {
 		return
 	}
+	row, details, ok := EventFor(oc)
+	if !ok {
+		return
+	}
+	if details == nil {
+		state.LogEvent(workDir, row)
+		return
+	}
+	state.LogEventDetails(workDir, row, details)
+}
+
+// EventFor renders one reconciliation as the journal row LogOutcome writes,
+// with its structured details — nil when the recovery followed the agent's
+// report rather than a verdict. ok is false for an outcome that is not
+// journalled. A remote device uses it to send the row back with the run's own
+// (pkg/executor/projectseed), so a recovery reads the same on the hub whether
+// it happened there or on the device.
+func EventFor(oc Outcome) (row state.EventRow, details map[string]any, ok bool) {
+	if oc.Verdict != nil {
+		details = map[string]any{
+			"recovered_from": "verdict",
+			"verdict_status": string(oc.Verdict.Status),
+			"verdict_source": oc.Verdict.Source,
+			"verdict_reason": oc.Verdict.Reason,
+		}
+	}
 	switch oc.Action {
 	case ActionAdopted:
-		state.LogEvent(workDir, state.EventRow{
+		msg := fmt.Sprintf(
+			"Task #%d recovered as %s: the agent had finished and reported it, but the run process "+
+				"died before the outcome was persisted. Adopted from the live artifact instead of re-running.",
+			oc.TaskID, oc.Status)
+		if oc.Verdict != nil {
+			// The orchestrator's decision, not the agent's report (Task
+			// 20365). Saying which matters most when they differ: a task the
+			// review gate rejected reads as failed here, and the agent's
+			// TASK_DONE is not what the timeline claims.
+			msg = fmt.Sprintf(
+				"Task #%d recovered as %s: cloop had decided it (%s), but the run ended before the "+
+					"outcome was persisted. Its decision was applied instead of re-running the task.",
+				oc.TaskID, oc.Status, oc.Verdict.Describe())
+		}
+		return state.EventRow{
 			Timestamp: oc.CompletedAt,
 			Type:      adoptedEventType(oc.Status),
 			TaskID:    oc.TaskID,
 			TaskTitle: oc.Title,
 			Step:      state.NoStep,
-			Message: fmt.Sprintf(
-				"Task #%d recovered as %s: the agent had finished and reported it, but the run process "+
-					"died before the outcome was persisted. Adopted from the live artifact instead of re-running.",
-				oc.TaskID, oc.Status),
-		})
+			Message:   msg,
+		}, details, true
 	case ActionRequeued:
-		state.LogEvent(workDir, state.EventRow{
+		return state.EventRow{
 			Type:      state.EventTaskStatusChange,
 			TaskID:    oc.TaskID,
 			TaskTitle: oc.Title,
 			Step:      state.NoStep,
 			Message: fmt.Sprintf("Task #%d reset to pending after an interrupted run: %s.",
 				oc.TaskID, oc.Reason),
-		})
+		}, details, true
 	}
+	return state.EventRow{}, nil, false
 }
 
 // adoptedEventType maps an adopted status onto the event the live path would
@@ -63,7 +101,7 @@ func adoptedEventType(status pm.TaskStatus) state.EventType {
 	switch status {
 	case pm.TaskDone:
 		return state.EventTaskDone
-	case pm.TaskFailed:
+	case pm.TaskFailed, pm.TaskTimedOut:
 		return state.EventTaskFailed
 	default:
 		return state.EventTaskSkipped

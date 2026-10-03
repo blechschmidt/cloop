@@ -1583,9 +1583,16 @@ where the run is the one that knows:
 **A run that ends mid-task is recovered, not believed.** Its result says the
 task is in progress and the project running; both are merged, and dead-run
 recovery — which `runEnded` runs straight afterwards — requeues the task and
-pauses the project with the executor's account of how the run ended. A run that
-finished the plan it was sent while the hub's plan grew is paused as *idle*
-rather than marked complete.
+pauses the project with the executor's account of how the run ended. The one
+exception is a task whose outcome the run had already decided when it ended —
+the review gate failed it, a verification rejected it, its background work
+never finished — but not yet stored. The orchestrator writes that decision to
+the task's verdict sidecar first, and the device applies it before reading the
+run back, so the hub hears "failed by the review gate" rather than "in
+progress", with the recovery in the journal. The device reads only the
+sidecars for this, refuses symbolic links in their path, and writes nothing.
+A run that finished the plan it was sent while the hub's plan grew is paused as
+*idle* rather than marked complete.
 
 **This one degrades rather than refuses, like the seed.** A v10–v12 agent runs a
 seeded project correctly and cannot report the outcome. Refusing it placement

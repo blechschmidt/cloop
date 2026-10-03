@@ -53,12 +53,8 @@ func TestRunTask_PanickingProviderIsRecovered(t *testing.T) {
 	_, err := RunTask(
 		context.Background(),
 		panickingMultiagentProvider{},
-		"some-model",
-		time.Second,
-		task,
-		"goal",
-		"instructions",
-		"",
+		provider.Options{Model: "some-model", Timeout: time.Second},
+		Brief{Task: task, Goal: "goal", Instructions: "instructions"},
 	)
 	if err == nil {
 		t.Fatalf("expected error from panicking provider, got nil")
@@ -115,12 +111,8 @@ func TestRunTask_EmptyOutputSurfacesAsError(t *testing.T) {
 	_, err := RunTask(
 		context.Background(),
 		emptyOutputProvider{},
-		"some-model",
-		time.Second,
-		task,
-		"goal",
-		"instructions",
-		"",
+		provider.Options{Model: "some-model", Timeout: time.Second},
+		Brief{Task: task, Goal: "goal", Instructions: "instructions"},
 	)
 	if err == nil {
 		t.Fatalf("expected error from empty-output provider, got nil")
@@ -145,12 +137,8 @@ func TestRunTask_NilResultSurfacesAsError(t *testing.T) {
 	_, err := RunTask(
 		context.Background(),
 		nilResultProvider{},
-		"some-model",
-		time.Second,
-		task,
-		"goal",
-		"instructions",
-		"",
+		provider.Options{Model: "some-model", Timeout: time.Second},
+		Brief{Task: task, Goal: "goal", Instructions: "instructions"},
 	)
 	if err == nil {
 		t.Fatalf("expected error from nil-result provider, got nil")
@@ -177,7 +165,8 @@ func TestRunTask_CancelledCtxBailsBeforeNextPass(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := RunTask(ctx, prov, "some-model", time.Second, task, "goal", "instructions", "")
+	_, err := RunTask(ctx, prov, provider.Options{Model: "some-model", Timeout: time.Second},
+		Brief{Task: task, Goal: "goal", Instructions: "instructions"})
 	if err == nil {
 		t.Fatalf("expected ctx-cancelled error, got nil")
 	}

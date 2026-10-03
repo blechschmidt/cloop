@@ -53,6 +53,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
 
 // eventManualKill is the structured-log Event used by the kill-request poller
@@ -171,7 +172,8 @@ func (o *Orchestrator) handleKillRequest(req state.KillRequest) {
 	// land (persistOutcome reports it) leaves the row, and this process's
 	// observation of the attempt, in place for the next tick to try again.
 	o.applyKillTargetStatus(task, req.TargetStatus)
-	if err := o.persistOutcome(o.state, task, "status chosen by the operator"); err != nil {
+	if err := o.persistOutcome(o.state, task, "status chosen by the operator",
+		decidedBy(taskrecover.SourceOperator, "operator_status", "the operator set its status while it ran")); err != nil {
 		return
 	}
 	o.forgetKillObserved(req.TaskID)

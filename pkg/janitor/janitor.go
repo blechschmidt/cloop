@@ -497,6 +497,8 @@ type Report struct {
 	DryRun      bool          `json:"dry_run"`
 	PlanHistory StepResult    `json:"plan_history"`
 	Archive     StepResult    `json:"audit_archive"`
+	// Verdicts is the orchestrator's verdict sidecars (Task 20365).
+	Verdicts StepResult `json:"verdicts"`
 	// The row tables (Task 20291), pruned before the VACUUM so it has
 	// something to reclaim.
 	ProviderCalls StepResult `json:"provider_calls"`
@@ -528,7 +530,7 @@ func (r *Report) BytesFreed() int64 {
 	if r == nil {
 		return 0
 	}
-	return r.PlanHistory.BytesFreed + r.Archive.BytesFreed + r.Vacuum.BytesFreed
+	return r.PlanHistory.BytesFreed + r.Archive.BytesFreed + r.Verdicts.BytesFreed + r.Vacuum.BytesFreed
 }
 
 // BytesReleased totals what row pruning returned to the database freelist,
@@ -556,7 +558,7 @@ func (r *Report) Errs() []error {
 		return nil
 	}
 	var out []error
-	steps := append([]StepResult{r.PlanHistory, r.Archive}, r.rowSteps()...)
+	steps := append([]StepResult{r.PlanHistory, r.Archive, r.Verdicts}, r.rowSteps()...)
 	for _, s := range append(steps, r.Vacuum) {
 		if s.Err != nil {
 			out = append(out, s.Err)
@@ -580,6 +582,9 @@ func (r *Report) Summary() string {
 	}
 	if r.Archive.Deleted > 0 {
 		parts = append(parts, fmt.Sprintf("%d seals", r.Archive.Deleted))
+	}
+	if r.Verdicts.Deleted > 0 {
+		parts = append(parts, fmt.Sprintf("%d task verdicts", r.Verdicts.Deleted))
 	}
 	// Rows are reported as their own clause rather than folded into the byte
 	// total: the bytes they released are still inside the file until the
@@ -624,6 +629,7 @@ func RunOnce(opts Options) (*Report, error) {
 
 	rep.PlanHistory = prunePlanHistory(opts.WorkDir, pol.KeepSnapshots, opts.DryRun)
 	rep.Archive = pruneArchive(resolveArchiveDir(opts.WorkDir, pol), pol, opts.now(), opts.DryRun)
+	rep.Verdicts = pruneVerdicts(opts)
 	// Rows before the VACUUM, so the pages those deletes free are on the
 	// freelist by the time the VACUUM decides whether the file is worth
 	// rewriting — and are reclaimed by the same pass rather than the next one.

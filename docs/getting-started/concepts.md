@@ -156,7 +156,12 @@ approval, recurrence, per-task time budgets, story points and links.
 There are **six** statuses: `pending`, `in_progress`, `done`, `skipped`,
 `failed`, and `timed_out` for a task that exceeded its wall-clock budget.
 `in_progress` also means "left behind by a run that died", which is why a fresh
-run reconciles those before scheduling anything. The two that decide what
+run reconciles those before scheduling anything. Reconciling takes cloop's own
+decision first — every outcome is written to `.cloop/artifacts/<id>_verdict.json`
+before it is stored — so a task the review gate or a verification had rejected
+comes back rejected, not as the agent's `TASK_DONE`; failing that, it adopts the
+terminal signal at the end of the agent's live output, and a task with neither
+runs again. The two that decide what
 happens next are `skipped` and `failed`: a `skipped` dependency counts as
 **satisfied**, because a task that was not applicable should not strand the
 work after it, while a `failed` or `timed_out` dependency leaves the dependant

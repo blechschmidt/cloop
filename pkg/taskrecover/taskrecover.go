@@ -34,9 +34,14 @@
 //
 // # The rule
 //
-// Adopt a terminal signal; re-queue everything else. Silence is not success: an
-// artifact that stops mid-sentence means the agent was interrupted, and that
-// task genuinely has to run again.
+// The orchestrator's verdict first (verdict.go): where it had decided the
+// execution's outcome before the run ended, that decision stands, whatever the
+// agent said — a review gate's rejection, a failed verification, abandoned
+// background work. Where it had not, adopt the agent's terminal signal, unless
+// the outcome was still waiting on the review gate and the agent claims done;
+// re-queue everything else. Silence is not success: an artifact that stops
+// mid-sentence means the agent was interrupted, and that task genuinely has to
+// run again.
 //
 // Callers must guarantee no process owns the project directory. Reconcile is a
 // repair for the dead, and running it against a live run would reset a task out
@@ -44,6 +49,7 @@
 package taskrecover
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -94,6 +100,10 @@ type Outcome struct {
 	CompletedAt time.Time
 	// Reason explains a re-queue in words a UI can show.
 	Reason string
+	// Verdict is the orchestrator's decision the outcome followed (Task
+	// 20365), when one was found for this execution; nil when the agent's own
+	// report decided it.
+	Verdict *Verdict
 }
 
 // Reconcile repairs every task in the plan left in_progress by a run that no
@@ -122,30 +132,71 @@ func Reconcile(workDir string, plan *pm.Plan) []Outcome {
 func reconcileTask(workDir string, t *pm.Task) Outcome {
 	out := Outcome{TaskID: t.ID, Title: t.Title}
 
+	// The orchestrator's verdict outranks the agent's report: it is what the
+	// run would have stored had it lived (Task 20365).
+	v, unusable := verdictFor(workDir, t)
+	if v.Decided() {
+		return applyVerdict(workDir, t, out, v, true)
+	}
+
 	output, modTime, truncated, err := readLiveArtifact(workDir, t.ID)
 	if err != nil {
-		return requeue(t, out, fmt.Sprintf("no live output was recoverable (%v)", err))
+		return requeue(t, out, withNote(fmt.Sprintf("no live output was recoverable (%v)", err), unusable))
 	}
 
 	// Freshness guard: an artifact older than the execution we are recovering
 	// belongs to a previous attempt, and adopting it would credit this run
 	// with work it never did.
 	if t.StartedAt != nil && modTime.Before(*t.StartedAt) {
-		return requeue(t, out, "the live output predates this execution, so it belongs to an earlier attempt")
+		return requeue(t, out, withNote("the live output predates this execution, so it belongs to an earlier attempt", unusable))
 	}
 
 	signal := pm.CheckTaskSignal(output)
 	switch signal {
 	case pm.TaskDone, pm.TaskFailed, pm.TaskSkipped:
-		return adopt(workDir, t, out, output, signal, modTime, truncated)
+		if signal == pm.TaskDone && v.AwaitingReview() {
+			// The gate never approved the work, so its held pushes died
+			// with the run: the claim is unreviewed and nothing of it was
+			// published. Running it again is how it gets reviewed.
+			out.Verdict = v
+			return requeue(t, out, "the agent reported it done, but the review gate had not approved it "+
+				"when the run ended, so none of its work was published")
+		}
+		return adopt(workDir, t, out, output, signal, modTime, truncated, unusable)
 	default:
-		return requeue(t, out, "the agent was interrupted before it reported an outcome")
+		return requeue(t, out, withNote("the agent was interrupted before it reported an outcome", unusable))
 	}
+}
+
+// verdictFor returns the verdict that decides t's current execution, or nil.
+// When a sidecar was there but could not be used, the second result says why,
+// for the annotation: a decision may have been lost, and whoever reads the
+// task should know its outcome rests on the agent's report alone.
+func verdictFor(workDir string, t *pm.Task) (*Verdict, string) {
+	v, err := ReadVerdict(workDir, t.ID)
+	switch {
+	case errors.Is(err, ErrNoVerdict):
+		return nil, ""
+	case err != nil:
+		return nil, fmt.Sprintf("cloop's verdict on it could not be read (%v), so the agent's own report was used", err)
+	case !v.For(t):
+		// An earlier attempt's: the rule the live artifact is held to.
+		return nil, ""
+	}
+	return v, ""
+}
+
+// withNote appends the note about an unusable verdict to a re-queue reason.
+func withNote(reason, note string) string {
+	if note == "" {
+		return reason
+	}
+	return reason + "; " + note
 }
 
 // adopt records the outcome the agent had already reached, reproducing the
 // bookkeeping the dying run did not get to do.
-func adopt(workDir string, t *pm.Task, out Outcome, output string, signal pm.TaskStatus, modTime time.Time, truncated bool) Outcome {
+func adopt(workDir string, t *pm.Task, out Outcome, output string, signal pm.TaskStatus, modTime time.Time, truncated bool, note string) Outcome {
 	body := output
 	if truncated {
 		body = truncationNotice + output
@@ -163,10 +214,14 @@ func adopt(workDir string, t *pm.Task, out Outcome, output string, signal pm.Tas
 		t.ArtifactPath = path
 	}
 
-	pm.AddAnnotation(t, "ai", fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Recovered after an interrupted run: the agent had already finished and reported %s, "+
 			"but the run process died before recording it. The outcome was adopted from the live "+
-			"artifact rather than re-executing the task.", signal))
+			"artifact rather than re-executing the task.", signal)
+	if note != "" {
+		msg += " Note: " + note + "."
+	}
+	pm.AddAnnotation(t, "ai", msg)
 
 	out.Action = ActionAdopted
 	out.Status = signal
@@ -174,11 +229,144 @@ func adopt(workDir string, t *pm.Task, out Outcome, output string, signal pm.Tas
 	return out
 }
 
+// applyVerdict records the outcome the orchestrator had decided before the run
+// ended. A verdict to re-queue re-queues; any other is applied as the task's
+// outcome, with the fields the run would have stored alongside it.
+//
+// readTranscript says whether the live artifact may be read for the task's
+// transcript. Reconcile reads it — the same evidence it would otherwise adopt —
+// and keeps the transcript as the task artifact; SettleFromVerdicts does not,
+// and the verdict's own summary stands in for it.
+func applyVerdict(workDir string, t *pm.Task, out Outcome, v *Verdict, readTranscript bool) Outcome {
+	out.Verdict = v
+	if v.Status == pm.TaskPending {
+		return requeue(t, out, "cloop had already returned it to pending — "+v.Describe())
+	}
+
+	var body string
+	agent := pm.TaskInProgress
+	if readTranscript {
+		output, modTime, truncated, err := readLiveArtifact(workDir, t.ID)
+		if err == nil && (t.StartedAt == nil || !modTime.Before(*t.StartedAt)) {
+			body = output
+			if truncated {
+				body = truncationNotice + output
+			}
+			agent = pm.CheckTaskSignal(output)
+		}
+	}
+
+	t.Status = v.Status
+	completed := v.WrittenAt
+	t.CompletedAt = &completed
+	if t.StartedAt != nil && !completed.Before(*t.StartedAt) {
+		t.ActualMinutes = int(completed.Sub(*t.StartedAt).Minutes())
+	}
+	switch {
+	case body != "":
+		t.Result = truncate(body, 500)
+		if path, err := artifact.WriteTaskArtifact(workDir, t, body); err == nil {
+			t.ArtifactPath = path
+		}
+	case v.Summary != "":
+		t.Result = v.Summary
+	}
+	if v.Diagnosis != "" {
+		t.FailureDiagnosis = v.Diagnosis
+	}
+	if v.Review != nil {
+		t.Review = v.Review.Clone()
+	}
+	switch {
+	case v.Background != nil:
+		bg := *v.Background
+		bg.Commands = append([]string(nil), v.Background.Commands...)
+		t.Background = &bg
+	case t.Background.Pending():
+		// The wait ended with the execution; a "waiting" record would show a
+		// finished task as blocked.
+		t.Background = nil
+	}
+
+	msg := fmt.Sprintf("Recovered after an interrupted run: cloop had already decided this execution "+
+		"was %s — %s — but the run ended before that reached the database.", v.Status, v.Describe())
+	switch {
+	case agent == v.Status:
+		msg += " The agent had reported the same."
+	case agent != pm.TaskInProgress:
+		msg += fmt.Sprintf(" That decision was applied, not the agent's own report (%s).", signalWord(agent))
+	default:
+		msg += " That decision was applied."
+	}
+	pm.AddAnnotation(t, "cloop", msg)
+
+	out.Action = ActionAdopted
+	out.Status = v.Status
+	out.CompletedAt = completed
+	return out
+}
+
+// signalWord renders a status as the agent's signal line.
+func signalWord(s pm.TaskStatus) string {
+	switch s {
+	case pm.TaskDone:
+		return "TASK_DONE"
+	case pm.TaskFailed:
+		return "TASK_FAILED"
+	case pm.TaskSkipped:
+		return "TASK_SKIPPED"
+	}
+	return string(s)
+}
+
+// SettleFromVerdicts applies the fresh verdicts in workDir to the tasks plan
+// left in progress, and leaves every other in-progress task as it is. It reads
+// the verdict sidecars and nothing else, and writes nothing: it mutates plan in
+// place and returns one Outcome per task it settled.
+//
+// It is the half of Reconcile that is safe on a remote device. Once a seeded
+// run has exited, the device reads back what it left (pkg/executor/projectseed)
+// and runs this first, so a run that died — or stopped on a failed write —
+// after the orchestrator decided an outcome reports that decision rather than
+// a task still in progress. What the orchestrator had not decided stays in
+// progress, for the hub's dead-run recovery to settle: the hub cannot read the
+// device's live artifact, so it re-queues.
+//
+// A sidecar that is present but unusable is noted on the task, which stays in
+// progress. The caller must guarantee the run has exited.
+func SettleFromVerdicts(workDir string, plan *pm.Plan) []Outcome {
+	if plan == nil {
+		return nil
+	}
+	var outcomes []Outcome
+	for _, t := range plan.Tasks {
+		if t == nil || t.Status != pm.TaskInProgress {
+			continue
+		}
+		v, unusable := verdictFor(workDir, t)
+		if !v.Decided() {
+			if unusable != "" {
+				pm.AddAnnotation(t, "cloop", "The run ended with this task in progress, and "+unusable+".")
+			}
+			continue
+		}
+		outcomes = append(outcomes, applyVerdict(workDir, t, Outcome{TaskID: t.ID, Title: t.Title}, v, false))
+	}
+	return outcomes
+}
+
 // requeue resets a genuinely unfinished task so it runs again.
 func requeue(t *pm.Task, out Outcome, reason string) Outcome {
 	t.Status = pm.TaskPending
 	t.StartedAt = nil
-	pm.AddAnnotation(t, "ai", fmt.Sprintf(
+	if t.Background.Pending() {
+		t.Background = nil
+	}
+	author := "ai"
+	if out.Verdict != nil {
+		author = "cloop"
+	}
+	pm.AddAnnotation(t, author, fmt.Sprintf(
 		"Reset to pending after an interrupted run: %s.", reason))
 
 	out.Action = ActionRequeued

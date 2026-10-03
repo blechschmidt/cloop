@@ -493,7 +493,7 @@ func TestPersistFailure_NamesWhatWasLost(t *testing.T) {
 	t.Cleanup(func() { saveState = prev })
 	saveState = func(*state.ProjectState, saveMode) error { return errSaveInjected }
 
-	err := o.persistOutcome(s, &pm.Task{ID: 42, Status: pm.TaskFailed}, "failure (provider error)")
+	err := o.persistOutcome(s, &pm.Task{ID: 42, Status: pm.TaskFailed}, "failure (provider error)", agentWhy(pm.TaskFailed))
 	if err == nil {
 		t.Fatal("persistOutcome returned nil on a failing store")
 	}

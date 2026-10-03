@@ -110,7 +110,7 @@ func (o *Orchestrator) abortTask(s *state.ProjectState, task *pm.Task, ab Abort,
 		note += fmt.Sprintf(" Retry scheduled after %s.", ab.RetryAfter.UTC().Format(time.RFC1123))
 	}
 	pm.AddAnnotation(task, "cloop", note)
-	if err := o.persistOutcome(s, task, fmt.Sprintf("abort (%s), back to pending", ab.Class)); err != nil {
+	if err := o.persistOutcome(s, task, fmt.Sprintf("abort (%s), back to pending", ab.Class), abortWhy(ab)); err != nil {
 		return err
 	}
 

@@ -91,6 +91,26 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Recovery no longer resurrects a task cloop rejected.** A run that died — or
+  stopped because its outcome write failed — after the review gate, `--verify`,
+  `--script-verify`, abandoned background work or an unanswered clarification
+  question had failed a task was recovered from the agent's own `TASK_DONE`, and
+  the task's dependents ran on rejected work. The orchestrator now writes each
+  decision to `.cloop/artifacts/<id>_verdict.json` before it stores it, and the
+  next run's recovery, the hub's dead-run repair and a remote device reading a
+  run back all apply that first; the agent's signal is used only when there is
+  no decision for the execution. A task whose review had not finished runs
+  again rather than counting as done. `cloop compact` and the retention janitor
+  remove verdicts nothing will read again.
+- **Multi-agent mode obeys the review gate.** `cloop run --multi-agent` built
+  options of its own for its architect, coder and reviewer passes, so a gated
+  project's sub-agents pushed straight to the remote, unreviewed. Every pass now
+  runs as a single agent would — the gate's push hold, the task's directory, the
+  project's effort and thinking settings, the background-work notice — and no
+  longer stops at a hidden ten-minute limit when no step timeout is set.
+- `--script-verify` verified nothing when no step timeout was set, which is the
+  default: the script was requested under a deadline that had already passed,
+  and the error that followed counted as a pass.
 - A project's `capabilities.egress: public` on an executor whose firewall allows
   only a private range handed the project the whole public Internet. It is now
   refused, like the broker-only case: a scope may only remove reach.

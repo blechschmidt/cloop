@@ -10,6 +10,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
 
 // stalledProject builds an initialised project whose task 63 is in_progress
@@ -78,6 +79,47 @@ func TestReconcileStaleTasksAdoptsAndPersists(t *testing.T) {
 	}
 	if found.CompletedAt == nil {
 		t.Error("CompletedAt not persisted")
+	}
+}
+
+// The hub's dead-run repair reads the orchestrator's verdict before the
+// agent's transcript (Task 20365): a run that died after the review gate
+// rejected its task must not be repaired into "done" on the agent's word.
+func TestReconcileStaleTasksAppliesTheOrchestratorsVerdict(t *testing.T) {
+	dir, taskID := stalledProject(t)
+	st, err := state.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := *st.Plan.TaskByID(taskID).StartedAt
+	if err := taskrecover.WriteVerdict(dir, taskrecover.Verdict{
+		TaskID: taskID, Status: pm.TaskFailed, Source: taskrecover.SourceReviewGate, Reason: "review_blocked",
+		Detail: "Review gate: changes requested — not published.", StartedAt: &started,
+		WrittenAt: started.Add(31 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{WorkDir: dir}
+	srv.reconcileDeadRun(dir, runVerdict{})
+
+	reloaded, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("reload state: %v", err)
+	}
+	if got := reloaded.Plan.TaskByID(taskID); got.Status != pm.TaskFailed {
+		t.Fatalf("status = %q, want failed: the hub adopted the agent's TASK_DONE over the gate's rejection", got.Status)
+	}
+	rows, _, err := state.ListEvents(dir, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalled bool
+	for _, r := range rows {
+		journalled = journalled || (r.Type == state.EventTaskFailed && r.TaskID == taskID)
+	}
+	if !journalled {
+		t.Errorf("no task_failed recovery row: %+v", rows)
 	}
 }
 

@@ -70,6 +70,11 @@ there too. A run that is already going picks up a change at its next task.
    performs — [git mode](../reference/commands.md) branches, the
    [parallel merge queue](../architecture/executors.md) — go ahead.
 
+In multi-agent mode (`cloop run --multi-agent`) the gate holds the pushes of all
+three sub-agents — architect, coder and reviewer — and each is told so, exactly
+as a single agent is. The gate then reviews the task once, after the pipeline's
+own reviewer, and a fix round resumes the coder's conversation.
+
 A task that changed nothing is not sent to the reviewer at all: there is nothing
 to review and nothing to publish. The gate works on git repositories — the
 project's own and any the task clones inside it — so in a project directory
@@ -93,6 +98,15 @@ lists a `blocker` or `major` finding: the reviewer contradicted itself.
 A blocked task's commits stay where the agent made them, in the working copy,
 for a person to look at; in git mode its branch stays unmerged. Resetting the
 task runs it again, and the retry is told what the reviewer found.
+
+**A run that ends before the outcome is stored keeps the gate's decision.**
+cloop writes each decision about a task to `.cloop/artifacts/<id>_verdict.json`
+before it records the outcome, and the next run's recovery — or the hub's, when
+it notices the run has gone — reads that first. A task the gate failed is
+recovered as failed, not as the `TASK_DONE` the agent printed, so the tasks that
+depend on it do not run on rejected work. A run that ends while the review is
+still going is recovered by running the task again: the agent's pushes were
+held, so nothing of it was published, and the retry is reviewed like any other.
 
 ## What the reviewer sees
 
@@ -177,6 +191,5 @@ tree the reviewer approved.
 - **Parallel tasks in one working tree** see each other's changes, so each
   review includes whatever its peers changed so far. Turn on worktree isolation
   for reviews of one task at a time.
-- **Multi-agent mode** runs its own sub-agents and does not hold their pushes.
 - **Opening a feature's pull request** publishes the feature branch as it
   stands; the pull request is itself the place a person reviews it.

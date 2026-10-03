@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -23,6 +22,33 @@ type Result struct {
 	// falling back to the coder's signal. One of TASK_DONE, TASK_FAILED, TASK_SKIPPED.
 	Signal      pm.TaskStatus
 	ArtifactDir string // relative path of the per-task artifact directory
+
+	// InputTokens, OutputTokens and ThinkingTokens are summed over the passes.
+	InputTokens    int
+	OutputTokens   int
+	ThinkingTokens int
+	// Background is the background work the passes left behind (Task 20205):
+	// the first pass whose work did not drain, else the last that left any.
+	// The orchestrator judges the task by it exactly as it judges a single
+	// agent's — otherwise a coder that started a job and walked away would
+	// have its "waiting" record cleared and its result accepted.
+	Background *provider.BackgroundActivity
+	// SessionID is the coder's conversation, where a provider reports one.
+	// The coder made the changes, so a review gate that sends the task back
+	// with findings resumes that conversation.
+	SessionID string
+}
+
+// Brief is what every pass is told about the task.
+type Brief struct {
+	Task           *pm.Task
+	Goal           string
+	Instructions   string
+	ProjectContext string
+	// Notice is a prompt section every pass carries — the review gate's,
+	// while the project's gate is on (Task 20365), so a sub-agent that pushes
+	// knows the push is held and must not be routed around.
+	Notice string
 }
 
 var nonSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -50,6 +76,17 @@ func slug(title string, maxLen int) string {
 // Sub-agent responses are stored as artifact files under
 // .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt.
 //
+// opts are the options a single-agent run of the task would get — model,
+// effort, thinking settings, working directory, the environment that holds
+// pushes for the review gate, the background-wait notice — and every pass
+// runs with them, setting only its own system prompt (Task 20365). Before
+// that, the pipeline built options of its own from a model and a timeout, so a
+// gated project's sub-agents pushed straight past the gate, ran in the
+// process's working directory rather than the task's, and were cut off at ten
+// minutes when no step timeout was set, against Task 20148's rule that
+// a task has no time limit unless one is configured. A zero opts.Timeout
+// still means none.
+//
 // Two stability bounds protect the pipeline:
 //   - ctx.Err() is checked between passes so a cancelled parent (Ctrl+C
 //     translated to cancel, or the orchestrator's per-task watchdog firing)
@@ -61,81 +98,80 @@ func slug(title string, maxLen int) string {
 //     a provider implementation (e.g. nil-pointer in a third-party SDK,
 //     malformed JSON deref) becomes a returned error instead of taking down
 //     the orchestrator and losing every other queued task.
-func RunTask(
-	ctx context.Context,
-	prov provider.Provider,
-	model string,
-	timeout time.Duration,
-	task *pm.Task,
-	goal string,
-	instructions string,
-	projectContext string,
-) (*Result, error) {
+func RunTask(ctx context.Context, prov provider.Provider, opts provider.Options, brief Brief) (*Result, error) {
+	task := brief.Task
+	if task == nil {
+		return nil, fmt.Errorf("multiagent: no task")
+	}
 	res := &Result{}
 
 	// Build the base task description block used by all passes.
 	var header strings.Builder
-	if projectContext != "" {
+	if brief.ProjectContext != "" {
 		header.WriteString("## Project Context\n\n")
-		header.WriteString(projectContext)
+		header.WriteString(brief.ProjectContext)
 		header.WriteString("\n\n")
 	}
 	header.WriteString("## Goal\n\n")
-	header.WriteString(goal)
+	header.WriteString(brief.Goal)
 	header.WriteString("\n\n")
-	if instructions != "" {
+	if brief.Instructions != "" {
 		header.WriteString("## Instructions\n\n")
-		header.WriteString(instructions)
+		header.WriteString(brief.Instructions)
 		header.WriteString("\n\n")
 	}
 	header.WriteString(fmt.Sprintf("## Task %d: %s\n\n", task.ID, task.Title))
 	header.WriteString(task.Description)
 	header.WriteString("\n")
+	if brief.Notice != "" {
+		header.WriteString("\n")
+		header.WriteString(strings.TrimRight(brief.Notice, "\n"))
+		header.WriteString("\n")
+	}
 	baseContext := header.String()
 
-	opts := provider.Options{
-		Model:   model,
-		Timeout: timeout,
-	}
-	if opts.Timeout == 0 {
-		opts.Timeout = 10 * time.Minute
+	// pass runs one sub-agent with the shared options and its role's system
+	// prompt, and folds what it spent and left behind into res.
+	pass := func(name, systemPrompt, prompt string) (*provider.Result, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("multiagent cancelled before %s pass: %w", name, err)
+		}
+		passOpts := opts
+		passOpts.SystemPrompt = systemPrompt
+		r, err := safeComplete(ctx, prov, prompt, passOpts)
+		if err != nil {
+			return nil, fmt.Errorf("%s pass: %w", name, err)
+		}
+		res.InputTokens += r.InputTokens
+		res.OutputTokens += r.OutputTokens
+		res.ThinkingTokens += r.ThinkingTokens
+		if bg := r.Background; bg != nil && bg.Detected > 0 && !res.Background.Incomplete() {
+			res.Background = bg
+		}
+		return r, nil
 	}
 
 	// ── Pass 1: Architect ──────────────────────────────────────────────────
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("multiagent cancelled before architect pass: %w", err)
-	}
-	architectPrompt := baseContext + "\nDesign the technical approach for this task."
-	archOpts := opts
-	archOpts.SystemPrompt = ArchitectSystemPrompt
-	archResult, err := safeComplete(ctx, prov, architectPrompt, archOpts)
+	archResult, err := pass("architect", ArchitectSystemPrompt, baseContext+"\nDesign the technical approach for this task.")
 	if err != nil {
-		return nil, fmt.Errorf("architect pass: %w", err)
+		return nil, err
 	}
 	res.ArchitectOutput = archResult.Output
 
 	// ── Pass 2: Coder ──────────────────────────────────────────────────────
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("multiagent cancelled before coder pass: %w", err)
-	}
 	var coderPrompt strings.Builder
 	coderPrompt.WriteString(baseContext)
 	coderPrompt.WriteString("\n## Architect's Design\n\n")
 	coderPrompt.WriteString(res.ArchitectOutput)
 	coderPrompt.WriteString("\n\nImplement the task following the architect's design above.")
-
-	coderOpts := opts
-	coderOpts.SystemPrompt = CoderSystemPrompt
-	coderResult, err := safeComplete(ctx, prov, coderPrompt.String(), coderOpts)
+	coderResult, err := pass("coder", CoderSystemPrompt, coderPrompt.String())
 	if err != nil {
-		return nil, fmt.Errorf("coder pass: %w", err)
+		return nil, err
 	}
 	res.CoderOutput = coderResult.Output
+	res.SessionID = coderResult.SessionID
 
 	// ── Pass 3: Reviewer ───────────────────────────────────────────────────
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("multiagent cancelled before reviewer pass: %w", err)
-	}
 	var reviewerPrompt strings.Builder
 	reviewerPrompt.WriteString(baseContext)
 	reviewerPrompt.WriteString("\n## Architect's Design\n\n")
@@ -143,12 +179,9 @@ func RunTask(
 	reviewerPrompt.WriteString("\n\n## Coder's Implementation\n\n")
 	reviewerPrompt.WriteString(res.CoderOutput)
 	reviewerPrompt.WriteString("\n\nReview the implementation and emit your verdict.")
-
-	reviewerOpts := opts
-	reviewerOpts.SystemPrompt = ReviewerSystemPrompt
-	reviewerResult, err := safeComplete(ctx, prov, reviewerPrompt.String(), reviewerOpts)
+	reviewerResult, err := pass("reviewer", ReviewerSystemPrompt, reviewerPrompt.String())
 	if err != nil {
-		return nil, fmt.Errorf("reviewer pass: %w", err)
+		return nil, err
 	}
 	res.ReviewerOutput = reviewerResult.Output
 

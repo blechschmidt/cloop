@@ -733,6 +733,33 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	return t, nil
 }
 
+// TaskStatuses returns every task's status by ID, without loading the tasks.
+// The janitor uses it to tell which verdict sidecars a stale-task recovery
+// could still need (Task 20365).
+func (d *DB) TaskStatuses() (map[int]pm.TaskStatus, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`SELECT id, status FROM plan_tasks`)
+	if err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	defer rows.Close()
+	out := map[int]pm.TaskStatus{}
+	for rows.Next() {
+		var id int
+		var status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, classifyDriverErr(err)
+		}
+		out[id] = pm.TaskStatus(status)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	return out, nil
+}
+
 // DeleteTask removes a single task by id. Returns nil even if the row did
 // not exist — the post-condition (task absent) is satisfied either way.
 func (d *DB) DeleteTask(id int) error {

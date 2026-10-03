@@ -714,6 +714,7 @@ rest all outlive the lease by a wide margin:
 | --- | --- |
 | `.cloop/tasks/<id>-<slug>.md`, the task artifact | permanent |
 | `.cloop/artifacts/<id>_output.txt`, tailed by `cloop task watch` | until compaction |
+| `.cloop/artifacts/<id>_verdict.json`, the orchestrator's verdict on a task, carrying its result summary | a week after the task leaves in-progress |
 | the step log in `state.db` | until retention prunes it |
 | live-log frames | broadcast to every browser attached to the project |
 

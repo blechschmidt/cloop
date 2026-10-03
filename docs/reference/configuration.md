@@ -1241,6 +1241,13 @@ VACUUM is refused unless another hub does not hold the control-plane lease and
 the filesystem has room for the rebuild — SQLite needs free space *before* it
 returns any, which makes a nearly-full disk the worst moment to try.
 
+Every pass also removes the task verdicts the orchestrator writes beside each
+live artifact (`.cloop/artifacts/<id>_verdict.json`, read by stale-task
+recovery) once they are a week old and their task is no longer in progress. One
+whose task is still in progress is never removed: that is the one a recovery
+needs. `cloop compact` removes them on the same terms, after
+`--keep-artifacts-days` (an hour at the least).
+
 #### Row tables
 
 The keys above bound files and dead pages. These bound the tables that gain a

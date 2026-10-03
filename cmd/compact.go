@@ -64,6 +64,7 @@ Use --dry-run to preview what would be deleted without making any changes.`,
 		printRow("Plan snapshots pruned", sum.SnapshotsDeleted, sum.SnapshotsBytesFreed)
 		printRow("Task checkpoints removed", sum.CheckpointsDeleted, sum.CheckpointsBytesFreed)
 		printRow("Task artifacts deleted", sum.ArtifactsDeleted, sum.ArtifactsBytesFreed)
+		printRow("Task verdicts removed", sum.VerdictsDeleted, sum.VerdictsBytesFreed)
 
 		stepLogLine := "Step log unchanged"
 		if sum.StepLogTruncated {

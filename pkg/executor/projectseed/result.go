@@ -61,6 +61,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
 
 // ResultFormat is the version of the Result document this build writes.
@@ -261,6 +262,16 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 		return nil, fmt.Errorf("projectseed: read the project the run left in %s: %w", dbPath, err)
 	}
 
+	// A run that died — or stopped because its own outcome write failed —
+	// after the orchestrator had decided a task leaves that decision in the
+	// task's verdict sidecar, not in the database (Task 20365). Apply it here,
+	// so the hub hears the decision rather than "still in progress"; without
+	// the device's live artifact, the hub's own recovery could only re-queue
+	// the task, and a rejected one would run again as if nothing had been
+	// decided. Only verdicts are read: what the orchestrator had not decided
+	// stays in progress for the hub to settle, as before.
+	settled := taskrecover.SettleFromVerdicts(dir, after.Plan)
+
 	r.Status = after.Status
 	if after.PauseReason != nil {
 		pr := *after.PauseReason
@@ -281,9 +292,44 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 	if err != nil {
 		return nil, err
 	}
-	r.Events, r.Costs = events, costs
+	r.Events, r.Costs = append(events, settledEvents(settled, scrub)...), costs
+	if n := len(r.Events) - maxResultEvents; n > 0 {
+		r.Events = r.Events[n:]
+		notes = append(notes, fmt.Sprintf("%d more of the run's oldest journal events were left on the "+
+			"executor to make room for its recoveries", n))
+	}
 	r.Omitted = append(r.Omitted, notes...)
 	return r, nil
+}
+
+// settledEvents renders the recoveries SettleFromVerdicts made as the journal
+// rows a recovery on the hub would have written, newest last.
+func settledEvents(settled []taskrecover.Outcome, scrub func(string) string) []Event {
+	var out []Event
+	for _, oc := range settled {
+		row, details, ok := taskrecover.EventFor(oc)
+		if !ok {
+			continue
+		}
+		e := Event{
+			Timestamp: row.Timestamp,
+			Type:      string(row.Type),
+			TaskID:    row.TaskID,
+			TaskTitle: scrub(row.TaskTitle),
+			Step:      row.Step,
+			Message:   truncate(scrub(row.Message), maxEventMessageBytes),
+		}
+		if e.Timestamp.IsZero() {
+			e.Timestamp = time.Now()
+		}
+		if details != nil {
+			if b, err := json.Marshal(details); err == nil {
+				e.Details = boundDetails(scrub(string(b)))
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // diffTasks returns every task in after that is new or differs from base.

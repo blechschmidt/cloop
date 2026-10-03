@@ -412,3 +412,49 @@ func journalHas(t *testing.T, dir, eventType string) bool {
 	}
 	return false
 }
+
+// Multi-agent mode used to build options of its own for its three passes, so
+// a gated project's sub-agents pushed past the gate (Task 20365). Every pass
+// now runs as a single agent would: the hold's environment, the task's
+// directory, the project's effort, and the gate's section in its prompt. The
+// helper is never run here — the passes do not push — but naming one is what
+// makes the gate hold pushes at all under go test.
+func TestReviewGate_MultiAgentPassesAreHeldToo(t *testing.T) {
+	repo := gateProject(t, &pm.ReviewGate{Enabled: true, Mode: pm.ReviewModeBlock}, "Add division")
+	worker := &gateWorker{do: func(dir, prompt string, call int) string {
+		if strings.Contains(prompt, "Implement the task following the architect's design") {
+			commitFile(dir, "calc.txt", "b == 0 ? err : a / b\n")
+		}
+		return "pass done\nTASK_DONE"
+	}}
+	reviewer := &gateReviewer{decide: func(string, int) string { return approve }}
+	o := newOrchestrator(t, repo, Config{WorkDir: repo, PMMode: true, MultiAgent: true, Effort: "high",
+		ReviewProvider: reviewer, ReviewGateHelper: []string{"/bin/false"}}, worker)
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	calls := worker.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("worker calls = %d, want the three passes", len(calls))
+	}
+	for i, c := range calls {
+		env := strings.Join(c.opts.Env, "\n")
+		if !strings.Contains(env, "pushInsteadOf") || !strings.Contains(env, "PATH=") {
+			t.Errorf("pass %d ran without the gate's push hold: %v", i, c.opts.Env)
+		}
+		if c.opts.WorkDir != repo || c.opts.Effort != "high" || c.opts.Timeout != 0 {
+			t.Errorf("pass %d options: workdir %q effort %q timeout %s", i, c.opts.WorkDir, c.opts.Effort, c.opts.Timeout)
+		}
+		if !strings.Contains(c.prompt, "## REVIEW GATE") {
+			t.Errorf("pass %d was not told about the gate", i)
+		}
+	}
+	if reviewer.count() != 1 {
+		t.Errorf("reviews = %d, want the gate to review the pipeline's work once", reviewer.count())
+	}
+	got := loadTask(t, repo, 1)
+	if got.Status != pm.TaskDone || got.Review == nil || got.Review.Verdict != pm.ReviewApproved {
+		t.Fatalf("status %s, review %+v", got.Status, got.Review)
+	}
+}

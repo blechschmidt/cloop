@@ -160,6 +160,7 @@ func renderRetention(rep *janitor.Report, pol janitor.Policy) {
 	}{
 		{"plan-history", rep.PlanHistory, "file"},
 		{"audit-archive", rep.Archive, "file"},
+		{"task-verdicts", rep.Verdicts, "file"},
 		{"provider-calls", rep.ProviderCalls, "row"},
 		{"steps", rep.Steps, "row"},
 		{"events", rep.Events, "row"},

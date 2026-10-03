@@ -21,7 +21,10 @@
 //	                   back as an error wrapping ErrStateNotPersisted, and the
 //	                   run ends with it.
 //	persistOutcome     the same, for a task's status. The error names the task
-//	                   and the status that did not reach the database.
+//	                   and the status that did not reach the database. It
+//	                   writes the orchestrator's verdict first (verdict.go), so
+//	                   a run that stops here is recovered as it decided, not
+//	                   as the agent said (Task 20365).
 //	persistBestEffort  the state may be dropped. The call site says why that is
 //	                   true, and a failure is reported, never swallowed.
 //
@@ -178,7 +181,22 @@ func (o *Orchestrator) persist(s *state.ProjectState, what string, mode ...saveM
 // persist with the task named, so a failure says which task's outcome was lost
 // and what it was — without that the operator sees a SQLite error and no way
 // to know which task will run again. The returned error must be propagated.
-func (o *Orchestrator) persistOutcome(s *state.ProjectState, task *pm.Task, what string) error {
+//
+// why says who decided the status and why. It goes into the task's verdict
+// sidecar, written before the save: if the save fails and the run stops, or
+// the process dies between the two, the next run's stale-task recovery applies
+// this decision rather than adopting whatever the agent's transcript says.
+func (o *Orchestrator) persistOutcome(s *state.ProjectState, task *pm.Task, what string, why verdictWhy) error {
+	if task != nil {
+		o.noteVerdict(task, task.Status, why)
+	}
+	return o.saveOutcome(s, task, what)
+}
+
+// saveOutcome is persistOutcome without the verdict, for a write that stores
+// more of a task whose outcome persistOutcome has already stored — the step
+// record after it — and so decides nothing recovery could need.
+func (o *Orchestrator) saveOutcome(s *state.ProjectState, task *pm.Task, what string) error {
 	if err := saveState(s, mergeExternal); err != nil {
 		pf := &persistFailure{what: what, err: err}
 		if task != nil {
