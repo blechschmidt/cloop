@@ -47,7 +47,10 @@ import (
 // any workload carrying revocable credentials on a driver that does not
 // implement this interface, so a signature drift here would take host execution
 // out of service for leased work rather than fail a build.
-var _ executor.Revoker = (*Executor)(nil)
+var (
+	_ executor.Revoker         = (*Executor)(nil)
+	_ executor.SecretRefresher = (*Executor)(nil)
+)
 
 // SupportsRevocation reports whether a revocation issued now would be honoured.
 // Always true: the process, its environment and its credential files are all on
@@ -198,4 +201,70 @@ func wipeBindingFiles(bindings []executor.SecretBinding) (int, error) {
 		}
 	}
 	return removed, errors.Join(errs...)
+}
+
+// RefreshSecretFiles implements executor.SecretRefresher (Task 20375).
+//
+// A host process reads its lease where the hub materialised it, on this
+// machine's tmpfs, so the files to rewrite are the very paths the lease's
+// bindings recorded — and only those: a file the lease did not deliver is
+// refused. Each path is rewritten once however many processes hold the lease,
+// since they read the same file.
+//
+// The new content also joins each holder's output redaction. A host workload's
+// redactor covers its credential variables only — the file contents are caught
+// by the workload itself, reading its own lease directory (redact.FromEnviron)
+// — but a token that changed after the workload started is one it may not have
+// read yet, and scrubbing it here too costs nothing.
+func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRefreshRequest) executor.SecretRefreshReport {
+	out := executor.SecretRefreshReport{LeaseID: strings.TrimSpace(req.LeaseID)}
+	if err := req.Validate(); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	held := e.leases.Handles(executor.RevokeRequest{LeaseID: out.LeaseID})
+	if len(held) == 0 {
+		return out
+	}
+	out.Known = true
+
+	delivered := make(map[string]bool)
+	for _, bindings := range held {
+		for _, b := range bindings {
+			for _, f := range b.Files {
+				delivered[filepath.Clean(f)] = true
+			}
+		}
+	}
+	values := req.Values()
+	for _, handleID := range executor.SortedHandles(held) {
+		rec, err := e.lookup(handleID)
+		if err != nil {
+			continue
+		}
+		rec.addRedactions(values...)
+		out.Handles = append(out.Handles, handleID)
+	}
+
+	var errs []error
+	for _, f := range req.Files {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		path := filepath.Clean(f.Path())
+		if !delivered[path] {
+			errs = append(errs, fmt.Errorf("%s was not delivered by lease %s", path, out.LeaseID))
+			continue
+		}
+		if err := executor.ReplaceSecretFile(path, f.Content, executor.ReplaceOptions{Mode: f.FileMode()}); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		out.FilesRewritten++
+	}
+	if err := errors.Join(errs...); err != nil {
+		out.Error = err.Error()
+	}
+	return out
 }

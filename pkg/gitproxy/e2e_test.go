@@ -122,6 +122,13 @@ type harness struct {
 	// can be crossed without sleeping.
 	clock atomic.Int64
 
+	// forgeAuth, when set, replaces the forge's fixed-PAT check: the refresh
+	// tests (Task 20375) have it honour only the tokens a fake GitHub minted
+	// and has not let expire. An atomic.Value because the forge's handler
+	// reads it on a goroutine the race detector cannot see ordered after the
+	// test's write — the request comes from a git child process.
+	forgeAuth atomic.Value // func(user, pass, repo string) bool
+
 	mu     sync.Mutex
 	events []gitproxy.Event
 }
@@ -234,7 +241,15 @@ func (h *harness) startProxy(t *testing.T) {
 // hand rather than by weakening what the proxy sends.
 func (h *harness) serveForge(w http.ResponseWriter, r *http.Request) {
 	user, pass, ok := r.BasicAuth()
-	if !ok || user != forgeUser || pass != forgePAT {
+	allowed := ok && user == forgeUser && pass == forgePAT
+	if check, set := h.forgeAuth.Load().(func(user, pass, repo string) bool); set {
+		repo := ""
+		if parts := strings.SplitN(strings.Trim(r.URL.Path, "/"), "/", 3); len(parts) >= 2 {
+			repo = parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
+		}
+		allowed = ok && check(user, pass, repo)
+	}
+	if !allowed {
 		w.Header().Set("WWW-Authenticate", `Basic realm="forge"`)
 		http.Error(w, "forge: missing or wrong credential", http.StatusUnauthorized)
 		return

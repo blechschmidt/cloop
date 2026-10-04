@@ -494,6 +494,15 @@ The hub's session TTL is `executors.git_proxy.session_minutes`, defaulting to
 `[0, GitProxySessionMinutesUpper]` (720, i.e. `MaxSessionTTL`) is reported and
 reset to the default at load rather than silently narrowed.
 
+A session's TTL and its upstream credential's life are separate clocks. A GitHub
+App installation token is honoured for an hour; a session presenting one renews
+it through the broker when about ten minutes are left, at the scope it was first
+minted at, and destroys the old one once no request still presents it — so a
+session set to run three hours keeps working at GitHub for three hours. A
+renewal the broker or GitHub refuses (the grant revoked, the installation
+suspended) closes the session. See
+[the upstream credential renews itself](architecture/git-proxy.md#the-upstream-credential-renews-itself).
+
 ### A session's life is its TTL, not the run's
 
 This is about the *workspace* session — the one cloop's own fetch and write-back

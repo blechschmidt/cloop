@@ -162,6 +162,9 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 				// grant whose push it withheld, and a read-only grant never
 				// had one.
 				Branches: mat.Constraints.BranchNames(),
+				// A GitHub App token's hour, which RefreshWorkspaceCredential
+				// renews for a proxy session that outlives it. Zero for a PAT.
+				TokenExpiresAt: mat.GitHubTokenExpiresAt(),
 			},
 		}, release, nil
 	}
@@ -180,6 +183,33 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	}
 	return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 		"no active GitHub grant authorises %s", repoPath))
+}
+
+// RefreshWorkspaceCredential re-mints the GitHub App installation token cred
+// carries, at the scope it was first minted at, for a git proxy session that
+// presents it longer than GitHub's hour (Task 20375). held is the token the
+// session presents now.
+//
+// It returns the renewed credential and the function that destroys the one it
+// replaced, which the session calls once nothing presents that any more. A
+// refusal that will not change — the grant revoked or expired, the lease
+// released, GitHub refusing for good — wraps executor.ErrCredentialRefused; any
+// other error is worth retrying.
+func (s *BrokerSource) RefreshWorkspaceCredential(ctx context.Context, cred executor.GitCredential, held string) (executor.GitCredential, func(), error) {
+	if s == nil || s.Broker == nil {
+		return executor.GitCredential{}, nil, errors.New("gitcreds: no broker configured")
+	}
+	got, err := s.Broker.RefreshAppToken(ctx, cred.LeaseID, cred.GrantID, held)
+	if err != nil {
+		if errors.Is(err, secretbroker.ErrRefreshRefused) {
+			return executor.GitCredential{}, nil, fmt.Errorf("%w: %w", executor.ErrCredentialRefused, err)
+		}
+		return executor.GitCredential{}, nil, err
+	}
+	out := cred
+	out.Password = got.Token
+	out.TokenExpiresAt = got.ExpiresAt
+	return out, got.Retire, nil
 }
 
 // matchesGrantRef reports whether a material is the one the spec named. Both

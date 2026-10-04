@@ -503,8 +503,12 @@ func (h *httpGitHubApp) CreateInstallationToken(ctx context.Context, req Install
 	defer drainClose(resp)
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return InstallationToken{}, wrapf(ErrGitHubAppMint,
-			"create installation token: %s", describeGitHubError(resp))
+		message, described := readGitHubError(resp)
+		if githubRefusal(resp.StatusCode, resp.Header, message) {
+			return InstallationToken{}, fmt.Errorf("%w: %w: create installation token: %s",
+				ErrGitHubAppMint, ErrGitHubAppRefused, described)
+		}
+		return InstallationToken{}, wrapf(ErrGitHubAppMint, "create installation token: %s", described)
 	}
 	var tok InstallationToken
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tok); err != nil {
@@ -629,6 +633,73 @@ func drainClose(resp *http.Response) {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	_ = resp.Body.Close()
+}
+
+// githubRefusal reports whether a failed mint is GitHub saying no for good, as
+// opposed to GitHub being unreachable, busy or briefly unwilling (Task 20375).
+//
+// The difference decides what a refresh does next. A refusal ends the grant's
+// access the way a revocation does — its tokens destroyed, a proxy session
+// closed — while anything else is retried and the token already held keeps
+// working. Getting it wrong in the refusal direction cuts a long run off over
+// something that would have cleared in a minute, so the answer is "refused"
+// only where GitHub's own words say the authority is gone:
+//
+//   - 404: the installation is gone (uninstalled).
+//   - 422: the request names repositories or permissions the installation no
+//     longer covers — a repository removed from it, a permission withdrawn.
+//   - 403 naming a suspension ("This installation has been suspended"). Every
+//     other 403 — a secondary rate limit, which GitHub does not always mark
+//     with Retry-After or an exhausted X-RateLimit-Remaining, an abuse
+//     detection — may pass.
+//   - 401, unless GitHub objects to the JWT's timing ("'iat' claim", "'exp'
+//     claim"), which is this hub's clock and not the App: otherwise the App's
+//     key or the App itself is gone.
+//
+// 429 and every 5xx are retried.
+func githubRefusal(status int, header http.Header, message string) bool {
+	msg := strings.ToLower(message)
+	switch status {
+	case http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	case http.StatusForbidden:
+		if strings.TrimSpace(header.Get("Retry-After")) != "" ||
+			strings.TrimSpace(header.Get("X-RateLimit-Remaining")) == "0" {
+			return false
+		}
+		return strings.Contains(msg, "suspended")
+	case http.StatusUnauthorized:
+		for _, timing := range []string{"claim", "'iat'", "'exp'", "issued at", "expiration time"} {
+			if strings.Contains(msg, timing) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// readGitHubError reads a failed response once and returns GitHub's own
+// "message" field, if there was one, and the rendering describeGitHubError
+// gives it.
+func readGitHubError(resp *http.Response) (message, described string) {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &parsed) == nil && strings.TrimSpace(parsed.Message) != "" {
+		message = strings.TrimSpace(parsed.Message)
+		return message, fmt.Sprintf("github returned %s: %s", resp.Status, message)
+	}
+	excerpt := strings.TrimSpace(string(raw))
+	if len(excerpt) > 200 {
+		excerpt = excerpt[:200] + "…"
+	}
+	if excerpt == "" {
+		return "", "github returned " + resp.Status
+	}
+	return excerpt, fmt.Sprintf("github returned %s: %s", resp.Status, excerpt)
 }
 
 // describeGitHubError renders a failed response for an error message: the
@@ -776,6 +847,74 @@ func newGitHubAppMinter(api GitHubAppAPI, clock func() time.Time) *githubAppMint
 type mintResult struct {
 	token   InstallationToken
 	summary string
+	// scope is exactly what GitHub was asked for, kept so a refresh can ask
+	// for the same and nothing more (Task 20375).
+	scope appTokenScope
+}
+
+// appTokenScope is the request an installation token was minted under: which
+// installation, which repositories by ID, which permissions. A refresh replays
+// it verbatim rather than re-deriving it from the grant, because re-deriving
+// would resolve the allowlist against the installation's *current* inventory —
+// and a repository added to the installation since dispatch, matching "org/*",
+// would then widen a credential the run already holds.
+type appTokenScope struct {
+	baseURL        string
+	installationID int64
+	// repositoryIDs is nil for an installation-wide token (a "*" allowlist).
+	repositoryIDs []int64
+	// permissions is what was asked for; nil asked for the installation's
+	// whole permission set (a "*" permission list).
+	permissions map[string]string
+	// granted is what GitHub answered the first mint with. A refresh whose
+	// answer exceeds it is refused, so even a "*" grant cannot come back wider
+	// than the token it replaces.
+	granted map[string]string
+	// summary names what the token reaches: "org/a|org/b" or
+	// "installation-wide". Audit-safe.
+	summary string
+}
+
+// clone returns a copy whose slices and maps are not shared.
+func (s appTokenScope) clone() appTokenScope {
+	out := s
+	out.repositoryIDs = append([]int64(nil), s.repositoryIDs...)
+	out.permissions = copyPermissions(s.permissions)
+	out.granted = copyPermissions(s.granted)
+	return out
+}
+
+func copyPermissions(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// widerThan reports how got exceeds the scope's granted permissions, or "" when
+// it does not: a scope GitHub granted that the first token did not have, or a
+// higher level of one it did. Nothing is compared when either side is unknown
+// — GitHub always reports permissions, so that is a fake or a future API.
+func (s appTokenScope) widerThan(got map[string]string) string {
+	if s.granted == nil || got == nil {
+		return ""
+	}
+	var wider []string
+	for scope, level := range got {
+		had, ok := s.granted[scope]
+		switch {
+		case !ok:
+			wider = append(wider, scope+":"+level)
+		case permissionRank(level) > permissionRank(had):
+			wider = append(wider, scope+":"+level+" (was "+had+")")
+		}
+	}
+	sort.Strings(wider)
+	return strings.Join(wider, ", ")
 }
 
 // mint issues an installation token narrowed to the grant.
@@ -851,7 +990,77 @@ func (m *githubAppMinter) mint(ctx context.Context, cred *AppCredential, c Const
 		m.revoke(ctx, cred.BaseURL, tok.Token)
 		return mintResult{}, err
 	}
-	return mintResult{token: tok, summary: summary}, nil
+	scope := appTokenScope{
+		baseURL:        cred.BaseURL,
+		installationID: cred.InstallationID,
+		repositoryIDs:  append([]int64(nil), req.RepositoryIDs...),
+		permissions:    copyPermissions(req.Permissions),
+		granted:        copyPermissions(tok.Permissions),
+		summary:        summary,
+	}
+	return mintResult{token: tok, summary: summary, scope: scope}, nil
+}
+
+// remint mints a replacement for a token minted under scope, asking GitHub for
+// exactly what the first mint asked for (Task 20375).
+//
+// Nothing about the grant is consulted here, by design: the caller has already
+// re-checked that the grant still authorises the lease, and the scope is the
+// ceiling. The repository list is replayed by ID rather than re-resolved, and
+// the answer is held to the first token's permissions — a refresh can come back
+// narrower (GitHub is told the same, and an installation that lost a permission
+// grants less) but never wider. A token that came back wider is destroyed.
+func (m *githubAppMinter) remint(ctx context.Context, cred *AppCredential, scope appTokenScope) (InstallationToken, error) {
+	if m == nil || m.api == nil {
+		return InstallationToken{}, wrapf(ErrGitHubAppMint, "this hub has no GitHub API client")
+	}
+	if cred == nil || cred.InstallationID <= 0 {
+		return InstallationToken{}, wrapf(ErrGitHubAppMint, "github app credential names no installation")
+	}
+	if cred.InstallationID != scope.installationID || cred.BaseURL != scope.baseURL {
+		// Secrets are immutable, so this cannot happen through the broker. A
+		// store edited underneath it could do it, and a refresh must not follow
+		// the edit to another installation or another GitHub.
+		return InstallationToken{}, fmt.Errorf("%w: %w: the secret now names installation %d at %s, not "+
+			"installation %d at %s the token was minted for", ErrGitHubAppMint, ErrGitHubAppRefused,
+			cred.InstallationID, cred.BaseURL, scope.installationID, scope.baseURL)
+	}
+	now := m.now()
+	appJWT, err := cred.signJWT(now)
+	if err != nil {
+		return InstallationToken{}, err
+	}
+	perms := copyPermissions(scope.permissions)
+	if perms == nil {
+		// A "*" grant asked the first time for the installation's whole
+		// permission set. Asking for that again would take whatever the
+		// installation holds *now*: a permission an org admin accepted since
+		// would come back, be refused as wider than the first token, and cut
+		// the run off. Asking for exactly what the first token was granted
+		// keeps the refresh at the first token's reach.
+		perms = copyPermissions(scope.granted)
+	}
+	tok, err := m.api.CreateInstallationToken(ctx, InstallationTokenRequest{
+		BaseURL:        scope.baseURL,
+		AppJWT:         appJWT,
+		InstallationID: scope.installationID,
+		RepositoryIDs:  append([]int64(nil), scope.repositoryIDs...),
+		Permissions:    perms,
+	})
+	if err != nil {
+		return InstallationToken{}, err
+	}
+	if err := m.checkFreshness(tok, now); err != nil {
+		m.revoke(ctx, scope.baseURL, tok.Token)
+		return InstallationToken{}, err
+	}
+	if wider := scope.widerThan(tok.Permissions); wider != "" {
+		m.revoke(ctx, scope.baseURL, tok.Token)
+		return InstallationToken{}, fmt.Errorf("%w: %w: github answered the refresh with permissions the "+
+			"first token did not have (%s); it was destroyed rather than delivered",
+			ErrGitHubAppMint, ErrGitHubAppRefused, wider)
+	}
+	return tok, nil
 }
 
 func (m *githubAppMinter) now() time.Time {

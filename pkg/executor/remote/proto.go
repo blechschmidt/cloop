@@ -187,7 +187,16 @@ const (
 	// has no handler for the chunks and would ignore the workspace's branch,
 	// running the harness on the feature's base without any of its work. See
 	// MinBranchBundleVersion.
-	ProtocolVersion = 16
+	//
+	// v17 adds the secret_refresh frame pair (Task 20375): the hub replaces a
+	// credential file it already delivered to a running workload — a GitHub App
+	// installation token re-minted before GitHub's hour ran out — and the agent
+	// rewrites it in place in the lease directory and acknowledges. Gated on the
+	// hub side and degraded rather than refused: an older agent has no handler
+	// for the frame, so the hub does not send it, keeps the dispatch, and
+	// journals that the run's token lapses an hour after dispatch on that
+	// device. See MinSecretRefreshVersion.
+	ProtocolVersion = 17
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the

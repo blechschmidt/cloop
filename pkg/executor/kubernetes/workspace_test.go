@@ -142,6 +142,46 @@ func (f *fakeAPI) routeSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 201, in)
 
+	case r.Method == http.MethodPatch && name != "":
+		// A JSON merge patch of data keys: a GitHub App token replaced in a
+		// running Pod's lease Secret (Task 20375). Anything else is refused.
+		if ct := r.Header.Get("Content-Type"); ct != "application/merge-patch+json" {
+			writeStatus(w, 415, "UnsupportedMediaType", "want a merge patch, got "+ct)
+			return
+		}
+		f.mu.Lock()
+		deny := f.denySecretPatch
+		f.mu.Unlock()
+		if deny {
+			writeStatus(w, 403, "Forbidden", fmt.Sprintf("secrets %q is forbidden: cannot patch resource "+
+				"\"secrets\" in API group \"\"", name))
+			return
+		}
+		var patch struct {
+			Data map[string][]byte `json:"data"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			writeStatus(w, 400, "BadRequest", "undecodable patch: "+err.Error())
+			return
+		}
+		f.mu.Lock()
+		stored, ok := f.secrets[name]
+		if ok {
+			if stored.Data == nil {
+				stored.Data = map[string][]byte{}
+			}
+			for k, v := range patch.Data {
+				stored.Data[k] = v
+			}
+			f.secretPatches = append(f.secretPatches, name)
+		}
+		f.mu.Unlock()
+		if !ok {
+			writeStatus(w, 404, "NotFound", fmt.Sprintf("secrets %q not found", name))
+			return
+		}
+		writeJSON(w, 200, stored)
+
 	case r.Method == http.MethodDelete && name != "":
 		f.mu.Lock()
 		_, ok := f.secrets[name]

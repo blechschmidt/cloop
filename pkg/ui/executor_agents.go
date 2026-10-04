@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -159,9 +160,19 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		// the registry first.
 		restoreVirtualExecutors(state.DBPath(s.WorkDir), db)
 		executorHub = hub
+		executorHubLive.Store(hub)
 	})
 	return executorHub, executorHubErr
 }
+
+// executorHubLive is the agent hub once remoteHub has built it, for callers
+// with no Server to ask — a lease's keepalive, delivering a refreshed GitHub
+// App token to the device holding it (Task 20375). Nil until then, and on a
+// hub that never accepted an agent connection.
+var executorHubLive atomic.Pointer[remote.Hub]
+
+// activeRemoteHub returns the agent hub, or nil when none was built.
+func activeRemoteHub() *remote.Hub { return executorHubLive.Load() }
 
 // makeExecutorStatusMirror keeps the executors table in step with live
 // connectivity, so the Executors panel and `cloop executor list` report what

@@ -46,6 +46,11 @@ type fakeAPI struct {
 	// handlers and every assertion about them are in workspace_test.go.
 	secrets       map[string]*secret
 	secretDeletes []string
+	// secretPatches names the Secrets a merge patch reached (Task 20375).
+	secretPatches []string
+	// denySecretPatch answers every Secret patch 403, as a Role granting
+	// create and delete but not patch does.
+	denySecretPatch bool
 	// secretCreates counts accepted Secret creates. It is separate from
 	// len(secrets) because a Secret that was created and then deleted is
 	// indistinguishable from one that never existed if you only count what is

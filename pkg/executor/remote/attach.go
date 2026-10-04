@@ -109,7 +109,7 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 	// remote driver installs its set on the handle's bus at Start; reusing it
 	// keeps a credential that never reaches the live-log room from reaching a
 	// terminal on the same workload.
-	as.out = executor.RedactAttachOutput(pr, hs.redactor())
+	as.out = executor.RedactAttachOutputFollowing(pr, hs.redactor)
 
 	// Register before asking, so a device that answers faster than this
 	// goroutine resumes still finds somewhere to deliver the first chunk.

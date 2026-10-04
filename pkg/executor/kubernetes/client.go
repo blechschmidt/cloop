@@ -263,8 +263,9 @@ func (e *APIError) hint() string {
 			"it may have expired; re-mint it and update the secret with `cloop secret mint --kind kubeconfig`"
 	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/secrets"):
 		return "the kubeconfig's identity may not manage Secrets in the target namespace, which a git " +
-			"workspace needs: add `- apiGroups: [\"\"] resources: [\"secrets\"] verbs: [\"create\", \"delete\"]` " +
-			"to its Role. create and delete only — the driver never reads a Secret back"
+			"workspace and a lease's credential files need: add `- apiGroups: [\"\"] resources: [\"secrets\"] " +
+			"verbs: [\"create\", \"patch\", \"delete\"]` to its Role. create, patch and delete only — the " +
+			"driver never reads a Secret back, and patches one only to replace a GitHub App token before it expires"
 	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/networkpolicies"):
 		return "the kubeconfig's identity may not manage NetworkPolicies in the target namespace, which " +
 			"the egress filter needs: add `- apiGroups: [\"networking.k8s.io\"] resources: " +
@@ -274,7 +275,7 @@ func (e *APIError) hint() string {
 	case e.Code == http.StatusForbidden:
 		return "the kubeconfig's identity lacks RBAC for this call. It needs a Role in the target " +
 			"namespace granting pods: create, get, list, watch, delete; pods/log: get; and " +
-			"secrets: create, delete"
+			"secrets: create, patch, delete"
 	case e.Code == http.StatusNotFound && strings.Contains(e.Path, "/namespaces/"):
 		return "check that executors.kubernetes.namespace names an existing namespace"
 	case e.Code == http.StatusConflict:
@@ -444,8 +445,10 @@ func (c *client) deletePod(ctx context.Context, namespace, name string, gracePer
 // The driver creates exactly one kind of Secret — a workspace credential for
 // one run — and deletes it as soon as the init container that consumes it has
 // finished. There is deliberately no getSecret and no listSecrets, and the
-// shipped RBAC grants create and delete only: this driver never reads a Secret
-// back, so the ability to do so would be authority nothing here needs.
+// shipped RBAC grants create, patch and delete only: this driver never reads a
+// Secret back, so the ability to do so would be authority nothing here needs.
+// patch replaces a GitHub App token in a running Pod's lease Secret before
+// GitHub's hour ends (Task 20375).
 
 // secret models the fields this driver sets.
 //
@@ -494,6 +497,38 @@ func (c *client) createSecret(ctx context.Context, namespace string, s *secret) 
 		return nil, fmt.Errorf("kubernetes: API server accepted the Secret but returned no name")
 	}
 	return &out, nil
+}
+
+// patchSecretData replaces the given keys of a Secret's data, leaving every
+// other key as it is (Task 20375).
+//
+// A JSON merge patch rather than an update: an update would have to send the
+// whole data map, and this driver keeps no copy of the other files — it never
+// reads a Secret back. The response is not decoded, for the reason createSecret
+// reads only a name from its own: the API server echoes the object, credential
+// included.
+func (c *client) patchSecretData(ctx context.Context, namespace, name string, data map[string][]byte) error {
+	body, err := json.Marshal(struct {
+		Data map[string][]byte `json:"data"`
+	}{Data: data})
+	if err != nil {
+		return fmt.Errorf("kubernetes: encode secret patch: %w", err)
+	}
+	path := secretPath(namespace, name)
+	req, err := c.newRequest(ctx, http.MethodPatch, path, nil, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	resp, err := c.unary.Do(req)
+	if err != nil {
+		return c.transportError(http.MethodPatch, path, err)
+	}
+	defer drainClose(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return newAPIError(http.MethodPatch, path, resp)
+	}
+	return nil
 }
 
 // deleteSecret removes a Secret. As with deletePod, an already-absent object is

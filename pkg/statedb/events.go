@@ -149,6 +149,17 @@ const (
 	// times out inside a sandbox reads as a broken network, and the rules that
 	// dropped it live on the hub where the developer cannot see them.
 	EventFirewall EventType = "firewall"
+
+	// EventCredentialRefresh records that a run's GitHub App token could not
+	// be kept alive past GitHub's hour on the executor running it, or that its
+	// renewal was refused (Task 20375).
+	//
+	// On the project's journal for the reason the firewall row is: the
+	// symptom — git failing to authenticate an hour into a long run — lands on
+	// the developer, and the cause — an agent too old to receive the new
+	// token, a grant revoked, an installation suspended — is on the hub where
+	// they cannot see it.
+	EventCredentialRefresh EventType = "credential_refresh"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

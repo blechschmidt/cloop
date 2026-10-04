@@ -83,6 +83,23 @@ type GitGuardRequest struct {
 	// Token is the credential the guard takes custody of. It must not be
 	// copied into the result, into a log, or into anything the sandbox reads.
 	Token string
+	// TokenExpiresAt is when GitHub stops honouring Token: a GitHub App
+	// installation token's hour. Zero for a PAT, whose expiry the hub does not
+	// know.
+	TokenExpiresAt time.Time
+	// Refresh re-mints Token before it expires, at the scope it was first
+	// minted at (Task 20375): the same installation, repositories and
+	// permissions, and only while the grant behind it holds. Set for a
+	// github_app grant, nil for a PAT. held is the token the caller presents
+	// now; see Broker.RefreshAppToken.
+	//
+	// A guard that keeps Token for longer than an hour — a proxy session —
+	// calls it from its own request path when Token is within
+	// AppTokenRefreshWindow of TokenExpiresAt, presents the result from then
+	// on, and calls its Retire once nothing presents the old one. An error
+	// wrapping ErrRefreshRefused is final: the grant's access has ended, the
+	// tokens are destroyed, and the guard should close what it minted.
+	Refresh func(ctx context.Context, held string) (AppTokenRefresh, error)
 	// Repos is the grant's owner/name glob allowlist. The guard enforces it.
 	Repos []string
 	// Permissions is the grant's permission set ("contents:read"). The guard

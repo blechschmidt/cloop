@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 const ftBranch = "cloop/feature/widget"
@@ -203,6 +205,30 @@ func TestFeatureOutputIsReadAsBytesOnly(t *testing.T) {
 	// With no report at all, the write-back says why rather than nothing.
 	if wb := f.writeBack(); wb.Err == "" || wb.Delivered() {
 		t.Errorf("a missing report = %+v", wb)
+	}
+}
+
+// TestFeatureResultScrubsARefreshedToken: the project state is read back after
+// the run, so it is scrubbed of a token refreshed during it too.
+func TestFeatureResultScrubsARefreshedToken(t *testing.T) {
+	f := &featureRun{root: t.TempDir(), redact: redact.New("ghs_first_token_value").String}
+	f.out = filepath.Join(f.root, "out")
+	if err := os.Mkdir(f.out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bus := logbus.New("h", executor.StreamCombined, logbus.Options{Redact: redact.New("ghs_first_token_value")})
+	f.followRedaction(bus)
+	bus.AddRedactions("ghs_refreshed_token_value")
+	if err := os.WriteFile(filepath.Join(f.out, featureResultName+".err"),
+		[]byte("push with ghs_first_token_value then ghs_refreshed_token_value failed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.projectResult()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Redact(res.Err); strings.Contains(got, "ghs_") {
+		t.Errorf("project result scrubbed to %q; both tokens should be gone", got)
 	}
 }
 

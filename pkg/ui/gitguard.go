@@ -30,8 +30,10 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -86,8 +88,12 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		actor = workspaceLeaseActor
 	}
 
+	upstream := githubUpstreamBase
+	if g.svc.githubUpstream != "" {
+		upstream = g.svc.githubUpstream
+	}
 	m, err := g.svc.reg.Mint(gitproxy.MintRequest{
-		Upstream:     githubUpstreamBase,
+		Upstream:     upstream,
 		RepoPatterns: req.Repos,
 		Credential: gitproxy.Credential{
 			Username: secretbroker.GitHubUsername,
@@ -95,11 +101,15 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 			GrantID:  req.GrantID,
 			LeaseID:  req.LeaseID,
 		},
-		Policy:     policy,
-		TTL:        g.svc.ttl,
-		ProjectID:  req.ProjectID,
-		ExecutorID: req.ExecutorID,
-		Actor:      actor,
+		// A GitHub App token lives GitHub's hour; the session renews it from
+		// the broker before then (Task 20375). A PAT has neither.
+		CredentialExpiresAt: refreshableExpiry(req),
+		Refresh:             sessionRefresher(req),
+		Policy:              policy,
+		TTL:                 g.svc.ttl,
+		ProjectID:           req.ProjectID,
+		ExecutorID:          req.ExecutorID,
+		Actor:               actor,
 	})
 	if err != nil {
 		return secretbroker.GitGuardResult{}, err
@@ -126,6 +136,51 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		Summary: fmt.Sprintf("%s via git proxy, repos %s, refs %s",
 			mode, strings.Join(req.Repos, "|"), m.Session.Policy.RefSummary()),
 	}, nil
+}
+
+// refreshableExpiry is the expiry a session measures its upstream credential
+// against: the token's own, when the broker can renew it, and zero otherwise —
+// a PAT, whose expiry the hub does not know, is presented until the session
+// ends, as before.
+func refreshableExpiry(req secretbroker.GitGuardRequest) (exp time.Time) {
+	if req.Refresh == nil {
+		return exp
+	}
+	return req.TokenExpiresAt
+}
+
+// sessionRefresher adapts the broker's refresher for a GitHub App token to the
+// session's (Task 20375), or returns nil for a credential the hub cannot renew.
+//
+// The translation that matters is the final refusal: the broker says
+// ErrRefreshRefused when the grant was revoked or expired, the lease released,
+// or GitHub refused for good, and the session must then close — the proxy's
+// ErrCredentialRefused. Anything else is a failure that may pass, which the
+// session retries while the token it holds still works.
+func sessionRefresher(req secretbroker.GitGuardRequest) gitproxy.RefreshFunc {
+	if req.Refresh == nil || req.TokenExpiresAt.IsZero() {
+		return nil
+	}
+	refresh, grantID, leaseID := req.Refresh, req.GrantID, req.LeaseID
+	return func(ctx context.Context, held string) (gitproxy.Refreshed, error) {
+		got, err := refresh(ctx, held)
+		if err != nil {
+			if errors.Is(err, secretbroker.ErrRefreshRefused) {
+				return gitproxy.Refreshed{}, fmt.Errorf("%w: %w", gitproxy.ErrCredentialRefused, err)
+			}
+			return gitproxy.Refreshed{}, err
+		}
+		return gitproxy.Refreshed{
+			Credential: gitproxy.Credential{
+				Username: secretbroker.GitHubUsername,
+				Password: got.Token,
+				GrantID:  grantID,
+				LeaseID:  leaseID,
+			},
+			ExpiresAt: got.ExpiresAt,
+			Retire:    got.Retire,
+		}, nil
+	}
 }
 
 // guardPolicy narrows the hub's configured policy by the grant's permissions,

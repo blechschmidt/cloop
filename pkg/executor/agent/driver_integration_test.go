@@ -32,9 +32,12 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -208,4 +211,105 @@ func TestIntegration_ContainerModeRunsThePayloadInAContainer(t *testing.T) {
 	if status.ExitCode != 0 {
 		t.Errorf("exit code = %d, want 0.\noutput:\n%s", status.ExitCode, got)
 	}
+}
+
+// TestIntegration_ContainerModeSeesARefreshedTokenFile is the device half of
+// Task 20375 in container mode: the agent places a lease's token file in its
+// own lease directory, binds that directory into the sandbox, and a refresh
+// frame later rewrites the file there — which the running container must see,
+// because the directory is bind-mounted whole rather than the file.
+func TestIntegration_ContainerModeSeesARefreshedTokenFile(t *testing.T) {
+	engine, image := requireEngineAndImage(t)
+	work := unprivilegedDir(t)
+	st, err := os.Stat(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := st.Sys().(*syscall.Stat_t)
+
+	a := &Agent{cfg: Config{Logf: t.Logf}, vault: newVault()}
+	const (
+		leaseID  = "lease_refresh_device"
+		declared = "/run/cloop/cloop-lease-refreshdevice"
+	)
+	spec := executor.Spec{
+		WorkDir: work,
+		Image:   image,
+		Argv: []string{"/bin/sh", "-c", `first=$(sha256sum "$CLOOP_LEASE_DIR/github-token" | cut -c1-64)
+echo WAITING
+i=0
+while [ "$(sha256sum "$CLOOP_LEASE_DIR/github-token" | cut -c1-64)" = "$first" ]; do
+  i=$((i+1)); [ "$i" -gt 600 ] && { echo NEVER_REFRESHED; exit 3; }
+  sleep 0.1
+done
+echo "REFRESHED:$(sha256sum "$CLOOP_LEASE_DIR/github-token" | cut -c1-64)"`},
+		Env: []string{"CLOOP_LEASE_DIR=" + declared},
+		Secrets: []executor.SecretBinding{{
+			LeaseID: leaseID, GrantID: "grant_1", SecretName: "app", Kind: "github_app",
+			Dir: declared, Files: []string{declared + "/github-token"},
+		}},
+	}
+	placed, err := a.materializeSecretFiles(&spec, []executor.SecretFile{{
+		LeaseID: leaseID, GrantID: "grant_1", Dir: declared, Name: "github-token", Mode: 0o600,
+		Content: []byte("ghs_first_token_for_the_device_test\n"),
+	}})
+	if err != nil {
+		t.Fatalf("materializeSecretFiles: %v", err)
+	}
+	defer placed.wipe(t.Logf)
+	// The agent runs as the user that owns its work directories; this test
+	// runs as root, so the files are handed to that owner the way the agent
+	// would have written them.
+	for _, dir := range placed.dirs {
+		_ = os.Chown(dir, int(owner.Uid), int(owner.Gid))
+	}
+	for _, p := range placed.paths() {
+		_ = os.Chown(p, int(owner.Uid), int(owner.Gid))
+	}
+	a.vault.bind("h-refresh", spec.Secrets)
+	a.vault.own("h-refresh", placed.paths())
+	spec.HostMounts = append(spec.HostMounts, placed.hostMounts()...)
+
+	driver, err := newDriverCache().driverFor(executor.SandboxSettings{
+		Mode: executor.SandboxModeContainer, Engine: engine, Image: image,
+	}, &hostDriver{})
+	if err != nil {
+		t.Fatalf("driverFor: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	handle, err := driver.Start(ctx, spec)
+	if err != nil {
+		t.Fatalf("Start in a container: %v", err)
+	}
+	lines, err := driver.Stream(ctx, handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var out strings.Builder
+	next := func(want string) {
+		t.Helper()
+		for !strings.Contains(out.String(), want) {
+			select {
+			case l, ok := <-lines:
+				if !ok {
+					t.Fatalf("the sandbox ended before %q:\n%s", want, out.String())
+				}
+				out.WriteString(l.Text + "\n")
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting for %q:\n%s", want, out.String())
+			}
+		}
+	}
+	next("WAITING")
+
+	second := []byte("ghs_second_token_for_the_device_test\n")
+	rep := a.vault.refresh(leaseID, []executor.SecretFile{{
+		LeaseID: leaseID, GrantID: "grant_1", Dir: declared, Name: "github-token", Mode: 0o600, Content: second,
+	}})
+	if len(rep.errors) > 0 || rep.rewritten != 1 {
+		t.Fatalf("vault refresh = %+v", rep)
+	}
+	sum := sha256.Sum256(second)
+	next("REFRESHED:" + hex.EncodeToString(sum[:]))
 }

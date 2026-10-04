@@ -89,7 +89,9 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 	// rebuilding it from a Spec is deliberate: a rehydrated handle has no Spec
 	// any more, and a credential that is filtered out of the log stream must
 	// not reappear the moment someone opens a terminal on the same workload.
-	redactor := rec.bus.Redactor()
+	// Asked as the session goes, so a token refreshed while the terminal is
+	// open is scrubbed in it too.
+	redactor := rec.bus.Redactor
 
 	args := []string{"exec"}
 	if req.Stdin {
@@ -122,7 +124,7 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 
 // startAttach wires the runtime subprocess to the caller, choosing a pty only
 // when one is both wanted and usable.
-func startAttach(cmd *exec.Cmd, req executor.AttachRequest, redactor *redact.Set, cancel context.CancelFunc) (executor.AttachConn, error) {
+func startAttach(cmd *exec.Cmd, req executor.AttachRequest, redactor func() *redact.Set, cancel context.CancelFunc) (executor.AttachConn, error) {
 	// A pty is only needed when the operator can type. Without -i the runtime
 	// is content with a pipe on its own stdin and still allocates a terminal
 	// inside the sandbox, so a read-only TTY session costs nothing here.
@@ -131,7 +133,7 @@ func startAttach(cmd *exec.Cmd, req executor.AttachRequest, redactor *redact.Set
 		if err != nil {
 			return nil, err
 		}
-		out := executor.RedactAttachOutput(sess.Master, redactor)
+		out := executor.RedactAttachOutputFollowing(sess.Master, redactor)
 		return executor.NewAttachConn(out, sess.Master, sess.Resize, func() error {
 			cancel()
 			return sess.Close()
@@ -161,7 +163,7 @@ func startAttach(cmd *exec.Cmd, req executor.AttachRequest, redactor *redact.Set
 		return nil, err
 	}
 
-	out := executor.RedactAttachOutput(merged, redactor)
+	out := executor.RedactAttachOutputFollowing(merged, redactor)
 	return executor.NewAttachConn(out, stdin,
 		// No pty means no window size to report. Not an error: a caller that
 		// always sends geometry should not have to know which kind it opened.

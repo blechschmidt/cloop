@@ -98,7 +98,25 @@ type Material struct {
 	// labels above it is consulted — by the GitHub deliveries, to decide
 	// whether a branch-restricted grant keeps its push. See githubPushGuarded.
 	heldByProxy bool
+
+	// requester is the whole request the material was leased for. A GitHub
+	// App token's slot keeps it, so a refresh re-checks the grant against the
+	// same subject the lease was issued to (apprefresh.go).
+	requester Requester
+
+	// githubTokenExpiresAt is when GitHub stops honouring githubToken: an App
+	// installation token's hour. Zero for a PAT, whose expiry the hub does not
+	// know. GitHubTokenExpiresAt is the only reader.
+	githubTokenExpiresAt time.Time
 }
+
+// GitHubTokenExpiresAt reports when the GitHub token this material carries
+// stops working, for a token the hub minted (github_app). Zero for a PAT.
+//
+// It is what tells the workspace path that the credential it hands the git
+// proxy needs a refresh source (Task 20375): a pinned session presenting it
+// would otherwise fail an hour after dispatch.
+func (m Material) GitHubTokenExpiresAt() time.Time { return m.githubTokenExpiresAt }
 
 // File is one credential file to place in the lease directory.
 type File struct {

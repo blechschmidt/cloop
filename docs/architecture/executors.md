@@ -1346,7 +1346,9 @@ two settings that caused it.
 ### Kubernetes RBAC consequence
 
 The chart's executor Role gained two verbs: `create` and `delete` on `secrets`
-in the workload namespace. Deliberately **not** `get`, `list` or `watch` — the
+in the workload namespace — and later a third, `patch`, with which a running
+Pod's lease Secret has a GitHub App token replaced before GitHub's hour ends
+(Task 20375; see [replacing a file under a running workload](#replacing-a-file-under-a-running-workload)). Deliberately **not** `get`, `list` or `watch` — the
 driver writes one Secret holding the brokered credential, points the init
 container at it with a `secretKeyRef`, and deletes it as soon as that container
 terminates. It never reads a Secret back, so it holds none of the read side.
@@ -1760,6 +1762,32 @@ Every mount is read-only. That is not decoration: a credential helper the
 workload could rewrite is a credential helper that answers for every
 repository, which would undo the only enforcement point a repository-scoped PAT
 has.
+
+### Replacing a file under a running workload
+
+One file changes while its workload runs: a GitHub App installation token,
+which GitHub honours for an hour and the hub re-mints before then (Task 20375).
+A driver that can rewrite a lease's files in place implements
+`executor.SecretRefresher`; the lease keepalive hands it the new file and the
+driver puts it where the workload already reads it:
+
+| Driver | Where the file is | How it is replaced |
+| --- | --- | --- |
+| `localprocess` | the hub's own lease directory | a new file beside it, renamed over it (`executor.ReplaceSecretFile`) |
+| `container` | the per-run staging directory, bind-mounted into the container | the same rename, in the staging directory, owned by the sandbox user |
+| `remote` | the agent's own lease directory (and, in container mode, bind-mounted into the container) | a `secret_refresh` frame (protocol v17); the agent renames the new file in, keeping the old one's owner |
+| `kubernetes` | the run's `cloop-lease-<handle>` Secret, projected as a directory volume with no `subPath` | a JSON merge patch of the one key; the kubelet syncs the volume within its period, so the report says the delivery is eventual |
+
+Every lease directory is mounted **whole**, never file by file, and that is what
+makes the rename visible: a bind mount of a directory follows a new entry
+renamed into it, where a bind of the file itself would go on showing the inode it
+was given. Each driver rewrites only a file the lease already delivered to that
+workload — a name it was not given is refused, so a refresh is never a way to
+plant a file — refuses a path that is not a regular file inside a lease
+directory, and adds the new content to the workload's output redaction before
+the rename, since the workload can print it the moment it can read it. A driver
+that adopted a workload after a hub restart holds no staging record for it and
+reports that, rather than guessing a path.
 
 ---
 

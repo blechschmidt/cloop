@@ -78,6 +78,8 @@ Three facts carry most of it:
 | `executors.git_proxy` | `pkg/config/gitproxy.go` | The section. `GitProxyConfig.Policy()` turns it into the hub's policy: `allowed_refs` (default `refs/heads/cloop/**`), create and update, delete only with `allow_delete`, fetch always. Read once, at startup, from the hub's effective configuration: `.cloop/config.yaml` with the hub's per-instance `config.ui-<port>.yaml` overlay merged in (Task 20364), so one of two dashboards sharing a directory can run the proxy without the other. There is no dashboard setting for it. See [turning it on](../git-interception-proxy.md#turning-it-on). |
 | `ensureGitProxy`, `startGitProxy` | `pkg/ui/gitproxy.go` | Start the proxy once per process. Record separately whether the configuration *asked* for one (`gitProxyRequired`), so "wanted" and "running" are never the same fact. |
 | `gitproxy.Registry` | `pkg/gitproxy/session.go` | Sessions keyed by id, each holding `sha256(token)` — never the token — beside the upstream credential and the policy. No HTTP in it. |
+| upstream credential generations | `pkg/gitproxy/refresh.go` | A session minted with `MintRequest.Refresh` renews its upstream credential — a GitHub App token — from its own request path before it expires, single-flight, and retires the one it replaced once no request presents it (Task 20375). |
+| App token slots | `pkg/secretbroker/apprefresh.go` | One per App grant a lease carries: the token's current and superseded generations and the scope it was minted at, which a refresh replays exactly. |
 | `gitproxy.Proxy` | `pkg/gitproxy/proxy.go` | The three smart-HTTP routes. Authenticates, checks the repository, parses a push's command list, decides, and only then attaches the forge credential. |
 | `gitproxycreds.Source` | `pkg/executor/gitproxycreds` | Decorates an `executor.WorkspaceCredentialSource`: leases as before, keeps the credential, mints a **pinned** session, and returns the session token together with the proxy's URL for the repository. |
 | `secretbroker.GitGuard`, `gitGuard` | `pkg/secretbroker/gitguard.go`, `pkg/ui/gitguard.go` | The seam a broker hands a GitHub token through. The hub's implementation mints a **scoped** session over the grant's repository allowlist and returns what the sandbox should hold instead. |
@@ -643,6 +645,46 @@ dispatch: the keepalive extends the lease, not the session. Set it against the
 longest run the hub is expected to complete — see
 [a session's life is its TTL](../git-interception-proxy.md#a-sessions-life-is-its-ttl-not-the-runs).
 
+### The upstream credential renews itself
+
+Extending a lease extends nothing at GitHub, and the installation token a
+session presents upstream for a `github_app` grant is honoured for an hour. So a
+session minted for one is given the broker's refresher with it
+(`GitGuardRequest.Refresh`, carried into `MintRequest.Refresh`), and keeps the
+token in generations (`pkg/gitproxy/refresh.go`):
+
+```
+request ─▶ credentialFor(session)
+             ├─ more than 10 min left ─▶ present the current generation
+             └─ 10 min or less ─▶ one refresh at a time (the others wait for it)
+                  └─ Broker.refreshSlot ─▶ grant re-read ─▶ mint at the original scope
+                       ├─ ok ─▶ new generation; the old one is retired — destroyed at
+                       │        GitHub — when the last request presenting it finishes
+                       ├─ refused for good ─▶ Registry.Close("upstream credential will
+                       │        not be renewed: …"), tokens destroyed, 401
+                       └─ may pass ─▶ keep presenting the held token while it works,
+                                retry after a minute; once it has lapsed, 502 with why
+```
+
+The refresh asks GitHub for exactly what the first mint asked for — the same
+installation, the same repositories by ID, the same permissions — and refuses an
+answer wider than the first token's, so a session can never come back with more
+than it was minted with. It re-reads the grant first: revoked or expired, issued
+to someone else, its secret gone or naming another installation — any of those
+ends the session as a revocation does. A request a refresh is waiting on is
+bounded by its client, and the refresh itself by 45 seconds, detached from the
+request that happened to start it. The pinned sessions of the workspace path renew
+the same way, through `gitcreds.BrokerSource.RefreshWorkspaceCredential` on the
+inner lease, when the credential is an App token.
+
+Each re-mint is an allowed `secret.renew` row naming the session; each refusal a
+denied one, beside the session's `gitproxy.session_closed` row. The superseded
+token's destruction is a `github_app.token_destroy` row.
+
+Without the proxy the same broker slot is refreshed by the lease's keepalive, and
+the new token travels to the executor holding the file — see
+[keeping the token past GitHub's hour](../guides/secrets.md#keeping-the-token-past-githubs-hour).
+
 A hub restart drops every session of both kinds — the registry is memory — and a
 workload that survives the restart on an edge device keeps a credential that no
 longer authenticates. Its next git operation gets a 401.
@@ -662,6 +704,8 @@ longer authenticates. Its next git operation gets a 401.
 | The sandbox cannot reach `advertise_url` | git: `Could not resolve host`, `Failed to connect`, or a timeout behind a dropping firewall | the fetch fails | the workload's git fails |
 | The sandbox does not trust the certificate | git: `SSL certificate problem` | the fetch fails | the workload's git fails |
 | The session lapsed or was closed | git: an authentication failure (HTTP 401); a `gitproxy.rejected` row — naming the expiry if the reaper has not swept the session yet, and only `unauthenticated` once it is gone | a late push fails | late git fails — see [how long a session lives](#how-long-a-session-lives) |
+| An App token's renewal was refused: grant revoked or expired, installation suspended, repository removed | git: HTTP 401 on the request that found it due; the session's `gitproxy.session_closed` row says *upstream credential will not be renewed* and why; a denied `secret.renew` | that session's git ends | that session's git ends; the grant's tokens are destroyed |
+| An App token's renewal failed for a reason that may pass — GitHub unreachable, rate limiting | a denied `secret.renew` saying it will retry | git carries on with the held token while it is valid; past its expiry, HTTP 502 naming why, until a retry succeeds | the same |
 | A repository outside the session's scope | HTTP 403, `session is scoped to …`; a `gitproxy.rejected` row | — | refused |
 | A ref outside the policy | `! [remote rejected] … (…)`; a `gitproxy.push_denied` row | refused | refused |
 
@@ -762,6 +806,8 @@ all of it is reconnaissance.
 | Workspace credentials in a Pod | the session id reaches the init container through the run's Secret, the helper is projected executable, and the lease behind the token lives as long as that Secret | `pkg/executor/kubernetes` `workspace_test.go`, `secretfiles_test.go` |
 | Session and lease lifetimes | a pinned session releases its lease exactly once when it ends, an unused one is closed on release, a lease is extended only while its grants hold and its run is live | `pkg/gitproxy` `session_test.go`, `pkg/executor/gitproxycreds`, `pkg/secretbroker` `extend_test.go`, `pkg/ui` `secrets_keepalive_test.go` |
 | Live GitHub, opt-in | a grant assigned through the panel's endpoint pushes through the proxy to a real repository — outside its branches refused, inside them landed, no token in the sandbox | `TestLiveBranchRestrictionThroughTheGitProxy` in `pkg/ui` |
+| An App token past its hour | the clocks of a fake GitHub App API and of the broker are driven past the first token's expiry, against a forge that refuses expired tokens: a real git fetches and pushes through the proxy after it, at the first token's scope; a session that cannot renew is refused by the same forge; a revoked grant closes the session and mints nothing | `pkg/gitproxy` `refresh_e2e_test.go`, `refresh_test.go`; the hub's own adapter and lease files in `pkg/ui` `secrets_refresh_test.go`; the broker's rules in `pkg/secretbroker` `apprefresh_test.go` |
+| The same without a proxy | the token file rewritten under a running workload — on the host, in a real container (`CLOOP_REFRESH_CONTAINER_E2E=1`), on a device over the v17 frame (and in a container on it, `CLOOP_AGENT_SANDBOX_E2E=1`) — whose own git then fetches and pushes past the hour, with the new token scrubbed from its output | `pkg/ui` `secrets_refresh_test.go`, `pkg/executor/container` `refresh_e2e_test.go`, `pkg/executor/remote` `refresh_e2e_test.go`, `pkg/executor/agent` `driver_integration_test.go` |
 
 The [guarantee → test table](../security/model.md#git-interception-proxy--the-package-suites)
 maps each claim to its test.
@@ -803,14 +849,23 @@ than by a failing run. Task 20349 closed all seven:
 | A virtual executor's workspace was leased as its parent device, so a grant issued to the virtual executor was chosen and then missing | The lease is taken as the virtual executor |
 | Turning the proxy on or off, or moving `advertise_url`, left a device refusing its own checkout | The checkout records which repository it is of (`cloop.upstream`), and a provisioning that reaches the same repository another way re-points `origin` instead of refusing |
 
+Task 20375 closed the one after them, which used to head the list below — *a
+GitHub App token lives GitHub's hour*: the keepalive extended a lease and not the
+installation token minted for it, so a run still using GitHub an hour after
+dispatch lost it. A session now [renews its upstream token](#the-upstream-credential-renews-itself),
+and without the proxy the keepalive rewrites the sandbox's token file through the
+executor holding it.
+
 What remains is either deliberate or beyond what the hub can reach today:
 
-1. **A GitHub App token lives GitHub's hour.** The keepalive extends a lease,
-   not the installation token minted for it at dispatch — in the sandbox without
-   a proxy, and upstream of the session with one. A run that still needs GitHub
-   more than an hour after dispatch loses it then. `Broker.Renew` mints a fresh
-   token, but nothing can yet hand a running sandbox new material, or swap the
-   credential a live session presents upstream.
+1. **Not every holder can take a new token file.** A device whose agent speaks a
+   protocol older than v17 is not sent one — the hub journals it and the run's
+   GitHub access ends at the token's hour, as before; on Kubernetes the run's
+   Secret is patched and the Pod reads the new token only within the kubelet's
+   sync period, and only with `patch` on `secrets` in its Role; a refresh does not
+   cross members of a hub cluster, so a device whose agent reconnected to another
+   member mid-run keeps its first token. A `"*"` allowlist's `GITHUB_TOKEN` and
+   `GH_TOKEN` are environment variables, which no refresh reaches.
 2. **A lease session is bounded by `session_minutes`**, counted from dispatch,
    whatever the lease does. That is the operator's ceiling by design; set it
    against the longest run the hub is expected to complete.

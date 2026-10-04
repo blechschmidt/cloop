@@ -178,6 +178,18 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		pol.RestrictRefs = append([]string(nil), access.Credential.Branches...)
 	}
 
+	var (
+		refresh   gitproxy.RefreshFunc
+		credUntil time.Time
+	)
+	if rs, ok := s.Inner.(RefreshingSource); ok && !access.Credential.TokenExpiresAt.IsZero() {
+		// A credential the hub minted, such as a GitHub App installation
+		// token: the session renews it through the source that leased it,
+		// rather than presenting it past its hour (Task 20375).
+		refresh = workspaceRefresher(rs, access.Credential)
+		credUntil = access.Credential.TokenExpiresAt
+	}
+
 	m, err := s.Registry.Mint(gitproxy.MintRequest{
 		Upstream: w.Repo,
 		Credential: gitproxy.Credential{
@@ -186,9 +198,11 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			GrantID:  access.Credential.GrantID,
 			LeaseID:  access.Credential.LeaseID,
 		},
-		Policy:    pol,
-		TTL:       s.TTL,
-		ProjectID: projectID,
+		CredentialExpiresAt: credUntil,
+		Refresh:             refresh,
+		Policy:              pol,
+		TTL:                 s.TTL,
+		ProjectID:           projectID,
 		// No TaskID. ForWorkspace is not told one, and filling the field with
 		// the nearest available string — the grant name — would put
 		// "task=github-pat" on every proxy event and quietly break any join
@@ -245,6 +259,42 @@ func (s *Source) relinquish(sess *gitproxy.Session) func() {
 			return
 		}
 		s.Registry.Close(sess.ID, "workspace credential released unused")
+	}
+}
+
+// RefreshingSource is implemented by an inner source whose credentials expire
+// on a clock the hub knows and can be re-minted before they do —
+// gitcreds.BrokerSource, for a GitHub App grant (Task 20375).
+//
+// Discovered by type assertion for the reason HeldSource is.
+type RefreshingSource interface {
+	// RefreshWorkspaceCredential renews cred, whose password the session
+	// presents as held. It returns the renewed credential and the function
+	// that ends the one it replaced; an error wrapping
+	// executor.ErrCredentialRefused is final.
+	RefreshWorkspaceCredential(ctx context.Context, cred executor.GitCredential, held string) (executor.GitCredential, func(), error)
+}
+
+// workspaceRefresher adapts a RefreshingSource to the session's refresher.
+func workspaceRefresher(rs RefreshingSource, cred executor.GitCredential) gitproxy.RefreshFunc {
+	return func(ctx context.Context, held string) (gitproxy.Refreshed, error) {
+		got, retire, err := rs.RefreshWorkspaceCredential(ctx, cred, held)
+		if err != nil {
+			if errors.Is(err, executor.ErrCredentialRefused) {
+				return gitproxy.Refreshed{}, fmt.Errorf("%w: %w", gitproxy.ErrCredentialRefused, err)
+			}
+			return gitproxy.Refreshed{}, err
+		}
+		return gitproxy.Refreshed{
+			Credential: gitproxy.Credential{
+				Username: got.Username,
+				Password: got.Password,
+				GrantID:  got.GrantID,
+				LeaseID:  got.LeaseID,
+			},
+			ExpiresAt: got.TokenExpiresAt,
+			Retire:    retire,
+		}, nil
 	}
 }
 

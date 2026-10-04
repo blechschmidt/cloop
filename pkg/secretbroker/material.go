@@ -16,14 +16,14 @@ import (
 // serves concurrent requesters: two leases minting at once must not be able to
 // adopt each other's credentials.
 type mints struct {
-	tokens []appToken
+	slots []*appTokenSlot
 }
 
-func (m *mints) add(t appToken) {
-	if m == nil {
+func (m *mints) add(slot *appTokenSlot) {
+	if m == nil || slot == nil {
 		return
 	}
-	m.tokens = append(m.tokens, t)
+	m.slots = append(m.slots, slot)
 }
 
 // materialFor opens a secret's payload and reduces it to what the grant's
@@ -68,6 +68,7 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		actor:       actor,
 		owner:       s.Owner,
 		heldByProxy: req.GitHubProxied,
+		requester:   req,
 	}
 
 	switch s.Kind {
@@ -284,29 +285,54 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 	// Material.GitHubToken() whether or not the sandbox gets a copy, and rec
 	// below is what makes the token revocable. A return that skipped rec would
 	// leave a live credential at GitHub that this hub no longer knows it owns.
+	//
+	// The slot is also what keeps the token alive past GitHub's hour: it
+	// remembers the scope GitHub was asked for, so a refresh asks for exactly
+	// that again (apprefresh.go). Every failure below marks it abandoned, which
+	// leaves it to be destroyed and never refreshed.
 	mat.githubToken = res.token.Token
-	rec.add(appToken{
+	mat.githubTokenExpiresAt = res.token.ExpiresAt
+	slot := newAppTokenSlot()
+	slot.grantID = mat.GrantID
+	slot.secretID = mat.SecretID
+	slot.secretName = mat.SecretName
+	slot.requester = mat.requester
+	slot.actor = mat.actor
+	slot.scope = res.scope.clone()
+	slot.current = appToken{
 		grantID:    mat.GrantID,
 		secretID:   mat.SecretID,
 		secretName: mat.SecretName,
 		baseURL:    cred.BaseURL,
 		token:      res.token.Token,
 		expiresAt:  res.token.ExpiresAt,
-	})
+	}
+	slot.delivered = true
+	rec.add(slot)
+	abandon := func() {
+		if b == nil {
+			return
+		}
+		b.mu.Lock()
+		slot.abandoned = true
+		b.mu.Unlock()
+	}
 
 	if b != nil && b.GitGuard != nil {
 		guarded, gerr := b.GitGuard.GuardGitHub(ctx, GitGuardRequest{
-			Token:       res.token.Token,
-			Repos:       mat.Constraints.Repos,
-			Permissions: mat.Constraints.Permissions,
-			Branches:    mat.Constraints.Branches,
-			SecretName:  mat.SecretName,
-			SecretID:    mat.SecretID,
-			GrantID:     mat.GrantID,
-			ProjectID:   mat.projectID,
-			ExecutorID:  mat.executorID,
-			Actor:       mat.actor,
-			Owner:       mat.owner,
+			Token:          res.token.Token,
+			TokenExpiresAt: res.token.ExpiresAt,
+			Refresh:        b.slotRefresher(slot),
+			Repos:          mat.Constraints.Repos,
+			Permissions:    mat.Constraints.Permissions,
+			Branches:       mat.Constraints.Branches,
+			SecretName:     mat.SecretName,
+			SecretID:       mat.SecretID,
+			GrantID:        mat.GrantID,
+			ProjectID:      mat.projectID,
+			ExecutorID:     mat.executorID,
+			Actor:          mat.actor,
+			Owner:          mat.owner,
 		})
 		if gerr != nil {
 			// A guard that was asked for and is broken denies the grant rather
@@ -319,6 +345,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			// destroyed even if this call does not land. Revoking twice is
 			// harmless — GitHub answers the second with 401/404, which
 			// RevokeInstallationToken treats as the end state it wanted.
+			abandon()
 			b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 			return Material{}, fmt.Errorf("%w: guard github app secret %s: %w",
 				ErrGuardUnavailable, mat.SecretName, gerr)
@@ -326,9 +353,16 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		if guarded.Guarded() {
 			mat, err = deliverGuardedGitHub(mat, guarded)
 			if err != nil {
+				abandon()
 				b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 				return Material{}, err
 			}
+			// The session presents the token now, and refreshes it on its own
+			// request path; the lease keepalive leaves a guarded slot alone.
+			b.mu.Lock()
+			slot.guarded = true
+			slot.sessionID = guarded.SessionID
+			b.mu.Unlock()
 			mode := "read-write"
 			if guarded.ReadOnly {
 				mode = "read-only"
@@ -348,6 +382,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		// and a token that can push to every branch is exactly what the grant
 		// ruled out, so it is destroyed rather than delivered.
 		if mat.Constraints.RestrictsBranches() && !mat.heldByProxy {
+			abandon()
 			b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 			return Material{}, wrapf(ErrBranchesUnenforced,
 				"grant %s limits pushes to branches %s and the git guard declined to hold its token",
@@ -357,13 +392,24 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 
 	mat, err = deliverGitHubToken(mat, res.token.Token)
 	if err != nil {
+		abandon()
 		b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 		return Material{}, err
 	}
+	if b != nil && allowsAllRepos(mat.Constraints.Repos) {
+		// deliverGitHubToken exported the token as GITHUB_TOKEN and GH_TOKEN
+		// too, which a refresh cannot reach in a running process; see
+		// appTokenSlot.envExported.
+		b.mu.Lock()
+		slot.envExported = true
+		b.mu.Unlock()
+	}
 
-	// The workload is told when its credential dies so a long task can decide
-	// to re-read the file after a renewal rather than discovering the expiry as
-	// an authentication failure. A timestamp is not a credential.
+	// The workload is told when the credential it was handed dies. The hub
+	// rewrites the token file before then (apprefresh.go), so git — whose
+	// helper reads the file on every call — never sees the expiry; something
+	// that copied the token out of the file at the start would. A timestamp is
+	// not a credential.
 	mat.Env["CLOOP_GITHUB_TOKEN_EXPIRES_AT"] = res.token.ExpiresAt.UTC().Format(time.RFC3339)
 
 	mat.Summary = fmt.Sprintf("github app installation %d token for %s, expires %s",

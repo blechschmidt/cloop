@@ -952,7 +952,7 @@ func workspaceCredentialFactory(db *statedb.DB) func(string) executor.WorkspaceC
 		fmt.Fprintf(os.Stderr, "ui: workspace credentials unavailable: %v\n", err)
 		return nil
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	broker, err := secretbroker.New(store, brokerOptions(secretstore.NewAuditor(db))...)
 	if err != nil {
 		// An install with no CLOOP_SECRET_KEY has not adopted the broker; that
 		// is the ordinary state, not a fault, and it must not print on every

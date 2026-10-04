@@ -50,6 +50,14 @@ const (
 	ActionLeaseRevokeAcked  Action = "lease.revoke_acked"
 	ActionLeaseRevokeFailed Action = "lease.revoke_failed"
 
+	// ActionLeaseRefresh records a re-minted GitHub App token being delivered
+	// to an executor holding the lease's token file — or failing to be
+	// (Task 20375). Separate from ActionRenew, which records the re-mint: a
+	// token minted and never delivered is a credential that exists at GitHub
+	// while the workload still holds the old one, and the trail has to be able
+	// to say so.
+	ActionLeaseRefresh Action = "lease.refresh"
+
 	// ActionAppTokenDestroy records a GitHub App installation token being
 	// destroyed at GitHub (Task 20254).
 	//

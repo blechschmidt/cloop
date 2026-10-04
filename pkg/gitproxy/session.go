@@ -108,8 +108,20 @@ type Session struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 
-	tokenHash  [sha256.Size]byte
-	credential Credential
+	tokenHash [sha256.Size]byte
+
+	// The upstream credential, in generations (refresh.go). credMu guards all
+	// four fields; cred is never nil on a minted session.
+	credMu     sync.Mutex
+	cred       *credentialGen
+	refresh    RefreshFunc
+	refreshing *refreshCall
+	// retryAt holds back the next refresh after one failed for a reason that
+	// may pass, so a busy workload does not ask GitHub once per request.
+	retryAt time.Time
+	// refreshErr is why the last refresh failed, for the error a request gets
+	// when the held credential has already expired.
+	refreshErr string
 
 	closed    atomic.Bool
 	reason    atomic.Value // string
@@ -188,6 +200,17 @@ type MintRequest struct {
 	// Credential authenticates the proxy upstream. Optional: a public
 	// repository needs none, though pushing to one generally does.
 	Credential Credential
+	// CredentialExpiresAt is when the forge stops honouring Credential — a
+	// GitHub App installation token's hour. Zero for a credential that does
+	// not expire on a clock the hub knows (a PAT).
+	CredentialExpiresAt time.Time
+	// Refresh, when set, re-mints Credential before CredentialExpiresAt
+	// (Task 20375). The session calls it from its request path once
+	// CredentialRefreshWindow or less of the credential's life remains,
+	// single-flight, presents the result to every later upstream request, and
+	// retires the superseded credential once no request presents it. Requires
+	// CredentialExpiresAt. See refresh.go.
+	Refresh RefreshFunc
 	// Policy is what the sandbox may do. Zero value gets WriteBackPolicy.
 	Policy Policy
 	// TTL bounds the session. 0 means DefaultSessionTTL; anything above
@@ -334,6 +357,12 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		return nil, fmt.Errorf("gitproxy: %w", err)
 	}
 
+	if req.Refresh != nil && req.CredentialExpiresAt.IsZero() {
+		// A refresher with nothing to measure the credential against would
+		// never run, and the session would fail at an expiry nobody recorded.
+		return nil, errors.New("gitproxy: a refreshable upstream credential needs its expiry")
+	}
+
 	ttl := req.TTL
 	switch {
 	case ttl == 0:
@@ -367,7 +396,8 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		IssuedAt:     now,
 		ExpiresAt:    now.Add(ttl),
 		tokenHash:    sha256.Sum256([]byte(token)),
-		credential:   req.Credential,
+		cred:         &credentialGen{cred: req.Credential, expiresAt: req.CredentialExpiresAt},
+		refresh:      req.Refresh,
 		onEnd:        req.OnEnd,
 	}
 

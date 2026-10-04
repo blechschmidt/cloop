@@ -555,7 +555,7 @@ ends up holding, and that difference decides how much a leak costs.
 | What the sandbox receives, no git proxy | that same token | an installation token minted for this lease |
 | What the sandbox receives, git proxy configured | a proxy session credential | a proxy session credential |
 | Who enforces the repository allowlist | cloop's credential helper, at `git`'s request | **GitHub**, on every call |
-| Lifetime in the sandbox | the PAT's own, typically months | ~1 hour from dispatch; the lease is extended in place for a long run, the token is not re-minted |
+| Lifetime in the sandbox | the PAT's own, typically months | each token ~1 hour; while the run is live the hub replaces it before it expires, at the same scope, and destroys the one it replaced |
 | Revocation | wipe the file; the token itself is untouched | wipe the file **and** `DELETE /installation/token` |
 | If the workload reads the file and calls the REST API directly | unconstrained — the PAT is whatever GitHub issued | constrained — GitHub refuses anything outside the grant |
 
@@ -567,6 +567,19 @@ two, and the one this section recommends — was the one that still wrote a usab
 GitHub token into the sandbox's filesystem. The installation token's hour and
 its repository scope bounded that, but "bounded" is not the claim a guarded
 grant makes.
+
+**A refresh is never wider than the dispatch.** A long run is handed a new
+installation token before each hour runs out (Task 20375) — by the proxy session
+presenting it, or, without a proxy, by rewriting the sandbox's token file — and
+each one is minted from the scope GitHub was asked for at dispatch: the same
+installation, the same repository IDs (not the grant's globs re-resolved), the
+same permissions, held to what GitHub granted the first token. The grant is
+re-read before every mint, so a revoked or expired grant ends the run's access at
+the next refresh rather than at the end of the run, and its tokens are destroyed
+at GitHub then. A leaked token is still worth at most its own hour — and less,
+since a superseded token is destroyed shortly after its replacement reaches the
+workload. See
+[keeping the token past GitHub's hour](../guides/secrets.md#keeping-the-token-past-githubs-hour).
 
 **Prefer `github_app`.** It is the only kind where the constraint an operator
 writes becomes a constraint GitHub enforces. `--repos 'acme/tool'` on a PAT is a

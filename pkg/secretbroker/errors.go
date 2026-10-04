@@ -71,6 +71,21 @@ var (
 	// at GitHub. It still lapses on GitHub's own expiry, but until then it is
 	// a credential nothing here can take back.
 	ErrGitHubAppRevoke = errors.New("secretbroker: github app token revoke failed")
+	// ErrGitHubAppRefused: GitHub answered a mint with a refusal that asking
+	// again will not change — the installation is suspended or gone, the
+	// App's key was revoked, or a repository the token is scoped to is no
+	// longer in the installation (Task 20375). Always wrapped together with
+	// ErrGitHubAppMint, so a caller that only knows the older sentinel still
+	// matches. A network failure, a 5xx or a rate limit is not one: those are
+	// retried.
+	ErrGitHubAppRefused = errors.New("secretbroker: github refused the installation token")
+	// ErrRefreshRefused: a GitHub App token a lease holds could not be
+	// re-minted, and will not be on a later attempt either — the grant was
+	// revoked or expired, the lease was released, or GitHub refused
+	// (ErrGitHubAppRefused). Access ends as it does on revocation: the tokens
+	// are destroyed at GitHub and a proxy session presenting them is closed.
+	// Wrapped together with the sentinel that names the cause.
+	ErrRefreshRefused = errors.New("secretbroker: github app token refresh refused")
 
 	// ErrNoKey: CLOOP_SECRET_KEY is unset, so payloads can be neither
 	// sealed nor opened.

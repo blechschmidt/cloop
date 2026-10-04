@@ -339,7 +339,7 @@ func (p *Proxy) handleAdvertise(w http.ResponseWriter, r *http.Request, sess *Se
 
 	up, err := p.upstreamRequest(r, sess, "/info/refs?service="+service, nil)
 	if err != nil {
-		p.rejectSession(w, r, sess, http.StatusBadGateway, err.Error())
+		p.upstreamFailed(w, r, sess, err)
 		return
 	}
 	p.forward(w, r, sess, up, fmt.Sprintf(advertiseContentType, service))
@@ -422,7 +422,7 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 
 	up, err := p.upstreamRequest(r, sess, "/"+receivePackService, replay)
 	if err != nil {
-		p.rejectSession(w, r, sess, http.StatusBadGateway, err.Error())
+		p.upstreamFailed(w, r, sess, err)
 		return
 	}
 	sess.pushes.Add(1)
@@ -445,7 +445,7 @@ func (p *Proxy) handleUploadPack(w http.ResponseWriter, r *http.Request, sess *S
 	}
 	up, err := p.upstreamRequest(r, sess, "/"+uploadPackService, body)
 	if err != nil {
-		p.rejectSession(w, r, sess, http.StatusBadGateway, err.Error())
+		p.upstreamFailed(w, r, sess, err)
 		return
 	}
 	sess.fetches.Add(1)
@@ -522,15 +522,55 @@ func (p *Proxy) upstreamRequest(r *http.Request, sess *Session, suffix string, b
 		}
 	}
 	req.Header.Set("User-Agent", "cloop-gitproxy")
-	if auth := sess.credential.authorization(); auth != "" {
+
+	// The credential this request presents, renewed first when it is near its
+	// end (refresh.go). It is held until the forge's response is finished, so
+	// a renewal in the meantime retires the old one only once nothing is
+	// still presenting it.
+	cred, done, err := p.reg.credentialFor(r.Context(), sess)
+	if err != nil {
+		return nil, err
+	}
+	if auth := cred.authorization(); auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("upstream request failed: %w", scrub(err, sess))
+		done()
+		return nil, fmt.Errorf("upstream request failed: %w", scrub(err, cred.Password))
 	}
+	resp.Body = &releasingBody{ReadCloser: resp.Body, release: done}
 	return resp, nil
+}
+
+// releasingBody gives a session's credential generation back when the forge's
+// response has been read and closed.
+type releasingBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *releasingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
+}
+
+// upstreamFailed answers a request whose forge-side leg could not be made.
+//
+// A session whose upstream credential will not be renewed has just been closed
+// (refresh.go), and the request gets what any request presenting a closed
+// session gets: 401, so git reports an authentication failure rather than a
+// server fault. Everything else — the forge unreachable, a credential lapsed
+// while its renewal is retried — is the gateway's failure, 502.
+func (p *Proxy) upstreamFailed(w http.ResponseWriter, r *http.Request, sess *Session, err error) {
+	if errors.Is(err, ErrCredentialRefused) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="cloop git proxy"`)
+		p.rejectSession(w, r, sess, http.StatusUnauthorized, err.Error())
+		return
+	}
+	p.rejectSession(w, r, sess, http.StatusBadGateway, err.Error())
 }
 
 // forward streams the upstream response back to the sandbox.
@@ -571,7 +611,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, u
 		p.reg.emit(Event{
 			Kind: EventRejected, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 			ProjectID: sess.ProjectID, TaskID: sess.TaskID,
-			Detail: "upstream stream ended early: " + scrub(err, sess).Error(),
+			Detail: "upstream stream ended early: " + scrub(err, sess.upstreamPasswords()...).Error(),
 			At:     p.reg.now(),
 		})
 	}
@@ -581,14 +621,13 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, u
 // sandbox. url.Error quotes the request URL, which never contains the
 // credential here — but an error built elsewhere might, and the cost of being
 // certain is one string replacement.
-func scrub(err error, sess *Session) error {
+func scrub(err error, passwords ...string) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	if pw := strings.TrimSpace(sess.credential.Password); pw != "" && strings.Contains(msg, pw) {
-		msg = strings.ReplaceAll(msg, pw, "[redacted]")
-		return errors.New(msg)
+	if scrubbed := scrubPasswords(msg, passwords...); scrubbed != msg {
+		return errors.New(scrubbed)
 	}
 	return err
 }

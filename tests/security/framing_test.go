@@ -49,6 +49,10 @@ func decodeAll(f remote.Frame) {
 	_, _ = remote.DecodeStatus(f)
 	_, _ = remote.DecodeBye(f)
 	_, _ = remote.DecodeError(f)
+	_, _ = remote.DecodeRevoke(f)
+	_, _ = remote.DecodeRevoked(f)
+	_, _ = remote.DecodeSecretRefresh(f)
+	_, _ = remote.DecodeSecretRefreshed(f)
 }
 
 // FuzzFrameDecoding is the main target: arbitrary bytes off the wire, through

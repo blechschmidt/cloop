@@ -385,8 +385,8 @@ func TestMintUpstreamAndCredentialStayOnTheHub(t *testing.T) {
 
 	// The forge credential is reachable only through the unexported field the
 	// proxy reads when it forwards; nothing the sandbox is handed carries it.
-	if m.Session.credential.Password != pat {
-		t.Fatalf("session upstream credential = %q, want the PAT", m.Session.credential.Password)
+	if m.Session.cred.cred.Password != pat {
+		t.Fatalf("session upstream credential = %q, want the PAT", m.Session.cred.cred.Password)
 	}
 	if m.Token == pat {
 		t.Fatal("the session token is the PAT")

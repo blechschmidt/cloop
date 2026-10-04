@@ -328,12 +328,12 @@ dashboard, rather than being stored and failing inside somebody's run. Add
 At lease time the hub signs a nine-minute JWT with that key and exchanges it for
 an installation token narrowed to the repositories the grant allows and the
 permissions it names. **Only the token is delivered.** The private key never
-leaves the hub, the token expires in about an hour, and releasing or revoking
+leaves the hub, each token expires in about an hour, and releasing or revoking
 calls `DELETE /installation/token` so the credential dies at GitHub rather than
-only on the sandbox's disk. A run's lease is kept alive in place while the run
-is, which keeps the token it was issued rather than minting another: a run that
-still needs GitHub more than an hour after dispatch loses it when that token
-expires. Each destruction is audited as `github_app.token_destroy`
+only on the sandbox's disk. A run that needs GitHub for longer than an hour keeps
+it: the hub re-mints the token before it expires and swaps it in — see
+[keeping the token past GitHub's hour](#keeping-the-token-past-githubs-hour).
+Each destruction is audited as `github_app.token_destroy`
 — its own action rather than `secret.revoke`, because it happens on every
 ordinary task teardown and would otherwise drown the count of grants an operator
 actually withdrew. A DELETE that GitHub refuses is recorded as a **denial**
@@ -356,6 +356,78 @@ side-by-side comparison and says when a PAT is still the right answer.
 With the [git interception proxy](../git-interception-proxy.md) on, an App
 token is held by the hub exactly as a PAT is: the sandbox gets a proxy session,
 and the token GitHub minted never enters it.
+
+### Keeping the token past GitHub's hour
+
+An installation token works for an hour, and a run's lease is kept alive for as
+long as the run (Task 20349) — so before Task 20375 a run still using git an hour
+after dispatch met a dead token. Now the hub replaces it when about ten minutes
+of its hour are left:
+
+- **The new token is minted at exactly the scope of the first**: the same
+  installation, the same repositories — by ID, as GitHub was first told them, not
+  re-resolved from the grant's globs, so a repository added to the installation
+  since dispatch is not picked up — and the same permissions. GitHub's answer is
+  held to the permissions it granted the first token; a refresh that came back
+  wider is destroyed rather than delivered.
+- **Only while the authority behind it holds.** The grant is re-read on every
+  refresh and must still be active and still issued to the lease's holder, its
+  secret must still exist and name the same installation, and the lease must not
+  have been released.
+- **The old token is destroyed** at GitHub once nothing presents it any more.
+
+Where the token is decides who replaces it:
+
+| The grant is delivered | Who refreshes | How the workload gets the new token |
+| --- | --- | --- |
+| through the [git proxy](../git-interception-proxy.md) | the proxy session, on the first request inside the last ten minutes (one at a time; the rest wait for it) | it does not need to: the session presents the new token upstream from then on, and destroys the old one when the last request that was using it finishes |
+| as `github-token` on a hub-local host or container executor | the lease's keepalive, once a minute | the file is replaced in place, by a rename inside the lease directory — the container has that directory bind-mounted whole, which is what makes a rename visible inside it |
+| as `github-token` on an edge device | the keepalive, through the agent | a `secret_refresh` frame (protocol v17): the agent rewrites the file in the lease directory it created, which a container on the device also has bind-mounted whole |
+| as `github-token` on Kubernetes | the keepalive | the run's lease Secret is patched; the kubelet syncs the Pod's Secret volume — mounted as a directory, with no `subPath`, which is the shape it keeps in sync — within its sync period |
+
+git's credential helper reads `github-token` on every call, so the next git
+operation uses the new token without the workload doing anything. Without the
+proxy the superseded token is destroyed two minutes after its replacement reached
+the workload — git reuses the credential it read for the rest of one invocation,
+and a fetch that started a moment before the rewrite needs its old token for a
+few more requests — and on Kubernetes it is left to run out its last minutes
+instead, since the kubelet's sync has no completion signal the hub could wait
+for.
+
+Each re-mint is an allowed `secret.renew` row naming the lease, grant, secret and
+run, the scope it was minted at and the new expiry (and, under the proxy, the
+session presenting it). Each delivery to an executor holding the file is a
+`lease.refresh` row: allowed when every workload has the new file, denied when it
+could not get there. The new token also joins the output redaction on both sides
+of the sandbox boundary — the log stream, a terminal already attached to the
+workload, and the project state a feature run hands back — so a workload that
+prints it has it scrubbed exactly as the first.
+
+**When a refresh is refused.** A refresh the broker or GitHub refuses — the grant
+revoked or expired, the lease released, the installation suspended or uninstalled,
+a repository removed from it, the App's key deleted — ends the grant's access as a
+revocation does: every token the lease holds for it is destroyed at GitHub, a
+proxy session presenting it is closed (its next request gets HTTP 401, and its
+`gitproxy.session_closed` row says *upstream credential will not be renewed* and
+why), and a denied `secret.renew` row records the refusal. A no-proxy run's
+project journal says which grant's access ended and why. A failure that may pass
+— GitHub unreachable, rate-limiting or answering 5xx — is a denied `secret.renew`
+row too, and is retried every minute while the token held still works.
+
+**When it cannot be delivered**, nothing is minted. A device whose agent speaks a
+protocol older than v17 cannot take the frame: the run is dispatched as before and
+keeps the token it was given, the project's journal says once that its GitHub
+access ends when that token expires (naming the agent's protocol and the upgrade),
+and a denied `lease.refresh` row records it. A Kubernetes executor whose Role
+predates the `patch` verb on `secrets` fails the patch, and the denied row says
+which rule to add.
+
+What a refresh cannot reach: a `"*"` allowlist also exports the token as
+`GITHUB_TOKEN` and `GH_TOKEN`, and an environment variable in a running process
+cannot be changed — those keep the first token, which is therefore left to expire
+at its hour rather than destroyed early. `CLOOP_GITHUB_TOKEN_EXPIRES_AT` keeps
+naming the first token's expiry for the same reason; git, which reads the file,
+is not affected.
 
 ### Limiting pushes to particular branches
 

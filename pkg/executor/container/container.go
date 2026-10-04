@@ -909,6 +909,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// so the bus is where they stop being reproducible. Only the derived match
 	// set is retained — never the spec.
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
+	feature.followRedaction(rec.bus)
 	if prelude.Len() > 0 {
 		// How the feature's tree was built, at the top of its log, where an
 		// operator looking for why a run started on the wrong code will look.

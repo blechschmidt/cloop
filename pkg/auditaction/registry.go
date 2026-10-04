@@ -617,6 +617,19 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note:      "The row an incident response cares about: the credential is still out there.",
 	},
+	{
+		Action:  ActionLeaseRefresh,
+		Home:    HomeControlPlane,
+		Entity:  "lease",
+		Trigger: "A GitHub App token re-minted before its hour ran out is delivered to an executor holding the lease's token file, or cannot be.",
+		Payload: []string{"decision", "lease_id", "grant_id", "executor_id", "project_id", "files", "handles",
+			"eventual", "error", "reason"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The re-mint itself is a secret.renew row; this one says whether the workload got the new token. " +
+			"A deny means it did not — an agent too old for the refresh frame, a device offline, a Role without " +
+			"patch on secrets — and the run's GitHub access ends when the token it holds expires.",
+	},
 
 	// ── github_app ─────────────────────────────────────────────────────────
 	{

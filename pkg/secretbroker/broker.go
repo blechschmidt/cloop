@@ -68,14 +68,16 @@ type Broker struct {
 	mu     sync.Mutex
 	leases map[string]*leaseState
 	// minted holds the GitHub App installation tokens this broker is
-	// responsible for destroying, keyed by lease ID.
+	// responsible for destroying, keyed by lease ID: one slot per App grant
+	// the lease carries, holding its current token and any it superseded
+	// (apprefresh.go).
 	//
 	// It is the difference between revocation and forgetting. Every other
 	// credential kind is minimized from something the operator already holds,
 	// so withdrawing it means wiping a file; an App token is a credential this
 	// hub brought into existence at GitHub, and nothing but a DELETE takes it
 	// back. Losing this map would leave live tokens with no owner.
-	minted map[string][]appToken
+	minted map[string][]*appTokenSlot
 
 	clock       func() time.Time
 	maxLeaseTTL time.Duration
@@ -198,7 +200,7 @@ func New(store Store, opts ...Option) (*Broker, error) {
 		store:       store,
 		auditor:     nopAuditor{},
 		leases:      make(map[string]*leaseState),
-		minted:      make(map[string][]appToken),
+		minted:      make(map[string][]*appTokenSlot),
 		clock:       time.Now,
 		maxLeaseTTL: DefaultMaxLeaseTTL,
 	}
@@ -710,7 +712,13 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		// Any App token minted above now belongs to a lease that will never
 		// exist. Destroy it here rather than let it live out GitHub's hour as
 		// a credential no record points at.
-		b.destroyAppTokens(ctx, rec.tokens, "lease creation failed")
+		b.mu.Lock()
+		var doomed []appToken
+		for _, slot := range rec.slots {
+			doomed = append(doomed, slot.end()...)
+		}
+		b.mu.Unlock()
+		b.destroyAppTokens(ctx, doomed, "lease creation failed")
 		return nil, err
 	}
 	lease := &Lease{
@@ -741,8 +749,14 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		requester: r, actor: actor, expiresAt: lease.ExpiresAt, kinds: kinds,
 		grantIDs: grantIDs,
 	}
-	if len(rec.tokens) > 0 {
-		b.minted[lease.ID] = rec.tokens
+	if len(rec.slots) > 0 {
+		// The lease ID exists only now, so the slots learn it here — before
+		// the lease is returned, and so before anything could ask one to
+		// refresh: a refresh row has to name the lease it renewed.
+		for _, slot := range rec.slots {
+			slot.leaseID = lease.ID
+		}
+		b.minted[lease.ID] = rec.slots
 	}
 	b.mu.Unlock()
 	for _, k := range kinds {
@@ -851,8 +865,10 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 // clamped to the earliest grant expiry exactly as at issue.
 //
 // It does not re-render anything. A secret whose value an operator re-minted
-// reaches the next dispatch, not this one, and an App token keeps the hour
-// GitHub gave it when it was minted.
+// reaches the next dispatch, not this one. An App token keeps the hour GitHub
+// gave it, and is replaced before that hour runs out by a refresh at the same
+// scope (apprefresh.go, Task 20375) — the one credential a lease carries that
+// the hub can renew without re-issuing the lease.
 func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) {
 	ev := Event{Action: ActionRenew, LeaseID: leaseID}
 	if err := ctx.Err(); err != nil {
@@ -1044,8 +1060,15 @@ func (b *Broker) SweepExpired() (expired, live map[Kind]int) {
 // one map lookup and returns.
 func (b *Broker) destroyLeaseTokens(ctx context.Context, leaseID, reason string) {
 	b.mu.Lock()
-	tokens := b.minted[leaseID]
+	slots := b.minted[leaseID]
 	delete(b.minted, leaseID)
+	var tokens []appToken
+	for _, slot := range slots {
+		// Ended under the lock, so a refresh in flight on another goroutine
+		// finds the slot ended when it comes back from GitHub and destroys
+		// what it minted instead of installing it.
+		tokens = append(tokens, slot.end()...)
+	}
 	b.mu.Unlock()
 	if len(tokens) == 0 {
 		return
@@ -1067,14 +1090,16 @@ func (b *Broker) destroyGrantTokens(ctx context.Context, grantID, reason string)
 	}
 	var doomed []appToken
 	b.mu.Lock()
-	for leaseID, tokens := range b.minted {
-		var keep []appToken
-		for _, t := range tokens {
-			if t.grantID == grantID {
-				doomed = append(doomed, t)
+	for leaseID, slots := range b.minted {
+		var keep []*appTokenSlot
+		for _, slot := range slots {
+			if slot.grantID == grantID {
+				// Ended, not merely dropped: a refresh of this slot must find
+				// it ended rather than renew a grant that was just withdrawn.
+				doomed = append(doomed, slot.end()...)
 				continue
 			}
-			keep = append(keep, t)
+			keep = append(keep, slot)
 		}
 		if len(keep) == 0 {
 			delete(b.minted, leaseID)

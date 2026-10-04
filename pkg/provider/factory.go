@@ -105,7 +105,7 @@ func Build(cfg ProviderConfig) (Provider, error) {
 	}
 	// Outermost, so nothing downstream — the provider audit log included —
 	// records a credential this process was lent. See redaction.go.
-	return WithRedaction(wrapped, processRedactor()), nil
+	return withLiveRedaction(wrapped, processRedactor()), nil
 }
 
 // Available returns a comma-separated list of registered providers.

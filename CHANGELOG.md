@@ -12,6 +12,26 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **GitHub App tokens outlive GitHub's hour.** A run that still uses git more
+  than an hour after dispatch keeps its GitHub access. The hub re-mints a
+  `github_app` grant's installation token when about ten minutes of its hour
+  are left — at exactly the scope of the first (same installation, same
+  repositories by ID, same permissions, never wider than GitHub granted the
+  first time), and only while the grant still authorises the lease — and
+  destroys the token it replaced once nothing presents it. Under the git proxy
+  the session renews the token it presents upstream from its own request path;
+  without it the lease keepalive rewrites the sandbox's `github-token` file in
+  place: on the hub's host, in a container's staged directory, on an edge
+  device through the new `secret_refresh` frame (agent protocol **v17**), and on
+  Kubernetes by patching the run's lease Secret (the chart's executor Role gains
+  `patch` on `secrets`). A refresh the broker or GitHub refuses — the grant
+  revoked or expired, the installation suspended, a repository removed from it —
+  ends the grant's access as revocation does; a device too old for the frame is
+  journaled instead of refused, and keeps the token it was given. Each re-mint
+  is an allowed `secret.renew` row; each delivery to an executor a
+  `lease.refresh` row (new audit action). See *Keeping the token past GitHub's
+  hour* in `docs/guides/secrets.md`.
+
 - **Done means committed.** An opt-in, per-project post-condition: a task
   whose agent says it is done is accepted only once the changes it made are
   committed — and, with *pushed*, on its branch's upstream. When a turn ends

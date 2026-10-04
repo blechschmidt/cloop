@@ -69,6 +69,10 @@ type gitProxyService struct {
 	stopReaping context.CancelFunc
 	// auditDB is the handle the event sink writes through. May be nil.
 	auditDB *statedb.DB
+	// githubUpstream overrides githubUpstreamBase for the scoped sessions the
+	// guard mints. Empty — the forge is github.com — everywhere but in tests,
+	// which put a local forge behind the proxy; nothing reads it from config.
+	githubUpstream string
 }
 
 // gitProxySingleton is the process's proxy, or nil when none is configured.

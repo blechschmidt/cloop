@@ -163,6 +163,50 @@ func TestWriter_CatchesASecretSplitAcrossWrites(t *testing.T) {
 	}
 }
 
+// TestFollowingWriter_ScrubsAValueThatJoinedMidStream: a credential refreshed
+// while the stream is open is scrubbed from the next Write on — split across
+// two Writes too — and the one it replaced stays scrubbed (Task 20375).
+func TestFollowingWriter_ScrubsAValueThatJoinedMidStream(t *testing.T) {
+	const first, second = "ghs_firstTokenValue0123456789", "ghs_secondTokenValue987654321"
+	set := New(first)
+	var sink bytes.Buffer
+	w := NewFollowingWriter(&sink, func() *Set { return set })
+	for _, chunk := range []string{"a " + first + " b\n"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set = set.With(second)
+	for _, chunk := range []string{"c " + second[:12], second[12:] + " d " + first + " e"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := sink.String()
+	if strings.Contains(got, first) || strings.Contains(got, second) {
+		t.Fatalf("a token reached the sink: %q", got)
+	}
+	if want := "a " + Marker + " b\nc " + Marker + " d " + Marker + " e"; got != want {
+		t.Errorf("sink = %q, want %q", got, want)
+	}
+}
+
+// TestFollowingWriter_ForwardsVerbatimWithoutASet: nothing to scrub yet means
+// nothing withheld.
+func TestFollowingWriter_ForwardsVerbatimWithoutASet(t *testing.T) {
+	var sink bytes.Buffer
+	w := NewFollowingWriter(&sink, func() *Set { return nil })
+	if _, err := w.Write([]byte("plain ")); err != nil {
+		t.Fatal(err)
+	}
+	if sink.String() != "plain " {
+		t.Fatalf("sink = %q before Flush, want the write forwarded at once", sink.String())
+	}
+}
+
 func TestWriter_ReportsFullLengthConsumedWhileWithholding(t *testing.T) {
 	w := NewWriter(&bytes.Buffer{}, New(token))
 	// This write ends mid-secret, so nothing may be forwarded yet — but the

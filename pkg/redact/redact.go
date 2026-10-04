@@ -123,6 +123,35 @@ func New(values ...string) *Set {
 	return s
 }
 
+// With returns a Set over s's values and values, or s itself when values add
+// nothing that survives New's filter. s is not modified — a Set is immutable,
+// which is what lets one be read without a lock — so a holder whose credential
+// changes while it runs (a GitHub App token refreshed mid-run, Task 20375)
+// installs the result in place of the old Set. The old values stay: the
+// credential a workload printed before the refresh must stay scrubbed after it.
+func (s *Set) With(values ...string) *Set {
+	var all []string
+	if s != nil {
+		all = make([]string, 0, len(s.values)+len(values))
+		for _, v := range s.values {
+			all = append(all, string(v))
+		}
+	}
+	before := len(all)
+	all = append(all, values...)
+	if len(all) == before {
+		return s
+	}
+	out := New(all...)
+	if out == nil {
+		return s
+	}
+	if s != nil && out.Len() == s.Len() {
+		return s
+	}
+	return out
+}
+
 // IsPlaceholder reports whether v is something a redactor already left behind
 // rather than a credential.
 //
@@ -252,6 +281,9 @@ func (s *Set) holdback(buf []byte) int {
 type Writer struct {
 	dst io.Writer
 	set *Set
+	// current, when set, is asked for the Set on every Write instead: a stream
+	// that outlives a credential refresh scrubs the new value too (Task 20375).
+	current func() *Set
 
 	mu      sync.Mutex
 	pending []byte
@@ -263,22 +295,40 @@ func NewWriter(dst io.Writer, set *Set) *Writer {
 	return &Writer{dst: dst, set: set}
 }
 
+// NewFollowingWriter is NewWriter over a Set that may grow while the stream is
+// open: current is asked on every Write and Flush, and its answer scrubs that
+// chunk together with whatever an earlier one withheld. A value printed before
+// it joined the set has already gone; nothing can call it back.
+func NewFollowingWriter(dst io.Writer, current func() *Set) *Writer {
+	return &Writer{dst: dst, current: current}
+}
+
+// setNow is the Set to scrub with now. Callers hold mu, or need no consistency
+// with pending.
+func (w *Writer) setNow() *Set {
+	if w.current != nil {
+		return w.current()
+	}
+	return w.set
+}
+
 // Write scrubs p and forwards it. It reports len(p) consumed on success even
 // when part of p is being withheld, because the io.Writer contract is about
 // what the caller may consider handed over, not about what has reached dst yet.
 func (w *Writer) Write(p []byte) (int, error) {
-	if w.set == nil {
-		return w.dst.Write(p)
-	}
 	if len(p) == 0 {
 		return 0, nil
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	set := w.setNow()
+	if set == nil && len(w.pending) == 0 {
+		return w.dst.Write(p)
+	}
 
 	w.pending = append(w.pending, p...)
-	w.pending = w.set.Bytes(w.pending)
-	hold := w.set.holdback(w.pending)
+	w.pending = set.Bytes(w.pending)
+	hold := set.holdback(w.pending)
 	emit := w.pending[:len(w.pending)-hold]
 	if len(emit) > 0 {
 		if _, err := w.dst.Write(emit); err != nil {
@@ -293,15 +343,12 @@ func (w *Writer) Write(p []byte) (int, error) {
 
 // Flush writes any withheld remainder. It is safe to call more than once.
 func (w *Writer) Flush() error {
-	if w.set == nil {
-		return nil
-	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(w.pending) == 0 {
 		return nil
 	}
-	out := w.set.Bytes(w.pending)
+	out := w.setNow().Bytes(w.pending)
 	w.pending = nil
 	_, err := w.dst.Write(out)
 	return err

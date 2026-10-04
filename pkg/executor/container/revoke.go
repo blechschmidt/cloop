@@ -53,7 +53,10 @@ import (
 // any workload carrying revocable credentials on a driver that does not
 // implement this interface, so a signature drift here would take the container
 // backend out of service for leased work rather than fail a build.
-var _ executor.Revoker = (*Executor)(nil)
+var (
+	_ executor.Revoker         = (*Executor)(nil)
+	_ executor.SecretRefresher = (*Executor)(nil)
+)
 
 // SupportsRevocation reports whether a revocation issued now would be honoured.
 //
@@ -141,6 +144,61 @@ func (e *Executor) RevokeLease(ctx context.Context, req executor.RevokeRequest) 
 		}
 	}
 	e.settle(&out, ack, errors.Join(append(errs, unresolved)...))
+	return out
+}
+
+// RefreshSecretFiles implements executor.SecretRefresher: it rewrites req's
+// files in every container holding the lease, in the host directory the
+// container has bind-mounted, and extends each container's output redaction to
+// the new content (Task 20375).
+//
+// The redaction goes first. The moment the file is renamed into place the
+// workload can read it, and print it.
+func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRefreshRequest) executor.SecretRefreshReport {
+	out := executor.SecretRefreshReport{LeaseID: strings.TrimSpace(req.LeaseID)}
+	if err := req.Validate(); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	held := e.leases.Handles(executor.RevokeRequest{LeaseID: out.LeaseID})
+	if len(held) == 0 {
+		return out
+	}
+	out.Known = true
+	values := req.Values()
+	var errs []error
+	for _, handleID := range executor.SortedHandles(held) {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		rec, err := e.lookup(handleID)
+		if err != nil {
+			// Finished between the index read and here; finish() wiped its
+			// stage. Nothing holds the old file any more.
+			continue
+		}
+		if rec.secretStage == nil {
+			// Adopted after a hub restart: the record was rebuilt from a row,
+			// and the row deliberately holds no host paths of credentials.
+			errs = append(errs, fmt.Errorf("container %s was adopted from a row written before this hub "+
+				"process started, which does not record where its credential files were staged", handleID))
+			continue
+		}
+		if rec.bus != nil {
+			rec.bus.AddRedactions(values...)
+		}
+		n, err := rec.secretStage.refresh(req)
+		out.FilesRewritten += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("container %s: %w", handleID, err))
+			continue
+		}
+		out.Handles = append(out.Handles, handleID)
+	}
+	if err := errors.Join(errs...); err != nil {
+		out.Error = err.Error()
+	}
 	return out
 }
 

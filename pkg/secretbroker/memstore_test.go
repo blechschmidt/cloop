@@ -28,6 +28,8 @@ type memStore struct {
 	// putRequestErr makes the next PutAccessRequest fail, which is how the
 	// "approval recorded, grant already minted" rollback is tested.
 	putRequestErr error
+	// getGrantErr makes the next GetGrant fail as a busy database would.
+	getGrantErr error
 }
 
 func newMemStore() *memStore {
@@ -92,6 +94,11 @@ func (m *memStore) PutGrant(g Grant) error {
 func (m *memStore) GetGrant(id string) (Grant, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.getGrantErr != nil {
+		err := m.getGrantErr
+		m.getGrantErr = nil
+		return Grant{}, err
+	}
 	g, ok := m.grants[id]
 	if !ok {
 		return Grant{}, wrapf(ErrGrantNotFound, "%s", id)

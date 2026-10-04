@@ -982,6 +982,28 @@ jobs:
             exit 1
           }
 
+      - name: Refresh a GitHub App token in a container
+        timeout-minutes: 5 # observed locally: 2s once the image layer is cached
+        env:
+          CLOOP_REFRESH_CONTAINER_E2E: "1"
+        # Task 20375: a sandbox with no git proxy holds its App installation
+        # token as a file, and the hub rewrites that file in place before
+        # GitHub's hour ends. The workload's own git — in a real container,
+        # through a forge that refuses expired tokens — fetches and pushes past
+        # the hour, and the new token is scrubbed from its output. Its image is
+        # the previous step's pinned base plus git, so the layer is cached. The
+        # same PASS-line assertion, for the same reason: the test skips without
+        # docker.
+        run: |
+          set -euo pipefail
+          go test ./pkg/executor/container/ -run '^TestContainerSandboxRefreshesItsAppTokenPastTheHour$' \
+            -v -count=1 -timeout 4m 2>&1 | tee /tmp/refresh-container.log
+          grep -qE '^--- PASS: TestContainerSandboxRefreshesItsAppTokenPastTheHour \(' /tmp/refresh-container.log || {
+            echo "::error::go test succeeded but TestContainerSandboxRefreshesItsAppTokenPastTheHour did" \
+                 "not pass — it was skipped (docker unavailable, or CLOOP_REFRESH_CONTAINER_E2E lost)."
+            exit 1
+          }
+
       - name: Circuit diagnostics on failure
         timeout-minutes: 3 # observed: <1s; bounded because it shells out too
         # A failure here is a failure of an eight-step circuit, and the step

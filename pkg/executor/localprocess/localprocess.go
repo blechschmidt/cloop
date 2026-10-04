@@ -824,6 +824,17 @@ func (r *record) emit(text string) {
 	r.publishLocked(text)
 }
 
+// addRedactions extends the record's redaction to values from the next chunk
+// on, keeping what it already scrubs (Task 20375).
+func (r *record) addRedactions(values ...string) {
+	if r == nil || len(values) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.redactor = r.redactor.With(values...)
+}
+
 // emitRaw publishes text without passing it through the redactor, for the one
 // caller that has already scrubbed it: finish, flushing the held-back tail.
 // Routing that tail back through emit would re-run the holdback and withhold
@@ -940,15 +951,14 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// is marked closed and emit turns into a no-op. A workload whose final
 	// bytes happened to look like the start of a credential must not lose
 	// them: the tail of the output is where the error message is.
-	if rec.redactor != nil {
-		rec.mu.Lock()
-		tail := rec.pending
-		rec.pending = ""
-		alreadyClosed := rec.closed
-		rec.mu.Unlock()
-		if tail != "" && !alreadyClosed {
-			rec.emitRaw(rec.redactor.String(tail))
-		}
+	rec.mu.Lock()
+	set := rec.redactor
+	tail := rec.pending
+	rec.pending = ""
+	alreadyClosed := rec.closed
+	rec.mu.Unlock()
+	if set != nil && tail != "" && !alreadyClosed {
+		rec.emitRaw(set.String(tail))
 	}
 
 	rec.mu.Lock()

@@ -97,6 +97,13 @@ type fakeGitHub struct {
 	revokeErr  error
 	installErr error
 
+	// beforeCreate, when set, runs at the start of every mint, outside the
+	// lock — a test parks a refresh there to race something against it.
+	beforeCreate func()
+	// answerPermissions, when set, replaces the permissions a mint answers
+	// with — GitHub granting something other than what was asked.
+	answerPermissions map[string]string
+
 	// Recorded traffic.
 	creates      []InstallationTokenRequest
 	revoked      []string
@@ -122,6 +129,12 @@ func (f *fakeGitHub) now() time.Time {
 
 func (f *fakeGitHub) CreateInstallationToken(_ context.Context, req InstallationTokenRequest) (InstallationToken, error) {
 	f.mu.Lock()
+	hook := f.beforeCreate
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createErr != nil {
 		return InstallationToken{}, f.createErr
@@ -133,10 +146,14 @@ func (f *fakeGitHub) CreateInstallationToken(_ context.Context, req Installation
 	f.seq++
 	tok := fmt.Sprintf("ghs_faketoken%02d", f.seq)
 	f.live[tok] = true
+	perms := req.Permissions
+	if f.answerPermissions != nil {
+		perms = f.answerPermissions
+	}
 	return InstallationToken{
 		Token:       tok,
 		ExpiresAt:   f.now().Add(f.lifetime),
-		Permissions: req.Permissions,
+		Permissions: perms,
 	}, nil
 }
 

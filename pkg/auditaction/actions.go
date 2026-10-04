@@ -206,6 +206,9 @@ const (
 	ActionLeaseRevokeAcked Action = "lease.revoke_acked"
 	// ActionLeaseRevokeFailed records a revocation that did not land.
 	ActionLeaseRevokeFailed Action = "lease.revoke_failed"
+	// ActionLeaseRefresh records a refreshed GitHub App token file reaching —
+	// or failing to reach — an executor holding the lease (Task 20375).
+	ActionLeaseRefresh Action = "lease.refresh"
 
 	// ── github_app ─────────────────────────────────────────────────────────
 

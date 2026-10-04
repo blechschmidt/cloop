@@ -176,6 +176,24 @@ type secretLease struct {
 	// calls it first, so no extension can land on a lease being released.
 	stopKeepalive func()
 
+	// workDir is the project the lease was issued for, whose journal says when
+	// a GitHub App token in it cannot be renewed (secrets_refresh.go).
+	workDir string
+	// auditDB is the control-plane handle the broker was opened over, open
+	// until closer runs; the keepalive's lease.refresh rows go through it.
+	auditDB *statedb.DB
+	// refreshNoted is the reason last journaled per executor for a token it
+	// cannot be handed, so a device too old for the refresh frame is named
+	// once per run rather than once a minute. Guarded by mu.
+	refreshNoted map[string]string
+	// refreshCannot holds executors found unable to take a refreshed file —
+	// told so by the executor, or failing the same way refreshGiveUpAfter
+	// times running — so no further token is minted for them. Guarded by mu.
+	refreshCannot map[string]string
+	// refreshFailed is each executor's last delivery failure and how many
+	// ticks running it has repeated. Guarded by mu.
+	refreshFailed map[string]refreshFailure
+
 	once sync.Once
 }
 
@@ -309,12 +327,21 @@ func (sl *secretLease) startKeepalive(tick time.Duration) {
 		defer recoverGoroutine("secret lease keepalive: " + sl.lease.ID)
 		t := time.NewTicker(tick)
 		defer t.Stop()
+		extending := true
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				if !sl.keepAlive(ctx, now) {
+				if extending && !sl.keepAlive(ctx, now) {
+					extending = false
+				}
+				// A GitHub App token in the sandbox's files is renewed before
+				// GitHub's hour ends (Task 20375), for as long as the lease
+				// lasts — including the stretch after extending stopped, while
+				// the lease runs out its current period.
+				watching := sl.refreshAppTokens(ctx, now)
+				if !extending && (!watching || !now.Before(sl.ExpiresAt())) {
 					return
 				}
 			}
@@ -548,7 +575,10 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 		return nil
 	}
 
-	sl := &secretLease{broker: broker, lease: lease, closer: closeDB, expiry: lease.ExpiresAt}
+	sl := &secretLease{
+		broker: broker, lease: lease, closer: closeDB, expiry: lease.ExpiresAt,
+		workDir: workDir, auditDB: db,
+	}
 	if ex != nil && ex.Capabilities().SecretFilesFromHostPath {
 		// Name the directory, record the intent, *then* write the plaintext.
 		//
@@ -671,7 +701,7 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 		_ = db.Close()
 		return nil, nil, nil, err
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	broker, err := secretbroker.New(store, brokerOptions(secretstore.NewAuditor(db))...)
 	if err != nil {
 		_ = db.Close()
 		return nil, nil, nil, err
@@ -687,6 +717,18 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 	// cluster-admin one their own administrator issued them — would otherwise
 	// land in the workload's filesystem. See kubeguard.go.
 	return attachKubeGuard(attachGitGuard(broker)), db, func() { _ = db.Close() }, nil
+}
+
+// testBrokerOptions are appended to every broker this hub opens. Nil in
+// production. Tests set it to stand a fake GitHub (secretbroker.WithGitHubApp)
+// and a clock they drive in for api.github.com and the wall clock, so a GitHub
+// App token's hour can be crossed without waiting for one (Task 20375).
+var testBrokerOptions []secretbroker.Option
+
+// brokerOptions is the option list every broker the hub opens is built with.
+func brokerOptions(auditor secretbroker.Auditor) []secretbroker.Option {
+	opts := []secretbroker.Option{secretbroker.WithAuditor(auditor)}
+	return append(opts, testBrokerOptions...)
 }
 
 // isBrokerUnconfigured reports whether the broker simply is not set up on

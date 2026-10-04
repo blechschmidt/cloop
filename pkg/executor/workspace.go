@@ -496,6 +496,12 @@ type GitCredential struct {
 	// the credential — a git proxy between the holder and the forge is what
 	// applies it (see pkg/executor/gitproxycreds).
 	Branches []string
+	// TokenExpiresAt is when the forge stops honouring Password, for a
+	// credential the hub minted — a GitHub App installation token's hour.
+	// Zero for a PAT, whose expiry the hub does not know. A git proxy that
+	// keeps the credential longer than that renews it through the source that
+	// leased it (Task 20375). Not secret.
+	TokenExpiresAt time.Time
 }
 
 // Empty reports whether there is no credential to deliver.
@@ -915,6 +921,12 @@ var ErrWorkspaceGrantMissing = errors.New("executor: no secret grant can authent
 // distinct from a harness failure because the remedy is entirely different —
 // nothing about the task's code is implicated.
 var ErrWorkspaceUnavailable = errors.New("executor: workspace could not be provisioned")
+
+// ErrCredentialRefused: a workspace credential with an expiry the hub knows
+// could not be renewed, and will not be on a later attempt either — its grant
+// was revoked or expired, the lease behind it released, or the forge refused
+// (Task 20375). Whatever presents the credential stops doing so.
+var ErrCredentialRefused = errors.New("executor: workspace credential will not be renewed")
 
 // WorkspaceGrantError names the grant a workload needed and did not have.
 //

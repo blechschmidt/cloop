@@ -366,7 +366,7 @@ func openBrokersAt(controlPlaneWorkDir string) (*brokerSet, error) {
 	auditor := secretstore.NewAuditor(db)
 
 	if store, serr := secretstore.New(db); serr == nil {
-		if broker, berr := secretbroker.New(store, secretbroker.WithAuditor(auditor)); berr == nil {
+		if broker, berr := secretbroker.New(store, brokerOptions(auditor)...); berr == nil {
 			bs.secret = broker
 			bs.status.SecretsAvailable = true
 		} else {

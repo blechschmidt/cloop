@@ -498,6 +498,11 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// stall heartbeat acks and every other handle's control traffic.
 			go a.handleRevoke(ctx, sess, frame)
 
+		case remote.TypeSecretRefresh:
+			// Its own goroutine for the reason revoke has one: it writes files
+			// and takes the vault's lock, which a scrub may be holding.
+			go a.handleSecretRefresh(ctx, sess, frame)
+
 		case remote.TypeUpgrade:
 			// Its own goroutine for the usual reason — a release download is
 			// slow, and the frame loop carries every other handle's traffic —
@@ -650,6 +655,10 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// binding afterwards would leave a window in which the credential is live
 	// on the device and invisible to revocation.
 	a.vault.bind(handleID, spec.Secrets)
+	// And which files this agent itself wrote for it: the only ones a later
+	// refresh frame may replace (Task 20375). The bindings above are the hub's
+	// word for what the lease covers; this is the device's own record.
+	a.vault.own(handleID, placed.paths())
 
 	workDir, err := a.resolveWorkDir(spec.WorkDir)
 	if err != nil {

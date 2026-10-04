@@ -116,10 +116,15 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # what enforcing them already required. `cloop executor test` reports a missing
 # rule as a fatal finding rather than silently running Pods unfiltered.
 #
-# There is still no `update` or `patch` on anything: the driver never mutates
-# an object after creating it, so a compromised hub cannot rewrite a running
-# workload's spec, swap a credential under a Pod that already started, or
-# loosen the egress policy of one that is running.
+# There is no `update` or `patch` on anything but the lease Secret: the driver
+# never mutates a Pod or a NetworkPolicy after creating it, so a compromised hub
+# cannot rewrite a running workload's spec or loosen the egress policy of one
+# that is running. `patch` on secrets exists for one thing (Task 20375): a
+# GitHub App installation token in a running Pod's lease Secret is replaced
+# before GitHub's hour ends, and the kubelet syncs the Pod's directory volume
+# from the patched object. It does not widen the namespace's blast radius — with
+# `pods: create` any Secret here could already be read or replaced by a Pod — and
+# without it a run that needs GitHub for more than an hour loses it there.
 #
 # `/version` is also called (preflight). It needs no rule here: Kubernetes
 # grants it to system:authenticated through the built-in
@@ -143,9 +148,10 @@ rules:
     resources: ["pods/log"]
     verbs: ["get"]
   # Write-only, by design. See the note above: no get, no list, no watch.
+  # patch replaces a GitHub App token in a running Pod's lease Secret.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "delete"]
+    verbs: ["create", "patch", "delete"]
   # The per-Pod egress allowlist. list is for the orphan sweep; there is no
   # update, so a running Pod's firewall cannot be widened. See the note above.
   - apiGroups: ["networking.k8s.io"]

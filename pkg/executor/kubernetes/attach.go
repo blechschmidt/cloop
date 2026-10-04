@@ -100,7 +100,7 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 
 	// The same set the log bus scrubs with — see the container driver for why
 	// the bus rather than the Spec.
-	return newExecConn(conn, req, rec.bus.Redactor()), nil
+	return newExecConn(conn, req, rec.bus.Redactor), nil
 }
 
 // execURL builds the pods/exec endpoint for req, as a ws:// or wss:// URL.
@@ -200,7 +200,7 @@ type execConn struct {
 }
 
 // newExecConn starts the demultiplexer and returns the caller's view.
-func newExecConn(ws *websocket.Conn, req executor.AttachRequest, redactor *redact.Set) executor.AttachConn {
+func newExecConn(ws *websocket.Conn, req executor.AttachRequest, redactor func() *redact.Set) executor.AttachConn {
 	// Detached from the request context for the same reason the container
 	// driver detaches: an HTTP handler returning must not end the session.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -208,7 +208,7 @@ func newExecConn(ws *websocket.Conn, req executor.AttachRequest, redactor *redac
 
 	pr, pw := io.Pipe()
 	go c.demux(pw)
-	c.out = executor.RedactAttachOutput(pr, redactor)
+	c.out = executor.RedactAttachOutputFollowing(pr, redactor)
 	return c
 }
 

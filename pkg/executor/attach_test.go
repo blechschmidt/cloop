@@ -298,6 +298,40 @@ func TestRedactAttachOutput_ScrubsAcrossReadBoundaries(t *testing.T) {
 	}
 }
 
+// TestRedactAttachOutputFollowing_ScrubsARefreshedToken: a terminal open
+// across a credential refresh scrubs the new token as well as the first
+// (Task 20375).
+func TestRedactAttachOutputFollowing_ScrubsARefreshedToken(t *testing.T) {
+	const first, second = "ghs_firstLeasedTokenValue12345", "ghs_refreshedLeasedTokenValue678"
+	var mu sync.Mutex
+	set := redact.New(first)
+	current := func() *redact.Set {
+		mu.Lock()
+		defer mu.Unlock()
+		return set
+	}
+	pr, pw := io.Pipe()
+	out := RedactAttachOutputFollowing(pr, current)
+	done := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(out)
+		done <- b
+	}()
+	_, _ = pw.Write([]byte("one " + first + "\n"))
+	mu.Lock()
+	set = set.With(second)
+	mu.Unlock()
+	_, _ = pw.Write([]byte("two " + second + " " + first + "\n"))
+	_ = pw.Close()
+	got := string(<-done)
+	if strings.Contains(got, first) || strings.Contains(got, second) {
+		t.Fatalf("attach output leaked a token: %q", got)
+	}
+	if !strings.Contains(got, "one ") || !strings.Contains(got, "two ") {
+		t.Errorf("redaction ate the surrounding text: %q", got)
+	}
+}
+
 // TestRedactAttachOutput_PassesThroughWithoutASet keeps the common case free:
 // a workload holding no credential must not pay for a pipe and a goroutine.
 func TestRedactAttachOutput_PassesThroughWithoutASet(t *testing.T) {

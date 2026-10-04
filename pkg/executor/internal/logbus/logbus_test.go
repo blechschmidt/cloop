@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // collect drains ch until it closes or the deadline expires, returning the
@@ -366,5 +367,22 @@ func TestDefaultStreamIsCombined(t *testing.T) {
 	b.Close()
 	if line := <-ch; line.Stream != executor.StreamCombined {
 		t.Fatalf("Stream = %q, want %q", line.Stream, executor.StreamCombined)
+	}
+}
+
+// TestAddRedactionsScrubsAReplacedCredential: a credential the hub replaced
+// while the workload runs is scrubbed from the next chunk on, and the one it
+// replaced still is (Task 20375).
+func TestAddRedactionsScrubsAReplacedCredential(t *testing.T) {
+	b := New("h1", executor.StreamCombined, Options{Redact: redact.New("ghs_first_token_value")})
+	b.AddRedactions("ghs_second_token_value\n", "ghs_second_token_value")
+	b.Emit("old=ghs_first_token_value new=ghs_second_token_value\n")
+	b.Close()
+	var out strings.Builder
+	for line := range b.Subscribe(context.Background()) {
+		out.WriteString(line.Text)
+	}
+	if got := out.String(); strings.Contains(got, "ghs_") {
+		t.Fatalf("a credential reached the bus: %q", got)
 	}
 }

@@ -338,9 +338,26 @@ func RedactAttachOutput(r io.Reader, set *redact.Set) io.Reader {
 	if set == nil || set.Len() == 0 || r == nil {
 		return r
 	}
+	return redactAttachOutput(r, func(w io.Writer) *redact.Writer { return redact.NewWriter(w, set) })
+}
+
+// RedactAttachOutputFollowing is RedactAttachOutput over the set current
+// returns as the session goes on — a handle's log bus's, which a credential
+// refreshed while the workload runs joins (Task 20375). A terminal open across
+// the refresh scrubs the new token as the log stream does. It pipes even when
+// the set is empty now: a rehydrated handle's bus starts empty and gains the
+// first token it is sent.
+func RedactAttachOutputFollowing(r io.Reader, current func() *redact.Set) io.Reader {
+	if current == nil || r == nil {
+		return r
+	}
+	return redactAttachOutput(r, func(w io.Writer) *redact.Writer { return redact.NewFollowingWriter(w, current) })
+}
+
+func redactAttachOutput(r io.Reader, newWriter func(io.Writer) *redact.Writer) io.Reader {
 	pr, pw := io.Pipe()
 	go func() {
-		rw := redact.NewWriter(pw, set)
+		rw := newWriter(pw)
 		_, err := io.Copy(rw, r)
 		// Flush before closing: the holdback buffer may still be sitting on the
 		// tail of a transcript that ended mid-token, and dropping it would eat

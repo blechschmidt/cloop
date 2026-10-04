@@ -221,7 +221,7 @@ func (a *Agent) handleAttachOpen(ctx context.Context, sess *deviceSession, frame
 		SessionID: payload.SessionID,
 		TTY:       gotTTY,
 	})
-	a.pumpAttach(sess, proc, out, wl.redactor())
+	a.pumpAttach(sess, proc, out, wl.redactor)
 }
 
 // startPipeAttach wires a non-pty session and starts it.
@@ -257,11 +257,12 @@ func (a *Agent) startPipeAttach(proc *attachProc, payload remote.AttachOpenPaylo
 
 // pumpAttach streams the command's output back to the control plane until it
 // ends, then reports the close.
-func (a *Agent) pumpAttach(sess *deviceSession, proc *attachProc, out io.Reader, red *redact.Set) {
+func (a *Agent) pumpAttach(sess *deviceSession, proc *attachProc, out io.Reader, red func() *redact.Set) {
 	// Scrubbed on the device, before the bytes leave it. The hub scrubs again
 	// with the same set, but this is the half that matters: a credential that
-	// never crosses the wire cannot be read off it.
-	src := executor.RedactAttachOutput(out, red)
+	// never crosses the wire cannot be read off it. Asked as the session goes,
+	// so a token a refresh frame wrote is scrubbed in a terminal already open.
+	src := executor.RedactAttachOutputFollowing(out, red)
 
 	go func() {
 		defer func() {
@@ -448,4 +449,15 @@ func (w *workload) redactor() *redact.Set {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.redactSet
+}
+
+// addRedactions extends this workload's credential set with values a refresh
+// frame is about to write into its lease directory.
+func (w *workload) addRedactions(values ...string) {
+	if len(values) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.redactSet = w.redactSet.With(values...)
 }

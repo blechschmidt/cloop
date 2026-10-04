@@ -60,6 +60,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
+	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
 )
 
 const (
@@ -297,6 +298,16 @@ func (f *featureRun) bundle() ([]byte, error) {
 		return nil, fmt.Errorf("%w: %v", executor.ErrWriteBackUnavailable, err)
 	}
 	return data, nil
+}
+
+// followRedaction scrubs the project state read back with bus's redaction as
+// it stands then, not the Spec's: the state comes back after the run, and a
+// token refreshed meanwhile (RefreshSecretFiles) joined the bus, not the Spec.
+func (f *featureRun) followRedaction(bus *logbus.Bus) {
+	if f == nil || bus == nil {
+		return
+	}
+	f.redact = func(s string) string { return bus.Redactor().String(s) }
 }
 
 // projectResult reads the run's project state back.

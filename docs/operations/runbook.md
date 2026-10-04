@@ -692,6 +692,44 @@ blunt instrument; the sharp one is
 revoking the underlying grant with `cloop secret revoke`, which stops the *next*
 dispatch from minting anything, and rotating the PAT at the forge.
 
+The lease keepalive does not stretch the GitHub App **token** a session presents
+upstream, which GitHub honours for an hour: the session renews that itself, at
+the grant's original scope, when about ten minutes are left (Task 20375). So with
+a `github_app` grant `session_minutes` is the only ceiling on a session's life,
+as it is with a PAT. See
+[GitHub App tokens past their hour](#github-app-tokens-past-their-hour).
+
+### GitHub App tokens past their hour
+
+A `github_app` grant's installation token expires an hour after it is minted, and
+the hub replaces it before then, at exactly the scope of the first — under the
+proxy from the session's request path, without it from the lease keepalive,
+which rewrites the sandbox's `github-token` file in place. The full behaviour is
+in [the secrets guide](../guides/secrets.md#keeping-the-token-past-githubs-hour).
+When a long run loses GitHub anyway, it is one of these, and the audit trail says
+which:
+
+```console
+$ cloop audit-log list --type secret.renew --since 24h --json      # re-mints, and refusals
+$ cloop audit-log list --type lease.refresh --since 24h --json     # deliveries to the executor
+$ cloop audit-log list --type github_app.token_destroy --since 24h # superseded and refused tokens
+$ cloop audit-log list --type gitproxy.session_closed --since 24h  # sessions a refusal closed
+```
+
+| What you see | What happened | What to do |
+| --- | --- | --- |
+| a denied `secret.renew` naming a revoked or expired grant | the grant behind the token was withdrawn; its tokens were destroyed and, under the proxy, the session closed | nothing, if intended; re-grant otherwise |
+| a denied `secret.renew` quoting GitHub (*suspended*, *not accessible to the installation*, 401) | GitHub refused the re-mint for good: the installation was suspended or uninstalled, a repository was removed from it, the App's key was deleted | fix the App installation, then start the run again |
+| denied `secret.renew` rows saying *will retry* | GitHub was unreachable, rate-limiting or answering 5xx; the held token kept working while the hub retried each minute | check the hub's route to `api.github.com`; access ends only if this outlasts the token |
+| a denied `lease.refresh` and a `credential_refresh` journal row naming the agent's protocol | the device's agent is older than v17, so it was not sent the new token; the run kept its first token until it expired | upgrade the agent to the hub's build (the row says how) |
+| a denied `lease.refresh` naming `"patch"` | a Kubernetes executor's Role predates the `patch` verb on `secrets` | add `patch` to the Role's secrets rule (the shipped chart has it) |
+| a denied `lease.refresh` saying the agent is not connected | the device was offline when the token was due | the keepalive retries each minute while the old token lasts |
+
+A refresh does not cross members of a [hub cluster](#the-control-plane-lease): the
+keepalive runs on the member that issued the lease, and reaches the agents
+connected to that member. A device whose agent reconnected to another member
+mid-run keeps its token until it expires.
+
 ### Alert on `gitproxy.push_denied`
 
 ```console

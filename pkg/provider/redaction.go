@@ -53,7 +53,10 @@ import (
 // everything the wrapped provider returns or streams.
 type redactingProvider struct {
 	inner Provider
-	set   *redact.Set
+	// set returns the Set in force now. For the process's own lease it follows
+	// the lease directory, whose token file the hub rewrites before a GitHub
+	// App token expires (Task 20375); see redact.Live.
+	set func() *redact.Set
 }
 
 // WithRedaction returns p with credential scrubbing applied, or p unchanged
@@ -63,17 +66,27 @@ func WithRedaction(p Provider, set *redact.Set) Provider {
 	if p == nil || set.Len() == 0 {
 		return p
 	}
-	return &redactingProvider{inner: p, set: set}
+	return &redactingProvider{inner: p, set: func() *redact.Set { return set }}
+}
+
+// withLiveRedaction is WithRedaction over a lease whose files may be rewritten
+// while the process runs.
+func withLiveRedaction(p Provider, live *redact.Live) Provider {
+	if p == nil || !live.Active() {
+		return p
+	}
+	return &redactingProvider{inner: p, set: live.Current}
 }
 
 // processRedactor is the scrub set for this process, derived from the
-// environment the lease put its material in. Computed once: it reads the lease
-// directory off disk, and Build is called many times per run.
+// environment the lease put its material in. Built once — Build is called many
+// times per run — and re-reading the lease directory only when one of its
+// files changes, which is what a token refresh does (Task 20375).
 //
-// A control-plane process has no lease and gets a nil set, so the hub pays
-// nothing for a mechanism that only applies to workloads.
-var processRedactor = sync.OnceValue(func() *redact.Set {
-	return redact.FromEnviron(os.Environ())
+// A control-plane process has no lease and gets an inactive one, so the hub
+// pays nothing for a mechanism that only applies to workloads.
+var processRedactor = sync.OnceValue(func() *redact.Live {
+	return redact.NewLive(os.Environ())
 })
 
 func (p *redactingProvider) Name() string         { return p.inner.Name() }
@@ -94,7 +107,7 @@ func (p *redactingProvider) Complete(ctx context.Context, prompt string, opts Op
 		flush()
 	}
 	if res != nil {
-		res.Output = p.set.String(res.Output)
+		res.Output = p.set().String(res.Output)
 	}
 	return res, err
 }
@@ -114,10 +127,11 @@ func (p *redactingProvider) streamFilter(next func(string)) (func(string), func(
 	)
 	emit := func(tok string) {
 		mu.Lock()
-		text := p.set.String(pending + tok)
+		set := p.set()
+		text := set.String(pending + tok)
 		// Withhold only a tail that could genuinely begin a known secret, so
 		// ordinary tokens reach the live artifact with no added latency.
-		if hold := p.set.Holdback(text); hold > 0 {
+		if hold := set.Holdback(text); hold > 0 {
 			pending = text[len(text)-hold:]
 			text = text[:len(text)-hold]
 		} else {
@@ -134,7 +148,7 @@ func (p *redactingProvider) streamFilter(next func(string)) (func(string), func(
 		pending = ""
 		mu.Unlock()
 		if tail != "" {
-			next(p.set.String(tail))
+			next(p.set().String(tail))
 		}
 	}
 	return emit, flush

@@ -125,12 +125,33 @@ func New(handleID string, stream executor.StreamName, opts Options) *Bus {
 // honest place to ask, and asking keeps the two paths from drifting: a credential
 // added to the log filter is filtered in the terminal by construction.
 //
-// The set is immutable after New, so handing it out shares no mutable state.
+// It is the set in force now. A refreshed credential (AddRedactions) installs a
+// new one, so a consumer that holds on to the result for a long time scrubs
+// what the workload held when it asked; each set is immutable, so handing one
+// out shares no mutable state.
 func (b *Bus) Redactor() *redact.Set {
 	if b == nil {
 		return nil
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.redact
+}
+
+// AddRedactions extends the redaction to values from the next Emit on, keeping
+// everything already redacted.
+//
+// It is for a credential the hub replaced while the workload runs — a GitHub
+// App token re-minted before GitHub's hour ran out (Task 20375). The workload
+// can print the new token as easily as the old one, and a Set fixed at
+// construction would scrub only the old.
+func (b *Bus) AddRedactions(values ...string) {
+	if b == nil || len(values) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.redact = b.redact.With(values...)
 }
 
 // subscriber is one live consumer. The mutex guards the send/close pair; see
@@ -315,14 +336,13 @@ func (b *Bus) Close() {
 	// last bytes happened to look like the start of a credential must not
 	// lose them: the tail of the output is where the error message is, which
 	// is the same reason executor.Run truncates from the front.
-	if b.redact != nil {
-		b.mu.Lock()
-		tail := b.pending
-		b.pending = ""
-		b.mu.Unlock()
-		if tail != "" {
-			b.emitRaw(b.redact.String(tail))
-		}
+	b.mu.Lock()
+	set := b.redact
+	tail := b.pending
+	b.pending = ""
+	b.mu.Unlock()
+	if set != nil && tail != "" {
+		b.emitRaw(set.String(tail))
 	}
 
 	b.mu.Lock()

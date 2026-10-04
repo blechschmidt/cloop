@@ -93,13 +93,49 @@ type heldLease struct {
 type vault struct {
 	mu     sync.Mutex
 	leases map[string]*heldLease
+	// owned is, per handle, the credential files this agent itself placed for
+	// it (materializeSecretFiles). A refresh may replace only these: a binding
+	// is the hub's claim about which paths a lease covers, and a hub that is
+	// compromised could claim another workload's files (Task 20375).
+	owned map[string]map[string]struct{}
 	// retired is a bounded FIFO of lease IDs whose material this agent has
 	// already destroyed, so a later revocation can be logged as the no-op it
 	// genuinely is rather than as one that found nothing. See retire.
 	retired []string
 }
 
-func newVault() *vault { return &vault{leases: make(map[string]*heldLease)} }
+func newVault() *vault {
+	return &vault{leases: make(map[string]*heldLease), owned: make(map[string]map[string]struct{})}
+}
+
+// own records the files this agent placed for handleID.
+func (v *vault) own(handleID string, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	set := v.owned[handleID]
+	if set == nil {
+		set = make(map[string]struct{}, len(paths))
+		v.owned[handleID] = set
+	}
+	for _, p := range paths {
+		set[filepath.Clean(p)] = struct{}{}
+	}
+}
+
+// ownsLocked reports whether path is a file this agent placed for one of
+// held's workloads. Callers hold v.mu.
+func (v *vault) ownsLocked(held *heldLease, path string) bool {
+	clean := filepath.Clean(path)
+	for h := range held.handles {
+		if _, ok := v.owned[h][clean]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // bind records the material a start frame delivered for one handle.
 //
@@ -169,6 +205,7 @@ func (v *vault) release(handleID string) []scrubReport {
 	defer v.mu.Unlock()
 
 	var reports []scrubReport
+	delete(v.owned, handleID)
 	for id, held := range v.leases {
 		delete(held.handles, handleID)
 		if len(held.handles) > 0 {

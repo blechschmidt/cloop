@@ -86,6 +86,15 @@ type secretStage struct {
 	dirs []string
 	// files are the staged credentials, attributed to their leases.
 	files []stagedFile
+	// uid and gid own every staged file when chown is set: the sandbox user,
+	// remembered so a file rewritten mid-run (refresh) is readable inside the
+	// container exactly as the one it replaces was.
+	uid, gid int
+	chown    bool
+	// dirIDs is each staging directory's identity, recorded when it was
+	// created. The sandbox user owns these directories in a sticky /dev/shm and
+	// can rename them; a refresh writes only into the directory it created.
+	dirIDs map[string]executor.FileIdentity
 }
 
 // mountList returns the binds to add to the run, or nil for no stage.
@@ -186,6 +195,73 @@ func (s *secretStage) revoke(req executor.RevokeRequest) (int, error) {
 	return removed, errors.Join(errs...)
 }
 
+// refresh rewrites, in place, the staged files of req's lease that req
+// carries new content for (Task 20375), and reports how many it replaced.
+//
+// The host directory is bind-mounted into the container whole, so a file
+// renamed inside it is what the workload reads next; executor.ReplaceSecretFile
+// does the rename. Only a file this stage already holds for the lease is
+// rewritten — a refresh is never a way to plant a new file in a sandbox.
+func (s *secretStage) refresh(req executor.SecretRefreshRequest) (int, error) {
+	if s == nil {
+		return 0, errors.New("no credential files were staged for this container")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hostDirs := make(map[string]string, len(s.mounts))
+	for _, m := range s.mounts {
+		hostDirs[m.TargetPath] = m.HostPath
+	}
+	var owner *executor.FileOwner
+	if s.chown {
+		owner = &executor.FileOwner{UID: s.uid, GID: s.gid}
+	}
+	var (
+		errs      []error
+		rewritten int
+	)
+	for _, f := range req.Files {
+		dir, ok := hostDirs[f.Dir]
+		if !ok {
+			errs = append(errs, fmt.Errorf("%s was not staged for this container", f.Dir))
+			continue
+		}
+		path := filepath.Join(dir, f.Name)
+		if !s.holdsLocked(path, req.LeaseID) {
+			errs = append(errs, fmt.Errorf("%s was not delivered to this container for lease %s",
+				filepath.Join(f.Dir, f.Name), req.LeaseID))
+			continue
+		}
+		id, known := s.dirIDs[dir]
+		if !known {
+			errs = append(errs, fmt.Errorf("the staging directory for %s has no recorded identity", f.Dir))
+			continue
+		}
+		// Through the directory this stage created, by descriptor: the
+		// directory belongs to the sandbox user, and this process may be root.
+		if err := executor.ReplaceSecretFile(path, f.Content, executor.ReplaceOptions{
+			Mode: f.FileMode(), Owner: owner, Dir: &id,
+		}); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		rewritten++
+	}
+	return rewritten, errors.Join(errs...)
+}
+
+// holdsLocked reports whether path is a file this stage wrote for leaseID.
+// Callers hold s.mu.
+func (s *secretStage) holdsLocked(path, leaseID string) bool {
+	for _, f := range s.files {
+		if f.host == path && f.leaseID == strings.TrimSpace(leaseID) {
+			return true
+		}
+	}
+	return false
+}
+
 // stageSecretFiles writes spec.SecretFiles into per-run host directories and
 // returns the read-only binds that make them visible at the paths the
 // workload's environment already points at.
@@ -211,7 +287,7 @@ func stageSecretFiles(spec executor.Spec, user string) (*secretStage, error) {
 		return nil, err
 	}
 
-	stage := &secretStage{}
+	stage := &secretStage{uid: uid, gid: gid, chown: chown, dirIDs: map[string]executor.FileIdentity{}}
 	// One host directory per distinct target directory. A lease produces one;
 	// two leases on one workload would produce two, and they must not share a
 	// staging directory or a revocation of either would take both.
@@ -232,13 +308,9 @@ func stageSecretFiles(spec executor.Spec, user string) (*secretStage, error) {
 			stage.remove()
 			return nil, fmt.Errorf("container: secure secret staging dir: %w", cerr)
 		}
-		if chown {
-			if cerr := os.Chown(dir, uid, gid); cerr != nil {
-				stage.remove()
-				return nil, fmt.Errorf(
-					"container: hand secret staging dir to uid %d (the sandbox user): %w", uid, cerr)
-			}
-		}
+		// Handed to the sandbox user only after its files are written below:
+		// once the sandbox user owns the directory it can rename and replace
+		// entries in it, and every file operation here is by path.
 		stage.mounts = append(stage.mounts, mount{
 			HostPath:   dir,
 			TargetPath: target,
@@ -277,6 +349,21 @@ func stageSecretFiles(spec executor.Spec, user string) (*secretStage, error) {
 			stage.remove()
 			return nil, fmt.Errorf("container: set mode on secret file %s: %w", f.Name, cerr)
 		}
+	}
+	for _, dir := range stage.dirs {
+		if chown {
+			if cerr := os.Chown(dir, uid, gid); cerr != nil {
+				stage.remove()
+				return nil, fmt.Errorf(
+					"container: hand secret staging dir to uid %d (the sandbox user): %w", uid, cerr)
+			}
+		}
+		id, ierr := executor.IdentityOf(dir)
+		if ierr != nil {
+			stage.remove()
+			return nil, fmt.Errorf("container: record secret staging dir %s: %w", dir, ierr)
+		}
+		stage.dirIDs[dir] = id
 	}
 	return stage, nil
 }

@@ -102,6 +102,22 @@ type secretFilesState struct {
 	// spurious 404 in the log rather than a second cleanup.
 	secretName string
 	deleted    bool
+	// keys maps each delivered file — its directory as the workload sees it,
+	// joined with its name — to the Secret key it is stored under, so a
+	// refresh (Task 20375) patches exactly the key the volume projects to that
+	// path. Names only, like everything else here.
+	keys map[string]string
+}
+
+// keyFor returns the Secret key a delivered file is stored under.
+func (st *secretFilesState) keyFor(path string) (string, bool) {
+	if st == nil {
+		return "", false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	k, ok := st.keys[path]
+	return k, ok
 }
 
 // secretFilesSecretName derives the Secret's name from the handle ID.
@@ -328,6 +344,14 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 	if err != nil {
 		return nil, nil, err
 	}
+	plan, err := planSecretFiles(spec.SecretFiles)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys := make(map[string]string, len(spec.SecretFiles))
+	for i, f := range spec.SecretFiles {
+		keys[f.Path()] = plan.keys[i]
+	}
 
 	name := secretFilesSecretName(handleID)
 	obj := &secret{
@@ -354,7 +378,7 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 		Data: data,
 	}
 
-	st := &secretFilesState{namespace: namespace}
+	st := &secretFilesState{namespace: namespace, keys: keys}
 
 	create := func(ctx context.Context, owner ownerReference, owned bool) error {
 		if owned {
@@ -446,9 +470,10 @@ func explainSecretFileFailure(namespace, name string, err error) error {
 			"secret lease's credential files needs: %w — add this rule to the executor's Role:\n"+
 			"  - apiGroups: [\"\"]\n"+
 			"    resources: [\"secrets\"]\n"+
-			"    verbs: [\"create\", \"delete\"]\n"+
-			"create and delete only: the driver writes the credentials and removes them again, and "+
-			"never reads a Secret back", namespace, err)
+			"    verbs: [\"create\", \"patch\", \"delete\"]\n"+
+			"create, patch and delete only: the driver writes the credentials, replaces a GitHub App "+
+			"token in them before it expires, and removes them again, and never reads a Secret back",
+			namespace, err)
 	case http.StatusConflict:
 		// The name is derived from the handle ID, so a conflict means a Secret
 		// from a previous run of this exact handle survived — which only happens

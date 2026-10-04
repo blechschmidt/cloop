@@ -47,6 +47,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -56,7 +57,10 @@ import (
 // any workload carrying revocable credentials on a driver that does not
 // implement this interface, so a signature drift here would take the Kubernetes
 // backend out of service for leased work rather than fail a build.
-var _ executor.Revoker = (*Executor)(nil)
+var (
+	_ executor.Revoker         = (*Executor)(nil)
+	_ executor.SecretRefresher = (*Executor)(nil)
+)
 
 // SupportsRevocation reports whether a revocation issued now would be honoured.
 //
@@ -149,6 +153,93 @@ func (e *Executor) RevokeLease(ctx context.Context, req executor.RevokeRequest) 
 	}
 	e.settle(&out, ack, errors.Join(append(errs, unresolved)...))
 	return out
+}
+
+// RefreshSecretFiles implements executor.SecretRefresher: it replaces req's
+// files in the lease Secret of every Pod holding the lease, and extends each
+// Pod's output redaction to the new content (Task 20375).
+//
+// The Secret is mounted as a directory volume with no subPath, which is the one
+// shape of Secret volume the kubelet keeps in sync with the object: it swaps
+// the projected files atomically when the Secret changes. So the Pod reads the
+// new content within the kubelet's sync period rather than at once, and the
+// report says Eventual — the hub then leaves the superseded token to lapse on
+// its own instead of destroying it while the Pod may still be reading it.
+//
+// The patch needs the "patch" verb on secrets, which the shipped RBAC grants;
+// a Role from before Task 20375 refuses it, and the error says what to add.
+func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRefreshRequest) executor.SecretRefreshReport {
+	out := executor.SecretRefreshReport{LeaseID: strings.TrimSpace(req.LeaseID), Eventual: true}
+	if err := req.Validate(); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	held := e.leases.Handles(executor.RevokeRequest{LeaseID: out.LeaseID})
+	if len(held) == 0 {
+		return out
+	}
+	out.Known = true
+	values := req.Values()
+	var errs []error
+	for _, handleID := range executor.SortedHandles(held) {
+		rec, err := e.lookup(handleID)
+		if err != nil || rec.finished() {
+			continue
+		}
+		st := rec.leaseFilesState()
+		if st == nil {
+			errs = append(errs, fmt.Errorf("pod for %s was adopted from a row written before this hub "+
+				"process started, which does not record its lease Secret's keys", handleID))
+			continue
+		}
+		cli := rec.client()
+		if cli == nil {
+			errs = append(errs, fmt.Errorf("pod for %s has no API client yet", handleID))
+			continue
+		}
+		data := make(map[string][]byte, len(req.Files))
+		for _, f := range req.Files {
+			key, ok := st.keyFor(f.Path())
+			if !ok {
+				errs = append(errs, fmt.Errorf("%s was not delivered to the pod for %s", f.Path(), handleID))
+				continue
+			}
+			data[key] = f.Content
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if rec.bus != nil {
+			rec.bus.AddRedactions(values...)
+		}
+		name := secretFilesSecretName(handleID)
+		if err := cli.patchSecretData(ctx, rec.namespace, name, data); err != nil {
+			if ae, ok := asAPIError(err); ok && ae.Code == http.StatusForbidden {
+				// The Role will refuse every later patch too: this executor
+				// cannot take a refresh until an operator adds the verb.
+				out.Unsupported = true
+			}
+			errs = append(errs, explainSecretFilePatchFailure(rec.namespace, name, err))
+			continue
+		}
+		out.FilesRewritten += len(data)
+		out.Handles = append(out.Handles, handleID)
+	}
+	if err := errors.Join(errs...); err != nil {
+		out.Error = err.Error()
+	}
+	return out
+}
+
+// explainSecretFilePatchFailure turns a refused patch into an actionable error.
+func explainSecretFilePatchFailure(namespace, name string, err error) error {
+	if ae, ok := asAPIError(err); ok && ae.Code == http.StatusForbidden {
+		return fmt.Errorf("kubernetes: not allowed to patch Secret %s/%s, which replacing a GitHub App "+
+			"token before it expires needs: %w — add \"patch\" to the secrets rule of the executor's Role "+
+			"(verbs: [\"create\", \"patch\", \"delete\"]); until then the Pod keeps the token it was "+
+			"given, which GitHub stops honouring an hour after dispatch", namespace, name, err)
+	}
+	return fmt.Errorf("kubernetes: patch secret lease files %s/%s: %w", namespace, name, err)
 }
 
 // settle finalises an outcome and its log entry from one report.
