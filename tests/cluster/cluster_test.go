@@ -149,6 +149,11 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	projIdx := w.projectIndex()
 	w.bindProject(projIdx, agentID)
 
+	// Metrics: three members, one database. The gauges read from it come
+	// from the leader alone, so summing them over the cluster counts the one
+	// agent once, not three times (Task 20377).
+	w.checkLeaderOnlyGauges("with three members", w.hubs, 1)
+
 	// ── 3. A run started on a member that does not hold the agent ──────────
 	starter, watcher := w.otherTwo(holder)
 	resp := w.post(starter, fmt.Sprintf("/api/run?project_idx=%d", projIdx))
@@ -159,6 +164,9 @@ func TestHubClusterEndToEnd(t *testing.T) {
 		t.Fatalf("the run was dispatched by %s, want %s — only the member holding the agent's "+
 			"socket can reach it", short(resp.servedBy), short(holder.id))
 	}
+	// Counted once, by the member that dispatched it — not by the member the
+	// request arrived at, which forwarded it.
+	w.waitClusterSum("the run's start", w.hubs, 1, `cloop_executor_task_starts_total{executor_kind="remote",`)
 
 	// ── 4. Its output reaches a dashboard on the third member ──────────────
 	ws := w.openStream(watcher, projIdx)
@@ -184,6 +192,14 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	w.waitClusterVia(watcher, "a surviving leader", func(s clusterStatus) bool {
 		return s.Leader != "" && s.Leader != holder.id && s.alive(s.Leader)
 	})
+	var survivors []*hub
+	for _, h := range w.hubs {
+		if h != holder {
+			survivors = append(survivors, h)
+		}
+	}
+	// Whoever leads now reports the shared gauges, and only they do.
+	w.checkLeaderOnlyGauges("after a member was killed", survivors, 1)
 
 	// ── 7. It finishes, and its result is merged into the hub's project ────
 	// Frames from here on: the membership change may already have told the
@@ -197,6 +213,10 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	if n := w.stubStarts(); n != 1 {
 		t.Fatalf("the harness was started %d times for one task: the run was started over, not adopted", n)
 	}
+	// Settled — and counted — by the member that adopted it; the member that
+	// counted its start died with that count.
+	w.waitClusterSum("the adopted run's completion", survivors, 1,
+		`cloop_executor_task_completions_total{executor_kind="remote",`)
 	w.waitCluster("the finished run's owner row to be released", func(s clusterStatus) bool {
 		return s.owner("run", w.projDir) == ""
 	})
@@ -211,12 +231,6 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	}
 	w.addTask("Write world.txt")
 	starts := w.stubStarts()
-	var survivors []*hub
-	for _, h := range w.hubs {
-		if h != holder {
-			survivors = append(survivors, h)
-		}
-	}
 	if r := w.post(survivors[0], fmt.Sprintf("/api/run?project_idx=%d", projIdx)); r.status != http.StatusOK {
 		t.Fatalf("second run on hub %d = %d: %s", survivors[0].port, r.status, r.body)
 	}
@@ -240,6 +254,12 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	w.waitCluster("the stopped run's owner row to be released", func(s clusterStatus) bool {
 		return s.owner("run", w.projDir) == ""
 	})
+	// A run that pauses and exits zero after Stop was withdrawn, not
+	// completed: one cancellation, counted by the member that settled it.
+	w.waitClusterSum("the stopped run's cancellation", survivors, 1,
+		`cloop_executor_task_failures_total{executor_kind="remote",`, `reason="cancelled"`)
+	w.waitClusterSum("completions after the stop", survivors, 1,
+		`cloop_executor_task_completions_total{executor_kind="remote",`)
 	if got, err := w.queryProject(`SELECT status FROM plan_tasks WHERE id = 2`); err != nil || got == "done" {
 		t.Fatalf("task 2 is %q (%v) after Stop; a stopped run must not complete it", got, err)
 	}
@@ -279,6 +299,8 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	w.waitClusterVia(staying, "the last member to lead", func(s clusterStatus) bool {
 		return s.Leader == staying.id
 	})
+	// And reports the shared gauges, whether or not it led before.
+	w.checkLeaderOnlyGauges("with one member left", []*hub{staying}, 1)
 }
 
 // ── world setup ─────────────────────────────────────────────────────────────

@@ -331,8 +331,12 @@ recent and waits once a renewal has been missed.
 serving, not only while one holds the lease. Stop the members, or use the REST
 API or dashboard, which every member serves.
 
-**Metrics and logs are per member.** Scrape every member. What concerns the
-cluster is logged with `event=cluster` (adopting a run, a forward that failed)
+**Metrics and logs are per member.** Scrape every member: counters are each
+member's own and sum to the cluster's, and the gauges read from the shared
+database are exported by the leader alone, so neither is multiplied by the
+number of members — see
+[which member exports what](../operations/metrics.md#hub-clusters-which-member-exports-what).
+What concerns the cluster is logged with `event=cluster` (adopting a run, a forward that failed)
 or prefixed `cluster:` on stderr (joining, leading, stepping down).
 
 **Probes.** `/healthz` and `/readyz` describe the member that answers, and
@@ -369,8 +373,11 @@ readiness does not depend on leadership: every member serves.
   one member is dispatched by the agent's member and watched from the third; its
   member is SIGKILLed and a survivor adopts the run without restarting it; Stop
   pressed on a member not streaming a run reaches the one that is; a SIGTERM
-  hands a run over. It runs in CI as the `hub-cluster` job, against a binary
-  built with the race detector.
+  hands a run over. Along the way it scrapes every member's `/metrics`: the
+  gauges read from the shared database come from the leader alone, before and
+  after a member dies, and the run's start, completion and cancellation are each
+  counted once across the cluster. It runs in CI as the `hub-cluster` job,
+  against a binary built with the race detector.
 - The chart job in CI installs the Helm chart into a kind cluster, scales it to
   three replicas, and asserts one cluster with one leader on one node — before
   and after a rolling restart that replaces every member.
