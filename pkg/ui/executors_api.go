@@ -1803,7 +1803,41 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The executor cannot do what this run needs: firewall rules no executor
+	// here can enforce, or an agent too old for the rules, the workspace, the
+	// credential files or the sandbox mode it was configured with. A 409 like
+	// the refusals above — the request is well formed, what conflicts is the
+	// run with where it would go — and the sentence already names the remedy
+	// (pkg/executor/protocolneed.go). It used to fall through to the 500
+	// below, which tells an operator the hub broke when it refused on purpose
+	// (Task 20371: a v14 device under a device rule set).
+	if isExecutorRefusal(err) {
+		writeExecutorBlocked(w, "executor_unsupported", err.Error(), "")
+		return
+	}
 	jsonErr(w, err.Error(), http.StatusInternalServerError)
+}
+
+// executorRefusals are the errors an executor returns when it refuses a run it
+// cannot carry out as configured — as opposed to failing to try.
+var executorRefusals = []error{
+	executor.ErrUnsupported,
+	executor.ErrRevocationUnsupported,
+	remote.ErrWorkspaceUnsupported,
+	remote.ErrSecretFilesUnsupported,
+	remote.ErrProjectSeedUnsupported,
+	remote.ErrSandboxModeUnsupported,
+	remote.ErrVirtualExecutorUnsupported,
+}
+
+// isExecutorRefusal reports whether err is one of executorRefusals.
+func isExecutorRefusal(err error) bool {
+	for _, target := range executorRefusals {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeSandboxDenied writes a 409 for a sandbox spec the deployment cannot
