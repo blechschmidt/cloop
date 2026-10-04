@@ -7,6 +7,8 @@ package container
 import (
 	"context"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -247,5 +249,33 @@ func TestEgressProxyRouteValidates(t *testing.T) {
 		if err := spec.Validate(); err != nil {
 			t.Errorf("route %+v: %v", good, err)
 		}
+	}
+}
+
+// TestInternalOnlyFilterNeedsNoPacketFilterPrivilege: `internal: true` with no
+// direct rules installs nothing, so a hub that may not use nft — CI's runner,
+// any hub without CAP_NET_ADMIN — must still start sandboxes under it. The
+// stale-table cleanup on that path used to refuse every run there (Task
+// 20378's container test found it). An nft this process may use and that
+// still fails stays a refusal: as root the same failure is a fault.
+func TestInternalOnlyFilterNeedsNoPacketFilterPrivilege(t *testing.T) {
+	dir := t.TempDir()
+	fake := "#!/bin/sh\necho 'netlink: Error: cache initialization failed: Operation not permitted' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	e := &Executor{id: "internal-only", opts: Options{Network: NetworkBridge,
+		EgressFilter: EgressFilter{Enabled: true, Internal: true}}}
+	err := e.removeFirewall(context.Background(), confinement{})
+	if os.Geteuid() == 0 {
+		if err == nil {
+			t.Fatal("as root, an nft that refuses is a fault and must be reported")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("an unprivileged hub refused an internal-only sandbox: %v", err)
 	}
 }

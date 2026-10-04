@@ -789,14 +789,19 @@ func (e *Executor) effectiveFilter(c confinement) (EgressFilter, error) {
 	return out, nil
 }
 
-// removeFirewall deletes this executor's nftables table.
+// removeFirewall deletes this executor's nftables table, for a workload whose
+// bridge is --internal and carries no ruleset of its own.
 //
 // A host with no nft at all is not an error: there is nothing installed to
-// remove, which is the outcome the caller wanted. Any other failure is
-// returned, because on the path that calls this — narrowing a filter down to
-// an internal network — a table that survives is a *wider* policy than the
-// configuration says, and swallowing that would be the same class of silent
-// over-permission this package exists to remove.
+// remove, which is the outcome the caller wanted. Nor is a process that may
+// not use nft — a hub running without CAP_NET_ADMIN, which is exactly what
+// `internal: true` promises to need nothing beyond (Task 20378's container
+// test found this path refusing every run on such a hub, CI's included). Such
+// a process installed no table, and a table some privileged process left on an
+// --internal bridge can only narrow it: the bridge has no route off the host
+// for the table's forward allows to open, and its input chain drops more of
+// the host than an unfiltered bridge does. Any other failure is returned — an
+// nft this process may use and that still refuses is a fault worth a refusal.
 func (e *Executor) removeFirewall(ctx context.Context, c confinement) error {
 	applier, err := netfilter.NewApplier()
 	if err != nil {
@@ -805,7 +810,10 @@ func (e *Executor) removeFirewall(ctx context.Context, c confinement) error {
 		}
 		return err
 	}
-	return applier.Remove(ctx, firewallTable(e.id, c))
+	if err := applier.Remove(ctx, firewallTable(e.id, c)); err != nil && !errors.Is(err, netfilter.ErrUnavailable) {
+		return err
+	}
+	return nil
 }
 
 // preflightEgressFilter reports what the configured filter will and will not
