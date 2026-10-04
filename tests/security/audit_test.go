@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
@@ -39,7 +40,7 @@ const auditCanary = "sk-ant-api03-AUDITCANARY-must-never-be-persisted-0123456789
 // non-empty before the test adds anything.
 func newAuditProject(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "audit conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

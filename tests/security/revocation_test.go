@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
@@ -539,7 +540,7 @@ func (e *revokingExecutor) Revocations() []executor.RevokeOutcome { return nil }
 // the original pointer and pass while production wrote plaintext to disk.
 func newSessionStore(t *testing.T) *executorstore.Scheduler {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open statedb: %v", err)
 	}
@@ -781,7 +782,7 @@ func TestAHubThatCannotRebuildABindingSaysSo(t *testing.T) {
 // It also pins the three-state encoding the honesty guarantee depends on: ”
 // (unrecorded) must not be stored or read back as '[]' (recorded, none).
 func TestPersistedBindingsCarryNoMaterialThroughSQLite(t *testing.T) {
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open statedb: %v", err)
 	}

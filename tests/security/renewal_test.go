@@ -39,6 +39,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/ui"
@@ -50,7 +51,7 @@ func TestOnlyTheRenewalDocumentsAreFramable(t *testing.T) {
 	idp := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(idp.Close)
 
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "framing conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

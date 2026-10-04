@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -47,7 +48,7 @@ func localRepoBroker(t *testing.T) *secretbroker.Broker {
 	t.Helper()
 	t.Setenv(secretbroker.EnvPassphraseKey, "local-repo-conformance-passphrase")
 
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "local repo conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

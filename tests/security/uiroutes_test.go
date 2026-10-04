@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -108,7 +109,7 @@ func newSecretsAPIFixture(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	t.Setenv(secretbroker.EnvPassphraseKey, "ui-route-conformance-passphrase")
 
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "secrets api conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

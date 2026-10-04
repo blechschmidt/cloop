@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -113,31 +114,63 @@ func moduleRoot() (string, error) {
 	return filepath.Dir(filepath.Dir(filepath.Dir(thisFile))), nil
 }
 
+// The type-checked module, loaded once per test binary (Task 20372).
+//
+// Every static check in this suite reads the same thing: the whole module
+// and its dependencies, type-checked from source. Under -race that load costs
+// about 30 seconds, and nine tests each made their own, which was two thirds
+// of this package's wall clock in CI's race step. The loaded packages are only
+// ever read — each check builds its own Graph or walks the syntax itself, and
+// the meta-tests that seed synthetic edges seed them into their own Graph — so
+// one load serves them all and every check still sees exactly what it saw.
+var (
+	moduleLoadOnce sync.Once
+	moduleLoadPkgs []*packages.Package
+	moduleLoadErr  error
+)
+
+// loadModule returns the module's packages as packages.Load reports them: the
+// roots matched by ModulePath/..., with their dependencies reachable through
+// Imports. Callers must not modify what it returns.
+func loadModule() ([]*packages.Package, error) {
+	moduleLoadOnce.Do(func() {
+		root, err := moduleRoot()
+		if err != nil {
+			moduleLoadErr = err
+			return
+		}
+		cfg := &packages.Config{
+			Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
+				packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps |
+				packages.NeedImports,
+			Dir: root,
+			// Test variants are excluded: a _test.go file may legitimately
+			// fork a helper process or stand up a server with a throwaway
+			// certificate, and the guarantees are about the code that ships.
+			Tests: false,
+		}
+		pkgs, err := packages.Load(cfg, ModulePath+"/...")
+		if err != nil {
+			moduleLoadErr = fmt.Errorf("load packages: %w", err)
+			return
+		}
+		moduleLoadPkgs = pkgs
+	})
+	return moduleLoadPkgs, moduleLoadErr
+}
+
 // LoadGraph type-checks every package in the module and builds the reference
-// graph.
+// graph. Each call returns a graph of its own, so a test may seed edges into
+// it without another test seeing them.
 //
 // It deliberately loads the whole module rather than just the audited packages:
 // the interesting violations are transitive, hiding two or three hops away in
 // a helper package that shells out to git, and a check that only reads pkg/ui
 // would never see them.
 func LoadGraph() (*Graph, error) {
-	root, err := moduleRoot()
+	pkgs, err := loadModule()
 	if err != nil {
 		return nil, err
-	}
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
-			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps |
-			packages.NeedImports,
-		Dir: root,
-		// Test variants are excluded: a _test.go file may legitimately fork
-		// a helper process, and the guarantee is about production
-		// request-handling code.
-		Tests: false,
-	}
-	pkgs, err := packages.Load(cfg, ModulePath+"/...")
-	if err != nil {
-		return nil, fmt.Errorf("load packages: %w", err)
 	}
 	if len(pkgs) == 0 {
 		return nil, fmt.Errorf("no packages loaded — the guard would silently pass")

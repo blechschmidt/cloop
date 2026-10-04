@@ -496,23 +496,13 @@ func TestHubRejectsCrossOriginUpgrade(t *testing.T) {
 // the InsecureSkipVerify check needs and LoadGraph's Graph does not expose.
 func loadModulePackages(t *testing.T) []*packages.Package {
 	t.Helper()
-	root, err := moduleRoot()
+	// The suite's one load of the module (see loadModule): test files are
+	// excluded from it, since a _test.go may legitimately stand up a server
+	// with a throwaway certificate. The guarantee is about the code that
+	// ships.
+	loaded, err := loadModule()
 	if err != nil {
-		t.Fatalf("locate module root: %v", err)
-	}
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
-			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps |
-			packages.NeedImports,
-		Dir: root,
-		// Test files are excluded: a _test.go may legitimately stand up a
-		// server with a throwaway certificate. The guarantee is about the
-		// code that ships.
-		Tests: false,
-	}
-	loaded, err := packages.Load(cfg, ModulePath+"/...")
-	if err != nil {
-		t.Fatalf("load packages: %v", err)
+		t.Fatal(err)
 	}
 	var all []*packages.Package
 	packages.Visit(loaded, nil, func(p *packages.Package) { all = append(all, p) })

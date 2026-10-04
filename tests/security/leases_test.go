@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -210,7 +211,7 @@ func TestRevocationTakesEffectMidSession(t *testing.T) {
 // would test a Go-level check that production does not rely on.
 func newEnrollStore(t *testing.T) *executorstore.Store {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open statedb: %v", err)
 	}
@@ -402,19 +403,12 @@ var identifierNotMaterial = []string{"name", "ref", "id", "path", "file", "kind"
 // Comparisons against a constant (`token == ""`, `kind == "bearer"`) are
 // ignored: there is no secret on one side, so there is no secret to leak.
 func TestSecretComparisonsAreConstantTime(t *testing.T) {
-	root, err := moduleRoot()
+	// The suite's shared load (see loadModule). It also type-checks the
+	// dependencies from source, which this scan does not need, but it reads
+	// only the module's own packages — the roots, the same set either way.
+	pkgs, err := loadModule()
 	if err != nil {
-		t.Fatalf("locate module root: %v", err)
-	}
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
-			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports,
-		Dir:   root,
-		Tests: false,
-	}
-	pkgs, err := packages.Load(cfg, ModulePath+"/...")
-	if err != nil {
-		t.Fatalf("load packages: %v", err)
+		t.Fatal(err)
 	}
 	if len(pkgs) == 0 {
 		t.Fatal("no packages loaded — the scan would pass vacuously")

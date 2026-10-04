@@ -44,6 +44,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -122,7 +123,7 @@ const keyRotationPassphrase = "guarantee-12-passphrase"
 
 func newKeyRotationFixture(t *testing.T) *keyRotationFixture {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "key rotation conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
