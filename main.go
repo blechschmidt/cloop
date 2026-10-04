@@ -5,6 +5,9 @@ import (
 	"os"
 
 	"github.com/blechschmidt/cloop/cmd"
+	// Before bubbletea's init can query the terminal and wait five seconds
+	// for an answer that, under a script's pty, never comes.
+	_ "github.com/blechschmidt/cloop/internal/termquery"
 	"github.com/blechschmidt/cloop/pkg/caps"
 )
 
