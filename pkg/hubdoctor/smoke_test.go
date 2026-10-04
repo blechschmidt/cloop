@@ -344,6 +344,9 @@ type smokeWorld struct {
 	dir string
 	ex  *fakeSmokeExecutor
 	cfg *config.Config
+	// leaseDir is where the world's smoke runs stage host-path leases
+	// (Options.SmokeLeaseDir), private to the test.
+	leaseDir string
 }
 
 // executorSeq hands out unique executor ids across the package's tests.
@@ -396,7 +399,7 @@ func newSmokeWorld(t *testing.T) *smokeWorld {
 	}
 	t.Cleanup(func() { executor.DefaultRegistry.Unregister(ex.ID()) })
 
-	return &smokeWorld{dir: dir, ex: ex, cfg: &config.Config{}}
+	return &smokeWorld{dir: dir, ex: ex, cfg: &config.Config{}, leaseDir: t.TempDir()}
 }
 
 // run drives checkSmoke alone and returns the report it filled in.
@@ -408,6 +411,9 @@ func (w *smokeWorld) run(t *testing.T, opts Options) *Report {
 func (w *smokeWorld) runCtx(t *testing.T, ctx context.Context, opts Options) *Report {
 	t.Helper()
 	opts.Smoke = true
+	if opts.SmokeLeaseDir == "" {
+		opts.SmokeLeaseDir = w.leaseDir
+	}
 	if opts.SmokeTimeout == 0 {
 		opts.SmokeTimeout = 20 * time.Second
 	}
@@ -520,7 +526,7 @@ func TestSmokeLeavesNothingBehind(t *testing.T) {
 	}
 
 	// 3. No credential material anywhere the lease could have staged it.
-	assertNoLeaseDirs(t)
+	assertNoLeaseDirs(t, w.leaseDir)
 
 	// 4 and 5. No secret or grant rows in the database. These are the "state
 	//    row" case, and the one most likely to accumulate invisibly: nothing
@@ -582,7 +588,7 @@ func TestSmokeCleansUpWhenInterrupted(t *testing.T) {
 	if entries, err := os.ReadDir(smokeRoot); err == nil && len(entries) > 0 {
 		t.Errorf("interrupting the run left a workspace under %s", smokeRoot)
 	}
-	assertNoLeaseDirs(t)
+	assertNoLeaseDirs(t, w.leaseDir)
 	assertBrokerEmpty(t, w.dir)
 }
 
@@ -605,7 +611,7 @@ func TestSmokeCleansUpWhenAStageFails(t *testing.T) {
 	if entries, err := os.ReadDir(smokeRoot); err == nil && len(entries) > 0 {
 		t.Errorf("a failed run left a workspace under %s", smokeRoot)
 	}
-	assertNoLeaseDirs(t)
+	assertNoLeaseDirs(t, w.leaseDir)
 	assertBrokerEmpty(t, w.dir)
 }
 
@@ -646,32 +652,53 @@ func assertBrokerEmpty(t *testing.T, dir string) {
 	}
 }
 
-// assertNoLeaseDirs checks the machine-global staging locations a lease can
-// use. Both are shared, which is why a leak here would be a leak of credential
-// material into a directory other tenants can list.
-func assertNoLeaseDirs(t *testing.T) {
+// assertNoLeaseDirs checks that no credential staging directory survives in
+// dir, the private directory the smoke world stages host-path leases under.
+//
+// It used to look in the machine-wide locations instead — /run/cloop,
+// /dev/shm, $TMPDIR — at anything modified in the last minute. Those are
+// shared by every hub and every test binary on the machine, and `go test ./...`
+// runs packages side by side, so another package's live lease failed this one
+// on CI (three tests at once, the same directory each time). Staging under a
+// private directory makes what is found there this run's and nobody else's.
+func assertNoLeaseDirs(t *testing.T, dir string) {
 	t.Helper()
-	// The three places a lease can stage material. /run/cloop is the preferred
-	// one on a systemd host, and omitting it would make this assertion pass
-	// while missing the leak it is written to catch.
-	for _, base := range []string{"/run/cloop", "/dev/shm", os.TempDir()} {
-		matches, err := filepath.Glob(filepath.Join(base, "cloop-lease-*"))
-		if err != nil || len(matches) == 0 {
-			continue
+	matches, err := filepath.Glob(filepath.Join(dir, "cloop-lease-*"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	for _, m := range matches {
+		t.Errorf("credential staging directory left behind: %s", m)
+	}
+}
+
+// TestSmokeStagesAHostPathLeaseWhereToldAndRemovesIt covers the rendering the
+// fake's default skips: a driver that reads credential files from the hub's
+// filesystem gets them written there, under SmokeLeaseDir, and they are gone
+// when the run is.
+func TestSmokeStagesAHostPathLeaseWhereToldAndRemovesIt(t *testing.T) {
+	w := newSmokeWorld(t)
+	w.ex.caps.SecretFilesFromHostPath = true
+
+	res := w.only(t, w.run(t, Options{}))
+	if lease := stageOf(t, res, StageLease); lease.Outcome != StagePass {
+		t.Fatalf("the lease stage did not pass, so there was nothing to stage: %+v", lease)
+	}
+
+	// The workload was pointed at files under the private directory — so the
+	// option is honoured, and the emptiness checked below means something.
+	staged := false
+	for _, kv := range w.ex.lastSpec(t).Env {
+		if _, v, _ := strings.Cut(kv, "="); strings.HasPrefix(v, w.leaseDir+string(filepath.Separator)) {
+			staged = true
 		}
-		// Only complain about directories this process could have made: the
-		// box may be running a real hub, and failing a unit test because a
-		// production lease is live would be a false positive with a very
-		// confusing message.
-		for _, m := range matches {
-			info, statErr := os.Stat(m)
-			if statErr != nil {
-				continue
-			}
-			if time.Since(info.ModTime()) < time.Minute {
-				t.Errorf("credential staging directory left behind: %s", m)
-			}
-		}
+	}
+	if !staged {
+		t.Fatalf("no credential path in the spec is under %s: %v", w.leaseDir, w.ex.lastSpec(t).Env)
+	}
+	assertNoLeaseDirs(t, w.leaseDir)
+	if len(res.Leaked) != 0 {
+		t.Errorf("the run leaked: %v", res.Leaked)
 	}
 }
 

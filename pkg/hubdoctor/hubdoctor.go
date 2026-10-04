@@ -280,6 +280,14 @@ type Options struct {
 	// and is nowhere near long enough to start a container.
 	SmokeTimeout time.Duration
 
+	// SmokeLeaseDir is the directory the smoke stages its throwaway
+	// credential file under, for a driver that reads it from the hub's
+	// filesystem. Empty takes the tmpfs a real lease uses (/dev/shm, else
+	// $TMPDIR). Tests point it somewhere private: the default is shared by
+	// every hub and every test binary on the machine, so what a test found
+	// there afterwards could be anybody's.
+	SmokeLeaseDir string
+
 	// ProbeImage overrides the busybox image the probe Pods run, for a cluster
 	// that mirrors its own registry or enforces an image policy.
 	ProbeImage string

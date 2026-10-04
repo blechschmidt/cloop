@@ -436,7 +436,7 @@ func smokeOne(ctx context.Context, dir string, ex executor.Executor, opts Option
 	}
 
 	// --- lease --------------------------------------------------------
-	lease, leaseStage := smokeLease(runCtx, dir, ex, caps, nonce, cl)
+	lease, leaseStage := smokeLease(runCtx, dir, ex, caps, nonce, opts.SmokeLeaseDir, cl)
 	res.Stages = append(res.Stages, leaseStage)
 	if leaseStage.Outcome == StageFail {
 		res.FirstFailure = StageLease
@@ -665,7 +665,7 @@ type smokeLeaseState struct {
 // it found it. That ordering is load-bearing: releasing the lease before
 // revoking the grant, and revoking the grant before deleting the secret, is
 // the only sequence in which each step's precondition still holds.
-func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps executor.Capabilities, nonce string, cl *cleanupStack) (*smokeLeaseState, StageResult) {
+func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps executor.Capabilities, nonce, leaseBase string, cl *cleanupStack) (*smokeLeaseState, StageResult) {
 	started := time.Now()
 	st := &smokeLeaseState{}
 	stage := StageResult{Stage: StageLease}
@@ -797,7 +797,7 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	// filesystem gets files written there, and one whose cannot gets the bytes
 	// to place itself.
 	if caps.SecretFilesFromHostPath {
-		leaseDir, derr := secretbroker.NewLeaseDirPath("")
+		leaseDir, derr := secretbroker.NewLeaseDirPath(leaseBase)
 		if derr != nil {
 			return finish(StageFail, fmt.Sprintf("could not choose a lease directory: %v", derr),
 				"The hub could not create a staging directory for credential files; check that "+
