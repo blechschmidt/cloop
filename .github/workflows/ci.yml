@@ -216,6 +216,23 @@ jobs:
         # on the day it is added.
         run: go test -v ./tests/hermetic/
 
+      - name: Warm the browser the dashboard tests drive
+        # pkg/ui runs first in the race step, so its first browser test starts
+        # Chrome in the step's busiest minute — three other race-instrumented
+        # test binaries running beside it — and on a fresh runner that start
+        # also reads Chrome in from a cold disk. Once it outlasted the drivers'
+        # bound (Task 20372). Starting Chrome here, while nothing competes for
+        # the machine, leaves the race step a warm start. Best effort: a runner
+        # without Chrome skips the browser tests anyway.
+        run: |
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+          if [ -n "$chrome" ]; then
+            timeout 60 "$chrome" --headless=new --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
+            echo "warmed $chrome"
+          else
+            echo "no Chrome on this runner; the browser tests will skip"
+          fi
+
       - name: Test with race detector and coverage
         # -timeout, because `go test`'s default is a per-package 10 minutes and
         # pkg/ui is a large instrumented package that lands within a factor of

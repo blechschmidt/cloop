@@ -24,9 +24,12 @@
 # rather than silently dropping out of the run, and every package not named is
 # still tested, in go list's order, after the named ones.
 #
-# Keep `slow` to the packages that set the step's wall clock. Their order is by
-# duration on the runner, longest first; the numbers are in the commit that
-# last changed it.
+# Keep `slow` to the packages that set the step's wall clock, roughly longest
+# first; the numbers are in the commit that last changed it. One exception:
+# tests/security is kept out of the first four. Its static checks type-check
+# the whole module from source, a burst that takes every core for half a
+# minute, and pkg/ui's first browser test starts Chrome cold in that same first
+# minute; on the runner that start outlasted the drivers' bound (Task 20372).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -36,9 +39,9 @@ slow=(
 	pkg/ui
 	pkg/orchestrator
 	pkg/statedb
-	tests/security
-	pkg/secret
 	pkg/state
+	pkg/secret
+	tests/security
 	pkg/executor/container
 	pkg/featureops
 	pkg/executor/projectseed
