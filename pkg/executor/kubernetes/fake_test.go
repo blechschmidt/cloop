@@ -46,6 +46,9 @@ type fakeAPI struct {
 	// handlers and every assertion about them are in workspace_test.go.
 	secrets       map[string]*secret
 	secretDeletes []string
+	// secretRemovals names the deletes that found a Secret to remove — a
+	// subset of secretDeletes, which also records a delete answered 404.
+	secretRemovals []string
 	// secretPatches names the Secrets a merge patch reached (Task 20375).
 	secretPatches []string
 	// denySecretPatch answers every Secret patch 403, as a Role granting
@@ -567,6 +570,11 @@ func (f *fakeAPI) collectGarbage(ownerUID string) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.collectGarbageLocked(owned)
+}
+
+// collectGarbageLocked is collectGarbage's sweep, with f.mu held.
+func (f *fakeAPI) collectGarbageLocked(owned func([]ownerReference) bool) {
 	for name, s := range f.secrets {
 		if owned(s.Metadata.OwnerReferences) {
 			delete(f.secrets, name)
@@ -930,15 +938,28 @@ func (f *fakeAPI) handleDeleteDirect(name string) {
 	}
 	delete(f.pods, name)
 	f.logs[name].close()
+	// The collector runs here too, in the same critical section as the Pod's
+	// removal. This is the path a test uses to model a Pod vanishing for a
+	// reason the driver had nothing to do with — a node eviction, or an
+	// operator with kubectl — which is exactly the case ownerReferences exist
+	// to cover. Releasing the lock between the two let the driver's status
+	// pump, which polls the Pod, see it gone and delete the Secrets itself
+	// first: the run then proved the driver's cleanup, not the collector's,
+	// and failed on CI's slower runner (Task 20376).
+	if ok && strings.TrimSpace(uid) != "" {
+		f.collectGarbageLocked(func(refs []ownerReference) bool {
+			for _, ref := range refs {
+				if ref.UID == uid {
+					return true
+				}
+			}
+			return false
+		})
+	}
 	f.mu.Unlock()
 	if !ok {
 		return
 	}
-	// The collector runs here too. This is the path a test uses to model a Pod
-	// vanishing for a reason the driver had nothing to do with — a node
-	// eviction, or an operator with kubectl — which is exactly the case
-	// ownerReferences exist to cover.
-	f.collectGarbage(uid)
 	raw, _ := json.Marshal(p)
 	f.recordDeletion(name, raw)
 }

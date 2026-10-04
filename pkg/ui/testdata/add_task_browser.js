@@ -210,12 +210,29 @@ async function type(cdp, lines) {
 
 const valueOf = id => `(document.getElementById(${JSON.stringify(id)}) || {}).value`;
 
+// focusByClick clicks into a field and makes sure the click gave it the
+// keys. A click is aimed at where the field was when it was measured; if the
+// page shifted in between — the task list rendering above the form while the
+// panel is still loading, which CI's slower runner showed (Task 20376) — the
+// press lands on the page instead, and every key after it goes to <body>.
+// A person would click again, and so does this.
+async function focusByClick(cdp, sel) {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    await click(cdp, sel);
+    const focused = await cdp.eval(`document.activeElement === document.querySelector(${JSON.stringify(sel)})`);
+    if (focused) return;
+    if (Date.now() >= deadline) throw new Error('clicking ' + sel + ' never gave it the focus');
+    await sleep(100);
+  }
+}
+
 // fill types a title and a description the way a person does: a click into
 // each field, then the keys.
 async function fill(cdp, title, lines) {
-  await click(cdp, '#newTaskTitle');
+  await focusByClick(cdp, '#newTaskTitle');
   await cdp.send('Input.insertText', {text: title});
-  await click(cdp, '#newTaskDesc');
+  await focusByClick(cdp, '#newTaskDesc');
   await type(cdp, lines);
 }
 

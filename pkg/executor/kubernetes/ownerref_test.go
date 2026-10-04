@@ -189,10 +189,14 @@ func TestOwnerReference_DeletingThePodCollectsBothSecrets(t *testing.T) {
 	if !reflect.DeepEqual(collected, wantCollected) {
 		t.Errorf("garbage collected = %v, want %v", collected, wantCollected)
 	}
-	// And the driver did not do it: no DELETE reached the Secret endpoint.
-	if dels := api.secretDeleteNames(); len(dels) != 0 {
-		t.Errorf("secret deletes = %v; this test asserts the *cluster* collected them, so any "+
-			"driver-issued delete means it is proving the wrong path", dels)
+	// And the driver did not do it: no DELETE of its found a Secret to
+	// remove. The driver may still *ask* — its status pump polls the Pod, sees
+	// it gone and runs its own cleanup, which is correct behaviour for a live
+	// hub — but by then the collector has taken both, and the delete finds
+	// nothing (Task 20376: counting the asks failed on CI's slower runner).
+	if dels := api.secretRemovalNames(); len(dels) != 0 {
+		t.Errorf("secrets removed by the driver = %v; this test asserts the *cluster* collected them, so a "+
+			"driver delete that found one means it is proving the wrong path", dels)
 	}
 }
 

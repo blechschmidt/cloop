@@ -187,6 +187,9 @@ func (f *fakeAPI) routeSecret(w http.ResponseWriter, r *http.Request) {
 		_, ok := f.secrets[name]
 		delete(f.secrets, name)
 		f.secretDeletes = append(f.secretDeletes, name)
+		if ok {
+			f.secretRemovals = append(f.secretRemovals, name)
+		}
 		f.mu.Unlock()
 		if !ok {
 			writeStatus(w, 404, "NotFound", fmt.Sprintf("secrets %q not found", name))
@@ -219,6 +222,13 @@ func (f *fakeAPI) secretNames() []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// secretRemovalNames returns the deletes that found a Secret to remove.
+func (f *fakeAPI) secretRemovalNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.secretRemovals...)
 }
 
 func (f *fakeAPI) secretDeleteNames() []string {
