@@ -140,6 +140,9 @@ func (s *Server) closeSessionStore() {
 // digest.
 func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 	return func(ev oidcauth.SessionAudit) {
+		// The counters first: they cannot fail, and the journal below can.
+		countSessionEvent(ev)
+
 		payload := map[string]any{
 			"subject": ev.Subject,
 			"ip":      ev.IP,
@@ -383,7 +386,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := s.grantFor(r).subjectLabel()
-	ok, err := s.OIDC.RevokeSession(id, actor, "admin_revoked")
+	ok, err := s.OIDC.RevokeSession(id, actor, oidcauth.ReasonAdminRevoked)
 	if err != nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
 		return

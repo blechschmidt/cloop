@@ -285,6 +285,28 @@ const (
 	AuditSessionRenewalMismatch = auditaction.ActionSessionRenewalMismatch
 )
 
+// The Reason a session.expired or session.revoked event carries for each way a
+// session ends that is not the IdP's doing (a session.idp_revoked event names
+// the provider's own error instead). Exported so a consumer of the audit sink
+// — the hub's metrics — can tell them apart by constant rather than by a
+// literal that would drift the day one of them is renamed here.
+const (
+	// ReasonAbsoluteTTL: the session reached the ceiling set at sign-in.
+	ReasonAbsoluteTTL = "absolute_ttl"
+	// ReasonIdleTimeout: the session went unused past the idle timeout.
+	ReasonIdleTimeout = "idle_timeout"
+	// ReasonUserLogout: the user signed out of this session.
+	ReasonUserLogout = "user_logout"
+	// ReasonLogoutAll: the user ended every other session of theirs.
+	ReasonLogoutAll = "logout_all"
+	// ReasonSessionQuota: the identity's session quota made room for a new
+	// sign-in by ending its least recently used session.
+	ReasonSessionQuota = "session_quota_exceeded"
+	// ReasonAdminRevoked: an operator terminated the session and gave no
+	// reason of their own.
+	ReasonAdminRevoked = "admin_revoked"
+)
+
 // SessionAudit describes one session lifecycle event.
 //
 // It carries no credential material by construction: the session id here is
@@ -446,6 +468,21 @@ func (m *memStore) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]Sessio
 		delete(m.rows, id)
 	}
 	return out, nil
+}
+
+// CountLive counts the sessions DeleteExpired would keep.
+func (m *memStore) CountLive(absoluteCutoff, idleCutoff time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, s := range m.rows {
+		expired := !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(absoluteCutoff)
+		idle := !s.LastSeen.After(idleCutoff)
+		if !expired && !idle {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (m *memStore) DueForRefresh(cutoff time.Time, limit int) ([]SessionRecord, error) {

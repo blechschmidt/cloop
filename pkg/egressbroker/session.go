@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // TokenBytes is the size of a minted proxy token. 256 bits from crypto/rand
@@ -307,6 +309,7 @@ func (s *Session) addUp(n int64) error {
 		return nil
 	}
 	total := s.bytesUp.Add(n)
+	countBytes(hubmetrics.EgressUp, n)
 	if limit := s.Grant.MaxBytesUp; limit > 0 && total > limit {
 		return fmt.Errorf("%w: sent %s of the %s upload budget",
 			ErrQuotaExceeded, FormatBytes(total), FormatBytes(limit))
@@ -321,6 +324,7 @@ func (s *Session) addDown(n int64) error {
 		return nil
 	}
 	total := s.bytesDown.Add(n)
+	countBytes(hubmetrics.EgressDown, n)
 	if limit := s.Grant.MaxBytesDown; limit > 0 && total > limit {
 		return fmt.Errorf("%w: received %s of the %s download budget",
 			ErrQuotaExceeded, FormatBytes(total), FormatBytes(limit))

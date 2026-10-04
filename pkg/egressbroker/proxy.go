@@ -281,6 +281,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// deliberately-immutable log at will — turning the audit trail into
 		// the softest target on the box. Authenticated denials are the ones
 		// worth recording, and those all carry a session.
+		//
+		// Counted, though, when the credential was good and the session
+		// behind it is spent — expired, or past its quota. That is a verdict
+		// on a known session, and a counter is not something a stranger can
+		// grow into a liability the way rows in the chain are. A credential
+		// that did not authenticate is no verdict and counts as nothing.
+		countRequest(err)
 		w.Header().Set("Proxy-Authenticate", ProxyAuthScheme+` realm="cloop-egress"`)
 		p.refuse(w, nil, r, http.StatusProxyAuthRequired, err)
 		return

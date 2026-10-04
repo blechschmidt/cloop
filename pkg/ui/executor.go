@@ -163,6 +163,9 @@ func bootstrapExecutors(dir string, port int) {
 	// a previous run.
 	sweepOrphanedLeaseDirs(dir)
 	startExecutorSupervisor(dir)
+	// The scrape-time collectors for /metrics: fleet state, live leases, key
+	// rotation, sessions, quotas. Once per process (see hubmetrics.go).
+	registerHubCollectors()
 }
 
 // applyHostExecutionPolicy installs cfg's executors.allow_host_process on the
@@ -387,12 +390,20 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 // the run's provenance file so the harness can stamp it onto every cost row.
 // An explicit parameter rather than another label because it decides who pays,
 // and that should be visible at each call site rather than buried in a map.
-func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
+//
+// Every dispatch is counted (cloop_executor_task_starts_total) once ex is
+// resolved, and every way it can fail from there on — a grant the executor
+// cannot receive, a sandbox it cannot honour, a driver that will not start it
+// — is a failure at start. The named results are what let one deferred call
+// see all of them: a return path added later is counted without anyone having
+// to remember to.
+func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir string, argv []string, labels map[string]string) (_ executor.Executor, _ executor.Handle, err error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
+	defer func() { countRunStart(ex, err) }()
 	if err := checkFeatureExecutor(workDir, ex); err != nil {
 		return nil, executor.Handle{}, err
 	}

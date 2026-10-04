@@ -141,7 +141,7 @@ func (a *Authenticator) enforceSessionLimit(id Identity, now time.Time) {
 	}
 	sort.Slice(mine, func(i, j int) bool { return mine[i].LastSeen.Before(mine[j].LastSeen) })
 	for i := 0; i < surplus && i < len(mine); i++ {
-		a.terminate(mine[i], AuditSessionRevoked, "session_quota_exceeded", "quota")
+		a.terminate(mine[i], AuditSessionRevoked, ReasonSessionQuota, "quota")
 	}
 }
 
@@ -207,11 +207,11 @@ func (a *Authenticator) peekSession(r *http.Request) (SessionRecord, bool) {
 		return SessionRecord{}, false
 	}
 	if rec.Expired(now) {
-		a.terminate(rec, AuditSessionExpired, "absolute_ttl", "system")
+		a.terminate(rec, AuditSessionExpired, ReasonAbsoluteTTL, "system")
 		return SessionRecord{}, false
 	}
 	if rec.Idle(now, a.cfg.IdleTimeout) {
-		a.terminate(rec, AuditSessionExpired, "idle_timeout", "system")
+		a.terminate(rec, AuditSessionExpired, ReasonIdleTimeout, "system")
 		return SessionRecord{}, false
 	}
 	return rec, true
@@ -345,7 +345,7 @@ func (a *Authenticator) auditTermination(rec SessionRecord, event auditaction.Ac
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) *Identity {
 	var out *Identity
 	if rec, ok := a.SessionFromRequest(r); ok {
-		a.terminate(rec, AuditSessionRevoked, "user_logout", rec.Identity.OwnerKey())
+		a.terminate(rec, AuditSessionRevoked, ReasonUserLogout, rec.Identity.OwnerKey())
 		id := rec.Identity
 		out = &id
 	}
@@ -377,7 +377,7 @@ func (a *Authenticator) LogoutAll(subject, keepID, actor string) (int, error) {
 	a.mu.Unlock()
 	for _, rec := range gone {
 		a.notifyInvalidated(rec.ID)
-		a.auditTermination(rec, AuditSessionRevoked, "logout_all", actor)
+		a.auditTermination(rec, AuditSessionRevoked, ReasonLogoutAll, actor)
 	}
 	return len(gone), nil
 }
@@ -415,7 +415,7 @@ func (a *Authenticator) RevokeSession(id, actor, reason string) (bool, error) {
 		return false, nil
 	}
 	if reason == "" {
-		reason = "admin_revoked"
+		reason = ReasonAdminRevoked
 	}
 	a.auditTermination(rec, AuditSessionRevoked, reason, actor)
 	return true, nil
@@ -442,6 +442,44 @@ func (a *Authenticator) SessionCount() int {
 		return 0
 	}
 	return len(rows)
+}
+
+// LiveCounter is a SessionStore that can count valid sessions itself, under
+// the same cutoffs DeleteExpired takes. Optional: LiveSessionCount falls back
+// to listing the rows, but a store that can answer with a count should — a
+// listing of the durable store unseals every refresh token in it, which is no
+// thing to do for the sake of a number.
+type LiveCounter interface {
+	CountLive(absoluteCutoff, idleCutoff time.Time) (int, error)
+}
+
+// LiveSessionCount returns how many sessions are valid now: neither past their
+// absolute ceiling nor idle beyond the timeout, as the store records them. The
+// store's last-seen clock is written at most once a minute, so a session's
+// idle time can read up to that much long. Zero when sign-on is off.
+func (a *Authenticator) LiveSessionCount() (int, error) {
+	if a == nil || !a.Enabled() {
+		return 0, nil
+	}
+	now := a.now()
+	idleCutoff := now.Add(-a.cfg.IdleTimeout)
+	if a.cfg.IdleTimeout <= 0 {
+		idleCutoff = time.Time{} // idle clock disabled, as in SweepExpired
+	}
+	if c, ok := a.store.(LiveCounter); ok {
+		return c.CountLive(now, idleCutoff)
+	}
+	rows, err := a.store.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, rec := range rows {
+		if !rec.Expired(now) && !rec.Idle(now, a.cfg.IdleTimeout) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ── janitor ─────────────────────────────────────────────────────────────────
@@ -495,9 +533,9 @@ func (a *Authenticator) SweepExpired() int {
 		a.notifyInvalidated(rec.ID)
 	}
 	for _, rec := range gone {
-		reason := "idle_timeout"
+		reason := ReasonIdleTimeout
 		if rec.Expired(now) {
-			reason = "absolute_ttl"
+			reason = ReasonAbsoluteTTL
 		}
 		a.auditTermination(rec, AuditSessionExpired, reason, "system")
 	}

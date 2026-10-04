@@ -291,6 +291,66 @@ func TestSweepExpiredAuditsOnce(t *testing.T) {
 	}
 }
 
+// TestLiveSessionCountAppliesBothClocks: the gauge counts exactly what a
+// request would still accept, through the store's own count and through the
+// listing fallback alike, so a session the next sweep removes is never
+// reported as live.
+func TestLiveSessionCountAppliesBothClocks(t *testing.T) {
+	idp := newFakeIdP(t)
+	for name, store := range map[string]SessionStore{
+		"counting store": NewMemorySessionStore(0),
+		"listing store":  listOnlyStore{NewMemorySessionStore(0)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clk := newClock()
+			a := newLifecycleAuth(t, idp, store, clk, func(c *Config) {
+				c.SessionTTL = 3 * time.Hour
+				c.IdleTimeout = time.Hour
+			})
+			count := func() int {
+				t.Helper()
+				n, err := a.LiveSessionCount()
+				if err != nil {
+					t.Fatalf("LiveSessionCount: %v", err)
+				}
+				return n
+			}
+
+			if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil); err != nil {
+				t.Fatal(err)
+			}
+			clk.advance(50 * time.Minute)
+			if _, err := a.createSession(Identity{Sub: "u2"}, reqWithCookie("x"), "", nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := count(); got != 2 {
+				t.Fatalf("live = %d, want 2", got)
+			}
+
+			// u1 goes idle; u2 does not.
+			clk.advance(20 * time.Minute)
+			if got := count(); got != 1 {
+				t.Errorf("live = %d after u1 idled out, want 1", got)
+			}
+
+			// The ceiling ends u2 however active it is.
+			clk.advance(130 * time.Minute)
+			if got := count(); got != 0 {
+				t.Errorf("live = %d past every ceiling, want 0", got)
+			}
+		})
+	}
+
+	var off *Authenticator
+	if n, err := off.LiveSessionCount(); n != 0 || err != nil {
+		t.Errorf("a nil authenticator counted %d (%v), want 0", n, err)
+	}
+}
+
+// listOnlyStore hides a store's CountLive, so LiveSessionCount takes the
+// listing path.
+type listOnlyStore struct{ SessionStore }
+
 // ── revocation ──────────────────────────────────────────────────────────────
 
 // TestRevokeThenRequestIsRefused is the operator kill switch: after

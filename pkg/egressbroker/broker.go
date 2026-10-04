@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -328,6 +329,11 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 
 	var chosen *Grant
 	var lastReason string
+	// lastSentinel is why the last grant aimed at this requester was refused,
+	// which is the more useful thing to count than the ErrNoGrant every
+	// refused redemption ends in: "a grant exists but was revoked" and "no
+	// grant targets this project" have different fixes.
+	var lastSentinel error
 	for i := range grants {
 		g := grants[i]
 		if req.GrantID != "" && g.ID != req.GrantID {
@@ -345,7 +351,8 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 			ev.Constraints = g.Summary()
 			ev.ExpiresAt = g.ExpiresAt
 			lastReason = reason
-			_ = b.deny(ev, fmt.Errorf("%w: %s", g.DenySentinel(), reason))
+			lastSentinel = g.DenySentinel()
+			_ = b.deny(ev, fmt.Errorf("%w: %s", lastSentinel, reason))
 			continue
 		}
 		chosen = &g
@@ -355,6 +362,11 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 		if lastReason == "" {
 			lastReason = "no grant targets this executor/project"
 		}
+		why := lastSentinel
+		if why == nil {
+			why = ErrNoGrant
+		}
+		countRefusal(why)
 		return nil, b.deny(base, fmt.Errorf("%w: %s", ErrNoGrant, lastReason))
 	}
 
@@ -391,6 +403,9 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 	b.mu.Lock()
 	b.sessions[sess.ID] = sess
 	b.mu.Unlock()
+	// Counted down in CloseSession, the one way a session leaves the map, by
+	// whichever call actually ends it.
+	hubmetrics.EgressSessionsLive.Inc()
 
 	// Re-read the grant now that the session is visible, and only now.
 	//
@@ -403,9 +418,12 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 	if fresh, ferr := b.store.GetGrant(chosen.ID); ferr != nil || !fresh.Active(b.now()) {
 		b.CloseSession(sess.ID, "grant became inactive during redemption")
 		reason := "grant was revoked or expired during redemption"
+		why := fresh.DenySentinel()
 		if ferr != nil {
 			reason = "grant disappeared during redemption"
+			why = ErrNoGrant
 		}
+		countRefusal(why)
 		return nil, b.deny(base, fmt.Errorf("%w: %s", ErrNoGrant, reason))
 	}
 
@@ -486,6 +504,7 @@ func (b *Broker) CloseSession(id, reason string) {
 	if !sess.end() {
 		return
 	}
+	hubmetrics.EgressSessionsLive.Add(-1)
 	b.emit(secretbroker.Event{
 		Action:     secretbroker.ActionEgressClose,
 		Actor:      sess.Actor,
@@ -579,6 +598,10 @@ func (b *Broker) deny(ev secretbroker.Event, err error) error {
 // field on secretbroker.Event capable of carrying a URL path, a header, or a
 // body, so a future change cannot start logging request contents by accident.
 func (b *Broker) auditRequest(sess *Session, action secretbroker.Action, host string, port int, err error, reason string) {
+	// The metric is taken from the same decision as the row, here, so a
+	// verdict cannot reach one and miss the other.
+	countAudited(action, err)
+
 	ev := secretbroker.Event{
 		Action: action,
 		Host:   host,

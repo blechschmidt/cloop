@@ -84,6 +84,9 @@ func (s *Server) interruptRun(workDir string) stopDelivery {
 				d.ExecutorErr = err
 			} else {
 				d.Signalled++
+				// So that settling it counts a cancellation: an interrupted
+				// run pauses and exits zero, which alone reads as finished.
+				s.noteStopRequested(workDir, run.handleID)
 				if statusErr == nil && run.ex.Kind() == executor.KindLocalProcess {
 					reached = st.PID
 				}

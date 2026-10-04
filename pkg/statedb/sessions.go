@@ -350,6 +350,25 @@ func (d *DB) DeleteExpiredSessions(absoluteCutoff, idleCutoff time.Time) ([]Sess
 	return doomed, nil
 }
 
+// CountLiveSessions counts the sessions DeleteExpiredSessions would keep under
+// the same two cutoffs: neither past expires_at nor last seen at or before
+// idleCutoff. A count rather than a listing, so nothing sealed leaves the row.
+func (d *DB) CountLiveSessions(absoluteCutoff, idleCutoff time.Time) (int, error) {
+	abs := absoluteCutoff.UTC().Format(time.RFC3339Nano)
+	idle := idleCutoff.UTC().Format(time.RFC3339Nano)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var n int
+	if err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE NOT ((expires_at <> '' AND expires_at <= ?) OR last_seen <= ?)`,
+		abs, idle,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("statedb: count live sessions: %w", classifyDriverErr(err))
+	}
+	return n, nil
+}
+
 // SessionsDueForRefresh returns sessions whose IdP check is older than cutoff
 // and that still hold a sealed refresh token, oldest first and at most limit
 // rows.

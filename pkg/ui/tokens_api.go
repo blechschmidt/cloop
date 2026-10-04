@@ -208,11 +208,18 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request) (*
 		// the chain would have granted.
 		s.log().Error(logger.EventAuthz, 0, "api token: open store",
 			map[string]interface{}{"error": err.Error()})
+		// A failure the metric names store_error, so every scraper and CI
+		// job suddenly getting 503s shows up as the hub's fault, not theirs.
+		countTokenVerification(err)
 		jsonErr(w, "token authentication is unavailable", http.StatusServiceUnavailable)
 		return nil, false, true
 	}
 
+	// Counted on the verifier's verdict alone. The lockout above answered
+	// before any verification, and a refusal by the token's kind below is
+	// authorization of a credential that did verify.
 	tok, verr := mgr.Verify(cred)
+	countTokenVerification(verr)
 	if verr != nil {
 		s.recordAuthFailure(ip)
 		s.auditTokenEvent(tokenAuditRecord{

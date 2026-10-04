@@ -489,6 +489,9 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 			s.collectRunResult(workDir, ex, meta.Handle)
 		}
 		s.reconcileDeadRun(workDir, verdict)
+		// Settled here, so counted here: the member that dispatched it, and
+		// counted its start, is gone, and the cluster's sum needs the end.
+		countRunSettled(ex, st, stErr, false, meta.Started)
 		return
 	}
 	if meta.Seeded && meta.Provenance != nil {

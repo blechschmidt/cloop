@@ -226,6 +226,14 @@ func (s *Store) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]oidcauth.
 	return s.toRecords(rows), nil
 }
 
+// CountLive counts the sessions DeleteExpired would keep, in SQL: listing
+// them to count would unseal every refresh token in the table.
+func (s *Store) CountLive(absoluteCutoff, idleCutoff time.Time) (int, error) {
+	return s.db.CountLiveSessions(absoluteCutoff, idleCutoff)
+}
+
+var _ oidcauth.LiveCounter = (*Store)(nil)
+
 func (s *Store) DueForRefresh(cutoff time.Time, limit int) ([]oidcauth.SessionRecord, error) {
 	rows, err := s.db.SessionsDueForRefresh(cutoff, limit)
 	if err != nil {

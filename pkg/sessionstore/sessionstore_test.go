@@ -259,6 +259,47 @@ func TestDeleteExpiredHonoursBothClocks(t *testing.T) {
 	}
 }
 
+// TestCountLiveMatchesTheSweep: the count is what DeleteExpired would keep,
+// under the same two cutoffs, so the live-sessions gauge never reports a row
+// the next sweep removes.
+func TestCountLiveMatchesTheSweep(t *testing.T) {
+	t.Setenv(secretbroker.EnvPassphraseKey, "test-passphrase")
+	store, _ := newTestStore(t, t.TempDir())
+	now := time.Now().UTC()
+
+	past := sampleRecord("past-ceiling", now)
+	past.ExpiresAt = now.Add(-time.Minute)
+	idle := sampleRecord("idle", now)
+	idle.LastSeen = now.Add(-9 * time.Hour)
+	unbounded := sampleRecord("no-ceiling", now)
+	unbounded.ExpiresAt = time.Time{}
+	for _, rec := range []oidcauth.SessionRecord{sampleRecord("live", now), past, idle, unbounded} {
+		if err := store.Put(rec); err != nil {
+			t.Fatalf("Put %s: %v", rec.ID, err)
+		}
+	}
+
+	idleCutoff := now.Add(-8 * time.Hour)
+	n, err := store.CountLive(now, idleCutoff)
+	if err != nil {
+		t.Fatalf("CountLive: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountLive = %d, want 2 (live and no-ceiling)", n)
+	}
+	gone, err := store.DeleteExpired(now, idleCutoff)
+	if err != nil {
+		t.Fatalf("DeleteExpired: %v", err)
+	}
+	all, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != n || len(gone) != 4-n {
+		t.Errorf("the sweep kept %d and removed %d; CountLive said %d would stay", len(all), len(gone), n)
+	}
+}
+
 // TestTouchIsMonotonic pins the conditional UPDATE. Two processes sharing the
 // database can call Touch out of order; the later timestamp must win, or a
 // session could be aged into an early idle expiry by a stale writer.

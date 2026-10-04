@@ -52,7 +52,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
-	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/quotastore"
@@ -786,11 +785,11 @@ func quotaResourceNames() []string {
 // operator's scrape config and recording rules are already written against
 // them; what changes is that they now get the registry's cardinality ceiling,
 // escaping and stable ordering instead of their own one-off versions.
+//
+// The gauges derived from live state — quotas among them — are collected at
+// scrape time by the collectors in hubmetrics.go, against this Server.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metricsMu.Lock()
-	s.publishQuotaGauges()
-	body := hubmetrics.Default.Gather()
-	metricsMu.Unlock()
+	body := s.gatherMetrics()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -798,65 +797,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// metricsMu makes publish-then-render atomic.
+// metricsMu makes collect-then-render atomic.
 //
-// The quota gauges are per-Server state published into a process-global
-// registry, and publishing Resets before it Sets. One hub has one Server so
-// this never contends in production, but pkg/ui builds a Server per test and
-// runs them in parallel; without the lock one test's Reset lands between
-// another's Set and its Gather, and the scrape comes back missing the very
-// identity that test just admitted. Serialising scrapes costs nothing real —
-// Prometheus polls on the order of tens of seconds.
+// The collectors publish per-Server state into a process-global registry,
+// and each Resets the families it owns before it Sets them. One hub has one
+// Server so this never contends in production, but pkg/ui builds a Server per
+// test and runs them in parallel; without the lock one test's Reset lands
+// between another's Set and its render, and the scrape comes back missing the
+// very identity that test just admitted. Serialising scrapes costs nothing
+// real — Prometheus polls on the order of tens of seconds.
 var metricsMu sync.Mutex
-
-// publishQuotaGauges refreshes the identity-scoped gauges from live enforcer
-// state immediately before a scrape reads them.
-//
-// Reset-then-Set rather than incremental updates is what keeps this metric
-// bounded: cardinality becomes the number of identities the hub is accounting
-// right now, not the number it has ever seen, so a tenant cannot grow the
-// registry by churning identities. It is also what stops a departed identity's
-// last usage reading from being exported forever as though it were live.
-func (s *Server) publishQuotaGauges() {
-	hubmetrics.QuotaLimit.Reset()
-	hubmetrics.QuotaUsage.Reset()
-
-	entries := s.allProjectEntries()
-	hubmetrics.ProjectsRegistered.Set(float64(len(entries)))
-
-	e := s.quotas()
-	if e == nil || !e.Enabled() {
-		hubmetrics.QuotaEnforcementEnabled.Set(0)
-	} else {
-		hubmetrics.QuotaEnforcementEnabled.Set(1)
-	}
-	if e == nil {
-		hubmetrics.QuotaIdentities.Set(0)
-		return
-	}
-
-	var known []string
-	for _, entry := range entries {
-		if entry.Owner != "" {
-			known = append(known, entry.Owner)
-		}
-	}
-	snapshot := e.Snapshot(known)
-	for _, v := range snapshot {
-		for _, res := range quota.AllResources {
-			if limit, ok := v.Limits.Get(res); ok {
-				hubmetrics.QuotaLimit.Set(limit, v.Identity, string(res))
-			}
-			hubmetrics.QuotaUsage.Set(v.Usage[res], v.Identity, string(res))
-		}
-	}
-
-	// Set, not Add: the enforcer holds the authoritative running total, so
-	// mirroring the absolute value keeps the counter monotonic across
-	// scrapes without this path having to track what it last published.
-	denials := e.Denials()
-	for _, res := range quota.AllResources {
-		hubmetrics.QuotaDenials.Set(float64(denials[res]), string(res))
-	}
-	hubmetrics.QuotaIdentities.Set(float64(len(snapshot)))
-}

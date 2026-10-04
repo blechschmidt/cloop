@@ -31,6 +31,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,14 @@ type dispatchedRun struct {
 	cancel context.CancelFunc
 	// handedOver marks a run another member took over.
 	handedOver bool
+	// stopRequested records that the control plane asked the run to stop —
+	// Stop pressed, a budget stop (interruptRun). It is what lets settling
+	// tell a run that was withdrawn from one that exited of its own accord:
+	// a run told to stop pauses and exits zero, exactly like one that finished.
+	stopRequested bool
+	// tracked is when this member began tracking the run: its dispatch, or
+	// its adoption from another member.
+	tracked time.Time
 }
 
 // trackRun remembers the workload dispatched for workDir.
@@ -103,7 +112,19 @@ func (s *Server) trackRunWithCancel(workDir string, ex executor.Executor, handle
 	if s.runHandles == nil {
 		s.runHandles = make(map[string]dispatchedRun)
 	}
-	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID, cancel: cancel}
+	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID, cancel: cancel, tracked: time.Now()}
+}
+
+// noteStopRequested records that the control plane asked handleID's run to
+// stop. Keyed on the handle as well as the project, so a stop meant for a run
+// that has since ended cannot mark the next one.
+func (s *Server) noteStopRequested(workDir, handleID string) {
+	s.runHandleMu.Lock()
+	defer s.runHandleMu.Unlock()
+	if run, ok := s.runHandles[workDir]; ok && run.handleID == handleID {
+		run.stopRequested = true
+		s.runHandles[workDir] = run
+	}
 }
 
 // untrackRun forgets workDir's workload. The map is therefore bounded by the
@@ -248,15 +269,47 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// progress is recovered from the run's own account rather than from a plan
 	// that never heard it started (Task 20339).
 	s.collectRunResult(workDir, ex, handleID)
-	verdict := workloadVerdict(ex, handleID)
+	// One Status call answers both questions: what the project's journal
+	// says about the end, and how the run is counted.
+	var verdict runVerdict
+	st, stErr := executor.Status{}, errNoWorkload
+	if ex != nil && handleID != "" {
+		st, stErr = workloadStatus(ex, handleID)
+		verdict = verdictFor(st, stErr)
+	}
+	// Read before untrackRun forgets it: whether the hub asked this run to
+	// stop, and since when this member has been following it.
+	run, _ := s.trackedRun(workDir)
+	stopped := run.handleID == handleID && run.stopRequested
 	s.untrackRun(workDir)
 	s.reconcileDeadRun(workDir, verdict)
+	countRunSettled(ex, st, stErr, stopped, run.tracked)
 	// A feature that completed and asked for it gets its pull request now
 	// (Task 20341). A no-op for everything else; the work is backgrounded.
 	s.maybeAutoOpenFeaturePR(workDir)
 }
 
+// errNoWorkload stands in for a Status nobody could ask for: no executor, or
+// no handle.
+var errNoWorkload = errors.New("no workload to ask about")
+
+// workloadStatus asks the driver for a finished workload's last status,
+// bounded by workloadStatusTimeout.
+func workloadStatus(ex executor.Executor, handleID string) (executor.Status, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), workloadStatusTimeout)
+	defer cancel()
+	return ex.Status(ctx, handleID)
+}
+
 // workloadVerdict asks the driver how a finished workload ended.
+func workloadVerdict(ex executor.Executor, handleID string) runVerdict {
+	if ex == nil || handleID == "" {
+		return runVerdict{}
+	}
+	return verdictFor(workloadStatus(ex, handleID))
+}
+
+// verdictFor reads a finished workload's status as a verdict.
 //
 // The OOM determination rests on one property of the drivers: a termination
 // cloop requested carries the reason the requester gave, so a kill that reports
@@ -265,13 +318,7 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 // process to SIGKILL without anyone sending it, the OOM killer is far and away
 // the likeliest explanation — so the message says "typically", and names the
 // alternative rather than asserting a cause it cannot prove.
-func workloadVerdict(ex executor.Executor, handleID string) runVerdict {
-	if ex == nil || handleID == "" {
-		return runVerdict{}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), workloadStatusTimeout)
-	defer cancel()
-	st, err := ex.Status(ctx, handleID)
+func verdictFor(st executor.Status, err error) runVerdict {
 	if err != nil {
 		return runVerdict{Detail: "its executor could not say how it ended"}
 	}
