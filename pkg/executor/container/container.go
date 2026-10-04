@@ -754,13 +754,16 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		req.Network = NetworkNone
 	}
 	var rulesNetwork string
+	var gateway netip.Addr
 	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter() || spec.EgressRules != nil) &&
 		req.Network != NetworkNone {
 		c := confineTo(spec)
-		network, dns, ferr := e.installRulesAware(ctx, c)
+		sbxNet, ferr := e.installRulesAware(ctx, c)
 		if ferr != nil {
 			return executor.Handle{}, ferr
 		}
+		network, dns := sbxNet.name, sbxNet.dns
+		gateway = sbxNet.gateway
 		if c.rules != nil {
 			rulesNetwork = network
 			defer func() {
@@ -788,6 +791,16 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 				HostPath: conf, TargetPath: "/etc/resolv.conf", ReadOnly: true,
 				SELinuxLabel: e.opts.SELinuxLabel,
 			})
+		}
+	}
+
+	// The hub's egress proxy, when this workload was given a session for it
+	// (Task 20378): its name pinned to the gateway of the bridge the sandbox
+	// just joined, which is where the host answers. The ruleset, if one was
+	// installed, already opens it.
+	if spec.EgressProxy != nil {
+		if err := e.routeEgressProxy(ctx, &req, *spec.EgressProxy, gateway); err != nil {
+			return executor.Handle{}, err
 		}
 	}
 

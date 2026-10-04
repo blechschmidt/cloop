@@ -28,7 +28,9 @@ import (
 func TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild(t *testing.T) {
 	dev := edgetest.NewDevice(t, "dev+g06e06ed", 16, provenance.ChannelEdge)
 	rel := edgetest.NewRelease(t)
-	rel.Publish(t, edgeCommit, cosigntest.Edge, 17, "EDGE BUILD")
+	// The edge build speaks what the loopback agent speaks — this build's
+	// protocol — so the upgrade moves the device sideways rather than back.
+	rel.Publish(t, edgeCommit, cosigntest.Edge, remote.ProtocolVersion, "EDGE BUILD")
 	// The agent checks cosign is there before it says yes.
 	t.Setenv("PATH", filepath.Dir(cosigntest.Install(t))+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -54,7 +56,7 @@ func TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := ex.RequestUpgrade(ctx, remote.UpgradeRequest{TargetVersion: "edge:" + edgeCommit, TargetProtocol: 17})
+	out, err := ex.RequestUpgrade(ctx, remote.UpgradeRequest{TargetVersion: "edge:" + edgeCommit, TargetProtocol: remote.ProtocolVersion})
 	if err != nil || !out.Accepted {
 		t.Fatalf("RequestUpgrade = %+v, %v", out, err)
 	}
@@ -82,7 +84,7 @@ func TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild(t *testing.T) {
 	if cur, prev := dev.Installed(t); cur != "EDGE BUILD" || prev != "INSTALLED" {
 		t.Errorf("installed %q, kept for rollback %q", cur, prev)
 	}
-	if !res.Verified || res.StagedBuild.Version != "dev+ga0f3870" || res.StagedBuild.Protocol != 17 {
+	if !res.Verified || res.StagedBuild.Version != "dev+ga0f3870" || res.StagedBuild.Protocol != remote.ProtocolVersion {
 		t.Errorf("the staged binary was not identified before it was installed: %+v", res.StagedBuild)
 	}
 	for p, want := range dropIns {

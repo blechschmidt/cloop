@@ -595,6 +595,17 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		}
 	}
 
+	// And for a route to the hub's egress proxy through a firewall the device
+	// installs. An older agent ignores the route and would install the rules
+	// without the proxy in them, so the sandbox would hold a proxy session it
+	// cannot reach. The hub does not issue one in that case (pkg/ui); this is
+	// the backstop for a dispatch that did.
+	if spec.EgressProxy != nil && spec.EgressRules != nil && !SupportsEgressProxy(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf("%w: %s", executor.ErrUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinEgressProxyVersion,
+			"to open the hub's egress proxy in this workload's firewall", ""))
+	}
+
 	// Where this payload runs on the device. Read before anything is leased or
 	// persisted, because it can refuse the dispatch and the cheapest refusal is
 	// the earliest one.

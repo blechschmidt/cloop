@@ -484,6 +484,16 @@ type Spec struct {
 	// that a driver on that machine can check the containment itself. nil when
 	// the device has no rule set; never set without EgressRules.
 	EgressBound *FirewallRules `json:"egress_bound,omitempty"`
+	// EgressProxy is the route this workload takes to the hub's egress proxy,
+	// when the hub redeemed it a proxy session (Task 20378). It carries no
+	// credential — the session's URL travels in Env, declared sensitive — only
+	// what a driver needs to make that URL work from inside its sandbox: a
+	// name to pin to the sandbox network's gateway, and an address to open in
+	// the sandbox's firewall. See EgressProxyRoute.
+	//
+	// nil means the workload was given no session, and no driver opens
+	// anything for one.
+	EgressProxy *EgressProxyRoute `json:"egress_proxy,omitempty"`
 	// SandboxHash identifies the sandbox spec this workload was built from,
 	// for the audit trail. Drivers surface it as a label; it never affects
 	// execution.
@@ -685,6 +695,11 @@ func (s Spec) Validate() error {
 	}
 	if err := s.validateEgressRules(); err != nil {
 		return err
+	}
+	if s.EgressProxy != nil {
+		if err := s.EgressProxy.Validate(); err != nil {
+			return err
+		}
 	}
 	// Checked here as well as by the driver that writes them, and for the same
 	// reason: a bare file name is what stops a crafted secret from becoming an

@@ -196,7 +196,15 @@ const (
 	// for the frame, so the hub does not send it, keeps the dispatch, and
 	// journals that the run's token lapses an hour after dispatch on that
 	// device. See MinSecretRefreshVersion.
-	ProtocolVersion = 17
+	//
+	// v18 adds the start frame's egress_proxy route (Task 20378): the hub's
+	// egress proxy as this workload reaches it, which the agent's sandbox
+	// driver opens in the workload's firewall. No frame changes; the version
+	// says the agent's drivers honour the field. Gated on the hub side: an
+	// older agent ignores it and would install the firewall without the
+	// proxy in it, so the hub issues no proxy session to a firewalled sandbox
+	// on such a device and journals why. See MinEgressProxyVersion.
+	ProtocolVersion = 18
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -362,6 +370,19 @@ const MinBranchBundleVersion = 16
 // SupportsBranchBundle reports whether an agent speaking this protocol version
 // can receive a shipped branch.
 func SupportsBranchBundle(version int) bool { return version >= MinBranchBundleVersion }
+
+// MinEgressProxyVersion is the first version whose agents open the hub's
+// egress proxy in a workload's firewall from the route its Spec carries.
+//
+// A placement rule for the firewalled case only: a sandbox with no firewall
+// reaches the proxy over its ordinary route whatever its agent speaks, so an
+// older device is refused a proxy session only where its firewall would drop
+// the proxy.
+const MinEgressProxyVersion = 18
+
+// SupportsEgressProxy reports whether an agent speaking this protocol version
+// opens a workload's egress proxy route in its firewall.
+func SupportsEgressProxy(version int) bool { return version >= MinEgressProxyVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

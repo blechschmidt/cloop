@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -99,6 +100,13 @@ type EgressFilter struct {
 	// HostPatterns carries the L7 allowlist purely so the compiled policy
 	// can warn that it is not enforcing it.
 	HostPatterns []string
+
+	// hubProxy is the hub's egress proxy as one workload reaches it — the
+	// gateway of its bridge, or the address its route names — opened like
+	// Broker (Task 20378). Unexported because it is never configuration: it is
+	// derived per workload, from the route its Spec carries, by
+	// provisionNetwork.
+	hubProxy netip.AddrPort
 }
 
 // filtersDirectly reports whether this filter needs an nftables ruleset, as
@@ -182,6 +190,9 @@ func (f EgressFilter) input() (netfilter.Input, error) {
 		}
 		in.Brokers = append(in.Brokers, ap)
 	}
+	if f.hubProxy.IsValid() {
+		in.Brokers = append(in.Brokers, f.hubProxy)
+	}
 	for i, r := range f.Resolvers {
 		// A resolver written without a port means the standard one. That is
 		// the only defaulting here: a broker endpoint has no standard port,
@@ -253,14 +264,19 @@ func (f EgressFilter) Validate() error {
 // the bridge a workload lands on has to be keyed by both. When the rules are
 // present they win: the hub folds the scope into them before dispatch, and they
 // are the more specific statement, made by identities the hub authenticated.
+//
+// proxy rides along for the same reason (Task 20378): a workload the hub gave
+// an egress session has to reach the hub's proxy through its ruleset, and a
+// ruleset that opens the proxy is a different ruleset from one that does not.
 type confinement struct {
 	scope executor.EgressScope
 	rules *executor.FirewallRules
+	proxy *executor.EgressProxyRoute
 }
 
-// confineTo reads the pair out of a Spec.
+// confineTo reads the confinement out of a Spec.
 func confineTo(spec executor.Spec) confinement {
-	return confinement{scope: spec.EgressScope, rules: spec.EgressRules}
+	return confinement{scope: spec.EgressScope, rules: spec.EgressRules, proxy: spec.EgressProxy}
 }
 
 // scoped is the confinement of a workload that carries only a scope.
@@ -274,15 +290,29 @@ func scoped(scope executor.EgressScope) confinement { return confinement{scope: 
 // different reach can never share one — the second Apply would replace the
 // first's ruleset, and one of them would run under the other's firewall. The
 // "r" prefix keeps a fingerprint from ever colliding with a scope name.
+//
+// A proxy route adds its port, so a workload whose ruleset opens the hub's
+// proxy never shares a bridge — and so a table — with one whose ruleset does
+// not: the second Apply would close the first's way out, or open the proxy to a
+// workload that was given no session for it. Only the port: the address opened
+// is the bridge's own gateway, which the bridge already determines. The "x"
+// keeps it from reading as part of a fingerprint.
 func (c confinement) key() string {
+	var base string
 	switch {
 	case c.rules != nil:
-		return "r" + fwpolicy.Fingerprint(*c.rules)
+		base = "r" + fwpolicy.Fingerprint(*c.rules)
 	case c.scope != executor.EgressScopeUnset:
-		return string(c.scope)
-	default:
-		return ""
+		base = string(c.scope)
 	}
+	if c.proxy == nil {
+		return base
+	}
+	px := "x" + strconv.Itoa(c.proxy.Port)
+	if base == "" {
+		return px
+	}
+	return base + "-" + px
 }
 
 // networkName derives the runtime network a filter needs.
@@ -516,12 +546,34 @@ func validateNetworkName(name string) error {
 // the configured resolvers without also pointing the sandbox at them would
 // leave every lookup going somewhere the filter drops.
 func (e *Executor) installFirewall(ctx context.Context, c confinement) (string, []string, error) {
+	n, err := e.provisionNetwork(ctx, c)
+	return n.name, n.dns, err
+}
+
+// sandboxNet is what provisioning one workload's network produced.
+type sandboxNet struct {
+	// name is the runtime network the workload joins.
+	name string
+	// dns is the resolvers it should be pointed at, when the filter opened
+	// exactly these.
+	dns []string
+	// keyed is the confinement the network and its table are named after:
+	// the workload's, less a proxy route when no ruleset was installed for it
+	// to open.
+	keyed confinement
+	// gateway is the network's gateway, when the workload's proxy route asked
+	// for it while the network was being built.
+	gateway netip.Addr
+}
+
+// provisionNetwork is installFirewall with everything the caller needs back.
+func (e *Executor) provisionNetwork(ctx context.Context, c confinement) (sandboxNet, error) {
 	f, err := e.effectiveFilter(c)
 	if err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
 	}
 	if !f.Enabled {
-		return e.opts.Network, nil, nil
+		return sandboxNet{name: e.opts.Network}, nil
 	}
 	if e.rootless() {
 		// Rootless podman creates the bridge inside a network namespace the
@@ -530,16 +582,31 @@ func (e *Executor) installFirewall(ctx context.Context, c confinement) (string, 
 		// other one — it would load cleanly and match nothing, and the sandbox
 		// would run with unrestricted egress under a firewall that reported
 		// success (Task 20345).
-		return "", nil, fmt.Errorf("%w: executor %s runs %s rootless, and a rootless engine's networks "+
+		return sandboxNet{}, fmt.Errorf("%w: executor %s runs %s rootless, and a rootless engine's networks "+
 			"live in a network namespace the host's packet filter cannot see, so an egress filter "+
 			"installed for one would filter nothing; run the engine as root (docker, or podman as "+
 			"root) for a filtered sandbox, or remove the filter", executor.ErrUnsupported, e.id, e.rt.Name)
 	}
 
+	// The proxy route is part of a bridge's identity only when a ruleset is
+	// installed on it, because the ruleset is what has to open the proxy. An
+	// --internal bridge with no ruleset reaches its gateway on-link already,
+	// so every workload on the executor can keep sharing one.
+	if !f.filtersDirectly() {
+		c.proxy = nil
+	}
 	name := networkName(e.id, c)
 	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
 	if err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
+	}
+	out := sandboxNet{name: name, keyed: c}
+	if c.proxy != nil {
+		ap, gw, err := e.proxyEndpoint(ctx, name, *c.proxy)
+		if err != nil {
+			return sandboxNet{}, err
+		}
+		f.hubProxy, out.gateway = ap, gw
 	}
 	if !f.filtersDirectly() {
 		// --internal alone: the runtime installs no route off the bridge,
@@ -554,26 +621,39 @@ func (e *Executor) installFirewall(ctx context.Context, c confinement) (string, 
 		// costs one nft call on the common path and closes the case where
 		// the configuration moved and the kernel did not.
 		if err := e.removeFirewall(ctx, c); err != nil {
-			return "", nil, err
+			return sandboxNet{}, err
 		}
-		return name, nil, nil
+		return out, nil
 	}
 
 	policy, err := f.Policy()
 	if err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
+	}
+	// The proof, before anything is installed: the compiled policy's own
+	// semantics must let the workload reach the hub's proxy. A deny list that
+	// covers the bridge's gateway shadows the opening (the deny wins, as it
+	// must), and a sandbox started under it would time out on every request
+	// its session was issued for.
+	if f.hubProxy.IsValid() {
+		if verdict, why := policy.Evaluate(f.hubProxy.Addr(), f.hubProxy.Port(), netfilter.ProtoTCP); verdict != netfilter.VerdictAllow {
+			return sandboxNet{}, fmt.Errorf("%w: the hub's egress proxy at %s is unreachable through executor %s's "+
+				"firewall (%s), so the egress session this workload was given could not be used; remove "+
+				"the deny that covers it, or the project's egress grant", executor.ErrUnsupported, f.hubProxy, e.id, why)
+		}
 	}
 	applier, err := netfilter.NewApplier()
 	if err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
 	}
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
 		Table:  firewallTable(e.id, c),
 		Bridge: bridge,
 	}); err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
 	}
-	return name, sandboxResolvers(f.Resolvers), nil
+	out.dns = sandboxResolvers(f.Resolvers)
+	return out, nil
 }
 
 // sandboxResolvers turns the filter's resolver list into the addresses the
@@ -924,26 +1004,26 @@ type rulesNetUse struct {
 
 // installRulesAware installs the firewall for a confinement, and for one
 // carrying rules records the workload on its network under rulesMu.
-func (e *Executor) installRulesAware(ctx context.Context, c confinement) (string, []string, error) {
+func (e *Executor) installRulesAware(ctx context.Context, c confinement) (sandboxNet, error) {
 	if c.rules == nil {
-		return e.installFirewall(ctx, c)
+		return e.provisionNetwork(ctx, c)
 	}
 	e.rulesMu.Lock()
 	defer e.rulesMu.Unlock()
-	network, dns, err := e.installFirewall(ctx, c)
+	n, err := e.provisionNetwork(ctx, c)
 	if err != nil {
-		return "", nil, err
+		return sandboxNet{}, err
 	}
 	if e.rulesNets == nil {
 		e.rulesNets = map[string]*rulesNetUse{}
 	}
-	u := e.rulesNets[network]
+	u := e.rulesNets[n.name]
 	if u == nil {
-		u = &rulesNetUse{table: firewallTable(e.id, c)}
-		e.rulesNets[network] = u
+		u = &rulesNetUse{table: firewallTable(e.id, n.keyed)}
+		e.rulesNets[n.name] = u
 	}
 	u.refs++
-	return network, dns, nil
+	return n, nil
 }
 
 // releaseRulesNetwork drops one workload from a rules-keyed network and, when
