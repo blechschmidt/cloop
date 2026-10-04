@@ -423,7 +423,7 @@ request is audited exactly as a sandbox's would be.`,
 		faint.Printf("grant   %s\n", red.Session.GrantID)
 		faint.Printf("policy  %s\n", red.Session.Grant.Summary())
 		faint.Printf("session %s (expires %s)\n", red.Session.ID,
-			red.Session.ExpiresAt.Local().Format("15:04:05"))
+			red.Session.ExpiresAt().Local().Format("15:04:05"))
 		fmt.Println()
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
@@ -546,7 +546,7 @@ func egressFailureHint(red *egressbroker.Redemption) string {
 	case g.MaxBytesUp > 0 && s.BytesUp() >= g.MaxBytesUp:
 		return fmt.Sprintf("verdict quota_exceeded — the %s upload budget is spent (%s transferred)",
 			egressbroker.FormatBytes(g.MaxBytesUp), egressbroker.FormatBytes(s.BytesUp()))
-	case s.Closed() || !time.Now().Before(s.ExpiresAt):
+	case s.Closed() || !time.Now().Before(s.ExpiresAt()):
 		return "verdict session_expired — the proxy session ended mid-request"
 	default:
 		return ""

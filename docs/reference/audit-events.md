@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 127 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 128 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 112 |
+| `control-plane` | the hub's own state.db | 113 |
 | `project` | the project's .cloop/state.db | 13 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-127 actions in 36 families. Every action is listed: this section is the whole
+128 actions in 36 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (7) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -338,12 +338,14 @@ Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret
 | `egress.connect` | `secret` | control-plane | stable | A sandbox's connection attempt is evaluated against the session's host allowlist. |
 | `egress.grant` | `secret` | control-plane | stable | A subject is authorised to reach the network through the hub's egress proxy. |
 | `egress.redeem` | `secret` | control-plane | stable | A proxy session is minted against a matching egress grant. |
+| `egress.renew` | `secret` | control-plane | stable | A hub renews a live proxy session for a run that is still going, after re-reading its grant. |
 | `egress.request` | `secret` | control-plane | stable | An HTTP request passes through the egress proxy. |
 | `egress.revoke` | `secret` | control-plane | stable | An egress authorisation is marked unusable. |
 
 Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret_name`, `kind`, `grant_id`, `request_id`, `lease_id`, `executor_id`, `project_id`, `run_id`, `constraints`, `reason`, `task_id`, `host`, `port`, `bytes_up`, `bytes_down`, `expires_at`
 
 - `egress.connect` — `host` and `port` name the attempted destination; `decision` says whether it was reached.
+- `egress.renew` — Allowed rows carry the new `expires_at`. A refused renewal is a `deny` row; the session it concerned then closes with an `egress.close` row saying why.
 
 ### gitproxy.*
 

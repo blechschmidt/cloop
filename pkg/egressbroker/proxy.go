@@ -87,6 +87,9 @@ type Proxy struct {
 	listener net.Listener
 	closed   bool
 	done     chan struct{}
+	// reaping is held by the reap loop while it runs, so Close can wait for
+	// it: a proxy that has been closed leaves no goroutine of its own behind.
+	reaping sync.WaitGroup
 	// inflight counts handlers that are still running, so Close can wait for
 	// them. See Close for why that matters.
 	inflight sync.WaitGroup
@@ -184,7 +187,15 @@ func (p *Proxy) Serve(ln net.Listener) error {
 	}
 	p.broker.SetEndpoint(endpoint)
 
-	go p.reapLoop()
+	p.mu.Lock()
+	if !p.closed {
+		p.reaping.Add(1)
+		go func() {
+			defer p.reaping.Done()
+			p.reapLoop()
+		}()
+	}
+	p.mu.Unlock()
 
 	err := p.srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -245,6 +256,7 @@ func (p *Proxy) Close() error {
 	drained := make(chan struct{})
 	go func() {
 		p.inflight.Wait()
+		p.reaping.Wait()
 		close(drained)
 	}()
 	select {
@@ -469,15 +481,12 @@ func (p *Proxy) closeTunnel(client, upstream net.Conn, sess *Session, host strin
 // tunnel copies bytes both ways until one side closes, a quota is spent, or
 // the session expires.
 //
-// The session deadline is set on both raw connections rather than watched by
-// a timer. That is what makes expiry apply to an *idle* tunnel too: a
-// long-lived connection with no traffic still dies at its TTL, instead of
-// surviving indefinitely because nothing woke up to check.
+// The session deadline is on both raw connections rather than watched by a
+// timer — the session set it when they were registered (registerTunnel), and
+// moves it when the session is renewed. That is what makes expiry apply to an
+// *idle* tunnel too: a long-lived connection with no traffic still dies at its
+// TTL, instead of surviving indefinitely because nothing woke up to check.
 func (p *Proxy) tunnel(client, upstream net.Conn, sess *Session) error {
-	deadline := sess.ExpiresAt
-	_ = client.SetDeadline(deadline)
-	_ = upstream.SetDeadline(deadline)
-
 	var (
 		wg     sync.WaitGroup
 		result atomic.Pointer[error]
@@ -524,17 +533,18 @@ func (p *Proxy) classifyTunnelErr(err error, sess *Session) error {
 	// reported. When revocation severs the connections the copy sees a bare
 	// net.ErrClosed, which isBenignCopyErr would otherwise record as a normal
 	// hang-up — losing the fact that the control plane cut it.
+	expiry := sess.ExpiresAt()
 	if sess.Closed() {
-		if !p.broker.now().Before(sess.ExpiresAt) {
+		if !p.broker.now().Before(expiry) {
 			return fmt.Errorf("%w: session %s expired mid-tunnel at %s",
-				ErrSessionExpired, sess.ID, sess.ExpiresAt.UTC().Format(time.RFC3339))
+				ErrSessionExpired, sess.ID, expiry.Format(time.RFC3339))
 		}
 		return fmt.Errorf("%w: session %s was closed mid-tunnel", ErrSessionExpired, sess.ID)
 	}
 	var nerr net.Error
-	if errors.As(err, &nerr) && nerr.Timeout() && !p.broker.now().Before(sess.ExpiresAt) {
+	if errors.As(err, &nerr) && nerr.Timeout() && !p.broker.now().Before(expiry) {
 		return fmt.Errorf("%w: session %s expired mid-tunnel at %s",
-			ErrSessionExpired, sess.ID, sess.ExpiresAt.UTC().Format(time.RFC3339))
+			ErrSessionExpired, sess.ID, expiry.Format(time.RFC3339))
 	}
 	return err
 }

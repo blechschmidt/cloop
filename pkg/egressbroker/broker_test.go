@@ -261,8 +261,8 @@ func TestSessionTTLIsClampedByTheBrokerCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if want := now.Add(5 * time.Minute); !red.Session.ExpiresAt.Equal(want) {
-		t.Fatalf("session expires %s, want the broker ceiling %s", red.Session.ExpiresAt, want)
+	if want := now.Add(5 * time.Minute); !red.Session.ExpiresAt().Equal(want) {
+		t.Fatalf("session expires %s, want the broker ceiling %s", red.Session.ExpiresAt(), want)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestMaxSessionTTLOptionIsItselfBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if got := red.Session.ExpiresAt.Sub(now); got > MaxSessionTTLCeiling {
+	if got := red.Session.ExpiresAt().Sub(now); got > MaxSessionTTLCeiling {
 		t.Fatalf("session TTL %s exceeds the hard ceiling %s", got, MaxSessionTTLCeiling)
 	}
 }

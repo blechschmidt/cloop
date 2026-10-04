@@ -701,6 +701,17 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 	},
+	{
+		Action:    ActionEgressRenew,
+		Home:      HomeControlPlane,
+		Entity:    "secret",
+		Trigger:   "A hub renews a live proxy session for a run that is still going, after re-reading its grant.",
+		Payload:   secretPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Allowed rows carry the new `expires_at`. A refused renewal is a `deny` row; " +
+			"the session it concerned then closes with an `egress.close` row saying why.",
+	},
 
 	// ── gitproxy ───────────────────────────────────────────────────────────
 	// The git interception proxy runs outside the sandbox, so these rows are

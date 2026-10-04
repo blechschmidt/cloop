@@ -107,6 +107,9 @@ const (
 	ActionEgressConnect Action = "egress.connect"
 	ActionEgressRequest Action = "egress.request"
 	ActionEgressClose   Action = "egress.close"
+	// ActionEgressRenew is a live proxy session renewed for a run that is
+	// still going (Task 20378), after its grant was re-read and found active.
+	ActionEgressRenew Action = "egress.renew"
 )
 
 // Event is one audit record. Every field on it is metadata about a

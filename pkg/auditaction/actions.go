@@ -229,6 +229,8 @@ const (
 	ActionEgressRequest Action = "egress.request"
 	// ActionEgressClose records a proxy session closing with its byte counts.
 	ActionEgressClose Action = "egress.close"
+	// ActionEgressRenew records a live proxy session being renewed for its run.
+	ActionEgressRenew Action = "egress.renew"
 
 	// ── gitproxy ───────────────────────────────────────────────────────────
 

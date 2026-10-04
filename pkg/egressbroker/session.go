@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
 // TokenBytes is the size of a minted proxy token. 256 bits from crypto/rand
@@ -60,20 +62,40 @@ type Session struct {
 	// TaskID ties every audit row to the unit of work that caused it, which
 	// is what makes "what did task 20163 talk to" an answerable question.
 	TaskID string `json:"task_id,omitempty"`
-	Actor  string `json:"actor,omitempty"`
+	// RunID names the execution the session was redeemed for (Task 20378),
+	// the id the hub's dispatch rows carry, so a run's egress joins the rest
+	// of its trail.
+	RunID string `json:"run_id,omitempty"`
+	Actor string `json:"actor,omitempty"`
 
-	IssuedAt  time.Time `json:"issued_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	IssuedAt time.Time `json:"issued_at"`
+
+	// deadline is the session's current expiry, in Unix nanoseconds. It only
+	// moves forward, and only through ExtendSession: a session the hub keeps
+	// alive for a long run is renewed rather than reissued, so its credential
+	// and its byte counters stay the ones the workload already holds. Read it
+	// with ExpiresAt.
+	deadline atomic.Int64
 
 	// tokenHash is SHA-256 of the minted token. The token itself is returned
 	// once, from Redeem, and is never stored, logged, or recoverable —
 	// including by this process.
 	tokenHash [sha256.Size]byte
 
+	// requester is who the session was issued to, labels included, so a
+	// renewal can ask whether the grant is still issued to the same party.
+	requester secretbroker.Requester
+
 	bytesUp   atomic.Int64
 	bytesDown atomic.Int64
 	requests  atomic.Int64
 	closed    atomic.Bool
+
+	// closeReason and tunnelsCut record how the session ended, for a holder
+	// that learns of it afterwards — a hub journaling a revocation it did not
+	// perform. See CloseReason and TunnelsCut.
+	closeReason atomic.Pointer[string]
+	tunnelsCut  atomic.Int64
 
 	// live holds the sockets this session currently owns, so ending the
 	// session ends the traffic rather than only the right to start more.
@@ -94,10 +116,19 @@ type Session struct {
 //
 // The closed flag makes the set one-shot: a connection registered after the
 // set was closed is closed immediately rather than escaping the teardown.
+//
+// A set may also carry a deadline, which every member gets on registration
+// and again whenever it moves. A session's set carries the session's expiry,
+// so a tunnel dies at the TTL even when idle — and is not cut at the old one
+// when the session is renewed under it. Setting it under the same lock as
+// registration is what keeps a renewal from racing a tunnel that is opening:
+// either the tunnel registers first and the renewal re-arms it, or the renewal
+// lands first and the tunnel registers with the new deadline.
 type connSet struct {
-	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
-	closed bool
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+	closed   bool
+	deadline time.Time
 }
 
 // add registers c and reports whether the set is still open. A false return
@@ -112,7 +143,20 @@ func (s *connSet) add(c net.Conn) bool {
 		s.conns = make(map[net.Conn]struct{})
 	}
 	s.conns[c] = struct{}{}
+	if !s.deadline.IsZero() {
+		_ = c.SetDeadline(s.deadline)
+	}
 	return true
+}
+
+// setDeadline moves the set's deadline and applies it to every member.
+func (s *connSet) setDeadline(d time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deadline = d
+	for c := range s.conns {
+		_ = c.SetDeadline(d)
+	}
 }
 
 func (s *connSet) remove(c net.Conn) {
@@ -121,9 +165,9 @@ func (s *connSet) remove(c net.Conn) {
 	delete(s.conns, c)
 }
 
-// closeAll closes every registered connection and refuses further
-// registrations. Idempotent.
-func (s *connSet) closeAll() {
+// closeAll closes every registered connection, refuses further
+// registrations, and reports how many it closed. Idempotent.
+func (s *connSet) closeAll() int {
 	s.mu.Lock()
 	conns := s.conns
 	s.conns = nil
@@ -133,6 +177,14 @@ func (s *connSet) closeAll() {
 	for c := range conns {
 		_ = c.Close()
 	}
+	return len(conns)
+}
+
+// count reports how many connections are registered.
+func (s *connSet) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
 }
 
 // track registers a connection with the session, or reports that the session
@@ -154,13 +206,111 @@ func (s *Session) Done() <-chan struct{} {
 // end marks the session finished, releases its sockets, and unblocks anything
 // waiting on Done. It reports whether this call was the one that ended it, so
 // the caller can emit exactly one audit row.
-func (s *Session) end() bool {
+func (s *Session) end(reason string) bool {
 	if s == nil || !s.closed.CompareAndSwap(false, true) {
 		return false
 	}
+	s.closeReason.Store(&reason)
+	// Counted before the sockets go, so "N live tunnels were cut" can be said
+	// about a revocation after the fact. A tunnel holds two sockets: the
+	// sandbox's and the origin's.
+	s.tunnelsCut.Store(int64(s.live.count() / 2))
 	s.doneOnce.Do(func() { close(s.doneCh) })
 	s.live.closeAll()
 	return true
+}
+
+// OpenTunnels reports how many CONNECT tunnels the session is carrying now.
+func (s *Session) OpenTunnels() int {
+	if s == nil {
+		return 0
+	}
+	return s.live.count() / 2
+}
+
+// TunnelsCut reports how many open tunnels the session's end severed — the
+// tunnels a revocation or a run's end took down mid-transfer. Zero while the
+// session is live.
+func (s *Session) TunnelsCut() int {
+	if s == nil {
+		return 0
+	}
+	return int(s.tunnelsCut.Load())
+}
+
+// CloseReason says why the session ended, or "" while it is live.
+func (s *Session) CloseReason() string {
+	if s == nil {
+		return ""
+	}
+	if r := s.closeReason.Load(); r != nil {
+		return *r
+	}
+	return ""
+}
+
+// ExpiresAt returns the session's current expiry: the deadline it was issued
+// with, or a later one ExtendSession moved it to.
+func (s *Session) ExpiresAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	n := s.deadline.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
+}
+
+// setExpiry sets the deadline a session is issued with, before anyone else
+// can see it.
+func (s *Session) setExpiry(t time.Time) {
+	s.deadline.Store(t.UnixNano())
+	s.live.setDeadline(t)
+}
+
+// extendTo moves the deadline forward to t and reports whether it moved. A
+// t at or before the current deadline changes nothing: a session is never
+// shortened by a renewal, only ended — by CloseSession, which says why.
+func (s *Session) extendTo(t time.Time) bool {
+	want := t.UnixNano()
+	for {
+		cur := s.deadline.Load()
+		if want <= cur {
+			return false
+		}
+		if s.deadline.CompareAndSwap(cur, want) {
+			// The sockets follow, so a tunnel opened under the old deadline
+			// lives to the new one instead of dying on schedule mid-run.
+			s.live.setDeadline(t)
+			return true
+		}
+	}
+}
+
+// MarshalJSON renders the session with its current expiry, which is not a
+// field because it moves.
+func (s *Session) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ID         string    `json:"id"`
+		GrantID    string    `json:"grant_id"`
+		ExecutorID string    `json:"executor_id,omitempty"`
+		ProjectID  string    `json:"project_id,omitempty"`
+		TaskID     string    `json:"task_id,omitempty"`
+		RunID      string    `json:"run_id,omitempty"`
+		Actor      string    `json:"actor,omitempty"`
+		IssuedAt   time.Time `json:"issued_at"`
+		ExpiresAt  time.Time `json:"expires_at"`
+		BytesUp    int64     `json:"bytes_up"`
+		BytesDown  int64     `json:"bytes_down"`
+		Requests   int64     `json:"requests"`
+	}
+	return json.Marshal(wire{
+		ID: s.ID, GrantID: s.GrantID, ExecutorID: s.ExecutorID, ProjectID: s.ProjectID,
+		TaskID: s.TaskID, RunID: s.RunID, Actor: s.Actor, IssuedAt: s.IssuedAt,
+		ExpiresAt: s.ExpiresAt(), BytesUp: s.BytesUp(), BytesDown: s.BytesDown(),
+		Requests: s.Requests(),
+	})
 }
 
 // BindContext returns a context bounded by the session: it is cancelled at
@@ -170,15 +320,32 @@ func (s *Session) end() bool {
 // deadline on — the response body is streamed by an http.Transport, and the
 // only handle on it is the request context. Without it a workload could hold
 // an endless chunked response open long past its lease.
+//
+// The deadline is re-read when it is reached rather than fixed at the start,
+// because a renewal can move it while a response is streaming; only a deadline
+// that is still the session's when it arrives ends the exchange.
 func (s *Session) BindContext(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithDeadline(parent, s.ExpiresAt)
+	ctx, cancel := context.WithCancel(parent)
 	// The watcher exits on ctx.Done, which the caller's deferred cancel
 	// guarantees, so it cannot outlive the request.
 	go func() {
-		select {
-		case <-s.doneCh:
-			cancel()
-		case <-ctx.Done():
+		for {
+			deadline := s.ExpiresAt()
+			timer := time.NewTimer(time.Until(deadline))
+			select {
+			case <-s.doneCh:
+				timer.Stop()
+				cancel()
+				return
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				if !s.ExpiresAt().After(deadline) {
+					cancel()
+					return
+				}
+			}
 		}
 	}()
 	return ctx, cancel
@@ -200,7 +367,17 @@ type Redemption struct {
 	// ProxyURL is the full "http://id:token@host:port" the sandbox uses. It
 	// carries the credential, so it is never audited or logged.
 	ProxyURL string
+	// NoProxy lists further hosts the workload must reach directly rather
+	// than through the proxy, beyond loopback — the hub's own endpoints, such
+	// as its git proxy, which a grant does not name and should not have to.
+	NoProxy []string
 }
+
+// ProxyEnvKeys names the variables Env sets that carry the session's
+// credential. A caller placing Env into a workload declares these sensitive
+// (redact.EnvKey), so their values are scrubbed from the workload's output and
+// left out of anything persisted about it.
+var ProxyEnvKeys = []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"}
 
 // Env returns the environment a workload needs to route through the proxy.
 //
@@ -216,12 +393,27 @@ type Redemption struct {
 // NO_PROXY keeps loopback traffic local. Without it a workload that talks to
 // its own sidecar on 127.0.0.1 would send that request to the proxy, which
 // would refuse it as a blocked destination — correct, but for a request that
-// never needed brokering.
+// never needed brokering. NoProxy extends it the same way for the hub's own
+// endpoints.
+//
+// CLOOP_EGRESS_EXPIRES is the deadline the session was issued with. A hub
+// renews a session for as long as its run lives, so this is when the session
+// would end unrenewed, not a promise that it will.
 func (r Redemption) Env() map[string]string {
 	if r.Session == nil {
 		return nil
 	}
-	noProxy := "localhost,127.0.0.1,::1"
+	exempt := []string{"localhost", "127.0.0.1", "::1"}
+	seen := map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
+	for _, h := range r.NoProxy {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || seen[h] || strings.ContainsAny(h, ", \t\r\n") {
+			continue
+		}
+		seen[h] = true
+		exempt = append(exempt, h)
+	}
+	noProxy := strings.Join(exempt, ",")
 	env := map[string]string{
 		"HTTP_PROXY":            r.ProxyURL,
 		"HTTPS_PROXY":           r.ProxyURL,
@@ -231,7 +423,7 @@ func (r Redemption) Env() map[string]string {
 		"no_proxy":              noProxy,
 		"CLOOP_EGRESS_SESSION":  r.Session.ID,
 		"CLOOP_EGRESS_ALLOW":    strings.Join(r.Session.Grant.Hosts, ","),
-		"CLOOP_EGRESS_EXPIRES":  r.Session.ExpiresAt.UTC().Format(time.RFC3339),
+		"CLOOP_EGRESS_EXPIRES":  r.Session.ExpiresAt().Format(time.RFC3339),
 		"CLOOP_EGRESS_GRANT_ID": r.Session.GrantID,
 	}
 	if len(r.Session.Grant.CIDRs) > 0 {
@@ -258,7 +450,7 @@ func (r Redemption) EnvLines() []string {
 
 // Expired reports whether the session's TTL has elapsed at now.
 func (s *Session) Expired(now time.Time) bool {
-	return s == nil || s.closed.Load() || !now.Before(s.ExpiresAt)
+	return s == nil || s.closed.Load() || !now.Before(s.ExpiresAt())
 }
 
 // TTL returns the remaining lifetime at now, clamped at zero.
@@ -266,7 +458,7 @@ func (s *Session) TTL(now time.Time) time.Duration {
 	if s == nil {
 		return 0
 	}
-	d := s.ExpiresAt.Sub(now)
+	d := s.ExpiresAt().Sub(now)
 	if d < 0 {
 		return 0
 	}
@@ -338,9 +530,9 @@ func (s *Session) checkLive(now time.Time) error {
 	if s == nil || s.closed.Load() {
 		return fmt.Errorf("%w: session was closed", ErrSessionExpired)
 	}
-	if !now.Before(s.ExpiresAt) {
+	if exp := s.ExpiresAt(); !now.Before(exp) {
 		return fmt.Errorf("%w: session %s expired at %s",
-			ErrSessionExpired, s.ID, s.ExpiresAt.UTC().Format(time.RFC3339))
+			ErrSessionExpired, s.ID, exp.Format(time.RFC3339))
 	}
 	if s.Grant.MaxBytesUp > 0 && s.bytesUp.Load() >= s.Grant.MaxBytesUp {
 		return fmt.Errorf("%w: upload budget of %s is spent",

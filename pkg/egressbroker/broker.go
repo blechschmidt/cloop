@@ -39,6 +39,10 @@ type Broker struct {
 	clock         func() time.Time
 	maxSessionTTL time.Duration
 	endpoint      string
+
+	// defaultUp and defaultDown are the per-session quotas a grant that names
+	// none is redeemed under; zero means unlimited. See WithDefaultQuotas.
+	defaultUp, defaultDown int64
 }
 
 // Option configures a Broker.
@@ -87,6 +91,24 @@ func WithEndpoint(addr string) Option {
 	return func(b *Broker) {
 		if s := strings.TrimSpace(addr); s != "" {
 			b.endpoint = s
+		}
+	}
+}
+
+// WithDefaultQuotas sets the per-session byte quotas applied to a session
+// whose grant names none — executors.egress.default_max_bytes_up/down on a hub.
+//
+// Applied at redemption rather than written into grants, so a grant made
+// before the default was configured, or through a path that did not apply it,
+// is bounded all the same. A grant's own quota always wins, and a default can
+// only bound a session that would otherwise be unlimited: it never widens one.
+func WithDefaultQuotas(up, down int64) Option {
+	return func(b *Broker) {
+		if up > 0 {
+			b.defaultUp = up
+		}
+		if down > 0 {
+			b.defaultDown = down
 		}
 	}
 }
@@ -287,6 +309,19 @@ type RedeemRequest struct {
 	// GrantID pins the redemption to one grant. Empty picks the widest
 	// active match — see Redeem.
 	GrantID string
+	// RunID names the execution the session is for, recorded on every row the
+	// session produces. Never matched against, like Requester.RunID.
+	RunID string
+	// Endpoint overrides the broker's advertised address for this session's
+	// proxy URL. A hub serves executors of several kinds, and each reaches the
+	// proxy by a different route — a container by its bridge gateway, a Pod by
+	// a Service, a device by an address on the link between them — so the
+	// address that goes into HTTPS_PROXY is chosen per redemption. Empty uses
+	// the broker's.
+	Endpoint string
+	// NoProxy lists hosts the workload reaches directly; see
+	// Redemption.NoProxy.
+	NoProxy []string
 }
 
 // Redeem mints a single-use proxy credential for the first active grant that
@@ -319,6 +354,7 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 		ExecutorID: r.ExecutorID,
 		ProjectID:  r.ProjectID,
 		TaskID:     req.TaskID,
+		RunID:      req.RunID,
 	}
 
 	grants, err := b.store.ListGrants()
@@ -378,23 +414,35 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 	if err != nil {
 		return nil, err
 	}
+	snapshot := *chosen
+	if snapshot.MaxBytesUp == 0 {
+		snapshot.MaxBytesUp = b.defaultUp
+	}
+	if snapshot.MaxBytesDown == 0 {
+		snapshot.MaxBytesDown = b.defaultDown
+	}
 	sess := &Session{
 		ID:         id,
 		GrantID:    chosen.ID,
-		Grant:      *chosen,
+		Grant:      snapshot,
 		ExecutorID: r.ExecutorID,
 		ProjectID:  r.ProjectID,
 		TaskID:     req.TaskID,
+		RunID:      req.RunID,
 		Actor:      actor,
 		IssuedAt:   now,
-		ExpiresAt:  chosen.SessionDeadline(now, b.maxSessionTTL),
 		tokenHash:  hash,
 		doneCh:     make(chan struct{}),
+		requester:  secretbroker.Requester{ExecutorID: r.ExecutorID, ProjectID: r.ProjectID, Labels: copyLabels(r.Labels)},
 	}
+	sess.setExpiry(chosen.SessionDeadline(now, b.maxSessionTTL))
 
-	b.mu.RLock()
-	endpoint := b.endpoint
-	b.mu.RUnlock()
+	endpoint := strings.TrimSpace(req.Endpoint)
+	if endpoint == "" {
+		b.mu.RLock()
+		endpoint = b.endpoint
+		b.mu.RUnlock()
+	}
 	proxyURL, err := buildProxyURL(endpoint, sess.ID, token)
 	if err != nil {
 		return nil, b.deny(base, err)
@@ -430,14 +478,107 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 	ev := base
 	ev.GrantID = chosen.ID
 	ev.Subject = chosen.Subject.String()
-	ev.Constraints = chosen.Summary()
+	ev.Constraints = snapshot.Summary()
 	ev.LeaseID = sess.ID
-	ev.ExpiresAt = sess.ExpiresAt
+	ev.ExpiresAt = sess.ExpiresAt()
 	ev.Decision = secretbroker.DecisionAllow
 	ev.Reason = "proxy session issued"
 	b.emit(ev)
 
-	return &Redemption{Session: sess, Token: token, ProxyURL: proxyURL}, nil
+	return &Redemption{Session: sess, Token: token, ProxyURL: proxyURL,
+		NoProxy: append([]string(nil), req.NoProxy...)}, nil
+}
+
+// ExtendSession renews a live session for as long as the grant behind it
+// still authorises it, and returns the session's deadline afterwards.
+//
+// It is the egress counterpart of secretbroker.Broker.Extend, and a hub calls
+// it for the same reason: a run outlives one session period, and a session
+// that lapsed under it would cut the run off the network part-way through. The
+// grant is re-read from the store on every call, so a revocation or an expiry
+// made anywhere — the dashboard, the CLI, another hub member — is refused here
+// even though the session itself was issued before it. The deadline moves to
+// min(now + the session TTL, the grant's own expiry), never past either, and
+// never backwards; a call that cannot move it returns the current deadline and
+// writes no row.
+//
+// The policy the session enforces is not refreshed. It is the snapshot taken
+// at redemption, which is what keeps a request from being evaluated against a
+// half-updated grant; grants are immutable but for revocation, which this
+// refuses, so nothing is lost by it.
+func (b *Broker) ExtendSession(ctx context.Context, id string) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	ev := secretbroker.Event{Action: secretbroker.ActionEgressRenew, LeaseID: id}
+	sess := b.Session(id)
+	if sess == nil || sess.Closed() {
+		return time.Time{}, b.deny(ev, fmt.Errorf("%w: session %s is not live", ErrSessionExpired, id))
+	}
+	ev.Actor = sess.Actor
+	ev.GrantID = sess.GrantID
+	ev.ExecutorID = sess.ExecutorID
+	ev.ProjectID = sess.ProjectID
+	ev.TaskID = sess.TaskID
+	ev.RunID = sess.RunID
+	ev.Constraints = sess.Grant.Summary()
+
+	now := b.now()
+	current := sess.ExpiresAt()
+	if !now.Before(current) {
+		// A lapsed session stays lapsed: the reaper may already be closing it,
+		// and extending it here would race that into a session the hub had
+		// written off.
+		return time.Time{}, b.deny(ev, fmt.Errorf("%w: session %s lapsed at %s and cannot be renewed",
+			ErrSessionExpired, id, current.Format(time.RFC3339)))
+	}
+	g, err := b.recheckGrant(sess, now)
+	if err != nil {
+		return time.Time{}, b.deny(ev, err)
+	}
+	deadline := g.SessionDeadline(now, b.maxSessionTTL)
+	if !sess.extendTo(deadline) {
+		return sess.ExpiresAt(), nil
+	}
+	ev.Subject = g.Subject.String()
+	ev.ExpiresAt = sess.ExpiresAt()
+	ev.Decision = secretbroker.DecisionAllow
+	ev.Reason = "proxy session renewed"
+	b.emit(ev)
+	return ev.ExpiresAt, nil
+}
+
+// RecheckSession reports whether the grant behind a live session still
+// authorises it, reading the grant from the store. It writes no row: a hub
+// asks it every minute of a run, and the answer that matters — a revoked or
+// expired grant — is recorded by the CloseSession the caller makes on it.
+//
+// It is how a revocation the hub's own broker did not perform reaches a live
+// session promptly: `cloop egress revoke` in another process, or a revoke on
+// another hub member, stamps the shared store and nothing else.
+func (b *Broker) RecheckSession(id string) error {
+	sess := b.Session(id)
+	if sess == nil || sess.Closed() {
+		return fmt.Errorf("%w: session %s is not live", ErrSessionExpired, id)
+	}
+	_, err := b.recheckGrant(sess, b.now())
+	return err
+}
+
+// recheckGrant re-reads the session's grant and refuses one that has been
+// revoked, has expired, or is no longer issued to the session's requester.
+func (b *Broker) recheckGrant(sess *Session, now time.Time) (Grant, error) {
+	g, err := b.store.GetGrant(sess.GrantID)
+	if err != nil {
+		return Grant{}, fmt.Errorf("%w: grant %s can no longer be read", ErrNoGrant, sess.GrantID)
+	}
+	if reason := g.DenyReason(now); reason != "" {
+		return Grant{}, fmt.Errorf("%w: %s", g.DenySentinel(), reason)
+	}
+	if !g.Subject.Matches(sess.requester) {
+		return Grant{}, fmt.Errorf("%w: grant %s is no longer issued to this requester", ErrNoGrant, sess.GrantID)
+	}
+	return g, nil
 }
 
 // Authenticate resolves a presented credential to its session.
@@ -501,7 +642,7 @@ func (b *Broker) CloseSession(id, reason string) {
 	sess := b.sessions[id]
 	delete(b.sessions, id)
 	b.mu.Unlock()
-	if !sess.end() {
+	if !sess.end(reason) {
 		return
 	}
 	hubmetrics.EgressSessionsLive.Add(-1)
@@ -513,11 +654,28 @@ func (b *Broker) CloseSession(id, reason string) {
 		ExecutorID: sess.ExecutorID,
 		ProjectID:  sess.ProjectID,
 		TaskID:     sess.TaskID,
+		RunID:      sess.RunID,
 		BytesUp:    sess.BytesUp(),
 		BytesDown:  sess.BytesDown(),
 		Decision:   secretbroker.DecisionAllow,
 		Reason:     fmt.Sprintf("%s after %d request(s)", reason, sess.Requests()),
 	})
+}
+
+// CloseAllSessions retires every live session and reports how many there
+// were. A hub calls it on shutdown, so each session's last row says why it
+// ended rather than the trail simply stopping.
+func (b *Broker) CloseAllSessions(reason string) int {
+	b.mu.RLock()
+	ids := make([]string, 0, len(b.sessions))
+	for id := range b.sessions {
+		ids = append(ids, id)
+	}
+	b.mu.RUnlock()
+	for _, id := range ids {
+		b.CloseSession(id, reason)
+	}
+	return len(ids)
 }
 
 // closeSessionsForGrant retires every session issued under a grant and
@@ -546,7 +704,7 @@ func (b *Broker) ReapExpired() int {
 	b.mu.RLock()
 	var ids []string
 	for id, s := range b.sessions {
-		if !now.Before(s.ExpiresAt) {
+		if !now.Before(s.ExpiresAt()) {
 			ids = append(ids, id)
 		}
 	}
@@ -614,8 +772,9 @@ func (b *Broker) auditRequest(sess *Session, action secretbroker.Action, host st
 		ev.ExecutorID = sess.ExecutorID
 		ev.ProjectID = sess.ProjectID
 		ev.TaskID = sess.TaskID
+		ev.RunID = sess.RunID
 		ev.Constraints = sess.Grant.Summary()
-		ev.ExpiresAt = sess.ExpiresAt
+		ev.ExpiresAt = sess.ExpiresAt()
 		ev.BytesUp = sess.BytesUp()
 		ev.BytesDown = sess.BytesDown()
 	}
@@ -627,4 +786,17 @@ func (b *Broker) auditRequest(sess *Session, action secretbroker.Action, host st
 		ev.Reason = reason
 	}
 	b.emit(ev)
+}
+
+// copyLabels copies a requester's labels, so a session's record of who it was
+// issued to cannot be changed by the caller that asked.
+func copyLabels(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
