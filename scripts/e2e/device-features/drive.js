@@ -145,7 +145,9 @@ async function type(cdp, sel, text) {
 }
 
 const text = (cdp, sel) => cdp.eval(`((document.querySelector(${JSON.stringify(sel)}) || {}).textContent || '').trim()`);
-const toasts = cdp => cdp.eval(`[...document.querySelectorAll('.toast')].map(t => t.textContent.trim())`);
+// The dashboard has one toast element, #toast, whose text each toast replaces
+// and which clears after three seconds; boot() logs every text it shows.
+const toasts = cdp => cdp.eval(`window.__toastLog || []`);
 
 async function boot(cdp) {
   await cdp.send('Page.enable');
@@ -161,6 +163,10 @@ async function boot(cdp) {
   await waitFor(cdp, `typeof window.openNewFeatureModal === 'function' && typeof window.openProject === 'function'`,
     'the dashboard bundle');
   await waitFor(cdp, `!!window._lastProjectsData && (window._lastProjectsData.projects || []).length > 0`, 'the project list');
+  await cdp.eval(`(() => { const t = document.getElementById('toast'); if (!t || window.__toastLog) return;
+    window.__toastLog = [];
+    new MutationObserver(() => { const s = t.textContent.trim(); if (s) window.__toastLog.push(s); })
+      .observe(t, {childList: true, characterData: true, subtree: true}); })()`);
 }
 
 const projectIdx = (cdp, p) => cdp.eval(`(window._lastProjectsData.projects || []).findIndex(x => x.path === ${JSON.stringify(p)})`);
