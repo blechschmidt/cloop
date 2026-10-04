@@ -900,27 +900,33 @@ func fromRaw(r *statedb.State) *ProjectState {
 //     project came back empty — the user's goal, plan and history still on
 //     disk in a file nothing would read again.
 func migrateLegacyIfNeeded(dir, jsonPath, dbPath string) error {
+	_, err := migrateLegacy(dir, jsonPath, dbPath)
+	return err
+}
+
+// migrateLegacy is migrateLegacyIfNeeded, reporting whether it converted.
+func migrateLegacy(dir, jsonPath, dbPath string) (bool, error) {
 	jsonInfo, jsonErr := os.Stat(jsonPath)
 	if jsonErr != nil {
-		return nil // no legacy file: nothing to migrate, and nothing to check
+		return false, nil // no legacy file: nothing to migrate, and nothing to check
 	}
 
 	dbInfo, dbErr := os.Stat(dbPath)
 	if os.IsNotExist(dbErr) {
 		if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
-			return fmt.Errorf("migrate state.json → state.db: %w", err)
+			return false, fmt.Errorf("migrate state.json → state.db: %w", err)
 		}
-		return nil
+		return true, nil
 	}
 	if dbErr != nil {
-		return nil // unreadable for some other reason; let the open below report it
+		return false, nil // unreadable for some other reason; let the open below report it
 	}
 
 	if jsonInfo.ModTime().After(dbInfo.ModTime()) {
 		if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
-			return fmt.Errorf("re-migrate state.json → state.db: %w", err)
+			return false, fmt.Errorf("re-migrate state.json → state.db: %w", err)
 		}
-		return nil
+		return true, nil
 	}
 
 	// The extra open is paid only by projects that still have a state.json
@@ -928,12 +934,28 @@ func migrateLegacyIfNeeded(dir, jsonPath, dbPath string) error {
 	// common case, which returned at the first stat above.
 	written, err := legacyDBHasState(dbPath)
 	if err != nil || written {
-		return nil // unreadable, or already holds a project: leave it alone
+		return false, nil // unreadable, or already holds a project: leave it alone
 	}
 	if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
-		return fmt.Errorf("migrate state.json into an empty state.db: %w", err)
+		return false, fmt.Errorf("migrate state.json into an empty state.db: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+// MigrateLegacy converts workDir's legacy state.json — the active session's,
+// when one is active — into its database, under exactly the conditions Load
+// converts on, and reports whether it did. It is how `cloop migrate` converts
+// a legacy project: through statedb, like every other write of project state,
+// rather than through a schema of its own (Task 20374).
+func MigrateLegacy(workDir string) (bool, error) {
+	dir := ActiveDir(workDir)
+	return migrateLegacy(dir, effectiveLegacyPath(dir), effectiveDBPath(dir))
+}
+
+// LegacyPath returns where workDir's legacy state.json is — the active
+// session's, when one is active: the file Load and MigrateLegacy convert.
+func LegacyPath(workDir string) string {
+	return effectiveLegacyPath(ActiveDir(workDir))
 }
 
 // legacyDBHasState reports whether dbPath already holds project state.

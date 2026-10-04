@@ -159,8 +159,12 @@ func init() {
 			}
 		}
 
-		// Warn if the .cloop schema is behind the current version, unless the
-		// user is already running 'cloop migrate' (which would be redundant).
+		// Warn if the project needs 'cloop migrate' — its state still in a
+		// legacy state.json, or a state.db from before statedb's migrations —
+		// unless the user is already running it. A database statedb owns is
+		// migrated by whatever opens it and never warns, whatever its version:
+		// the old check read a version key statedb never writes, and told the
+		// user of every project current cloop creates to migrate (Task 20374).
 		// Only emit the warning when stderr is an interactive terminal — otherwise
 		// it pollutes machine-readable output captured by tests/pipes/CI.
 		if cmd.Name() != "migrate" && isatty.IsTerminal(os.Stderr.Fd()) {

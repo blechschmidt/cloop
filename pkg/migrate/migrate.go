@@ -1,350 +1,338 @@
-// Package migrate provides versioned schema upgrade and repair for .cloop directories.
-// It detects the current schema version, runs idempotent migration steps, and
-// repairs common corruption such as orphaned snapshot files and missing columns.
+// Package migrate upgrades and repairs a project's .cloop directory.
+//
+// The project database belongs to pkg/statedb, which migrates it every time
+// anything opens it: numbered migrations embedded in the binary, recorded in
+// schema_migrations. This package used to run a second schema system beside
+// that one (Task 187) — its own version number in metadata.schema_version, its
+// own CREATE TABLE for a converted state.json, its own ALTER TABLE on
+// plan_tasks — and the two disagreed (Task 20374):
+//
+//   - statedb never wrote schema_version, so every project created by a current
+//     binary read as version 1 of 2, and every interactive command told its
+//     user to run `cloop migrate` on a project that was up to date;
+//   - the state.json conversion created three of the six tables statedb's first
+//     migration does, so statedb adopted the result as version 1 and then
+//     failed on the first later migration that touched a missing table — and
+//     every command that opened the project failed with it;
+//   - the ALTER TABLE added plan_tasks columns statedb did not know about until
+//     migration 0054 had to adopt them.
+//
+// So this package no longer has a schema. It reports what a project's state
+// storage is without writing to it (Inspect), says whether the project needs
+// `cloop migrate` (NeedsUpgrade), and when it does, Run hands the work to the
+// code that owns the schema: pkg/state converts a legacy state.json, through
+// statedb, exactly as Load would; statedb.Open adopts a database its framework
+// has never seen and applies whatever migrations are pending.
+//
+// Two kinds of project need it, and only these: a legacy one whose state exists
+// only in state.json, and one whose state.db predates statedb's migration
+// framework. Every other database is statedb's own, and is migrated whenever
+// anything opens it.
 package migrate
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver
-
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
-// CurrentVersion is the highest schema version this binary understands.
-const CurrentVersion = 2
+// Kind is what a project's state storage is.
+type Kind string
 
-// Report summarises what was (or would be) done during a migration run.
-type Report struct {
-	FromVersion    int
-	ToVersion      int
-	DryRun         bool
-	Steps          []StepReport
-	Warnings       []string
-	RowsMigrated   int
-	FilesConverted int
+const (
+	// KindNone is a directory with no project state.
+	KindNone Kind = "none"
+	// KindLegacyJSON is a project whose state exists only in state.json: no
+	// state.db, or one that holds no project.
+	KindLegacyJSON Kind = "legacy-json"
+	// KindPreStatedb is a state.db that statedb's migration framework has
+	// never opened: it has no schema_migrations table.
+	KindPreStatedb Kind = "pre-statedb"
+	// KindStatedb is a state.db statedb owns, which is migrated whenever
+	// anything opens it.
+	KindStatedb Kind = "statedb"
+)
+
+// Status describes a project's state storage. Inspect produces it without
+// writing anything.
+type Status struct {
+	Kind Kind
+	// DBPath and JSONPath are where the database and the legacy file are, or
+	// would be — the active session's when one is active.
+	DBPath   string
+	JSONPath string
+	// SchemaVersion is the highest statedb migration the database records;
+	// zero when it records none.
+	SchemaVersion int
+	// LatestVersion is the highest migration this binary carries.
+	LatestVersion int
+	// LegacyNewer reports a state.json beside a database it is newer than:
+	// something older than this binary is still writing the legacy file, and
+	// loading the project converts it again.
+	LegacyNewer bool
 }
 
-// StepReport is the outcome of a single versioned migration step.
+// Pending is how many of this binary's migrations the database has not had.
+// Zero for a database ahead of the binary; see Ahead.
+func (s Status) Pending() int {
+	if s.Kind == KindLegacyJSON || s.SchemaVersion >= s.LatestVersion {
+		return 0
+	}
+	return s.LatestVersion - s.SchemaVersion
+}
+
+// Ahead reports a database migrated past this binary, which statedb refuses
+// to open (see statedb's schema guard).
+func (s Status) Ahead() bool { return s.SchemaVersion > s.LatestVersion }
+
+// Describe names the storage in a phrase for reports: "statedb schema v56".
+func (s Status) Describe() string {
+	switch s.Kind {
+	case KindNone:
+		return "no project state"
+	case KindLegacyJSON:
+		return "legacy state.json"
+	case KindPreStatedb:
+		return "state.db from before statedb's migrations"
+	}
+	return fmt.Sprintf("statedb schema v%d", s.SchemaVersion)
+}
+
+// Inspect reports what workDir's state storage is. It never writes: the
+// database is read through a read-only handle, so asking cannot migrate it,
+// create it, or wait on anything but another process's lock.
+func Inspect(workDir string) (Status, error) {
+	latest, err := statedb.LatestSchemaVersion()
+	if err != nil {
+		return Status{}, err
+	}
+	st := Status{
+		Kind:          KindNone,
+		DBPath:        state.DBPath(workDir),
+		JSONPath:      state.LegacyPath(workDir),
+		LatestVersion: latest,
+	}
+	jsonInfo, jsonErr := os.Stat(st.JSONPath)
+	hasJSON := jsonErr == nil && !jsonInfo.IsDir()
+	dbInfo, dbErr := os.Stat(st.DBPath)
+	switch {
+	case errors.Is(dbErr, fs.ErrNotExist):
+		if hasJSON {
+			st.Kind = KindLegacyJSON
+		}
+		return st, nil
+	case dbErr != nil:
+		return st, fmt.Errorf("inspect %s: %w", st.DBPath, dbErr)
+	}
+
+	schema, err := statedb.InspectSchema(st.DBPath)
+	if err != nil {
+		return st, err
+	}
+	st.SchemaVersion = schema.Version
+
+	switch {
+	case hasJSON && !schema.HoldsProject:
+		// A database that exists but holds no project — something opened it
+		// for an unrelated reason — while the project is still in state.json.
+		st.Kind = KindLegacyJSON
+	case schema.PreFramework:
+		st.Kind = KindPreStatedb
+	default:
+		// Either statedb's own, or a file with no tables at all, which
+		// statedb.Open builds from scratch like any new database.
+		st.Kind = KindStatedb
+		st.LegacyNewer = hasJSON && jsonInfo.ModTime().After(dbInfo.ModTime())
+	}
+	return st, nil
+}
+
+// NeedsUpgrade reports whether workDir holds a project that needs `cloop
+// migrate`: one whose state exists only in a legacy state.json, or whose
+// state.db predates statedb's migrations. A database statedb owns is migrated
+// whenever anything opens it and never needs this, whatever its version. Any
+// doubt — no project, an unreadable database — answers false: this decides
+// whether every command prints a warning, and a wrong warning on every command
+// is the defect it was rewritten for.
+func NeedsUpgrade(workDir string) bool {
+	if _, err := os.Stat(filepath.Join(workDir, ".cloop")); err != nil {
+		return false
+	}
+	st, err := Inspect(workDir)
+	if err != nil {
+		return false
+	}
+	return st.Kind == KindLegacyJSON || st.Kind == KindPreStatedb
+}
+
+// Report summarises what Run did, or on a dry run would do.
+type Report struct {
+	DryRun bool
+	// Before is the state storage Run found; After is what it left, which on
+	// a dry run is Before again.
+	Before Status
+	After  Status
+	Steps  []StepReport
+	// Warnings are conditions Run did not change and the operator should
+	// know about.
+	Warnings []string
+}
+
+// StepReport is one thing Run did or would do.
 type StepReport struct {
-	From    int
-	To      int
-	Applied bool   // false when already up-to-date
-	Note    string // human-readable summary
+	Applied bool
+	Note    string
 }
 
 // RepairReport describes a single repair action.
 type RepairReport struct {
-	Kind   string // "orphan_snapshot", "missing_column", "invalid_config_key"
+	Kind   string // "orphan_snapshot", "invalid_config_key"
 	Detail string
 	Fixed  bool
 }
 
-// Options controls migration behaviour.
+// Options controls Run.
 type Options struct {
-	WorkDir     string
-	DryRun      bool
-	FromVersion int // -1 = auto-detect
+	WorkDir string
+	DryRun  bool
 }
 
-// Run detects the schema version, applies all pending migrations, and repairs
-// common corruption. It returns a Report describing what happened.
+// Run brings workDir's state storage up to date — through pkg/state and
+// statedb, never through SQL of its own — and repairs what it can around it.
 func Run(opts Options) (*Report, []RepairReport, error) {
-	workDir := opts.WorkDir
-	dotcloop := filepath.Join(workDir, ".cloop")
-
-	report := &Report{DryRun: opts.DryRun}
-
-	// ── Detect current version ───────────────────────────────────────────────
-	currentVersion, err := detectVersion(dotcloop, opts.FromVersion)
+	before, err := Inspect(opts.WorkDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("detect version: %w", err)
+		return nil, nil, err
 	}
-	report.FromVersion = currentVersion
-	report.ToVersion = currentVersion // updated below as migrations succeed
-
-	if currentVersion == CurrentVersion {
-		// Nothing to migrate; run repairs only.
-		repairs, err := repairExisting(dotcloop, opts.DryRun)
-		return report, repairs, err
+	rep := &Report{DryRun: opts.DryRun, Before: before, After: before}
+	if before.Ahead() {
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf(
+			"the database records schema v%d, which is newer than this binary's v%d — statedb refuses to "+
+				"open it; use the build that migrated it, or a newer one", before.SchemaVersion, before.LatestVersion))
 	}
 
-	// ── Run versioned steps ──────────────────────────────────────────────────
-	for from := currentVersion; from < CurrentVersion; from++ {
-		to := from + 1
-		step, rowsMigrated, filesConverted, err := runStep(dotcloop, from, to, opts.DryRun)
+	if opts.DryRun {
+		rep.Steps = plannedSteps(before)
+	} else {
+		steps, after, err := upgrade(opts.WorkDir, before)
+		rep.Steps = steps
+		if after.Kind != "" {
+			rep.After = after
+		}
 		if err != nil {
-			return report, nil, fmt.Errorf("migration v%d→v%d: %w", from, to, err)
-		}
-		report.Steps = append(report.Steps, step)
-		report.RowsMigrated += rowsMigrated
-		report.FilesConverted += filesConverted
-		if step.Applied {
-			report.ToVersion = to
+			return rep, nil, err
 		}
 	}
 
-	// ── Repairs ─────────────────────────────────────────────────────────────
-	repairs, err := repairExisting(dotcloop, opts.DryRun)
-	return report, repairs, err
+	repairs, err := repairExisting(filepath.Join(opts.WorkDir, ".cloop"), opts.DryRun)
+	return rep, repairs, err
 }
 
-// NeedsUpgrade returns true when the .cloop directory exists but the schema
-// version is behind CurrentVersion. It never returns an error on missing dirs.
-func NeedsUpgrade(workDir string) bool {
-	dotcloop := filepath.Join(workDir, ".cloop")
-	if _, err := os.Stat(dotcloop); err != nil {
-		return false // no project
+// plannedSteps says what upgrade would do with st.
+func plannedSteps(st Status) []StepReport {
+	var steps []StepReport
+	switch st.Kind {
+	case KindLegacyJSON:
+		note := "would convert state.json → state.db through statedb"
+		if tasks, stepCount, err := legacyCounts(st.JSONPath); err == nil {
+			note += fmt.Sprintf(" (%d tasks, %d steps)", tasks, stepCount)
+		}
+		steps = append(steps, StepReport{Applied: true, Note: note +
+			fmt.Sprintf(", creating statedb schema v%d", st.LatestVersion)})
+	case KindPreStatedb:
+		steps = append(steps, StepReport{Applied: true, Note: fmt.Sprintf(
+			"would adopt the database into statedb's migrations and apply v2–v%d", st.LatestVersion)})
+	case KindStatedb:
+		if st.LegacyNewer {
+			steps = append(steps, StepReport{Applied: true,
+				Note: "would convert state.json again: it is newer than state.db, so something is still writing it"})
+		}
+		if n := st.Pending(); n > 0 {
+			steps = append(steps, StepReport{Applied: true, Note: fmt.Sprintf(
+				"would apply statedb migrations v%d–v%d", st.SchemaVersion+1, st.LatestVersion)})
+		}
 	}
-	v, err := detectVersion(dotcloop, -1)
+	return steps
+}
+
+// upgrade does what plannedSteps describes. The conversion is pkg/state's and
+// the migration statedb's; this only decides that they run, and reports.
+func upgrade(workDir string, before Status) ([]StepReport, Status, error) {
+	var steps []StepReport
+	if before.Kind == KindLegacyJSON || before.LegacyNewer {
+		tasks, stepCount, countErr := legacyCounts(before.JSONPath)
+		converted, err := state.MigrateLegacy(workDir)
+		if err != nil {
+			return steps, Status{}, err
+		}
+		if converted {
+			note := "converted state.json → state.db through statedb"
+			if countErr == nil {
+				note += fmt.Sprintf(" (%d tasks, %d steps)", tasks, stepCount)
+			}
+			steps = append(steps, StepReport{Applied: true, Note: note})
+		}
+	}
+
+	if _, err := os.Stat(before.DBPath); err == nil {
+		db, err := statedb.Open(before.DBPath)
+		if err != nil {
+			return steps, Status{}, err
+		}
+		if err := db.Close(); err != nil {
+			return steps, Status{}, err
+		}
+	}
+
+	after, err := Inspect(workDir)
 	if err != nil {
-		return false // can't determine — don't spam warnings
+		return steps, Status{}, err
 	}
-	return v < CurrentVersion
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Version detection
-// ─────────────────────────────────────────────────────────────────────────────
-
-func detectVersion(dotcloop string, override int) (int, error) {
-	if override >= 0 {
-		return override, nil
-	}
-
-	dbPath := filepath.Join(dotcloop, "state.db")
-	jsonPath := filepath.Join(dotcloop, "state.json")
-
-	// No state at all → v0 (empty project; nothing to migrate).
-	dbExists := fileExists(dbPath)
-	jsonExists := fileExists(jsonPath)
-	if !dbExists && !jsonExists {
-		return CurrentVersion, nil // pristine; migrations not needed
-	}
-
-	// Legacy JSON only → v0 (needs v0→v1 migration).
-	if !dbExists && jsonExists {
-		return 0, nil
-	}
-
-	// state.db exists: read schema_version from metadata table.
-	conn, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return 0, fmt.Errorf("open state.db: %w", err)
-	}
-	defer conn.Close()
-
-	// Ensure the metadata table exists (very old databases may lack it).
-	var v string
-	err = conn.QueryRow(`SELECT value FROM metadata WHERE key='schema_version'`).Scan(&v)
-	if err == sql.ErrNoRows || err != nil {
-		// DB exists but no schema_version → v1.
-		return 1, nil
-	}
-	n, _ := strconv.Atoi(v)
-	return n, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Versioned migration steps
-// ─────────────────────────────────────────────────────────────────────────────
-
-func runStep(dotcloop string, from, to int, dryRun bool) (StepReport, int, int, error) {
 	switch {
-	case from == 0 && to == 1:
-		return stepV0toV1(dotcloop, dryRun)
-	case from == 1 && to == 2:
-		return stepV1toV2(dotcloop, dryRun)
-	default:
-		return StepReport{From: from, To: to, Note: "unknown step"}, 0, 0,
-			fmt.Errorf("no migration step defined for v%d→v%d", from, to)
+	case before.Kind == KindPreStatedb && after.Kind == KindStatedb:
+		steps = append(steps, StepReport{Applied: true, Note: fmt.Sprintf(
+			"adopted the database into statedb's migrations and applied v2–v%d", after.SchemaVersion)})
+	case before.Kind == KindStatedb && after.SchemaVersion > before.SchemaVersion:
+		steps = append(steps, StepReport{Applied: true, Note: fmt.Sprintf(
+			"applied statedb migrations v%d–v%d", before.SchemaVersion+1, after.SchemaVersion)})
 	}
+	return steps, after, nil
 }
 
-// stepV0toV1 converts .cloop/state.json to .cloop/state.db.
-func stepV0toV1(dotcloop string, dryRun bool) (StepReport, int, int, error) {
-	step := StepReport{From: 0, To: 1}
-	jsonPath := filepath.Join(dotcloop, "state.json")
-	dbPath := filepath.Join(dotcloop, "state.db")
-
-	if !fileExists(jsonPath) {
-		step.Note = "state.json not found; skipping"
-		return step, 0, 0, nil
-	}
-
-	raw, err := os.ReadFile(jsonPath)
+// legacyCounts reads how many tasks and steps a legacy state.json holds, for
+// the report. Bounded like pkg/state's own read of the file.
+func legacyCounts(jsonPath string) (tasks, steps int, err error) {
+	data, err := boundedread.ReadFile(jsonPath, 64<<20)
 	if err != nil {
-		return step, 0, 0, fmt.Errorf("read state.json: %w", err)
+		return 0, 0, err
 	}
-
-	// Parse the legacy JSON state.
-	var legacy legacyState
-	if err := json.Unmarshal(raw, &legacy); err != nil {
-		return step, 0, 0, fmt.Errorf("parse state.json: %w", err)
+	var legacy struct {
+		Plan  *pm.Plan          `json:"plan"`
+		Steps []json.RawMessage `json:"steps"`
 	}
-
-	rowsMigrated := 0
-	filesConverted := 0
-
-	if dryRun {
-		n := 0
-		if legacy.Plan != nil {
-			n = len(legacy.Plan.Tasks)
-		}
-		step.Applied = true
-		step.Note = fmt.Sprintf("dry-run: would convert state.json → state.db (%d tasks, %d steps)",
-			n, len(legacy.Steps))
-		return step, n + len(legacy.Steps), 1, nil
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return 0, 0, err
 	}
-
-	// Open (or create) the target database.
-	conn, err := openDB(dbPath)
-	if err != nil {
-		return step, 0, 0, err
-	}
-	defer conn.Close()
-
-	tx, err := conn.Begin()
-	if err != nil {
-		return step, 0, 0, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// ── scalar metadata ──
-	meta := buildMetaFromLegacy(&legacy)
-	for k, v := range meta {
-		if err := upsertMeta(tx, k, v); err != nil {
-			return step, 0, 0, fmt.Errorf("upsert meta %q: %w", k, err)
-		}
-	}
-
-	// ── plan tasks ──
 	if legacy.Plan != nil {
-		for _, t := range legacy.Plan.Tasks {
-			if err := upsertTask(tx, t); err != nil {
-				return step, 0, 0, fmt.Errorf("insert task %d: %w", t.ID, err)
-			}
-			rowsMigrated++
-		}
+		tasks = len(legacy.Plan.Tasks)
 	}
-
-	// ── steps ──
-	for i, s := range legacy.Steps {
-		if err := upsertStep(tx, i+1, s); err != nil {
-			return step, 0, 0, fmt.Errorf("insert step %d: %w", i+1, err)
-		}
-		rowsMigrated++
-	}
-
-	// ── set schema_version = 1 ──
-	if err := upsertMeta(tx, "schema_version", "1"); err != nil {
-		return step, 0, 0, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return step, 0, 0, err
-	}
-
-	filesConverted = 1
-	step.Applied = true
-	step.Note = fmt.Sprintf("converted state.json → state.db (%d tasks, %d steps)", rowsMigrated-len(legacy.Steps), len(legacy.Steps))
-	return step, rowsMigrated, filesConverted, nil
-}
-
-// stepV1toV2 adds columns introduced after the initial SQLite migration:
-// assignee, external_url, links (all in plan_tasks).
-func stepV1toV2(dotcloop string, dryRun bool) (StepReport, int, int, error) {
-	step := StepReport{From: 1, To: 2}
-	dbPath := filepath.Join(dotcloop, "state.db")
-
-	if !fileExists(dbPath) {
-		step.Note = "state.db not found; skipping"
-		return step, 0, 0, nil
-	}
-
-	conn, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return step, 0, 0, fmt.Errorf("open state.db: %w", err)
-	}
-	defer conn.Close()
-
-	// Determine which columns are missing.
-	existing, err := columnSet(conn, "plan_tasks")
-	if err != nil {
-		return step, 0, 0, err
-	}
-
-	type colDef struct {
-		name string
-		ddl  string
-	}
-	needed := []colDef{
-		{"assignee", "TEXT NOT NULL DEFAULT ''"},
-		{"external_url", "TEXT NOT NULL DEFAULT ''"},
-		{"links", "TEXT NOT NULL DEFAULT '[]'"},
-	}
-
-	var missing []colDef
-	for _, c := range needed {
-		if !existing[c.name] {
-			missing = append(missing, c)
-		}
-	}
-
-	if len(missing) == 0 {
-		// Bump schema_version and return.
-		if !dryRun {
-			if _, err := conn.Exec(`INSERT INTO metadata(key,value) VALUES('schema_version','2') ON CONFLICT(key) DO UPDATE SET value='2'`); err != nil {
-				return step, 0, 0, err
-			}
-		}
-		step.Note = "all columns present; schema_version bumped to 2"
-		step.Applied = true
-		return step, 0, 0, nil
-	}
-
-	if dryRun {
-		names := make([]string, len(missing))
-		for i, c := range missing {
-			names[i] = c.name
-		}
-		step.Applied = true
-		step.Note = fmt.Sprintf("dry-run: would add columns: %s", strings.Join(names, ", "))
-		return step, 0, 0, nil
-	}
-
-	for _, c := range missing {
-		sql := fmt.Sprintf("ALTER TABLE plan_tasks ADD COLUMN %s %s", c.name, c.ddl)
-		if _, err := conn.Exec(sql); err != nil {
-			return step, 0, 0, fmt.Errorf("ALTER TABLE add %s: %w", c.name, err)
-		}
-	}
-
-	if _, err := conn.Exec(`INSERT INTO metadata(key,value) VALUES('schema_version','2') ON CONFLICT(key) DO UPDATE SET value='2'`); err != nil {
-		return step, 0, 0, err
-	}
-
-	names := make([]string, len(missing))
-	for i, c := range missing {
-		names[i] = c.name
-	}
-	step.Applied = true
-	step.Note = fmt.Sprintf("added columns: %s", strings.Join(names, ", "))
-	return step, 0, 0, nil
+	return tasks, len(legacy.Steps), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Repair
 // ─────────────────────────────────────────────────────────────────────────────
 
+// repairExisting runs the repairs on the project's .cloop directory.
 func repairExisting(dotcloop string, dryRun bool) ([]RepairReport, error) {
 	var repairs []RepairReport
 
@@ -366,13 +354,12 @@ func repairOrphanSnapshots(dotcloop string, dryRun bool) ([]RepairReport, error)
 	if _, err := os.Stat(histDir); err != nil {
 		return nil, nil // no snapshots dir
 	}
-
 	dbPath := filepath.Join(dotcloop, "state.db")
-	if !fileExists(dbPath) {
+	if _, err := os.Stat(dbPath); err != nil {
 		return nil, nil
 	}
 
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -381,6 +368,9 @@ func repairOrphanSnapshots(dotcloop string, dryRun bool) ([]RepairReport, error)
 	// Collect known task IDs.
 	rows, err := conn.Query(`SELECT id FROM plan_tasks`)
 	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -391,6 +381,9 @@ func repairOrphanSnapshots(dotcloop string, dryRun bool) ([]RepairReport, error)
 			return nil, err
 		}
 		knownIDs[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	var repairs []RepairReport
@@ -473,269 +466,7 @@ func repairConfigTypes(dotcloop string, dryRun bool) ([]RepairReport, error) {
 	return repairs, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SQLite helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-const createSchema = `
-PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS metadata (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS plan_tasks (
-    id                INTEGER PRIMARY KEY,
-    title             TEXT    NOT NULL DEFAULT '',
-    description       TEXT    NOT NULL DEFAULT '',
-    priority          INTEGER NOT NULL DEFAULT 5,
-    status            TEXT    NOT NULL DEFAULT 'pending',
-    role              TEXT    NOT NULL DEFAULT '',
-    depends_on        TEXT    NOT NULL DEFAULT '[]',
-    result            TEXT    NOT NULL DEFAULT '',
-    started_at        TEXT,
-    completed_at      TEXT,
-    deadline          TEXT,
-    verify_retries    INTEGER NOT NULL DEFAULT 0,
-    github_issue      INTEGER NOT NULL DEFAULT 0,
-    estimated_minutes INTEGER NOT NULL DEFAULT 0,
-    actual_minutes    INTEGER NOT NULL DEFAULT 0,
-    artifact_path     TEXT    NOT NULL DEFAULT '',
-    failure_diagnosis TEXT    NOT NULL DEFAULT '',
-    tags              TEXT    NOT NULL DEFAULT '[]',
-    fail_count        INTEGER NOT NULL DEFAULT 0,
-    heal_attempts     INTEGER NOT NULL DEFAULT 0,
-    annotations       TEXT    NOT NULL DEFAULT '[]',
-    condition_expr    TEXT    NOT NULL DEFAULT '',
-    recurrence        TEXT    NOT NULL DEFAULT '',
-    next_run_at       TEXT,
-    requires_approval INTEGER NOT NULL DEFAULT 0,
-    approved          INTEGER NOT NULL DEFAULT 0,
-    max_minutes       INTEGER NOT NULL DEFAULT 0,
-    assignee          TEXT    NOT NULL DEFAULT '',
-    external_url      TEXT    NOT NULL DEFAULT '',
-    links             TEXT    NOT NULL DEFAULT '[]'
-);
-
-CREATE TABLE IF NOT EXISTS steps (
-    step          INTEGER PRIMARY KEY,
-    task          TEXT    NOT NULL DEFAULT '',
-    output        TEXT    NOT NULL DEFAULT '',
-    exit_code     INTEGER NOT NULL DEFAULT 0,
-    duration      TEXT    NOT NULL DEFAULT '',
-    time          TEXT    NOT NULL DEFAULT '',
-    input_tokens  INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0
-);
-`
-
-func openDB(path string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	conn, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	conn.SetMaxOpenConns(1)
-	if _, err := conn.Exec(createSchema); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return conn, nil
-}
-
-func upsertMeta(tx *sql.Tx, key, value string) error {
-	_, err := tx.Exec(
-		`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		key, value,
-	)
-	return err
-}
-
-func upsertTask(tx *sql.Tx, t *pm.Task) error {
-	depsJSON, _ := json.Marshal(t.DependsOn)
-	tagsJSON, _ := json.Marshal(t.Tags)
-	annJSON, _ := json.Marshal(t.Annotations)
-	linksJSON, _ := json.Marshal(t.Links)
-
-	boolInt := func(b bool) int {
-		if b {
-			return 1
-		}
-		return 0
-	}
-	nullStr := func(tp *time.Time) sql.NullString {
-		if tp == nil {
-			return sql.NullString{}
-		}
-		return sql.NullString{String: tp.Format(time.RFC3339Nano), Valid: true}
-	}
-
-	_, err := tx.Exec(`
-		INSERT INTO plan_tasks(
-			id, title, description, priority, status, role, depends_on, result,
-			started_at, completed_at, deadline, verify_retries, github_issue,
-			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
-			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			assignee, external_url, links
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET
-			title=excluded.title, description=excluded.description,
-			priority=excluded.priority, status=excluded.status, role=excluded.role,
-			depends_on=excluded.depends_on, result=excluded.result,
-			started_at=excluded.started_at, completed_at=excluded.completed_at,
-			deadline=excluded.deadline, verify_retries=excluded.verify_retries,
-			github_issue=excluded.github_issue,
-			estimated_minutes=excluded.estimated_minutes,
-			actual_minutes=excluded.actual_minutes,
-			artifact_path=excluded.artifact_path,
-			failure_diagnosis=excluded.failure_diagnosis,
-			tags=excluded.tags, fail_count=excluded.fail_count,
-			heal_attempts=excluded.heal_attempts, annotations=excluded.annotations,
-			condition_expr=excluded.condition_expr, recurrence=excluded.recurrence,
-			next_run_at=excluded.next_run_at,
-			requires_approval=excluded.requires_approval,
-			approved=excluded.approved, max_minutes=excluded.max_minutes,
-			assignee=excluded.assignee, external_url=excluded.external_url,
-			links=excluded.links`,
-		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
-		string(depsJSON), t.Result,
-		nullStr(t.StartedAt), nullStr(t.CompletedAt), nullStr(t.Deadline),
-		t.VerifyRetries, t.GitHubIssue,
-		t.EstimatedMinutes, t.ActualMinutes,
-		t.ArtifactPath, t.FailureDiagnosis,
-		string(tagsJSON), t.FailCount, t.HealAttempts,
-		string(annJSON), t.Condition, t.Recurrence,
-		nullStr(t.NextRunAt),
-		boolInt(t.RequiresApproval), boolInt(t.Approved),
-		t.MaxMinutes,
-		t.Assignee, t.ExternalURL, string(linksJSON),
-	)
-	return err
-}
-
-func upsertStep(tx *sql.Tx, step int, s legacyStep) error {
-	ts := ""
-	if !s.Time.IsZero() {
-		ts = s.Time.Format(time.RFC3339Nano)
-	}
-	_, err := tx.Exec(`
-		INSERT INTO steps(step, task, output, exit_code, duration, time, input_tokens, output_tokens)
-		VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(step) DO UPDATE SET
-			task=excluded.task, output=excluded.output, exit_code=excluded.exit_code,
-			duration=excluded.duration, time=excluded.time,
-			input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens`,
-		step, s.Task, s.Output, s.ExitCode, s.Duration, ts, s.InputTokens, s.OutputTokens,
-	)
-	return err
-}
-
-func columnSet(conn *sql.DB, table string) (map[string]bool, error) {
-	rows, err := conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	cols := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return nil, err
-		}
-		cols[name] = true
-	}
-	return cols, rows.Err()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Legacy JSON state structures
-// ─────────────────────────────────────────────────────────────────────────────
-
-type legacyState struct {
-	Goal              string       `json:"goal"`
-	WorkDir           string       `json:"workdir"`
-	MaxSteps          int          `json:"max_steps"`
-	CurrentStep       int          `json:"current_step"`
-	Status            string       `json:"status"`
-	Steps             []legacyStep `json:"steps"`
-	CreatedAt         time.Time    `json:"created_at"`
-	UpdatedAt         time.Time    `json:"updated_at"`
-	Model             string       `json:"model,omitempty"`
-	Instructions      string       `json:"instructions,omitempty"`
-	AutoEvolve        bool         `json:"auto_evolve"`
-	EvolveStep        int          `json:"evolve_step"`
-	Provider          string       `json:"provider,omitempty"`
-	PMMode            bool         `json:"pm_mode,omitempty"`
-	Plan              *pm.Plan     `json:"plan,omitempty"`
-	TotalInputTokens  int          `json:"total_input_tokens,omitempty"`
-	TotalOutputTokens int          `json:"total_output_tokens,omitempty"`
-	DefaultMaxMinutes int          `json:"default_max_minutes,omitempty"`
-	SkipClarify       bool         `json:"skip_clarify,omitempty"`
-}
-
-type legacyStep struct {
-	Step         int       `json:"step"`
-	Task         string    `json:"task"`
-	Output       string    `json:"output"`
-	ExitCode     int       `json:"exit_code"`
-	Duration     string    `json:"duration"`
-	Time         time.Time `json:"time"`
-	InputTokens  int       `json:"input_tokens,omitempty"`
-	OutputTokens int       `json:"output_tokens,omitempty"`
-}
-
 // snapshotFile is the shape of a plan-history JSON snapshot (partial parse).
 type snapshotFile struct {
 	Tasks []*pm.Task `json:"tasks"`
-}
-
-func buildMetaFromLegacy(s *legacyState) map[string]string {
-	boolStr := func(b bool) string {
-		if b {
-			return "1"
-		}
-		return "0"
-	}
-	m := map[string]string{
-		"goal":                s.Goal,
-		"workdir":             s.WorkDir,
-		"max_steps":           strconv.Itoa(s.MaxSteps),
-		"current_step":        strconv.Itoa(s.CurrentStep),
-		"status":              s.Status,
-		"model":               s.Model,
-		"instructions":        s.Instructions,
-		"auto_evolve":         boolStr(s.AutoEvolve),
-		"evolve_step":         strconv.Itoa(s.EvolveStep),
-		"provider":            s.Provider,
-		"pm_mode":             boolStr(s.PMMode),
-		"total_input_tokens":  strconv.Itoa(s.TotalInputTokens),
-		"total_output_tokens": strconv.Itoa(s.TotalOutputTokens),
-		"default_max_minutes": strconv.Itoa(s.DefaultMaxMinutes),
-		"skip_clarify":        boolStr(s.SkipClarify),
-		"created_at":          s.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at":          s.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if s.Plan != nil {
-		m["plan_goal"] = s.Plan.Goal
-		m["plan_version"] = strconv.Itoa(s.Plan.Version)
-	}
-	return m
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Util
-// ─────────────────────────────────────────────────────────────────────────────
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
