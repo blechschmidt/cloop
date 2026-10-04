@@ -104,7 +104,9 @@ func (s Spec) UpgradeHelperPathUnitPath() string {
 
 // UpgradeHelperStateDir is the helper's own state directory — systemd's
 // StateDirectory for it, where cosign keeps the Sigstore trust root it fetched.
-func (s Spec) UpgradeHelperStateDir() string { return filepath.Join(DefaultStateRoot, s.UpgradeHelperName()) }
+func (s Spec) UpgradeHelperStateDir() string {
+	return filepath.Join(DefaultStateRoot, s.UpgradeHelperName())
+}
 
 // UpgradeHelperPathUnitName is the path unit's name, for systemctl.
 func (s Spec) UpgradeHelperPathUnitName() string { return s.UpgradeHelperName() + ".path" }
