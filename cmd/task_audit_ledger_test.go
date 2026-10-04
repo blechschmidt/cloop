@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -115,7 +116,7 @@ func TestAuditPlanLedger_EmptySummaryIsNotTheSignature(t *testing.T) {
 }
 
 func TestReopenLedgerTasks_ResetsToPending(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := state.Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)
@@ -210,7 +211,7 @@ func TestReopenLedgerTasks_ResetsToPending(t *testing.T) {
 // tasks; without a way to record that, the audit would reopen finished work
 // every time it ran.
 func TestApplyLedgerVerdicts_ClearRecordsTheReason(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := state.Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

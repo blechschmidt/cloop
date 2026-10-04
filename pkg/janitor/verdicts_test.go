@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskrecover"
@@ -27,6 +28,7 @@ func writeVerdictAged(t *testing.T, workDir string, taskID int, age time.Duratio
 // the one a stale-task recovery needs: an in-progress task's.
 func TestRunOnce_PrunesTaskVerdictsRecoveryNoLongerNeeds(t *testing.T) {
 	dir := newProject(t)
+	statedbtest.SeedDir(t, dir)
 	db, err := statedb.Open(filepath.Join(dir, ".cloop", "state.db"))
 	if err != nil {
 		t.Fatal(err)

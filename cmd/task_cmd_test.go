@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -181,6 +182,7 @@ func TestTruncateStr_UnicodeAware(t *testing.T) {
 func makePMState(t *testing.T, tasks []*pm.Task) (*state.ProjectState, string) {
 	t.Helper()
 	dir := tempCmdDir(t)
+	statedbtest.SeedDir(t, dir)
 	s, err := state.Init(dir, "test goal", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

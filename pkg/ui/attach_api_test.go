@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -235,6 +236,7 @@ func newAttachServer(t *testing.T, dir string) *Server {
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	statedbtest.SeedDir(t, dir)
 	return New(dir, 0, "")
 }
 
@@ -399,7 +401,7 @@ func TestSameProjectPath(t *testing.T) {
 // is the only artefact that will ever say a human, rather than the agent, was
 // inside the sandbox during a run.
 func TestAttachAuditEventShape(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

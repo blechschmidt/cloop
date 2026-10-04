@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -34,7 +35,7 @@ import (
 // discovery call that reached GitHub with an empty key would fail with GitHub's
 // wording, which says nothing about cloop's dialog.
 func TestGitHubAppInstallationsRejectsIncompleteInput(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 10); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestGitHubAppInstallationsRejectsIncompleteInput(t *testing.T) {
 // TestGitHubAppRepositoriesRequiresASecret: the inventory route names a stored
 // credential, and without one there is nothing to enumerate.
 func TestGitHubAppRepositoriesRequiresASecret(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 10); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestGitHubAppRepositoriesRequiresASecret(t *testing.T) {
 // authorises nothing, and the broker would refuse it anyway — but the refusal
 // belongs in front of the person who forgot to tick a box.
 func TestProjectRepositoriesRejectsAnEmptyAllowlist(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 10); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestLiveGitHubAppFlowThroughTheAPI(t *testing.T) {
 	}
 	t.Setenv("CLOOP_SECRET_KEY", "live-ui-flow-passphrase")
 
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "github app flow", 10); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

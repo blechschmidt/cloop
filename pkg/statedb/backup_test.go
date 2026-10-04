@@ -17,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -27,8 +28,8 @@ import (
 // DB handle (closed by t.Cleanup) and the on-disk path.
 func seedDB(t *testing.T) (*statedb.DB, string) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.db")
+	path := statedbtest.Path(t)
+	dir := filepath.Dir(path)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)

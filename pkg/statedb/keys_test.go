@@ -7,19 +7,13 @@ package statedb
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func openKeysDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openFresh(t)
 }
 
 func putTestKEK(t *testing.T, db *DB, id, state string) {

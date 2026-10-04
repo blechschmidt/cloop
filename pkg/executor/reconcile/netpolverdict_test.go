@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -21,7 +22,7 @@ import (
 
 func verdictDB(t *testing.T) (*statedb.DB, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	// state.DBPath puts the database under .cloop/, which a bare temp dir does
 	// not have — the same shape openSweepDB uses.
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {

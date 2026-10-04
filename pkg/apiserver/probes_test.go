@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -25,6 +26,7 @@ func initProject(t *testing.T) string {
 		t.Fatalf("mkdirtemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	statedbtest.SeedDir(t, dir)
 	if _, err := state.Init(dir, "test goal", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

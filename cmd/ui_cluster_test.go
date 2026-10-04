@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -74,6 +75,7 @@ func TestHubClusterStatusJSON(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	statedbtest.Seed(t, path)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatal(err)

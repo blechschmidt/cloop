@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -98,7 +99,7 @@ func seedingRemoteExecutor() *workspaceTestExecutor {
 // else, in the repositories granted to it.
 func writeRepolessProject(t *testing.T, goal string) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, goal, 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
@@ -156,7 +157,7 @@ func useControlPlaneDir(t *testing.T, dir string) {
 // directory.
 func newWorkspaceControlPlane(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}

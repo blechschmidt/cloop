@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -12,7 +13,7 @@ import (
 // while a run may be going, and has to reach it without the run's saves
 // switching it back.
 func TestSetCommitPolicyReachesARunningProcess(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	run, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatal(err)

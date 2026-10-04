@@ -1,7 +1,6 @@
 package statedb
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -160,7 +159,7 @@ func TestTaskPin_BothReadersAgree(t *testing.T) {
 // "not pinned" rather than as an error or a true. This is what an older hub's
 // rows look like after the migration runs.
 func TestTaskPin_PreExistingRowsReadAsUnpinned(t *testing.T) {
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := Open(freshPath(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

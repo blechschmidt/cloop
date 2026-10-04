@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -159,7 +160,7 @@ func TestAbsentSandboxYAMLIsStillBounded(t *testing.T) {
 func TestProjectCeilingTightensBelowTheFleet(t *testing.T) {
 	withFleetCeiling(t, executor.ResourceCeiling{MemoryMB: 8192})
 
-	hub := t.TempDir()
+	hub := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(hub, ".cloop"), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	mockprovider "github.com/blechschmidt/cloop/pkg/provider/mock"
@@ -86,6 +87,8 @@ func tempDir(t *testing.T) string {
 
 func initState(t *testing.T, dir, goal string, maxSteps int) *state.ProjectState {
 	t.Helper()
+	// A migrated database, copied rather than built: see internal/statedbtest.
+	statedbtest.SeedDir(t, dir)
 	s, err := state.Init(dir, goal, maxSteps)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

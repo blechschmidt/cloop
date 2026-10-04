@@ -11,6 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -86,6 +87,7 @@ func countFiles(t *testing.T, dir string) int {
 func fillAndDelete(t *testing.T, workDir string, rows, payloadKB int) string {
 	t.Helper()
 	dbPath := filepath.Join(workDir, ".cloop", "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)
@@ -110,6 +112,7 @@ func fillAndDelete(t *testing.T, workDir string, rows, payloadKB int) string {
 func newSmallDB(t *testing.T, workDir string) string {
 	t.Helper()
 	dbPath := filepath.Join(workDir, ".cloop", "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

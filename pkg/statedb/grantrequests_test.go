@@ -9,19 +9,13 @@ package statedb
 // reconciled from live handles without ever overwriting an answer already given.
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func openRequestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return openFresh(t)
 }
 
 // TestGrantRequestsMigrationIsAdditive is the compatibility gate.

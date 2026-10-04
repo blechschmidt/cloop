@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 )
 
@@ -185,7 +186,7 @@ const ciHubKey = "sk-ant-hub-key-never-leaves-the-hub"
 
 func newCIHarness(t *testing.T, mutate ...func(*config.Config)) *ciHarness {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -590,7 +591,7 @@ func TestCI_RelayRefusesTheRestOfTheAPI(t *testing.T) {
 // carve-out has to hold: with a static token configured, a pipeline reaches
 // the two CI endpoints without it, and reaches nothing else.
 func TestCI_EndpointsBypassHubAuthButNothingElseDoes(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -25,6 +26,7 @@ import (
 func seedRowTables(t *testing.T, workDir string, rows int, providerBodyKB int, providerAge time.Duration) {
 	t.Helper()
 	dbPath := filepath.Join(workDir, ".cloop", "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

@@ -3,6 +3,7 @@ package state
 import (
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -33,7 +34,7 @@ func eqIDs(a, b []int) bool {
 // "orchestrator" is holding in memory for the duration of its run.
 func seedRun(t *testing.T) (*ProjectState, string) {
 	t.Helper()
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "ship it", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)

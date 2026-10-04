@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -25,6 +26,7 @@ import (
 // dir models a hub restart.
 func newTestStore(t *testing.T, dir string) (*Store, *statedb.DB) {
 	t.Helper()
+	statedbtest.Seed(t, filepath.Join(dir, "state.db"))
 	db, err := statedb.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

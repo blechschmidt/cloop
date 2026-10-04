@@ -2,20 +2,13 @@ package statedb
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "state.db")
-	db, err := Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openFresh(t)
 }
 
 func TestRequestKill_RoundTrip(t *testing.T) {

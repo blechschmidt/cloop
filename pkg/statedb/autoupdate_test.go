@@ -1,7 +1,6 @@
 package statedb
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor/autoupdate"
@@ -9,12 +8,7 @@ import (
 
 func openAutoUpdateDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openFresh(t)
 }
 
 // An unconfigured fleet reads as "off", not as an error. "Nobody has set this"

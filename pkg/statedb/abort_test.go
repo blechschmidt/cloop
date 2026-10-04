@@ -1,7 +1,6 @@
 package statedb
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,8 +14,7 @@ import (
 // every iteration and reopens work that was verified as finished — so both the
 // classification and the verdict have to come back intact.
 func TestAbortRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "state.db"))
+	db, err := Open(freshPath(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

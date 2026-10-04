@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -16,7 +17,7 @@ import (
 // planProject initialises a project holding two pending tasks.
 func planProject(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("Init: %v", err)

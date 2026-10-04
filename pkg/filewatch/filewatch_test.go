@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -118,7 +119,7 @@ func assertContains(t *testing.T, ids []int, id int, msg string) {
 // them after cancel: 2-2.5s on a lightly loaded machine, over 3s on a loaded
 // CI runner.
 func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := statedbtest.Dir(t)
 
 	// Create a minimal PM-mode state so applyReEvaluation has work to do
 	// (resetRelevantTasks runs against a real plan).
@@ -212,7 +213,7 @@ func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
 // The sleeps below only give a regression time to show itself; however a
 // loaded machine stretches or starves them, a correct Run passes.
 func TestRun_OneBatchAtATimeAndNoneAfterCancel(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := statedbtest.Dir(t)
 	s, err := state.Init(tmpDir, "test", 10)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

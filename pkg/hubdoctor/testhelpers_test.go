@@ -8,22 +8,21 @@ package hubdoctor
 
 import (
 	"database/sql"
-	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 
 	_ "modernc.org/sqlite"
 )
 
 // mustInitStateDB creates .cloop/state.db and migrates it to this binary's
-// latest schema.
+// latest schema — by copying internal/statedbtest's template, which statedb.Open
+// built, rather than migrating again; the Open below then finds nothing to do.
 func mustInitStateDB(t *testing.T, dir string) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
-		t.Fatalf("mkdir .cloop: %v", err)
-	}
+	statedbtest.SeedDir(t, dir)
 	path := filepath.Join(dir, ".cloop", "state.db")
 	db, err := statedb.Open(path)
 	if err != nil {

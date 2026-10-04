@@ -8,17 +8,17 @@ package statedb_test
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func clusterDB(t *testing.T) (*statedb.DB, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)

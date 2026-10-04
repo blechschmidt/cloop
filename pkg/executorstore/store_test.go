@@ -16,13 +16,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open statedb: %v", err)
 	}

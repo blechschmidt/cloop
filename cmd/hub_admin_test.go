@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -34,7 +35,7 @@ import (
 // hubDir returns a directory holding an initialized control plane.
 func hubDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatal(err)
 	}

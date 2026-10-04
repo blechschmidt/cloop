@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -43,7 +44,7 @@ func TestInit_CreatesStateFile(t *testing.T) {
 }
 
 func TestInit_UnlimitedSteps(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -56,7 +57,7 @@ func TestInit_UnlimitedSteps(t *testing.T) {
 // --- Load ---
 
 func TestLoad_RoundTrip(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	original, err := Init(dir, "my goal", 5)
 	if err != nil {
 		t.Fatalf("init error: %v", err)
@@ -230,7 +231,7 @@ func TestLoad_DoesNotOverwriteADatabaseThatHoldsState(t *testing.T) {
 // silently drop count info (steps_count: 0 on the wire) or fall back to
 // loading every row.
 func TestLoadLite_SkipsStepsButPopulatesCountAndLastTime(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "test goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -273,7 +274,7 @@ func TestLoadLite_SkipsStepsButPopulatesCountAndLastTime(t *testing.T) {
 // TestLoadLite_EmptyProject covers the no-steps case: StepCount must be 0
 // and LastStepTime must be the zero value (not a parse-error garbage value).
 func TestLoadLite_EmptyProject(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	if _, err := Init(dir, "goal", 0); err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestLoadLite_EmptyProject(t *testing.T) {
 // --- AddStep / LastNSteps ---
 
 func TestAddStep_IncrementsCurrentStep(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	if s.CurrentStep != 0 {
 		t.Fatalf("expected initial step 0, got %d", s.CurrentStep)
@@ -311,7 +312,7 @@ func TestAddStep_IncrementsCurrentStep(t *testing.T) {
 }
 
 func TestAddStep_MultipleSteps(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	for i := 0; i < 5; i++ {
 		s.AddStep(StepResult{Task: "task", Output: "out", Duration: "1s", Time: time.Now()})
@@ -325,7 +326,7 @@ func TestAddStep_MultipleSteps(t *testing.T) {
 }
 
 func TestLastNSteps_LessThanN(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	s.AddStep(StepResult{Task: "a", Output: "1", Duration: "1s", Time: time.Now()})
 	s.AddStep(StepResult{Task: "b", Output: "2", Duration: "1s", Time: time.Now()})
@@ -337,7 +338,7 @@ func TestLastNSteps_LessThanN(t *testing.T) {
 }
 
 func TestLastNSteps_MoreThanN(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	for i := 0; i < 10; i++ {
 		s.AddStep(StepResult{Task: "t", Output: "o", Duration: "1s", Time: time.Now()})
@@ -354,7 +355,7 @@ func TestLastNSteps_MoreThanN(t *testing.T) {
 }
 
 func TestLastNSteps_Zero(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	result := s.LastNSteps(3)
 	if len(result) != 0 {
@@ -365,7 +366,7 @@ func TestLastNSteps_Zero(t *testing.T) {
 // --- SyncFromDisk / mergeExternalTasks ---
 
 func TestSyncFromDisk_PicksUpExternallyAddedTasks(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -415,7 +416,7 @@ func TestSyncFromDisk_PicksUpExternallyAddedTasks(t *testing.T) {
 // an externally-added task (any ID not in memory) is preserved with its full
 // title/description content after multiple Save() → re-use cycles.
 func TestMergeExternalTasks_PreservesContentAcrossMultipleSaveCycles(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -486,7 +487,7 @@ func TestMergeExternalTasks_PreservesContentAcrossMultipleSaveCycles(t *testing.
 // task is assigned an ID that would have been reused by evolvePM (old bug), the
 // set-based merge correctly preserves both tasks by ID-set logic.
 func TestMergeExternalTasks_SetBasedMerge_NoIDReuse(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -548,7 +549,7 @@ func TestMergeExternalTasks_SetBasedMerge_NoIDReuse(t *testing.T) {
 // TestMergeExternalTasks_ExternalTaskSurvivesAfterSyncFromDisk verifies that
 // SyncFromDisk picks up an external task and subsequent Save() calls preserve it.
 func TestMergeExternalTasks_ExternalTaskSurvivesAfterSyncFromDisk(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -618,7 +619,7 @@ func TestStateDBPath(t *testing.T) {
 // --- Save preserves fields ---
 
 func TestSave_UpdatesTimestamp(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "goal", 0)
 	before := time.Now()
 	time.Sleep(time.Millisecond) // ensure updated_at changes
@@ -632,7 +633,7 @@ func TestSave_UpdatesTimestamp(t *testing.T) {
 }
 
 func TestSave_PreservesGoalAndSteps(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, _ := Init(dir, "preserve me", 0)
 	s.AddStep(StepResult{Task: "t", Output: "o", Duration: "1s", Time: time.Now()})
 	s.Save()
@@ -659,7 +660,7 @@ func TestSave_PreservesGoalAndSteps(t *testing.T) {
 // by `t.ID > maxInMemID`. With set-based merging, an external task whose ID
 // sits BELOW the highest in-memory ID must still be preserved.
 func TestRegression_Task151_ExternalTaskWithLowerIDSurvivesMerge(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -718,7 +719,7 @@ func TestRegression_Task151_ExternalTaskWithLowerIDSurvivesMerge(t *testing.T) {
 // `cloop task add`) must remain intact through subsequent orchestrator Save()
 // cycles even when the in-memory plan never observed it directly.
 func TestRegression_Task197_TaskAddNotOverwrittenByOrchestratorSave(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -793,7 +794,7 @@ func TestRegression_Task197_TaskAddNotOverwrittenByOrchestratorSave(t *testing.T
 // completed task's ID. Concretely: a Save() that contains a task with the same
 // ID as one already on disk does NOT result in two distinct rows for that ID.
 func TestRegression_Task151_NoIDReuseAfterCompletedTask(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)
@@ -942,7 +943,7 @@ func TestRegression_Task5000_OlderStateJSONDoesNotOverwriteDB(t *testing.T) {
 // Save would mergeExternalTasks() and re-introduce the just-removed tasks
 // from disk.
 func TestSaveDirect_PlanShrinkPersists(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)

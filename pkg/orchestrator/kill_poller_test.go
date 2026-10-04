@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -27,7 +28,7 @@ import (
 // cleanup that closes the DB.
 func newTestOrchestrator(t *testing.T) *Orchestrator {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	ps, err := state.Init(dir, "test goal", 100)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

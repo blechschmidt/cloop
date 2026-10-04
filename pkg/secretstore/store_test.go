@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -40,8 +41,7 @@ func testKey() []byte {
 // with its path.
 func openTestDB(t *testing.T) (*statedb.DB, string) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)

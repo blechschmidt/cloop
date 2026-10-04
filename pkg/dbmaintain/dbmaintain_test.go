@@ -11,6 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -19,6 +20,7 @@ import (
 // substantially. Returns nothing — failures fail the test.
 func fillSteps(t *testing.T, dbPath string, n, payloadKB int) {
 	t.Helper()
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)
@@ -257,6 +259,7 @@ func TestRun_EmptyPath(t *testing.T) {
 func TestSizeStats_NonZero(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -283,6 +286,7 @@ func TestSizeStats_NonZero(t *testing.T) {
 func TestLastMaintenanceLog_NilWhenEmpty(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -302,6 +306,7 @@ func TestLastMaintenanceLog_NilWhenEmpty(t *testing.T) {
 func TestAppendMaintenanceLog_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
+	statedbtest.Seed(t, dbPath)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)

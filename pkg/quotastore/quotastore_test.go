@@ -5,17 +5,17 @@ package quotastore
 // admission logic; this proves the rows survive.
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func openStore(t *testing.T) (*Store, *statedb.DB) {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)
 	}

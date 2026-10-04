@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/auditretention"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -33,6 +34,7 @@ func buildProject(t *testing.T) (workDir string, wantTasks []*pm.Task) {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
 
+	statedbtest.SeedDir(t, workDir)
 	db, err := statedb.Open(filepath.Join(workDir, ".cloop", "state.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)

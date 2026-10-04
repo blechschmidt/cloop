@@ -2,7 +2,6 @@ package statedb
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,12 +10,7 @@ import (
 // openInventoryDB opens a migrated database in a temp directory.
 func openInventoryDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return openFresh(t)
 }
 
 func fullInventory() ExecutorInventory {

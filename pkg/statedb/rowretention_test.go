@@ -10,7 +10,6 @@ package statedb
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -527,7 +526,7 @@ func TestInactiveRetentionIsANoOp(t *testing.T) {
 // produced must still be present; counting rows would pass just as well if the
 // prune had deleted a fresh row and the writer had happened to add another.
 func TestPruneIsSafeAgainstAConcurrentWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := freshPath(t)
 	db, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -621,7 +620,7 @@ func TestPruneIsSafeAgainstAConcurrentWriter(t *testing.T) {
 // path. A strip that reached a row inserted after its cut would blank a live
 // call's prompt — the write path's data, destroyed by a maintenance pass.
 func TestStripIsSafeAgainstAConcurrentWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := freshPath(t)
 	db, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)

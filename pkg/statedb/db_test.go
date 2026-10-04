@@ -12,14 +12,14 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func tempDB(t *testing.T) (*statedb.DB, string) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -788,8 +788,7 @@ func TestOpen_AppliesConnectionPragmas(t *testing.T) {
 // writes. With WAL + busy_timeout, this must never produce a "database is
 // locked" error.
 func TestConcurrentReadWrite_AcrossHandles(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.db")
+	path := statedbtest.Path(t)
 
 	writer, err := statedb.Open(path)
 	if err != nil {

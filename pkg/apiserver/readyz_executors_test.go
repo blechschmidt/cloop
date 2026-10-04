@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -30,6 +31,7 @@ func initReadyzStateDB(t *testing.T, workDir string) {
 	if err := os.MkdirAll(filepath.Join(workDir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
+	statedbtest.SeedDir(t, workDir)
 	db, err := statedb.Open(state.StateDBPath(workDir))
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

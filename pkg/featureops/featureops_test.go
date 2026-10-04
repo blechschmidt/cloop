@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -84,6 +85,7 @@ func newProject(t *testing.T) (project, origin string) {
 	gitRun(t, project, "remote", "add", "origin", origin)
 	gitRun(t, project, "push", "-q", "origin", "main")
 
+	statedbtest.SeedDir(t, project)
 	st, err := state.Init(project, "Parent goal", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

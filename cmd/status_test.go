@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -14,7 +15,7 @@ import (
 // Task 20362. A paused run's reason was stored, shown on the dashboard and in
 // --json, and left out of the one view an operator at a terminal reads.
 func TestStatusSaysWhyTheRunPaused(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := state.Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +44,7 @@ func TestStatusSaysWhyTheRunPaused(t *testing.T) {
 
 // A run that is not paused has no reason line to print.
 func TestStatusPrintsNoReasonWhenNotPaused(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 0); err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -22,7 +23,7 @@ import (
 // path, so a test can close and reopen to simulate a restart.
 func openHandles(t *testing.T) (*Handles, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)

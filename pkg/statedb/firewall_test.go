@@ -39,12 +39,7 @@ CREATE INDEX idx_project_firewall_rules_set_at
 
 func openFirewallDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return openFresh(t)
 }
 
 func TestExecutorAndProjectFirewallsRoundTrip(t *testing.T) {

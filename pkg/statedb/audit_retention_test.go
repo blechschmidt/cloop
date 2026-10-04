@@ -10,7 +10,6 @@ package statedb
 
 import (
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -426,7 +425,7 @@ func TestBatchAppendMatchesSequentialChaining(t *testing.T) {
 		}
 	}
 
-	seq, err := Open(filepath.Join(t.TempDir(), "seq.db"))
+	seq, err := Open(freshPath(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -440,7 +439,7 @@ func TestBatchAppendMatchesSequentialChaining(t *testing.T) {
 		seqHashes = append(seqHashes, ev.RowHash)
 	}
 
-	batchDB, err := Open(filepath.Join(t.TempDir(), "batch.db"))
+	batchDB, err := Open(freshPath(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

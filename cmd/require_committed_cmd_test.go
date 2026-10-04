@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -11,7 +12,7 @@ import (
 // Task 20370: `cloop require-committed` sets "done means committed" without
 // starting a run, and `cloop status` shows it.
 func TestRequireCommittedCommandAndStatus(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 0); err != nil {
 		t.Fatal(err)
 	}

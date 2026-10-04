@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -15,7 +16,7 @@ import (
 // reproductions table exists.
 func newStoreFixture(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "goal", 10); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

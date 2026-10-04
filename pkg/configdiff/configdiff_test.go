@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -18,6 +19,7 @@ func initStateDB(t *testing.T, workdir string) {
 	if err := os.MkdirAll(filepath.Join(workdir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	statedbtest.SeedDir(t, workdir)
 	db, err := statedb.Open(filepath.Join(workdir, ".cloop", "state.db"))
 	if err != nil {
 		t.Fatalf("open state.db: %v", err)

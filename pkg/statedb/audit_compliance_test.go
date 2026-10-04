@@ -307,6 +307,7 @@ func TestTaskFinishIsEmittedOnEveryExitPath(t *testing.T) {
 func TestCrashRecoveryFinishNamesTheRunThatActuallyRan(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
+	freshTemplate().Seed(t, dbPath)
 	const runID = "run_crashed0123456789abcdef012345"
 
 	prev := auditEnabled

@@ -9,12 +9,14 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func sharedEnforcer(t *testing.T, path string, resolver *quota.Resolver) *quota.Enforcer {
 	t.Helper()
+	statedbtest.Seed(t, path)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

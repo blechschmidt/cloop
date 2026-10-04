@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
 // Task 20357: the review gate's settings are changed from the dashboard or the
 // CLI while a run may be going, and have to reach it.
 func TestSetReviewGateReachesARunningProcess(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	run, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatal(err)

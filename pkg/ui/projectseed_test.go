@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -48,6 +49,7 @@ func seedFixture(t *testing.T, goal string) string {
 // way `cloop init` would, and gives it a plan worth shipping.
 func initProjectIn(t *testing.T, dir, goal string) {
 	t.Helper()
+	statedbtest.SeedDir(t, dir)
 	st, err := state.Init(dir, goal, 50)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

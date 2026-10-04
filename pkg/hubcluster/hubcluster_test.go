@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -34,7 +35,9 @@ func fastOpts(dbPath string) hubcluster.Options {
 
 func dbPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), ".cloop", "state.db")
+	path := filepath.Join(t.TempDir(), ".cloop", "state.db")
+	statedbtest.Seed(t, path)
+	return path
 }
 
 // join starts a member and stops it at the end of the test.

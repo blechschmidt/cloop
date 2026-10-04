@@ -161,7 +161,7 @@ func TestCostIdentityMigrationOpensAnExistingDBWithoutLoss(t *testing.T) {
 // UTC day bucket, or a tenant sees a figure under their cap while being refused
 // against it.
 func TestSpendByIdentityWindowsOnUTCBoundaries(t *testing.T) {
-	db := openAt(t, t.TempDir())
+	db := openAt(t, freshDir(t))
 
 	midnight := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	write := func(ts time.Time, identity string, tokens int, usd float64) {
@@ -220,7 +220,7 @@ func TestSpendByIdentityWindowsOnUTCBoundaries(t *testing.T) {
 // the second write was rejected. The compare-and-swap is what makes exactly one
 // of them the booker, and the caller books only when it won.
 func TestOnlyOneDrainerClaimsABatch(t *testing.T) {
-	db := openAt(t, t.TempDir())
+	db := openAt(t, freshDir(t))
 
 	const project = "/srv/projects/api"
 	if err := db.OpenSpendCursor(project, "alice@example.com", 10); err != nil {
@@ -267,7 +267,7 @@ func TestOnlyOneDrainerClaimsABatch(t *testing.T) {
 // already has history must charge the next run for what it spends, not for
 // everything that was there when it arrived.
 func TestSpendCursorSeedsAtLedgerEndForANewRun(t *testing.T) {
-	dir := t.TempDir()
+	dir := freshDir(t)
 	db := openAt(t, dir)
 
 	for i := 0; i < 3; i++ {

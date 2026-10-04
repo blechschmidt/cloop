@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -78,6 +79,7 @@ func openSweepDB(t *testing.T, dir string) (*statedb.DB, *executorstore.Schedule
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
+	statedbtest.SeedDir(t, dir)
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
 		t.Fatalf("open state db: %v", err)

@@ -11,19 +11,13 @@ package statedb
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func openCIDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return openFresh(t)
 }
 
 // TestCIPipelinesMigrationIsAdditive is the compatibility gate.

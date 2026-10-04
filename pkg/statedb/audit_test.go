@@ -10,7 +10,6 @@ package statedb
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +24,7 @@ func newAuditDB(t *testing.T) *DB {
 	SetAuditEnabled(true)
 	t.Cleanup(func() { SetAuditEnabled(prev) })
 
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openFresh(t)
 }
 
 // seedAuditEvents appends a fixed, deterministic set of rows spanning the
@@ -152,7 +146,7 @@ func TestAuditAppendsFromTwoHandlesAreAllKept(t *testing.T) {
 	SetAuditEnabled(true)
 	t.Cleanup(func() { SetAuditEnabled(prev) })
 
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := freshPath(t)
 	handles := make([]*DB, 2)
 	for i := range handles {
 		db, err := Open(path)

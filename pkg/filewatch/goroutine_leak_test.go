@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -53,7 +54,7 @@ func settleGoroutineCount() int {
 func runOneLifecycle(t *testing.T, fireEvents bool) int32 {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := statedbtest.Dir(t)
 
 	s, err := state.Init(tmpDir, "test", 10)
 	if err != nil {

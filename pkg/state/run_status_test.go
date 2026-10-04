@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -12,7 +13,7 @@ import (
 // Task 20362. The last write of a run that stops because a full save failed:
 // the status and why, and nothing it did not manage to store.
 func TestSaveRunStatusWritesOnlyTheStatus(t *testing.T) {
-	dir := tempDir(t)
+	dir := statedbtest.Dir(t)
 	s, err := Init(dir, "goal", 0)
 	if err != nil {
 		t.Fatal(err)

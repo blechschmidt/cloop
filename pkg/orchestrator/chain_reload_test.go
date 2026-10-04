@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -25,7 +26,7 @@ const chainReloadTag = "chain:reload"
 // stops between the two.
 func chainedProject(t *testing.T, body string) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	art := filepath.Join(".cloop", "tasks", "1-produce.md")
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop", "tasks"), 0o755); err != nil {
 		t.Fatal(err)

@@ -6,18 +6,18 @@ package rolestore
 
 import (
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func newDB(t *testing.T) *statedb.DB {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)
 	}

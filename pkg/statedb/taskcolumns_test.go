@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,11 +45,7 @@ var fatalColumns = []string{"depends_on", "on_success", "on_failure"}
 // openTaskColumnsDB returns a database holding one saved task.
 func openTaskColumnsDB(t *testing.T, task *pm.Task) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openFresh(t)
 	st := &State{Goal: "g", Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{task}}}
 	if err := db.SaveState(st); err != nil {
 		t.Fatalf("SaveState: %v", err)

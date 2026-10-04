@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -150,7 +151,7 @@ func TestGateTasks_BothPathsAgreeOnTheNextTask(t *testing.T) {
 // any one of them speaking a different dialect breaks it silently, which is
 // exactly the state this task found the code in.
 func TestReorderDuringARunChangesWhatRunsNext(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	s, err := state.Init(dir, "ship it", 0)
 	if err != nil {
 		t.Fatalf("init: %v", err)

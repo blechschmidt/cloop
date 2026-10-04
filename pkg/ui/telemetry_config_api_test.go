@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -32,7 +33,7 @@ import (
 // counts stored rows and the save writes an audit row.
 func telemetrySettingsServer(t *testing.T) *Server {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := state.Init(dir, "telemetry settings test", 1); err != nil {
 		t.Fatalf("init project: %v", err)
 	}

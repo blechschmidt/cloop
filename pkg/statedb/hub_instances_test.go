@@ -2,10 +2,10 @@ package statedb_test
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -18,12 +18,7 @@ import (
 
 func hubLeaseDB(t *testing.T) *statedb.DB {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return statedbtest.Open(t)
 }
 
 func mustAcquire(t *testing.T, db *statedb.DB, instance string, expect statedb.HubLeaseRow) statedb.HubLeaseRow {

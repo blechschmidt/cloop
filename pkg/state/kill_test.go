@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 )
 
 func TestRequestTaskKill_RoundTripThroughDisk(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := Init(dir, "goal", 100); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -57,7 +59,7 @@ func TestRequestTaskKill_NoDB_NoOp(t *testing.T) {
 }
 
 func TestRequestTaskKill_RejectsZeroOrEmpty(t *testing.T) {
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	if _, err := Init(dir, "g", 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

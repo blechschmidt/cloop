@@ -2,13 +2,13 @@ package projectmember
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -33,7 +33,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 func openDB(t *testing.T) *statedb.DB {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestStoreTTLBoundsAnotherWritersChange(t *testing.T) {
 // every project for as long as the fault lasts, and a row this build cannot
 // read is skipped without taking the rest of the table with it.
 func TestStoreKeepsTheLastGoodSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatal(err)

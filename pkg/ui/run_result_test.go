@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -57,7 +58,7 @@ func gzResult(t *testing.T, r projectseed.Result) []byte {
 // task, still pending, bound to an executor that cannot read this filesystem.
 func remoteProject(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	st := &state.ProjectState{
 		Goal: "Test the cloop remote executor", WorkDir: dir, Status: "initialized",
 		Plan: &pm.Plan{Goal: "Test the cloop remote executor", Tasks: []*pm.Task{

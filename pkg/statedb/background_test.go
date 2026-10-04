@@ -1,7 +1,6 @@
 package statedb
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 // gone at the first save, and every layer above would still look correct —
 // which is exactly how it was missed the first time.
 func TestBackgroundRoundTrip(t *testing.T) {
-	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := Open(freshPath(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

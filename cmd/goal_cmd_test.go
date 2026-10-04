@@ -4,11 +4,13 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
 func TestGoalCmd_ShowGoal(t *testing.T) {
 	dir := tempCmdDir(t)
+	statedbtest.SeedDir(t, dir)
 	_, err := state.Init(dir, "build a REST API", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)
@@ -25,6 +27,7 @@ func TestGoalCmd_ShowGoal(t *testing.T) {
 
 func TestGoalCmd_UpdateGoal(t *testing.T) {
 	dir := tempCmdDir(t)
+	statedbtest.SeedDir(t, dir)
 	_, err := state.Init(dir, "original goal", 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

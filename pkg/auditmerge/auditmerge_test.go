@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -29,6 +30,7 @@ func chainDir(t *testing.T, name string, evs ...*statedb.AuditEvent) string {
 	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	statedbtest.SeedDir(t, dir)
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
 		t.Fatalf("open %s: %v", name, err)

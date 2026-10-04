@@ -10,18 +10,18 @@ package offboard
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func testDB(t *testing.T) *statedb.DB {
 	t.Helper()
-	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	db, err := statedb.Open(statedbtest.Path(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

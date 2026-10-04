@@ -14,13 +14,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite" // second connection for the tamper tests
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -31,7 +31,7 @@ var dbPaths = map[*statedb.DB]string{}
 func newDB(t *testing.T) *statedb.DB {
 	t.Helper()
 	statedb.SetAuditEnabled(true)
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := statedbtest.Path(t)
 	db, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)

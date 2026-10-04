@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
@@ -31,7 +32,7 @@ func isolateHome(t *testing.T) {
 // hubProject saves st as the hub's copy of a project and returns its directory.
 func hubProject(t *testing.T, st *state.ProjectState) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := statedbtest.Dir(t)
 	st.WorkDir = dir
 	if err := st.SaveDirect(); err != nil {
 		t.Fatalf("save hub project: %v", err)
