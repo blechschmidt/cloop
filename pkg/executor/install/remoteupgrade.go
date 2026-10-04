@@ -102,6 +102,10 @@ func (s Spec) UpgradeHelperPathUnitPath() string {
 	return filepath.Join(s.UnitDir, s.UpgradeHelperName()+".path")
 }
 
+// UpgradeHelperStateDir is the helper's own state directory — systemd's
+// StateDirectory for it, where cosign keeps the Sigstore trust root it fetched.
+func (s Spec) UpgradeHelperStateDir() string { return filepath.Join(DefaultStateRoot, s.UpgradeHelperName()) }
+
 // UpgradeHelperPathUnitName is the path unit's name, for systemctl.
 func (s Spec) UpgradeHelperPathUnitName() string { return s.UpgradeHelperName() + ".path" }
 
@@ -147,7 +151,7 @@ func UpgradeHelperService(s Spec) string {
 	b.WriteString("TimeoutStartSec=15min\n")
 	fmt.Fprintf(&b, "StateDirectory=%s\nStateDirectoryMode=0700\n", s.UpgradeHelperName())
 	b.WriteString("# cosign keeps the Sigstore trust root it fetches under $HOME.\n")
-	fmt.Fprintf(&b, "Environment=HOME=%s\n", systemdEscape(filepath.Join(DefaultStateRoot, s.UpgradeHelperName())))
+	fmt.Fprintf(&b, "Environment=HOME=%s\n", systemdEscape(s.UpgradeHelperStateDir()))
 	b.WriteString("StandardOutput=journal\nStandardError=journal\n")
 	fmt.Fprintf(&b, "SyslogIdentifier=%s\n", s.UpgradeHelperName())
 	b.WriteString("\n# Root, because it replaces a root-owned binary and restarts a unit — and\n")

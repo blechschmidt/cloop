@@ -411,6 +411,9 @@ func (in *Installer) Uninstall(spec Spec, out Output, purgeState bool) error {
 		remove(s.UnitPath() + ".d")
 		remove(s.UpgradeHelperPathUnitPath())
 		remove(s.UpgradeHelperServicePath())
+		// The helper's StateDirectory holds only cosign's cached trust root,
+		// which means nothing without the helper.
+		remove(s.UpgradeHelperStateDir())
 		if err := in.run("systemctl", "daemon-reload"); err != nil {
 			in.logf("note: systemctl daemon-reload failed: %v", err)
 		}

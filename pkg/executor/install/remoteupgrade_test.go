@@ -412,9 +412,30 @@ func TestHelperUnitsPassSystemdAnalyze(t *testing.T) {
 	}
 }
 
-// TestUninstallRemovesTheHelper: nothing of the helper outlives the agent.
+// TestUninstallRemovesTheHelper: nothing of the helper outlives the agent —
+// not its units, and not the state directory systemd made for it, which a
+// first run on sgx left behind (Task 20376).
 func TestUninstallRemovesTheHelper(t *testing.T) {
 	f := newUpgradeFixture(t, OutputSystemd, "SAME BUILD")
+	root := t.TempDir()
+	in := &Installer{Root: root, Logf: func(string, ...any) {}}
+	for _, p := range []struct{ path, body string }{
+		{f.spec.UnitPath(), SystemdUnit(f.spec)},
+		{f.spec.UpgradeHelperServicePath(), UpgradeHelperService(f.spec)},
+		{f.spec.UpgradeHelperPathUnitPath(), UpgradeHelperPathUnit(f.spec)},
+		{filepath.Join(f.spec.UpgradeHelperStateDir(), ".sigstore", "root", "tuf.json"), "{}"},
+	} {
+		mustWrite(t, filepath.Join(root, p.path), p.body, 0o644)
+	}
+	if err := in.Uninstall(f.spec, OutputSystemd, false); err != nil {
+		t.Fatalf("staged Uninstall: %v", err)
+	}
+	for _, p := range []string{f.spec.UpgradeHelperServicePath(), f.spec.UpgradeHelperPathUnitPath(), f.spec.UpgradeHelperStateDir()} {
+		if _, err := os.Lstat(filepath.Join(root, p)); err == nil {
+			t.Errorf("%s survived the uninstall", p)
+		}
+	}
+
 	mustWrite(t, f.spec.UpgradeHelperServicePath(), UpgradeHelperService(f.spec), UnitFileMode)
 	mustWrite(t, f.spec.UpgradeHelperPathUnitPath(), UpgradeHelperPathUnit(f.spec), UnitFileMode)
 	if err := f.inst.Uninstall(f.spec, OutputSystemd, false); err != nil {
