@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // Staged describes a release that has been fetched, verified and written to
@@ -40,9 +42,23 @@ type Staged struct {
 	// AssetName is the release archive the binary came out of.
 	AssetName string
 	// ProvenanceVerified records that the archive's signature was checked
-	// against cloop's pinned release identity. False only when the caller
-	// passed Options.SkipVerify.
+	// against cloop's pinned identity for its channel. False only when the
+	// caller passed Options.SkipVerify to StageRelease.
 	ProvenanceVerified bool
+
+	// Channel is the channel the build came from, and so the identity it was
+	// verified against.
+	Channel provenance.Channel
+	// Version is what the staged binary must report when it is run, when the
+	// channel says so: an edge build's signed manifest names it, and the
+	// installer refuses a binary that disagrees (Task 20376). Empty for a
+	// release, which is bound by its tag's signature alone.
+	Version string
+	// Protocol is the executor protocol an edge build's manifest claims; 0
+	// for a release. The installer reads the real one from the binary.
+	Protocol int
+	// Commit is the full commit an edge build was made from.
+	Commit string
 }
 
 // FetchRelease queries the GitHub releases API for one release by tag.
@@ -108,6 +124,7 @@ func StageRelease(tag, destDir string, opts Options, progress func(string)) (Sta
 		return staged, err
 	}
 	staged.Tag = rel.TagName
+	staged.Channel = provenance.ChannelStable
 
 	name := assetName()
 	binaryAsset := findAsset(rel.Assets, name)

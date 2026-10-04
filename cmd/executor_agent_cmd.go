@@ -27,8 +27,10 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/agent"
+	"github.com/blechschmidt/cloop/pkg/executor/install"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/provenance"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
@@ -330,8 +332,19 @@ or when the control plane revokes its credential.`,
 			return err
 		}
 
+		// The update channel is the unit's channel drop-in, by way of the
+		// environment (Task 20376): root's decision on this device, which
+		// nothing the hub sends can change. An unreadable value is the stable
+		// channel and a warning, not a refusal to start.
+		channel, chErr := provenance.ParseChannel(os.Getenv(install.ChannelEnv))
+		if chErr != nil {
+			color.New(color.FgYellow, color.Bold).Fprintf(os.Stderr,
+				"warning: %v; following the stable channel\n", chErr)
+		}
+
 		dim := color.New(color.Faint)
 		a, err := agent.New(agent.Config{
+			Channel:           channel,
 			Server:            server,
 			Token:             token,
 			TokenFile:         strings.TrimSpace(tokenFile),
@@ -375,6 +388,16 @@ or when the control plane revokes its credential.`,
 			fmt.Printf("  firewall: nft(8) — CAP_NET_ADMIN held by the agent, never by its workloads\n")
 		case caps.PacketFilterIssue != "":
 			fmt.Printf("  firewall: unavailable: %s\n", caps.PacketFilterIssue)
+		}
+		// Which builds the hub may move this device to, and whether it can.
+		switch provenance.Channel(caps.UpdateChannel) {
+		case provenance.ChannelEdge:
+			fmt.Printf("  updates: edge channel — releases, and signed builds of main\n")
+		default:
+			fmt.Printf("  updates: stable channel — published releases\n")
+		}
+		if !caps.RemoteUpgrade && caps.RemoteUpgradeIssue != "" {
+			fmt.Printf("  remote upgrade: unavailable: %s\n", caps.RemoteUpgradeIssue)
 		}
 		fmt.Println()
 

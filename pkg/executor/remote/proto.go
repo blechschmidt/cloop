@@ -835,6 +835,23 @@ type AgentCapabilities struct {
 	OCIRuntimes []string `json:"oci_runtimes,omitempty"`
 	// Labels are free-form selectors (region, site, gpu) set by the operator.
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// UpdateChannel is the channel the device installs builds from (Task
+	// 20376): "stable", releases only, or "edge", signed builds of commits on
+	// main as well. An operator on the device chooses it, with a drop-in the
+	// hub has no way to change; the hub reads it only to decide what the
+	// Upgrade dialog and the auto-update policy offer. Absent from an agent
+	// older than the field, which the hub reads as stable — there is no
+	// edge-capable agent older than it, so no protocol bump is needed: the
+	// field is its own capability flag.
+	UpdateChannel string `json:"update_channel,omitempty"`
+	// RemoteUpgrade reports that the device can carry out an upgrade the hub
+	// asks for: it has the root helper (install --remote-upgrade), or the
+	// agent runs as root, and cosign is installed to verify what it fetches.
+	// RemoteUpgradeIssue says why not when it cannot. Both absent means an
+	// agent older than the fields, whose answer is unknown.
+	RemoteUpgrade      bool   `json:"remote_upgrade,omitempty"`
+	RemoteUpgradeIssue string `json:"remote_upgrade_issue,omitempty"`
 }
 
 // Executor projects the device's advertised capabilities onto the

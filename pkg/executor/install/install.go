@@ -42,6 +42,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // Output selects which supervision system the plan targets.
@@ -222,6 +223,23 @@ type Spec struct {
 	// nft(8), so a workload never holds it. The zero value withholds it, for
 	// callers that build a Spec themselves.
 	PacketFilter bool
+
+	// RemoteUpgrade installs the root helper that carries out an upgrade the
+	// hub asked the agent for (Task 20376): <service>-upgrade.service and the
+	// .path unit that starts it when the agent files a request. Without it a
+	// device installed with the hardened defaults cannot be upgraded from the
+	// Executors panel or by auto-update — the agent cannot replace a
+	// root-owned binary or restart itself — and it says so when asked.
+	// systemd output only. `cloop executor agent install` installs it unless
+	// told --remote-upgrade=false; the zero value withholds it.
+	RemoteUpgrade bool
+
+	// Channel is the update channel the device follows (Task 20376). Empty or
+	// stable: releases only, and no drop-in. Edge: the channel drop-in, which
+	// lets the device be upgraded to signed builds of main as well. systemd
+	// output only, and decided here, on the device: the hub has no way to
+	// set it.
+	Channel provenance.Channel
 }
 
 // hasCredentialMaterial reports whether this install carries something to
@@ -349,6 +367,12 @@ func (s Spec) normalize(requireServer bool) (Spec, error) {
 		return Spec{}, fmt.Errorf(
 			"install: no control-plane URL — pass --bundle from `cloop executor enroll`, or --server explicitly")
 	}
+	channel, err := provenance.ParseChannel(string(out.Channel))
+	if err != nil {
+		return Spec{}, fmt.Errorf("install: --channel: %w", err)
+	}
+	out.Channel = channel
+
 	if out.MaxConcurrent < 0 {
 		return Spec{}, fmt.Errorf("install: --max-concurrent must not be negative, got %d", out.MaxConcurrent)
 	}
@@ -498,6 +522,23 @@ func BuildPlan(spec Spec, out Output) (Plan, error) {
 		} else {
 			p.Remove = append(p.Remove, s.PacketFilterDropInPath())
 		}
+		// The channel and the upgrade helper, the same way: present when
+		// asked for, removed when not, so the flags describe the device
+		// afterwards rather than adding to whatever an earlier install left.
+		if s.Channel == provenance.ChannelEdge {
+			p.Artifacts = append(p.Artifacts, Artifact{
+				Path: s.ChannelDropInPath(), Mode: UnitFileMode, Content: ChannelDropIn(s, s.Channel),
+			})
+		} else {
+			p.Remove = append(p.Remove, s.ChannelDropInPath())
+		}
+		if s.RemoteUpgrade {
+			p.Artifacts = append(p.Artifacts,
+				Artifact{Path: s.UpgradeHelperServicePath(), Mode: UnitFileMode, Content: UpgradeHelperService(s)},
+				Artifact{Path: s.UpgradeHelperPathUnitPath(), Mode: UnitFileMode, Content: UpgradeHelperPathUnit(s)})
+		} else {
+			p.Remove = append(p.Remove, s.UpgradeHelperServicePath(), s.UpgradeHelperPathUnitPath())
+		}
 		p.Display = unit
 		p.Next = []string{
 			"systemctl daemon-reload",
@@ -506,6 +547,9 @@ func BuildPlan(spec Spec, out Output) (Plan, error) {
 			p.Next = append(p.Next, "systemctl enable --now "+s.UnitFileName())
 		} else {
 			p.Next = append(p.Next, "systemctl enable "+s.UnitFileName()+"  (not started: --no-start)")
+		}
+		if s.RemoteUpgrade {
+			p.Next = append(p.Next, "systemctl enable --now "+s.UpgradeHelperPathUnitName())
 		}
 	case OutputShell:
 		script := InitScript(s)

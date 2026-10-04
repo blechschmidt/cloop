@@ -112,6 +112,12 @@ type executorView struct {
 	// device backwards. Both empty for anything but an enrolled device.
 	UpgradeTarget string `json:"upgrade_target,omitempty"`
 	UpgradeNote   string `json:"upgrade_note,omitempty"`
+	// UpgradeLabel names UpgradeTarget for a person when it does not name
+	// itself: "this hub's build (a0f3870)" for an edge build (Task 20376).
+	UpgradeLabel string `json:"upgrade_label,omitempty"`
+	// UpdateChannel is the channel the connected device reports following:
+	// "edge" or "stable"; empty when it is offline (Task 20376).
+	UpdateChannel string `json:"update_channel,omitempty"`
 	// Sandbox is the admin-configured answer to where this executor's payloads
 	// run (Task 20307). Nil when nobody has configured it — which is not the
 	// same as host mode, and the card renders the two differently: an unset
@@ -571,7 +577,7 @@ func (s *Server) buildExecutorView(
 	// last-known build an operator cannot ask about directly.
 	{
 		liveRemote, _ := ex.(*remote.Executor)
-		annotateInventory(&view, row, liveRemote)
+		annotateInventory(ctx, &view, row, liveRemote)
 	}
 	sort.Strings(view.Projects)
 	if view.Name == "" {

@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/install"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/provenance"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
@@ -102,6 +104,17 @@ type Config struct {
 	// means /sys and /dev.
 	SysfsRoot string
 	DevRoot   string
+	// InstallTarget overrides where this device's managed install is looked
+	// for — the unit, the helper and the binary an upgrade replaces. Tests
+	// point it at a staged tree; nil is the real install under /etc and
+	// /usr/local/bin.
+	InstallTarget func() (install.Spec, install.Output, error)
+	// Channel is the update channel this device follows (Task 20376), from
+	// the unit's channel drop-in by way of CLOOP_UPDATE_CHANNEL. Empty is
+	// stable. It is reported in the hello, so the hub knows what to offer,
+	// and an edge target is refused without it. Nothing the hub sends sets
+	// it.
+	Channel provenance.Channel
 }
 
 func (c Config) now() time.Time {
@@ -465,7 +478,26 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 		opts.ProbePacketFilter = probePacketFilter
 		opts.ProbeOCIRuntimes = probeOCIRuntimes
 	}
-	return Detect(opts)
+	caps := Detect(opts)
+	// The channel is configuration rather than a probe, so it is reported
+	// always; whether the device can carry out an upgrade is a probe of the
+	// install around it, and only an agent with host probes asks (Task 20376).
+	caps.UpdateChannel = string(a.channel())
+	if a.cfg.HostProbes {
+		mode, _, _, issue := a.remoteUpgradeReadiness()
+		caps.RemoteUpgrade = mode != remoteUpgradeUnavailable
+		caps.RemoteUpgradeIssue = issue
+	}
+	return caps
+}
+
+// channel is the update channel this device follows; stable unless the
+// operator on the device opted in.
+func (a *Agent) channel() provenance.Channel {
+	if a.cfg.Channel == provenance.ChannelEdge {
+		return provenance.ChannelEdge
+	}
+	return provenance.ChannelStable
 }
 
 // Run connects and serves until ctx is cancelled or the control plane refuses

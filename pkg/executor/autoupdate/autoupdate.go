@@ -98,6 +98,11 @@ func (p Policy) Resolve(hubVersion string) Policy {
 type Hub struct {
 	Version  string
 	Protocol int
+	// Edge is what CI published of the hub's own build (Task 20376): nil when
+	// the hub runs a release or a build no edge build can match, else whether
+	// "edge:<commit>" exists and the protocol its manifest claims. It is what
+	// "match the hub" means for a device on the edge channel.
+	Edge *executor.EdgeBuild
 }
 
 // Device is what the planner needs to know about one executor. It is a flat
@@ -125,6 +130,9 @@ type Device struct {
 	// Upgrading is whether this device has already been asked and has not yet
 	// come back. It is what keeps MaxInFlight meaningful across sweeps.
 	Upgrading bool
+	// Channel is the update channel the device reports: "edge" lets it follow
+	// the hub's own build, anything else is releases only (Task 20376).
+	Channel string
 }
 
 // Verdict is what the planner decided about one device.
@@ -132,6 +140,10 @@ type Verdict struct {
 	Device Device
 	// Upgrade is whether to send the request now.
 	Upgrade bool
+	// Target is what to ask this device for when Upgrade is set. Per device,
+	// because "match the hub" is the hub's edge build for a device on the edge
+	// channel and is refused outright for one that is not.
+	Target string
 	// Reason explains the decision either way, in the operator's terms. It is
 	// shown in the UI beside the device, so a fleet that is not converging can
 	// be understood without reading logs.
@@ -184,11 +196,12 @@ func Plan(p Policy, hub Hub, devices []Device) []Verdict {
 			v.Reason = executor.NeedsProtocol("this device's agent", d.ProtocolVersion,
 				minRemoteUpgradeProtocol, "to upgrade it remotely", "")
 		default:
-			if reason, refused := refuseTarget(d, eff.TargetVersion, hub); refused {
+			target, reason, refused := deviceTarget(d, eff.TargetVersion, hub)
+			if refused {
 				v.Reason = reason
 				break
 			}
-			reason, ok := compare(d.Version, eff.TargetVersion)
+			reason, ok := compare(d.Version, target)
 			if !ok {
 				v.Reason = reason
 				break
@@ -201,14 +214,78 @@ func Plan(p Policy, hub Hub, devices []Device) []Verdict {
 					"flight)", inFlight, eff.MaxInFlight)
 				break
 			}
-			v.Upgrade = true
-			v.Reason = fmt.Sprintf("upgrading from %s to %s", displayVersion(d.Version),
-				eff.TargetVersion)
+			v.Upgrade, v.Target = true, target
+			v.Reason = fmt.Sprintf("upgrading from %s to %s", displayVersion(d.Version), displayTarget(target, hub))
 			inFlight++
 		}
 		out = append(out, v)
 	}
 	return out
+}
+
+// deviceTarget resolves the policy's target for one device (Task 20376).
+//
+// On a hub running an unreleased build, "match the hub" — the empty target,
+// or the hub's own version written out — names a build no release carries.
+// For a device on the edge channel it is the hub's edge build, offered once CI
+// has published it and only if it does not lower the device's protocol. For
+// any other device it stays refused, now with the step that would change
+// that. A pinned edge:<commit> other than the hub's own is refused: the hub can
+// judge the protocol of its own build, not of an arbitrary commit.
+func deviceTarget(d Device, target string, hub Hub) (string, string, bool) {
+	target = strings.TrimSpace(target)
+	have := max(d.AgentProtocol, d.ProtocolVersion)
+	const subject = "this device's agent"
+	edgeDevice := d.Channel == executor.ChannelEdge
+	e := hub.Edge
+	hubsOwn := e != nil && target != "" &&
+		(target == strings.TrimSpace(hub.Version) || version.SameCommit(target, hub.Version) ||
+			(version.IsEdgeTarget(target) && e.Target != "" && sameEdgeCommit(target, e.Target)))
+
+	switch {
+	case hubsOwn && edgeDevice:
+		if !e.Published || e.Target == "" {
+			why := strings.TrimSuffix(strings.TrimSpace(e.WhyNot), ".")
+			if why == "" {
+				why = "CI has not published it"
+			}
+			return "", "The hub's build (" + e.Short + ") is not offered yet: " + why + ".", true
+		}
+		if have > 0 && e.Protocol < have {
+			return "", executor.ProtocolDrop(subject, have, e.Target, e.Protocol), true
+		}
+		return e.Target, "", false
+	case version.IsEdgeTarget(target) && !edgeDevice:
+		return "", executor.EdgeChannelRefusal(subject, target), true
+	case version.IsEdgeTarget(target):
+		return "", fmt.Sprintf("%s is not this hub's own build, and the auto-update policy follows only that one "+
+			"on the edge channel; leave the target empty to follow the hub, or pin a published release.", target), true
+	}
+	if reason, refused := refuseTarget(d, target, hub); refused {
+		if hubsOwn && !strings.Contains(reason, executor.EdgeOptIn) {
+			if hint := executor.StableChannelHint(); hint != "" {
+				reason += " " + hint
+			}
+		}
+		return "", reason, true
+	}
+	return target, "", false
+}
+
+// sameEdgeCommit reports whether two edge targets name one commit.
+func sameEdgeCommit(a, b string) bool {
+	ca, errA := version.ParseEdgeTarget(a)
+	cb, errB := version.ParseEdgeTarget(b)
+	return errA == nil && errB == nil && version.SameCommit(ca, cb)
+}
+
+// displayTarget names a target in a verdict: the hub's edge build by its
+// label, anything else as written.
+func displayTarget(target string, hub Hub) string {
+	if hub.Edge != nil && version.IsEdgeTarget(target) && sameEdgeCommit(target, hub.Edge.Target) {
+		return hub.Edge.Label()
+	}
+	return target
 }
 
 // refuseTarget is rule 4's protocol half: a target the device cannot be sent at
@@ -277,6 +354,15 @@ func compare(current, target string) (string, bool) {
 	if current == "" || current == version.LegacyAgentVersion {
 		return "this device does not report a build version, so there is no way to tell whether " +
 			"an upgrade would move it forward", false
+	}
+	// The hub's edge build: current when the device already runs that commit,
+	// and otherwise the move — "follow the hub" is what the channel means, and
+	// deviceTarget has already ruled out losing protocol.
+	if commit, err := version.ParseEdgeTarget(target); err == nil {
+		if version.SameCommit(current, commit) {
+			return "already on the hub's build", false
+		}
+		return "", true
 	}
 	cmp, ok := version.Compare(current, target)
 	if !ok {

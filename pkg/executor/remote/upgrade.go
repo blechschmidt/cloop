@@ -39,6 +39,17 @@ var ErrUpgradeTarget = errors.New("remote: upgrade target is not a published rel
 // UpgradeRequest.Force overrides it, as it overrides a downgrade on the device.
 var ErrUpgradeLowersProtocol = errors.New("remote: upgrade would lower the device's protocol")
 
+// ErrUpgradeChannel reports an edge target for a device that does not follow
+// the edge channel (Task 20376). The device would refuse it too; refusing here
+// says so before a frame is sent, and says that only the device can change it.
+var ErrUpgradeChannel = errors.New("remote: the device does not follow the edge channel")
+
+// ErrUpgradeUnavailable reports a device that has said it cannot carry out an
+// upgrade — no root helper for an unprivileged agent, or no cosign to verify
+// with (Task 20376). Asking anyway would only produce an "accepted" that
+// never completes.
+var ErrUpgradeUnavailable = errors.New("remote: the device cannot carry out an upgrade")
+
 // UpgradeRequest is what a caller asks for. It is the hub-side mirror of
 // UpgradePayload, and it carries no more than that one does on purpose: a field
 // here would have to reach the device somehow, and the set of things the device
@@ -59,6 +70,15 @@ type UpgradeRequest struct {
 	// Force reinstalls an identical build, and permits a downgrade — including
 	// one that lowers the device's protocol (ErrUpgradeLowersProtocol).
 	Force bool
+	// TargetProtocol is the protocol an edge target's manifest says it
+	// speaks, resolved by the caller through GitHub (Task 20376). It never
+	// reaches the wire — the device reads the signed manifest itself — and it
+	// is what lets the hub keep its promise never to lower a device's
+	// protocol for a build of main, which no release table describes. Zero
+	// for an edge target refuses it unless Force.
+	TargetProtocol int
+	// TargetProtocolIssue says why TargetProtocol is unknown, for the refusal.
+	TargetProtocolIssue string
 	// SettleTimeout bounds the device's wait for its restarted service.
 	SettleTimeout time.Duration
 	// Reason is recorded in the device's log: who asked, and whether it was a
@@ -146,11 +166,39 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 		target = LatestVersion
 	}
 	have := max(sess.AgentProtocol(), sess.Version())
-	if target != LatestVersion && !version.IsRelease(target) {
+	caps := sess.Capabilities()
+	// A device that says it cannot carry out an upgrade — an unprivileged
+	// agent with no root helper, or no cosign — is refused before anything is
+	// sent. Absent from agents older than the field, which say nothing.
+	if !caps.RemoteUpgrade && strings.TrimSpace(caps.RemoteUpgradeIssue) != "" {
+		return UpgradeOutcome{}, fmt.Errorf("%w: %s (%s) says: %s", ErrUpgradeUnavailable, e.id, e.name,
+			caps.RemoteUpgradeIssue)
+	}
+	switch {
+	case version.IsEdgeTarget(target):
+		commit, err := version.ParseEdgeTarget(target)
+		if err != nil {
+			return UpgradeOutcome{}, fmt.Errorf("%w: %v", ErrUpgradeTarget, err)
+		}
+		target = version.EdgeTarget(commit)
+		if caps.UpdateChannel != executor.ChannelEdge {
+			return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeChannel,
+				executor.EdgeChannelRefusal(e.subject(), target))
+		}
+		if !req.Force {
+			if req.TargetProtocol <= 0 {
+				return UpgradeOutcome{}, fmt.Errorf("%w: %s Ask with force to install it anyway.",
+					ErrUpgradeLowersProtocol, executor.EdgeProtocolUnknown(e.subject(), target, req.TargetProtocolIssue))
+			}
+			if have > 0 && req.TargetProtocol < have {
+				return UpgradeOutcome{}, fmt.Errorf("%w: %s Ask with force to install it anyway.",
+					ErrUpgradeLowersProtocol, executor.ProtocolDrop(e.subject(), have, target, req.TargetProtocol))
+			}
+		}
+	case target != LatestVersion && !version.IsRelease(target):
 		return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeTarget,
 			executor.UnpublishedTarget(e.subject(), target, have))
-	}
-	if !req.Force {
+	case !req.Force:
 		if err := checkProtocolDrop(e.subject(), have, target); err != nil {
 			return UpgradeOutcome{}, err
 		}

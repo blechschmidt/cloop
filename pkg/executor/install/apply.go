@@ -138,6 +138,17 @@ func (in *Installer) Apply(p Plan) error {
 		if err := in.run("systemctl", "daemon-reload"); err != nil {
 			return fmt.Errorf("install: reload systemd: %w", err)
 		}
+		// The upgrade helper's path unit is armed whether or not the agent is
+		// started: it only ever acts on a request the agent files. A plan
+		// without it stops one an earlier install armed; its files are already
+		// gone (p.Remove), so this is best-effort.
+		if s.RemoteUpgrade {
+			if err := in.run("systemctl", "enable", "--now", s.UpgradeHelperPathUnitName()); err != nil {
+				return fmt.Errorf("install: enable %s: %w", s.UpgradeHelperPathUnitName(), err)
+			}
+		} else {
+			_ = in.run("systemctl", "disable", "--now", s.UpgradeHelperPathUnitName())
+		}
 		if s.NoStart {
 			if err := in.run("systemctl", "enable", s.UnitFileName()); err != nil {
 				return fmt.Errorf("install: enable %s: %w", s.UnitFileName(), err)
@@ -362,7 +373,9 @@ func (in *Installer) Uninstall(spec Spec, out Output, purgeState bool) error {
 	switch out {
 	case OutputSystemd:
 		// Best-effort: a unit that is not loaded makes both of these fail,
-		// and that is the expected state on a second run.
+		// and that is the expected state on a second run. The upgrade helper
+		// first, so it cannot start mid-teardown on a request left behind.
+		_ = in.run("systemctl", "disable", "--now", s.UpgradeHelperPathUnitName())
 		_ = in.run("systemctl", "disable", "--now", s.UnitFileName())
 	case OutputShell:
 		if _, statErr := os.Stat(in.path(s.InitScriptPath())); statErr == nil {
@@ -396,6 +409,8 @@ func (in *Installer) Uninstall(spec Spec, out Output, purgeState bool) error {
 		// Drop-ins live in a sibling directory and would otherwise survive
 		// as an orphan that confuses the next install.
 		remove(s.UnitPath() + ".d")
+		remove(s.UpgradeHelperPathUnitPath())
+		remove(s.UpgradeHelperServicePath())
 		if err := in.run("systemctl", "daemon-reload"); err != nil {
 			in.logf("note: systemctl daemon-reload failed: %v", err)
 		}
@@ -416,7 +431,7 @@ func (in *Installer) Uninstall(spec Spec, out Output, purgeState bool) error {
 	leftovers := []string{s.CredentialsFile}
 	switch out {
 	case OutputSystemd:
-		leftovers = append(leftovers, s.UnitPath())
+		leftovers = append(leftovers, s.UnitPath(), s.UpgradeHelperPathUnitPath(), s.UpgradeHelperServicePath())
 	case OutputShell:
 		leftovers = append(leftovers, s.InitScriptPath())
 	}

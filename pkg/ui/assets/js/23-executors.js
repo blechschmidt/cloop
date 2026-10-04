@@ -199,6 +199,8 @@ function _execInventoryChips(ex) {
       + esc(skew ? 'Build skew: ' + skew : 'Reported cloop build') + '">build '
       + esc(inv.agent_version_label) + '</span>');
   }
+  // Task 20376: the device follows the hub's signed builds, not releases only.
+  if (ex.update_channel === 'edge') chips.push('<span class="exec-chip" title="Edge channel: installs this hub\'s signed builds">edge</span>');
   if (inv.os) {
     chips.push('<span class="exec-chip">' + esc(inv.os)
       + (inv.arch ? '/' + esc(inv.arch) : '') + '</span>');
@@ -2345,8 +2347,9 @@ window.upgradeExecutor = function(idx) {
   // which says what to do instead — and offers no prompt.
   const note = ex.upgrade_note || '';
   if (!ex.upgrade_target) { alert(note); return; }
+  // upgrade_label names an edge build, "this hub's build (a0f3870)" (Task 20376).
   const target = prompt(
-    'Upgrade ' + name + ' to which release?\n\n' + (note && note + '\n\n')
+    'Upgrade ' + name + ' to ' + (ex.upgrade_label || 'which release') + '?\n\n' + (note && note + '\n\n')
     + 'The device downloads it itself and verifies the signature before installing; '
     + 'it will restart and drop off the fleet briefly.',
     ex.upgrade_target);

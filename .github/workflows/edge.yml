@@ -1,0 +1,237 @@
+name: Edge builds
+
+# Signed builds of main, for devices that follow the hub (Task 20376).
+#
+# The hub at :8888 deploys main nightly and speaks a newer executor protocol
+# than any release. A device can only be moved onto a *signed* artifact — the
+# hub names a version, the device fetches and verifies it, and the hub never
+# supplies bytes (pkg/executor/remote/upgradeproto.go) — so until this workflow
+# existed every protocol bump stranded the fleet until someone hand-built a
+# static binary, copied it over and installed it with --insecure-skip-verify.
+#
+# This workflow is that artifact. After CI passes on a push to main, it builds
+# the commit for every release platform, stamped dev+g<short sha> exactly as the
+# deploy stamps the same commit, and signs each archive plus a manifest
+# {commit, version, protocol, archive hashes} with Sigstore keyless signing. The
+# results are commit-named assets of one "edge" prerelease:
+#
+#   - never marked latest, so `cloop upgrade` and the installer — which only
+#     ever ask for /releases/latest — cannot see it;
+#   - created once and never moved: its tag is wherever the first publish put
+#     it, and nothing here touches it again, because the assets name their
+#     commits and a moved tag rewrites history for everyone who fetched it;
+#   - pruned to the newest 30 commits (scripts/edge-prune.py).
+#
+# The certificate Fulcio issues names this file on refs/heads/main, and
+# pkg/provenance.EdgeIdentityRegexp accepts exactly that — a separate pin from
+# the tag-only release identity. A device verifies an edge build against it
+# only for an "edge:<commit>" target and only if an operator on that device put
+# it on the edge channel; nothing the hub sends can do either.
+#
+# A run of this workflow is triggered by every completed CI run, including ones
+# on pull requests and failed ones, and does nothing for them: the job's `if`
+# admits a successful CI run on a push to main of this repository and nothing
+# else. workflow_run also fires for a pull request whose head branch happens to
+# be called "main" — from a fork, say — and this job can sign, so that check is
+# the security boundary, not a filter.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# contents: write creates the prerelease and uploads and prunes its assets.
+# id-token: write is keyless signing: not a key, but the right to ask GitHub
+# for an OIDC token saying which workflow, in which repository, at which ref is
+# running — which Fulcio turns into the certificate verification pins.
+permissions:
+  contents: write
+  id-token: write
+
+# One publish at a time: two runs creating the release, or one pruning while
+# another uploads, would race on the same asset list.
+concurrency:
+  group: edge-channel
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, sign and publish the commit
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMMIT: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Checkout the commit CI passed on
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # The whole history: the commit must be shown to be on main, and the
+          # prune step ranks builds by their place in main's history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The commit is on main
+        # Belt and braces after the job's `if`: a build is published under the
+        # identity of this workflow on main, so it must be a build of main.
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$COMMIT" origin/main || {
+            echo "::error::$COMMIT is not an ancestor of origin/main; refusing to build it"
+            exit 1
+          }
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build every release platform
+        # The release script's builds, with the commit in the names and the
+        # manifest beside them. It checks that the binary reports the stamp and
+        # reads the protocol from the binary itself.
+        run: ./scripts/build-edge.sh "$COMMIT" dist/edge
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign every archive and the manifest
+        run: |
+          set -euo pipefail
+          cd dist/edge
+          for f in *.tar.gz *_manifest.json; do
+            echo "==> signing $f"
+            cosign sign-blob --yes "$f" --bundle "$f.sigstore.json"
+          done
+
+      - name: The signatures verify against the pinned edge identity
+        # The exact check a device makes, against the same literal pin as
+        # pkg/provenance.EdgeIdentityRegexp (TestEdgeWorkflowPinsTheSameIdentity
+        # holds the two together). A mismatch fails here, before publishing,
+        # rather than on every device that is asked to upgrade.
+        run: |
+          set -euo pipefail
+          cd dist/edge
+          issuer="https://token.actions.githubusercontent.com"
+          identity="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/edge\.yml@refs/heads/main$"
+          for f in *.tar.gz *_manifest.json; do
+            cosign verify-blob "$f" --bundle "$f.sigstore.json" \
+              --certificate-oidc-issuer "$issuer" --certificate-identity-regexp "$identity"
+            echo "ok: $f"
+          done
+
+      - name: The release identity refuses them
+        # The two pins are separate on purpose: an edge signature must never
+        # pass for a release. Checked against the release workflow's own pin, so
+        # a change that widened either one would fail here.
+        run: |
+          set -euo pipefail
+          cd dist/edge
+          f="cloop_${COMMIT}_manifest.json"
+          if cosign verify-blob "$f" --bundle "$f.sigstore.json" \
+               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/tags/v[^/]+$"; then
+            echo "::error::an edge signature verified against the release identity"
+            exit 1
+          fi
+          echo "ok: the release identity does not accept an edge build"
+
+      - name: A tampered archive is refused
+        run: |
+          set -euo pipefail
+          cd dist/edge
+          f="cloop_${COMMIT}_linux_amd64.tar.gz"
+          cp "$f" /tmp/tampered.tar.gz
+          printf 'malicious' >> /tmp/tampered.tar.gz
+          if cosign verify-blob /tmp/tampered.tar.gz --bundle "$f.sigstore.json" \
+               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/edge\.yml@refs/heads/main$"; then
+            echo "::error::cosign accepted a tampered archive"
+            exit 1
+          fi
+          echo "ok: the tampered archive was refused"
+
+      - name: Publish on the edge prerelease
+        # Created on the first run, as a prerelease that is not latest, with
+        # its tag at this commit; every later run only adds assets. Nothing here
+        # edits the release's tag or target, and nothing ever marks it latest.
+        run: |
+          set -euo pipefail
+          if ! gh release view edge >/dev/null 2>&1; then
+            cat > /tmp/edge-notes.md <<'EOF'
+          Signed builds of commits on `main` that passed CI, for executor devices that
+          follow the edge channel. **Not a release**: these are the hub's own builds,
+          kept for the newest 30 commits, and the tag is not moved as new ones arrive —
+          every asset names its commit.
+
+          A device installs one only when an operator on that device opted in with
+          `sudo cloop executor agent install --upgrade --channel edge`, and only after
+          verifying it was signed by `.github/workflows/edge.yml` on `refs/heads/main`.
+          See docs/guides/edge-channel.md.
+          EOF
+            gh release create edge --prerelease --latest=false --target "$COMMIT" \
+              --title "Edge builds (main)" --notes-file /tmp/edge-notes.md
+          fi
+          [ "$(gh release view edge --json isPrerelease --jq .isPrerelease)" = "true" ] || {
+            echo "::error::the edge release is not a prerelease"; exit 1; }
+          for f in dist/edge/*; do
+            for attempt in 1 2 3 4 5; do
+              if gh release upload edge "$f" --clobber; then echo "ok: $f"; break; fi
+              if [ "$attempt" -eq 5 ]; then echo "::error::could not upload $f"; exit 1; fi
+              echo "::warning::uploading $f failed (attempt $attempt); retrying"
+              sleep $((attempt * 10))
+            done
+          done
+
+      - name: The published build resolves where devices look
+        # The URLs pkg/upgrade computes: a device fetches these and nothing else.
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/edge"
+          for asset in "cloop_${COMMIT}_manifest.json" "cloop_${COMMIT}_manifest.json.sigstore.json" \
+                       "cloop_${COMMIT}_linux_amd64.tar.gz" "cloop_${COMMIT}_linux_amd64.tar.gz.sigstore.json"; do
+            for attempt in 1 2 3 4 5; do
+              code=$(curl -sSL -o /dev/null -w '%{http_code}' "$base/$asset")
+              [ "$code" = "200" ] && break
+              echo "attempt $attempt: $asset -> HTTP $code, retrying"
+              sleep 10
+            done
+            [ "$code" = "200" ] || { echo "::error::$base/$asset is HTTP $code"; exit 1; }
+            echo "ok: $asset"
+          done
+
+      - name: Latest is still a release
+        # The installer and `cloop upgrade` resolve /releases/latest. If the
+        # edge prerelease ever became latest they would install a build of main
+        # on every device, so check it rather than trust the flags above.
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          case "$tag" in
+            v*) echo "ok: latest is $tag" ;;
+            *) echo "::error::/releases/latest is '$tag', not a release tag"; exit 1 ;;
+          esac
+
+      - name: Prune builds beyond the newest 30 commits
+        run: |
+          set -euo pipefail
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/edge" --jq .id)
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${id}/assets?per_page=100" \
+            --jq '.[] | "\(.id) \(.name)"' > /tmp/edge-assets.txt
+          git rev-list origin/main > /tmp/main-history.txt
+          python3 scripts/edge-prune.py --keep 30 --assets /tmp/edge-assets.txt \
+            --history /tmp/main-history.txt > /tmp/edge-doomed.txt
+          echo "$(wc -l < /tmp/edge-doomed.txt) asset(s) to prune"
+          while read -r asset name; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset}"
+            echo "pruned: $name"
+          done < /tmp/edge-doomed.txt

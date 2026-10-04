@@ -36,21 +36,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
-// upgradeStager fetches and verifies a release, returning a path to the
-// extracted binary. Indirected through a variable so tests can exercise the
-// handler without reaching the network; production always uses the real one.
-var upgradeStager = func(tag, destDir string) (upgrade.Staged, error) {
-	return upgrade.StageRelease(tag, destDir, upgrade.Options{}, nil)
-}
-
-// upgradeInstaller applies a staged binary to this device's service install.
-// Indirected for the same reason as upgradeStager.
-var upgradeInstaller = func(
-	spec install.Spec, output install.Output, opts install.UpgradeOptions,
-) (install.UpgradeResult, error) {
-	return (&install.Installer{}).Upgrade(spec, output, opts)
-}
-
 // handleUpgrade serves a TypeUpgrade frame.
 func (a *Agent) handleUpgrade(ctx context.Context, sess *deviceSession, frame remote.Frame) {
 	payload, err := remote.DecodeUpgrade(frame)
@@ -100,6 +85,31 @@ func (a *Agent) upgradePreflight(p remote.UpgradePayload, current string) (strin
 		return err.Error(), false
 	}
 
+	// What the device installs at all, decided on the device: a release, or
+	// an edge build only if an operator here put it on the edge channel. The
+	// hub cannot change the channel, so this refusal is the end of it.
+	if err := CheckTarget(p.TargetVersion, a.channel()); err != nil {
+		return err.Error(), false
+	}
+
+	// Whether it can carry the upgrade out (Task 20376). An unprivileged agent
+	// with no root helper used to accept here and fail after the ack, where
+	// nobody looked; the reason now reaches the hub instead.
+	if mode, _, _, issue := a.remoteUpgradeReadiness(); mode == remoteUpgradeUnavailable {
+		return issue, false
+	}
+
+	if upgrade.IsEdgeTarget(p.TargetVersion) {
+		commit, _ := upgrade.ParseEdgeTarget(p.TargetVersion)
+		if !p.Force && upgrade.SameCommit(current, commit) {
+			return fmt.Sprintf("already running %s, the build of %s", current, p.TargetVersion), false
+		}
+		// Any other build moves to the hub's: "follow the hub" is what the
+		// channel means. What may not happen is losing protocol, and the
+		// installer refuses a staged binary that speaks less than this one.
+		return "", true
+	}
+
 	if !p.Force && p.TargetVersion != remote.LatestVersion {
 		if cmp, ok := version.Compare(current, p.TargetVersion); ok {
 			if cmp == 0 {
@@ -119,6 +129,11 @@ func (a *Agent) upgradePreflight(p remote.UpgradePayload, current string) (strin
 
 // runUpgrade performs the upgrade. It runs detached: by the time it succeeds,
 // the process is being replaced, so it reports only to the local log.
+//
+// An unprivileged agent — every device installed with the defaults — hands the
+// work to the root helper by filing a request, and the helper restarts this
+// process when it is done. An agent running as root does it itself, through
+// the same UpgradeTo the helper uses.
 func (a *Agent) runUpgrade(p remote.UpgradePayload, current string) {
 	reason := strings.TrimSpace(p.Reason)
 	if reason == "" {
@@ -126,43 +141,31 @@ func (a *Agent) runUpgrade(p remote.UpgradePayload, current string) {
 	}
 	a.logf("upgrade: moving from %s to %s (%s)", current, p.TargetVersion, reason)
 
-	// Staged into a private directory that is removed however this ends. A
-	// verified binary left in /tmp is an executable with nobody watching it.
-	dir, err := os.MkdirTemp("", "cloop-agent-upgrade-")
-	if err != nil {
-		a.logf("upgrade: staging directory: %v", err)
+	mode, spec, output, issue := a.remoteUpgradeReadiness()
+	switch mode {
+	case remoteUpgradeHelper:
+		if err := a.fileUpgradeRequest(spec, p, reason); err != nil {
+			a.logf("upgrade: %v", err)
+			return
+		}
+		a.logf("upgrade: filed the request for %s; %s carries it out and restarts this agent "+
+			"(journalctl -u %s.service)", p.TargetVersion, spec.UpgradeHelperPathUnitName(), spec.UpgradeHelperName())
 		return
-	}
-	defer os.RemoveAll(dir)
-
-	staged, err := upgradeStager(p.TargetVersion, dir)
-	if err != nil {
-		a.logf("upgrade: fetching %s: %v", p.TargetVersion, err)
-		return
-	}
-	a.logf("upgrade: staged %s from %s (provenance verified: %t)",
-		staged.Tag, staged.AssetName, staged.ProvenanceVerified)
-
-	spec, output, err := a.installTarget()
-	if err != nil {
-		a.logf("upgrade: %v", err)
+	case remoteUpgradeUnavailable:
+		a.logf("upgrade: %s", issue)
 		return
 	}
 
-	opts := install.UpgradeOptions{
-		Source: staged.BinaryPath,
-		Force:  p.Force,
-		// The signature was checked against the release archive before the
-		// binary was extracted, so there is no bundle beside this file to find.
-		// Never SkipVerify — see the field's doc comment.
-		ProvenanceEstablished: staged.ProvenanceVerified,
-		SkipVerify:            !staged.ProvenanceVerified,
+	t := UpgradeTarget{
+		Target:   p.TargetVersion,
+		Channel:  a.channel(),
+		Install:  install.UpgradeOptions{Force: p.Force},
+		Progress: func(line string) { a.logf("upgrade: %s", line) },
 	}
 	if p.SettleSeconds > 0 {
-		opts.SettleTimeout = time.Duration(p.SettleSeconds) * time.Second
+		t.Install.SettleTimeout = time.Duration(p.SettleSeconds) * time.Second
 	}
-
-	res, err := upgradeInstaller(spec, output, opts)
+	res, staged, err := UpgradeTo(spec, output, t)
 	if err != nil {
 		// Reaching here with the old binary still in place is the designed
 		// outcome of a failed upgrade, not a second failure: the installer
@@ -202,11 +205,17 @@ func (a *Agent) runUpgrade(p remote.UpgradePayload, current string) {
 // devices this feature is most useful for, and hardcoding systemd would have
 // excluded them while appearing to work everywhere else.
 func (a *Agent) installTarget() (install.Spec, install.Output, error) {
+	if a.cfg.InstallTarget != nil {
+		return a.cfg.InstallTarget()
+	}
 	spec := install.Spec{
 		ServiceName: install.DefaultServiceName,
 		BinaryPath:  install.DefaultBinaryPath,
 		UnitDir:     install.DefaultUnitDir,
 		InitDir:     install.DefaultInitDir,
+		// Stated, not left to Normalize, for the reason the comment above
+		// gives for the rest: the upgrade request is filed here.
+		StateDir: install.DefaultStateRoot + "/" + install.DefaultServiceName,
 	}
 	if _, err := os.Stat(spec.UnitPath()); err == nil {
 		return spec, install.OutputSystemd, nil

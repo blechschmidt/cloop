@@ -26,9 +26,11 @@ package ui
 //     cache of it for when the device is offline.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -197,7 +199,7 @@ func hubVersion() string { return executor.HubBuild() }
 // The live session is preferred over the stored row, and the row is the
 // fallback for an offline device — which is the case where an operator most
 // needs to know what a device *was* running, since they cannot ask it.
-func annotateInventory(view *executorView, row statedb.ExecutorRow, live *remote.Executor) {
+func annotateInventory(ctx context.Context, view *executorView, row statedb.ExecutorRow, live *remote.Executor) {
 	// Only devices have a build of their own. A container or Kubernetes
 	// executor runs this very binary, so reporting "version skew" against the
 	// hub would be comparing the hub with itself.
@@ -237,9 +239,38 @@ func annotateInventory(view *executorView, row statedb.ExecutorRow, live *remote
 	}
 	// What the Upgrade dialog offers: never a release that would lower the
 	// device's protocol, and never the hub's own version when that is not a
-	// release (Task 20371).
-	view.UpgradeTarget, view.UpgradeNote = executor.UpgradeOffer("This device's agent", deviceProtocol,
-		remote.ProtocolVersion)
+	// release (Task 20371) — except, for a device whose operator put it on the
+	// edge channel, the hub's own build as CI signed it, once CI has published
+	// it (Task 20376). The channel is the device's to report and the hub's
+	// only to read.
+	channel := ""
+	if live != nil {
+		channel = live.UpdateChannel()
+	}
+	view.UpdateChannel = channel
+	switch channel {
+	case executor.ChannelEdge:
+		lookupCtx, cancel := context.WithTimeout(ctx, edgeLookupTimeout)
+		view.UpgradeTarget, view.UpgradeLabel, view.UpgradeNote = executor.EdgeUpgradeOffer(
+			"This device's agent", deviceProtocol, remote.ProtocolVersion, hubEdgeOffer(lookupCtx))
+		cancel()
+	default:
+		view.UpgradeTarget, view.UpgradeNote = executor.UpgradeOffer("This device's agent", deviceProtocol,
+			remote.ProtocolVersion)
+		if channel == executor.ChannelStable && !strings.Contains(view.UpgradeNote, executor.EdgeOptIn) {
+			if hint := executor.StableChannelHint(); hint != "" {
+				view.UpgradeNote += " " + hint
+			}
+		}
+	}
+	// A device that has said it cannot carry an upgrade out is offered
+	// nothing: the button shows why, and what to run on the device instead.
+	if live != nil {
+		if caps, ok := live.AgentInventory(); ok && !caps.RemoteUpgrade && caps.RemoteUpgradeIssue != "" {
+			view.UpgradeTarget, view.UpgradeLabel = "", ""
+			view.UpgradeNote = "This device cannot carry out an upgrade from here yet: " + caps.RemoteUpgradeIssue
+		}
+	}
 
 	skew, note := version.Classify(hub, inv.AgentVersion)
 	sv := &executorSkewView{

@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"slices"
+
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // PacketFilterChange is what an upgrade does to the packet-filter grant.
@@ -35,6 +37,8 @@ const (
 // dropInChange is one pending change to the packet-filter drop-in, with what
 // it replaces so a failed upgrade can put that back.
 type dropInChange struct {
+	// kind says which of the upgrade's unit changes this is (unitchanges.go).
+	kind     string
 	path     string // in the device's namespace
 	next     string // the content to write; empty to remove the file
 	previous []byte // what was there before
@@ -42,6 +46,8 @@ type dropInChange struct {
 	// grantedBefore and grantedAfter describe the device on either side of
 	// the change.
 	grantedBefore, grantedAfter bool
+	// channelAfter is the channel a channel change leaves the device on.
+	channelAfter provenance.Channel
 }
 
 // packetFilterState reports whether the device's unit grants the packet filter

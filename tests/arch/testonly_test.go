@@ -2,9 +2,10 @@ package arch_test
 
 // Test-only packages stay out of the binary (Task 20372).
 //
-// internal/ holds four packages written for tests: hometest sandboxes $HOME,
-// taskfill builds fully populated tasks, and dbtemplate and statedbtest hand
-// tests a migrated state.db by copying a file instead of migrating one. Go's
+// internal/ holds six packages written for tests: hometest sandboxes $HOME,
+// taskfill builds fully populated tasks, dbtemplate and statedbtest hand
+// tests a migrated state.db by copying a file instead of migrating one, and
+// cosigntest and edgetest stand in for cosign and an edge release (Task 20376). Go's
 // internal/ rule only stops other modules from importing them; nothing stops a
 // production file in this one from doing so.
 //
@@ -38,6 +39,8 @@ var testOnly = map[string]string{
 	"internal/taskfill":    "builds a pm.Task with every field set, for persistence tests",
 	"internal/dbtemplate":  "captures a database once per test binary and copies it into place",
 	"internal/statedbtest": "seeds a migrated state.db without migrating one",
+	"internal/cosigntest":  "stands in for cosign, accepting a bundle only for the identity it names",
+	"internal/edgetest":    "stages a device install and an edge release for upgrade tests",
 }
 
 func TestTestOnlyPackagesAreImportedOnlyByTests(t *testing.T) {

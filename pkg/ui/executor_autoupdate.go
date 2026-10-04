@@ -102,6 +102,16 @@ func (a *autoUpdater) sweepOnce(ctx context.Context) {
 
 	devices, live := a.fleet()
 	hub := autoupdate.Hub{Version: hubVersion(), Protocol: remote.ProtocolVersion}
+	// The hub's own edge build is looked up only when a device could follow
+	// it: GitHub's unauthenticated API allows sixty requests an hour.
+	for _, d := range devices {
+		if d.Channel == executor.ChannelEdge {
+			lookupCtx, cancel := context.WithTimeout(ctx, edgeLookupTimeout)
+			hub.Edge = hubEdgeOffer(lookupCtx)
+			cancel()
+			break
+		}
+	}
 	for _, v := range autoupdate.Plan(stored.Policy, hub, devices) {
 		if !v.Upgrade {
 			continue
@@ -113,10 +123,11 @@ func (a *autoUpdater) sweepOnce(ctx context.Context) {
 		a.markAsked(v.Device.ID)
 
 		reqCtx, cancel := context.WithTimeout(ctx, upgradeRequestTimeout)
-		outcome, err := a.sendFn(reqCtx, ex, remote.UpgradeRequest{
-			TargetVersion: stored.Policy.Resolve(hubVersion()).TargetVersion,
-			Reason:        "fleet auto-update policy",
-		})
+		req := remote.UpgradeRequest{TargetVersion: v.Target, Reason: "fleet auto-update policy"}
+		if hub.Edge != nil && hub.Edge.Published && v.Target == hub.Edge.Target {
+			req.TargetProtocol = hub.Edge.Protocol
+		}
+		outcome, err := a.sendFn(reqCtx, ex, req)
 		cancel()
 
 		name := v.Device.Name
@@ -169,6 +180,7 @@ func (a *autoUpdater) fleet() ([]autoupdate.Device, map[string]*remote.Executor)
 			Online:          rex.Connected(),
 			Busy:            len(rex.Handles()) > 0,
 			Upgrading:       a.recentlyAsked(id),
+			Channel:         rex.UpdateChannel(),
 		}
 		if a.sv != nil {
 			h := a.sv.Health(id)

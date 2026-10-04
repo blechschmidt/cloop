@@ -37,7 +37,17 @@ func withKnownReleases(t *testing.T) {
 const (
 	unreleasedNote15 = "The hub runs an unreleased build (dev+g8b418e2), so no published release may speak v15 yet — " +
 		"the newest this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade button and " +
-		"auto-update install published releases only."
+		releasesOrEdge
+	// releasesOrEdge ends that sentence for a hub built from a clean commit,
+	// whose own build CI publishes on the edge channel (Task 20376).
+	releasesOrEdge = "auto-update install published releases, and this hub's own build only on a device that " +
+		"follows the edge channel."
+	// edgeFirst8b418e2 is the remedy for such a hub: the signed path first,
+	// the hand-built binary as the fallback.
+	edgeFirst8b418e2 = "put the device on the edge channel (`sudo cloop executor agent install --upgrade --channel " +
+		"edge` on it, once — a cloop older than the channel first needs one edge build installed by hand) and " +
+		"press Upgrade on its row in the Executors panel: it installs this hub's own build, 8b418e2, signed by " +
+		"CI, once CI has published it. Or " + buildAt8b418e2
 	buildAt8b418e2 = "build cloop at the hub's commit 8b418e2 as a static binary (`CGO_ENABLED=0 go build -o cloop .`), " +
 		"copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there " +
 		"(a binary built by hand carries no signed provenance); a plain --upgrade keeps the device's packet-filter " +
@@ -57,7 +67,7 @@ func TestNeedsProtocolOnAnUnreleasedHub(t *testing.T) {
 
 	got := NeedsProtocol("agent sgx-1 (sgx)", 14, 15, "for firewall rules stored in the hub", "")
 	want := "agent sgx-1 (sgx) speaks protocol v14, and the hub needs v15 for firewall rules stored in the hub. " +
-		unreleasedNote15 + " To move the device forward, " + buildAt8b418e2
+		unreleasedNote15 + " To move the device forward, " + edgeFirst8b418e2
 	if got != want {
 		t.Errorf("need 15:\n got %q\nwant %q", got, want)
 	}
@@ -66,7 +76,7 @@ func TestNeedsProtocolOnAnUnreleasedHub(t *testing.T) {
 	want = "agent sgx-1 (sgx) speaks protocol v14, and the hub needs v16 to ship the feature branch " +
 		"cloop/feature/x to it. The hub runs an unreleased build (dev+g8b418e2), so no published release may " +
 		"speak v16 yet — the newest this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade " +
-		"button and auto-update install published releases only. To move the device forward, " + buildAt8b418e2
+		"button and " + releasesOrEdge + " To move the device forward, " + edgeFirst8b418e2
 	if got != want {
 		t.Errorf("need 16:\n got %q\nwant %q", got, want)
 	}
@@ -141,8 +151,8 @@ func TestNeedsProtocolOffersAPublishedReleaseThatSuffices(t *testing.T) {
 		"Or remove the grant from this project.")
 	want := "agent edge-2 (edge-2) speaks protocol v12, and the hub needs v13 to send a seeded run's results " +
 		"back. The hub runs an unreleased build (dev+g8b418e2), and the Executors panel's Upgrade button and " +
-		"auto-update install published releases only. Pressing Upgrade on the device's row with v0.0.4 as the " +
-		"target raises it to v13; to bring it level with the hub instead, " + buildAt8b418e2 +
+		releasesOrEdge + " Pressing Upgrade on the device's row with v0.0.4 as the " +
+		"target raises it to v13; to bring it level with the hub instead, " + edgeFirst8b418e2 +
 		" Or remove the grant from this project."
 	if got != want {
 		t.Errorf("\n got %q\nwant %q", got, want)
@@ -164,8 +174,8 @@ func TestProtocolDrop(t *testing.T) {
 	got := ProtocolDrop("agent sgx-1 (sgx)", 14, "v0.0.4", 13)
 	want := "agent sgx-1 (sgx) speaks protocol v14; v0.0.4 speaks v13, so installing it would lower the " +
 		"device's protocol and lose what needs v14. The hub runs an unreleased build (dev+g8b418e2), and the " +
-		"Executors panel's Upgrade button and auto-update install published releases only. To move the " +
-		"device forward, " + buildAt8b418e2
+		"Executors panel's Upgrade button and " + releasesOrEdge + " To move the " +
+		"device forward, " + edgeFirst8b418e2
 	if got != want {
 		t.Errorf("\n got %q\nwant %q", got, want)
 	}
@@ -197,8 +207,9 @@ func TestUnpublishedTarget(t *testing.T) {
 	withKnownReleases(t)
 	got := UnpublishedTarget("agent sgx-1 (sgx)", "dev+g8b418e2", 14)
 	want := "dev+g8b418e2 is this hub's own unreleased build, not a release tag: a device asked to upgrade " +
-		"installs a published, signed release and nothing else, so agent sgx-1 (sgx) cannot be sent it. To put " +
-		"the hub's build on the device, " + buildAt8b418e2
+		"installs a published, signed release — or, on the edge channel, this hub's signed build as " +
+		"edge:8b418e2 — so agent sgx-1 (sgx) cannot be sent it under that name. To put the hub's build on the " +
+		"device, " + edgeFirst8b418e2
 	if got != want {
 		t.Errorf("hub's own build:\n got %q\nwant %q", got, want)
 	}
@@ -227,7 +238,7 @@ func TestUpgradeOffer(t *testing.T) {
 	target, note := UpgradeOffer(subject, 12, 16)
 	wantNote := "The hub runs an unreleased build (dev+g8b418e2), which no published release matches, so " +
 		"Upgrade offers the newest published release this hub knows of, v0.0.4, which speaks v13. To bring the " +
-		"device level with the hub (v16), " + buildAt8b418e2
+		"device level with the hub (v16), " + edgeFirst8b418e2
 	if target != "v0.0.4" || note != wantNote {
 		t.Errorf("v12 device, unreleased hub:\n got (%q, %q)\nwant (%q, %q)", target, note, "v0.0.4", wantNote)
 	}

@@ -1,5 +1,7 @@
 package remote
 
+import "strings"
+
 // inventory.go exposes what a connected device said about itself, so the hub
 // can answer "which cloop build is each edge device running?" without inferring
 // it from behaviour.
@@ -52,4 +54,18 @@ func (e *Executor) AgentInventory() (AgentCapabilities, bool) {
 		return AgentCapabilities{}, false
 	}
 	return sess.Capabilities(), true
+}
+
+// UpdateChannel reports the update channel the connected agent says its
+// device follows (Task 20376): "edge" or "stable". It is "" when the device is
+// not connected, and when its agent predates the field — which follows
+// releases only, and also cannot be put on the channel without a newer build
+// first, so callers treat it as stable but need not tell it to run a flag it
+// does not have.
+func (e *Executor) UpdateChannel() string {
+	sess := e.currentSession()
+	if sess == nil {
+		return ""
+	}
+	return strings.TrimSpace(sess.Capabilities().UpdateChannel)
 }

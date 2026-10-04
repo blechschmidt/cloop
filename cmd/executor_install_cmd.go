@@ -15,6 +15,7 @@ package cmd
 // view of what is about to happen.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/executor/agent"
 	"github.com/blechschmidt/cloop/pkg/executor/install"
+	"github.com/blechschmidt/cloop/pkg/provenance"
+	"github.com/blechschmidt/cloop/pkg/upgrade"
 )
 
 // enrollBundleEnv is where the bootstrap script passes the bundle.
@@ -52,6 +56,11 @@ device needs to stay enrolled across reboots:
     keeps the capability to itself: nothing it starts receives it except nft,
     so a workload never holds it. --packet-filter=false withholds it, and the
     device then refuses every sandbox with a firewall
+  * a root helper (<service>-upgrade.path and .service) that carries out an
+    upgrade the hub asks for, which the unprivileged agent cannot do itself:
+    it fetches the named build from cloop's repository, verifies its signature
+    with cosign, and installs it with backup and rollback. --remote-upgrade=false
+    withholds it, and the device then refuses the hub's Upgrade button
 
 The token never appears in ExecStart. A unit file is world-readable and
 ` + "`systemctl show`" + ` prints the command line to anyone who asks, so the token is
@@ -71,10 +80,10 @@ atomically and restarts the service, and it deliberately does nothing else: the
 unit file and the credential are left exactly as they are, because re-rendering
 the unit needs the control-plane URL and certificate pin from an enrollment
 bundle that nobody still has months later. A unit change means re-running a full
-install with the bundle. The one exception is the firewall grant, which is a
-drop-in beside the unit precisely so that --upgrade --packet-filter can add it
-(and --packet-filter=false take it away) without the bundle; a plain --upgrade
-leaves it as it is.
+install with the bundle. The exceptions are the firewall grant, the update
+channel and the remote-upgrade helper, which are files beside the unit precisely
+so that --upgrade with --packet-filter, --channel or --remote-upgrade can add them
+(and take them away) without the bundle; a plain --upgrade leaves them as they are.
 
 It is idempotent — an upgrade to the identical binary copies nothing and
 restarts nothing — and it refuses rather than half-installing a device that was
@@ -112,6 +121,14 @@ Examples:
   # firewalls. No bundle needed; restarts the agent even if its build is current.
   sudo cloop executor agent install --upgrade --packet-filter
 
+  # Follow the hub's own build: the hub may then move this device to signed
+  # builds of main as well as releases. Decided here; the hub cannot change it.
+  sudo cloop executor agent install --upgrade --channel edge
+
+  # Fetch a published build, verify it, and install it: a release, "latest",
+  # or on the edge channel edge:<commit>.
+  sudo cloop executor agent install --upgrade --to v0.0.4
+
   # Remove it, including the agent's identity and workspaces.
   sudo cloop executor agent install --uninstall --purge`,
 	Args: cobra.NoArgs,
@@ -141,6 +158,13 @@ Examples:
 			Logf: func(format string, a ...any) { dim.Fprintf(os.Stderr, "  "+format+"\n", a...) },
 		}
 
+		applyRequest, _ := cmd.Flags().GetBool("apply-request")
+		to, _ := cmd.Flags().GetString("to")
+		to = strings.TrimSpace(to)
+		if (applyRequest || to != "") && !upgrade {
+			return fmt.Errorf("--to and --apply-request are forms of --upgrade; pass --upgrade with them")
+		}
+
 		if upgrade {
 			if err := requirePrivilege(inst, dryRun); err != nil {
 				return err
@@ -162,8 +186,11 @@ Examples:
 			settle, _ := cmd.Flags().GetDuration("settle-timeout")
 			bundle, _ := cmd.Flags().GetString("bundle-sig")
 			skipVerify, _ := cmd.Flags().GetBool("insecure-skip-verify")
-
-			res, err := inst.Upgrade(spec, out, install.UpgradeOptions{
+			channel, err := upgradeChannel(cmd)
+			if err != nil {
+				return err
+			}
+			opts := install.UpgradeOptions{
 				Source:        strings.TrimSpace(from), // empty: Upgrade uses this executable
 				Bundle:        strings.TrimSpace(bundle),
 				SkipVerify:    skipVerify,
@@ -171,7 +198,21 @@ Examples:
 				DryRun:        dryRun,
 				SettleTimeout: settle,
 				PacketFilter:  upgradePacketFilter(cmd),
-			})
+				Channel:       channel,
+				RemoteUpgrade: upgradeRemoteUpgrade(cmd, channel),
+			}
+
+			if applyRequest {
+				return applyUpgradeRequest(cmd, inst, spec, out)
+			}
+			if to != "" {
+				if strings.TrimSpace(from) != "" {
+					return fmt.Errorf("--to fetches a published build and --from names a local binary; pass one")
+				}
+				return upgradeToTarget(cmd, inst, spec, out, to, opts)
+			}
+
+			res, err := inst.Upgrade(spec, out, opts)
 			if err != nil {
 				return err
 			}
@@ -204,6 +245,17 @@ Examples:
 					"workloads", out)
 			}
 			spec.PacketFilter = false
+		}
+		// The channel and the upgrade helper the same way (Task 20376).
+		if out != install.OutputSystemd {
+			if spec.Channel == provenance.ChannelEdge {
+				return fmt.Errorf("--channel applies to --output systemd only: it is a systemd drop-in")
+			}
+			if spec.RemoteUpgrade && cmd.Flags().Changed("remote-upgrade") {
+				return fmt.Errorf("--remote-upgrade applies to --output systemd only: the helper is a root " +
+					"systemd unit")
+			}
+			spec.RemoteUpgrade = false
 		}
 
 		plan, err := install.BuildPlan(spec, out)
@@ -267,6 +319,11 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 	maxConc, _ := cmd.Flags().GetInt("max-concurrent")
 	noStart, _ := cmd.Flags().GetBool("no-start")
 	packetFilter, _ := cmd.Flags().GetBool("packet-filter")
+	remoteUpgrade, _ := cmd.Flags().GetBool("remote-upgrade")
+	channel, err := provenance.ParseChannel(str("channel"))
+	if err != nil {
+		return install.Spec{}, "", err
+	}
 
 	spec := install.Spec{
 		ServiceName:     str("service-name"),
@@ -288,6 +345,8 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 		Image:           str("image"),
 		NoStart:         noStart,
 		PacketFilter:    packetFilter,
+		RemoteUpgrade:   remoteUpgrade,
+		Channel:         channel,
 	}
 
 	// Default the binary to the one being run, not to a path that may not
@@ -313,6 +372,107 @@ func upgradePacketFilter(cmd *cobra.Command) install.PacketFilterChange {
 		return install.PacketFilterGrant
 	}
 	return install.PacketFilterWithdraw
+}
+
+// upgradeChannel maps --channel onto an upgrade: acted on only when passed,
+// like --packet-filter, because which builds a device accepts is not something
+// to change as a side effect of replacing its binary.
+func upgradeChannel(cmd *cobra.Command) (provenance.Channel, error) {
+	if !cmd.Flags().Changed("channel") {
+		return "", nil
+	}
+	v, _ := cmd.Flags().GetString("channel")
+	return provenance.ParseChannel(v)
+}
+
+// upgradeRemoteUpgrade maps --remote-upgrade onto an upgrade. Moving a device
+// onto the edge channel installs the helper too unless told otherwise: the
+// only point of the channel is that the hub can move the device along it.
+func upgradeRemoteUpgrade(cmd *cobra.Command, channel provenance.Channel) install.RemoteUpgradeChange {
+	if !cmd.Flags().Changed("remote-upgrade") {
+		if channel == provenance.ChannelEdge {
+			return install.RemoteUpgradeGrant
+		}
+		return install.RemoteUpgradeKeep
+	}
+	if grant, _ := cmd.Flags().GetBool("remote-upgrade"); grant {
+		return install.RemoteUpgradeGrant
+	}
+	return install.RemoteUpgradeWithdraw
+}
+
+// deviceChannel is the channel the device follows as root sees it, for a
+// command that is about to fetch a build: the one this same command moves it
+// to, if it does, else what the unit says.
+func deviceChannel(inst *install.Installer, spec install.Spec, requested provenance.Channel) (provenance.Channel, error) {
+	if requested != "" {
+		return requested, nil
+	}
+	s, err := spec.NormalizeForRemoval()
+	if err != nil {
+		return provenance.ChannelStable, err
+	}
+	return inst.DeviceChannel(s)
+}
+
+// upgradeToTarget is --upgrade --to: fetch a published build — a release,
+// "latest", or on an edge-channel device edge:<commit> — verify it, and
+// install it, through the same path the hub's Upgrade button ends in.
+func upgradeToTarget(cmd *cobra.Command, inst *install.Installer, spec install.Spec, out install.Output,
+	target string, opts install.UpgradeOptions) error {
+	channel, err := deviceChannel(inst, spec, opts.Channel)
+	if err != nil {
+		return err
+	}
+	dim := color.New(color.Faint)
+	res, staged, err := agent.UpgradeTo(spec, out, agent.UpgradeTarget{
+		Target:    target,
+		Channel:   channel,
+		Install:   opts,
+		Fetch:     upgrade.Options{SkipVerify: opts.SkipVerify},
+		Installer: inst,
+		Progress:  func(line string) { dim.Fprintf(os.Stderr, "  %s\n", line) },
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "\nInstalled from %s (%s channel%s).\n", staged.Tag, staged.Channel,
+		verifiedNote(staged.ProvenanceVerified))
+	printUpgraded(cmd.OutOrStdout(), res)
+	return nil
+}
+
+func verifiedNote(verified bool) string {
+	if verified {
+		return ", signature verified"
+	}
+	return ", NOT verified"
+}
+
+// applyUpgradeRequest is --upgrade --apply-request, which the remote-upgrade
+// helper runs as root when the agent files a request (Task 20376). It takes the
+// request — deleting it whatever happens next — and carries it out under the
+// device's own channel, never one the request names.
+func applyUpgradeRequest(cmd *cobra.Command, inst *install.Installer, spec install.Spec, out install.Output) error {
+	w := cmd.OutOrStdout()
+	req, res, staged, err := agent.ApplyUpgradeRequest(spec, out, agent.ApplyOptions{
+		Installer: inst,
+		Progress:  func(line string) { fmt.Fprintf(w, "  %s\n", line) },
+	})
+	switch {
+	case errors.Is(err, install.ErrNoRequest):
+		fmt.Fprintln(w, "No upgrade request is waiting.")
+		return nil
+	case err != nil && req.TargetVersion == "":
+		return err
+	case err != nil:
+		return fmt.Errorf("the request to move to %s (%s) was not carried out, and the device is on the build "+
+			"it had: %w", req.TargetVersion, req.Reason, err)
+	}
+	fmt.Fprintf(w, "Carried out the request to move to %s (%s).\n", req.TargetVersion, req.Reason)
+	fmt.Fprintf(w, "Installed from %s (%s channel%s).\n", staged.Tag, staged.Channel, verifiedNote(staged.ProvenanceVerified))
+	printUpgraded(w, res)
+	return nil
 }
 
 // requirePrivilege refuses an install that cannot succeed, rather than failing
@@ -485,12 +645,14 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 }
 
 // printPacketFilter reports the firewall grant: what the upgrade did to it, or,
-// on a device without it, the flag that adds it. Silent for outputs that have
-// no grant to report.
+// on a device without it, the flag that adds it — and then the update channel
+// and the remote-upgrade helper the same way (Task 20376). Silent for outputs
+// that have none of them to report.
 func printPacketFilter(w io.Writer, res install.UpgradeResult) {
 	if res.Output != install.OutputSystemd {
 		return
 	}
+	defer printUpdates(w, res)
 	dim := color.New(color.Faint)
 	switch {
 	case res.PacketFilterChange != "":
@@ -499,6 +661,29 @@ func printPacketFilter(w io.Writer, res install.UpgradeResult) {
 		dim.Fprintf(w, "  firewall: granted (the agent holds CAP_NET_ADMIN for nft(8))\n")
 	default:
 		color.New(color.FgYellow).Fprintf(w, "  firewall: not granted — %s\n", install.PacketFilterHint)
+	}
+}
+
+// printUpdates reports which builds the device accepts and whether the hub can
+// move it, naming what changed.
+func printUpdates(w io.Writer, res install.UpgradeResult) {
+	dim := color.New(color.Faint)
+	for _, line := range res.UnitChanges {
+		if line != res.PacketFilterChange {
+			fmt.Fprintf(w, "  changed: %s\n", line)
+		}
+	}
+	switch res.Channel {
+	case provenance.ChannelEdge:
+		dim.Fprintf(w, "  channel: edge — releases, and signed builds of main that passed CI\n")
+	default:
+		dim.Fprintf(w, "  channel: stable — published releases only\n")
+	}
+	if res.RemoteUpgradeInstalled {
+		dim.Fprintf(w, "  remote upgrade: %s is armed\n", res.Spec.UpgradeHelperPathUnitName())
+	} else {
+		color.New(color.FgYellow).Fprintf(w, "  remote upgrade: not installed — the hub cannot upgrade this "+
+			"device; re-run with --remote-upgrade\n")
 	}
 }
 
@@ -603,6 +788,23 @@ func init() {
 			"back to the previous binary (default 30s)")
 	f.String("root", "",
 		"stage the files beneath this directory instead of installing them, for image builds")
+	f.String("to", "",
+		"with --upgrade, fetch this published build from cloop's repository, verify its signature and "+
+			"install it, instead of installing the running binary: a release tag, \"latest\", or — on a "+
+			"device on the edge channel — edge:<commit>")
+	f.String("channel", "",
+		"the update channel this device follows: stable (published releases) or edge (signed builds of "+
+			"main as well, so the hub can move it to its own build). A drop-in beside the unit that the "+
+			"hub cannot change. With --upgrade it acts only when passed; edge also installs the "+
+			"remote-upgrade helper. systemd output only")
+	f.Bool("remote-upgrade", true,
+		"install the root helper that carries out an upgrade the hub asks for (the agent itself runs "+
+			"unprivileged and cannot replace its own binary). =false withholds it, and the hub's Upgrade "+
+			"button is then refused by the device. With --upgrade it acts only when passed. systemd "+
+			"output only")
+	f.Bool("apply-request", false,
+		"with --upgrade, carry out the upgrade request the agent filed; what the helper unit runs")
+	_ = f.MarkHidden("apply-request")
 	f.Bool("packet-filter", true,
 		"grant the agent CAP_NET_ADMIN and netlink sockets, in a drop-in beside the unit, so it can "+
 			"install sandboxes' IP firewalls with nft(8) — nothing the agent starts receives the "+

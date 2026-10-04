@@ -150,7 +150,14 @@ func AgentUpgradePath(have, need int) string {
 	} else {
 		b.WriteString(",")
 	}
-	b.WriteString(" and the Executors panel's Upgrade button and auto-update install published releases only.")
+	if h.commit != "" {
+		// Task 20376: the hub's own build is installable, signed, on a device
+		// that follows the edge channel.
+		b.WriteString(" and the Executors panel's Upgrade button and auto-update install published releases, " +
+			"and this hub's own build only on a device that follows the edge channel.")
+	} else {
+		b.WriteString(" and the Executors panel's Upgrade button and auto-update install published releases only.")
+	}
 	if known && need > 0 && need <= newest.Protocol && have >= MinRemoteUpgradeVersion {
 		fmt.Fprintf(&b, " Pressing Upgrade on the device's row with %s as the target raises it to v%d; to "+
 			"bring it level with the hub instead, %s", newest.Tag, newest.Protocol, h.buildSteps())
@@ -190,8 +197,9 @@ func ProtocolDrop(subject string, have int, target string, targetProtocol int) s
 	target = strings.TrimSpace(target)
 	h := hubFacts()
 	ownRelease := h.release && sameTag(target, h.version)
+	edge := version.IsEdgeTarget(target)
 	speaks := fmt.Sprintf("speaks v%d", targetProtocol)
-	if lo, hi := knownReleaseProtocol(target); !ownRelease && (lo != hi || hi != targetProtocol) {
+	if lo, hi := knownReleaseProtocol(target); !ownRelease && !edge && (lo != hi || hi != targetProtocol) {
 		speaks = fmt.Sprintf("speaks at most v%d", targetProtocol)
 	}
 	lost := fmt.Sprintf("v%d", have)
@@ -204,6 +212,13 @@ func ProtocolDrop(subject string, have int, target string, targetProtocol int) s
 	if ownRelease {
 		return first + " " + target + " is this hub's own release, so the device is ahead of the hub: " +
 			"upgrade the hub rather than move the device back."
+	}
+	if edge {
+		// An edge build's protocol is exact — its signed manifest says it —
+		// and a device ahead of a build of main is ahead of the hub that
+		// offered it (Task 20376).
+		return first + " The device is ahead of that build of main: move the hub forward rather than the " +
+			"device back."
 	}
 	return first + " " + AgentUpgradePath(have, 0)
 }
@@ -221,6 +236,12 @@ func UnpublishedTarget(subject, target string, have int) string {
 	}
 	target = strings.TrimSpace(target)
 	h := hubFacts()
+	if !h.release && target == h.version && h.commit != "" {
+		return fmt.Sprintf("%s is this hub's own unreleased build, not a release tag: a device asked to upgrade "+
+			"installs a published, signed release — or, on the edge channel, this hub's signed build as %s — "+
+			"so %s cannot be sent it under that name. To put the hub's build on the device, %s",
+			target, version.EdgeTarget(h.commit), subject, h.buildSteps())
+	}
 	if !h.release && target == h.version {
 		return fmt.Sprintf("%s is this hub's own unreleased build, not a release tag: a device asked to upgrade "+
 			"installs a published, signed release and nothing else, so %s cannot be sent it. To put the hub's "+
@@ -309,6 +330,10 @@ type hubBuildFacts struct {
 	release bool
 	// source completes "build cloop ___" for an unreleased hub.
 	source string
+	// commit is the clean commit an unreleased hub was built from, which CI
+	// may have published on the edge channel; empty for a release, a dirty
+	// tree or a build with no VCS data, none of which an edge build matches.
+	commit string
 }
 
 func hubFacts() hubBuildFacts {
@@ -319,6 +344,7 @@ func hubFacts() hubBuildFacts {
 	h := hubBuildFacts{version: v, release: version.IsRelease(v)}
 	if !h.release {
 		h.source = buildSource(v)
+		h.commit, _ = version.CommitOf(v)
 	}
 	return h
 }
@@ -359,10 +385,22 @@ func isHexRevision(s string) bool {
 // built by hand has no signature and cannot have one; the packet-filter note
 // because a plain --upgrade neither adds nor removes the drop-in that lets the
 // agent install sandbox firewalls, and an operator should not have to wonder.
+//
+// Since Task 20376 a hub built from a clean commit names the signed path
+// first: CI publishes that commit on the edge channel, and a device that
+// follows it is moved there by the Upgrade button. The hand-built binary stays
+// as the fallback, for a device whose operator has not opted in.
 func (h hubBuildFacts) buildSteps() string {
-	return fmt.Sprintf("build cloop %s as a static binary (`%s`), copy it to the device and run `sudo ./%s "+
+	manual := fmt.Sprintf("build cloop %s as a static binary (`%s`), copy it to the device and run `sudo ./%s "+
 		"--insecure-skip-verify` there (a binary built by hand carries no signed provenance); a plain --upgrade "+
 		"keeps the device's packet-filter grant as it is.", h.source, staticBuildCommand, AgentUpgradeProcedure)
+	if h.commit == "" {
+		return manual
+	}
+	return fmt.Sprintf("put the device on the edge channel (`%s` on it, once — a cloop older than the channel "+
+		"first needs one edge build installed by hand) and press Upgrade on its row in the Executors panel: it "+
+		"installs this hub's own build, %s, signed by CI, once CI has published it. Or %s",
+		EdgeOptIn, h.commit, manual)
 }
 
 // releaseSteps is the manual path to a published release, for a device too old

@@ -40,6 +40,15 @@ func connectAt(t *testing.T, ex *remote.Executor, protocol int, build string) fu
 func connectAnswering(t *testing.T, ex *remote.Executor, protocol int, build string,
 	answer func(conn remote.Conn, f remote.Frame)) func() {
 	t.Helper()
+	return connectAnsweringCaps(t, ex, protocol, build, remote.AgentCapabilities{}, answer)
+}
+
+// connectAnsweringCaps is connectAnswering with more of the hello's
+// capabilities set — the update channel, say (Task 20376).
+func connectAnsweringCaps(t *testing.T, ex *remote.Executor, protocol int, build string,
+	caps remote.AgentCapabilities, answer func(conn remote.Conn, f remote.Frame)) func() {
+	t.Helper()
+	caps.OS, caps.Arch, caps.CPUs = "linux", "amd64", 2
 	hubSide, agentSide := remote.NewPipe(16)
 	type accepted struct {
 		sess *remote.Session
@@ -58,7 +67,7 @@ func connectAnswering(t *testing.T, ex *remote.Executor, protocol int, build str
 		AgentID:         ex.ID(),
 		Name:            ex.Name(),
 		AgentVersion:    build,
-		Capabilities:    remote.AgentCapabilities{OS: "linux", Arch: "amd64", CPUs: 2},
+		Capabilities:    caps,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +138,7 @@ func TestAnnotateInventorySurfacesEveryAdvertisedField(t *testing.T) {
 	inv := fullInventory()
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	if view.Inventory == nil {
 		t.Fatal("Inventory is nil; the device's advertisement was not surfaced at all")
@@ -176,7 +185,7 @@ func TestAnnotateInventorySkewedBuild(t *testing.T) {
 	inv.AgentVersion = "v0.1.0" // two minor releases behind
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	if view.VersionSkew == nil {
 		t.Fatal("VersionSkew is nil for a device on an older build")
@@ -212,7 +221,7 @@ func TestAnnotateInventoryPatchDriftIsNotMaterial(t *testing.T) {
 	inv.AgentVersion = "v0.1.1"
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	if view.VersionSkew == nil {
 		t.Fatal("VersionSkew is nil")
@@ -235,7 +244,7 @@ func TestAnnotateInventoryLegacyPlaceholder(t *testing.T) {
 	inv.AgentVersion = version.LegacyAgentVersion
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	if view.VersionSkew == nil {
 		t.Fatal("VersionSkew is nil")
@@ -263,7 +272,7 @@ func TestAnnotateInventoryUnreportedVersion(t *testing.T) {
 	inv.AgentVersion = ""
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	if view.VersionSkew == nil || view.VersionSkew.Skew != string(version.SkewUnknown) {
 		t.Fatalf("skew = %+v, want %q", view.VersionSkew, version.SkewUnknown)
@@ -285,7 +294,7 @@ func TestAnnotateInventoryUniformFleetIsSilent(t *testing.T) {
 	withHubVersion(t, "v0.1.0")
 
 	var view executorView
-	annotateInventory(&view, remoteRow(fullInventory()), nil)
+	annotateInventory(context.Background(), &view, remoteRow(fullInventory()), nil)
 
 	if view.VersionSkew == nil {
 		t.Fatal("VersionSkew is nil for a device on the hub's own build")
@@ -312,7 +321,7 @@ func TestAnnotateInventorySkipsNonDeviceBackends(t *testing.T) {
 		row.Kind = kind
 
 		var view executorView
-		annotateInventory(&view, row, nil)
+		annotateInventory(context.Background(), &view, row, nil)
 
 		if view.Inventory != nil {
 			t.Errorf("%s: rendered a device inventory for a non-device backend", kind)
@@ -332,7 +341,7 @@ func TestExecutorViewInventoryWireShape(t *testing.T) {
 	inv.AgentVersion = "v0.1.0"
 
 	var view executorView
-	annotateInventory(&view, remoteRow(inv), nil)
+	annotateInventory(context.Background(), &view, remoteRow(inv), nil)
 
 	encoded, err := json.Marshal(view)
 	if err != nil {
@@ -473,7 +482,7 @@ func TestAnnotateInventoryUnreleasedHubSkew(t *testing.T) {
 	defer conn()
 
 	var view executorView
-	annotateInventory(&view, remoteRow(statedb.ExecutorInventory{AgentVersion: "dev+g47e68a9"}), ex)
+	annotateInventory(context.Background(), &view, remoteRow(statedb.ExecutorInventory{AgentVersion: "dev+g47e68a9"}), ex)
 
 	sv := view.VersionSkew
 	if sv == nil {
@@ -523,7 +532,7 @@ func TestAnnotateInventoryReleasedHubOffersItsOwnRelease(t *testing.T) {
 	defer conn()
 
 	var view executorView
-	annotateInventory(&view, remoteRow(statedb.ExecutorInventory{AgentVersion: "v0.2.0"}), ex)
+	annotateInventory(context.Background(), &view, remoteRow(statedb.ExecutorInventory{AgentVersion: "v0.2.0"}), ex)
 	if view.UpgradeTarget != "v0.3.0" {
 		t.Errorf("upgrade_target = %q, want the hub's own release v0.3.0", view.UpgradeTarget)
 	}

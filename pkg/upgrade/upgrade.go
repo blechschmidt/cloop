@@ -296,8 +296,17 @@ type Options struct {
 	// replace one replaces the other.
 	SkipVerify bool
 
-	// Verifier overrides the provenance verifier. Tests set it.
+	// Verifier overrides the provenance verifier. Tests set it. An edge build
+	// is verified with Verifier.ForChannel(provenance.ChannelEdge), so the
+	// release identity configured here never vouches for one.
 	Verifier *provenance.Verifier
+
+	// EdgeBaseURL overrides where edge assets are downloaded from, for tests
+	// and for a site that mirrors the edge release. Every asset is still
+	// verified against the edge identity, so a mirror can withhold builds but
+	// not substitute them. Set only in-process: nothing that crosses the wire
+	// reaches Options (pkg/executor/remote/upgradeproto.go).
+	EdgeBaseURL string
 }
 
 // verifyArchiveProvenance proves archiveData came from cloop's release

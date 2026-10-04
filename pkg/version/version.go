@@ -275,6 +275,11 @@ func Classify(hub, agent string) (Skew, string) {
 	if hub != "" && agent == hub {
 		return SkewNone, ""
 	}
+	// Two dev builds of one commit, abbreviated differently: the hub's deploy
+	// stamps `git log --format=%h`, an edge build seven digits (Task 20376).
+	if SameCommit(hub, agent) {
+		return SkewNone, ""
+	}
 
 	cmp, ok := Compare(agent, hub)
 	if !ok {
