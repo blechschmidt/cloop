@@ -32,16 +32,33 @@ historically grown subtle data races.
 
 ### Keeping the suite fast
 
-`pkg/ui` is the largest package and the one closest to CI's timeout, so it is
-worth knowing why it is not slower than it is. Two things dominate, and both
-have a fix already in place that new tests should reuse:
+CI's race step is the slowest job, and its wall clock is set by the longest
+packages (`pkg/ui`, `pkg/orchestrator`, `pkg/statedb`, `tests/security`).
+`go test` starts packages in the order they are named, so the step (and
+`make test-unit`) names them through `scripts/race-packages.sh`, longest first;
+a package that grows into the minutes belongs in its `slow` list. A few costs
+dominate, and each has a fix already in place that new tests should reuse:
 
-- **Creating a project database.** `statedb.Open` applies 29 migrations to a
-  new database, which costs ~457ms under `-race` because `modernc.org/sqlite`
-  is pure Go and the detector instruments all of it. Test helpers call
-  `seedMigratedDB(t, dir)` (see `pkg/ui/dbtemplate_test.go`) to drop a
-  pre-migrated database into the directory first, so `Open` finds nothing left
-  to apply. A new helper that creates a project directory should do the same.
+- **Creating a project database.** `statedb.Open` applies every migration in
+  `pkg/statedb/migrations` to a new database, which costs ~1.5 s under `-race`
+  because `modernc.org/sqlite` is pure Go, the detector instruments all of it,
+  and each `ALTER TABLE … ADD COLUMN` re-parses the whole schema. A test that
+  needs a project or a database and is not about how one comes to exist uses
+  `internal/statedbtest` instead: `statedbtest.Dir(t)` for a project
+  directory, `statedbtest.SeedDir(t, dir)` before `state.Init` on one you
+  already have, `statedbtest.Open(t)` for a `*statedb.DB`. They copy a
+  database migrated once per test binary, so `Open` finds nothing left to
+  apply. Tests of migrations, schema adoption, version skew or first-open races
+  must still build from scratch. `pkg/statedb`'s in-package tests use
+  `openFresh` / `freshPath` / `freshDir` (template_test.go) instead, since a
+  package's own tests cannot import a package that imports it.
+- **Browser drivers.** A `testdata/*_browser.js` driver must clear each CDP
+  command's timeout when the reply arrives and call `process.exit` on success;
+  a timer left armed holds node — and the Go test waiting on it — up to 20 s
+  after the work is done. `TestBrowserDriversReleaseNodeWhenDone` enforces it.
+- **Loading the module for static analysis.** `tests/security` type-checks the
+  whole module once per binary (`loadModule`); a new structural check reads
+  that load rather than calling `packages.Load` again (~30 s under `-race`).
 - **Scanning the dashboard bundle.** Static-analysis tests that walk
   `dashboardSource` run over ~13k lines. Narrow the lines once before looping
   over routes rather than running a regex per (route × line).

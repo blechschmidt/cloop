@@ -231,9 +231,20 @@ jobs:
         # after every ADD COLUMN: under -race that costs +0.46 s (1.0 s to
         # 1.47 s) for every database a test creates from scratch, which took
         # pkg/ui past 20m and pkg/orchestrator to ~18. Production pays ~17 ms
-        # once per new project. pkg/ui/dbtemplate_test.go is how a package
-        # takes that cost back out of its own tests.
-        run: go test -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
+        # once per new project. internal/statedbtest is how a test takes that
+        # cost back out: it copies a database migrated once per test binary.
+        #
+        # The packages come from scripts/race-packages.sh, which is go list's
+        # set in a different order: the few packages that take minutes first.
+        # go test starts packages in the order they are named, so in go list's
+        # alphabetical order pkg/ui and pkg/orchestrator started last and this
+        # step waited on them alone (Task 20372). Assigned first, so that a
+        # failing script fails the step instead of leaving go test an empty
+        # list, which would test the root package and pass.
+        run: |
+          pkgs=$(./scripts/race-packages.sh)
+          # shellcheck disable=SC2086 # one word per package, on purpose
+          go test -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $pkgs
 
       - name: End-to-end integration tests
         run: |

@@ -52,10 +52,12 @@ icons:
 ## test: run all tests (unit + e2e)
 test: test-unit test-e2e
 
-## test-unit: run unit tests with race detector and coverage
+## test-unit: run unit tests with race detector and coverage, the packages
+##            CI's race step tests in the order it tests them (longest first;
+##            see scripts/race-packages.sh)
 test-unit:
-	$(GO) test -race -coverprofile=coverage.out -covermode=atomic \
-		$(shell $(GO) list ./... | grep -v 'tests/e2e')
+	pkgs=$$(GO=$(GO) ./scripts/race-packages.sh) && \
+		$(GO) test -race -coverprofile=coverage.out -covermode=atomic $$pkgs
 
 ## test-e2e: run end-to-end integration tests against the built binary
 test-e2e: build
