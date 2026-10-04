@@ -123,6 +123,10 @@ func bootstrapExecutors(dir string, port int) {
 	// point: a broker built before it exists would deliver an unmonitored
 	// kubeconfig. See kubeguard.go.
 	ensureKubeGuard(cfg, dir)
+	// The egress proxy (Task 20378), before anything can dispatch: a run that
+	// starts before it is bound would be told the hub hosts none. Every
+	// cluster member binds its own; see egressproxy.go.
+	ensureEgressProxy(cfg, dir, port)
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
 	// driver in through the door the policy exists to close. (The eviction
@@ -490,6 +494,25 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		return nil, executor.Handle{}, err
 	}
 
+	// The run's egress session on the hub's proxy, when its project holds a
+	// grant (Task 20378). After the sandbox and the firewall, which decide
+	// whether there is a network to reach the proxy over and what a route to
+	// it has to get through; the driver opens the route in the very ruleset
+	// the firewall step composed.
+	spec, egress, err := applyEgressSession(spec, ex, workDir, sandboxSpec, egressRun{runID: runID, identity: identity})
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+	// Every return below that does not start the workload gives the session
+	// back; one that does hands it to the watcher.
+	egressHandedOff := false
+	defer func() {
+		if !egressHandedOff {
+			egress.close("the run did not start")
+		}
+	}()
+
 	// Then the source tree — after the sandbox, never before. The sandbox is
 	// what sets Workspace.SizeLimitMB (from resources.disk) and what refuses a
 	// spec the executor cannot honour; applyWorkspace fills in the rest and
@@ -543,7 +566,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		auditImageDenial(workDir, err)
 		return nil, executor.Handle{}, err
 	}
-	go wipeLeaseOnExit(ex, handle.ID, lease)
+	egress.bindHandle(ex, handle.ID)
+	egressHandedOff = true
+	go wipeLeaseOnExit(ex, handle.ID, lease, egress)
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
 	if len(spec.ProjectSeed) > 0 {
 		// The project went out as a copy, so its outcome has to come back:
@@ -572,7 +597,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	return ex, handle, nil
 }
 
-// wipeLeaseOnExit closes a lease once its workload reaches a terminal state.
+// wipeLeaseOnExit closes a lease once its workload reaches a terminal state,
+// and the run's egress session with it (Task 20378).
 //
 // Streaming is the signal rather than polling Status: the driver closes the
 // output channel when the workload is finished and its output drained, which
@@ -580,11 +606,14 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 // cannot stream falls back to polling, and either way the wipe is bounded by
 // maxLeaseWatch so a lost workload cannot strand a credential directory for
 // the lifetime of the server.
-func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease) {
+func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease, egress *runEgress) {
 	defer recoverGoroutine("secret lease wipe: " + handleID)
-	if lease == nil {
+	if lease == nil && egress == nil {
 		return
 	}
+	// The session goes with the workload, like the credentials: a run that
+	// is over has no business reaching anything. Both are nil-safe.
+	defer egress.close("the run ended")
 	defer lease.Close()
 
 	// The lease is kept alive while this goroutine watches the workload
@@ -602,6 +631,12 @@ func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease) 
 		return !st.State.Terminal()
 	})
 
+	watchWorkloadExit(ex, handleID)
+}
+
+// watchWorkloadExit returns once the workload with handleID reaches a
+// terminal state, or after maxLeaseWatch, whichever is first.
+func watchWorkloadExit(ex executor.Executor, handleID string) {
 	const maxLeaseWatch = 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), maxLeaseWatch)
 	defer cancel()
@@ -680,7 +715,8 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// run id still exists so the lease rows are attributable, even though no
 	// task.dispatch will reference it: these are helper subcommands
 	// (`cloop suggest`, `cloop do`), not task executions.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, artifact.NewRunID())
+	runID := artifact.NewRunID()
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID)
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)
@@ -712,7 +748,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if err != nil {
 		return nil, err
 	}
-	spec, _, err = applySandbox(spec, ex, workDir)
+	spec, sandboxSpec, err := applySandbox(spec, ex, workDir)
 	if err != nil {
 		auditImageDenial(workDir, err)
 		return nil, err
@@ -720,6 +756,14 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if spec, err = applyFirewall(spec, ex, workDir); err != nil {
 		return nil, err
 	}
+	// The same egress session a run gets (Task 20378): a helper subcommand
+	// on a sandbox whose only way out is the proxy needs it as much. The call
+	// is synchronous, so the session's life is the call's.
+	spec, egress, err := applyEgressSession(spec, ex, workDir, sandboxSpec, egressRun{runID: runID})
+	if err != nil {
+		return nil, err
+	}
+	defer egress.close("the subcommand finished")
 	// Same order and the same reasons as startWorkload, and deliberately not
 	// exempted for being a "short helper subcommand". Every caller of this
 	// function reads or writes the project: `cloop do`, `cloop suggest`,

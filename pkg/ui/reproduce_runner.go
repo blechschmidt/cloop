@@ -170,7 +170,8 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	// not the original's: it holds its own leases, and filing them under the run
 	// being reproduced would put credentials the original never held into that
 	// run's trail (Task 20282).
-	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, artifact.NewRunID())
+	runID := artifact.NewRunID()
+	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, runID)
 	defer lease.Close()
 
 	base := uiSpec(rs.ProjectDir, rs.Argv, map[string]string{
@@ -197,12 +198,20 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	if spec, err = applyInterfaceGrants(spec, ex, lease); err != nil {
 		return nil, err
 	}
-	if spec, _, err = applySandbox(spec, ex, rs.ProjectDir); err != nil {
+	spec, sandboxSpec, err := applySandbox(spec, ex, rs.ProjectDir)
+	if err != nil {
 		return nil, err
 	}
 	if spec, err = applyFirewall(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}
+	// The project's egress, as its own runs get it (Task 20378), for the
+	// length of the reproduction.
+	spec, egress, err := applyEgressSession(spec, ex, rs.ProjectDir, sandboxSpec, egressRun{runID: runID})
+	if err != nil {
+		return nil, err
+	}
+	defer egress.close("the reproduction finished")
 	if spec, err = applyWorkspace(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}

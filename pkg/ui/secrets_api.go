@@ -376,8 +376,17 @@ func openBrokersAt(controlPlaneWorkDir string) (*brokerSet, error) {
 		bs.status.Reason, bs.status.Remediation = brokerUnavailableReason(serr)
 	}
 
-	if estore, eerr := secretstore.NewEgressStore(db); eerr == nil {
-		if ebroker, berr := egressbroker.New(estore, egressbroker.WithAuditor(auditor)); berr == nil {
+	// The hub's own broker when it hosts the egress proxy (Task 20378): the
+	// live sessions are in that broker and nowhere else, so a revocation made
+	// through any other could stamp the grant and leave its tunnels open until
+	// the next keepalive noticed. Otherwise one built here, with the same
+	// configuration the hosted one would have.
+	if hosted := hostedEgressBroker(controlPlaneWorkDir); hosted != nil {
+		bs.egress = hosted
+		bs.status.EgressAvailable = true
+	} else if estore, eerr := secretstore.NewEgressStore(db); eerr == nil {
+		cfg, _ := controlPlaneConfig()
+		if ebroker, berr := egressbroker.New(estore, egressBrokerOptions(auditor, cfg, "")...); berr == nil {
 			bs.egress = ebroker
 			bs.status.EgressAvailable = true
 		}

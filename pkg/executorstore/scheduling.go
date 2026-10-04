@@ -32,6 +32,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -346,8 +347,14 @@ const redactedEnvValue = "<redacted:leased>"
 // copy would hand the replacement executor a credential the broker already
 // considers dead. A run that needs it fails loudly and is re-leased on the next
 // start.
+//
+// The variables the environment itself declares sensitive (redact.EnvKey) are
+// removed too. That is how an egress proxy session's URL, which carries the
+// session's token, stays out of the table (Task 20378): it is not a lease
+// binding, and a failover that re-dispatched it would hand the replacement a
+// session the hub closed with the original.
 func redactLeasedEnv(spec executor.Spec) executor.Spec {
-	if len(spec.Env) == 0 || len(spec.Secrets) == 0 {
+	if len(spec.Env) == 0 {
 		return spec
 	}
 	leased := make(map[string]struct{})
@@ -355,6 +362,15 @@ func redactLeasedEnv(spec executor.Spec) executor.Spec {
 		for _, k := range b.EnvKeys {
 			if k = strings.TrimSpace(k); k != "" {
 				leased[k] = struct{}{}
+			}
+		}
+	}
+	for _, kv := range spec.Env {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == redact.EnvKey {
+			for _, k := range strings.Split(value, ",") {
+				if k = strings.TrimSpace(k); k != "" {
+					leased[k] = struct{}{}
+				}
 			}
 		}
 	}

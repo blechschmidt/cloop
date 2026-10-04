@@ -263,6 +263,11 @@ func deadRunPauseReason(v runVerdict) pausereason.Reason {
 // projectExecuting whether anything is still running the project, and a flag
 // left standing would answer yes about the very run being settled.
 func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string) {
+	// The run's egress session ends with it (Task 20378). The exit watcher
+	// closes it too; this is the same close from the path every settled run
+	// takes, including one adopted from another hub member, whose watcher —
+	// and whose session — were on the member that dispatched it.
+	closeRunEgress(handleID, "the run ended")
 	// First: a run on an executor that does not share this filesystem kept
 	// its outcomes in its own copy of the project, and everything below reads
 	// this hub's. Merging it before recovery means a task the run left in

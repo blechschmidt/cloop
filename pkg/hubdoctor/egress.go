@@ -16,18 +16,33 @@ package hubdoctor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"os"
+	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // checkEgressBroker reports whether the brokered Internet path is usable.
-func checkEgressBroker(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
+func checkEgressBroker(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn) {
 	e := cfg.Executors.Egress
 
 	if !e.Enabled {
+		// A hub whose per-instance overlay enables the proxy still reports it
+		// here when this run read a configuration without that overlay: what
+		// the running hubs did outranks what this file says they would do.
+		checkEgressHosting(dir, add, false)
 		// Not a defect on its own — most deployments do not lease the hub's
 		// connection — but it is one when a sandbox has been confined to an
 		// internal network, because then the broker was its only way out and
@@ -54,6 +69,11 @@ func checkEgressBroker(ctx context.Context, cfg *config.Config, opts Options, ad
 		})
 		return
 	}
+
+	// What the running hubs did with the section — the one thing the file
+	// cannot say. A proxy that would not bind leaves the configuration valid
+	// and every run that needs it refused.
+	checkEgressHosting(dir, add, true)
 
 	adv := strings.TrimSpace(e.AdvertiseAddr)
 	switch {
@@ -120,4 +140,122 @@ func isLoopbackHostPort(addr string) bool {
 		return ip.IsLoopback() || ip.IsUnspecified()
 	}
 	return false
+}
+
+// checkEgressHosting reports where each running hub's egress proxy listens,
+// or why it does not, from the status every hub records when it starts the
+// proxy (Task 20378): "listening on X, advertised as Y", or the bind failure.
+//
+// Read through a read-only handle, like `cloop hub cluster status`: a doctor
+// must never migrate a live hub's database by looking at it. A row whose hub
+// process is gone — on this machine, by its pid; in a cluster, by its
+// membership — is skipped: it describes a proxy nobody is serving.
+//
+// required says the configuration enables the proxy, so finding none running
+// is worth a warning; otherwise only the hubs that do host one are reported.
+func checkEgressHosting(dir string, add addFn, required bool) {
+	const check, title = "egress.hosted", "Egress proxy"
+	path := state.DBPath(dir)
+	if _, err := os.Stat(path); err != nil {
+		if !required {
+			return
+		}
+		add(Finding{
+			Check: check, Title: title, Severity: SeverityWarn,
+			Message:     "there is no control-plane database yet, so no hub has started the proxy here",
+			Remediation: "Start the hub; it binds executors.egress.listen_addr at startup and records the result",
+		})
+		return
+	}
+	members, rows, err := statedb.PeekHubCluster(path, egressbroker.HostedStatusKind)
+	if err != nil {
+		if !required {
+			return
+		}
+		add(Finding{
+			Check: check, Title: title, Severity: SeverityWarn,
+			Message:     fmt.Sprintf("the hubs' egress proxy status could not be read: %v", err),
+			Remediation: "Run `cloop db verify` on the control plane, and check the hub's log for the proxy",
+		})
+		return
+	}
+	self := hublease.LocalIdentity()
+	now := time.Now()
+	alive := map[string]bool{}
+	for _, m := range members {
+		alive[m.InstanceID] = hubcluster.RowAlive(m, now)
+	}
+	type hosted struct {
+		key string
+		st  egressbroker.HostedStatus
+	}
+	var live []hosted
+	for _, r := range rows {
+		var st egressbroker.HostedStatus
+		if json.Unmarshal([]byte(r.Meta), &st) != nil {
+			continue
+		}
+		if up, member := alive[r.InstanceID]; member && !up {
+			continue
+		}
+		if st.Hostname != "" && st.Hostname == self.Hostname && hublease.SameBoot(st.BootID, self.BootID) &&
+			!pidAlive(st.PID) {
+			continue
+		}
+		live = append(live, hosted{key: r.Key, st: st})
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].key < live[j].key })
+	if len(live) == 0 {
+		if !required {
+			return
+		}
+		add(Finding{
+			Check: check, Title: title, Severity: SeverityWarn,
+			Message: "executors.egress is enabled, but no running hub has reported hosting the proxy — " +
+				"the hub is stopped, or runs a build that predates hosting it",
+			Remediation: "Start the hub (or upgrade it and restart); it binds executors.egress.listen_addr " +
+				"at startup and records where it listens",
+		})
+		return
+	}
+	for _, h := range live {
+		who := hostedBy(h.key, h.st)
+		if h.st.Error != "" {
+			add(Finding{
+				Check: check, Title: title, Severity: SeverityFail,
+				Message: fmt.Sprintf("%s could not start its egress proxy: %s — runs whose %s names an egress "+
+					"grant are refused, and the rest get no proxy session", who, h.st.Error, ".cloop/sandbox.yaml"),
+				Remediation: "Fix executors.egress — listen_addr must be free and bindable by the hub — and restart " +
+					"that hub",
+				Details: map[string]any{"hub": h.key, "error": h.st.Error},
+			})
+			continue
+		}
+		add(Finding{
+			Check: check, Title: title, Severity: SeverityPass,
+			Message: fmt.Sprintf("%s: listening on %s, advertised as %s", who, h.st.Listening, h.st.Advertised),
+			Details: map[string]any{"hub": h.key, "listening": h.st.Listening, "advertised": h.st.Advertised},
+		})
+	}
+}
+
+// hostedBy names the hub a status row came from, for a sentence.
+func hostedBy(key string, st egressbroker.HostedStatus) string {
+	switch {
+	case st.HubPort > 0 && st.Hostname != "":
+		return fmt.Sprintf("the hub on %s port %d", st.Hostname, st.HubPort)
+	case st.Hostname != "":
+		return "the hub on " + st.Hostname
+	}
+	return "hub " + key
+}
+
+// pidAlive reports whether pid names a live process on this machine. EPERM
+// is a process that exists under another account, so it counts as alive.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

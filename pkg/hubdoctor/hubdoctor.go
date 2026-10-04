@@ -394,7 +394,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkGitProxy(ctx, cfg, opts, add)
 	checkBranchRestrictedGrants(dir, cfg, add)
 	checkKubeGuard(ctx, cfg, opts, add)
-	checkEgressBroker(ctx, cfg, opts, add)
+	checkEgressBroker(ctx, dir, cfg, opts, add)
 	checkStorage(dir, add)
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)

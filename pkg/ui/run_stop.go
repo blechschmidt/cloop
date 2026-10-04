@@ -87,6 +87,10 @@ func (s *Server) interruptRun(workDir string) stopDelivery {
 				// So that settling it counts a cancellation: an interrupted
 				// run pauses and exits zero, which alone reads as finished.
 				s.noteStopRequested(workDir, run.handleID)
+				// A stopped run's way out closes now, open tunnels and all,
+				// rather than when it finishes winding down: pausing writes
+				// the project's state, which needs no network (Task 20378).
+				closeRunEgress(run.handleID, "the run was stopped")
 				if statusErr == nil && run.ex.Kind() == executor.KindLocalProcess {
 					reached = st.PID
 				}

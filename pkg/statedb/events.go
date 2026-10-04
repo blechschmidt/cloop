@@ -160,6 +160,19 @@ const (
 	// token, a grant revoked, an installation suspended — is on the hub where
 	// they cannot see it.
 	EventCredentialRefresh EventType = "credential_refresh"
+
+	// EventEgress records what became of a run's access to the hub's egress
+	// proxy (Task 20378): the session it was issued and the route to it, why
+	// a project holding an egress grant got none, and when a session ended —
+	// the run over, stopped, or its grant revoked with tunnels still open.
+	//
+	// On the project's journal for the reason the firewall row is: a sandbox
+	// whose every request through the proxy fails looks like a broken
+	// network, and the reasons — no proxy on the hub, a route the executor
+	// cannot take, a revocation — are on the hub, out of the developer's
+	// sight. It never carries the session's credential: the proxy URL is not
+	// written here, only its address.
+	EventEgress EventType = "egress"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

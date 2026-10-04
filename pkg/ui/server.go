@@ -1427,6 +1427,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
 	activeGitProxy().Close()
+	// The egress proxy the same way (Task 20378): every run's session is
+	// closed and journaled, the listener and every open tunnel go, and the
+	// status row hub doctor reads is cleared. Only the proxy this server's
+	// control plane started; nil-safe when there is none.
+	closeEgressProxy(s.WorkDir)
 	// Same for the CI relay (Task 20278): revoke every federated session so
 	// the audit trail records a close rather than a gap, and stop the reaper
 	// goroutine. A session that outlived the process able to authenticate it

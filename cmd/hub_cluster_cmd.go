@@ -17,6 +17,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -118,6 +119,9 @@ func printHubClusterStatus(dbPath string, asJSON bool) error {
 	for _, o := range owned {
 		if o.Kind == "ccauth" || o.Kind == "session_refresh" || o.Kind == "lock" {
 			continue // identities and transient locks: nothing an operator acts on here
+		}
+		if o.Kind == egressbroker.HostedStatusKind {
+			continue // a member's report of its own egress proxy, not a thing it owns; see `cloop hub doctor`
 		}
 		owners = append(owners, clusterStatusOwner{Kind: o.Kind, Key: o.Key, Member: o.InstanceID, Since: o.ClaimedAt})
 	}

@@ -1742,6 +1742,13 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		writeSandboxDenied(w, "sandbox_grant_denied", grantDenied.Error(), grantDenied.Remediation(), nil)
 		return
 	}
+	// It holds the grant, and the hub cannot serve it to this run: no proxy,
+	// or no route to it from where the run would go (Task 20378).
+	var egressDenied *egressUnservableError
+	if errors.As(err, &egressDenied) {
+		writeSandboxDenied(w, "sandbox_egress_unavailable", egressDenied.Error(), egressDenied.Remediation(), nil)
+		return
+	}
 	// The image the project named is not one this hub will run (Task 20177).
 	// A 409 like the two above — the request is well-formed and what conflicts
 	// is the repo's image with the hub's trust policy — carrying the rule that
