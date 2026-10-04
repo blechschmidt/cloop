@@ -982,6 +982,34 @@ jobs:
             exit 1
           }
 
+      - name: Reach an origin through the hub's egress proxy from a container
+        timeout-minutes: 10 # observed locally: 16s once the image layer is cached
+        env:
+          CLOOP_EGRESS_CONTAINER_E2E: "1"
+          CLOOP_FLAGSHIP_BIN: /tmp/cloop-flagship-bin
+        # Task 20378: a real `cloop ui` hosts the egress proxy, and a run on its
+        # container executor — on an --internal network with no route off the
+        # host — is issued a session at dispatch. The stand-in harness fetches a
+        # local TLS origin the grant names (--cidrs) through HTTPS_PROXY, and is
+        # refused for the same origin at a host address the grant does not name;
+        # both verdicts are audited, `cloop hub doctor` reads where the proxy
+        # listens, and the session's credential is checked absent from the hub's
+        # log, the run's artifacts, the journal and the trail. Its image is the
+        # feature step's pinned base plus git, so the layer is cached. The same
+        # PASS-line assertion, for the same reason: the test skips without
+        # docker, and without a second host address to be refused at.
+        run: |
+          set -euo pipefail
+          # tests/e2e runs the hub from ./cloop; the static build serves.
+          cp /tmp/cloop-flagship-bin ./cloop
+          go test ./tests/e2e/ -run '^TestE2EEgressProxyInAContainer$' -v -count=1 -timeout 8m \
+            2>&1 | tee /tmp/egress-container.log
+          grep -qE '^--- PASS: TestE2EEgressProxyInAContainer \(' /tmp/egress-container.log || {
+            echo "::error::go test succeeded but TestE2EEgressProxyInAContainer did not pass — it was" \
+                 "skipped (docker unavailable, no second host address, or CLOOP_EGRESS_CONTAINER_E2E lost)."
+            exit 1
+          }
+
       - name: Refresh a GitHub App token in a container
         timeout-minutes: 5 # observed locally: 2s once the image layer is cached
         env:
