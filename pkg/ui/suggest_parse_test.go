@@ -54,6 +54,12 @@ func runSuggest(t *testing.T, dir, stub string) map[string]interface{} {
 
 	srv := New(dir, 0, "")
 	srv.SelfExe = stub
+	// The loop below polls every 10 ms. The default per-IP budget (20/s, burst
+	// 50) lasts about half a second of that, so a job that takes longer — any
+	// spawn on a busy race-step runner — turned into HTTP 429 instead of a
+	// result. The limiter is not under test; suggest_plan_test.go lifts it the
+	// same way.
+	srv.RPS, srv.Burst = 1e6, 1e6
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
