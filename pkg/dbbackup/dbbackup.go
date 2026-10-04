@@ -40,19 +40,15 @@ package dbbackup
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite" // pure-Go driver
 
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -368,18 +364,15 @@ func LoadMetadata(backupPath string) (*Metadata, error) {
 // validateBackup opens the backup with a read-only handle and runs
 // PRAGMA integrity_check. We deliberately do NOT use statedb.Open here,
 // which would trigger a Migrate write — destructive on a backup the
-// operator has not yet decided to restore.
+// operator has not yet decided to restore. The read-only handle is the
+// connection policy's (statedb.OpenConn), which also waits out a lock
+// instead of failing on it.
 func validateBackup(path string) error {
-	dsn := fmt.Sprintf("file:%s?mode=ro", url.PathEscape(path))
-	conn, err := sql.Open("sqlite", dsn)
+	conn, err := statedb.OpenConn(path, statedb.ReadOnly)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
 	defer conn.Close()
-	conn.SetMaxOpenConns(1)
-	if err := conn.Ping(); err != nil {
-		return fmt.Errorf("ping: %w", err)
-	}
 	rows, err := conn.Query(`PRAGMA integrity_check`)
 	if err != nil {
 		return fmt.Errorf("integrity_check: %w", err)

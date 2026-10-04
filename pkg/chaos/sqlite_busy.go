@@ -56,6 +56,10 @@ func (h *BusyHolder) Start(ctx context.Context) error {
 
 	// Use a generous busy_timeout so the BEGIN IMMEDIATE itself does not
 	// surface SQLITE_BUSY when the database is genuinely contended at start.
+	//
+	// A bare sql.Open, the one tests/arch allows outside pkg/statedb (Task
+	// 20374): this connection exists to hold the lock every other handle's
+	// policy is written to survive, so it is configured for that job alone.
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", h.dbPath)
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {

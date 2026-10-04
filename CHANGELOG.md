@@ -121,6 +121,39 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Three defects every interactive CLI user met.** (1) Every command whose
+  stdout was a terminal asked it for its background colour (OSC 11 and a
+  cursor-position request) in bubbletea's package init and waited up to five
+  seconds for the reply: under a pty nobody answers — expect, `docker` or
+  `kubectl exec -t` from a script, CI with a tty — `cloop status` took 5.05 s
+  instead of 0.03 s and its output began with the query. An init that Go runs
+  first now gives lipgloss the answer; nothing in cloop reads it, and
+  `tests/arch` fails if something starts to. (2) Every project created by
+  current cloop printed "warning: .cloop schema is out of date — run 'cloop
+  migrate'" on every interactive command, because `cloop migrate` kept a
+  version number of its own that the database layer never wrote. It now
+  answers from the database's own migrations and warns only for a legacy
+  `state.json` project or a database from before them, and `cloop migrate`
+  converts and migrates through the database layer instead of its own
+  `CREATE TABLE`/`ALTER TABLE` — whose converted databases could not be opened
+  at all: the database layer adopted them and then failed at migration 0009
+  ("no such table: stuck_tasks"). Such databases are now completed and adopted.
+  (3) `cloop config validate --fix` reset every in-progress task to `pending`
+  with a bare `UPDATE`, even while a run was executing it. It now leaves the
+  plan alone while a run of the project is live — a `cloop run` process in it,
+  or a run claimed in the control plane of a hub on this host, judged by the
+  rule hub members use — and otherwise recovers the tasks the way the hub
+  does: an outcome cloop or the agent had reached (a review gate's rejection,
+  a finished agent's `TASK_DONE`) is kept, anything else goes back to
+  `pending`, a stale running status is paused, all saved through the database
+  layer into the events journal and the audit trail. Every package that opened
+  a cloop database with a bare `sql.Open` (taskqueue, globalbudget, taskreplay,
+  chaos, the read-only handles of `cloop db backup`/`verify`) now opens it
+  under one connection policy: `busy_timeout` on every connection the pool
+  opens — taskqueue's `MarkDone` failed instantly with `SQLITE_BUSY` once the
+  pool replaced the one connection its pragma had reached — foreign keys,
+  `BEGIN IMMEDIATE` for writers, `mode=ro` for readers. A new bare open fails
+  `tests/arch`.
 - **The Upgrade button no longer moves a device backwards, and "upgrade the
   agent" says how.** The Executors panel's Upgrade button and the fleet
   auto-update policy can only make a device install a published, signed

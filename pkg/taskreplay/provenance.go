@@ -294,14 +294,9 @@ func openStateDB(workDir string) (*sql.DB, error) {
 	}
 	db.Close()
 
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadWrite)
 	if err != nil {
 		return nil, fmt.Errorf("open state db conn: %w", err)
-	}
-	conn.SetMaxOpenConns(1)
-	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("busy_timeout: %w", err)
 	}
 	return conn, nil
 }

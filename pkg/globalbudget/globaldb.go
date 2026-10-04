@@ -20,15 +20,16 @@ import (
 	"runtime"
 	"sync"
 
-	_ "modernc.org/sqlite"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const (
 	globalDBFile    = "global.db"
 	globalDBMetaKey = "budget_yaml"
-	globalDBSchema  = `
+	// busy_timeout comes from the connection policy, which applies it to
+	// every connection rather than only the one that runs this (Task 20374).
+	globalDBSchema = `
 PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS metadata (
     key   TEXT PRIMARY KEY,
@@ -62,11 +63,10 @@ func openGlobalDB() (*sql.DB, string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", fmt.Errorf("globalbudget: creating db dir: %w", err)
 	}
-	conn, err := sql.Open("sqlite", path)
+	conn, err := statedb.OpenConn(path, statedb.ReadWrite)
 	if err != nil {
 		return nil, "", fmt.Errorf("globalbudget: open %s: %w", path, err)
 	}
-	conn.SetMaxOpenConns(1)
 	if _, err := conn.Exec(globalDBSchema); err != nil {
 		conn.Close()
 		return nil, "", fmt.Errorf("globalbudget: schema: %w", err)
@@ -111,7 +111,7 @@ func loadFromSQLite() string {
 	if _, err := os.Stat(path); err != nil {
 		return ""
 	}
-	conn, err := sql.Open("sqlite", path)
+	conn, err := statedb.OpenConn(path, statedb.ReadOnly)
 	if err != nil {
 		return ""
 	}

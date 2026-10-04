@@ -5,9 +5,10 @@
 // error, or a partial write) is surfaced before it manifests as a confusing
 // runtime failure deeper in the stack.
 //
-// The package opens its own *sql.DB handle (not statedb.Open) and runs only
-// PRAGMA integrity_check / quick_check / foreign_key_check. We avoid
-// statedb.Open here because:
+// The package opens its own read-only handle — statedb.OpenConn, the
+// connection policy's reader, not statedb.Open — and runs only PRAGMA
+// integrity_check / quick_check / foreign_key_check. We avoid statedb.Open
+// here because:
 //
 //   - statedb.Open executes the CREATE TABLE schema, which would mutate a
 //     freshly-corrupted database during a read-only diagnostic.
@@ -21,10 +22,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // Report summarises the result of an integrity verification run.
@@ -85,20 +85,15 @@ func Verify(dbPath string, quick bool) (*Report, error) {
 		return nil, fmt.Errorf("dbverify: stat %s: %w", dbPath, err)
 	}
 
-	// Open read-only with immutable=0 so we can still see live updates if the
+	// Open read-only, not immutable, so we can still see live updates if the
 	// DB is being written to by another process (e.g. a running cloop ui), but
-	// our handle itself never writes.
-	dsn := fmt.Sprintf("file:%s?mode=ro", url.PathEscape(dbPath))
-	conn, err := sql.Open("sqlite", dsn)
+	// our handle itself never writes. The connection policy's reader
+	// (statedb.OpenConn) also waits out a writer's lock instead of failing.
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadOnly)
 	if err != nil {
 		return nil, fmt.Errorf("dbverify: open %s: %w", dbPath, err)
 	}
 	defer conn.Close()
-	conn.SetMaxOpenConns(1)
-
-	if err := conn.Ping(); err != nil {
-		return nil, fmt.Errorf("dbverify: ping %s: %w", dbPath, err)
-	}
 
 	rep := &Report{DBPath: dbPath, QuickCheck: quick}
 

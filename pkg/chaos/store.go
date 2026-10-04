@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // Run is one row of the chaos_runs table — a single fault injection together
@@ -30,8 +30,12 @@ type Run struct {
 // rather than statedb.DB so chaos can run even when statedb itself is the
 // subject of the fault (for sqlite-busy testing).
 //
-// All operations honour a brief busy_timeout so a fault holder doesn't
-// accidentally wedge the chaos store while testing sqlite-busy contention.
+// The handle is opened under statedb's connection policy (Task 20374): a lock
+// is not what the store is for, so it waits one out like every other writer.
+// Its own writes never meet its own fault — the suite and the CLI insert a
+// run's row before the sqlite-busy holder takes the lock and finalise it after
+// the holder has let go. The holder itself (sqlite_busy.go) opens bare,
+// because there the lock is the point.
 type Store struct {
 	db     *sql.DB
 	dbPath string
@@ -48,15 +52,13 @@ func OpenStore(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, errors.New("chaos: empty db path")
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(2000)&_pragma=journal_mode(WAL)", dbPath)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := statedb.OpenConn(dbPath, statedb.ReadWrite)
 	if err != nil {
 		return nil, fmt.Errorf("chaos: open store %s: %w", dbPath, err)
 	}
-	db.SetMaxOpenConns(1)
-	if err := db.Ping(); err != nil {
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("chaos: ping store %s: %w", dbPath, err)
+		return nil, fmt.Errorf("chaos: open store %s: %w", dbPath, err)
 	}
 	// Idempotent table creation; migration 0004 covers the "fresh project"
 	// path but creating here keeps unit tests using a bare sqlite file

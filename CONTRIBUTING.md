@@ -230,6 +230,19 @@ it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
 map for packages that are unreferenced on purpose — it is empty, and an entry
 needs an argument a reader can check.
 
+## Opening a SQLite database
+
+Open cloop's databases with `statedb.Open` when you want the project store and
+its migrations, and with `statedb.OpenConn(path, statedb.ReadWrite)` or
+`statedb.OpenConn(path, statedb.ReadOnly)` for a handle of your own — never with
+a bare `sql.Open`, which `go test ./tests/arch/` rejects in production code.
+`OpenConn` carries the connection policy in the data source name, so the driver
+applies it to every connection the pool ever opens: `busy_timeout` before any
+other statement, foreign keys, `BEGIN IMMEDIATE` for writers, `mode=ro` for
+readers. A `PRAGMA busy_timeout` issued with `Exec` after opening reaches only
+the connection that ran it, and taskqueue's writes failed with `SQLITE_BUSY` as
+soon as the pool replaced that connection. Tests may open however they like.
+
 ## Documentation site
 
 The guides under `docs/` are published to

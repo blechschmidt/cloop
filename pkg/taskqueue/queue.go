@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // sessionMetaFile is the sentinel that identifies a session directory. When
@@ -76,9 +76,13 @@ type Queue struct {
 	path string
 }
 
+// schema provisions the queue table for a database statedb has not yet
+// migrated. busy_timeout is not here: it is a per-connection setting, and set
+// by Exec it reached only the connection that ran this — every connection the
+// pool opened afterwards had none, and failed at once with SQLITE_BUSY where it
+// should have waited. The connection policy carries it instead (Task 20374).
 const schema = `
 PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS queue (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,11 +146,13 @@ func Open(workDir string) (*Queue, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("taskqueue mkdir %s: %w", filepath.Dir(path), err)
 	}
-	conn, err := sql.Open("sqlite", path)
+	// The connection policy every cloop database is opened under: busy_timeout
+	// on every connection the pool opens, foreign keys, transactions that take
+	// the write lock at BEGIN.
+	conn, err := statedb.OpenConn(path, statedb.ReadWrite)
 	if err != nil {
 		return nil, fmt.Errorf("taskqueue open %s: %w", path, err)
 	}
-	conn.SetMaxOpenConns(1)
 	if _, err := conn.Exec(schema); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("taskqueue schema: %w", err)
@@ -173,12 +179,12 @@ func Open(workDir string) (*Queue, error) {
 // destination connection's queue table, preserving the original IDs, then
 // removes the legacy file (including its WAL/SHM siblings).
 func migrateLegacyQueue(dst *sql.DB, legacyPath string) error {
-	src, err := sql.Open("sqlite", legacyPath)
+	// Read-only: the legacy file is only ever read, then removed.
+	src, err := statedb.OpenConn(legacyPath, statedb.ReadOnly)
 	if err != nil {
 		return fmt.Errorf("open legacy: %w", err)
 	}
 	defer src.Close()
-	src.SetMaxOpenConns(1)
 
 	// Discover table existence — a torn or empty file might have no schema.
 	var tableName string

@@ -48,15 +48,11 @@ func persistReplay(workDir string, r *Result) error {
 	}
 	defer db.Close()
 
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadWrite)
 	if err != nil {
 		return fmt.Errorf("open replay writer conn: %w", err)
 	}
 	defer conn.Close()
-	conn.SetMaxOpenConns(1)
-	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return fmt.Errorf("busy_timeout: %w", err)
-	}
 
 	_, err = conn.Exec(`
 		INSERT INTO replay_runs(
@@ -96,15 +92,11 @@ func ListRuns(workDir string, taskID int, limit int) ([]Run, error) {
 	}
 	db.Close()
 
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadOnly)
 	if err != nil {
 		return nil, fmt.Errorf("open replay reader: %w", err)
 	}
 	defer conn.Close()
-	conn.SetMaxOpenConns(1)
-	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return nil, fmt.Errorf("busy_timeout: %w", err)
-	}
 
 	var rows *sql.Rows
 	if taskID > 0 {
@@ -168,15 +160,11 @@ func GetRun(workDir string, id int64) (*Run, error) {
 	}
 	db.Close()
 
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadOnly)
 	if err != nil {
 		return nil, fmt.Errorf("open replay reader: %w", err)
 	}
 	defer conn.Close()
-	conn.SetMaxOpenConns(1)
-	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return nil, fmt.Errorf("busy_timeout: %w", err)
-	}
 
 	var run Run
 	var ts string
