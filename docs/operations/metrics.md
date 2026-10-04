@@ -7,9 +7,11 @@ The catalog is declared in one file, [`pkg/hubmetrics/catalog.go`][catalog], so
 that "what does this hub expose, and does anything here label by something
 unbounded?" is a question you answer by reading a single page rather than by
 grepping the repository. This document is the operator-facing half of that
-file, and a test keeps the two in step: `TestCatalogIsDocumented` fails the
+file, and two tests keep the three in step: `TestCatalogIsDocumented` fails the
 build if a metric is exported without an entry here, or described here without
-being exported.
+being exported, and `TestEveryFamilyIsRecorded` fails it if a metric is
+declared without anything in the hub that records it — so every family below
+carries samples once the thing it measures has happened.
 
 [catalog]: https://github.com/blechschmidt/cloop/blob/main/pkg/hubmetrics/catalog.go
 
@@ -70,13 +72,15 @@ Two conventions carry most of the meaning.
 `increase()`; the absolute value is only meaningful as a difference, because it
 resets to zero when the hub restarts.
 
-**Gauges are instantaneous.** Several are recomputed at scrape time by a
-collector that reads live subsystem state — the executor fleet, the merge
-queue, live leases, quota usage — rather than being maintained incrementally.
-Those gauges reset and repopulate on every scrape, so a series disappears when
-the object behind it does, instead of freezing at its last value. A frozen
-gauge is worse than a missing one: it reads as a live measurement and will hold
-an alert open forever.
+**Gauges are instantaneous.** Most are recomputed at scrape time by a
+collector that reads live subsystem state — the executor fleet, live leases,
+live sessions, key rotation progress, quota usage — rather than being
+maintained incrementally. Those gauges reset and repopulate on every scrape, so
+a series disappears when the object behind it does, instead of freezing at its
+last value. A frozen gauge is worse than a missing one: it reads as a live
+measurement and will hold an alert open forever. Two are kept incrementally by
+the subsystem that owns them, because it is the only thing that sees every
+change: the merge queue's depth and the egress broker's live sessions.
 
 ## Cardinality and the overflow series
 
@@ -116,33 +120,6 @@ Label values are also truncated to 64 bytes, which bounds the damage when a
 long user-controlled value does reach a label. Two values differing only past
 that point collapse into one series.
 
-## Declared but not yet recorded
-
-Every metric below is registered, so every one appears in a scrape with its
-`HELP` and `TYPE`. Not all of them have a call site yet: the following families
-will render with no samples until the subsystem that owns them is instrumented.
-
-<!-- Keep in step with the call sites; see "Adding a metric" below. -->
-
-```
-cloop_executor_task_starts_total          cloop_sessions_created_total
-cloop_executor_task_completions_total     cloop_sessions_terminated_total
-cloop_executor_task_failures_total        cloop_sessions_live
-cloop_executor_task_duration_seconds      cloop_apitoken_auth_total
-cloop_executors                           cloop_apitoken_auth_failures_total
-cloop_executor_heartbeat_age_seconds_max  cloop_egress_requests_total
-cloop_secret_leases_live                  cloop_egress_denials_total
-cloop_secret_kek_rotation_records         cloop_egress_bytes_total
-cloop_secret_kek_rotation_active          cloop_egress_sessions_live
-```
-
-An alert written against one of these will never fire — not because the
-condition is never met, but because the series is empty. Check here before
-relying on a metric you have not seen data for. The distinction is deliberate:
-a registered-but-silent family tells you the hub knows about the measurement
-and has not taken it, which is a different and more useful statement than the
-metric being absent entirely.
-
 ### The one identity-labelled exception
 
 `cloop_quota_limit` and `cloop_quota_usage` label by `identity`. They are safe
@@ -151,14 +128,54 @@ identities the hub is accounting *right now*, not the number it has ever seen,
 so a tenant cannot grow them by churning. Both also carry a raised but finite
 ceiling of 4096 series.
 
+## Hub clusters: which member exports what
+
+When several `cloop ui` processes serve one control plane (a
+[hub cluster](../architecture/hub-cluster.md)), scrape every member, the way
+you would any replicated service. Each member's scrape then splits three ways:
+
+**Counters are per member.** A member counts the runs it dispatched or
+settled, the tokens it verified, the sessions whose end it recorded, the
+requests its proxy decided. `sum()` over members is the cluster's total, and a
+run that started on one member and was settled by another after the first died
+is counted once at each end, as it should be.
+
+**Gauges read from the shared database are exported by the leader only.**
+Every member reads the same rows, so if each exported them, three members
+would report three times the fleet under `sum()`. These come from whichever
+member holds leadership, and from no other:
+
+```
+cloop_executors                           cloop_projects_registered
+cloop_executor_heartbeat_age_seconds_max  cloop_quota_enforcement_enabled
+cloop_secret_kek_rotation_records         cloop_quota_limit
+cloop_secret_kek_rotation_active          cloop_quota_usage
+cloop_sessions_live                       cloop_quota_identities
+```
+
+`sum()` and `max()` over the cluster therefore both give the right answer. A
+standalone hub is always its own leader. During a leadership hand-over — at
+most a lease TTL, normally seconds — no member exports these, so they read as
+briefly absent rather than doubled or stale; write alerts on them with a `for:`
+of a minute or more.
+
+**Gauges of per-process state are exported by every member**, and each
+member's value is its own share: `cloop_secret_leases_live` (the leases that
+member materialised and still holds), `cloop_egress_sessions_live` (the
+sessions its broker issued) and `cloop_mergequeue_depth` (its own queue).
+`sum()` is again the cluster's.
+
 ---
 
 ## Executor and task lifecycle
 
-`executor_kind` is the driver (`local`, `container`, `kubernetes`, `remote`);
-`isolation` is the level the workload ran at. Neither carries an executor ID —
-a hub fronting a fleet of edge devices would turn that into one series per
-device per metric.
+These count the harness runs the hub dispatches — a Start pressed on the
+dashboard, a project created with a run, a paused run the hub resumes on its
+own — and settles when they end. `executor_kind` is the driver: `localprocess`,
+`container`, `remote`, `kubernetes` or `virtual`. `isolation` is the level the
+workload ran at: `none`, `container`, `vm` or `remote`. Neither carries an
+executor ID — a hub fronting a fleet of edge devices would turn that into one
+series per device per metric.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -167,14 +184,39 @@ device per metric.
 | `cloop_executor_task_failures_total` | counter | `executor_kind`, `isolation`, `reason` |
 | `cloop_executor_task_duration_seconds` | histogram | `executor_kind`, `isolation` |
 
-`reason` is `start` (the executor refused to launch the workload), `run` (it
-launched and failed), or `cancelled` (the control plane withdrew it). The
-distinction matters: `start` is an infrastructure fault, `run` is usually the
-task's own doing.
+A run is counted as started once the hub has chosen its executor, whether or
+not that executor then launches it. When the run is settled it is counted once
+more: as a completion if its workload exited zero, or as a failure with a
+`reason`:
 
-The duration histogram's buckets span 1 second to 2 hours, because that is the
-real range — a `cloop suggest` subcommand returns in seconds while an agent
+| `reason` | Meaning |
+| --- | --- |
+| `start` | it never began: the executor could not receive what the run needed (a grant, a sandbox, the source tree) or refused to launch it |
+| `run` | it launched and failed — a non-zero exit, a kill nobody in cloop asked for (usually the OOM killer), an executor failure — or ended in a way its executor could not account for |
+| `cancelled` | the control plane stopped it: Stop pressed, a daily budget spent, or a kill cloop requested. A run that pauses and exits zero after being told to stop is cancelled, not completed |
+
+The distinction matters: `start` is an infrastructure or configuration fault,
+`run` is usually the task's own doing, and `cancelled` is nobody's fault.
+Every run the hub settles is counted exactly once more, so starts minus
+completions minus failures is the runs dispatched and not yet settled: the ones
+in flight, plus the rare one whose output the hub lost hold of at dispatch and
+so cannot settle. A run refused before any executor was chosen — a project
+bound to an executor that is not registered, or strict mode refusing the host —
+never reached a driver and is not counted; the refusal is in the dashboard and
+the hub's log.
+
+The duration is observed for every run that launched (a failure at start has
+none): the executor's own account of the workload, start to finish, or where
+the executor keeps no such account, the time since the hub began following the
+run. The buckets
+span 1 second to 2 hours, because that is the real range — a run with nothing
+left to do, or one that crashes on start, is over in seconds, while an agent
 task on a remote sandbox runs for an hour.
+
+In a [hub cluster](#hub-clusters-which-member-exports-what) the member that
+dispatched a run counts its start and the member that settled it counts its
+end — the same one, unless the run was adopted after its member died — so sum
+over members.
 
 **Task success rate**
 
@@ -188,6 +230,17 @@ sum(rate(cloop_executor_task_completions_total[5m]))
 ```promql
 sum by (executor_kind) (rate(cloop_executor_task_failures_total{reason="start"}[5m]))
 ```
+
+**Runs dispatched and not yet settled**
+
+```promql
+sum(cloop_executor_task_starts_total)
+  - sum(cloop_executor_task_completions_total)
+  - sum(cloop_executor_task_failures_total)
+```
+
+Counters reset when a hub restarts, so read this one over a member's
+lifetime.
 
 ## Executor fleet health
 
@@ -203,10 +256,18 @@ sum by (executor_kind) (rate(cloop_executor_task_failures_total{reason="start"}[
 that rejected the most candidates — the headline reason placement found
 nothing, not the full per-candidate detail, which interpolates executor IDs.
 
+`cloop_executors` counts the executors registered with the hub by the state
+the liveness supervisor last recorded for each; one the supervisor has not
+probed yet counts as `ready`, as placement treats it. Both fleet gauges are
+read at scrape time from the shared database and exported by the
+[leader only](#hub-clusters-which-member-exports-what).
+
 The heartbeat gauge reports the *oldest* successful liveness probe per kind
 rather than one series per executor. The alert that matters is "some executor
 of this kind has gone quiet", and a maximum answers it in one series instead of
-one per device.
+one per device. An executor that has never answered is aged from when it
+entered its current state, so one that has been unreachable since the hub met
+it still rises.
 
 **No executor of a kind is schedulable**
 
@@ -237,8 +298,14 @@ rate(cloop_executor_placement_failures_total[5m]) > 0
 | `cloop_secret_kek_rotation_records` | gauge | `phase` |
 | `cloop_secret_kek_rotation_active` | gauge | — |
 
-`kind` is the credential kind (GitHub repo, PAT, kubeconfig, egress, …).
-`event` is `issued`, `renewed`, `revoked` or `expired`.
+`kind` is the credential kind: `github_pat`, `github_app`, `kubeconfig`,
+`registry`, `env`, `egress_proxy`, `local_repo`, `host_device` or
+`host_interface`. `event` is `issued`, `renewed`, `revoked` or `expired`.
+
+`cloop_secret_leases_live` counts the leases a hub process issued, still holds
+and has not seen expire, with every kind present — zero included. It is per
+process: a lease's material lives with the member that materialised it, so in a
+cluster each member reports its own and the sum is the cluster's.
 
 **`cloop_secret_unseal_failures_total` is the one to page on.** Any non-zero
 rate means the hub can no longer read its own secrets. `reason` says which
@@ -262,7 +329,13 @@ min_over_time(cloop_secret_kek_rotation_active[30m]) == 1
 ```
 
 `cloop_secret_kek_rotation_records` reports progress by `phase` — `total`,
-`rewrapped`, `skipped`, `failed`.
+`rewrapped`, `skipped`, `failed`. Both rotation gauges read the history
+`cloop hub key rotate` writes to the control-plane database, so they follow a
+rotation run from the command line, and are exported by the
+[leader only](#hub-clusters-which-member-exports-what). A hub that has never
+rotated reports `cloop_secret_kek_rotation_active 0` and no progress. A rotation
+whose process was killed stays at 1 until the next one starts — which is
+exactly the stalled state the alert above is for.
 
 ## Sign-in, sessions and API tokens
 
@@ -281,9 +354,40 @@ Sessions are deliberately unlabelled by subject. The *count* of sessions is
 operational; the roster of who holds them belongs in the audit trail behind
 `audit.read`, not copied into every monitoring system that touches a scrape.
 
-`reason` on termination is `idle_evicted`, `absolute_expired`, `admin_revoked`
-or `self_logout`. On token failure it is `malformed`, `not_found`,
-`bad_secret`, `revoked`, `expired` or `no_roles`.
+A session is counted as created when a sign-in completes, and as terminated
+by the call whose delete actually removed it from the session store — so a
+session two requests both found expired, or a janitor pass racing a sign-out,
+ends once here exactly as it does in the audit trail. `reason` on termination
+is one of:
+
+| `reason` | Meaning |
+| --- | --- |
+| `idle_evicted` | it went unused past the idle timeout |
+| `absolute_expired` | it reached the ceiling set at sign-in |
+| `self_logout` | the user signed out of it, or ended all their other sessions |
+| `admin_revoked` | an operator terminated it, from the sessions panel or an offboarding |
+| `idp_revoked` | the identity provider refused to renew the grant — the user was disabled there, or withdrew consent |
+| `quota_evicted` | the identity's session quota ended its least recently used session to make room for a new sign-in |
+
+`cloop hub session revoke` deletes sessions from its own process, outside any
+hub's registry, so those terminations lower `cloop_sessions_live` without
+appearing in `cloop_sessions_terminated_total`; the audit trail records them.
+
+`cloop_sessions_live` counts the sessions valid at scrape time — neither past
+their ceiling nor idle past the timeout, as the session store records them
+(a session's last-seen time is written at most once a minute). It reads the
+shared database, so it is exported by the
+[leader only](#hub-clusters-which-member-exports-what), and is 0 on a hub
+without sign-on.
+
+`cloop_apitoken_auth_total` counts every verdict on a presented API token, and
+`reason` on a failure is `malformed`, `not_found`, `bad_secret`, `revoked`,
+`expired`, `no_roles` or `store_error`. The first six are the token's fault;
+`store_error` is the hub's — its token store could not be read, and every
+scraper and CI job holding a token is being turned away. A request the failure
+lockout refuses before verifying anything is not counted, and neither is a
+verified display-glasses link refused for the path it asked for: that is
+authorization, not authentication.
 
 `outcome` on a sign-in is `success`, `discovery_failed`, `idp_error`,
 `invalid_request`, `invalid_state`, `exchange_failed`, `token_invalid`,
@@ -455,18 +559,50 @@ what each reason means.
 | `cloop_egress_bytes_total` | counter | `direction` |
 | `cloop_egress_sessions_live` | gauge | — |
 
-`direction` is `up` or `down`. The intended `reason` vocabulary is `no_grant`,
-`revoked`, `expired`, `host_not_allowed`, `port_not_allowed`,
-`method_not_allowed`, `destination_blocked` and `quota_exhausted` — but note
-that all four egress metrics are in the [not yet
-recorded](#declared-but-not-yet-recorded) list, and only the five refusals the
-broker already names in source (`expired`, `host_not_allowed`,
-`port_not_allowed`, `method_not_allowed`, `destination_blocked`) exist as
-values today. The other three are reserved by the catalog, not yet implemented.
+The broker records these itself, from the same typed error each audit row is
+derived from, so a verdict cannot reach one and miss the other. All four are
+per process: a session lives in the broker that issued it, and so do its
+verdicts and its bytes. They come from whichever process runs the broker and
+its forward proxy — `cloop egress test` runs one, in its own process, for the
+length of a test. `cloop ui` does not yet run the proxy itself
+(`executors.egress` configures it but nothing in the hub binds it), so on a hub
+these families carry no samples until it does.
 
-`destination_blocked` is the SSRF guard refusing a link-local or private
-address. Once the metric is recorded, a sustained rate of it is a sandbox
-trying to reach the hub's own network:
+`cloop_egress_requests_total` counts the requests through the proxy that
+reached a policy verdict: a CONNECT tunnel opened or refused, a plain-HTTP
+exchange forwarded or refused. A request that failed for want of DNS or a
+route, or was malformed, is neither allowed nor denied, so the denial rate does
+not move in exactly the situation an operator is paging on. A request with no
+valid credential is refused with 407 and counted nowhere — like the audit
+trail, the count starts at an authenticated session — but one on a session that
+is spent, expired or past its quota, is a verdict and is counted.
+
+`cloop_egress_denials_total` counts every refusal the broker makes, which is
+more than the denied requests. `no_grant`, `revoked` and an expired grant's
+`expired` refuse a *session*, when one is asked for and before any request
+exists. `quota_exhausted` and `expired` also cut a transfer the broker had
+allowed, when a budget is spent or a session's TTL lapses inside an open tunnel
+— that request already has its `allowed` sample, so only the denial is added.
+
+| `reason` | Meaning |
+| --- | --- |
+| `no_grant` | no active grant targets the executor or project asking for a session |
+| `revoked` | the grant that targets it has been revoked |
+| `expired` | the grant, or the session, is past its TTL |
+| `host_not_allowed` | the destination is outside the grant's host allowlist and every allowed CIDR |
+| `port_not_allowed` | the destination port is outside the grant's port allowlist |
+| `method_not_allowed` | the plain-HTTP method is outside the grant's method allowlist |
+| `destination_blocked` | the SSRF guard refused a loopback, private, link-local, multicast or unspecified address no allowed CIDR names |
+| `quota_exhausted` | the session's upload or download budget is spent |
+
+`direction` on `cloop_egress_bytes_total` is `up` (from the sandbox) or
+`down` (to it), and includes the bytes of a transfer its quota then cut — they
+crossed the control plane all the same. `cloop_egress_sessions_live` counts the
+sessions a process has issued and not yet closed; an expired one is closed
+within the proxy's reap interval.
+
+`destination_blocked` is the one to alert on: a sustained rate of it is a
+sandbox trying to reach the hub's own network.
 
 ```promql
 rate(cloop_egress_denials_total{reason="destination_blocked"}[5m]) > 0
@@ -488,6 +624,10 @@ rate(cloop_egress_denials_total{reason="destination_blocked"}[5m]) > 0
 
 These names and label schemas predate the registry and are preserved exactly,
 because operator scrape configs and recording rules are already written against
+them. The gauges describe the policy, the usage the members' enforcers share
+through the database and the project registry, so a cluster exports them from
+its [leader only](#hub-clusters-which-member-exports-what);
+`cloop_quota_denials_total` is each member's own refusals, exported by all of
 them.
 
 **Identities near their ceiling** — the alert that gives a tenant warning
@@ -525,4 +665,12 @@ cloop_metrics_series_dropped_total > 0
    you cannot point at the constant block the values come from, the label is
    unbounded and does not belong.
 3. Counters end in `_total`; histograms name their unit.
-4. Add a row to this page. `TestCatalogIsDocumented` fails the build otherwise.
+4. Record it in the same change: call `Inc`, `Add`, `Set` or `Observe` on it
+   where the event happens, or name it in the `Families` of a scrape-time
+   collector registered in `pkg/ui/hubmetrics.go`. `TestEveryFamilyIsRecorded`
+   fails the build for a family nothing records, because one that renders with
+   no samples is a family every alert written against it silently ignores.
+5. If it is a gauge read from the shared database, export it from the cluster
+   leader only (`metricsScrape.leader`), so that `sum()` over members does not
+   multiply it.
+6. Add a row to this page. `TestCatalogIsDocumented` fails the build otherwise.
