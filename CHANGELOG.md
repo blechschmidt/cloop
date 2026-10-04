@@ -147,6 +147,22 @@ schema and the hub's HTTP API may change in any release.
   connected device below the hub's protocol is material version skew whatever
   its build string says. See *Moving a device forward* in
   `docs/architecture/executors.md`.
+- **Features run on a remote device against a private repository, come back
+  clean, and open their pull request.** Three defects, found on the first live
+  run of a feature on a real device (Task 20371), each fixed with a test. A
+  feature whose branch rides on a clone of its project's https upstream leased
+  the project's GitHub grant as the feature's own path, which no grant names,
+  so the dispatch was refused with "no active GitHub grant named … is issued to
+  this executor for this project" while the grant was in force. A host-mode
+  payload with an environment of its own (any project holding a grant) had its
+  checkout as `HOME`, so the harness wrote `.claude.json`, `.claude/` — its
+  session transcript among them — and `.config/cloop/` into the repository,
+  and a feature's write-back committed them onto the feature's branch; the
+  agent now gives such a payload a home of its own beside the tree
+  (`.<dir>.home`, mode 0700). And the hub's push of a feature's branch dropped
+  its Authorization header, so opening the pull request failed with GitHub's
+  403 every time. `scripts/e2e/device-features` drives the whole path through
+  the dashboard.
 - **Recovery no longer resurrects a task cloop rejected.** A run that died — or
   stopped because its outcome write failed — after the review gate, `--verify`,
   `--script-verify`, abandoned background work or an unanswered clarification
