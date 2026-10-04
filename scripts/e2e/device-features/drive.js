@@ -14,6 +14,8 @@
 //   feature <name> <description> <task>                create a feature, start it
 //   pr <feature-slug>                                  open its pull request
 //   upgrade-dialog <executor-id>                       press Upgrade, report the dialog, cancel it
+//   start [project-path]                               press Start run on its Tasks tab
+//   tasks [project-path]                               list the Tasks tab, completed included
 //   debug                                              list the project grid
 // Prints one JSON document on stdout describing what the page showed.
 
@@ -288,6 +290,22 @@ async function stepPR(cdp, slug) {
   result.pr_links = await cdp.eval(`[...document.querySelectorAll('#featureBanner a, #featuresList a')].map(a => a.href)`);
 }
 
+// stepStart opens a project (or a feature, by its path) and presses Start run
+// on its Tasks tab, reporting what the dashboard said and whether the run bar
+// switched to Pause / Stop.
+async function stepStart(cdp, p) {
+  await openProject(cdp, p);
+  await cdp.eval(`window.switchTab('tasks')`);
+  await waitFor(cdp, visible('#tasksCtrlRun'), 'the Start run button');
+  await click(cdp, '#tasksCtrlRun');
+  try {
+    await waitFor(cdp, `${visible('#tasksCtrlStop')} || (window.__toastLog || []).length > 0`, 'the run to start', 60000);
+  } catch (e) { /* reported below */ }
+  await sleep(1500);
+  result.running = await cdp.eval(visible('#tasksCtrlStop'));
+  result.toasts = await toasts(cdp);
+}
+
 // stepUpgradeDialog presses Upgrade on the device's card and reports the
 // dialog the dashboard opened — an alert carrying the hub's explanation when no
 // release would move the device forward, or a prompt prefilled with the release
@@ -333,6 +351,18 @@ async function main() {
       case 'feature': await stepFeature(cdp, ARGS[0], ARGS[1], ARGS[2]); break;
       case 'pr': await stepPR(cdp, ARGS[0]); break;
       case 'upgrade-dialog': await stepUpgradeDialog(cdp, ARGS[0]); break;
+      case 'start': await stepStart(cdp, ARGS[0] || PROJECT); break;
+      case 'tasks':
+        // The task list as the Tasks tab shows it, completed tasks included.
+        await openProject(cdp, ARGS[0] || PROJECT);
+        await cdp.eval(`window.switchTab('tasks')`);
+        await waitFor(cdp, `document.querySelectorAll('#taskListFull .task-item').length > 0
+          || !!document.getElementById('toggleCompletedBtn')`, 'the task list');
+        if ((await text(cdp, '#toggleCompletedBtn')).startsWith('Show')) await click(cdp, '#toggleCompletedBtn');
+        await sleep(1000);
+        result.tasks = await cdp.eval(`[...document.querySelectorAll('#taskListFull .task-item')]
+          .map(e => e.textContent.replace(/\\s+/g, ' ').trim().slice(0, 160))`);
+        break;
       case 'debug':
         await cdp.eval(`window.switchTab('projects')`);
         await sleep(2500);

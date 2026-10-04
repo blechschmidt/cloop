@@ -20,7 +20,10 @@ node drive.js $C $HUB $PROJECT device-fw <executor-id> 1.1.1.1/32,1.0.0.1/32 443
 node drive.js $C $HUB $PROJECT project-fw 1.1.1.1/32 443
 node drive.js $C $HUB $PROJECT project-fw 1.1.1.1/32,8.8.8.8/32 443   # refused
 node drive.js $C $HUB $PROJECT feature "name" "what it achieves" "first task"
+node drive.js $C $HUB $PROJECT start $PROJECT/.cloop/features/<slug>   # Start run, Tasks tab
+node drive.js $C $HUB $PROJECT tasks $PROJECT/.cloop/features/<slug>   # the Tasks tab's list
 node drive.js $C $HUB $PROJECT pr <slug>
+node drive.js $C $HUB $PROJECT upgrade-dialog <executor-id>   # what Upgrade offers, cancelled
 ```
 
 ## The checks
@@ -33,7 +36,9 @@ node drive.js $C $HUB $PROJECT pr <slug>
 | a probe task ([`../firewall/mktask.sh`](../firewall/mktask.sh)) with the device in container mode | `1.1.1.1:443 open`, `1.0.0.1:443 blocked` (project), `8.8.8.8:443 blocked` (device) |
 | `feature` | the crumb opens `<project>/<slug>`, the run starts |
 | the feature's run | its task done; on the hub the worktree fast-forwarded onto the run's commits (or the work parked on `cloop/returned/<slug>/<run>`); the device's journal says the branch came "as a standalone checkout" and the write-back was bundled |
+| a second task, `start` again | the device's journal shows the branch arriving as an *N-byte bundle* — a new feature's first run has no commits to ship |
 | `pr` | the banner reads "PR #N open"; the PR's files are only what the task changed |
+| `tasks` | every task ✓ |
 
 The device must be in **container** mode for rule sets to apply (host mode
 refuses runs while rules exist), and a run of the real harness needs the
@@ -52,6 +57,15 @@ run a feature on a real device with a private repository:
   write-back onto the feature's branch (`pkg/executor/agent/payloadhome.go`);
 - the hub's push of a feature's branch dropped its Authorization header, so
   every pull request failed with 403 (`pkg/featureops`).
+
+On the production hub (2026-10-04, sgx upgraded to protocol v16) every row
+held: 1.1.1.1:443 open, 1.0.0.1:443 and 8.8.8.8:443 blocked; the feature's
+branch went out as a 566-byte bundle, both runs fast-forwarded, and PR #4 of
+`bb-selforg/cloop-app-e2e` opened with exactly the two commits. Before the
+upgrade the same hub refused the feature (409) and the rule-bound run with
+the protocol each needed and the build path that gets there. A dashboard
+signed in with an API token toasts "no identity on request" from a side
+panel; it is not the step failing — read the run's state.
 
 ## Cleanup
 
