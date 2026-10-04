@@ -77,6 +77,29 @@ func TestWithPayloadHome(t *testing.T) {
 		}
 	})
 
+	t.Run("a link where the home goes is replaced, never followed", func(t *testing.T) {
+		outside := t.TempDir()
+		if err := os.Chmod(outside, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(wantHome); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, wantHome); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := withPayloadHome([]string{"PATH=/bin"}, root, tree); err != nil {
+			t.Fatalf("withPayloadHome: %v", err)
+		}
+		info, err := os.Lstat(wantHome)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("the home is not a real directory after a link was planted there: %v (%v)", info, err)
+		}
+		if st, err := os.Stat(outside); err != nil || st.Mode().Perm() != 0o755 {
+			t.Fatalf("the link's target was touched: %v (%v)", st.Mode().Perm(), err)
+		}
+	})
+
 	t.Run("an explicit HOME is kept", func(t *testing.T) {
 		in := []string{"PATH=/bin", "HOME=/somewhere"}
 		got, err := withPayloadHome(in, root, tree)

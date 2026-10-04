@@ -29,7 +29,9 @@ package agent
 // keeps it.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,15 +70,39 @@ func withPayloadHome(env []string, root, workDir string) ([]string, error) {
 	if err := containedIn(root, home); err != nil {
 		return env, err
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return env, fmt.Errorf("agent: create the workload's home directory %s: %w", home, err)
-	}
-	// MkdirAll leaves an existing directory's mode alone, and a home a later
-	// run reuses must not have been loosened in between.
-	if err := os.Chmod(home, 0o700); err != nil {
-		return env, fmt.Errorf("agent: restrict the workload's home directory %s: %w", home, err)
+	if err := ensurePayloadHome(home); err != nil {
+		return env, err
 	}
 	out := make([]string, 0, len(env)+1)
 	out = append(out, env...)
 	return append(out, "HOME="+home), nil
+}
+
+// ensurePayloadHome makes home a directory of mode 0700, reusing one an
+// earlier run left. It never follows a link: a payload's previous run could
+// have put one where its home goes, and a chmod or a HOME through it would land
+// wherever it points. Anything but a real directory there is removed first —
+// the link itself, never what it names.
+func ensurePayloadHome(home string) error {
+	info, err := os.Lstat(home)
+	switch {
+	case err == nil && info.IsDir():
+		// MkdirAll would leave an existing directory's mode alone, and a home
+		// a later run reuses must not have been loosened in between.
+		if err := os.Chmod(home, 0o700); err != nil {
+			return fmt.Errorf("agent: restrict the workload's home directory %s: %w", home, err)
+		}
+		return nil
+	case err == nil:
+		if err := os.Remove(home); err != nil {
+			return fmt.Errorf("agent: %s is not a directory and cannot be replaced by the workload's home: %w",
+				home, err)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("agent: inspect the workload's home directory %s: %w", home, err)
+	}
+	if err := os.Mkdir(home, 0o700); err != nil {
+		return fmt.Errorf("agent: create the workload's home directory %s: %w", home, err)
+	}
+	return nil
 }
