@@ -125,6 +125,15 @@ func (in *Installer) Apply(p Plan) error {
 			return err
 		}
 	}
+	// A plan without the upgrade helper disarms one an earlier install armed,
+	// while its unit file still exists for systemctl to find; removing the
+	// file first would leave a dangling .wants link and a "not-found" unit
+	// running until the next boot.
+	if p.Output == OutputSystemd && !s.RemoteUpgrade {
+		if _, err := os.Stat(in.path(s.UpgradeHelperPathUnitPath())); err == nil {
+			_ = in.run("systemctl", "disable", "--now", s.UpgradeHelperPathUnitName())
+		}
+	}
 	// Before the reload below, so systemd never starts the service with a
 	// grant this install withholds.
 	for _, path := range p.Remove {
@@ -146,8 +155,6 @@ func (in *Installer) Apply(p Plan) error {
 			if err := in.run("systemctl", "enable", "--now", s.UpgradeHelperPathUnitName()); err != nil {
 				return fmt.Errorf("install: enable %s: %w", s.UpgradeHelperPathUnitName(), err)
 			}
-		} else {
-			_ = in.run("systemctl", "disable", "--now", s.UpgradeHelperPathUnitName())
 		}
 		if s.NoStart {
 			if err := in.run("systemctl", "enable", s.UnitFileName()); err != nil {

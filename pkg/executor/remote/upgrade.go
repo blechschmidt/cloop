@@ -44,12 +44,6 @@ var ErrUpgradeLowersProtocol = errors.New("remote: upgrade would lower the devic
 // says so before a frame is sent, and says that only the device can change it.
 var ErrUpgradeChannel = errors.New("remote: the device does not follow the edge channel")
 
-// ErrUpgradeUnavailable reports a device that has said it cannot carry out an
-// upgrade — no root helper for an unprivileged agent, or no cosign to verify
-// with (Task 20376). Asking anyway would only produce an "accepted" that
-// never completes.
-var ErrUpgradeUnavailable = errors.New("remote: the device cannot carry out an upgrade")
-
 // UpgradeRequest is what a caller asks for. It is the hub-side mirror of
 // UpgradePayload, and it carries no more than that one does on purpose: a field
 // here would have to reach the device somehow, and the set of things the device
@@ -166,14 +160,12 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 		target = LatestVersion
 	}
 	have := max(sess.AgentProtocol(), sess.Version())
+	// Whether the device can carry an upgrade out is not judged here, though
+	// its hello says (remote_upgrade_issue): that answer is as old as the
+	// session, and an operator who has since installed cosign or the helper
+	// would be refused until the agent reconnected. The device answers the
+	// request from a preflight it runs now, before it acknowledges anything.
 	caps := sess.Capabilities()
-	// A device that says it cannot carry out an upgrade — an unprivileged
-	// agent with no root helper, or no cosign — is refused before anything is
-	// sent. Absent from agents older than the field, which say nothing.
-	if !caps.RemoteUpgrade && strings.TrimSpace(caps.RemoteUpgradeIssue) != "" {
-		return UpgradeOutcome{}, fmt.Errorf("%w: %s (%s) says: %s", ErrUpgradeUnavailable, e.id, e.name,
-			caps.RemoteUpgradeIssue)
-	}
 	switch {
 	case version.IsEdgeTarget(target):
 		commit, err := version.ParseEdgeTarget(target)

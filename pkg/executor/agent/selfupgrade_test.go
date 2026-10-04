@@ -27,10 +27,14 @@ func deviceAgent(t *testing.T, channel provenance.Channel) (*Agent, *edgetest.De
 	t.Helper()
 	d := edgetest.NewDevice(t, "dev+g06e06ed", 16, channel)
 	withPrivilege(t, 995, nil)
-	return &Agent{cfg: Config{Channel: channel, InstallTarget: d.Target, Now: func() time.Time {
+	return &Agent{cfg: Config{Channel: channel, InstallTarget: d.Target, UnitActive: helperArmed, Now: func() time.Time {
 		return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	}}}, d
 }
+
+// helperArmed answers UnitActive for a helper whose path unit is running, so
+// no test asks the machine's systemd.
+func helperArmed(string) (bool, bool) { return true, true }
 
 // withPrivilege stubs the effective uid and cosign's presence.
 func withPrivilege(t *testing.T, euid int, cosign error) {
@@ -120,7 +124,7 @@ func TestAgentRefusesWhatItCannotCarryOut(t *testing.T) {
 	if ok || !strings.Contains(reason, RemoteUpgradeCommand) {
 		t.Errorf("no helper, no root: ok=%t, %s", ok, reason)
 	}
-	if caps := (&Agent{cfg: Config{HostProbes: true, InstallTarget: d.Target}}).Capabilities(); caps.RemoteUpgrade ||
+	if caps := (&Agent{cfg: Config{HostProbes: true, InstallTarget: d.Target, UnitActive: helperArmed}}).Capabilities(); caps.RemoteUpgrade ||
 		!strings.Contains(caps.RemoteUpgradeIssue, RemoteUpgradeCommand) {
 		t.Errorf("the hello does not carry the reason: %+v", caps)
 	}
@@ -133,6 +137,37 @@ func TestAgentRefusesWhatItCannotCarryOut(t *testing.T) {
 	reason, ok = a.upgradePreflight(remote.UpgradePayload{TargetVersion: "v9.9.9"}, "dev+g06e06ed")
 	if ok || !strings.Contains(reason, "cosign is not installed") {
 		t.Errorf("no cosign: ok=%t, %s", ok, reason)
+	}
+}
+
+// TestAgentRefusesWithADisarmedHelper: the helper's files without its path
+// unit running would take the request and never act on it; an answer that is
+// not a unit state is "cannot tell", which does not refuse.
+func TestAgentRefusesWithADisarmedHelper(t *testing.T) {
+	a, _ := deviceAgent(t, provenance.ChannelEdge)
+	var asked string
+	a.cfg.UnitActive = func(unit string) (bool, bool) { asked = unit; return false, true }
+	reason, ok := a.upgradePreflight(remote.UpgradePayload{TargetVersion: "v9.9.9"}, "dev+g06e06ed")
+	if ok || !strings.Contains(reason, "is not active") || !strings.Contains(reason, "systemctl enable --now cloop-executor-upgrade.path") {
+		t.Errorf("a disarmed helper: ok=%t, %s", ok, reason)
+	}
+	if asked != "cloop-executor-upgrade.path" {
+		t.Errorf("asked about %q", asked)
+	}
+	a.cfg.UnitActive = func(string) (bool, bool) { return false, false }
+	if reason, ok := a.upgradePreflight(remote.UpgradePayload{TargetVersion: "v9.9.9"}, "dev+g06e06ed"); !ok {
+		t.Errorf("an unknown answer refused the upgrade: %s", reason)
+	}
+}
+
+// TestAgentRefusesASettleTheHelperWouldDrop: acknowledged here and dropped
+// by the helper is the outcome the ack ordering exists to prevent.
+func TestAgentRefusesASettleTheHelperWouldDrop(t *testing.T) {
+	a, _ := deviceAgent(t, provenance.ChannelEdge)
+	reason, ok := a.upgradePreflight(remote.UpgradePayload{TargetVersion: "v9.9.9",
+		SettleSeconds: install.MaxSettleSeconds + 1}, "dev+g06e06ed")
+	if ok || !strings.Contains(reason, "settle time") {
+		t.Errorf("ok=%t, %s", ok, reason)
 	}
 }
 
@@ -310,10 +345,31 @@ func TestOwnInstallIsTheUnitThatRunsThisBinary(t *testing.T) {
 		}
 	}
 
-	// An init-script install is not under systemd at all.
+	// An init-script install that systemd's SysV generator started runs as
+	// <svc>.service with no unit file of its own.
 	if err := os.MkdirAll(initDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	sysv := install.Spec{ServiceName: "cloop-sysv", BinaryPath: exe, Server: "wss://hub.example/api/agents/connect",
+		StateDir: "/var/lib/cloop-sysv", InitDir: initDir}
+	if err := os.WriteFile(filepath.Join(initDir, "cloop-sysv"), []byte(install.InitScript(sysv)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if spec, out, err := ownInstall("0::/system.slice/cloop-sysv.service", exe, "", unitDir, initDir); err != nil ||
+		out != install.OutputShell || spec.ServiceName != "cloop-sysv" {
+		t.Errorf("SysV-generated unit: %+v, %s, %v", spec, out, err)
+	}
+	// ...and only if the script runs this binary.
+	sysv.BinaryPath = "/usr/local/bin/someone-else"
+	if err := os.WriteFile(filepath.Join(initDir, "cloop-sysv"), []byte(install.InitScript(sysv)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ownInstall("0::/system.slice/cloop-sysv.service", exe, "", unitDir, initDir); err == nil ||
+		!strings.Contains(err.Error(), "does not run this binary") {
+		t.Errorf("another binary's init script was taken as this agent's install: %v", err)
+	}
+
+	// An init-script install is not under systemd at all.
 	if err := os.WriteFile(filepath.Join(initDir, install.DefaultServiceName), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

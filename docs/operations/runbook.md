@@ -1140,6 +1140,10 @@ $ systemctl is-active cloop-executor-upgrade.path
 active
 ```
 
+An inactive path unit means a request would never be read; the agent refuses
+upgrades and says so in its banner (`remote upgrade: unavailable: … is not active …`) until
+`sudo systemctl enable --now cloop-executor-upgrade.path`.
+
 Then, from the dashboard: Executors → the device's **Upgrade** → *this hub's
 build (`<commit>`)*. The device files the request, the helper verifies and
 installs the build, and the device reconnects on it; the row's build chip

@@ -158,9 +158,20 @@ than 15 minutes. Its unit runs as root but confined: it may write only the
 binary's directory, the request's, and its own state directory (cosign's cache).
 
 A device without the helper, whose agent is not root, now **refuses** an
-upgrade and says why — the dialog shows the reason instead of offering a
-target — where it used to accept and then fail where nobody looked. The same
-goes for a device with no cosign.
+upgrade and says why, where it used to accept and then fail where nobody
+looked. The same goes for a device with no cosign, and for one whose helper is
+installed but not armed — `cloop-executor-upgrade.path` is not active, so a
+request would sit in the state directory unread; the refusal names
+`sudo systemctl enable --now cloop-executor-upgrade.path`. The device says
+which when it connects, and the dialog shows that as a warning beside the
+target rather than in its place: what the device said is as old as its
+connection, so Upgrade asks again and the device answers from a check it runs
+then. Fixing the cause on the device is enough; the agent need not restart.
+
+The request's settle time is at most 600 seconds — the helper's unit gives
+itself 15 minutes in all — and the agent refuses a longer one before it
+acknowledges anything. `<name>-upgrade` is the helper of the agent `<name>`, so
+a new agent may not be installed under a service name ending in `-upgrade`.
 
 ### A device whose cloop predates the channel
 
@@ -267,6 +278,16 @@ sudo cloop executor agent install --upgrade --channel stable
 
 `--force` is needed to move to an older build or a lower protocol, here as
 anywhere.
+
+A release older than the channel — v0.0.4 is one — knows neither the channel
+nor the helper. Its agent does not file requests, so on a device rolled back
+to it the Upgrade button is accepted and then fails in the device's journal,
+as it did before the helper existed, and the helper units left behind would
+start a binary without `--apply-request`. Upgrade such a device on the device
+until it runs a build that knows the channel again; to leave nothing behind,
+take the device off the channel and remove the helper before rolling back
+(`sudo cloop executor agent install --upgrade --channel stable
+--remote-upgrade=false`).
 
 ---
 

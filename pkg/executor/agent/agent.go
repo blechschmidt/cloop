@@ -109,6 +109,10 @@ type Config struct {
 	// point it at a staged tree; nil is the real install under /etc and
 	// /usr/local/bin.
 	InstallTarget func() (install.Spec, install.Output, error)
+	// UnitActive overrides how the agent asks systemd whether a unit is
+	// active, and whether it could tell. Tests set it so that nothing they run
+	// queries the machine's systemd; nil asks `systemctl is-active`.
+	UnitActive func(unit string) (active, known bool)
 	// Channel is the update channel this device follows (Task 20376), from
 	// the unit's channel drop-in by way of CLOOP_UPDATE_CHANNEL. Empty is
 	// stable. It is reported in the hello, so the hub knows what to offer,

@@ -285,6 +285,16 @@ func (s Spec) normalize(requireServer bool) (Spec, error) {
 	if err := validateServiceName(out.ServiceName); err != nil {
 		return Spec{}, err
 	}
+	// "<name>-upgrade" is the remote-upgrade helper of the agent called
+	// <name> (Task 20376). An agent installed under such a name would share
+	// its units and state directory with that helper — and uninstalling the
+	// other agent would delete its credential. Only a new install is refused:
+	// an existing one can still be upgraded or removed.
+	if requireServer && strings.HasSuffix(out.ServiceName, "-upgrade") {
+		return Spec{}, fmt.Errorf("install: --service-name %q ends in -upgrade, which is reserved for the "+
+			"remote-upgrade helper of the agent called %q; choose another name",
+			out.ServiceName, strings.TrimSuffix(out.ServiceName, "-upgrade"))
+	}
 
 	if strings.TrimSpace(out.User) == "" {
 		out.User = out.ServiceName

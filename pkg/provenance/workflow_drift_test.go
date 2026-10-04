@@ -186,6 +186,8 @@ func TestEdgeWorkflowOnlyEverSignsMain(t *testing.T) {
 		{"scripts/build-edge.sh", "the asset names come from the script the Go drift test reads"},
 		{"run-name: Edge build of ${{ github.event.workflow_run.head_sha }}",
 			"the hub finds the run that built its commit by this title (upgrade.workflowRuns)"},
+		{"group: edge-${{ github.event.workflow_run.head_sha }}",
+			"publishes are serialised per commit at the job, so a skipped run cannot cancel a pending build"},
 	} {
 		if !strings.Contains(wf, want.snippet) {
 			t.Errorf("edge.yml no longer contains %q: %s", want.snippet, want.why)
@@ -196,6 +198,11 @@ func TestEdgeWorkflowOnlyEverSignsMain(t *testing.T) {
 		if strings.Contains(wf, banned) {
 			t.Errorf("edge.yml contains %q; the edge tag is created once and never moved, and the release is never latest", banned)
 		}
+	}
+	// A workflow-level group would let a failed CI run's skipped build cancel a
+	// real one waiting in it (GitHub keeps one pending run per group).
+	if strings.Contains(wf, "\nconcurrency:") {
+		t.Error("edge.yml has a workflow-level concurrency group; it must be per commit, on the job")
 	}
 	if strings.Count(wf, "--target") != 1 {
 		t.Errorf("edge.yml sets a release target %d times; only the create that makes the tag may", strings.Count(wf, "--target"))

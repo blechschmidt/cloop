@@ -8,6 +8,7 @@ package install
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,6 +142,30 @@ func TestUpgradeRemoteUpgradeHelper(t *testing.T) {
 	disarm := slices.Index(*f.commands, "systemctl disable --now cloop-executor-upgrade.path")
 	if disarm < 0 {
 		t.Errorf("the path unit was not disarmed: %v", *f.commands)
+	}
+}
+
+// TestLeavingTheChannelAndTheHelperAtOnce is what the guide tells an operator
+// to run before rolling a device back to a release that knows neither.
+func TestLeavingTheChannelAndTheHelperAtOnce(t *testing.T) {
+	f := newUpgradeFixture(t, OutputSystemd, "SAME BUILD")
+	src := f.newBinary(t, "SAME BUILD")
+	if _, err := f.inst.Upgrade(f.spec, OutputSystemd, UpgradeOptions{Source: src, Channel: provenance.ChannelEdge,
+		RemoteUpgrade: RemoteUpgradeGrant}); err != nil {
+		t.Fatalf("onto the channel: %v", err)
+	}
+	res, err := f.inst.Upgrade(f.spec, OutputSystemd, UpgradeOptions{Source: src, Channel: provenance.ChannelStable,
+		RemoteUpgrade: RemoteUpgradeWithdraw})
+	if err != nil {
+		t.Fatalf("off the channel: %v", err)
+	}
+	if !res.ChannelChanged || res.Channel != provenance.ChannelStable || !res.RemoteUpgradeChanged || res.RemoteUpgradeInstalled {
+		t.Errorf("result = %+v", res)
+	}
+	for _, p := range []string{f.spec.ChannelDropInPath(), f.spec.UpgradeHelperServicePath(), f.spec.UpgradeHelperPathUnitPath()} {
+		if f.exists(t, p) {
+			t.Errorf("%s is still there", p)
+		}
 	}
 }
 
@@ -279,6 +304,10 @@ func TestUpgradeRequestRoundTrip(t *testing.T) {
 			_ = FileUpgradeRequest(f.spec, UpgradeRequest{RequestedAt: now.Format(time.RFC3339)})
 		},
 		"not JSON": func() { mustWrite(t, f.spec.UpgradeRequestPath(), "target=v9", 0o600) },
+		"a settle the helper's unit would cut short": func() {
+			_ = FileUpgradeRequest(f.spec, UpgradeRequest{TargetVersion: "v9.9.9", SettleSeconds: MaxSettleSeconds + 1,
+				RequestedAt: now.Format(time.RFC3339)})
+		},
 		"too big": func() {
 			mustWrite(t, f.spec.UpgradeRequestPath(), `{"target_version":"`+strings.Repeat("v", 5000)+`"}`, 0o600)
 		},
@@ -297,6 +326,80 @@ func TestUpgradeRequestRoundTrip(t *testing.T) {
 		if _, err := os.Lstat(f.spec.UpgradeRequestPath()); err == nil {
 			t.Errorf("%s: the bad request was left for the path unit to trigger on again", name)
 		}
+	}
+}
+
+// TestUpgradeRequestCannotForgeJournalLines: what the request carries is made
+// printable before any error path returns it, so a target or reason with a
+// newline cannot write a line under the helper's name.
+func TestUpgradeRequestCannotForgeJournalLines(t *testing.T) {
+	f := newUpgradeFixture(t, OutputSystemd, "SAME BUILD")
+	if err := os.MkdirAll(f.spec.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	forged := "v1.2.3\nCarried out the request to move to v9.9.9."
+	_ = FileUpgradeRequest(f.spec, UpgradeRequest{TargetVersion: forged, Reason: "a\nb",
+		RequestedAt: now.Add(-time.Hour).Format(time.RFC3339)})
+	req, err := TakeUpgradeRequest(f.spec, now)
+	if err == nil {
+		t.Fatal("a stale request was taken")
+	}
+	for _, s := range []string{err.Error(), req.TargetVersion, req.Reason} {
+		if strings.ContainsAny(s, "\n\r") {
+			t.Errorf("a control character reached the caller: %q", s)
+		}
+	}
+}
+
+// TestAHelperNameIsNotAnAgentName: "<name>-upgrade" belongs to the helper of
+// the agent called <name>; a new agent may not take it, an existing one can
+// still be upgraded or removed.
+func TestAHelperNameIsNotAnAgentName(t *testing.T) {
+	if _, err := (Spec{ServiceName: "foo-upgrade", Server: "wss://h/x"}).Normalize(); err == nil {
+		t.Error("an agent was installed under a helper's name")
+	}
+	if _, err := (Spec{ServiceName: "foo-upgrade"}).NormalizeForRemoval(); err != nil {
+		t.Errorf("an existing foo-upgrade can no longer be removed: %v", err)
+	}
+}
+
+// TestInstallWithoutTheHelperDisarmsItBeforeRemovingIt: systemctl needs the
+// unit file to disable a unit, so the disarm comes first.
+func TestInstallWithoutTheHelperDisarmsItBeforeRemovingIt(t *testing.T) {
+	root := t.TempDir()
+	var events []string
+	in := &Installer{Root: root, Logf: func(format string, a ...any) { events = append(events, fmt.Sprintf(format, a...)) }}
+	s := baseSpec(t)
+	s.RemoteUpgrade = true
+	armed, err := BuildPlan(s, OutputSystemd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Apply(armed); err != nil {
+		t.Fatalf("Apply with the helper: %v", err)
+	}
+	events = nil
+	s.RemoteUpgrade = false
+	plain, err := BuildPlan(s, OutputSystemd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Apply(plain); err != nil {
+		t.Fatalf("Apply without the helper: %v", err)
+	}
+	disarm, removed := -1, -1
+	for i, e := range events {
+		switch {
+		case strings.Contains(e, "systemctl disable --now cloop-executor-upgrade.path") && disarm < 0:
+			disarm = i
+		case strings.HasPrefix(e, "removed ") && strings.Contains(e, "-upgrade.path") && removed < 0:
+			removed = i
+		}
+	}
+	if disarm < 0 || removed < 0 || disarm > removed {
+		t.Errorf("the helper was not disarmed before its unit file went (disarm at %d, removal at %d):\n%s",
+			disarm, removed, strings.Join(events, "\n"))
 	}
 }
 

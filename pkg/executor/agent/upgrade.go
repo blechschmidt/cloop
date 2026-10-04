@@ -100,6 +100,13 @@ func (a *Agent) upgradePreflight(p remote.UpgradePayload, current string) (strin
 		return issue, false
 	}
 
+	// The helper's unit gives a whole upgrade fifteen minutes; a settle window
+	// longer than it allows would be acknowledged here and dropped there.
+	if p.SettleSeconds > install.MaxSettleSeconds {
+		return fmt.Sprintf("a settle time of %ds is longer than the %ds this device's upgrade allows",
+			p.SettleSeconds, install.MaxSettleSeconds), false
+	}
+
 	if upgrade.IsEdgeTarget(p.TargetVersion) {
 		commit, _ := upgrade.ParseEdgeTarget(p.TargetVersion)
 		if !p.Force && upgrade.SameCommit(current, commit) {
@@ -270,6 +277,19 @@ func ownInstall(cgroup, exe, credentialPath, unitDir, initDir string) (install.S
 	}
 	unit, err := os.ReadFile(spec.UnitPath())
 	if err != nil {
+		// systemd's SysV generator runs an init-script install
+		// (--output shell) as <svc>.service with no unit file of its own.
+		// The script is its install only if it runs this binary.
+		if script, serr := os.ReadFile(spec.InitScriptPath()); serr == nil {
+			if !sameExecutable(initScriptBinary(string(script)), spec.BinaryPath) {
+				return defaults, install.OutputSystemd, fmt.Errorf(
+					"this agent is not running from a managed service install: it runs as %s, started from %s, "+
+						"which does not run this binary (%s), so that script is not its install and will not be "+
+						"touched. Install it as a service with `sudo cloop executor agent install` to make it "+
+						"upgradable from the hub", spec.UnitFileName(), spec.InitScriptPath(), spec.BinaryPath)
+			}
+			return spec, install.OutputShell, nil
+		}
 		return defaults, install.OutputSystemd, fmt.Errorf(
 			"this agent is not running from a managed service install: it runs as %s, which has no unit at %s "+
 				"— a transient unit, or one written by hand. Install it as a service with `sudo cloop executor "+
@@ -332,6 +352,17 @@ func execStartBinary(unit string) (string, bool) {
 		}
 	}
 	return bin, agent
+}
+
+// initScriptBinary returns the binary an init script written by
+// `install --output shell` runs: its BIN= line, unquoted.
+func initScriptBinary(script string) string {
+	for _, line := range strings.Split(script, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "BIN="); ok {
+			return strings.Trim(v, `'"`)
+		}
+	}
+	return ""
 }
 
 // sameExecutable reports whether two paths name the same file.

@@ -310,7 +310,10 @@ func workflowRuns(ctx context.Context, commit string) (ci, edge *workflowRun, er
 		return ci, nil, err
 	}
 	for i := range runs {
-		if strings.Contains(runs[i].DisplayTitle, commit) {
+		// A skipped run is one whose triggering CI run did not pass — an
+		// earlier attempt at this commit, before a re-run went green — and is
+		// not a build that failed.
+		if strings.Contains(runs[i].DisplayTitle, commit) && runs[i].Conclusion != "skipped" {
 			edge = &runs[i]
 			break
 		}

@@ -44,6 +44,8 @@ func TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild(t *testing.T) {
 	lb := newLoopback(t, func(c *agent.Config) {
 		c.Channel = provenance.ChannelEdge
 		c.InstallTarget = dev.Target
+		// The staged helper is "armed" without asking this machine's systemd.
+		c.UnitActive = func(string) (bool, bool) { return true, true }
 	})
 	ex := lb.executor(t)
 	if got := ex.UpdateChannel(); got != "edge" {
@@ -98,7 +100,10 @@ func TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild(t *testing.T) {
 // own refusal stands behind it (TestAgentRefusesEdgeTargetsWithoutOptIn).
 func TestLoopbackNeverSendsMainToAStableDevice(t *testing.T) {
 	dev := edgetest.NewDevice(t, "dev+g06e06ed", 16, provenance.ChannelStable)
-	lb := newLoopback(t, func(c *agent.Config) { c.InstallTarget = dev.Target })
+	lb := newLoopback(t, func(c *agent.Config) {
+		c.InstallTarget = dev.Target
+		c.UnitActive = func(string) (bool, bool) { return true, true }
+	})
 	ex := lb.executor(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

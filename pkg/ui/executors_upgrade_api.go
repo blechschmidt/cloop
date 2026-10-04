@@ -223,7 +223,7 @@ func upgradeRefusalStatus(err error) int {
 	case errors.Is(err, remote.ErrUpgradeTarget):
 		return http.StatusBadRequest
 	case errors.Is(err, remote.ErrUpgradeLowersProtocol), errors.Is(err, remote.ErrUpgradeUnsupported),
-		errors.Is(err, remote.ErrUpgradeChannel), errors.Is(err, remote.ErrUpgradeUnavailable):
+		errors.Is(err, remote.ErrUpgradeChannel):
 		return http.StatusConflict
 	}
 	return http.StatusServiceUnavailable

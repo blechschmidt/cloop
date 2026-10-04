@@ -115,20 +115,19 @@ func TestRequestUpgradeRefusesAMalformedEdgeTarget(t *testing.T) {
 	}
 }
 
-// TestRequestUpgradeRefusesADeviceThatCannotCarryItOut: a device that says it
-// has no way to replace its binary is not asked — for a release either — and
-// the refusal carries what it said.
-func TestRequestUpgradeRefusesADeviceThatCannotCarryItOut(t *testing.T) {
+// TestRequestUpgradeAsksADeviceThatSaidItCouldNot: what a device said about
+// itself at hello is as old as the session, so the hub asks anyway and the
+// device answers from a preflight it runs now. An operator who installed cosign
+// after the agent connected is not refused until it reconnects.
+func TestRequestUpgradeAsksADeviceThatSaidItCouldNot(t *testing.T) {
 	withHubBuild(t, "v0.2.0")
-	const issue = "this agent runs unprivileged and the device has no remote-upgrade helper"
+	const issue = "cosign is not installed on this device"
 	ex, up := connectWithCaps(t, 16, remote.AgentCapabilities{UpdateChannel: "edge", RemoteUpgradeIssue: issue})
-	for _, target := range []string{"v0.2.0", "edge:" + edgeCommit} {
-		_, err := ex.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: target, TargetProtocol: 17, Force: true})
-		if !errors.Is(err, remote.ErrUpgradeUnavailable) || !strings.Contains(err.Error(), issue) {
-			t.Errorf("%s: err = %v, want ErrUpgradeUnavailable carrying the device's reason", target, err)
-		}
+	out, err := ex.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: "v0.2.0"})
+	if err != nil || !out.Accepted {
+		t.Fatalf("RequestUpgrade = %+v, %v; want the device asked", out, err)
 	}
-	if len(up.asked()) != 0 {
-		t.Error("the device was asked anyway")
+	if got := up.asked(); len(got) != 1 || got[0] != "v0.2.0" {
+		t.Errorf("asked = %v", got)
 	}
 }

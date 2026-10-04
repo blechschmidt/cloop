@@ -418,6 +418,11 @@ func TestResolveEdgeBuildSaysWhyABuildIsNotOffered(t *testing.T) {
 	otherEdge := workflowRun{Path: ".github/workflows/edge.yml", Event: "workflow_run", HeadBranch: "main",
 		Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/x/other",
 		DisplayTitle: "Edge build of " + commitB}
+	// The run a failed CI attempt at this commit queued, before a re-run went
+	// green: skipped, newest first, and not a failed publish.
+	skippedEdge := workflowRun{Path: ".github/workflows/edge.yml", Event: "workflow_run", HeadBranch: "main",
+		Status: "completed", Conclusion: "skipped", HTMLURL: "https://github.com/x/skipped",
+		DisplayTitle: "Edge build of " + commitA}
 	known := map[string]string{commitA: ""}
 	for _, c := range []struct {
 		name    string
@@ -435,7 +440,7 @@ func TestResolveEdgeBuildSaysWhyABuildIsNotOffered(t *testing.T) {
 		{"CI running", "dev+ga0f3870", false, []workflowRun{ci("in_progress", "")}, EdgeCIRunning, "still running"},
 		{"CI failed", "dev+ga0f3870", false, []workflowRun{ci("completed", "failure")}, EdgeCIFailed, "CI failed"},
 		{"publishing", "dev+ga0f3870", false, []workflowRun{otherEdge, edge("in_progress", ""), ci("completed", "success")}, EdgePublishing, "has not published it yet"},
-		{"edge not started", "dev+ga0f3870", false, []workflowRun{otherEdge, ci("completed", "success")}, EdgePublishing, "has not published it yet"},
+		{"edge not started", "dev+ga0f3870", false, []workflowRun{skippedEdge, otherEdge, ci("completed", "success")}, EdgePublishing, "has not published it yet"},
 		{"publish failed", "dev+ga0f3870", false, []workflowRun{edge("completed", "failure"), ci("completed", "success")}, EdgePublishFailed, "failed"},
 		{"pruned", "dev+ga0f3870", false, []workflowRun{edge("completed", "success"), ci("completed", "success")}, EdgePruned, "pruned"},
 	} {

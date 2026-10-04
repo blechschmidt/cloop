@@ -174,14 +174,17 @@ func TestUpgradeDialog_NeverOffersMainToAStableDevice(t *testing.T) {
 	}
 }
 
-// TestUpgradeDialog_ADeviceThatCannotUpgradeIsOfferedNothing.
-func TestUpgradeDialog_ADeviceThatCannotUpgradeIsOfferedNothing(t *testing.T) {
+// TestUpgradeDialog_ADeviceThatSaidItCannotIsWarned: what the device said at
+// hello is shown, and the offer stands — the device answers a request from a
+// preflight it runs then, so fixing the cause is enough.
+func TestUpgradeDialog_ADeviceThatSaidItCannotIsWarned(t *testing.T) {
 	withHubVersion(t, "dev+ga0f3870")
 	withEdgeResolution(t, published(17))
 	const issue = "cosign is not installed on this device"
 	ex, _ := edgeDevice(t, "edge-cannot-1", 16, remote.AgentCapabilities{UpdateChannel: "edge", RemoteUpgradeIssue: issue})
 	v := dialog(t, ex)
-	if v.UpgradeTarget != "" || !strings.Contains(v.UpgradeNote, issue) {
+	if v.UpgradeTarget != "edge:"+hubCommit || !strings.Contains(v.UpgradeNote, issue) ||
+		!strings.Contains(v.UpgradeNote, "asks it again") {
 		t.Errorf("offer %q, note %q", v.UpgradeTarget, v.UpgradeNote)
 	}
 }

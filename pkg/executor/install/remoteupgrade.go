@@ -200,6 +200,11 @@ type UpgradeRequest struct {
 // user controls.
 const maxRequestBytes = 4096
 
+// MaxSettleSeconds bounds the settle time a request may ask for: the helper's
+// unit gives the whole upgrade TimeoutStartSec=15min, and a settle window that
+// outlived it would have systemd kill the helper before it could roll back.
+const MaxSettleSeconds = 600
+
 // RequestMaxAge is how old a request may be and still be carried out. A
 // request left behind — by a crash, or a device switched off mid-flight — is
 // not an instruction to upgrade at the next boot; the hub asks again.
@@ -272,14 +277,19 @@ func TakeUpgradeRequest(s Spec, now time.Time) (UpgradeRequest, error) {
 		return req, fmt.Errorf("install: read the upgrade request: %w", err)
 	}
 	if err := json.Unmarshal(data, &req); err != nil {
-		return req, fmt.Errorf("install: the upgrade request is not JSON: %w", err)
+		return UpgradeRequest{}, fmt.Errorf("install: the upgrade request is not JSON: %w", err)
 	}
-	req.TargetVersion = strings.TrimSpace(req.TargetVersion)
+	// Made printable before anything returns: these strings come from a file
+	// the agent's user writes and end up in a root service's journal, where a
+	// newline would let them forge a line in the helper's name.
+	req.TargetVersion = printable(strings.TrimSpace(req.TargetVersion), 100)
+	req.Reason = printable(req.Reason, 200)
 	switch {
 	case req.TargetVersion == "":
 		return req, fmt.Errorf("install: the upgrade request names no version")
-	case req.SettleSeconds < 0 || req.SettleSeconds > 3600:
-		return req, fmt.Errorf("install: the upgrade request's settle time %ds is out of range", req.SettleSeconds)
+	case req.SettleSeconds < 0 || req.SettleSeconds > MaxSettleSeconds:
+		return req, fmt.Errorf("install: the upgrade request's settle time %ds is out of range (0 to %ds)",
+			req.SettleSeconds, MaxSettleSeconds)
 	}
 	at, err := time.Parse(time.RFC3339, req.RequestedAt)
 	if err != nil {
@@ -289,16 +299,20 @@ func TakeUpgradeRequest(s Spec, now time.Time) (UpgradeRequest, error) {
 		return req, fmt.Errorf("install: the upgrade request for %s is %s old (the limit is %s); ignored",
 			req.TargetVersion, age.Round(time.Second), RequestMaxAge)
 	}
-	if len(req.Reason) > 200 {
-		req.Reason = req.Reason[:200]
+	return req, nil
+}
+
+// printable replaces control characters with spaces and cuts s to max bytes.
+func printable(s string, max int) string {
+	if len(s) > max {
+		s = s[:max]
 	}
-	req.Reason = strings.Map(func(r rune) rune {
+	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
-	}, req.Reason)
-	return req, nil
+	}, s)
 }
 
 // ── What the device has decided ────────────────────────────────────────────

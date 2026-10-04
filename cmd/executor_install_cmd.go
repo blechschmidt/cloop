@@ -203,6 +203,13 @@ Examples:
 			}
 
 			if applyRequest {
+				// What the helper runs, as root, against the live install: a
+				// dry run would still take (and so delete) the request, and a
+				// staged tree has no request to take.
+				if dryRun || inst.Root != "" {
+					return fmt.Errorf("--apply-request carries out the request the agent filed and takes no " +
+						"--dry-run or --root; use --to <target> --dry-run to see what an upgrade would do")
+				}
 				return applyUpgradeRequest(cmd, inst, spec, out)
 			}
 			if to != "" {

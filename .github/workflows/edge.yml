@@ -55,12 +55,6 @@ permissions:
   contents: write
   id-token: write
 
-# One publish at a time: two runs creating the release, or one pruning while
-# another uploads, would race on the same asset list.
-concurrency:
-  group: edge-channel
-  cancel-in-progress: false
-
 jobs:
   publish:
     name: Build, sign and publish the commit
@@ -71,6 +65,17 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Per commit, at the job: a re-run of one commit's build waits for the
+    # first, and different commits publish side by side. Not one group for the
+    # workflow — GitHub keeps one pending run per group and cancels it for the
+    # next, and every CI run on main queues one here, so a failed CI run's
+    # skipped build would cancel a real one still waiting. The steps that
+    # touch shared state tolerate a concurrent publish instead: the release may
+    # appear between the check and the create, and a prune may find an asset
+    # another one already deleted.
+    concurrency:
+      group: edge-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
     env:
       COMMIT: ${{ github.event.workflow_run.head_sha }}
       GH_TOKEN: ${{ github.token }}
@@ -186,7 +191,8 @@ jobs:
           See docs/guides/edge-channel.md.
           EOF
             gh release create edge --prerelease --latest=false --target "$COMMIT" \
-              --title "Edge builds (main)" --notes-file /tmp/edge-notes.md
+              --title "Edge builds (main)" --notes-file /tmp/edge-notes.md ||
+              gh release view edge >/dev/null   # another publish created it meanwhile
           fi
           [ "$(gh release view edge --json isPrerelease --jq .isPrerelease)" = "true" ] || {
             echo "::error::the edge release is not a prerelease"; exit 1; }
@@ -207,7 +213,7 @@ jobs:
           for asset in "cloop_${COMMIT}_manifest.json" "cloop_${COMMIT}_manifest.json.sigstore.json" \
                        "cloop_${COMMIT}_linux_amd64.tar.gz" "cloop_${COMMIT}_linux_amd64.tar.gz.sigstore.json"; do
             for attempt in 1 2 3 4 5; do
-              code=$(curl -sSL -o /dev/null -w '%{http_code}' "$base/$asset")
+              code=$(curl -sSL -o /dev/null -w '%{http_code}' "$base/$asset" || true)
               [ "$code" = "200" ] && break
               echo "attempt $attempt: $asset -> HTTP $code, retrying"
               sleep 10
@@ -239,6 +245,9 @@ jobs:
             --history /tmp/main-history.txt > /tmp/edge-doomed.txt
           echo "$(wc -l < /tmp/edge-doomed.txt) asset(s) to prune"
           while read -r asset name; do
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset}"
-            echo "pruned: $name"
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset}"; then
+              echo "pruned: $name"
+            else
+              echo "already gone (a concurrent prune?): $name"
+            fi
           done < /tmp/edge-doomed.txt

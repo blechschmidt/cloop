@@ -2900,9 +2900,23 @@ ignores a request more than 15 minutes old. One code path serves the helper,
 an agent that runs as root (which does the work itself), and
 `install --upgrade --to`: `agent.UpgradeTo`.
 
-A device without the helper whose agent is not root, or with no `cosign` on its
-`PATH`, says so in its hello (`remote_upgrade_issue`) and refuses an upgrade
-before acknowledging it; the dialog shows the reason in place of a target.
+A device that cannot carry an upgrade out — no helper and an agent that is not
+root, a helper whose path unit is not active (`systemctl is-active` says so;
+an answer that is not a unit state does not refuse), or no `cosign` on its
+`PATH` — says so in its hello (`remote_upgrade_issue`) and refuses an upgrade
+before acknowledging it. The hub does not refuse on the hello: it is as old as
+the session, so the dialog shows it as a warning beside the target, and
+pressing Upgrade asks the device, which answers from a preflight it runs then —
+an operator who installed cosign after the agent connected is not turned away
+until it reconnects. A refusal comes back as `accepted: false` with the
+device's reason.
+
+The agent also refuses a settle time over 600 seconds, the most the helper's
+unit (`TimeoutStartSec=15min`) leaves room for, rather than acknowledge a
+request the helper would drop; the helper refuses one too. The helper's
+journal lines quote the request with control characters removed, so a request
+cannot forge a line. And `<name>-upgrade` is the helper of the agent called
+`<name>`: a fresh install refuses a service name ending in `-upgrade`.
 
 #### The staged binary is executed before it is installed
 
@@ -3091,8 +3105,10 @@ instead of a prompt. Behind it, `POST /api/executors/{id}/upgrade`:
   that build's manifest to judge its protocol, and refuses it with **409** for a
   device on the stable channel, for a build CI has not published, and for one
   that would lower the device's protocol unless `force`;
-- refuses with **409** a device that has reported it cannot carry out an
-  upgrade (no remote-upgrade helper for an unprivileged agent, or no cosign);
+- asks a device that said at hello it cannot carry out an upgrade (no
+  remote-upgrade helper for an unprivileged agent, a helper that is not armed,
+  or no cosign) anyway: the device's own preflight answers, with
+  `accepted: false` and its reason when the cause is still there;
 - refuses a release whose binaries speak an older protocol than the device does
   with **409**, unless the request sets `force`; a device too old to be upgraded
   remotely is also a **409**.

@@ -22,6 +22,7 @@ package agent
 // the request file, which the agent's user can write, never carries it.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -179,6 +180,15 @@ func (a *Agent) remoteUpgradeReadiness() (remoteUpgradeMode, install.Spec, insta
 	mode := remoteUpgradeUnavailable
 	switch {
 	case out == install.OutputSystemd && (&install.Installer{}).HelperInstalled(spec):
+		// Installed is not armed: a path unit that was disabled, or stopped
+		// by a withdrawal that failed half-way, would leave the request filed
+		// and never carried out — the very failure the helper exists to end.
+		unit := spec.UpgradeHelperPathUnitName()
+		if active, known := a.unitActive(unit); known && !active {
+			return remoteUpgradeUnavailable, spec, out, fmt.Sprintf(
+				"the remote-upgrade helper is installed but %s is not active, so a request would never be "+
+					"carried out. Run `sudo systemctl enable --now %s` on the device", unit, unit)
+		}
 		mode = remoteUpgradeHelper
 	case agentEUID() == 0:
 		mode = remoteUpgradeInProcess
@@ -194,6 +204,27 @@ func (a *Agent) remoteUpgradeReadiness() (remoteUpgradeMode, install.Spec, insta
 			"(a single static binary, e.g. to /usr/local/bin/cosign)"
 	}
 	return mode, spec, out, ""
+}
+
+// unitActive asks systemd whether unit is active. Known is false when the
+// answer is not a unit state — no systemctl, no bus — which callers treat as
+// "cannot tell" rather than as a refusal.
+func (a *Agent) unitActive(unit string) (active, known bool) {
+	if a.cfg.UnitActive != nil {
+		return a.cfg.UnitActive(unit)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Read as the agent: the unit's sandbox allows it (AF_UNIX to the system
+	// bus), and is-active needs no privilege.
+	out, _ := exec.CommandContext(ctx, "systemctl", "is-active", unit).Output()
+	switch state := strings.TrimSpace(string(out)); state {
+	case "active", "reloading", "activating":
+		return true, true
+	case "inactive", "failed", "deactivating":
+		return false, true
+	}
+	return false, false
 }
 
 // fileUpgradeRequest hands an upgrade to the root helper.

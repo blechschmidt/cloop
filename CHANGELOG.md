@@ -36,8 +36,9 @@ schema and the hub's HTTP API may change in any release.
   by `install --upgrade --remote-upgrade`) now carries out the request the agent
   files: it takes the device's channel from systemd, verifies the build, and
   installs it with the usual backup, restart and rollback. A device that cannot
-  carry out an upgrade — no helper, or no cosign — says so in its hello and the
-  dialog shows the reason (Task 20376).
+  carry out an upgrade — no helper, a helper whose path unit is not active, or
+  no cosign — refuses before acknowledging and says why; the dialog warns with
+  what it said at hello and asks it again on Upgrade (Task 20376).
 
 - **GitHub App tokens outlive GitHub's hour.** A run that still uses git more
   than an hour after dispatch keeps its GitHub access. The hub re-mints a

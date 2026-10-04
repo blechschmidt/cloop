@@ -263,12 +263,16 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 			}
 		}
 	}
-	// A device that has said it cannot carry an upgrade out is offered
-	// nothing: the button shows why, and what to run on the device instead.
+	// A device that said, when it connected, that it cannot carry an upgrade
+	// out is warned about rather than shut out: that answer is as old as its
+	// session, and the device answers a request from a preflight it runs then
+	// — so an operator who has fixed the cause since is not refused until the
+	// agent reconnects.
 	if live != nil {
 		if caps, ok := live.AgentInventory(); ok && !caps.RemoteUpgrade && caps.RemoteUpgradeIssue != "" {
-			view.UpgradeTarget, view.UpgradeLabel = "", ""
-			view.UpgradeNote = "This device cannot carry out an upgrade from here yet: " + caps.RemoteUpgradeIssue
+			view.UpgradeNote = joinNote("When it connected, this device said it cannot carry out an upgrade: "+
+				strings.TrimSuffix(caps.RemoteUpgradeIssue, ".")+". Upgrade asks it again, and it answers with "+
+				"the reason if that is still so.", view.UpgradeNote)
 		}
 	}
 
@@ -348,4 +352,15 @@ func memoryLabel(mb int) string {
 	default:
 		return fmt.Sprintf("%.1f GB", float64(mb)/1024)
 	}
+}
+
+// joinNote puts two sentences of a note together, either possibly empty.
+func joinNote(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + " " + b
 }
