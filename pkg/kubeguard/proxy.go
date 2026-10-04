@@ -278,8 +278,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, r
 		return
 	}
 	var body io.Reader
+	var capped *cappedReader
 	if r.Body != nil {
-		body = &cappedReader{r: r.Body, n: &sess.bytesIn, limit: sess.Policy.MaxBodyBytes}
+		capped = &cappedReader{r: r.Body, n: &sess.bytesIn, limit: sess.Policy.MaxBodyBytes}
+		body = capped
 	}
 
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
@@ -305,6 +307,15 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, r
 	}
 
 	resp, err := tr.RoundTrip(out)
+	// The transport writes the body while it waits for the answer, and the
+	// two race: an upstream that answers once the stream breaks off at the cap
+	// can win, and RoundTrip then returns that answer with the cap's error
+	// swallowed. An answer to a request this proxy refused is not relayed —
+	// CI caught a 200 going back for an oversized chunked body (Task 20371).
+	if err == nil && capped != nil && capped.tripped() {
+		resp.Body.Close()
+		resp, err = nil, errBodyTooLarge
+	}
 	if err != nil {
 		// The cap tripped while the transport was streaming the body. This is
 		// a policy refusal that happens to surface as a transport error, so it
@@ -605,16 +616,28 @@ type cappedReader struct {
 	n     *atomic.Int64
 	limit int64
 	read  int64
+	// over is set once the cap trips. Atomic, because the transport reads the
+	// body on a goroutine of its own while the proxy waits for the answer.
+	over atomic.Bool
 }
 
+// tripped reports whether the body ran past the cap.
+func (c *cappedReader) tripped() bool { return c.over.Load() }
+
 func (c *cappedReader) Read(b []byte) (int, error) {
-	if c.read >= c.limit {
+	if c.over.Load() {
 		return 0, errBodyTooLarge
 	}
-	if int64(len(b)) > c.limit-c.read {
-		// Read no further than one byte past the limit, so the cap costs the
-		// hub the cap and not the body.
-		b = b[:c.limit-c.read+1]
+	if len(b) == 0 {
+		return 0, nil
+	}
+	// Read no further than one byte past the limit, so the cap costs the hub
+	// the cap and not the body. That one byte is also what tells a body that
+	// ends exactly at the cap — allowed, as a declared length of the cap is —
+	// from one that goes on: refusing on reaching the cap, as this once did,
+	// refused the first.
+	if room := c.limit - c.read + 1; int64(len(b)) > room {
+		b = b[:room]
 	}
 	n, err := c.r.Read(b)
 	if n > 0 {
@@ -622,6 +645,7 @@ func (c *cappedReader) Read(b []byte) (int, error) {
 		c.n.Add(int64(n))
 	}
 	if c.read > c.limit {
+		c.over.Store(true)
 		return 0, errBodyTooLarge
 	}
 	return n, err
