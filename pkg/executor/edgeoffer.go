@@ -95,16 +95,32 @@ func EdgeUpgradeOffer(subject string, have, hubProtocol int, edge *EdgeBuild) (t
 			"signed commit %s on main, and it speaks protocol v%d. The device verifies the signature against "+
 			"the edge workflow's identity before installing it.", edge.Label(), edge.Short, edge.Protocol)
 	case edge.Published:
-		return fallback, "", joinSentences(fmt.Sprintf("%s is not offered: it speaks v%d, below the device's "+
-			"v%d, so installing it would lower the device's protocol", capitalize(edge.Label()), edge.Protocol, have),
-			fallbackNote)
+		return edgeFallback(fmt.Sprintf("%s is not offered: it speaks v%d, below the device's v%d, so installing "+
+			"it would lower the device's protocol — the device is ahead of the hub, so move the hub forward rather "+
+			"than the device back", capitalize(edge.Label()), edge.Protocol, have), fallback, fallbackNote)
 	}
 	why := strings.TrimSpace(edge.WhyNot)
 	if why == "" {
 		why = "CI has not published it"
 	}
-	return fallback, "", joinSentences(fmt.Sprintf("%s is not offered yet: %s", capitalize(edge.Label()),
-		strings.TrimSuffix(why, ".")), fallbackNote)
+	return edgeFallback(fmt.Sprintf("%s is not offered yet: %s It is offered here once CI has published it",
+		capitalize(edge.Label()), joinSentences(why)), fallback, fallbackNote)
+}
+
+// edgeFallback completes the note for an edge-channel device whose hub build
+// is not offered: what UpgradeOffer would offer instead, if anything. With
+// nothing to offer, UpgradeOffer's own note — written for a device that still
+// has to be put on the channel — is left out: this one is on it already.
+func edgeFallback(lead, fallback, fallbackNote string) (target, label, note string) {
+	if fallback != "" {
+		return fallback, "", joinSentences(lead, "Until then Upgrade offers "+fallback+".", fallbackNote)
+	}
+	tail := "No published release can be offered instead without lowering the device's protocol."
+	if newest, ok := newestKnownRelease(); ok {
+		tail = fmt.Sprintf("No published release can be offered instead without lowering the device's protocol: "+
+			"the newest this hub knows of, %s, speaks v%d.", newest.Tag, newest.Protocol)
+	}
+	return "", "", joinSentences(lead, tail)
 }
 
 // capitalize upper-cases the first letter, for a label that starts a sentence.
