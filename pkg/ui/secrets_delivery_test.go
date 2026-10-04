@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -32,7 +33,7 @@ func seedPATGrant(t *testing.T, executorID, canary string) string {
 	t.Setenv(secretbroker.EnvPassphraseKey, "secret-delivery-unit-passphrase")
 
 	dir := t.TempDir()
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 	if _, err := state.Init(dir, "secret delivery", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

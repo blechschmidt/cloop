@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -38,8 +39,8 @@ func setupProjectDir(t *testing.T, goal string, tasks []*pm.Task) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	// Skip the 29-migration replay; see dbtemplate_test.go.
-	seedMigratedDB(t, dir)
+	// Copy a migrated database rather than migrate one; see internal/statedbtest.
+	statedbtest.SeedDir(t, dir)
 
 	ps, err := state.Init(dir, goal, 0)
 	if err != nil {

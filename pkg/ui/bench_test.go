@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -296,7 +297,7 @@ func benchSweepServer(b *testing.B, n int) (*Server, []string) {
 		}
 		// Skip the migration run per project: at 500 projects that dominates
 		// setup and none of it is what we are measuring.
-		seedMigratedDB(b, dir)
+		statedbtest.SeedDir(b, dir)
 		ps, err := state.Init(dir, fmt.Sprintf("tenant %d", i), 0)
 		if err != nil {
 			b.Fatalf("state.Init: %v", err)

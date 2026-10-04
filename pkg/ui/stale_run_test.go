@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
@@ -25,7 +26,7 @@ import (
 func runningProject(t *testing.T, status string) string {
 	t.Helper()
 	dir := t.TempDir()
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 	st, err := state.Init(dir, "ship the thing", 0)
 	if err != nil {
 		t.Fatalf("init project: %v", err)

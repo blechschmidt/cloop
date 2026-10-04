@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -19,7 +20,7 @@ import (
 func stalledProject(t *testing.T) (dir string, taskID int) {
 	t.Helper()
 	dir = t.TempDir()
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 
 	st, err := state.Init(dir, "ship the thing", 0)
 	if err != nil {

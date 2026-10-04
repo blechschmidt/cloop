@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -86,7 +87,7 @@ func (f *featureFixture) start(t *testing.T) {
 func addFeature(t *testing.T, parent, slug string, created time.Time, mutate func(*feature.Meta, *state.ProjectState)) string {
 	t.Helper()
 	dir := feature.Path(parent, slug)
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 	st, err := state.Init(dir, "goal of "+slug, 0)
 	if err != nil {
 		t.Fatalf("state.Init: %v", err)

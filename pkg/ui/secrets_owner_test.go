@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -58,7 +59,7 @@ func newPersonalFixture(t *testing.T) *personalFixture {
 	srv.Authz = resolver
 
 	// The hub's own project directory backs the broker the handlers open.
-	seedMigratedDB(t, srv.WorkDir)
+	statedbtest.SeedDir(t, srv.WorkDir)
 	if _, err := state.Init(srv.WorkDir, "personal secrets", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

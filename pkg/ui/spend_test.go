@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/quota"
@@ -38,14 +39,14 @@ func newSpendFixture(t *testing.T, limits quota.Limits) *spendFixture {
 	t.Helper()
 
 	control := t.TempDir()
-	seedMigratedDB(t, control)
+	statedbtest.SeedDir(t, control)
 	useControlPlaneDir(t, control)
 	if _, err := state.Init(control, "control plane", 1); err != nil {
 		t.Fatalf("init control plane: %v", err)
 	}
 
 	project := t.TempDir()
-	seedMigratedDB(t, project)
+	statedbtest.SeedDir(t, project)
 	if _, err := state.Init(project, "billed project", 1); err != nil {
 		t.Fatalf("init project: %v", err)
 	}

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -59,7 +60,7 @@ func newProvisionTestBroker(t *testing.T) *secretbroker.Broker {
 	t.Setenv(secretbroker.EnvPassphraseKey, "provision-test-passphrase")
 
 	dir := t.TempDir()
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 	if _, err := state.Init(dir, "provision test", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

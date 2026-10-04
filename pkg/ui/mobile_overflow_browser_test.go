@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -54,7 +55,7 @@ func namedProjectDir(t *testing.T, name, goal string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
-	seedMigratedDB(t, dir) // skip the migration replay; see dbtemplate_test.go
+	statedbtest.SeedDir(t, dir) // skip the migration replay; see internal/statedbtest
 	if _, err := state.Init(dir, goal, 0); err != nil {
 		t.Fatalf("state.Init(%s): %v", dir, err)
 	}

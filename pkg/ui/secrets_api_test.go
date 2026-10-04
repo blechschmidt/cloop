@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -203,7 +204,7 @@ func TestSecretsAPINeverDisclosesLeaseMaterial(t *testing.T) {
 
 	t.Setenv(secretbroker.EnvPassphraseKey, "lease-view-conformance-passphrase")
 	dir := t.TempDir()
-	seedMigratedDB(t, dir)
+	statedbtest.SeedDir(t, dir)
 	if _, err := state.Init(dir, "lease view conformance", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

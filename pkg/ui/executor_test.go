@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -159,7 +160,7 @@ func TestLookupProjectExecutorReadsBindings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(controlPlane, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
-	seedMigratedDB(t, controlPlane)
+	statedbtest.SeedDir(t, controlPlane)
 	dbPath := state.DBPath(controlPlane)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
