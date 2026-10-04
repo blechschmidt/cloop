@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -188,46 +189,165 @@ func (a *Agent) runUpgrade(p remote.UpgradePayload, current string) {
 	}
 }
 
-// installTarget describes this device's managed install, and which supervisor
-// is running it.
+// installTarget describes this agent's own managed install, and which
+// supervisor is running it.
+//
+// "Own" is the point (Task 20376). It used to describe the *default* install —
+// cloop-executor.service, /usr/local/bin/cloop — whichever agent asked, so a
+// second agent installed beside the first under another service name answered
+// for the first: it looked for the other's upgrade helper, and would have
+// filed its upgrade request into the other's state directory, where that
+// agent's helper would have acted on it. So a systemd install is identified
+// from the kernel's answer — the .service whose cgroup this process is in —
+// and accepted only if that unit's ExecStart runs exactly this binary as an
+// executor agent. A process that merely runs inside some service's cgroup (a
+// test binary under the hub's own unit, an agent started by hand from a
+// service's shell) is not that service's install, and must not restart it.
 //
 // The directories are spelled out rather than left zero. Spec.UnitPath() joins
 // UnitDir without defaulting it, so a spec carrying only a service name
 // resolves to "/cloop-executor.service" — a path that never exists, which would
 // make every device on the fleet refuse every upgrade with "not installed as a
-// service". A feature that is uniformly and quietly inert is worse than one
-// that fails loudly, so the values are stated here and asserted by
-// TestInstallTargetResolvesRealSupervisionPaths.
+// service". TestInstallTargetResolvesRealSupervisionPaths asserts them.
 //
-// Both supervision shapes are probed because `cloop executor agent install`
-// writes either, depending on --output: a systemd unit on most hosts, a POSIX
-// init script on BusyBox and OpenRC devices. Those are exactly the small edge
-// devices this feature is most useful for, and hardcoding systemd would have
-// excluded them while appearing to work everywhere else.
+// A POSIX init-script install (--output shell, for BusyBox and OpenRC devices)
+// supervises the agent as a plain process tree, so there is no cgroup to read;
+// its script at the default path is taken as the install, as before.
 func (a *Agent) installTarget() (install.Spec, install.Output, error) {
 	if a.cfg.InstallTarget != nil {
 		return a.cfg.InstallTarget()
 	}
-	spec := install.Spec{
+	cgroup, _ := os.ReadFile("/proc/self/cgroup")
+	exe, _ := os.Executable()
+	return ownInstall(string(cgroup), exe, a.cfg.CredentialPath, install.DefaultUnitDir, install.DefaultInitDir)
+}
+
+// defaultInstall is the install `cloop executor agent install` makes when told
+// nothing.
+func defaultInstall() install.Spec {
+	return install.Spec{
 		ServiceName: install.DefaultServiceName,
 		BinaryPath:  install.DefaultBinaryPath,
 		UnitDir:     install.DefaultUnitDir,
 		InitDir:     install.DefaultInitDir,
 		// Stated, not left to Normalize, for the reason the comment above
 		// gives for the rest: the upgrade request is filed here.
-		StateDir: install.DefaultStateRoot + "/" + install.DefaultServiceName,
+		StateDir: filepath.Join(install.DefaultStateRoot, install.DefaultServiceName),
 	}
-	if _, err := os.Stat(spec.UnitPath()); err == nil {
-		return spec, install.OutputSystemd, nil
+}
+
+// ownInstall is installTarget's logic, from what it reads: this process's
+// cgroup membership, its executable and its credential path, against the
+// unit and init-script directories.
+func ownInstall(cgroup, exe, credentialPath, unitDir, initDir string) (install.Spec, install.Output, error) {
+	defaults := defaultInstall()
+	defaults.UnitDir, defaults.InitDir = unitDir, initDir
+	svc := serviceFromCgroup(cgroup)
+	if svc == "" {
+		if _, err := os.Stat(defaults.InitScriptPath()); err == nil {
+			return defaults, install.OutputShell, nil
+		}
+		return defaults, install.OutputSystemd, fmt.Errorf(
+			"this agent is not running from a managed service install (it is not a systemd service, and %s is "+
+				"not present), so there is no supervised binary to replace. Install it as a service with "+
+				"`sudo cloop executor agent install` to make it upgradable from the hub", defaults.InitScriptPath())
 	}
-	if _, err := os.Stat(spec.InitScriptPath()); err == nil {
-		return spec, install.OutputShell, nil
+
+	spec := install.Spec{
+		ServiceName: svc,
+		BinaryPath:  exe,
+		UnitDir:     unitDir,
+		InitDir:     initDir,
+		StateDir:    filepath.Join(install.DefaultStateRoot, svc),
 	}
-	return spec, install.OutputSystemd, fmt.Errorf(
-		"this agent is not running from a managed service install (neither %s nor %s is "+
-			"present), so there is no supervised binary to replace. Install it as a service "+
-			"with `sudo cloop executor agent install` to make it upgradable from the hub",
-		spec.UnitPath(), spec.InitScriptPath())
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		spec.BinaryPath = resolved
+	}
+	// The installer puts the credential in the state directory, and so the
+	// upgrade request beside it, where the helper's path unit watches.
+	if c := strings.TrimSpace(credentialPath); c != "" && filepath.IsAbs(c) {
+		spec.StateDir = filepath.Dir(c)
+	}
+	unit, err := os.ReadFile(spec.UnitPath())
+	if err != nil {
+		return defaults, install.OutputSystemd, fmt.Errorf(
+			"this agent is not running from a managed service install: it runs as %s, which has no unit at %s "+
+				"— a transient unit, or one written by hand. Install it as a service with `sudo cloop executor "+
+				"agent install` to make it upgradable from the hub", spec.UnitFileName(), spec.UnitPath())
+	}
+	bin, agent := execStartBinary(string(unit))
+	if !agent || !sameExecutable(bin, spec.BinaryPath) {
+		return defaults, install.OutputSystemd, fmt.Errorf(
+			"this agent is not running from a managed service install: it runs inside %s, whose ExecStart does "+
+				"not run this binary (%s) as an executor agent, so that unit is not its install and will not be "+
+				"touched. Install it as a service with `sudo cloop executor agent install` to make it upgradable "+
+				"from the hub", spec.UnitFileName(), spec.BinaryPath)
+	}
+	return spec, install.OutputSystemd, nil
+}
+
+// serviceFromCgroup returns the systemd service a /proc/<pid>/cgroup names,
+// without its ".service" suffix, or "" when the process is in no service — a
+// login session's scope, a container, or no systemd at all.
+func serviceFromCgroup(cgroup string) string {
+	for _, line := range strings.Split(cgroup, "\n") {
+		// "0::/system.slice/cloop-executor.service" on the unified hierarchy,
+		// "1:name=systemd:/system.slice/…" on a legacy one.
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(parts) != 3 || (parts[0] != "0" && parts[1] != "name=systemd") {
+			continue
+		}
+		for _, seg := range strings.Split(parts[2], "/") {
+			if name, ok := strings.CutSuffix(seg, ".service"); ok && name != "" && !strings.Contains(name, "@") {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// execStartBinary returns the program a unit's ExecStart= runs, and whether
+// it runs it as `… executor agent`. The last ExecStart= wins, as in systemd.
+func execStartBinary(unit string) (string, bool) {
+	var bin string
+	var agent bool
+	for _, line := range strings.Split(unit, "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimLeft(v, "@-:+!")
+		fields := strings.Fields(v)
+		if len(fields) == 0 {
+			bin, agent = "", false
+			continue
+		}
+		bin = strings.Trim(fields[0], `"`)
+		agent = false
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "executor" && fields[i+1] == "agent" {
+				agent = true
+				break
+			}
+		}
+	}
+	return bin, agent
+}
+
+// sameExecutable reports whether two paths name the same file.
+func sameExecutable(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(sa, sb)
 }
 
 // logf writes one line to the agent's log.

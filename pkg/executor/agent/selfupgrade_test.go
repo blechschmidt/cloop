@@ -8,6 +8,7 @@ package agent
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +237,87 @@ func TestApplyUpgradeRequestRefusesAnotherSigner(t *testing.T) {
 	}
 	if cur, _ := d.Installed(t); cur != "INSTALLED" {
 		t.Errorf("the device changed: %q", cur)
+	}
+}
+
+func TestServiceFromCgroup(t *testing.T) {
+	for in, want := range map[string]string{
+		"0::/system.slice/cloop-executor.service\n":                         "cloop-executor",
+		"0::/system.slice/cloop-t20376.service":                             "cloop-t20376",
+		"12:pids:/x\n1:name=systemd:/system.slice/cloop-executor.service\n": "cloop-executor",
+		"0::/user.slice/user-0.slice/session-4.scope":                       "",
+		"0::/system.slice/getty@tty1.service":                               "",
+		"0::/":                                                              "",
+		"":                                                                  "",
+	} {
+		if got := serviceFromCgroup(in); got != want {
+			t.Errorf("serviceFromCgroup(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestOwnInstallIsTheUnitThatRunsThisBinary: an agent is the install whose
+// unit runs this very binary as an executor agent — a second service beside
+// the default one answers for itself, and a process that only shares a
+// service's cgroup is not that service's install (Task 20376).
+func TestOwnInstallIsTheUnitThatRunsThisBinary(t *testing.T) {
+	dir := t.TempDir()
+	unitDir, initDir := filepath.Join(dir, "units"), filepath.Join(dir, "init.d")
+	exe := filepath.Join(dir, "cloop-t20376")
+	other := filepath.Join(dir, "cloop-latest")
+	for _, p := range []string{exe, other} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unit := func(name, execStart string) {
+		t.Helper()
+		body := "[Service]\nExecStart=" + execStart + "\n"
+		if err := os.WriteFile(filepath.Join(unitDir, name+".service"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unit("cloop-t20376", exe+" executor agent --server ws://127.0.0.1:18376/api/executors/connect")
+	unit("cloop-ui-latest", other+" ui --port 8081")
+	unit("cloop-sneaky", exe+" ui --port 1")
+
+	spec, out, err := ownInstall("0::/system.slice/cloop-t20376.service\n", exe, "/var/lib/cloop-t20376/agent.json", unitDir, initDir)
+	if err != nil || out != install.OutputSystemd {
+		t.Fatalf("own unit: %v (%s)", err, out)
+	}
+	if spec.ServiceName != "cloop-t20376" || spec.BinaryPath != exe || spec.StateDir != "/var/lib/cloop-t20376" {
+		t.Errorf("spec = %+v", spec)
+	}
+	if spec.UpgradeRequestPath() != "/var/lib/cloop-t20376/upgrade-request.json" {
+		t.Errorf("the request would be filed at %s", spec.UpgradeRequestPath())
+	}
+
+	for name, cgroup := range map[string]string{
+		"another service's cgroup":                    "0::/system.slice/cloop-ui-latest.service",
+		"a unit running this binary, not as an agent": "0::/system.slice/cloop-sneaky.service",
+		"a transient unit":                            "0::/system.slice/run-u42.service",
+		"no service at all":                           "0::/user.slice/user-0.slice/session-4.scope",
+	} {
+		spec, _, err := ownInstall(cgroup, exe, "", unitDir, initDir)
+		if err == nil || !strings.Contains(err.Error(), "managed service install") {
+			t.Errorf("%s: err = %v, want a refusal", name, err)
+		}
+		if spec.ServiceName != install.DefaultServiceName {
+			t.Errorf("%s: the refusal still describes %s", name, spec.ServiceName)
+		}
+	}
+
+	// An init-script install is not under systemd at all.
+	if err := os.MkdirAll(initDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(initDir, install.DefaultServiceName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, out, err := ownInstall("0::/", exe, "", unitDir, initDir); err != nil || out != install.OutputShell {
+		t.Errorf("init script: %s, %v", out, err)
 	}
 }

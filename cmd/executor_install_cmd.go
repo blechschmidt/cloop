@@ -735,6 +735,16 @@ func printInstalled(p install.Plan) {
 		} else {
 			fmt.Printf("  firewall: withheld (--packet-filter=false); a sandbox with a firewall is refused here\n")
 		}
+		if p.Spec.Channel == provenance.ChannelEdge {
+			fmt.Printf("  channel: edge — releases and signed builds of main, in %s\n", p.Spec.ChannelDropInPath())
+		} else {
+			fmt.Printf("  channel: stable — published releases only\n")
+		}
+		if p.Spec.RemoteUpgrade {
+			fmt.Printf("  remote upgrade: %s carries out the hub's Upgrade, as root\n", p.Spec.UpgradeHelperPathUnitName())
+		} else {
+			fmt.Printf("  remote upgrade: withheld (--remote-upgrade=false); the hub's Upgrade is refused here\n")
+		}
 		fmt.Printf("  server:  %s\n", p.Spec.Server)
 		if p.Spec.Pin != "" {
 			fmt.Printf("  pin:     %s\n", p.Spec.Pin)
