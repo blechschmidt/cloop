@@ -87,9 +87,14 @@ type Registry struct {
 	families map[string]*Metric
 	order    []string
 
-	// collectorMu serialises scrapes. Collectors reset and repopulate the
-	// gauges they own, which is not safe to interleave with another scrape
-	// reading those same gauges.
+	// scrapeMu serialises scrapes, from the first collector to the last byte
+	// rendered. Collectors reset and repopulate the gauges they own, which is
+	// not safe to interleave with another scrape: a second scrape's Reset
+	// landing between the first's collect and its render would blank the
+	// families the first was about to write out.
+	scrapeMu sync.Mutex
+
+	// collectorMu guards the collector list.
 	collectorMu sync.Mutex
 	collectors  []namedCollector
 
@@ -102,6 +107,8 @@ type Registry struct {
 type namedCollector struct {
 	name string
 	fn   Collector
+	// families are the gauges fn repopulates, Reset before each run.
+	families []*Metric
 }
 
 // Collector recomputes derived gauges immediately before a scrape.
@@ -251,13 +258,55 @@ func (r *Registry) Register(def Definition) (*Metric, error) {
 
 // RegisterCollector adds a function run before each scrape. name appears in
 // the panic-recovery path so a broken collector is identifiable.
-func (r *Registry) RegisterCollector(name string, fn Collector) {
+//
+// families are the gauges fn populates, and the collector owns them: each is
+// Reset immediately before fn runs. That is what keeps a collector-backed
+// gauge honest without every collector having to remember it — a series whose
+// object is gone stops being exported instead of freezing at its last value,
+// and a collector that decides to export nothing this scrape (a cluster member
+// that is not the leader, declining a gauge the leader reports) exports
+// nothing rather than whatever it wrote last time it led.
+//
+// Only a gauge can be owned. A counter Reset every scrape is one that rate()
+// reads as a spike that never happened, so owning one panics — like
+// MustRegister, this is called at startup with families named in source, and
+// the mistake would fire on every start.
+func (r *Registry) RegisterCollector(name string, fn Collector, families ...*Metric) {
 	if fn == nil {
 		return
 	}
+	for _, m := range families {
+		switch {
+		case m == nil:
+			panic("hubmetrics: collector " + name + " owns a nil metric")
+		case m.reg != r:
+			panic("hubmetrics: collector " + name + " owns " + m.name + ", which belongs to another registry")
+		case m.typ != TypeGauge:
+			panic("hubmetrics: collector " + name + " owns " + m.name + ", a " + string(m.typ) +
+				"; only a gauge may be Reset before every scrape")
+		}
+	}
 	r.collectorMu.Lock()
 	defer r.collectorMu.Unlock()
-	r.collectors = append(r.collectors, namedCollector{name: name, fn: fn})
+	r.collectors = append(r.collectors, namedCollector{
+		name:     name,
+		fn:       fn,
+		families: append([]*Metric(nil), families...),
+	})
+}
+
+// CollectorFamilies reports which collector owns each collector-backed family,
+// keyed by family name.
+func (r *Registry) CollectorFamilies() map[string]string {
+	r.collectorMu.Lock()
+	defer r.collectorMu.Unlock()
+	out := make(map[string]string)
+	for _, c := range r.collectors {
+		for _, m := range c.families {
+			out[m.name] = c.name
+		}
+	}
+	return out
 }
 
 // Inc adds one to the counter or gauge identified by labelValues.
@@ -450,6 +499,9 @@ func (r *Registry) runCollectors() {
 	r.collectorMu.Lock()
 	defer r.collectorMu.Unlock()
 	for _, c := range r.collectors {
+		for _, m := range c.families {
+			m.Reset()
+		}
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -469,6 +521,17 @@ func (r *Registry) runCollectors() {
 // makes diffs between scrapes meaningful and keeps the golden-file tests from
 // depending on Go's map iteration order.
 func (r *Registry) WriteTo(w io.Writer) (int64, error) {
+	// Rendered into memory under the scrape lock and written after it, so a
+	// slow reader holds up nothing but itself.
+	out := r.render()
+	n, err := io.WriteString(w, out)
+	return int64(n), err
+}
+
+// render runs the collectors and renders the result as one scrape.
+func (r *Registry) render() string {
+	r.scrapeMu.Lock()
+	defer r.scrapeMu.Unlock()
 	r.runCollectors()
 
 	var b strings.Builder
@@ -484,17 +547,11 @@ func (r *Registry) WriteTo(w io.Writer) (int64, error) {
 		families[name].writeTo(&b)
 	}
 	r.writeDropped(&b)
-
-	n, err := io.WriteString(w, b.String())
-	return int64(n), err
+	return b.String()
 }
 
 // Gather renders the registry to a string.
-func (r *Registry) Gather() string {
-	var b strings.Builder
-	_, _ = r.WriteTo(&b)
-	return b.String()
-}
+func (r *Registry) Gather() string { return r.render() }
 
 func (m *Metric) writeTo(b *strings.Builder) {
 	m.mu.RLock()

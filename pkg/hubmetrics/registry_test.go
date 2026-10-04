@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -810,6 +811,94 @@ func TestRegisterCollectorIgnoresNil(t *testing.T) {
 	r := New()
 	r.RegisterCollector("nil", nil)
 	r.Gather() // must not panic on a nil func
+}
+
+// TestCollectorOwnedFamiliesResetBeforeEachRun. A collector that declines to
+// export this scrape — a cluster follower declining the leader's gauges — must
+// leave its families empty, not holding what it wrote the last time it ran.
+func TestCollectorOwnedFamiliesResetBeforeEachRun(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	owned := r.MustRegister(Definition{Name: "cloop_owned", Help: "h", Type: TypeGauge, Labels: []string{"k"}})
+	other := r.MustRegister(Definition{Name: "cloop_other", Help: "h", Type: TypeGauge})
+
+	export := true
+	r.RegisterCollector("leader", func() {
+		if export {
+			owned.Set(7, "a")
+		}
+	}, owned)
+	other.Set(3) // nobody owns this one, so nothing resets it
+
+	if got := mustFind(t, parseExposition(t, r.Gather()), "cloop_owned", "k", "a"); got != 7 {
+		t.Fatalf("first scrape cloop_owned{k=a} = %v, want 7", got)
+	}
+	export = false
+	out := r.Gather()
+	if strings.Contains(out, `cloop_owned{k="a"}`) {
+		t.Errorf("a collector that exported nothing still reported its previous sample:\n%s", out)
+	}
+	if got := mustFind(t, parseExposition(t, out), "cloop_other"); got != 3 {
+		t.Errorf("an unowned gauge was reset with the owned one: cloop_other = %v, want 3", got)
+	}
+	if got := r.CollectorFamilies(); len(got) != 1 || got["cloop_owned"] != "leader" {
+		t.Errorf("CollectorFamilies() = %v, want cloop_owned owned by leader", got)
+	}
+}
+
+// TestConcurrentScrapesNeverSeeAnotherScrapesReset. Each scrape Resets the
+// families its collectors own and then renders them; a second scrape's Reset
+// landing between the first's collect and its render would hand the first an
+// empty family. Every one of many concurrent scrapes must carry the sample.
+func TestConcurrentScrapesNeverSeeAnotherScrapesReset(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	owned := r.MustRegister(Definition{Name: "cloop_always", Help: "h", Type: TypeGauge})
+	r.RegisterCollector("always", func() { owned.Set(1) }, owned)
+
+	var wg sync.WaitGroup
+	var missing atomic.Int64
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if !strings.Contains(r.Gather(), "\ncloop_always 1\n") {
+					missing.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if n := missing.Load(); n > 0 {
+		t.Errorf("%d scrapes rendered cloop_always without its sample: another scrape reset it mid-render", n)
+	}
+}
+
+// TestCollectorMayOnlyOwnGauges. Resetting a counter every scrape is a counter
+// rate() reads as a spike, so ownership of anything else is refused outright.
+func TestCollectorMayOnlyOwnGauges(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	counter := r.MustRegister(Definition{Name: "cloop_owned_total", Help: "h", Type: TypeCounter})
+	foreign := New().MustRegister(Definition{Name: "cloop_foreign", Help: "h", Type: TypeGauge})
+
+	for name, m := range map[string]*Metric{"counter": counter, "foreign": foreign, "nil": nil} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("owning a %s metric did not panic", name)
+				}
+			}()
+			r.RegisterCollector(name, func() {}, m)
+		}()
+	}
+	if got := r.CollectorFamilies(); len(got) != 0 {
+		t.Errorf("a refused registration still recorded ownership: %v", got)
+	}
 }
 
 // ── Concurrency ─────────────────────────────────────────────────────────────

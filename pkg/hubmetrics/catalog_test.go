@@ -260,12 +260,8 @@ func TestCatalogIsDocumented(t *testing.T) {
 func TestRegisterCollectorsInstallsAtMostOnce(t *testing.T) {
 	first, second := 0, 0
 
-	RegisterCollectors(map[string]Collector{
-		"test-first": func() { first++ },
-	})
-	RegisterCollectors(map[string]Collector{
-		"test-second": func() { second++ },
-	})
+	RegisterCollectors(CollectorSpec{Name: "test-first", Collect: func() { first++ }})
+	RegisterCollectors(CollectorSpec{Name: "test-second", Collect: func() { second++ }})
 
 	Default.Gather()
 	Default.Gather()
