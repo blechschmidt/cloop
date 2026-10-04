@@ -26,6 +26,11 @@ const STRIPPED = fs.readFileSync(process.argv[4], 'utf8');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// How long Chrome gets to report its DevTools port, in 50 ms polls: 90 s.
+// A cold start on a CI runner that is also running three race-instrumented
+// test binaries has taken longer than the 30 s this used to allow (Task 20372).
+const CHROME_START_POLLS = 1800;
+
 // The same minimal CDP client as cssstrip_oracle.js; duplicated because these
 // drivers are standalone scripts with no module system between them.
 class CDP {
@@ -75,7 +80,7 @@ async function main() {
   proc.stderr.on('data', d => { stderr += d.toString(); });
   try {
     let port = 0;
-    for (let i = 0; i < 600 && !port; i++) {
+    for (let i = 0; i < CHROME_START_POLLS && !port; i++) {
       await sleep(50);
       if (proc.exitCode !== null) throw new Error('chrome exited: ' + stderr);
       try {
@@ -83,7 +88,7 @@ async function main() {
         if (txt[0] && txt[0].trim()) port = Number(txt[0].trim());
       } catch (e) { /* not written yet */ }
     }
-    if (!port) throw new Error('chrome never reported a debugging port within 30s: ' + stderr);
+    if (!port) throw new Error('chrome never reported a debugging port within ' + CHROME_START_POLLS * 50 / 1000 + 's: ' + stderr);
     const list = await (await fetch('http://127.0.0.1:' + port + '/json/list',
       {signal: AbortSignal.timeout(15000)})).json();
     const page = list.find(t => t.type === 'page');
