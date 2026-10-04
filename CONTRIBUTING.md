@@ -230,6 +230,34 @@ it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
 map for packages that are unreferenced on purpose — it is empty, and an entry
 needs an argument a reader can check.
 
+## Documentation site
+
+The guides under `docs/` are published to
+<https://blechschmidt.github.io/cloop/> by the **Documentation site** workflow
+(`.github/workflows/docs.yml`) on every push to `main` that touches them:
+
+```bash
+make docs-serve       # live preview on http://127.0.0.1:8000
+make docs-site        # the strict build CI runs: dead links and anchors fail it
+make docs-freshness   # is the published site as new as main's docs?
+```
+
+Every build is stamped: `build.json` at the site root names the commit it was
+built from. A deploy can stop without failing anything — on 2026-09-30 GitHub
+held one `waiting` on the `github-pages` environment for days, every later
+deploy queued behind it, and the site served a days-old build under green
+checks. `make docs-freshness` reads the live stamp, compares it with main's
+newest docs-touching commit (a path in `docs.yml`'s `on.push.paths`), and fails
+when the site lags by more than six hours (`DOCS_MAX_LAG_HOURS`), naming every
+docs run that is waiting or pending, and since when. The **Documentation site
+freshness** workflow runs it every three hours. It is not part of CI on
+purpose: a hold on GitHub's side is nothing a diff can fix.
+
+When it fails on a held deploy, cancel the run it names in the Actions tab
+(**Cancel workflow**); the newest pending deploy then publishes. If none is
+pending, start the Documentation site workflow by hand (**Run workflow** on
+`main`).
+
 ## Committing
 
 After every change, run:

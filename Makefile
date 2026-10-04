@@ -1,5 +1,6 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve release-dist \
+        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
+        release-dist \
         terraform-test terraform-validate
 
 BINARY := cloop
@@ -29,6 +30,9 @@ DIST := dist
 DOCS_VENV := $(DIST)/docs-venv
 DOCS_MKDOCS := $(DOCS_VENV)/bin/mkdocs
 DOCS_PORT ?= 8000
+# How far the published site may lag main's docs-touching commits before
+# `make docs-freshness` (and the scheduled workflow that runs it) fails.
+DOCS_MAX_LAG_HOURS ?= 6
 
 # Per-target fuzz time. 30s is enough to catch shallow panics on every parser
 # without making the target painful to run locally; CI may set a longer budget.
@@ -243,6 +247,20 @@ docs-site: $(DOCS_VENV) docs-check docs-stage
 	@echo "==> mkdocs build --strict"
 	@$(DOCS_MKDOCS) build --strict -f $(DIST)/mkdocs.yml
 	@echo "==> site built: $(DIST)/docs-site/index.html"
+
+## docs-freshness: fail when the published site lags main's docs-touching
+##                 commits by more than DOCS_MAX_LAG_HOURS (default 6)
+##
+## Reads the build stamp (build.json, written by scripts/build-docs.py) off
+## https://blechschmidt.github.io/cloop/, fetches main, and names any docs.yml
+## run that is waiting or pending, and since when. A deploy GitHub holds fails
+## nothing — the site just stops changing — so this is how a held or failing
+## deploy becomes visible. .github/workflows/docs-freshness.yml runs it every
+## three hours; it is deliberately not part of CI, because a hold on GitHub's
+## side is not something a diff can fix. Set GITHUB_TOKEN to lift the
+## unauthenticated API limit.
+docs-freshness:
+	@python3 scripts/docs-freshness.py --max-lag-hours $(DOCS_MAX_LAG_HOURS)
 
 ## screenshots: rebuild docs/screenshots/ from a throwaway demo hub
 ##

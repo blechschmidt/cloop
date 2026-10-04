@@ -7,13 +7,21 @@ name: Documentation site (GitHub Pages)
 # layout so the relative links between pages survive, derives the navigation
 # from docs/README.md, and Material for MkDocs renders it.
 #
-# Both jobs run the same `make docs-site` developers run locally, so CI and
-# local builds cannot drift. That build is --strict with `validation.anchors`
-# turned up, which makes this workflow a gate as well as a publisher: a
-# relative link that does not resolve, a dead #heading-anchor, or a page under
-# docs/ that no section of docs/README.md lists all fail it. Pull requests
-# build but do not deploy, so breakage is caught in review rather than on the
-# live site.
+# The build job runs the same `make docs-check` and `make docs-site` developers
+# run locally, so CI and local builds cannot drift. That build is --strict with
+# `validation.anchors` turned up, which makes this workflow a gate as well as a
+# publisher: a relative link that does not resolve, a dead #heading-anchor, or a
+# page under docs/ that no section of docs/README.md lists all fail it. It runs
+# for every push and pull request, including while a deploy is held (see the
+# deploy job's concurrency). Pull requests build but do not deploy, so breakage
+# is caught in review rather than on the live site.
+#
+# Every build is stamped: dist/docs-site/build.json names the commit it was
+# built from. A deploy can stop without failing — held by GitHub, it simply
+# never runs, and the live site keeps serving an old build under a page of
+# cancelled runs — so docs-freshness.yml reads the stamp off the live site on
+# a schedule and fails when the site lags main by more than six hours, naming
+# the run that holds it. Locally: `make docs-freshness`.
 #
 # Publishing needs two repository settings, both one-time and both outside a
 # workflow's control:
@@ -63,14 +71,12 @@ on:
       - "scripts/check-docs.sh"
       - "Makefile"
       - ".github/workflows/docs.yml"
-  # Manual re-publish, e.g. after enabling Pages or changing branch policy.
+  # Manual re-publish, e.g. after enabling Pages, changing branch policy, or
+  # cancelling a held deploy whose queued successor has since gone.
   workflow_dispatch:
 
-# Never cancel an in-flight deployment: a half-published site is worse than a
-# slightly stale one. Superseded *builds* are cheap enough to let finish.
-concurrency:
-  group: pages-${{ github.ref }}
-  cancel-in-progress: false
+# No workflow-level concurrency: deploys are serialised on the deploy job, so
+# that a held deploy never stops the build below from gating a push.
 
 permissions:
   contents: read
@@ -106,6 +112,23 @@ jobs:
       - name: Build the site
         run: make docs-site
 
+      # docs-freshness.yml judges the live site by this stamp. Checked on the
+      # artifact about to be uploaded, so a build that stops stamping — or
+      # stamps the wrong commit — fails here, in the push or pull request that
+      # broke it, instead of reading as a stale site hours after it deploys.
+      - name: The site names the commit it was built from
+        run: |
+          python3 - <<'PY'
+          import json, os
+          stamp = json.load(open("dist/docs-site/build.json", encoding="utf-8"))
+          want = os.environ["GITHUB_SHA"]
+          if stamp.get("commit") != want or stamp.get("dirty"):
+              raise SystemExit(f"::error::dist/docs-site/build.json names "
+                               f"{stamp.get('commit')} (dirty: {stamp.get('dirty')}), "
+                               f"but this run built {want} from a clean checkout")
+          print(f"build.json names {want}, built by {stamp.get('run')}")
+          PY
+
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -118,6 +141,33 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # One deploy per ref at a time — on this job alone.
+    #
+    # The group used to be the whole workflow's, which made a held deploy hold
+    # the build too. On 2026-09-30 GitHub left run 36765144410's deploy
+    # `waiting` on the github-pages environment, which requires no reviewer and
+    # sets no wait timer, so there was nothing to wait for; it held the group
+    # for days, and every later run queued whole and was cancelled by the next
+    # push without building. No push in that time ran the strict build — the
+    # dead-link and anchor gate — at all. Here the build runs for every push
+    # whatever the deploys are doing, and only deploys queue.
+    #
+    # cancel-in-progress: false, because a deploy that has started must finish:
+    # a half-published site is worse than a stale one. GitHub keeps one
+    # *pending* deploy per group; a newer push's deploy replaces it, and the
+    # replaced run ends `cancelled` with its build green. That is expected —
+    # the newer deploy publishes a superset of it.
+    #
+    # A held deploy still holds this queue, deliberately: it keeps an old build
+    # from ever publishing over a newer one, should GitHub release it late. The
+    # group keeps its old name for the same reason, so deploys queued here also
+    # wait behind a run that took it at the workflow level. Nothing publishes
+    # until the waiting run is cancelled (Actions tab, Cancel workflow), and
+    # nothing fails while it waits — docs-freshness.yml is what notices.
+    concurrency:
+      group: pages-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       pages: write        # deploy to the Pages site

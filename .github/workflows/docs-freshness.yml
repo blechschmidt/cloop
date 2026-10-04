@@ -1,0 +1,59 @@
+name: Documentation site freshness
+
+# Is https://blechschmidt.github.io/cloop/ as new as main's documentation?
+#
+# docs.yml publishes the site on every docs-touching push, and a deploy can
+# stop there without anything failing. On 2026-09-30 GitHub left the deploy
+# job of docs.yml run 36765144410 `waiting` on the github-pages environment —
+# which requires no reviewer and sets no wait timer, so there was nothing to
+# wait for — and released it neither that day nor the next three. A waiting
+# job is not a failed one: every check stayed green, each later docs run
+# queued behind it and was cancelled by the next push, and the live site kept
+# serving its Sep 29 build while four new guides answered 404.
+#
+# That failure has no commit, so a job on the push path cannot see it. And it
+# must not try: a hold on GitHub's side would turn main red for something no
+# diff can fix, and block contributors on it. Hence a clock, like
+# released-installer.yml. Every build of the site is stamped with the commit it
+# was built from (build.json, written by scripts/build-docs.py), and
+# scripts/docs-freshness.py compares the live stamp with main: it fails when
+# the site lags main's newest docs-touching commit by more than six hours, or
+# carries no stamp, and names every docs.yml run that is waiting or pending,
+# and since when. `make docs-freshness` runs the same check locally.
+#
+# A red run here means "unblock the deploy", not "fix your diff": cancel the
+# run it names in the Actions tab (Cancel workflow), and the newest pending
+# deploy then publishes; if none is pending, run the Documentation site
+# workflow by hand.
+on:
+  schedule:
+    # Every three hours, so a hold is reported six to nine hours after it
+    # begins. Cheap: a checkout and a dozen HTTP requests.
+    - cron: '41 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read        # docs.yml runs, their jobs and pending deployments
+  deployments: read    # the last Pages deployment, when the site has no stamp
+
+jobs:
+  freshness:
+    name: The live site is no more than six hours behind main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The check is about main whatever ref a manual run starts from, and
+          # it walks main's history back to the commit the site was built
+          # from — which, when the site is stale, is days of history.
+          ref: main
+          fetch-depth: 0
+
+      - name: The live site is no more than six hours behind main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make docs-freshness
