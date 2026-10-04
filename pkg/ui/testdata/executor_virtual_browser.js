@@ -343,7 +343,7 @@ async function main() {
   }
 }
 
-main().catch(err => {
+main().then(() => process.exit(0), err => {
   process.stdout.write(JSON.stringify({error: {message: String(err && err.message || err)}}, null, 2));
   process.exit(1);
 });

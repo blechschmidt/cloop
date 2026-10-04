@@ -40,6 +40,26 @@ const BASE = process.argv[3];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Chrome runs in its own process group (spawned detached), so one signal takes
+// its helpers with it; killing only the browser leaves them writing into a
+// profile that is being deleted.
+function killChrome(proc) {
+  try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {
+    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+  }
+}
+
+// closeChrome kills Chrome, waits for it to be gone (bounded, and unref'd so
+// the wait cannot hold node open) and removes the profile, retrying while the
+// last helpers let go of it. Best effort: cleanup never fails a run.
+async function closeChrome(proc, dir) {
+  killChrome(proc);
+  if (proc.exitCode === null && proc.signalCode === null) {
+    await new Promise(r => { proc.once('exit', r); setTimeout(r, 5000).unref(); });
+  }
+  try { fs.rmSync(dir, {recursive: true, force: true, maxRetries: 10, retryDelay: 100}); } catch (_) { /* best effort */ }
+}
+
 // SPEAK_MS is how long a hold that is meant to be transcribed keeps talking
 // once the microphone is live: the input to those scenarios, not a wait for
 // anything. The length of the old fixed hold, now counted from the moment the
@@ -100,11 +120,17 @@ class CDP {
   send(method, params) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, {resolve, reject});
-      this.ws.send(JSON.stringify({id, method, params: params || {}}));
-      setTimeout(() => {
+      // Cleared on the reply: a timer left armed keeps node alive for its
+      // whole span after the last command, which cost every run of this
+      // driver up to 20 s (Task 20372).
+      const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(method + ' timed out'));
       }, 20000);
+      this.pending.set(id, {
+        resolve: v => { clearTimeout(timer); resolve(v); },
+        reject: e => { clearTimeout(timer); reject(e); },
+      });
+      this.ws.send(JSON.stringify({id, method, params: params || {}}));
     });
   }
   // eval returns the JS value of an expression, awaiting promises.
@@ -171,7 +197,7 @@ async function launchChrome() {
     '--use-file-for-fake-audio-capture=' + tone,
     '--autoplay-policy=no-user-gesture-required',
     'about:blank',
-  ], {stdio: ['ignore', 'ignore', 'pipe']});
+  ], {stdio: ['ignore', 'ignore', 'pipe'], detached: true});
 
   let stderr = '';
   proc.stderr.on('data', d => { stderr += d.toString(); });
@@ -206,7 +232,7 @@ async function launchChrome() {
     });
     return {cdp: new CDP(ws), proc, dir};
   } catch (e) {
-    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    killChrome(proc);
     throw e;
   }
 }
@@ -734,8 +760,7 @@ async function main() {
   } catch (err) {
     out.error = String(err && err.stack ? err.stack : err);
   } finally {
-    try { proc.kill('SIGKILL'); } catch (e) {}
-    try { fs.rmSync(dir, {recursive: true, force: true}); } catch (e) {}
+    await closeChrome(proc, dir);
   }
   process.stdout.write(JSON.stringify(out, null, 2));
   process.exit(0);

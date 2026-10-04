@@ -27,6 +27,26 @@ const BASE = process.argv[3];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Chrome runs in its own process group (spawned detached), so one signal takes
+// its helpers with it; killing only the browser leaves them writing into a
+// profile that is being deleted.
+function killChrome(proc) {
+  try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {
+    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+  }
+}
+
+// closeChrome kills Chrome, waits for it to be gone (bounded, and unref'd so
+// the wait cannot hold node open) and removes the profile, retrying while the
+// last helpers let go of it. Best effort: cleanup never fails a run.
+async function closeChrome(proc, dir) {
+  killChrome(proc);
+  if (proc.exitCode === null && proc.signalCode === null) {
+    await new Promise(r => { proc.once('exit', r); setTimeout(r, 5000).unref(); });
+  }
+  try { fs.rmSync(dir, {recursive: true, force: true, maxRetries: 10, retryDelay: 100}); } catch (_) { /* best effort */ }
+}
+
 // A minimal CDP client, the same shape as sandbox_browser.js's; duplicated for
 // the reason given there.
 class CDP {
@@ -46,11 +66,17 @@ class CDP {
   send(method, params) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, {resolve, reject});
-      this.ws.send(JSON.stringify({id, method, params: params || {}}));
-      setTimeout(() => {
+      // Cleared on the reply: a timer left armed keeps node alive for its
+      // whole span after the last command, which cost every run of this
+      // driver up to 20 s (Task 20372).
+      const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(method + ' timed out'));
       }, 20000);
+      this.pending.set(id, {
+        resolve: v => { clearTimeout(timer); resolve(v); },
+        reject: e => { clearTimeout(timer); reject(e); },
+      });
+      this.ws.send(JSON.stringify({id, method, params: params || {}}));
     });
   }
   async eval(expr) {
@@ -75,7 +101,7 @@ async function launchChrome() {
     '--disable-gpu',
     '--window-size=1400,1000',
     'about:blank',
-  ], {stdio: ['ignore', 'ignore', 'pipe']});
+  ], {stdio: ['ignore', 'ignore', 'pipe'], detached: true});
 
   let stderr = '';
   proc.stderr.on('data', d => { stderr += d.toString(); });
@@ -113,7 +139,7 @@ async function launchChrome() {
     });
     return {cdp: new CDP(ws), proc, dir};
   } catch (e) {
-    try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    killChrome(proc);
     throw e;
   }
 }
@@ -279,12 +305,11 @@ async function main() {
     await scenarioEditReplacesTheGrant(cdp);
     process.stdout.write(JSON.stringify(results, null, 2));
   } finally {
-    try { proc.kill('SIGKILL'); } catch (e) { /* already gone */ }
-    try { fs.rmSync(dir, {recursive: true, force: true}); } catch (e) { /* best effort */ }
+    await closeChrome(proc, dir);
   }
 }
 
-main().catch(err => {
+main().then(() => process.exit(0), err => {
   process.stdout.write(JSON.stringify({error: {message: String(err && err.message || err)}}, null, 2));
   process.exit(1);
 });
