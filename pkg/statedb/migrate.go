@@ -248,6 +248,9 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 			return nil, wrap(ErrSchemaMismatch, err)
 		}
 		if baseline {
+			if err := completeBaseline(db, migrations[0]); err != nil {
+				return nil, wrap(ErrSchemaMismatch, err)
+			}
 			if err := recordVersion(db, 1, "baseline (pre-framework adoption)", classifyMigration(migrations[0].SQL)); err != nil {
 				return nil, wrap(ErrSchemaMismatch, err)
 			}
@@ -518,6 +521,65 @@ func detectBaseline(db *sql.DB) (bool, error) {
 		return false, fmt.Errorf("inspect sqlite_master: %w", err)
 	}
 	return name == "metadata", nil
+}
+
+// completeBaseline creates whatever of migration 0001's schema a pre-framework
+// database lacks, before that database is recorded as being at version 1.
+//
+// Adoption used to record version 1 on the strength of the metadata table
+// alone. That was true of every database the pre-framework statedb wrote, which
+// had all of 0001. It was not true of the ones `cloop migrate` made by
+// converting a state.json: that package carried its own copy of the schema with
+// three of 0001's six tables, and its databases were adopted at version 1 all
+// the same. Migration 0009 then failed on the missing stuck_tasks table, and
+// with it every command that opened the project (Task 20374).
+//
+// 0001 is CREATE ... IF NOT EXISTS throughout, so running it against a database
+// that already has its tables changes nothing, and against one missing some of
+// them supplies exactly those. A statement that is not of that form is refused
+// rather than run: re-running anything else against a populated database is not
+// a completion, and 0001 is shipped and never edited, so meeting one means this
+// function is being asked to do something it was not written for.
+func completeBaseline(db *sql.DB, m migration) error {
+	stmts := splitStatements(m.SQL)
+	for i, stmt := range stmts {
+		if !isIdempotentDDL(stmt) {
+			return fmt.Errorf("adopt pre-framework database: statement %d of %s is not idempotent, "+
+				"so it cannot complete an existing schema:\n%s", i+1, m.Name, stmt)
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("adopt pre-framework database: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck — ignored if Commit succeeds
+	for i, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("adopt pre-framework database: statement %d of %s: %w\n--- SQL ---\n%s",
+				i+1, m.Name, err, stmt)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("adopt pre-framework database: commit: %w", err)
+	}
+	return nil
+}
+
+// isIdempotentDDL reports whether stmt changes nothing when what it creates
+// already exists: CREATE TABLE / INDEX ... IF NOT EXISTS, or a PRAGMA.
+func isIdempotentDDL(stmt string) bool {
+	s := strings.Join(strings.Fields(strings.ToUpper(stmt)), " ")
+	for _, prefix := range []string{
+		"CREATE TABLE IF NOT EXISTS ",
+		"CREATE INDEX IF NOT EXISTS ",
+		"CREATE UNIQUE INDEX IF NOT EXISTS ",
+		"PRAGMA ",
+	} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordVersion inserts a row into schema_migrations. Used both by

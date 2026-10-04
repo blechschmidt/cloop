@@ -177,7 +177,17 @@ func (d *DB) LeaveHubMember(instanceID string, at time.Time) error {
 func (d *DB) ListHubMembers() ([]HubMemberRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	rows, err := d.conn.Query(
+	return listHubMembers(d.conn)
+}
+
+// hubQueryer is what listing needs from a handle: a *DB's own connection, or
+// the read-only one PeekHubCluster opens.
+type hubQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func listHubMembers(q hubQueryer) ([]HubMemberRow, error) {
+	rows, err := q.Query(
 		`SELECT instance_id, hostname, pid, boot_id, address, advertise_url,
 		        version, meta, started_ms, heartbeat_ms, left_ms
 		 FROM hub_members ORDER BY started_ms, instance_id`)
@@ -366,6 +376,12 @@ func (d *DB) GetHubOwner(kind, key string) (HubOwnerRow, error) {
 // ListHubOwners returns every row of one kind, or of every kind when kind is
 // empty, ordered by kind then key.
 func (d *DB) ListHubOwners(kind string) ([]HubOwnerRow, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return listHubOwners(d.conn, kind)
+}
+
+func listHubOwners(q hubQueryer, kind string) ([]HubOwnerRow, error) {
 	query := `SELECT kind, key, instance_id, meta, claimed_ms, updated_ms FROM hub_owners`
 	var args []any
 	if kind != "" {
@@ -374,9 +390,7 @@ func (d *DB) ListHubOwners(kind string) ([]HubOwnerRow, error) {
 	}
 	query += ` ORDER BY kind, key`
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	rows, err := d.conn.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list hub owners: %w", classifyDriverErr(err))
 	}
@@ -393,6 +407,45 @@ func (d *DB) ListHubOwners(kind string) ([]HubOwnerRow, error) {
 		return nil, fmt.Errorf("statedb: list hub owners: %w", classifyDriverErr(err))
 	}
 	return out, nil
+}
+
+// PeekHubCluster reads the members serving the control plane at dbPath and the
+// ownership rows of one kind (every kind when kind is empty), through a
+// read-only handle (Task 20374).
+//
+// It is for a process that is not a member and must not become one by
+// looking: a CLI deciding whether a hub is running a project. Open would
+// migrate the database, and a hub's live control plane is the one database a
+// newer CLI build must never migrate early — nor may an older one be refused
+// for asking a question this narrow. Nothing here writes, so neither the
+// schema version nor a lock held by the hub stands in the way, beyond the
+// busy timeout every connection waits.
+//
+// A control plane no clustered hub has served has no cluster tables, and reads
+// as no members and no owners rather than as an error.
+func PeekHubCluster(dbPath, kind string) (members []HubMemberRow, owners []HubOwnerRow, err error) {
+	conn, err := OpenConn(dbPath, ReadOnly)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer conn.Close()
+
+	var tables int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('hub_members', 'hub_owners')`,
+	).Scan(&tables); err != nil {
+		return nil, nil, fmt.Errorf("statedb: inspect %s: %w", dbPath, classifyDriverErr(err))
+	}
+	if tables < 2 {
+		return nil, nil, nil
+	}
+	if members, err = listHubMembers(conn); err != nil {
+		return nil, nil, err
+	}
+	if owners, err = listHubOwners(conn, kind); err != nil {
+		return nil, nil, err
+	}
+	return members, owners, nil
 }
 
 // ClaimHubOwner takes (row.Kind, row.Key) for row.InstanceID, conditioned on

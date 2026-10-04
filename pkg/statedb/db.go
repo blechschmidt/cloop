@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -185,11 +184,12 @@ func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 // its read and its write: two handles appending audit rows concurrently lost
 // half of them that way. An immediate transaction waits on busy_timeout
 // instead, and in WAL mode readers are not blocked by it.
+//
+// Since Task 20374 these are the connection policy every package opens a cloop
+// database under (connpolicy.go); Open adds synchronous=NORMAL, which is safe
+// only because Open also puts the file in WAL mode.
 func connString(dbPath string) string {
-	return dbPath + "?" + url.Values{
-		"_pragma": {"busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"},
-		"_txlock": {"immediate"},
-	}.Encode()
+	return policyDSN(dbPath, ReadWrite, "synchronous(NORMAL)")
 }
 
 // applyPragmas configures the SQLite connection for safe multi-process use.
