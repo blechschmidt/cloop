@@ -1554,10 +1554,11 @@ driver that cannot revoke shows it too; the chip's tooltip says which holder and
 why. The hub refuses to *place* new revocable material on such an agent, so the
 old-agent case only appears for a device downgraded after a placement. Fix it by
 upgrading the device the way the tooltip says — the remedy depends on whether
-the hub runs a published release (press Upgrade) or an unreleased build (install
-a binary built from the hub's commit with
-`sudo ./cloop executor agent install --upgrade --insecure-skip-verify` on the
-device). `install --upgrade` replaces the binary and restarts the service,
+the hub runs a published release (press Upgrade) or an unreleased build (put
+the device on the [edge channel](edge-channel.md) and press Upgrade to install
+the hub's own build, signed by CI; or install a binary built from the hub's
+commit with `sudo ./cloop executor agent install --upgrade --insecure-skip-verify`
+on the device). `install --upgrade` replaces the binary and restarts the service,
 leaving the unit file and the enrollment credential untouched, and is idempotent,
 so it is safe to re-run. See
 [Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works),

@@ -205,6 +205,12 @@ Six pages in order, indexed at
   only narrow it: how containment is decided and where it is checked, what
   tightening a device does to what was saved under it, and which executors can
   enforce rules.
+- **[Following the hub's build: the edge channel](guides/edge-channel.md)** —
+  moving devices onto the hub's own commit, signed by CI, from the Executors
+  panel: what `edge.yml` publishes and the separate identity it is trusted by,
+  opting a device in on the device itself, the root helper that lets a hardened
+  agent upgrade itself, why the dialog says a build is not offered, rolling
+  back, and what the channel does not promise.
 
 ## Operations
 

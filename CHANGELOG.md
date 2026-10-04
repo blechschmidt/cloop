@@ -12,6 +12,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The edge channel: devices can follow the hub's own build, signed by CI.**
+  After CI passes on a push to `main`, the new `edge.yml` workflow builds that
+  commit for every release platform — stamped `dev+g<short sha>` as the hub's
+  deploy stamps it — and signs each archive and a manifest `{commit, version,
+  protocol, archive hashes}` with Sigstore keyless signing. They are
+  commit-named assets of one `edge` prerelease that is never latest, whose tag
+  is never moved, and which keeps the newest 30 commits. Edge builds are trusted
+  by a pin of their own, `edge.yml@refs/heads/main`, accepted only for an
+  `edge:<commit>` target; the tag-only release pin is unchanged and refuses
+  them. A device opts in on the device — `sudo cloop executor agent install
+  --upgrade --channel edge` writes `20-update-channel.conf`, which upgrades keep
+  and the hub cannot change — and then the Executors panel's Upgrade dialog and
+  the auto-update policy offer it **this hub's build (`<short sha>`)** once CI has
+  published it and only if its manifest's protocol does not lower the device's,
+  saying plainly otherwise why not: the deploy built an unpushed commit, CI has
+  not published it yet, or CI failed. `install --upgrade --to <target>` fetches
+  and verifies a published build on the device (Task 20376).
+- **Remote upgrade works on a hardened device.** The agent runs unprivileged
+  and could never replace its own root-owned binary or restart itself, so the
+  Upgrade button was accepted and then failed in the device's journal. A root
+  helper (`cloop-executor-upgrade.path` and `.service`, installed by default and
+  by `install --upgrade --remote-upgrade`) now carries out the request the agent
+  files: it takes the device's channel from systemd, verifies the build, and
+  installs it with the usual backup, restart and rollback. A device that cannot
+  carry out an upgrade — no helper, or no cosign — says so in its hello and the
+  dialog shows the reason (Task 20376).
+
 - **GitHub App tokens outlive GitHub's hour.** A run that still uses git more
   than an hour after dispatch keeps its GitHub access. The hub re-mints a
   `github_app` grant's installation token when about ten minutes of its hour

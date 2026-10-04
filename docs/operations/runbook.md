@@ -1108,6 +1108,61 @@ $ cloop executor reap container          # remove sandbox containers/Pods left b
 20191 a hub reaps on its own at startup, so this is for cleaning up after a hub
 that is *not* running, or for a runtime shared with one that never will be.
 
+### Moving a device onto the edge channel
+
+A hub that runs an unreleased build of `main` (the reference deployment's
+`dev+g<commit>`) can hand its devices its own build, signed by CI, once a
+device is on the [edge channel](../guides/edge-channel.md). Once per device,
+on the device:
+
+```console
+# 1. cosign, which every build is verified with (a single static binary).
+$ sudo install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign
+
+# 2a. A device whose cloop already knows the channel:
+$ sudo cloop executor agent install --upgrade --channel edge
+
+# 2b. One whose cloop predates it: fetch an edge build, verify it by hand, and
+#     let it install itself — see the guide for the download and the cosign line.
+$ sudo ./cloop executor agent install --upgrade --channel edge --to edge:<commit>
+```
+
+The first writes `20-update-channel.conf` beside the unit and installs the
+remote-upgrade helper (`cloop-executor-upgrade.path` and `.service`); both
+survive later upgrades, and only `--channel stable` / `--remote-upgrade=false`
+on the device take them away. Check what the agent says about itself:
+
+```console
+$ journalctl -u cloop-executor -n 30 | grep -E 'updates:|firewall:|remote upgrade'
+  firewall: nft(8) — CAP_NET_ADMIN held by the agent, never by its workloads
+  updates: edge channel — releases, and signed builds of main
+$ systemctl is-active cloop-executor-upgrade.path
+active
+```
+
+Then, from the dashboard: Executors → the device's **Upgrade** → *this hub's
+build (`<commit>`)*. The device files the request, the helper verifies and
+installs the build, and the device reconnects on it; the row's build chip
+follows. On the device, the helper's journal has the whole of it:
+
+```console
+$ journalctl -u cloop-executor-upgrade
+```
+
+When the dialog does not offer the hub's build it says why — an unpushed commit,
+CI still running, CI or the edge workflow failed, the build pruned, or a
+protocol the build would lower — and the
+[guide's table](../guides/edge-channel.md#upgrading-from-the-dashboard) names the
+remedy for each. To go back: `/usr/local/bin/cloop.prev` is the previous
+binary, `--to <release> --force` installs a release verified, and
+`--channel stable` takes the device off the channel.
+
+**The hub's deploy builds the local `main`.** If it deploys a commit before
+it is pushed, the dialog says so ("the deploy built commit … which is not on
+GitHub"), and the build is offered as soon as the push's CI run passes and
+`edge.yml` publishes it, about half an hour later. A push of several commits
+runs CI — and so publishes an edge build — for the newest one only.
+
 ### After a control-plane restart
 
 A hub that is killed mid-run does not lose the workloads it dispatched: the

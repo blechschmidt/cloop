@@ -2822,6 +2822,11 @@ sudo cloop executor agent install --upgrade
 # Or from an explicit path, without replacing the binary you are running.
 sudo cloop executor agent install --upgrade --from /tmp/cloop-new
 
+# Or fetch a published build and verify its signature, as the hub's Upgrade
+# button does: a release tag, "latest", or on an edge-channel device
+# edge:<commit> (Task 20376).
+sudo cloop executor agent install --upgrade --to v0.0.4
+
 # See what it would do first. This runs the real checks, including executing
 # the new binary — a dry run that only echoed the flags back would not be worth
 # running before bouncing a service on a device you cannot easily reach.
@@ -2845,6 +2850,59 @@ it, with no enrollment bundle:
 ```bash
 sudo cloop executor agent install --upgrade --packet-filter
 ```
+
+Two more device-side settings travel the same way, as files beside the unit
+that an upgrade keeps and only an explicit flag changes (Task 20376):
+
+- `--channel edge` (or `stable`) writes or removes `20-update-channel.conf`,
+  which puts the device on the [edge channel](../guides/edge-channel.md): it may
+  then be upgraded to the hub's own build, signed by CI, as well as to
+  releases. Only root on the device can set it; the hub only reads it, from the
+  hello.
+- `--remote-upgrade` (or `=false`) installs or removes the root helper that
+  carries out an upgrade the hub asks for — see below. `--channel edge` installs
+  it too unless told otherwise, and a fresh install has it by default.
+
+#### Upgrades the hub asks for: the remote-upgrade helper
+
+The Executors panel's Upgrade button and the auto-update policy send the device
+an upgrade frame naming a version. The agent that receives it runs as an
+unprivileged system user with `ProtectSystem=strict` and `NoNewPrivileges` — it
+cannot replace `/usr/local/bin/cloop`, which is root's, nor restart its own
+unit. Until Task 20376 it ran the installer in-process anyway, so on every
+device installed with the defaults the button was accepted and the upgrade then
+failed in the device's journal.
+
+So the agent hands the work over:
+
+```mermaid
+sequenceDiagram
+    participant Hub
+    participant Agent as agent (unprivileged)
+    participant Path as cloop-executor-upgrade.path
+    participant Helper as cloop-executor-upgrade.service (root)
+    Hub->>Agent: upgrade {target_version}
+    Agent->>Agent: preflight: installed, channel allows the target, helper and cosign present
+    Agent-->>Hub: upgrading {accepted}
+    Agent->>Path: writes upgrade-request.json in its state directory
+    Path->>Helper: start
+    Helper->>Helper: take and delete the request, channel from systemctl show
+    Helper->>Helper: fetch from the pinned repository, verify with cosign
+    Helper->>Agent: install --upgrade: identify, rename, keep cloop.prev, try-restart
+    Agent-->>Hub: reconnects reporting the new build
+```
+
+The request mirrors the frame — version, force, settle time, reason — and
+nothing else, so anything that can write it (the agent, or a workload running as
+its user) can ask for exactly what the hub can. The helper takes the device's
+channel from systemd's view of the agent's unit, never from the request, and
+ignores a request more than 15 minutes old. One code path serves the helper,
+an agent that runs as root (which does the work itself), and
+`install --upgrade --to`: `agent.UpgradeTo`.
+
+A device without the helper whose agent is not root, or with no `cosign` on its
+`PATH`, says so in its hello (`remote_upgrade_issue`) and refuses an upgrade
+before acknowledging it; the dialog shows the reason in place of a target.
 
 #### The staged binary is executed before it is installed
 
@@ -2960,10 +3018,12 @@ The remedy is chosen by **the hub's own build**, because the two ways to move a
 device behave differently:
 
 - The Executors panel's **Upgrade** button and the fleet **auto-update** policy
-  can only make a device install a *published, signed release*. The hub names a
-  version; the device fetches it through its own release channel and verifies
-  the archive's signature. The hub never supplies bytes — that is the security
-  model of the upgrade frame.
+  can only make a device install a *signed* build: a published release, or —
+  on a device whose operator put it on the [edge channel](../guides/edge-channel.md)
+  — the hub's own build as CI signed it. The hub names a version; the device
+  fetches it through its own pinned repository and verifies the signature
+  against the identity of its channel. The hub never supplies bytes — that is
+  the security model of the upgrade frame.
 - `cloop executor agent install --upgrade`, run on the device, installs whatever
   binary runs it (or `--from`). A binary built from source carries no signed
   provenance, and a release signs its *archive*, not the binary inside, so a
@@ -2973,7 +3033,8 @@ device behave differently:
 | The hub runs | The refusal tells you to |
 | --- | --- |
 | a release, e.g. `v0.2.0` | press Upgrade to install that release; a device below protocol v11, which cannot be upgraded remotely, once by hand |
-| an unreleased build, e.g. `dev+g8b418e2` | build cloop at the hub's commit (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there — no published release may speak what the hub needs. Where the newest published release *does* satisfy the need, pressing Upgrade with it is offered as well |
+| an unreleased build of a commit, e.g. `dev+g8b418e2` | put the device on the edge channel (`sudo cloop executor agent install --upgrade --channel edge`, once) and press Upgrade: it installs the hub's own build, signed by CI, once CI has published it. Or, without the channel, build cloop at the hub's commit (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there. Where the newest published release *does* satisfy the need, pressing Upgrade with it is offered as well |
+| an unreleased build of a dirty tree, or `dev` | the hand-built binary only — no CI build matches it |
 
 For the reference deployment — a hub on `dev+g8b418e2`, a device whose agent
 speaks v14, a run carrying firewall rules stored in the hub — the refusal reads:
@@ -2983,9 +3044,14 @@ speaks v14, a run carrying firewall rules stored in the hub — the refusal read
 > and check itself — an older one would ignore them. The hub runs an unreleased
 > build (dev+g8b418e2), so no published release may speak v15 yet — the newest
 > this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade
-> button and auto-update install published releases only. To move the device
-> forward, build cloop at the hub's commit 8b418e2 as a static binary
-> (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run
+> button and auto-update install published releases, and this hub's own build
+> only on a device that follows the edge channel. To move the device forward,
+> put the device on the edge channel (`sudo cloop executor agent install
+> --upgrade --channel edge` on it, once — a cloop older than the channel first
+> needs one edge build installed by hand) and press Upgrade on its row in the
+> Executors panel: it installs this hub's own build, 8b418e2, signed by CI, once
+> CI has published it. Or build cloop at the hub's commit 8b418e2 as a static
+> binary (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run
 > `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there
 > (a binary built by hand carries no signed provenance); a plain --upgrade keeps
 > the device's packet-filter grant as it is.
@@ -2996,36 +3062,52 @@ anything is sent:
 > agent sgx-1 (sgx) speaks protocol v14; v0.0.4 speaks v13, so installing it
 > would lower the device's protocol and lose what needs v14. The hub runs an
 > unreleased build (dev+g8b418e2), and the Executors panel's Upgrade button and
-> auto-update install published releases only. To move the device forward,
-> build cloop at the hub's commit 8b418e2 … (as above). Ask with force to
-> install it anyway.
+> auto-update install published releases, and this hub's own build only on a
+> device that follows the edge channel. To move the device forward, put the
+> device on the edge channel … (as above). Ask with force to install it anyway.
 
 **The Upgrade button never moves a device backwards.** The hub knows which
 releases were published and the protocol each speaks (`pkg/version/releases.go`;
 add a release's entry in the commit that is tagged), and the panel's version
 skew compares protocols as well as builds: a connected device below the hub's
 protocol is material skew whatever its build string says. The dialog offers the
-hub's own release when the hub is one, otherwise the newest published release
-that would not lower the device's protocol — and when there is none, it shows
-the explanation and the build path instead of a prompt. Behind it,
-`POST /api/executors/{id}/upgrade`:
+hub's own release when the hub is one; on a device that follows the edge
+channel, the hub's own build (`edge:<commit>`) once CI has published it and if
+its manifest's protocol is not below the device's — saying plainly why not
+otherwise: an unpushed commit, CI still running, CI failed (see the
+[edge channel guide](../guides/edge-channel.md#upgrading-from-the-dashboard));
+otherwise the newest published release that would not lower the device's
+protocol — and when there is none, it shows the explanation and the build path
+instead of a prompt. Behind it, `POST /api/executors/{id}/upgrade`:
 
 - resolves `latest` (or an empty target) to the tag it names today and asks the
   device for that tag, so what is installed is what was checked; a failed lookup
   keeps `latest` on the wire and judges it as the newest release the hub knows
   of, and says so;
 - refuses a target that is not a release tag — the hub's own `dev+g…` version,
-  say — with **400**;
+  say — with **400**, except on an edge-channel device, where the hub's own
+  version means its edge build;
+- accepts `edge:<commit>` for a device that follows the edge channel, looks up
+  that build's manifest to judge its protocol, and refuses it with **409** for a
+  device on the stable channel, for a build CI has not published, and for one
+  that would lower the device's protocol unless `force`;
+- refuses with **409** a device that has reported it cannot carry out an
+  upgrade (no remote-upgrade helper for an unprivileged agent, or no cosign);
 - refuses a release whose binaries speak an older protocol than the device does
   with **409**, unless the request sets `force`; a device too old to be upgraded
   remotely is also a **409**.
 
 The auto-update planner applies the same two refusals before it compares
 versions, so a device on a dev build is told the protocol reason rather than
-"cannot order", and its default target on an unreleased hub — the hub's own
-version — is refused as no release at all. And the device checks once more:
+"cannot order". Its default target on an unreleased hub — the hub's own
+version — is, for a device on the edge channel, the hub's edge build once CI has
+published it and if it does not lower the device's protocol; for any other
+device it is refused as no release at all, with the command that would put the
+device on the channel. Each verdict carries its own target, since the two
+channels converge on different builds. And the device checks once more:
 `install --upgrade` refuses a staged binary that speaks an older protocol than
-the installed one (see the table above).
+the installed one (see the table above), and one that does not report the
+version its signed manifest names.
 
 ---
 

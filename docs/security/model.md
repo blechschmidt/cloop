@@ -2498,6 +2498,61 @@ who can create a tag in this repository can already cut a release, so
 constraining the tag's *shape* buys nothing. The boundary is the repository and
 the workflow, not the version grammar.
 
+### The edge channel: a second, narrower pin
+
+A hub that deploys `main` speaks a newer executor protocol than any release, so
+its devices need a signed build of `main` (Task 20376). `.github/workflows/edge.yml`
+produces one after CI passes on a push to `main`, and it is trusted by a pin of
+its own:
+
+| Pinned | Value | Declared in |
+| --- | --- | --- |
+| Edge signing identity | `^https://github\.com/blechschmidt/cloop/\.github/workflows/edge\.yml@refs/heads/main$` | `provenance.EdgeIdentityRegexp` |
+
+It is a **separate pin, not a widening of the release one**, and the separation
+is the property:
+
+- A release target is verified against the release identity only; an edge
+  signature does not make anything a release, so `cloop upgrade`, the installer
+  and every stable-channel device are exactly as before.
+- An edge target (`edge:<commit>`) is verified against the edge identity only:
+  not a release signature, not `edge.yml` from another branch, a tag or a pull
+  request's merge ref, not another workflow on `main`, not a fork. There is no
+  wildcard in it at all.
+- The device decides which pin applies, from the kind of target it resolved,
+  and accepts an edge target only if **an operator on the device** put it on
+  the edge channel — a drop-in (`20-update-channel.conf`) that the hub can read
+  in the hello and has no way to write. The upgrade frame still names a version
+  and nothing else.
+- A signature says `edge.yml` built *a* commit; the signed manifest says which,
+  each archive must hash to what it lists, and the installed binary must report
+  the manifest's version. A genuine build renamed to another commit fails one
+  of the three.
+
+What the pin vouches for is weaker than a release, and it is stated, not
+implied: *a commit on `main` that passed CI*. Anyone who can push to `main` can
+change what `edge.yml` builds, so the pin cannot protect against them — it
+protects against everyone who cannot. The hub reads an edge build's manifest
+**unverified**, to decide what to offer and to keep its promise never to lower a
+device's protocol; the device verifies everything itself and refuses a lower
+protocol on its own. `CLOOP_PROVENANCE_EDGE_IDENTITY` repoints this pin for a
+fork, and is deliberately a different variable from `CLOOP_PROVENANCE_IDENTITY`.
+See the [edge channel guide](../guides/edge-channel.md) for the channel's limits.
+
+### Upgrades the hub asks for, and the privilege they need
+
+The agent runs unprivileged (`NoNewPrivileges`, `ProtectSystem=strict`), so it
+cannot replace its own root-owned binary. An upgrade the hub asks for is carried
+out by a **root helper** (`<service>-upgrade.service`, started by a `.path` unit
+when the agent writes `upgrade-request.json` in its state directory). The
+request carries what the frame carries — version, force, settle time, reason —
+and the helper re-derives everything that matters on its own: the device's
+channel from systemd's view of the agent's unit, the bytes from the pinned
+repository, the signer from the pin for that channel. A workload running as the
+agent's user can therefore file a request, and gains nothing by it the hub could
+not already ask for. Granting the agent write access to its binary instead would
+have let such a workload replace the binary that holds `CAP_NET_ADMIN`.
+
 ### Why the checksum was never enough
 
 `checksums.txt` is published beside the archives and both the installer and
@@ -2524,6 +2579,7 @@ Three paths write a cloop binary to disk, and all three verify before writing:
 | `GET /install.sh` bootstrap installer | archive + `checksums.txt` | `--insecure-skip-verify`, `CLOOP_INSECURE_SKIP_VERIFY=1` |
 | `cloop upgrade` | release archive | `--insecure-skip-verify` |
 | `cloop executor agent install --upgrade` | the source binary | `--insecure-skip-verify` |
+| `… --upgrade --to <target>`, the remote-upgrade helper, a root agent | the release archive, or an edge build's manifest and archive against the edge pin | `--insecure-skip-verify` for a release only; none for an edge build |
 
 Two ordering properties are load-bearing:
 
@@ -2636,6 +2692,16 @@ conformance suite deliberately does not require. Run them with
 | Verification is the default — the zero `Options` does not skip it | `pkg/upgrade`: `TestSkipVerifyIsOptIn` |
 | `--insecure-skip-verify` installs on a device with no cosign, reports that it did, and does not also disable the checksum | `pkg/executor/install`: `TestContainerInstallerSkipVerifyInstallsWithoutCosign`, `TestUpgradeSkipVerifyIsAnExplicitDecision` |
 | The trust root is overridable for a fork, and a blank override falls back to the pin rather than becoming "match anything" | `pkg/provenance`: `TestTrustRootIsOverridableForForks` |
+| The edge pin accepts only `edge.yml` on `main`, the release pin only `release.yml` on a tag: each refuses the other's signer, another branch, a tag or merge ref, another workflow, a fork and a lookalike | `pkg/provenance`: `TestEdgeAndReleasePinsMatrix`, `TestChannelVerificationMatrix` |
+| Repointing either pin never moves the other, and an edge verification ignores a release identity it was configured with | `pkg/provenance`: `TestForChannelKeepsTheTwoPinsApart` |
+| `edge.yml` signs only main's commits that passed CI, verifies against the same literal pin before publishing, is never latest and moves no tag | `pkg/provenance`: `TestEdgeWorkflowPinsTheSameIdentity`, `TestEdgeWorkflowOnlyEverSignsMain` |
+| An edge build signed by anything but `edge.yml` on `main` is refused, and a release signed by `edge.yml` is refused | `pkg/upgrade`: `TestStageEdgeRefusesEveryOtherSigner`, `TestStageReleaseRefusesAnEdgeSignature` |
+| A genuine manifest or archive of another commit, renamed, is refused | `pkg/upgrade`: `TestStageEdgeRefusesAManifestForAnotherCommit`, `TestStageEdgeRefusesASwappedArchive` |
+| The installed binary must report the version its signed manifest names — not overridable by `--force` | `pkg/executor/install`: `TestExpectVersionBindsTheBinaryToItsSignature` |
+| A device not on the edge channel refuses an edge target, and the hub refuses to send one | `pkg/executor/agent`: `TestAgentRefusesEdgeTargetsWithoutOptIn`; `pkg/executor/remote`: `TestRequestUpgradeLeavesTheChannelToTheDevice`, `TestLoopbackNeverSendsMainToAStableDevice` |
+| The root helper takes the channel from the unit, not the request, and refuses another signer | `pkg/executor/agent`: `TestApplyUpgradeRequestUsesTheDevicesChannel`, `TestApplyUpgradeRequestRefusesAnotherSigner` |
+| The request file is read defensively by root: no symlink, no oversized or stale request, deleted before it is acted on | `pkg/executor/install`: `TestUpgradeRequestRoundTrip` |
+| Hub, agent, request file, helper, verification and install, end to end | `pkg/executor/remote`: `TestLoopbackUpgradesAnEdgeDeviceToTheHubsBuild` |
 
 ### Secret non-disclosure — `secrets_test.go`, `audit_test.go`, `uiroutes_test.go`
 
