@@ -11,9 +11,10 @@
 //
 // Redaction is applied to the headers blob before insert, never at read
 // time, so on-disk rows are guaranteed safe even if a future caller forgets
-// to redact. The prompt and response themselves are stored verbatim — they
-// originate from user/orchestrator input and never carry the cloop binary's
-// own credentials.
+// to redact. The response arrives already scrubbed of every credential the
+// process was lent — pkg/provider.Build wraps redaction inside this decorator
+// (Task 20378), because a harness can echo one — and is stored as received;
+// the prompt is stored verbatim.
 package provideraudit
 
 import (

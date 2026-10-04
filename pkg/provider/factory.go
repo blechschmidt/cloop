@@ -77,18 +77,25 @@ func RegisterAuditDecorator(d func(Provider) Provider) {
 //
 // The returned provider is wrapped (innermost → outermost) in:
 //
-//	real provider → WithPanicSafety → WithRequestIDTracing → audit decorator
+//	real provider → WithPanicSafety → WithRequestIDTracing → redaction → audit decorator
 //
 // so a panic inside the underlying SDK becomes an ordinary error, every
 // error returned to the caller is tagged with the request ID carried in
-// the call context, and every call (success or failure) lands in the
-// per-project audit log. This is the single chokepoint every cloop
-// command goes through, so wrapping here gives the behaviour to all 80+
-// Complete call sites without touching them.
+// the call context, a credential this process was lent is scrubbed from
+// everything the call returns or streams, and every call (success or
+// failure) lands in the per-project audit log. This is the single
+// chokepoint every cloop command goes through, so wrapping here gives the
+// behaviour to all 80+ Complete call sites without touching them.
 //
 // The audit decorator runs OUTSIDE request-ID tagging so it sees the
 // final tagged error message; that message is what ends up in the audit
 // row. The decorator is best-effort and can never block the call.
+//
+// Redaction is inside the audit decorator, not outside it, and the order is
+// the point: the decorator writes the response it receives into
+// provider_calls, so it must receive the scrubbed one. With redaction
+// outermost — as it was until Task 20378's end-to-end test read the table —
+// the caller got a clean response while the audit row kept the credential.
 func Build(cfg ProviderConfig) (Provider, error) {
 	name := strings.ToLower(cfg.Name)
 	factory, ok := registry[name]
@@ -99,14 +106,19 @@ func Build(cfg ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	wrapped := WithRequestIDTracing(WithPanicSafety(p))
+	// Scrubbed before anything records it — the provider audit log included —
+	// so no row written about this call holds a credential this process was
+	// lent. See redaction.go.
+	wrapped := withLiveRedaction(WithRequestIDTracing(WithPanicSafety(p)), buildRedactor())
 	if auditDecorator != nil {
 		wrapped = auditDecorator(wrapped)
 	}
-	// Outermost, so nothing downstream — the provider audit log included —
-	// records a credential this process was lent. See redaction.go.
-	return withLiveRedaction(wrapped, processRedactor()), nil
+	return wrapped, nil
 }
+
+// buildRedactor is the scrub set Build applies: this process's own. A var so
+// a test can lend the process a credential without changing its environment.
+var buildRedactor = processRedactor
 
 // Available returns a comma-separated list of registered providers.
 func Available() string {
