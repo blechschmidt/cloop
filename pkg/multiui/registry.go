@@ -177,12 +177,22 @@ func cloopRunPIDs(match func(cwd string) bool) []int {
 // directory of every "cloop run" process. It is the shared body behind both
 // cloopRunPIDs and ScanRunningDirs, so the two cannot drift on what counts as a
 // run. It returns without visiting anything if /proc cannot be read.
+func forEachCloopRun(visit func(pid int, cwd string)) {
+	forEachCloopProcess(func(exePath string, argv []string, cwd string) bool {
+		// The full decision still goes through cloopRunMatch so the rules stay
+		// in the one place that is unit-tested without a live /proc.
+		return cloopRunMatch(exePath, argv, cwd, matchAnyDir)
+	}, visit)
+}
+
+// forEachCloopProcess walks /proc once and invokes visit with the PID and
+// working directory of every cloop process that match accepts.
 //
 // The executable is checked before the other two reads: on a host with several
 // hundred processes almost none of them are cloop, and the check is the
 // cheapest discriminator available, so testing it first skips two syscalls per
 // uninteresting process.
-func forEachCloopRun(visit func(pid int, cwd string)) {
+func forEachCloopProcess(match func(exePath string, argv []string, cwd string) bool, visit func(pid int, cwd string)) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return
@@ -208,12 +218,53 @@ func forEachCloopRun(visit func(pid int, cwd string)) {
 		if err != nil {
 			continue
 		}
-		// The full decision still goes through cloopRunMatch so the rules stay
-		// in the one place that is unit-tested without a live /proc.
-		if cloopRunMatch(exePath, splitCmdline(cmdline), cwd, matchAnyDir) {
+		if match(exePath, splitCmdline(cmdline), cwd) {
 			visit(pidNum, cwd)
 		}
 	}
+}
+
+// HubProcess is a `cloop ui` process on this host.
+type HubProcess struct {
+	PID int
+	// Dir is the process's working directory: the directory whose control
+	// plane it serves.
+	Dir string
+}
+
+// HubProcesses lists the `cloop ui` processes running on this host, read from
+// /proc the way runs are (Linux only; nil elsewhere or when /proc cannot be
+// read).
+//
+// A hub keeps the runs it dispatched in its control plane, which lives in its
+// own working directory rather than in the project's (Task 20374). A process
+// that is not a hub can find those control planes only through the hubs
+// themselves, and this is how.
+func HubProcesses() []HubProcess {
+	var out []HubProcess
+	forEachCloopProcess(func(exePath string, argv []string, _ string) bool {
+		return cloopHubMatch(exePath, argv)
+	}, func(pid int, cwd string) {
+		out = append(out, HubProcess{PID: pid, Dir: cwd})
+	})
+	return out
+}
+
+// cloopHubMatch reports whether process metadata identifies a `cloop ui`
+// invocation: a cloop executable with an argv entry, after the program name,
+// equal to "ui". The test is as loose as cloopRunMatch's, deliberately — a
+// false positive costs a caller one extra control plane to read, while a
+// missed hub is a run nobody sees.
+func cloopHubMatch(exePath string, argv []string) bool {
+	if !isCloopExe(exePath) || len(argv) < 2 {
+		return false
+	}
+	for _, part := range argv[1:] {
+		if part == "ui" {
+			return true
+		}
+	}
+	return false
 }
 
 // matchAnyDir is the cwd predicate that accepts every directory, used when the

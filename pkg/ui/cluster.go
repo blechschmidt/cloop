@@ -55,8 +55,9 @@ const (
 // Ownership kinds: things only one member can hold. See pkg/hubcluster/owners.go.
 const (
 	// ownerRun: the member streaming a project's dispatched run. Key: the
-	// project directory.
-	ownerRun = "run"
+	// project directory. Defined by pkg/hubcluster, because processes that are
+	// not members read these claims too (Task 20374).
+	ownerRun = hubcluster.OwnerKindRun
 	// ownerAgent: the member holding an edge agent's WebSocket. Key: executor
 	// id.
 	ownerAgent = "agent"

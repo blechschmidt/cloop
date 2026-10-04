@@ -63,18 +63,17 @@ type runOwnerMeta struct {
 	// returned work is landed against (Task 20367).
 	Feature *featureReturn `json:"feature,omitempty"`
 	Started time.Time      `json:"started,omitzero"`
-	// Dispatching marks a claim taken before its workload exists. A member
-	// that dies inside that window leaves a claim with nothing behind it,
-	// which the leader clears rather than tries to adopt.
-	Dispatching bool `json:"dispatching,omitempty"`
+	// RunClaimMeta carries Dispatching, which every observer of the claim
+	// judges by — members and, since Task 20374, processes that are not
+	// members at all. It is embedded rather than restated so the field is
+	// written here under the name pkg/hubcluster reads.
+	hubcluster.RunClaimMeta
 }
 
 // orphanRunGrace is how long a run whose owner died keeps its project marked
-// running while no member has adopted it. Long enough for the agent behind it
-// to reconnect to another member and be adopted there; short enough that a run
-// nobody can reach does not wedge its project. A variable so a test can
-// shorten it.
-var orphanRunGrace = 2 * time.Minute
+// running while no member has adopted it; see hubcluster.DefaultOrphanRunGrace.
+// A variable so a test can shorten it.
+var orphanRunGrace = hubcluster.DefaultOrphanRunGrace
 
 // errRunOwnedElsewhere is returned by claimRun when a live member owns the run.
 var errRunOwnedElsewhere = errors.New("a run for this project is in progress on another hub member")
@@ -88,7 +87,8 @@ func (s *Server) claimRun(workDir, handler string) (hubcluster.Owner, error) {
 		return hubcluster.Owner{}, nil
 	}
 	o, ok, err := n.Claim(ownerRun, workDir, runOwnerMeta{
-		Handler: handler, Dispatching: true, Started: time.Now().UTC(),
+		Handler: handler, Started: time.Now().UTC(),
+		RunClaimMeta: hubcluster.RunClaimMeta{Dispatching: true},
 	})
 	if err != nil {
 		// A claim that could not be read or written is not evidence of a
@@ -182,23 +182,14 @@ func (s *Server) clusterRunOwner(workDir string) (hubcluster.Owner, runOwnerMeta
 // the run may be adopted by the member its agent reconnects to, and repairing
 // the project in that window would reset tasks under a run that is about to
 // resume. Past the grace, nobody picked it up, and stale-run recovery may do
-// its work.
+// its work. The rule is hubcluster.RunClaimLive, which `cloop config validate
+// --fix` applies to the same rows from outside the cluster (Task 20374).
 func (s *Server) peerRunExecuting(workDir string) bool {
-	o, meta, found := s.clusterRunOwner(workDir)
+	o, _, found := s.clusterRunOwner(workDir)
 	if !found || o.Self {
 		return false
 	}
-	if o.Alive {
-		return true
-	}
-	if meta.Dispatching {
-		return false
-	}
-	since := o.Member.HeartbeatAt
-	if since.IsZero() {
-		since = o.ClaimedAt()
-	}
-	return time.Since(since) < orphanRunGrace
+	return hubcluster.RunClaimLive(o, time.Now(), orphanRunGrace)
 }
 
 // routeRunOwner forwards r to the member running workDir's run, and reports

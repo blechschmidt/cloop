@@ -23,14 +23,22 @@ Checks performed:
   - URL fields that are malformed (must be http/https)
   - Budget values that are negative
   - Hooks referencing non-executable scripts
-  - Task fields with invalid or stuck status values in state.db
+  - Tasks in state.db with an invalid status, and tasks or a run status left
+    "in progress" by a run that is no longer live
   - (with --probe) HTTP reachability of notification webhook URLs
 
 Findings are reported as ERROR, WARN, or INFO. Exit code 1 when any ERROR exists.
 
 Use --fix to auto-correct safe issues:
   - Strip unknown keys from config.yaml
-  - Reset invalid/stuck task statuses to "pending" in state.db`,
+  - Recover the tasks a dead run left in progress, the way the hub recovers
+    them: an outcome cloop or the agent had already reached is kept, anything
+    else goes back to "pending"; a status still claiming the run is paused
+  - Reset invalid task statuses to "pending"
+
+--fix does not touch the plan while a run of the project is live — a cloop run
+process in the project, or a run a hub on this host has claimed. Stop the run
+first.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		fix, _ := cmd.Flags().GetBool("fix")
@@ -117,7 +125,7 @@ Use --fix to auto-correct safe issues:
 }
 
 func init() {
-	configValidateCmd.Flags().Bool("fix", false, "Auto-correct safe issues (strip unknown keys, reset stuck task statuses)")
+	configValidateCmd.Flags().Bool("fix", false, "Auto-correct safe issues (strip unknown keys, recover tasks a dead run left in progress, reset invalid task statuses)")
 	configValidateCmd.Flags().Bool("probe", false, "Probe notification webhook URLs for HTTP reachability")
 	configCmd.AddCommand(configValidateCmd)
 }

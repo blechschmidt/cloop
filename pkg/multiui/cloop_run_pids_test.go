@@ -177,6 +177,33 @@ func TestCloopRunMatch(t *testing.T) {
 	}
 }
 
+// cloopHubMatch finds the `cloop ui` processes whose control planes hold the
+// run claims a process outside the cluster must read (Task 20374).
+func TestCloopHubMatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		exePath string
+		argv    []string
+		want    bool
+	}{
+		{"hub", "/usr/local/bin/cloop", []string{"cloop", "ui", "--port", "8081"}, true},
+		{"renamed binary", "/usr/local/bin/cloop-latest", []string{"cloop-latest", "ui"}, true},
+		{"global flag first", "/usr/local/bin/cloop", []string{"cloop", "--workspace", "w", "ui"}, true},
+		{"replaced on disk", "/usr/local/bin/cloop (deleted)", []string{"cloop", "ui"}, true},
+		{"a run is not a hub", "/usr/local/bin/cloop", []string{"cloop", "run"}, false},
+		{"program name alone", "/opt/ui", []string{"ui"}, false},
+		{"not cloop", "/usr/bin/python3", []string{"python3", "ui"}, false},
+		{"empty argv", "/usr/local/bin/cloop", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cloopHubMatch(tc.exePath, tc.argv); got != tc.want {
+				t.Fatalf("cloopHubMatch(%q, %v) = %v, want %v", tc.exePath, tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSplitCmdline verifies the trailing-NUL element from /proc/PID/cmdline
 // is dropped so callers see only real argv entries.
 func TestSplitCmdline(t *testing.T) {

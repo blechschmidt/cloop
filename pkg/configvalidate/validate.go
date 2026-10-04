@@ -3,23 +3,20 @@ package configvalidate
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/state"
 )
 
 // Severity is the severity level of a validation finding.
@@ -252,9 +249,11 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 	}
 
 	// ── 3. State DB: task status validity ───────────────────────────────────
-	dbPath := filepath.Join(workdir, ".cloop", "state.db")
+	// state.DBPath, not .cloop/state.db: with a session active the plan lives
+	// in the session's database, and that is the one --fix loads and saves.
+	dbPath := state.DBPath(workdir)
 	if _, err := os.Stat(dbPath); err == nil {
-		if err := checkStateDB(dbPath, opts.Fix, rep, add); err != nil {
+		if err := checkStateDB(workdir, dbPath, opts.Fix, rep, add); err != nil {
 			add(Finding{
 				Severity: SeverityWarn,
 				Field:    "state.db",
@@ -567,75 +566,6 @@ func checkNotifyURLReachability(ctx context.Context, cfg *config.Config, add fun
 			add(Finding{Severity: SeverityInfo, Field: e.field, Message: fmt.Sprintf("probe OK (HTTP %d)", resp.StatusCode)})
 		}
 	}
-}
-
-// checkStateDB validates task statuses stored in state.db.
-// If fix is true, tasks with invalid or stuck in_progress statuses are reset to pending.
-func checkStateDB(dbPath string, fix bool, rep *Report, add func(Finding)) error {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	rows, err := db.Query(`SELECT id, title, status FROM plan_tasks`)
-	if err != nil {
-		// Table might not exist yet
-		return nil
-	}
-	defer rows.Close()
-
-	type taskRow struct {
-		id     int
-		title  string
-		status string
-	}
-	var invalid []taskRow
-	var stuckInProgress []taskRow
-
-	for rows.Next() {
-		var t taskRow
-		if err := rows.Scan(&t.id, &t.title, &t.status); err != nil {
-			continue
-		}
-		if !validTaskStatuses[t.status] {
-			invalid = append(invalid, t)
-		} else if t.status == "in_progress" {
-			stuckInProgress = append(stuckInProgress, t)
-		}
-	}
-	rows.Close()
-
-	for _, t := range invalid {
-		add(Finding{
-			Severity: SeverityError,
-			Field:    fmt.Sprintf("state.db:plan_tasks[%d].status", t.id),
-			Message:  fmt.Sprintf("task %q has invalid status %q — not a known status value", t.title, t.status),
-			FixNote:  "will be reset to \"pending\"",
-		})
-	}
-
-	for _, t := range stuckInProgress {
-		add(Finding{
-			Severity: SeverityWarn,
-			Field:    fmt.Sprintf("state.db:plan_tasks[%d].status", t.id),
-			Message:  fmt.Sprintf("task %q is stuck in \"in_progress\" — may indicate an interrupted run", t.title),
-			FixNote:  "will be reset to \"pending\"",
-		})
-	}
-
-	if fix {
-		toReset := append(invalid, stuckInProgress...)
-		for _, t := range toReset {
-			if _, err := db.Exec(`UPDATE plan_tasks SET status='pending' WHERE id=?`, t.id); err != nil {
-				add(Finding{Severity: SeverityWarn, Field: "state.db", Message: fmt.Sprintf("--fix: could not reset task %d: %v", t.id, err)})
-				continue
-			}
-			rep.Fixed = append(rep.Fixed, fmt.Sprintf("reset task %d (%q) status from %q to \"pending\"", t.id, t.title, t.status))
-		}
-	}
-
-	return nil
 }
 
 func knownProviderList() string {
