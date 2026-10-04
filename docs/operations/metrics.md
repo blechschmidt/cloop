@@ -385,8 +385,10 @@ without sign-on.
 `expired`, `no_roles` or `store_error`. The first six are the token's fault;
 `store_error` is the hub's — its token store could not be read, and every
 scraper and CI job holding a token is being turned away. A request the failure
-lockout refuses before verifying anything is not counted, and neither is a
-verified display-glasses link refused for the path it asked for: that is
+lockout refuses before verifying anything is not counted as either. A
+display-glasses link that verifies and is then refused by the rules for its
+kind — a path outside the glasses views, or an owner it no longer names — is
+counted as a success: the token was genuine, and what refused it was
 authorization, not authentication.
 
 `outcome` on a sign-in is `success`, `discovery_failed`, `idp_error`,
