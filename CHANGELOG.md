@@ -121,6 +121,32 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **The Upgrade button no longer moves a device backwards, and "upgrade the
+  agent" says how.** The Executors panel's Upgrade button and the fleet
+  auto-update policy can only make a device install a published, signed
+  release. On a hub running an unreleased build — whose devices speak newer
+  protocols than any release — pressing Upgrade prefilled the hub's own
+  `dev+g…` version, which no device can download, and `latest` meant v0.0.4,
+  which speaks protocol v13: the device's own check could not order its dev
+  build against the release, so a v14 device would have installed it and
+  dropped a protocol. The hub now resolves `latest` to a tag and refuses, before
+  anything is sent, a target that is not a release (400) or whose binaries
+  speak an older protocol than the device (409; `force` overrides it), and the
+  planner refuses both before it compares versions. The dialog offers the hub's
+  own release, or the newest published release that would not lower the
+  device's protocol, or — when there is none — only the explanation.
+  `cloop executor agent install --upgrade` on a device refuses a staged binary
+  speaking an older protocol than the installed one, `--force` to override. And
+  every refusal of a device's protocol — revocation, workspace, secret files,
+  project state, feature branches, container mode, virtual executors, stored
+  firewall rules, attach, remote upgrade — now names the protocol the device
+  speaks, the one the hub needs, and the remedy for the hub's build: Upgrade to
+  the hub's own release on a hub that is one; on one that is not, build cloop at
+  the hub's commit and install it on the device with
+  `sudo ./cloop executor agent install --upgrade --insecure-skip-verify`. A
+  connected device below the hub's protocol is material version skew whatever
+  its build string says. See *Moving a device forward* in
+  `docs/architecture/executors.md`.
 - **Recovery no longer resurrects a task cloop rejected.** A run that died — or
   stopped because its outcome write failed — after the review gate, `--verify`,
   `--script-verify`, abandoned background work or an unanswered clarification

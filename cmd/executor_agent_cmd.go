@@ -25,13 +25,13 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/agent"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
-	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -530,9 +530,12 @@ what placement matches on.`,
 			fmt.Println()
 			dim.Printf("  hub build: %s\n", hub)
 			if skewed > 0 {
+				// The remedy depends on this build: a release can hand its
+				// devices that release, an unreleased build cannot (Task
+				// 20371). The helper says which, and the command it names is
+				// ui.AgentUpgradeCommand.
 				warn.Printf("  %d of %d agents materially trail this hub.\n", skewed, len(agents))
-				dim.Printf("  Upgrade a device by copying the new cloop binary to it and running:\n")
-				dim.Printf("    %s\n", ui.AgentUpgradeCommand)
+				dim.Printf("  %s\n", executor.AgentUpgradeAdvice())
 			}
 		}
 

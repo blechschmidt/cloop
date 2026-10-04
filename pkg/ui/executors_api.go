@@ -104,6 +104,14 @@ type executorView struct {
 	// backend that is not an enrolled device; a Skew of "none" means compared
 	// and uniform, which is distinct from never compared.
 	VersionSkew *executorSkewView `json:"version_skew,omitempty"`
+	// UpgradeTarget is the release the Upgrade dialog offers this device, and
+	// UpgradeNote the sentence explaining it (Task 20371): the hub's own
+	// release when the hub is one, else the newest published release that
+	// would not lower the device's protocol, else none — and then the note
+	// says what to do instead of offering a button that could only move the
+	// device backwards. Both empty for anything but an enrolled device.
+	UpgradeTarget string `json:"upgrade_target,omitempty"`
+	UpgradeNote   string `json:"upgrade_note,omitempty"`
 	// Sandbox is the admin-configured answer to where this executor's payloads
 	// run (Task 20307). Nil when nobody has configured it — which is not the
 	// same as host mode, and the card renders the two differently: an unset
@@ -677,10 +685,10 @@ func (s *Server) annotateRevocation(view *executorView, ex executor.Executor) {
 	case view.ProtocolVersion == 0:
 		view.RevocationNote = "Offline — a secret lease already on this device cannot be revoked until it reconnects."
 	default:
-		view.RevocationNote = fmt.Sprintf(
-			"Speaks protocol v%d; lease revocation needs v%d. cloop will refuse to place a workload "+
-				"carrying brokered credentials here. %s",
-			view.ProtocolVersion, remote.MinRevocationVersion, upgradeHint)
+		view.RevocationNote = executor.ProtocolShortfall("This device's agent", view.ProtocolVersion,
+			remote.MinRevocationVersion, "to take a lease's material back from it mid-run") +
+			" cloop will refuse to place a workload carrying brokered credentials here. " +
+			executor.AgentUpgradePath(view.ProtocolVersion, remote.MinRevocationVersion)
 	}
 }
 
@@ -1781,7 +1789,8 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 			// wrote, so pointing at sandbox.yaml would send the reader to edit
 			// a file that cannot fix it.
 			remediation = "Bind this project to an executor that can fetch a git workspace, " +
-				"or upgrade the agent on this device to a build that supports workspace provisioning."
+				"or upgrade the agent on this device to a build that supports workspace provisioning. " +
+				executor.AgentUpgradeAdvice()
 		}
 		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(), remediation,
 			executor.IsolatedIDs())

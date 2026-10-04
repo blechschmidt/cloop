@@ -184,6 +184,38 @@ const scenarios = {
     await boot([CONTAINER_BACKEND]);
     return {html: listHTML()};
   },
+  // The Upgrade dialog (Task 20371). The hub picks the release to prefill and
+  // says why; with no release that would not lower the device's protocol, the
+  // note is all that is shown — no prompt, nothing sent.
+  async upgrade_refused() {
+    const h = await boot([Object.assign({}, STALE_DEVICE,
+      {upgrade_target: '', upgrade_note: 'NO SAFE RELEASE: build cloop at the hub\'s commit.'})]);
+    const seen = {alert: null, prompted: false};
+    globalThis.alert = m => { seen.alert = String(m); };
+    globalThis.prompt = () => { seen.prompted = true; return null; };
+    window.upgradeExecutor(0);
+    await globalThis.__settle(3);
+    seen.posts = h.requests.filter(r => r.method === 'POST' && r.url.includes('/upgrade')).length;
+    return {html: JSON.stringify(seen)};
+  },
+  // With a safe release, the prompt is prefilled with it — never the hub's own
+  // "dev+g…" version — carries the note, and sends what the operator kept.
+  async upgrade_offered() {
+    const h = await boot([Object.assign({}, STALE_DEVICE,
+      {upgrade_target: 'v0.0.4', upgrade_note: 'OFFER NOTE: the newest published release.'})]);
+    // Longest prefix first; see domshim's fetch.
+    const list = h.routes['/api/executors'];
+    delete h.routes['/api/executors'];
+    h.routes['/api/executors/edge-stale/upgrade'] = {accepted: true, message: 'upgrading'};
+    h.routes['/api/executors'] = list;
+    const seen = {};
+    globalThis.prompt = (text, dflt) => { seen.text = String(text); seen.dflt = dflt; return dflt; };
+    window.upgradeExecutor(0);
+    await globalThis.__settle(3);
+    const post = h.requests.filter(r => r.method === 'POST' && r.url.includes('/upgrade')).pop();
+    seen.body = post ? post.body : '';
+    return {html: JSON.stringify(seen)};
+  },
 };
 
 (async () => {

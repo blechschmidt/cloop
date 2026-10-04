@@ -427,11 +427,10 @@ function _secRevocationCell(lease) {
   if (!revs.length) {
     // Never revoked. Say whether it *could* be, because an agent too old to
     // honour the frame is something to find out before the incident, not
-    // during it.
+    // during it. Why, and what to do, is the hub's to say (revocable_note):
+    // the remedy depends on the hub's own build, which this script cannot see.
     if (lease.revocable === false) {
-      return '<span class="sec-chip warn" title="At least one agent holding this lease speaks a protocol ' +
-        'older than v2 and cannot scrub material on request. Upgrade it: cloop executor agent install --upgrade">' +
-        'not revocable</span>';
+      return '<span class="sec-chip warn" title="' + esc(lease.revocable_note || '') + '">not revocable</span>';
     }
     return '<span class="sec-count">—</span>';
   }

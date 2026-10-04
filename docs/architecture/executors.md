@@ -2846,6 +2846,7 @@ them:
 | will not execute here (`ENOEXEC`, timeout, non-zero exit) | **no** | a binary that will not run before the rename will not run after it |
 | ran, but did not identify itself as cloop | **no** | the likely cause is a path typo pointing at another tool |
 | older build than the one installed | yes | a deliberate rollback is a real operation |
+| speaks an older executor protocol than the installed binary | yes | it would take away whatever the hub can only ask of the newer protocol — checked whether or not the two builds can be ordered, so a release cannot replace a newer `dev+g…` build unnoticed |
 | speaks a protocol below the hub's `MinProtocolVersion` | yes | installing it would take the device out of the fleet — the hub would refuse its hello frame |
 
 `--force` has always meant "replace even though the bytes are identical". It is
@@ -2857,7 +2858,9 @@ check here.
 
 An unreleased `dev+g…` build is *allowed*. It cannot be ordered against a
 release, and a developer testing a fix on a device is legitimate — the binary has
-already been shown to run, which is the check that matters.
+already been shown to run, which is the check that matters. What it may not do
+is speak an older protocol than the binary it replaces: both report their
+protocol, and that comparison needs no version order.
 
 #### A failed upgrade is reverted
 
@@ -2915,6 +2918,86 @@ Five properties, each covered by a test:
 The one mode where the binary is *not* executed is `--root`, which stages an
 install tree for a different machine. That machine's binary may legitimately not
 run on this one, which is the same reason `--root` never invokes `systemctl`.
+
+### Moving a device forward: which remedy works
+
+When a device's agent speaks too old a protocol for what the hub is asking of
+it, the refusal says three things: the protocol the device speaks, the one the
+hub needs and what for, and the remedy. All of them are composed by one helper,
+`executor.NeedsProtocol` in `pkg/executor/protocolneed.go`, and
+`TestProtocolRefusalsGoThroughTheHelper` fails the build when a "needs vN"
+sentence is written anywhere else in `pkg/`, `cmd/` or the dashboard's scripts.
+
+The remedy is chosen by **the hub's own build**, because the two ways to move a
+device behave differently:
+
+- The Executors panel's **Upgrade** button and the fleet **auto-update** policy
+  can only make a device install a *published, signed release*. The hub names a
+  version; the device fetches it through its own release channel and verifies
+  the archive's signature. The hub never supplies bytes — that is the security
+  model of the upgrade frame.
+- `cloop executor agent install --upgrade`, run on the device, installs whatever
+  binary runs it (or `--from`). A binary built from source carries no signed
+  provenance, and a release signs its *archive*, not the binary inside, so a
+  binary copied over by hand needs `--insecure-skip-verify`. A plain `--upgrade`
+  leaves the packet-filter drop-in as it is.
+
+| The hub runs | The refusal tells you to |
+| --- | --- |
+| a release, e.g. `v0.2.0` | press Upgrade to install that release; a device below protocol v11, which cannot be upgraded remotely, once by hand |
+| an unreleased build, e.g. `dev+g8b418e2` | build cloop at the hub's commit (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there — no published release may speak what the hub needs. Where the newest published release *does* satisfy the need, pressing Upgrade with it is offered as well |
+
+For the reference deployment — a hub on `dev+g8b418e2`, a device whose agent
+speaks v14, a run carrying firewall rules stored in the hub — the refusal reads:
+
+> agent sgx-1 (sgx) speaks protocol v14, and the hub needs v15 for the firewall
+> rules stored in the hub that this run carries, which the agent must install
+> and check itself — an older one would ignore them. The hub runs an unreleased
+> build (dev+g8b418e2), so no published release may speak v15 yet — the newest
+> this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade
+> button and auto-update install published releases only. To move the device
+> forward, build cloop at the hub's commit 8b418e2 as a static binary
+> (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run
+> `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there
+> (a binary built by hand carries no signed provenance); a plain --upgrade keeps
+> the device's packet-filter grant as it is.
+
+Pressing Upgrade on that device, where `latest` is v0.0.4, is refused before
+anything is sent:
+
+> agent sgx-1 (sgx) speaks protocol v14; v0.0.4 speaks v13, so installing it
+> would lower the device's protocol and lose what needs v14. The hub runs an
+> unreleased build (dev+g8b418e2), and the Executors panel's Upgrade button and
+> auto-update install published releases only. To move the device forward,
+> build cloop at the hub's commit 8b418e2 … (as above). Ask with force to
+> install it anyway.
+
+**The Upgrade button never moves a device backwards.** The hub knows which
+releases were published and the protocol each speaks (`pkg/version/releases.go`;
+add a release's entry in the commit that is tagged), and the panel's version
+skew compares protocols as well as builds: a connected device below the hub's
+protocol is material skew whatever its build string says. The dialog offers the
+hub's own release when the hub is one, otherwise the newest published release
+that would not lower the device's protocol — and when there is none, it shows
+the explanation and the build path instead of a prompt. Behind it,
+`POST /api/executors/{id}/upgrade`:
+
+- resolves `latest` (or an empty target) to the tag it names today and asks the
+  device for that tag, so what is installed is what was checked; a failed lookup
+  keeps `latest` on the wire and judges it as the newest release the hub knows
+  of, and says so;
+- refuses a target that is not a release tag — the hub's own `dev+g…` version,
+  say — with **400**;
+- refuses a release whose binaries speak an older protocol than the device does
+  with **409**, unless the request sets `force`; a device too old to be upgraded
+  remotely is also a **409**.
+
+The auto-update planner applies the same two refusals before it compares
+versions, so a device on a dev build is told the protocol reason rather than
+"cannot order", and its default target on an unreleased hub — the hub's own
+version — is refused as no release at all. And the device checks once more:
+`install --upgrade` refuses a staged binary that speaks an older protocol than
+the installed one (see the table above).
 
 ---
 

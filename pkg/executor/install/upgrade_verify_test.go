@@ -15,11 +15,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provenance"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // corruptBinary is what a truncated or interrupted download looks like: an ELF
@@ -193,6 +195,85 @@ func TestUpgradeRefusesAProtocolBelowTheControlPlaneFloor(t *testing.T) {
 	silent := BinaryIdentity{Version: "v2.0.0"}
 	if err := checkUpgradeSafety(silent, installed, 4); err != nil {
 		t.Errorf("a build that reported no protocol was treated as speaking v0: %v", err)
+	}
+}
+
+// fakeCloopSpeaking is fakeCloop with the protocol it reports chosen.
+func fakeCloopSpeaking(version string, protocol int, marker string) string {
+	body := fakeCloop(version, marker)
+	speaking := strings.Replace(body, `"protocol":6,`, `"protocol":`+strconv.Itoa(protocol)+`,`, 1)
+	if speaking == body && protocol != 6 {
+		panic("fakeCloop no longer reports `\"protocol\":6,`; update fakeCloopSpeaking")
+	}
+	return speaking
+}
+
+// TestUpgradeRefusesALowerProtocolEvenWhenVersionsCannotBeOrdered is the
+// device's own half of Task 20371. The reference deployment's device ran a dev
+// build speaking v14; v0.0.4 speaks v13; "dev+g47e68a9" and "v0.0.4" cannot be
+// ordered, so the version check let the release through and the device would
+// have dropped a protocol. Both binaries say which protocol they speak, and
+// that comparison needs no version order.
+func TestUpgradeRefusesALowerProtocolEvenWhenVersionsCannotBeOrdered(t *testing.T) {
+	staged := BinaryIdentity{Version: "v0.0.4", Protocol: 13, MinProtocol: 1, Structured: true}
+	installed := BinaryIdentity{Version: "dev+g47e68a9", Protocol: 14, MinProtocol: 1, Structured: true}
+	if _, ok := version.Compare(staged.Version, installed.Version); ok {
+		t.Fatal("fixture: the two versions are orderable, so this would not test the protocol check")
+	}
+
+	err := checkUpgradeSafety(staged, installed, 1)
+	if !errors.Is(err, ErrDowngrade) {
+		t.Fatalf("err = %v, want ErrDowngrade", err)
+	}
+	for _, want := range []string{"v0.0.4", "v13", "dev+g47e68a9", "v14", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not mention %q: %v", want, err)
+		}
+	}
+
+	// Unknown is not lower: a build older than the machine-readable report
+	// says nothing about its protocol, on either side.
+	silentStaged := BinaryIdentity{Version: "v0.0.4"}
+	if err := checkUpgradeSafety(silentStaged, installed, 1); err != nil {
+		t.Errorf("a staged binary that reported no protocol was refused: %v", err)
+	}
+	silentInstalled := BinaryIdentity{Version: "dev+g47e68a9"}
+	if err := checkUpgradeSafety(staged, silentInstalled, 1); err != nil {
+		t.Errorf("an installed binary that reported no protocol made the staged one look lower: %v", err)
+	}
+	// Equal or higher is not a drop.
+	for _, p := range []int{14, 15} {
+		up := BinaryIdentity{Version: "dev+gabcdef0", Protocol: p, MinProtocol: 1, Structured: true}
+		if err := checkUpgradeSafety(up, installed, 1); err != nil {
+			t.Errorf("a staged v%d binary over an installed v14 was refused: %v", p, err)
+		}
+	}
+}
+
+// TestUpgradeProtocolDropEndToEnd runs the same refusal through Upgrade with
+// real executables, and --force through it: a deliberate rollback is a real
+// operation, and the hub's own Force reaches the device as this flag.
+func TestUpgradeProtocolDropEndToEnd(t *testing.T) {
+	f := newUpgradeFixture(t, OutputSystemd, "UNUSED")
+	mustWrite(t, f.spec.BinaryPath, fakeCloopSpeaking("dev+g47e68a9", 14, "DEV V14"), BinaryMode)
+	src := f.stageBinary(t, fakeCloopSpeaking("v0.0.4", 13, "RELEASE V13"))
+
+	_, err := f.inst.Upgrade(f.spec, OutputSystemd, UpgradeOptions{Source: src})
+	if !errors.Is(err, ErrDowngrade) {
+		t.Fatalf("err = %v, want ErrDowngrade", err)
+	}
+	if got := f.installed(t); got != "DEV V14" {
+		t.Errorf("the v14 binary was replaced by a v13 one: %q", got)
+	}
+	if len(*f.commands) != 0 {
+		t.Errorf("refused upgrade bounced the service: %v", *f.commands)
+	}
+
+	if _, err := f.inst.Upgrade(f.spec, OutputSystemd, UpgradeOptions{Source: src, Force: true}); err != nil {
+		t.Fatalf("--force refused a deliberate rollback: %v", err)
+	}
+	if got := f.installed(t); got != "RELEASE V13" {
+		t.Errorf("--force did not install the older binary: %q", got)
 	}
 }
 

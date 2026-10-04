@@ -195,9 +195,9 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 	if !canFetch || !ex.Capabilities().ReturnsProjectState {
 		journal(fmt.Sprintf("Executor %q ran this project from a copy of its plan and cannot send the "+
 			"outcome back, so tasks it ran still show their earlier status here — and will run again "+
-			"if the project is started again. Upgrade its agent to protocol v%d or later — Upgrade on "+
-			"its card in the Executors tab, or `cloop executor agent install --upgrade` on the device.",
-			ex.ID(), remote.MinProjectResultVersion), nil)
+			"if the project is started again. %s", ex.ID(),
+			executor.NeedsProtocol("Its agent", sessionProtocolOf(ex), remote.MinProjectResultVersion,
+				"to have a seeded run's outcome sent back", "")), nil)
 		return
 	}
 

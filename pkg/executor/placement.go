@@ -615,8 +615,7 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireBranchBundle && !caps.SupportsBranchBundle {
 		return no(ConstraintWorkspace, "cannot receive a branch shipped from the control plane, so "+
 			"a feature — a branch of a repository that lives on the hub — has no way into its "+
-			"sandbox; run the feature on a container executor or a remote agent of protocol v16 "+
-			"or later (`cloop executor agent install --upgrade`)")
+			"sandbox; %s", branchBundleRemedy(c.Executor))
 	}
 	if req.RequireProjectSeed && !caps.SupportsProjectSeed {
 		return no(ConstraintWorkspace, "cannot place the project's .cloop/ into the working "+

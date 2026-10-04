@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // ErrHarnessInstallUnsupported reports that a device's agent predates the
@@ -95,9 +97,9 @@ func (e *Executor) RequestHarnessInstall(
 			ErrAgentUnreachable, e.id, e.name, harness)
 	}
 	if v := sess.Version(); !SupportsHarnessInstall(v) {
-		return HarnessInstallOutcome{}, fmt.Errorf(
-			"%w: %s (%s) speaks protocol v%d, and installing a harness on request needs v%d",
-			ErrHarnessInstallUnsupported, e.id, e.name, v, MinHarnessInstallVersion)
+		return HarnessInstallOutcome{}, fmt.Errorf("%w: %s", ErrHarnessInstallUnsupported,
+			executor.ProtocolShortfall(e.subject(), v, MinHarnessInstallVersion,
+				"to have it install a harness on request"))
 	}
 
 	payload := InstallHarnessPayload{Harness: harness, Reason: strings.TrimSpace(reason)}

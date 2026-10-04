@@ -101,7 +101,8 @@ func (a *autoUpdater) sweepOnce(ctx context.Context) {
 	}
 
 	devices, live := a.fleet()
-	for _, v := range autoupdate.Plan(stored.Policy, hubVersion(), devices) {
+	hub := autoupdate.Hub{Version: hubVersion(), Protocol: remote.ProtocolVersion}
+	for _, v := range autoupdate.Plan(stored.Policy, hub, devices) {
 		if !v.Upgrade {
 			continue
 		}
@@ -164,6 +165,7 @@ func (a *autoUpdater) fleet() ([]autoupdate.Device, map[string]*remote.Executor)
 			Name:            rex.Name(),
 			Version:         rex.AgentVersion(),
 			ProtocolVersion: rex.ProtocolVersion(),
+			AgentProtocol:   rex.AgentProtocol(),
 			Online:          rex.Connected(),
 			Busy:            len(rex.Handles()) > 0,
 			Upgrading:       a.recentlyAsked(id),

@@ -50,11 +50,12 @@ import (
 // copies of an operator instruction is how one of them goes stale.
 const AgentUpgradeCommand = executor.AgentUpgradeProcedure
 
-// upgradeHint is the sentence appended to any skew message, naming the real
-// procedure. Kept separate from pkg/version's prose so the version package
-// stays free of any opinion about how cloop is deployed.
-var upgradeHint = "Copy the new cloop binary to the device and run `" +
-	AgentUpgradeCommand + "` there."
+// upgradeHint is the sentence appended to a skew message, naming the procedure
+// that works for this hub's build. Kept separate from pkg/version's prose so
+// the version package stays free of any opinion about how cloop is deployed —
+// and written by pkg/executor's helper, because "copy the new binary and run
+// --upgrade" was untrue on a hub running an unreleased build (Task 20371).
+func upgradeHint() string { return executor.AgentUpgradeAdvice() }
 
 // inventoryFromCaps projects an agent's advertisement onto the queryable
 // inventory columns.
@@ -175,12 +176,21 @@ type executorSkewView struct {
 	// HubVersion is what the control plane is running, so the comparison can
 	// be checked rather than taken on trust.
 	HubVersion string `json:"hub_version,omitempty"`
+	// DeviceProtocol is the protocol the connected device's agent speaks, 0
+	// when it is offline; HubProtocol the one this hub speaks. A device below
+	// the hub's protocol is material skew whatever its build string says, and
+	// the note says so in those terms (Task 20371).
+	DeviceProtocol int `json:"device_protocol,omitempty"`
+	HubProtocol    int `json:"hub_protocol,omitempty"`
 	// Note is the operator-facing sentence, including the remediation.
 	Note string `json:"note,omitempty"`
 }
 
-// hubVersion is the control-plane build every device is compared against.
-var hubVersion = version.String
+// hubVersion is the control-plane build every device is compared against. It
+// reads executor.HubBuild, the build pkg/executor writes its upgrade advice
+// for, so a note's comparison and its remedy can never describe two hubs — and
+// a test pins both with one assignment.
+func hubVersion() string { return executor.HubBuild() }
 
 // annotateInventory fills a view's inventory and version-skew fields.
 //
@@ -221,25 +231,61 @@ func annotateInventory(view *executorView, row statedb.ExecutorRow, live *remote
 	}
 
 	hub := hubVersion()
+	deviceProtocol := 0
+	if live != nil {
+		deviceProtocol = live.DeviceProtocol()
+	}
+	// What the Upgrade dialog offers: never a release that would lower the
+	// device's protocol, and never the hub's own version when that is not a
+	// release (Task 20371).
+	view.UpgradeTarget, view.UpgradeNote = executor.UpgradeOffer("This device's agent", deviceProtocol,
+		remote.ProtocolVersion)
+
 	skew, note := version.Classify(hub, inv.AgentVersion)
-	if skew == version.SkewNone {
+	sv := &executorSkewView{
+		Skew:           string(skew),
+		HubVersion:     hub,
+		DeviceProtocol: deviceProtocol,
+		HubProtocol:    remote.ProtocolVersion,
+	}
+	view.VersionSkew = sv
+	switch {
+	case deviceProtocol > 0 && deviceProtocol < remote.ProtocolVersion:
+		// The protocol says what the build string cannot. Two dev builds are
+		// "unversioned" to each other, and that is all Classify can say about
+		// the reference deployment — but its device speaks v14 to a v16 hub,
+		// so whatever needs v15 or v16 is refused there, and that is the
+		// sentence an operator needs.
+		sv.Material = true
+		sv.Note = executor.NeedsProtocol("This device's agent", deviceProtocol, remote.ProtocolVersion,
+			"for everything it can ask of a device", "")
+	case skew == version.SkewNone:
 		// Nothing to say. Reported anyway so a client can distinguish
 		// "compared, and uniform" from "never compared".
-		view.VersionSkew = &executorSkewView{
-			Skew:       string(skew),
-			HubVersion: hub,
+	case skew == version.SkewAhead:
+		// The note names the remedy itself — upgrade the hub — and advice to
+		// upgrade the device would contradict it.
+		sv.Material, sv.Note = skew.Material(), note
+	default:
+		sv.Material = skew.Material()
+		if note != "" {
+			sv.Note = note + " " + upgradeHint()
 		}
-		return
 	}
-	if note != "" {
-		note += " " + upgradeHint
+}
+
+// sessionProtocolOf is the protocol the live session to ex's device
+// negotiated, for a refusal that has to say which one the device speaks: 0 when
+// ex is not a device, or its device is offline — and the helper then says only
+// that it speaks an older protocol than is needed.
+func sessionProtocolOf(ex executor.Executor) int {
+	switch x := ex.(type) {
+	case *remote.Executor:
+		return x.ProtocolVersion()
+	case *remote.Virtual:
+		return x.Parent().ProtocolVersion()
 	}
-	view.VersionSkew = &executorSkewView{
-		Skew:       string(skew),
-		Material:   skew.Material(),
-		HubVersion: hub,
-		Note:       note,
-	}
+	return 0
 }
 
 // agentVersionLabel renders a reported build for display.

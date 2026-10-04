@@ -69,8 +69,15 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // FetchLatestRelease queries the GitHub releases API for the latest release.
 func FetchLatestRelease() (*Release, error) {
+	return FetchLatestReleaseContext(context.Background())
+}
+
+// FetchLatestReleaseContext is FetchLatestRelease bounded by ctx, for a caller
+// answering a request — the hub resolving "latest" before it asks a device to
+// upgrade — that must not wait out the client's own 30-second timeout.
+func FetchLatestReleaseContext(ctx context.Context) (*Release, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", githubAPIBase, repoOwner, repoName)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
 	}

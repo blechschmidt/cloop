@@ -264,7 +264,14 @@ func (v *Virtual) ExplainEgressScopeRefusal() string {
 	if caps := v.parent.AgentCapabilities(); !caps.PacketFilter {
 		return "its device cannot install a packet filter (" + packetFilterIssue(caps) + ")"
 	}
-	return "its device's agent is too old to apply a virtual executor's firewall; upgrade it"
+	if p := v.parent.ProtocolVersion(); p > 0 && !SupportsVirtualExecutor(p) {
+		return strings.TrimSuffix(executor.NeedsProtocol("its device's agent", p, MinVirtualExecutorVersion,
+			"to apply a virtual executor's firewall", ""), ".")
+	}
+	if err != nil {
+		return "virtual executor " + v.id + "'s configuration could not be read: " + err.Error()
+	}
+	return "its device could not be shown to apply a virtual executor's firewall"
 }
 
 // checkVirtual refuses a dispatch the device cannot apply in full. Nil for a
@@ -277,11 +284,11 @@ func (e *Executor) checkVirtual(sess *Session, virtual *VirtualDispatch) error {
 		return nil
 	}
 	if !SupportsVirtualExecutor(sess.Version()) {
-		return fmt.Errorf("%w: virtual executor %s gives its sandboxes %s, which agent %s (%s) must "+
-			"apply itself, but it speaks protocol v%d (needs v%d) and would start the sandbox without "+
-			"them; upgrade the agent with `cloop executor agent install --upgrade`",
-			ErrVirtualExecutorUnsupported, virtual.ID, describeVirtualNeeds(virtual), e.id, e.name,
-			sess.Version(), MinVirtualExecutorVersion)
+		// An older agent would start the sandbox without them, not refuse it.
+		return fmt.Errorf("%w: %s", ErrVirtualExecutorUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinVirtualExecutorVersion,
+			"to apply "+describeVirtualNeeds(virtual)+", which virtual executor "+virtual.ID+" gives its "+
+				"sandboxes — an older agent would start the sandbox without them", ""))
 	}
 	return e.canApply(virtual)
 }

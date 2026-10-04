@@ -161,10 +161,11 @@ func ApplyMinAgentBuild(v string) {
 // floor, returning the operator-facing reason when it does.
 //
 // Every message names the remediation, because the person reading a placement
-// failure in the Executors panel is rarely the person who set the floor. The
-// procedure named is real and verified: `--upgrade` now checks the binary it is
-// about to install and rolls back if the service does not come back, which is
-// what makes it safe to recommend for a critical host.
+// failure in the Executors panel is rarely the person who set the floor. It is
+// BuildFloorPath's, which knows what this hub can hand a device: a floor is a
+// release version, so only a published release meets it — never a build made
+// from source, which is what the generic upgrade advice on an unreleased hub
+// would have produced.
 func rejectForBuild(ex Executor, floor string) (detail string, rejected bool) {
 	floor = strings.TrimSpace(floor)
 	if floor == "" {
@@ -177,27 +178,28 @@ func rejectForBuild(ex Executor, floor string) (detail string, rejected bool) {
 		return "", false
 	}
 
+	// Without its final full stop: reject() renders "<id> <detail>" inside a
+	// list, and BlockedByBuildFloor ends the sentence itself.
+	path := strings.TrimSuffix(BuildFloorPath(floor), ".")
 	switch {
 	case build == "":
 		return fmt.Sprintf("does not report a build version, so it cannot be shown to meet the "+
-			"fleet's minimum of %s; it predates build-version reporting entirely. Upgrade it "+
-			"with `%s` on the device, or clear executors.min_agent_build", floor, AgentUpgradeProcedure), true
+			"fleet's minimum of %s; it predates build-version reporting entirely. %s. Or clear "+
+			"executors.min_agent_build", floor, path), true
 	case build == version.LegacyAgentVersion:
 		return fmt.Sprintf("reports the placeholder build %q that agents sent before they knew "+
-			"their own version, so it cannot be shown to meet the fleet's minimum of %s. Upgrade "+
-			"it with `%s` on the device", version.LegacyAgentVersion, floor, AgentUpgradeProcedure), true
+			"their own version, so it cannot be shown to meet the fleet's minimum of %s. %s",
+			version.LegacyAgentVersion, floor, path), true
 	}
 
 	cmp, ok := version.Compare(build, floor)
 	if !ok {
 		return fmt.Sprintf("reports build %q, which cannot be ordered against the fleet's minimum "+
-			"of %s — an unreleased build carries no version to compare. Install a released build "+
-			"with `%s` on the device, or clear executors.min_agent_build",
-			build, floor, AgentUpgradeProcedure), true
+			"of %s — an unreleased build carries no version to compare. %s. Or clear "+
+			"executors.min_agent_build", build, floor, path), true
 	}
 	if cmp < 0 {
-		return fmt.Sprintf("runs cloop %s, below the fleet's minimum of %s. Copy the new binary to "+
-			"the device and run `%s` there", build, floor, AgentUpgradeProcedure), true
+		return fmt.Sprintf("runs cloop %s, below the fleet's minimum of %s. %s", build, floor, path), true
 	}
 	return "", false
 }

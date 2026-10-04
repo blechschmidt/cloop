@@ -137,4 +137,41 @@ func TestDashboard_ExecutorInventoryIsVisible(t *testing.T) {
 				"device with its own build:\n%s", forbidden, container)
 		}
 	}
+
+	// ---- the Upgrade dialog (Task 20371) --------------------------------
+	// No release that would not lower the device's protocol: the hub's note,
+	// and nothing asked or sent.
+	var refused struct {
+		Alert    *string `json:"alert"`
+		Prompted bool    `json:"prompted"`
+		Posts    int     `json:"posts"`
+	}
+	if err := json.Unmarshal([]byte(results["upgrade_refused"].HTML), &refused); err != nil {
+		t.Fatalf("upgrade_refused: %v: %s", err, results["upgrade_refused"].HTML)
+	}
+	if refused.Alert == nil || !strings.Contains(*refused.Alert, "NO SAFE RELEASE") {
+		t.Errorf("the dialog did not show the hub's note: %+v", refused)
+	}
+	if refused.Prompted || refused.Posts != 0 {
+		t.Errorf("the dialog offered a prompt (%v) or sent a request (%d) with no safe release",
+			refused.Prompted, refused.Posts)
+	}
+	// A safe release: prefilled with it, the note on the prompt, sent as kept.
+	var offered struct {
+		Text string `json:"text"`
+		Dflt string `json:"dflt"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(results["upgrade_offered"].HTML), &offered); err != nil {
+		t.Fatalf("upgrade_offered: %v: %s", err, results["upgrade_offered"].HTML)
+	}
+	if offered.Dflt != "v0.0.4" {
+		t.Errorf("the prompt was prefilled with %q, want the hub's upgrade_target v0.0.4", offered.Dflt)
+	}
+	if !strings.Contains(offered.Text, "OFFER NOTE") {
+		t.Errorf("the prompt does not carry the hub's note: %q", offered.Text)
+	}
+	if !strings.Contains(offered.Body, `"target_version":"v0.0.4"`) {
+		t.Errorf("the request sent %q, want target_version v0.0.4", offered.Body)
+	}
 }

@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 )
@@ -114,6 +115,10 @@ type featureExecutorError struct {
 	ExecutorKind string
 	// Missing lists what the executor cannot do.
 	Missing string
+	// Protocol is the protocol a remote agent's live session speaks, 0 when
+	// the executor is not a device or is offline. Below the branch-bundle
+	// protocol, the remediation says so and how to move the device forward.
+	Protocol int
 }
 
 func (e *featureExecutorError) Error() string {
@@ -124,9 +129,14 @@ func (e *featureExecutorError) Error() string {
 
 // Remediation says what to do about it.
 func (e *featureExecutorError) Remediation() string {
-	return "Bind the project to a container executor or a remote agent of protocol v16 or later " +
-		"(upgrade an older agent with `cloop executor agent install --upgrade`); a Kubernetes executor " +
-		"has no channel from the hub into a Pod to carry the branch through."
+	s := "Bind the project to a container executor, or to a remote agent new enough to carry a feature " +
+		"on a device with git; a Kubernetes executor has no channel from the hub into a Pod to carry the " +
+		"branch through."
+	if e.Protocol > 0 && e.Protocol < remote.MinBranchBundleVersion {
+		s += " " + executor.NeedsProtocol("This executor's agent", e.Protocol, remote.MinBranchBundleVersion,
+			"to ship a feature's branch to it", "")
+	}
+	return s
 }
 
 // errFeatureExecutor lets callers test for the refusal without the type.
@@ -142,7 +152,8 @@ func checkFeatureExecutor(workDir string, ex executor.Executor) error {
 		return nil
 	}
 	if gap := featureCapabilityGap(ex); gap != "" {
-		return &featureExecutorError{FeaturePath: workDir, ExecutorID: ex.ID(), ExecutorKind: string(ex.Kind()), Missing: gap}
+		return &featureExecutorError{FeaturePath: workDir, ExecutorID: ex.ID(), ExecutorKind: string(ex.Kind()),
+			Missing: gap, Protocol: sessionProtocolOf(ex)}
 	}
 	return nil
 }

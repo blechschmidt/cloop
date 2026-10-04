@@ -50,6 +50,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -267,10 +268,11 @@ func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (
 			ProjectPath:  workDir,
 			ExecutorID:   ex.ID(),
 			ExecutorKind: ex.Kind(),
+			// Without its final full stop: Error() continues the sentence
+			// with " — <remediation>".
 			Reason: "this project has no git remote, so its project state is the only thing " +
 				"that can carry it to an executor — and this one cannot accept a project " +
-				"state. A remote agent gains that by upgrading: " +
-				"`cloop executor agent install --upgrade`",
+				"state. " + strings.TrimSuffix(projectSeedRemedy(ex), "."),
 			// The git remediation does not apply: the whole point of this
 			// branch is that the project legitimately has no repository.
 			SuppressRemoteFix: true,
@@ -372,11 +374,21 @@ func logUnseedableExecutor(ex executor.Executor, workDir string) {
 		Message: fmt.Sprintf(
 			"executor %q (%s) cannot be sent this project's state, so the sandbox will see only "+
 				"what is committed to the repository; if `.cloop/` is not in the repo the run will "+
-				"exit with \"no cloop project found\". Upgrade the executor agent with "+
-				"`cloop executor agent install --upgrade`, or bind this project to an executor "+
-				"that shares the control plane's filesystem",
-			ex.ID(), ex.Kind()),
+				"exit with \"no cloop project found\". Bind this project to an executor that shares "+
+				"the control plane's filesystem, or upgrade the executor agent. %s",
+			ex.ID(), ex.Kind(), projectSeedRemedy(ex)),
 	})
+}
+
+// projectSeedRemedy says how ex comes to accept a project state: the protocol
+// its agent speaks and the one a seed needs when the live session shows it, the
+// hub's general upgrade path otherwise.
+func projectSeedRemedy(ex executor.Executor) string {
+	if v := sessionProtocolOf(ex); v > 0 && v < remote.MinProjectSeedVersion {
+		return executor.NeedsProtocol("Its agent", v, remote.MinProjectSeedVersion,
+			"to place a project's state in the sandbox", "")
+	}
+	return "A remote agent gains that by upgrading. " + executor.AgentUpgradeAdvice()
 }
 
 // workspaceGrantFor returns the name of the secret grant that authorises

@@ -66,8 +66,9 @@ const ProbeTimeout = 20 * time.Second
 // machine will not run after being renamed into place either.
 var ErrBinaryUnusable = errors.New("install: the staged binary failed verification")
 
-// ErrDowngrade means the staged binary is older than what is installed, or
-// speaks a protocol the control plane no longer accepts.
+// ErrDowngrade means the staged binary is older than what is installed, speaks
+// an older executor protocol than the installed binary does, or speaks a
+// protocol the control plane no longer accepts.
 //
 // This one *is* overridable with --force, because a deliberate rollback is a
 // real operation — an operator backing out a bad release needs it, and refusing
@@ -297,6 +298,26 @@ func checkUpgradeSafety(staged, installed BinaryIdentity, minProtocol int) error
 			"hello frame and the agent would reconnect forever.\n"+
 			"Pass --force if you are deliberately rolling back and will downgrade the hub too",
 			ErrDowngrade, staged.Version, staged.Protocol, minProtocol)
+	}
+
+	// The protocol the device would lose, checked before the versions and
+	// regardless of them (Task 20371). A dev build cannot be ordered against a
+	// release, so the version check below lets "v0.0.4" replace
+	// "dev+g47e68a9" — which on the reference deployment was a v13 binary
+	// replacing a v14 one, taking away everything the hub needed v14 for. Both
+	// binaries said which protocol they speak; that comparison needs no
+	// version order. Only made when both reported it: zero is "unknown".
+	if staged.Structured && installed.Structured && staged.Protocol > 0 && installed.Protocol > 0 &&
+		staged.Protocol < installed.Protocol {
+		return fmt.Errorf("%w: the staged binary (%s) speaks executor protocol v%d, older than the "+
+			"installed one (%s) at v%d.\n"+
+			"Installing it would move this device's protocol backwards: whatever the hub can only ask "+
+			"of a v%d agent would be refused from then on, whether or not the two builds can be "+
+			"ordered by version.\n"+
+			"Pass --force if moving the device back is deliberate, or copy a binary at least as new as "+
+			"the installed one",
+			ErrDowngrade, staged.Version, staged.Protocol, installed.Version, installed.Protocol,
+			installed.Protocol)
 	}
 
 	if installed.Version == "" {

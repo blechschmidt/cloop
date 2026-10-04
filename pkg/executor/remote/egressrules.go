@@ -31,9 +31,8 @@ func (e *Executor) rulesEnforceable() (bool, string) {
 			executor.PacketFilterGrantProcedure)
 	}
 	if v := e.ProtocolVersion(); v != 0 && !SupportsEgressRules(v) {
-		return false, fmt.Sprintf("device %s's agent speaks protocol v%d and cannot install firewall rules "+
-			"stored in the hub (needs v%d); upgrade it with `cloop executor agent install --upgrade`",
-			e.id, v, MinEgressRulesVersion)
+		return false, executor.NeedsProtocol("device "+e.id+"'s agent", v, MinEgressRulesVersion,
+			"to have it install firewall rules stored in the hub", "")
 	}
 	return true, ""
 }
@@ -102,10 +101,11 @@ func (e *Executor) checkEgressRules(sess *Session, spec executor.Spec, sandbox e
 		return nil
 	}
 	if !SupportsEgressRules(sess.Version()) {
-		return fmt.Errorf("%w: this run carries firewall rules stored in the hub, which agent %s (%s) must "+
-			"install and check itself, but it speaks protocol v%d (needs v%d) and would ignore them; "+
-			"upgrade the agent with `cloop executor agent install --upgrade`",
-			executor.ErrUnsupported, e.id, e.name, sess.Version(), MinEgressRulesVersion)
+		// An older agent would not refuse the rules, it would ignore them.
+		return fmt.Errorf("%w: %s", executor.ErrUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinEgressRulesVersion,
+			"for the firewall rules stored in the hub that this run carries, which the agent must install "+
+				"and check itself — an older one would ignore them", ""))
 	}
 	if sandbox.Mode != executor.SandboxModeContainer {
 		return fmt.Errorf("%w: this run carries firewall rules, but device %s runs payloads on its host, "+

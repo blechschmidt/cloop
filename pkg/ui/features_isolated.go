@@ -131,7 +131,7 @@ func applyFeatureWorkspace(spec executor.Spec, ex executor.Executor, workDir str
 	}
 	if gap := featureCapabilityGap(ex); gap != "" {
 		return spec, &featureExecutorError{FeaturePath: workDir, ExecutorID: ex.ID(),
-			ExecutorKind: string(ex.Kind()), Missing: gap}
+			ExecutorKind: string(ex.Kind()), Missing: gap, Protocol: sessionProtocolOf(ex)}
 	}
 	parent, _, _ := feature.ParentOf(workDir)
 	caps := ex.Capabilities()

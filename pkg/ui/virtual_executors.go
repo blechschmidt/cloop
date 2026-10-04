@@ -205,6 +205,14 @@ func applyVirtualExecutors(views []executorView, db *statedb.DB) []executorView 
 	return views
 }
 
+// virtualUnsupportedNote is the sentence for a device whose agent speaks
+// protocol have, too old to apply a virtual executor's firewall or devices: on
+// a virtual executor's card, and in the device's virtual-executor dialog.
+func virtualUnsupportedNote(subject string, have int) string {
+	return executor.NeedsProtocol(subject, have, remote.MinVirtualExecutorVersion,
+		"to apply a virtual executor's firewall or devices", "")
+}
+
 // virtualIssue is the sentence a card shows when the device cannot apply the
 // configuration, or "" when it can as far as the hub knows.
 func virtualIssue(vx *remote.Virtual, spec executor.VirtualSpec) string {
@@ -213,8 +221,7 @@ func virtualIssue(vx *remote.Virtual, spec executor.VirtualSpec) string {
 		return ""
 	}
 	if v := parent.ProtocolVersion(); v > 0 && !remote.SupportsVirtualExecutor(v) {
-		return fmt.Sprintf("its device's agent speaks protocol v%d; a firewall or devices need v%d — upgrade the agent",
-			v, remote.MinVirtualExecutorVersion)
+		return virtualUnsupportedNote("its device's agent", v)
 	}
 	if spec.Firewall != nil && !parent.AgentCapabilities().PacketFilter {
 		issue := strings.TrimSpace(parent.AgentCapabilities().PacketFilterIssue)

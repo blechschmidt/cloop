@@ -283,12 +283,10 @@ func (s *Server) describeSandboxTarget(view *executorSandboxView, id string) {
 			"decided by the hub's own configuration (executors.container / executors.kubernetes in " +
 			"config.yaml). The setting below is applied to enrolled devices."
 	case inv.remote && !inv.sandboxCapable && inv.connected:
-		view.Warning = fmt.Sprintf(
-			"This device's agent speaks protocol v%d, which cannot run payloads in a container — it "+
-				"would ignore the instruction and use its host. Upgrade it with `cloop executor agent "+
-				"install --upgrade` (needs v%d); until then a container mode is refused at dispatch "+
-				"rather than silently downgraded.",
-			inv.protocol, remoteSandboxMinVersion)
+		view.Warning = executor.ProtocolShortfall("This device's agent", inv.protocol, remoteSandboxMinVersion,
+			"to run payloads in a container — an older agent ignores the instruction and uses its host") +
+			" Until then a container mode is refused at dispatch rather than silently downgraded. " +
+			executor.AgentUpgradePath(inv.protocol, remoteSandboxMinVersion)
 	// A hypervisor the machine does not have. Placed above the engine check
 	// because it is the more specific answer to what this admin just
 	// configured, and because unlike a missing engine it usually cannot be

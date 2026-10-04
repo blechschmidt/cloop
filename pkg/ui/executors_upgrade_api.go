@@ -24,8 +24,11 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -33,6 +36,8 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/autoupdate"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/upgrade"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // upgradeRequestTimeout bounds the wait for a device to answer that it has
@@ -131,11 +136,27 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// "latest" is resolved here, to the tag it names today, and the tag is
+	// what the device is asked for (Task 20371): the hub can then check that
+	// release against the device's protocol before sending, and the device
+	// installs exactly what was checked. A failed lookup keeps "latest" on the
+	// wire, and RequestUpgrade judges it as the newest release this hub knows
+	// of — saying so if that refuses it.
+	target := strings.TrimSpace(req.TargetVersion)
+	if (target == "" || strings.EqualFold(target, remote.LatestVersion)) && remoteEx.Connected() {
+		target = remote.LatestVersion
+		lookupCtx, lookupCancel := context.WithTimeout(r.Context(), latestReleaseLookupTimeout)
+		if tag, err := latestRelease(lookupCtx); err == nil {
+			target = tag
+		}
+		lookupCancel()
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), upgradeRequestTimeout)
 	defer cancel()
 
 	outcome, err := remoteEx.RequestUpgrade(ctx, remote.UpgradeRequest{
-		TargetVersion: req.TargetVersion,
+		TargetVersion: target,
 		Force:         req.Force,
 		Reason:        "requested from the dashboard by " + s.auditActor(r),
 	})
@@ -144,8 +165,8 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 		// was asked for and refused is exactly as interesting to an auditor as
 		// one that succeeded — more so, if somebody is probing what they can
 		// reach.
-		s.auditExecutorUpgrade(r, id, req, executorUpgradeResponse{Reason: err.Error()})
-		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+		s.auditExecutorUpgrade(r, id, req, executorUpgradeResponse{Reason: err.Error(), TargetVersion: target})
+		jsonErr(w, err.Error(), upgradeRefusalStatus(err))
 		return
 	}
 
@@ -166,6 +187,79 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.broadcastExecutorUpdate("upgrading", id)
 	}
 	jsonOK(w, resp)
+}
+
+// upgradeRefusalStatus maps a refused upgrade onto its HTTP status. The hub's
+// own refusals are the caller's to fix and are not outages: a target that is
+// not a release is a bad request, and one the device's protocol rules out —
+// too old to be upgraded remotely, or a release that would move it backwards —
+// conflicts with the device's state. Only a device that could not be asked is
+// 503.
+func upgradeRefusalStatus(err error) int {
+	switch {
+	case errors.Is(err, remote.ErrUpgradeTarget):
+		return http.StatusBadRequest
+	case errors.Is(err, remote.ErrUpgradeLowersProtocol), errors.Is(err, remote.ErrUpgradeUnsupported):
+		return http.StatusConflict
+	}
+	return http.StatusServiceUnavailable
+}
+
+// latestReleaseLookupTimeout bounds resolving "latest" for one request. A hub
+// that cannot reach GitHub falls back to judging "latest" from its own table
+// rather than making the operator wait out the HTTP client's 30 seconds.
+const latestReleaseLookupTimeout = 10 * time.Second
+
+// latestReleaseTTL is how long a resolved "latest" is reused. Releases are
+// rare, GitHub's unauthenticated API allows sixty requests an hour, and an
+// operator pressing Upgrade across a fleet should cost one lookup, not one per
+// device.
+const latestReleaseTTL = 10 * time.Minute
+
+// latestRelease resolves "latest" to the newest published release's tag.
+// Indirected so tests never reach GitHub.
+var latestRelease = (&latestReleaseCache{fetch: fetchLatestReleaseTag, ttl: latestReleaseTTL}).get
+
+// fetchLatestReleaseTag asks GitHub which release is latest.
+func fetchLatestReleaseTag(ctx context.Context) (string, error) {
+	rel, err := upgrade.FetchLatestReleaseContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	tag := strings.TrimSpace(rel.TagName)
+	if !version.IsRelease(tag) {
+		return "", fmt.Errorf("the latest release is tagged %q, which is not a release tag", tag)
+	}
+	return tag, nil
+}
+
+// latestReleaseCache remembers a resolved tag for ttl. Failures are not
+// remembered: the next request tries again, bounded by its own timeout.
+type latestReleaseCache struct {
+	fetch func(context.Context) (string, error)
+	ttl   time.Duration
+
+	mu  sync.Mutex
+	tag string
+	at  time.Time
+}
+
+func (c *latestReleaseCache) get(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	if c.tag != "" && time.Since(c.at) < c.ttl {
+		tag := c.tag
+		c.mu.Unlock()
+		return tag, nil
+	}
+	c.mu.Unlock()
+	tag, err := c.fetch(ctx)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.tag, c.at = tag, time.Now()
+	c.mu.Unlock()
+	return tag, nil
 }
 
 // auditExecutorUpgrade records an upgrade request and what came of it.

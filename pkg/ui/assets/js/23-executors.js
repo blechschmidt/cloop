@@ -852,9 +852,12 @@ function _evxRender() {
   (sp.devices || []).forEach(x => { if (x.usb) chosen[x.usb.vendor_id + ':' + x.usb.product_id + ':' + (x.usb.serial || '')] = x; });
   // Whether the device can install a firewall is said under the Firewalled
   // choice (_evxNet), where it decides something, rather than up here.
+  // unsupported_note is the hub's sentence for an agent too old to apply a
+  // firewall or devices: which protocol it speaks, which one that needs, and
+  // the remedy for the hub's own build — none of which this script can know.
   let h = '<div class="form-hint" style="margin-bottom:10px">' + esc(d.name) + ' · '
     + (d.connected ? 'connected, protocol v' + esc(d.protocol_version) : 'offline — showing its last report')
-    + (d.connected && !d.supported ? ' · <b>agent too old for firewalls and devices (needs v14)</b>' : '') + '</div>';
+    + (d.unsupported_note ? '<br><b>' + esc(d.unsupported_note) + '</b>' : '') + '</div>';
   // The device's own rule set, read-only (Task 20363): every network chosen
   // below has to fit inside it. It is edited from the device's Firewall button.
   if (d.device_firewall) {
@@ -2331,17 +2334,22 @@ window.upgradeExecutor = function(idx) {
   const ex = _execAt(idx);
   if (!ex) return;
   const name = ex.name || ex.id;
-  const hub = (ex.version_skew && ex.version_skew.hub_version) || '';
-  // Prefilled with the hub's own build rather than "latest": matching the
-  // control plane is the invariant an operator actually wants, and "latest"
-  // evaluated separately on each device is how a fleet ends up split across
-  // two releases when something is published mid-rollout.
+  // The hub picks the release to prefill (upgrade_target) and says why
+  // (upgrade_note), Task 20371. It used to be the hub's own version, which on a
+  // hub running an unreleased build is "dev+g…" — no release at all — and
+  // "latest" there is a release older than the device. Prefilled with a
+  // concrete tag rather than "latest" still: "latest" evaluated separately on
+  // each device is how a fleet ends up split across two releases when one is
+  // published mid-rollout. With no release that would not move the device
+  // backwards there is nothing for this button to do, so it shows the note —
+  // which says what to do instead — and offers no prompt.
+  const note = ex.upgrade_note || '';
+  if (!ex.upgrade_target) { alert(note); return; }
   const target = prompt(
-    'Upgrade ' + name + ' to which release?\n\n'
-    + 'Leave as-is to match this hub, or enter a tag such as v0.1.4. '
+    'Upgrade ' + name + ' to which release?\n\n' + (note && note + '\n\n')
     + 'The device downloads it itself and verifies the signature before installing; '
     + 'it will restart and drop off the fleet briefly.',
-    hub || 'latest');
+    ex.upgrade_target);
   if (target === null) return;
 
   apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/upgrade',

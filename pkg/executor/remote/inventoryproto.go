@@ -88,9 +88,8 @@ func (e *Executor) RefreshInventory(ctx context.Context) (AgentCapabilities, err
 			ErrAgentUnreachable, e.id, e.name)
 	}
 	if v := sess.Version(); !SupportsVirtualExecutor(v) {
-		return AgentCapabilities{}, fmt.Errorf("%w: %s (%s) speaks protocol v%d, and re-reading its "+
-			"hardware on request needs v%d; upgrade the agent", ErrProtocol, e.id, e.name, v,
-			MinVirtualExecutorVersion)
+		return AgentCapabilities{}, fmt.Errorf("%w: %s", ErrProtocol, executor.NeedsProtocol(
+			e.subject(), v, MinVirtualExecutorVersion, "to re-read its hardware on request", ""))
 	}
 	frame, err := sess.frame(TypeInventoryReq, newCorrelationID(), "", InventoryRequestPayload{})
 	if err != nil {

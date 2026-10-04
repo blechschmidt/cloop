@@ -111,8 +111,11 @@ the kubeconfig for this project may not exec into pods
 
 Remote agents need protocol **v7 or newer**. An older device runs work perfectly
 well and simply cannot be entered; the hub refuses the session rather than
-sending frames the agent would log as unexpected and drop. To upgrade it,
-press Upgrade on the device's row in the Executors panel, or run `sudo cloop executor agent install --upgrade` on it.
+sending frames the agent would log as unexpected and drop. The refusal names the
+protocol the device speaks and how to move it forward from this hub — the
+Upgrade button installs published releases only, so on a hub running an
+unreleased build it is a binary built from the hub's commit, installed on the
+device. See [Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works).
 
 ## Read-only means read-only in the sandbox
 

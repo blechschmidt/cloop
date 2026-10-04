@@ -560,7 +560,7 @@ func placementRemediation(err error, ex executor.Executor) string {
 				"an unreachable one"
 		case executor.ConstraintAgentBuild:
 			return "The agent on this device is older than executors.min_agent_build. " +
-				"Press Upgrade on the device's row in the Executors panel, run `sudo cloop executor agent install --upgrade` on it, or lower the floor"
+				executor.BuildFloorPath(executor.MinAgentBuild()) + " Or lower the floor"
 		}
 	}
 	return "Run `cloop executor test " + ex.ID() + "` for the driver's own diagnosis"

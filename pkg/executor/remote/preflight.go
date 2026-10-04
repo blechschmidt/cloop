@@ -106,10 +106,10 @@ func (e *Executor) Preflight() PreflightReport {
 
 	if sandbox.Mode == executor.SandboxModeContainer && !SupportsSandboxMode(sess.Version()) {
 		add("sandbox-mode", LevelFail,
-			fmt.Sprintf("device speaks protocol v%d but container mode needs v%d, so payloads would "+
-				"run on the device's host", sess.Version(), MinSandboxModeVersion),
-			"upgrade the agent with `cloop executor agent install --upgrade`, or set this "+
-				"executor's sandbox mode back to host")
+			executor.ProtocolShortfall("the device", sess.Version(), MinSandboxModeVersion,
+				"for container mode; an older agent would run payloads on the device's host"),
+			executor.AgentUpgradePath(sess.Version(), MinSandboxModeVersion)+
+				" Or set this executor's sandbox mode back to host.")
 	}
 
 	e.preflightVirtualization(sandbox, sess.Version(), add)
@@ -193,11 +193,10 @@ func (e *Executor) preflightVirtualization(sandbox executor.SandboxSettings, ver
 	// dispatching.
 	if !SupportsVirtualizationProbe(version) {
 		add("virtualization", LevelWarn,
-			fmt.Sprintf("device speaks protocol v%d, which predates the virtualization probe (v%d), "+
-				"so cloop cannot tell whether it can start a VM under %q",
-				version, MinVirtualizationProbeVersion, sandbox.Runtime),
-			"upgrade the agent with `cloop executor agent install --upgrade` to have the device "+
-				"report whether "+agentKVMDevice+" is usable")
+			executor.ProtocolShortfall("the device", version, MinVirtualizationProbeVersion,
+				fmt.Sprintf("to ask it whether %s is usable, so cloop cannot tell whether it can start a "+
+					"VM under %q", agentKVMDevice, sandbox.Runtime)),
+			executor.AgentUpgradePath(version, MinVirtualizationProbeVersion))
 		return
 	}
 	if !e.AgentCapabilities().Virtualization {

@@ -348,8 +348,9 @@ nothing else. Either the device can start a VM or it cannot.
 An agent older than protocol v9 does not answer the question at all. Absence is
 reported as *unknown*, not as *no*: such a device keeps the behaviour it has
 today, and the panel and preflight both say that cloop could not ask rather than
-implying a hypervisor is there. `cloop executor agent install --upgrade` turns
-the guess into a fact.
+implying a hypervisor is there. Upgrading the agent turns the guess into a fact;
+the preflight's fix names the way that works from this hub (see
+[Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works)).
 
 > **If the device is a cloud instance, check this first.** Most hosted instance
 > types do not pass the CPU virtualization extensions through to the guest.

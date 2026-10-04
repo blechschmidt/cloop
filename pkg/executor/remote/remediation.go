@@ -16,7 +16,11 @@ package remote
 // remediation that exists in only one of them is a remediation most operators
 // never see.
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
+)
 
 // EnrollmentRemediation returns the one-line fix for an enrollment failure, or
 // "" when err is not one this function has advice for.
@@ -64,12 +68,13 @@ func EnrollmentRemediation(err error) string {
 			"is outbound-only, so no inbound port needs opening"
 
 	case errors.Is(err, ErrVersionUnsupported):
-		return "The agent and the hub do not share a protocol version. press Upgrade on the device's row in the Executors panel, " +
-			"or run `sudo cloop executor agent install --upgrade` on it; upgrade the hub instead if the device is the newer one"
+		// Read on the device as well as on the hub, so it names no build: see
+		// executor.ProtocolMismatchAdvice.
+		return "The agent and the hub do not share a protocol version. " + executor.ProtocolMismatchAdvice()
 
 	case errors.Is(err, ErrRevocationUnsupported):
 		return "This agent is too old to honour a mid-run credential revocation, so the hub " +
-			"refuses to hand it secrets. Press Upgrade on the device's row in the Executors panel, or run `sudo cloop executor agent install --upgrade` on it"
+			"refuses to hand it secrets. " + executor.AgentUpgradeAdvice()
 
 	case errors.Is(err, ErrAgentNotFound):
 		return "No agent with that ID is enrolled. `cloop executor list` shows the fleet; a " +

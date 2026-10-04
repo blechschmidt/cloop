@@ -222,8 +222,11 @@ never in a sandbox's copy of anything.
 its own (never the hub's worktree), mounts it as `/workspace`, and runs the
 write-back *inside* the container after the harness, so git is never run on the
 hub in a repository the sandbox could write; its sandbox image needs git and a
-cloop of this release or later. A remote agent needs protocol v16 or later
-(`cloop executor agent install --upgrade`). A Kubernetes executor cannot run
+cloop of this release or later. A remote agent needs protocol v16 or later, and
+git on its device; the refusal for an older one says how to move it forward from
+this hub (see
+[Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works)).
+A Kubernetes executor cannot run
 features — the hub has no way to carry the branch into a Pod — and a feature
 bound to one, like one on an outdated agent, is refused at dispatch with a 409
 naming what is missing.

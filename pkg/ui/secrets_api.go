@@ -275,6 +275,10 @@ type leaseView struct {
 	// can wipe the hub's copy but cannot reach the device, which the panel
 	// has to say out loud rather than offering a button that half works.
 	Revocable bool `json:"revocable"`
+	// RevocableNote says, when Revocable is false, which holder cannot give
+	// the material back and why — for a device, the protocol it speaks, the
+	// one revocation needs and the remedy for this hub's build (Task 20371).
+	RevocableNote string `json:"revocable_note,omitempty"`
 	// Holders lists the remote executors currently holding this lease.
 	Holders []string `json:"holders,omitempty"`
 	// Member is the hub process that issued the lease and keeps it alive, on
@@ -1248,7 +1252,9 @@ func (s *Server) localLeaseViews(names map[string]string) []leaseView {
 		}
 		view.RemainingSeconds = int64(sl.TTL(now) / time.Second)
 		view.Revocations = revocations[l.ID]
-		view.Holders, view.Revocable = s.leaseHolders(l.ID)
+		var gaps []string
+		view.Holders, view.Revocable, gaps = s.leaseHolders(l.ID)
+		view.RevocableNote = strings.Join(gaps, " ")
 		for _, m := range l.Materials {
 			// Material.Env and Material.Files carry the plaintext and are
 			// json:"-"; only these five metadata fields are copied, so the
@@ -1310,7 +1316,7 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	holders, _ := s.leaseHolders(id)
+	holders, _, _ := s.leaseHolders(id)
 
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
@@ -1367,8 +1373,9 @@ type leaseRevokeRequest struct {
 // deliver: an agent too old to understand the frame will never be sent a
 // revocable workload in the first place (remote.Executor.Start refuses it),
 // but a device downgraded after a placement, or one enrolled before the
-// binding existed, can still turn up here.
-func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool) {
+// binding existed, can still turn up here. The third value says, holder by
+// holder, why one cannot.
+func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool, gaps []string) {
 	revocable = true
 
 	if hub, err := s.remoteHub(); err == nil && hub != nil {
@@ -1377,6 +1384,7 @@ func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool)
 			ex, ok := hub.Executor(id)
 			if !ok || !ex.SupportsRevocation() {
 				revocable = false
+				gaps = append(gaps, remoteRevocationGap(id, ex, ok))
 			}
 		}
 	}
@@ -1404,9 +1412,27 @@ func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool)
 		holders = append(holders, ex.ID())
 		if !rv.SupportsRevocation() {
 			revocable = false
+			gaps = append(gaps, fmt.Sprintf("The %s executor %s cannot take a brokered credential back "+
+				"from a running workload.", ex.Kind(), ex.ID()))
 		}
 	}
-	return holders, revocable
+	return holders, revocable, gaps
+}
+
+// remoteRevocationGap says why device id cannot give a lease's material back
+// on request: unknown to this hub, offline, or — the case that needs an
+// upgrade — speaking a protocol older than the revoke frame.
+func remoteRevocationGap(id string, ex *remote.Executor, known bool) string {
+	switch {
+	case !known || ex == nil:
+		return "Agent " + id + " is not registered on this hub, so nothing here can ask it to give the " +
+			"credential back."
+	case ex.ProtocolVersion() == 0:
+		return "Agent " + id + " is offline, so it cannot be asked to give the credential back until it " +
+			"reconnects."
+	}
+	return executor.NeedsProtocol("Agent "+id, ex.ProtocolVersion(), remote.MinRevocationVersion,
+		"to take a lease's material back from it on request", "")
 }
 
 // revokeNote states, in the operator's terms, what the revocation achieved —

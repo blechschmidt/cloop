@@ -238,3 +238,26 @@ func isHexDigest(s string) bool {
 	}
 	return true
 }
+
+// BranchBundleExplainer is implemented by a driver that can say why it cannot
+// receive a branch shipped from the hub right now: a remote agent knows the
+// protocol its device speaks and whether the device has git, and those have
+// different remedies. Like EgressScopeExplainer, a method rather than a field,
+// so the answer comes from the driver that knows it.
+type BranchBundleExplainer interface {
+	// ExplainBranchBundleRefusal returns a sentence completing "this executor
+	// cannot receive a branch shipped from the control plane; ...", or "" when
+	// the driver has nothing more specific than the generic remedy.
+	ExplainBranchBundleRefusal() string
+}
+
+// branchBundleRemedy asks the driver why, falling back to the generic advice.
+func branchBundleRemedy(ex Executor) string {
+	if e, ok := ex.(BranchBundleExplainer); ok {
+		if s := strings.TrimSpace(e.ExplainBranchBundleRefusal()); s != "" {
+			return strings.TrimSuffix(s, ".")
+		}
+	}
+	return "run the feature on a container executor, or on a remote agent whose device has git and " +
+		"whose agent is new enough to receive a branch"
+}

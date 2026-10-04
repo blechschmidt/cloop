@@ -28,6 +28,13 @@
 //     current, newer than the target, or running an unparseable build: all
 //     three are left alone rather than forced, because forcing is how an
 //     automatic system turns one bad assumption into a fleet-wide rollback.
+//     Two more shapes of the same rule came from a hub running an unreleased
+//     build (Task 20371): a target that is not a release at all — the default
+//     target on such a hub is its own "dev+g…" version, which no device can
+//     download — and a release whose binaries speak an older protocol than the
+//     device already does. The second is judged by protocol before versions
+//     are compared, because a device on a dev build cannot be ordered against
+//     a release, and "cannot order" is not the reason it must be left alone.
 //
 // Everything here is a pure function of its inputs, so the rules can be tested
 // exhaustively without a device, a network or a clock.
@@ -38,6 +45,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -85,6 +93,13 @@ func (p Policy) Resolve(hubVersion string) Policy {
 	return out
 }
 
+// Hub is what the planner needs to know about the control plane: the build it
+// runs, which is the default target, and the protocol it speaks.
+type Hub struct {
+	Version  string
+	Protocol int
+}
+
 // Device is what the planner needs to know about one executor. It is a flat
 // snapshot rather than a live handle so that planning cannot race the fleet it
 // is planning over.
@@ -97,6 +112,10 @@ type Device struct {
 	// ProtocolVersion is the negotiated session version, used to tell a device
 	// that can be upgraded remotely from one that must be done by hand.
 	ProtocolVersion int
+	// AgentProtocol is the protocol the agent advertised at hello — more than
+	// ProtocolVersion when the device is newer than the hub. A target speaking
+	// less than the larger of the two would move the device backwards.
+	AgentProtocol int
 	// Online is whether there is a live session to send the request on.
 	Online bool
 	// Busy is whether the device is running work right now.
@@ -124,8 +143,8 @@ type Verdict struct {
 // It returns a verdict for every device rather than only the ones to act on,
 // because "why is that machine still on the old build" is the question this
 // feature generates and a list of the devices it skipped is the answer.
-func Plan(p Policy, hubVersion string, devices []Device) []Verdict {
-	eff := p.Resolve(hubVersion)
+func Plan(p Policy, hub Hub, devices []Device) []Verdict {
+	eff := p.Resolve(hub.Version)
 
 	// Sorted so a sweep is deterministic: with MaxInFlight of one, an unsorted
 	// input would upgrade an arbitrary device each pass, and a fleet where two
@@ -162,9 +181,13 @@ func Plan(p Policy, hubVersion string, devices []Device) []Verdict {
 			// Rule 1.
 			v.Reason = "running work; upgrading would kill the task"
 		case !supportsRemoteUpgrade(d.ProtocolVersion):
-			v.Reason = fmt.Sprintf("agent speaks protocol v%d, which predates remote upgrade; "+
-				"upgrade it once on the device", d.ProtocolVersion)
+			v.Reason = executor.NeedsProtocol("this device's agent", d.ProtocolVersion,
+				minRemoteUpgradeProtocol, "to upgrade it remotely", "")
 		default:
+			if reason, refused := refuseTarget(d, eff.TargetVersion, hub); refused {
+				v.Reason = reason
+				break
+			}
 			reason, ok := compare(d.Version, eff.TargetVersion)
 			if !ok {
 				v.Reason = reason
@@ -187,6 +210,55 @@ func Plan(p Policy, hubVersion string, devices []Device) []Verdict {
 	}
 	return out
 }
+
+// refuseTarget is rule 4's protocol half: a target the device cannot be sent at
+// all, or one that would lower the protocol it speaks. It runs before compare,
+// because the device it matters most for runs a dev build, which compare can
+// only call unorderable — true, and not the reason to leave it alone.
+func refuseTarget(d Device, target string, hub Hub) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false // compare explains a missing target
+	}
+	have := max(d.AgentProtocol, d.ProtocolVersion)
+	const subject = "this device's agent"
+	if strings.EqualFold(target, latestTarget) {
+		// The device resolves "latest" itself; this hub can only judge it as
+		// the newest release it knows of, and says so.
+		newest, ok := version.NewestPublishedRelease()
+		if !ok || have <= 0 || newest.Protocol >= have {
+			return "", false
+		}
+		return fmt.Sprintf("the target %q is judged as %s, the newest published release this hub knows of: %s",
+			latestTarget, newest.Tag, executor.ProtocolDrop(subject, have, newest.Tag, newest.Protocol)), true
+	}
+	if !version.IsRelease(target) {
+		return executor.UnpublishedTarget("this device", target, have) +
+			" Or pin a published release as the auto-update policy's target.", true
+	}
+	hi := targetProtocolBound(target, hub)
+	if have > 0 && hi > 0 && hi < have {
+		return executor.ProtocolDrop(subject, have, target, hi), true
+	}
+	return "", false
+}
+
+// targetProtocolBound is the newest protocol target can speak: exactly the
+// hub's own when target is the hub's own release, else what the published
+// release table bounds it at (0 for unknown).
+func targetProtocolBound(target string, hub Hub) int {
+	if hub.Protocol > 0 && version.IsRelease(hub.Version) {
+		if cmp, ok := version.Compare(target, hub.Version); ok && cmp == 0 {
+			return hub.Protocol
+		}
+	}
+	_, hi := version.ReleaseProtocol(target)
+	return hi
+}
+
+// latestTarget mirrors remote.LatestVersion, for the reason minRemoteUpgradeProtocol
+// mirrors remote.MinUpgradeVersion.
+const latestTarget = "latest"
 
 // compare decides whether moving from current to target is an upgrade worth
 // making, and explains itself when it is not.
@@ -223,11 +295,12 @@ func compare(current, target string) (string, bool) {
 
 // supportsRemoteUpgrade mirrors remote.SupportsUpgrade.
 //
-// Duplicated as a constant rather than imported because pkg/executor/remote
-// imports a good deal of transport machinery this package has no use for, and
-// a planner that can be tested without a websocket stack is worth one integer.
-// TestMinRemoteUpgradeProtocolMatchesTheWireConstant keeps the two honest.
-const minRemoteUpgradeProtocol = 11
+// Not imported from pkg/executor/remote because that package imports a good
+// deal of transport machinery this one has no use for, and a planner that can
+// be tested without a websocket stack is worth one integer. pkg/executor keeps
+// the same mirror for the advice it writes, so this is that one;
+// TestMinRemoteUpgradeProtocolMatchesTheWireConstant keeps both honest.
+const minRemoteUpgradeProtocol = executor.MinRemoteUpgradeVersion
 
 func supportsRemoteUpgrade(v int) bool { return v >= minRemoteUpgradeProtocol }
 

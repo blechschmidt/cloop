@@ -127,6 +127,17 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 			t.Errorf("editing an executor on a named network: dialog lacks %q — saving would reset it", want)
 		}
 	}
+	// An agent too old for firewalls and devices: the hub's sentence, which
+	// knows the hub's build, and not a remedy written into the script.
+	old := res["tooOld"].HTML
+	if !strings.Contains(old, "speaks protocol v13, and the hub needs v14 to apply a virtual executor&#39;s "+
+		"firewall or devices. NOTE FROM THE HUB.") {
+		t.Errorf("the dialog does not show the hub's note for an agent too old for firewalls:\n%s", old)
+	}
+	if strings.Contains(dialog, "speaks protocol") {
+		t.Error("a device that can apply a virtual executor is said to be too old")
+	}
+
 	nopf := res["noPacketFilter"].HTML
 	if !strings.Contains(nopf, "sgx cannot install a firewall</b>: nft(8) needs CAP_NET_ADMIN") ||
 		strings.Index(nopf, "cannot install a firewall") < strings.Index(nopf, `id="evxNetFw"`) {

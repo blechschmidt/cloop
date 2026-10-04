@@ -42,6 +42,10 @@ type Session struct {
 	// caps, which shares the mutex below because a future reconnect-in-place
 	// could replace it.
 	agentVersion string
+	// agentProtocol is the newest protocol the agent said it speaks at hello,
+	// before negotiation lowered it to this hub's (version holds that). Set
+	// once, like agentVersion.
+	agentProtocol int
 
 	mu       sync.Mutex
 	caps     AgentCapabilities
@@ -166,18 +170,19 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 		poll = HeartbeatInterval / 2
 	}
 	sess := &Session{
-		conn:         conn,
-		ex:           opts.Executor,
-		agentID:      opts.Agent.AgentID,
-		version:      version,
-		agentVersion: strings.TrimSpace(hello.AgentVersion),
-		nowFn:        opts.now,
-		poll:         poll,
-		caps:         hello.Capabilities,
-		pending:      make(map[string]chan Frame),
-		ackedOffset:  make(map[string]int64),
-		lastSeen:     now,
-		done:         make(chan struct{}),
+		conn:          conn,
+		ex:            opts.Executor,
+		agentID:       opts.Agent.AgentID,
+		version:       version,
+		agentVersion:  strings.TrimSpace(hello.AgentVersion),
+		agentProtocol: hello.ProtocolVersion,
+		nowFn:         opts.now,
+		poll:          poll,
+		caps:          hello.Capabilities,
+		pending:       make(map[string]chan Frame),
+		ackedOffset:   make(map[string]int64),
+		lastSeen:      now,
+		done:          make(chan struct{}),
 	}
 
 	// Reconcile resume offers before sending welcome: the welcome carries the
@@ -251,6 +256,12 @@ func (s *Session) AgentVersion() string { return s.agentVersion }
 
 // Version returns the negotiated protocol version.
 func (s *Session) Version() int { return s.version }
+
+// AgentProtocol returns the newest protocol version the agent advertised at
+// hello. It differs from Version when the agent is newer than this hub: the
+// session speaks the hub's protocol, but the device's binary speaks more — which
+// is what an upgrade must not take away (see Executor.RequestUpgrade).
+func (s *Session) AgentProtocol() int { return s.agentProtocol }
 
 // LastSeen returns when a frame last arrived from the agent.
 func (s *Session) LastSeen() time.Time {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -151,7 +152,11 @@ func TestRunEndedExplainsWhyNothingCameBack(t *testing.T) {
 		ex   *resultExecutor
 		want string
 	}{
-		{"an agent too old to report", &resultExecutor{id: "old", returns: false}, "Upgrade its agent"},
+		// Through the helper: the protocol it needs, and the remedy for this
+		// hub's build (Task 20371).
+		{"an agent too old to report", &resultExecutor{id: "old", returns: false},
+			executor.ProtocolShortfall("Its agent", 0, remote.MinProjectResultVersion,
+				"to have a seeded run's outcome sent back")},
 		{"a run that sent nothing", &resultExecutor{id: "lost", returns: true,
 			err: fmt.Errorf("%w: gone", executor.ErrProjectResultUnavailable)}, "ended without sending its results back"},
 		{"a device that could not read the run", &resultExecutor{id: "err", returns: true,

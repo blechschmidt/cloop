@@ -101,9 +101,9 @@ const revokeTimeout = 15 * time.Second
 // the whole feature a lie.
 func (s *Session) revokeLease(ctx context.Context, p RevokePayload) (RevokedPayload, error) {
 	if !SupportsRevocation(s.version) {
-		return RevokedPayload{}, fmt.Errorf(
-			"%w: agent %s speaks protocol v%d; revocation needs v%d or newer",
-			ErrRevocationUnsupported, s.agentID, s.version, MinRevocationVersion)
+		return RevokedPayload{}, fmt.Errorf("%w: %s", ErrRevocationUnsupported,
+			executor.NeedsProtocol("agent "+s.agentID, s.version, MinRevocationVersion,
+				"to take a lease's material back from it", ""))
 	}
 	if strings.TrimSpace(p.LeaseID) == "" {
 		return RevokedPayload{}, fmt.Errorf("%w: revoke with no lease id", ErrProtocol)
@@ -142,6 +142,29 @@ func (e *Executor) ProtocolVersion() int {
 		return 0
 	}
 	return sess.Version()
+}
+
+// AgentProtocol reports the protocol version the connected agent advertised in
+// its hello, or 0 when it is not connected. ProtocolVersion is the negotiated
+// one — the lower of this and the hub's — so the two differ only for a device
+// newer than its hub; DeviceProtocol is the larger of the two.
+func (e *Executor) AgentProtocol() int {
+	sess := e.currentSession()
+	if sess == nil {
+		return 0
+	}
+	return sess.AgentProtocol()
+}
+
+// DeviceProtocol is the protocol the device's binary speaks, as far as the
+// session shows: what the agent advertised, and never less than what was
+// negotiated (a hand-written peer may advertise nothing). 0 when offline.
+func (e *Executor) DeviceProtocol() int {
+	sess := e.currentSession()
+	if sess == nil {
+		return 0
+	}
+	return max(sess.AgentProtocol(), sess.Version())
 }
 
 // HoldsLease reports whether any handle this executor tracks was started with

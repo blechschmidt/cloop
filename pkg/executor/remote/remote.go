@@ -282,6 +282,11 @@ func (e *Executor) Kind() string { return executor.KindRemoteAgent }
 // Name reports the operator-facing label.
 func (e *Executor) Name() string { return e.name }
 
+// subject names this device's agent at the start of a refusal: "agent
+// agent-1 (edge-1)", the ID an operator can search for and the name they know
+// it by.
+func (e *Executor) subject() string { return fmt.Sprintf("agent %s (%s)", e.id, e.name) }
+
 // AgentCapabilities reports what the device advertised, including the fields
 // (CPU count, memory, container runtimes, harnesses) that the driver-agnostic
 // executor.Capabilities has no room for.
@@ -521,12 +526,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// do I do about it".
 	revocable := spec.RevocableSecrets()
 	if len(revocable) > 0 && !SupportsRevocation(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf(
-			"%w: agent %s (%s) speaks protocol v%d but this workload carries %s, which the control "+
-				"plane must be able to revoke mid-run (needs v%d); upgrade the agent with "+
-				"`cloop executor agent install --upgrade`, or remove the grant from this project",
-			ErrRevocationUnsupported, e.id, e.name, sess.Version(),
-			describeBindings(revocable), MinRevocationVersion)
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrRevocationUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinRevocationVersion,
+			"to revoke "+describeBindings(revocable)+", which this workload carries, mid-run",
+			"Or remove the grant from this project."))
 	}
 
 	// The same placement rule for the workspace, and the reason it is a refusal
@@ -534,13 +537,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// does not reject the credential field, it ignores it — and then runs the
 	// harness against the empty directory it created.
 	if spec.Workspace.NeedsProvisioning() && !SupportsWorkspaceProvisioning(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf(
-			"%w: agent %s (%s) speaks protocol v%d but this workload's source tree has to be cloned "+
-				"from %s by the device (needs v%d); upgrade the agent with "+
-				"`cloop executor agent install --upgrade`, or run this project on an executor that "+
-				"shares the control plane's filesystem",
-			ErrWorkspaceUnsupported, e.id, e.name, sess.Version(),
-			spec.Workspace.Repo, MinWorkspaceVersion)
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrWorkspaceUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinWorkspaceVersion,
+			"to have the device clone this workload's source tree from "+spec.Workspace.Repo,
+			"Or run this project on an executor that shares the control plane's filesystem."))
 	}
 
 	// And the same rule for the lease's credential files. An older agent ignores
@@ -550,12 +550,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// surfaces minutes later as an authentication error the transcript cannot
 	// explain. Refusing here is the only place it can be named.
 	if spec.NeedsSecretFiles() && !SupportsSecretFiles(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf(
-			"%w: agent %s (%s) speaks protocol v%d but %s is delivered to this workload as credential "+
-				"files the device has to write (needs v%d); upgrade the agent with "+
-				"`cloop executor agent install --upgrade`, or remove the grant from this project",
-			ErrSecretFilesUnsupported, e.id, e.name, sess.Version(),
-			describeSecretFiles(spec), MinSecretFilesVersion)
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrSecretFilesUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinSecretFilesVersion,
+			"to deliver "+describeSecretFiles(spec)+" to this workload as credential files the device writes",
+			"Or remove the grant from this project."))
 	}
 
 	// And again for the project state. Same mechanism as the two above — an
@@ -566,12 +564,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// message points at the agent, so an operator spends the next hour looking
 	// at a project that is perfectly intact.
 	if len(spec.ProjectSeed) > 0 && !SupportsProjectSeed(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf(
-			"%w: agent %s (%s) speaks protocol v%d but this workload's project state — its goal, "+
-				"instructions and plan — has to be placed into the cloned tree by the device "+
-				"(needs v%d); upgrade the agent with `cloop executor agent install --upgrade`, or "+
-				"run this project on an executor that shares the control plane's filesystem",
-			ErrProjectSeedUnsupported, e.id, e.name, sess.Version(), MinProjectSeedVersion)
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectSeedUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinProjectSeedVersion,
+			"to have the device place this workload's project state — its goal, instructions and plan — "+
+				"into the cloned tree",
+			"Or run this project on an executor that shares the control plane's filesystem."))
 	}
 
 	// And for a shipped branch — a feature's. An older agent has no handler
@@ -579,12 +576,17 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// it, so the harness would start on the feature's base commit with none of
 	// the feature's work: a run on the wrong code that reports success.
 	if b := spec.Workspace.Branch; b != nil {
-		if !SupportsBranchBundle(sess.Version()) || !e.AgentCapabilities().BranchBundles {
+		if !SupportsBranchBundle(sess.Version()) {
+			return executor.Handle{}, fmt.Errorf("%w: %s", ErrWorkspaceUnsupported, executor.NeedsProtocol(
+				e.subject(), sess.Version(), MinBranchBundleVersion,
+				"to ship "+b.Describe()+" to it, which a feature's run starts from", ""))
+		}
+		if !e.AgentCapabilities().BranchBundles {
 			return executor.Handle{}, fmt.Errorf(
-				"%w: agent %s (%s) speaks protocol v%d and cannot receive %s, which a feature's run "+
-					"needs (protocol v%d and git on the device); upgrade the agent with "+
-					"`cloop executor agent install --upgrade`",
-				ErrWorkspaceUnsupported, e.id, e.name, sess.Version(), b.Describe(), MinBranchBundleVersion)
+				"%w: %s cannot receive %s, which a feature's run starts from: the device reported no "+
+					"git, which building a tree from a shipped branch needs; install git on it and "+
+					"restart the agent, or run the feature on a container executor",
+				ErrWorkspaceUnsupported, e.subject(), b.Describe())
 		}
 		if b.Bytes > 0 {
 			if err := b.VerifyFile(spec.BranchBundleFile); err != nil {
@@ -629,12 +631,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// Nothing downstream can tell the difference, so this is the only place it
 	// can be named.
 	if sandbox.Mode == executor.SandboxModeContainer && !SupportsSandboxMode(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf(
-			"%w: agent %s (%s) speaks protocol v%d but this executor is configured to run payloads in "+
-				"a container on the device (needs v%d); upgrade the agent with "+
-				"`cloop executor agent install --upgrade`, or set this executor's sandbox mode back to "+
-				"host if running on the device's host is acceptable",
-			ErrSandboxModeUnsupported, e.id, e.name, sess.Version(), MinSandboxModeVersion)
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrSandboxModeUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinSandboxModeVersion,
+			"to run payloads in a container on the device, as this executor is configured to",
+			"Or set this executor's sandbox mode back to host, if running on the device's host is acceptable."))
 	}
 
 	// A hypervisor the device does not have. Refused here for the same reason

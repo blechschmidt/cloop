@@ -17,11 +17,27 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // ErrUpgradeUnsupported reports that a device's agent predates the upgrade
 // frame, and so can only be moved forward by hand on the device itself.
 var ErrUpgradeUnsupported = errors.New("remote: agent does not support remote upgrade")
+
+// ErrUpgradeTarget reports an upgrade target that is neither LatestVersion nor
+// a release tag — most often an unreleased hub's own version, "dev+g8b418e2",
+// which the Upgrade dialog used to prefill. A device installs published, signed
+// releases and nothing else, so no such request could do what it says.
+var ErrUpgradeTarget = errors.New("remote: upgrade target is not a published release")
+
+// ErrUpgradeLowersProtocol reports an upgrade target whose binaries speak an
+// older protocol than the device already does (Task 20371). The device's own
+// check cannot see it — "dev+g47e68a9" cannot be ordered against "v0.0.4" — so
+// it would install the release and lose everything the newer protocol carried.
+// UpgradeRequest.Force overrides it, as it overrides a downgrade on the device.
+var ErrUpgradeLowersProtocol = errors.New("remote: upgrade would lower the device's protocol")
 
 // UpgradeRequest is what a caller asks for. It is the hub-side mirror of
 // UpgradePayload, and it carries no more than that one does on purpose: a field
@@ -32,9 +48,16 @@ type UpgradeRequest struct {
 	// published release. Empty is accepted here and normalised to
 	// LatestVersion before it reaches the wire — the strictness in
 	// DecodeUpgrade is about frames arriving from elsewhere, and imposing it
-	// on in-process callers would only produce a redundant error.
+	// on in-process callers would only produce a redundant error. Anything
+	// else is refused with ErrUpgradeTarget before a frame is sent.
+	//
+	// A caller that can resolve LatestVersion to a tag should, and send the
+	// tag: the device then installs exactly the release that was checked. An
+	// unresolved LatestVersion is judged as the newest published release this
+	// hub knows of (version.NewestPublishedRelease).
 	TargetVersion string
-	// Force reinstalls an identical build, and permits a downgrade.
+	// Force reinstalls an identical build, and permits a downgrade — including
+	// one that lowers the device's protocol (ErrUpgradeLowersProtocol).
 	Force bool
 	// SettleTimeout bounds the device's wait for its restarted service.
 	SettleTimeout time.Duration
@@ -93,11 +116,19 @@ func displayVersion(v string) string {
 
 // RequestUpgrade asks the device behind this executor to move to a release.
 //
-// The version gate is checked before anything is sent, and its error names the
-// manual remedy rather than just the shortfall: a device too old to be upgraded
-// remotely is exactly the device whose operator most needs to be told that the
-// one-time fix is a local `cloop executor agent install --upgrade`, after which
-// it can be driven from here forever.
+// Three refusals are made before anything is sent, each naming the remedy that
+// works rather than just the shortfall:
+//
+//   - A device too old to be upgraded remotely (ErrUpgradeUnsupported) has to
+//     be moved once by hand, after which it can be driven from here forever.
+//   - A target that is not a release tag (ErrUpgradeTarget) cannot be installed
+//     this way at all: the device resolves a version through its own release
+//     channel and verifies the archive's signature, so a dev build's name has
+//     nothing behind it.
+//   - Unless req.Force, a release whose binaries speak an older protocol than
+//     the device does (ErrUpgradeLowersProtocol). This is the check the device
+//     cannot make: a dev build cannot be ordered against a release, so its own
+//     preflight would install v0.0.4 over a v14 agent and drop it to v13.
 func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (UpgradeOutcome, error) {
 	sess := e.currentSession()
 	if sess == nil {
@@ -106,16 +137,25 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 			ErrAgentUnreachable, e.id, e.name)
 	}
 	if v := sess.Version(); !SupportsUpgrade(v) {
-		return UpgradeOutcome{}, fmt.Errorf("%w: %s (%s) speaks protocol v%d, and remote upgrade "+
-			"needs v%d. Upgrade it once on the device with `sudo cloop executor agent install "+
-			"--upgrade`; from that build onwards it can be upgraded from here",
-			ErrUpgradeUnsupported, e.id, e.name, v, MinUpgradeVersion)
+		return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeUnsupported, executor.NeedsProtocol(
+			e.subject(), v, MinUpgradeVersion, "to upgrade it from here", ""))
 	}
 
 	target := strings.TrimSpace(req.TargetVersion)
-	if target == "" {
+	if target == "" || strings.EqualFold(target, LatestVersion) {
 		target = LatestVersion
 	}
+	have := max(sess.AgentProtocol(), sess.Version())
+	if target != LatestVersion && !version.IsRelease(target) {
+		return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeTarget,
+			executor.UnpublishedTarget(e.subject(), target, have))
+	}
+	if !req.Force {
+		if err := checkProtocolDrop(e.subject(), have, target); err != nil {
+			return UpgradeOutcome{}, err
+		}
+	}
+
 	payload := UpgradePayload{
 		TargetVersion: target,
 		Force:         req.Force,
@@ -147,4 +187,47 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 		FromVersion:    ack.FromVersion,
 		TargetVersion:  ack.TargetVersion,
 	}, nil
+}
+
+// checkProtocolDrop refuses target when its binaries are known to speak an
+// older protocol than have, the device's. LatestVersion is judged as the newest
+// published release this hub knows of, and the refusal says so: a release
+// published since this hub was built may well not lower anything, and Force is
+// how an operator who knows that proceeds.
+func checkProtocolDrop(subject string, have int, target string) error {
+	if have <= 0 {
+		return nil
+	}
+	judged, latest := target, false
+	var hi int
+	switch hub := executor.HubBuild(); {
+	case target == LatestVersion:
+		newest, ok := version.NewestPublishedRelease()
+		if !ok {
+			return nil
+		}
+		judged, hi, latest = newest.Tag, newest.Protocol, true
+	case version.IsRelease(hub) && sameRelease(target, hub):
+		// This hub's own release speaks exactly what this binary does,
+		// whether or not the table has caught up with it.
+		hi = ProtocolVersion
+	default:
+		_, hi = version.ReleaseProtocol(target)
+	}
+	// hi == 0: a release newer than anything this hub knows of; no bound.
+	if hi == 0 || hi >= have {
+		return nil
+	}
+	msg := executor.ProtocolDrop(subject, have, judged, hi)
+	if latest {
+		msg = fmt.Sprintf("%q could not be looked up, so it was judged as %s, the newest published release "+
+			"this hub knows of: %s", LatestVersion, judged, msg)
+	}
+	return fmt.Errorf("%w: %s Ask with force to install it anyway.", ErrUpgradeLowersProtocol, msg)
+}
+
+// sameRelease reports whether a and b are the same release.
+func sameRelease(a, b string) bool {
+	cmp, ok := version.Compare(a, b)
+	return ok && cmp == 0
 }

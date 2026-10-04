@@ -86,9 +86,8 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 			ErrAgentUnreachable, req.HandleID, e.id)
 	}
 	if !SupportsAttach(sess.Version()) {
-		return nil, fmt.Errorf("%w: agent %s speaks protocol v%d; interactive attach needs v%d "+
-			"(press Upgrade on the device's row in the Executors panel, or run `sudo cloop executor agent install --upgrade` on it)",
-			executor.ErrAttachUnsupported, e.id, sess.Version(), MinAttachVersion)
+		return nil, fmt.Errorf("%w: %s", executor.ErrAttachUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinAttachVersion, "to attach to a workload on it", ""))
 	}
 
 	sessionID := newCorrelationID()

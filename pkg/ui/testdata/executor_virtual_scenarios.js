@@ -200,6 +200,17 @@ const scenarios = {
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
+  // An agent too old for a virtual executor's firewall or devices: the dialog
+  // shows the hub's sentence (Task 20371), which knows the hub's build, rather
+  // than a remedy written into the script.
+  async tooOld() {
+    await boot({parent: {protocol_version: 13, supported: false,
+      unsupported_note: "This device's agent speaks protocol v13, and the hub needs v14 to apply a virtual " +
+        "executor's firewall or devices. NOTE FROM THE HUB."}});
+    window.openExecutorVirtual(0);
+    await globalThis.__settle(4);
+    return {html: el('evxBody').innerHTML};
+  },
   // A device that cannot install a firewall says so under Firewalled.
   async noPacketFilter() {
     await boot({parent: {packet_filter: false, packet_filter_issue: 'nft(8) needs CAP_NET_ADMIN'}});

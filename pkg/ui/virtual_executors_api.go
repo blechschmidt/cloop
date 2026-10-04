@@ -44,9 +44,13 @@ type virtualParentView struct {
 	Name       string `json:"name"`
 	Connected  bool   `json:"connected"`
 	// ProtocolVersion is the live session's, 0 when offline. Supported says
-	// whether it can apply a firewall or devices at all.
-	ProtocolVersion int  `json:"protocol_version,omitempty"`
-	Supported       bool `json:"supported"`
+	// whether it can apply a firewall or devices at all, and UnsupportedNote,
+	// when a connected agent cannot, says which protocol it speaks, which one
+	// that needs, and what to do — composed by the hub rather than written
+	// into the dialog, where the advice could not know this hub's build.
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	Supported       bool   `json:"supported"`
+	UnsupportedNote string `json:"unsupported_note,omitempty"`
 	// Engines and OCIRuntimes are what the device reported; Networks the two
 	// every engine has. Offered by the form, never enforced by it — the device
 	// refuses what it cannot run, at dispatch.
@@ -150,6 +154,9 @@ func (s *Server) virtualParent(ctx context.Context, db *statedb.DB, parent *remo
 	if view.Connected {
 		view.ProtocolVersion = parent.ProtocolVersion()
 		view.Supported = remote.SupportsVirtualExecutor(view.ProtocolVersion)
+		if !view.Supported {
+			view.UnsupportedNote = virtualUnsupportedNote("This device's agent", view.ProtocolVersion)
+		}
 		if refresh {
 			fresh, err := parent.RefreshInventory(ctx)
 			if err != nil {

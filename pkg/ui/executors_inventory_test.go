@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -13,16 +15,83 @@ import (
 
 // withHubVersion stages the control-plane build for a test.
 //
-// hubVersion is a package var precisely so this is possible: skew is a
+// executor.HubBuild is a package var precisely so this is possible: skew is a
 // comparison against the hub, and a test that could not fix both sides could
 // only assert the case that happens to hold for whatever build ran it — which
 // under `go test` is always the unstamped "dev", the one case where no ordering
-// exists at all.
+// exists at all. hubVersion reads it, and so does the upgrade advice the notes
+// carry (Task 20371), so one pin stages both.
 func withHubVersion(t *testing.T, v string) {
 	t.Helper()
-	prev := hubVersion
-	hubVersion = func() string { return v }
-	t.Cleanup(func() { hubVersion = prev })
+	prev := executor.HubBuild
+	executor.HubBuild = func() string { return v }
+	t.Cleanup(func() { executor.HubBuild = prev })
+}
+
+// connectAt attaches a live session to ex from a hand-written agent that
+// advertises protocol and build, and returns the function that ends it.
+func connectAt(t *testing.T, ex *remote.Executor, protocol int, build string) func() {
+	t.Helper()
+	return connectAnswering(t, ex, protocol, build, nil)
+}
+
+// connectAnswering is connectAt with a hand for the agent: answer sees every
+// frame the hub sends after the welcome and may reply on conn. Nil drops them.
+func connectAnswering(t *testing.T, ex *remote.Executor, protocol int, build string,
+	answer func(conn remote.Conn, f remote.Frame)) func() {
+	t.Helper()
+	hubSide, agentSide := remote.NewPipe(16)
+	type accepted struct {
+		sess *remote.Session
+		err  error
+	}
+	done := make(chan accepted, 1)
+	go func() {
+		sess, err := remote.Accept(context.Background(), hubSide, remote.AcceptOptions{
+			Agent:    remote.AgentRecord{AgentID: ex.ID(), Name: ex.Name()},
+			Executor: ex,
+		})
+		done <- accepted{sess, err}
+	}()
+	hello, err := remote.NewFrame(remote.TypeHello, "hello", "", remote.HelloPayload{
+		ProtocolVersion: protocol,
+		AgentID:         ex.ID(),
+		Name:            ex.Name(),
+		AgentVersion:    build,
+		Capabilities:    remote.AgentCapabilities{OS: "linux", Arch: "amd64", CPUs: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := agentSide.WriteFrame(ctx, hello); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	var res accepted
+	select {
+	case res = <-done:
+	case <-ctx.Done():
+		t.Fatal("the hub did not accept the hello")
+	}
+	if res.err != nil {
+		t.Fatalf("Accept: %v", res.err)
+	}
+	// Whatever the hub sends from here — the welcome, heartbeat acks — is
+	// read, and dropped unless answer wants it, so the session never blocks
+	// on a full pipe.
+	go func() {
+		for {
+			f, err := agentSide.ReadFrame(context.Background())
+			if err != nil {
+				return
+			}
+			if answer != nil && f.Type != remote.TypeWelcome {
+				answer(agentSide, f)
+			}
+		}
+	}()
+	return func() { _ = res.sess.Close() }
 }
 
 func remoteRow(inv statedb.ExecutorInventory) statedb.ExecutorRow {
@@ -365,16 +434,101 @@ func TestMemoryLabel(t *testing.T) {
 // The flag's existence is asserted in cmd (see TestExecutorInstallHasUpgradeFlag);
 // this side asserts the message still points at it and at nothing else.
 func TestUpgradeHintNamesAnImplementedFlag(t *testing.T) {
-	if !strings.Contains(upgradeHint, AgentUpgradeCommand) {
-		t.Errorf("upgradeHint does not name AgentUpgradeCommand: %q", upgradeHint)
-	}
 	if !strings.Contains(AgentUpgradeCommand, "--upgrade") {
 		t.Errorf("AgentUpgradeCommand = %q, expected it to name --upgrade", AgentUpgradeCommand)
 	}
-	// The hint must tell the operator to get the new binary onto the device
-	// first; --upgrade alone on an unchanged binary is a no-op, and an operator
-	// following an incomplete instruction would conclude the flag is broken.
-	if !strings.Contains(strings.ToLower(upgradeHint), "binary") {
-		t.Errorf("upgradeHint does not mention getting the new binary onto the device: %q", upgradeHint)
+	// Both kinds of hub: the hint is the helper's, and differs between them.
+	for _, hub := range []string{"v0.3.0", "dev+g8b418e2"} {
+		withHubVersion(t, hub)
+		hint := upgradeHint()
+		if !strings.Contains(hint, AgentUpgradeCommand) {
+			t.Errorf("hub %s: upgradeHint does not name AgentUpgradeCommand: %q", hub, hint)
+		}
+		// The hint must tell the operator to get the new binary onto the
+		// device first; --upgrade alone on an unchanged binary is a no-op,
+		// and an operator following an incomplete instruction would conclude
+		// the flag is broken.
+		if !strings.Contains(strings.ToLower(hint), "binary") {
+			t.Errorf("hub %s: upgradeHint does not mention getting the new binary onto the device: %q", hub, hint)
+		}
+		if hint != executor.AgentUpgradeAdvice() {
+			t.Errorf("hub %s: upgradeHint is not the helper's advice", hub)
+		}
+	}
+}
+
+// TestAnnotateInventoryUnreleasedHubSkew is the reference deployment as the
+// panel sees it (Task 20371): a hub on an unreleased build at this tree's
+// protocol, a device on another dev build at an older one. Classify can only
+// call two dev builds "unversioned"; the protocol says what the device lacks,
+// and the note says so in those terms, with the remedy that works — and the
+// Upgrade dialog offers no release that would move the device backwards.
+func TestAnnotateInventoryUnreleasedHubSkew(t *testing.T) {
+	withHubVersion(t, "dev+g8b418e2")
+	ex, err := remote.NewExecutor(remote.Options{ID: "sgx-1", Name: "sgx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connectAt(t, ex, 14, "dev+g47e68a9")
+	defer conn()
+
+	var view executorView
+	annotateInventory(&view, remoteRow(statedb.ExecutorInventory{AgentVersion: "dev+g47e68a9"}), ex)
+
+	sv := view.VersionSkew
+	if sv == nil {
+		t.Fatal("no skew view for a connected device")
+	}
+	if !sv.Material {
+		t.Error("a device two protocols behind its hub was not reported as material")
+	}
+	if sv.DeviceProtocol != 14 || sv.HubProtocol != remote.ProtocolVersion {
+		t.Errorf("device_protocol/hub_protocol = %d/%d, want 14/%d", sv.DeviceProtocol, sv.HubProtocol,
+			remote.ProtocolVersion)
+	}
+	want := executor.NeedsProtocol("This device's agent", 14, remote.ProtocolVersion,
+		"for everything it can ask of a device", "")
+	if sv.Note != want {
+		t.Errorf("note = %q\nwant %q", sv.Note, want)
+	}
+
+	wantTarget, wantNote := executor.UpgradeOffer("This device's agent", 14, remote.ProtocolVersion)
+	if view.UpgradeTarget != wantTarget || view.UpgradeNote != wantNote {
+		t.Errorf("upgrade offer = (%q, %q)\nwant (%q, %q)", view.UpgradeTarget, view.UpgradeNote,
+			wantTarget, wantNote)
+	}
+	// The v0.0.4 table entry speaks v13: nothing published can be offered.
+	if newest, ok := version.NewestPublishedRelease(); ok && newest.Protocol < 14 && view.UpgradeTarget != "" {
+		t.Errorf("the dialog offers %q, which would lower a v14 device to v%d", view.UpgradeTarget,
+			newest.Protocol)
+	}
+
+	encoded, _ := json.Marshal(view)
+	for _, key := range []string{`"upgrade_note"`, `"device_protocol":14`, `"hub_protocol"`} {
+		if !strings.Contains(string(encoded), key) {
+			t.Errorf("%s missing from the wire payload: %s", key, encoded)
+		}
+	}
+}
+
+// TestAnnotateInventoryReleasedHubOffersItsOwnRelease: on a hub that is a
+// release, the dialog prefills that release — never a "dev" string.
+func TestAnnotateInventoryReleasedHubOffersItsOwnRelease(t *testing.T) {
+	withHubVersion(t, "v0.3.0")
+	ex, err := remote.NewExecutor(remote.Options{ID: "edge-1", Name: "edge-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connectAt(t, ex, remote.ProtocolVersion, "v0.2.0")
+	defer conn()
+
+	var view executorView
+	annotateInventory(&view, remoteRow(statedb.ExecutorInventory{AgentVersion: "v0.2.0"}), ex)
+	if view.UpgradeTarget != "v0.3.0" {
+		t.Errorf("upgrade_target = %q, want the hub's own release v0.3.0", view.UpgradeTarget)
+	}
+	// Same protocol, older build: Classify's note, with the helper's path.
+	if sv := view.VersionSkew; sv == nil || !strings.HasSuffix(sv.Note, executor.AgentUpgradeAdvice()) {
+		t.Errorf("skew note does not end with the helper's advice: %+v", view.VersionSkew)
 	}
 }

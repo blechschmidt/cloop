@@ -11,6 +11,35 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
+)
+
+// ExplainBranchBundleRefusal implements executor.BranchBundleExplainer: why
+// placement found this device unable to receive a feature's branch. Too old a
+// protocol and a device without git have different remedies; an offline device
+// is judged by what it last advertised, which cannot tell the two apart, so it
+// gets the generic advice.
+func (e *Executor) ExplainBranchBundleRefusal() string {
+	v := e.ProtocolVersion()
+	switch {
+	case v > 0 && !SupportsBranchBundle(v):
+		return executor.NeedsProtocol("its agent", v, MinBranchBundleVersion, "to ship a feature's branch to it",
+			"Or run the feature on a container executor.")
+	case v > 0 && !e.AgentCapabilities().BranchBundles:
+		return "its device reported no git, which building a tree from a shipped branch needs; install git " +
+			"on it and restart the agent, or run the feature on a container executor"
+	}
+	return ""
+}
+
+// ExplainBranchBundleRefusal implements executor.BranchBundleExplainer: a
+// virtual executor receives a branch exactly as its device does.
+func (v *Virtual) ExplainBranchBundleRefusal() string { return v.parent.ExplainBranchBundleRefusal() }
+
+var (
+	_ executor.BranchBundleExplainer = (*Executor)(nil)
+	_ executor.BranchBundleExplainer = (*Virtual)(nil)
 )
 
 // sendBranchBundle streams the bundle at path to the agent as branch chunks for
