@@ -13,6 +13,7 @@
 //   project-fw <cidr,cidr…> <port,port…>               save a project rule set
 //   feature <name> <description> <task>                create a feature, start it
 //   pr <feature-slug>                                  open its pull request
+//   upgrade-dialog <executor-id>                       press Upgrade, report the dialog, cancel it
 //   debug                                              list the project grid
 // Prints one JSON document on stdout describing what the page showed.
 
@@ -32,9 +33,10 @@ class CDP {
     this.ws = ws;
     this.id = 0;
     this.pending = new Map();
+    this.events = [];
     ws.addEventListener('message', ev => {
       const msg = JSON.parse(ev.data);
-      if (msg.id === undefined) return;
+      if (msg.id === undefined) { this.events.push(msg); return; }
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
@@ -280,6 +282,41 @@ async function stepPR(cdp, slug) {
   result.pr_links = await cdp.eval(`[...document.querySelectorAll('#featureBanner a, #featuresList a')].map(a => a.href)`);
 }
 
+// stepUpgradeDialog presses Upgrade on the device's card and reports the
+// dialog the dashboard opened — an alert carrying the hub's explanation when no
+// release would move the device forward, or a prompt prefilled with the release
+// it offers — then dismisses it, so nothing is sent.
+async function stepUpgradeDialog(cdp, exID) {
+  await cdp.eval(`window.switchTab('executors')`);
+  await waitFor(cdp, `document.querySelectorAll('button[onclick^="upgradeExecutor("]').length > 0`, 'the Executors panel');
+  const sel = await cdp.eval(`(() => {
+    for (const b of document.querySelectorAll('button[onclick^="upgradeExecutor("]')) {
+      let c = b.parentElement;
+      while (c && !c.textContent.includes(${JSON.stringify(exID)})) c = c.parentElement;
+      if (c && c.querySelectorAll('button[onclick^="upgradeExecutor("]').length === 1) {
+        return 'button[onclick="' + b.getAttribute('onclick') + '"]';
+      }
+    }
+    return null; })()`);
+  if (!sel) throw new Error('no Upgrade button on a card naming ' + exID);
+  cdp.events.length = 0;
+  // Not awaited first: the dialog blocks the page, and the click's own answer
+  // arrives only once the dialog is handled.
+  const clicking = click(cdp, sel).catch(() => {});
+  const deadline = Date.now() + 15000;
+  let dlg = null;
+  while (!dlg && Date.now() < deadline) {
+    dlg = cdp.events.find(e => e.method === 'Page.javascriptDialogOpening');
+    if (!dlg) await sleep(100);
+  }
+  if (!dlg) throw new Error('pressing Upgrade opened no dialog');
+  result.dialog_type = dlg.params.type;
+  result.message = dlg.params.message;
+  result.default_prompt = dlg.params.defaultPrompt || '';
+  await cdp.send('Page.handleJavaScriptDialog', {accept: false});
+  await clicking;
+}
+
 async function main() {
   const {cdp, kill, dir} = await launchChrome();
   try {
@@ -289,6 +326,7 @@ async function main() {
       case 'project-fw': await stepProjectFirewall(cdp, ARGS[0], ARGS[1]); break;
       case 'feature': await stepFeature(cdp, ARGS[0], ARGS[1], ARGS[2]); break;
       case 'pr': await stepPR(cdp, ARGS[0]); break;
+      case 'upgrade-dialog': await stepUpgradeDialog(cdp, ARGS[0]); break;
       case 'debug':
         await cdp.eval(`window.switchTab('projects')`);
         await sleep(2500);
