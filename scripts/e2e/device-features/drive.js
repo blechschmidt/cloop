@@ -14,6 +14,7 @@
 //   feature <name> <description> <task>                create a feature, start it
 //   pr <feature-slug>                                  open its pull request
 //   upgrade-dialog <executor-id>                       press Upgrade, report the dialog, cancel it
+//   upgrade <executor-id>                              press Upgrade, accept what it offers, report the toast
 //   start [project-path]                               press Start run on its Tasks tab
 //   tasks [project-path]                               list the Tasks tab, completed included
 //   debug                                              list the project grid
@@ -310,7 +311,7 @@ async function stepStart(cdp, p) {
 // dialog the dashboard opened — an alert carrying the hub's explanation when no
 // release would move the device forward, or a prompt prefilled with the release
 // it offers — then dismisses it, so nothing is sent.
-async function stepUpgradeDialog(cdp, exID) {
+async function stepUpgradeDialog(cdp, exID, accept) {
   await cdp.eval(`window.switchTab('executors')`);
   await waitFor(cdp, `document.querySelectorAll('button[onclick^="upgradeExecutor("]').length > 0`, 'the Executors panel');
   const sel = await cdp.eval(`(() => {
@@ -337,8 +338,22 @@ async function stepUpgradeDialog(cdp, exID) {
   result.dialog_type = dlg.params.type;
   result.message = dlg.params.message;
   result.default_prompt = dlg.params.defaultPrompt || '';
-  await cdp.send('Page.handleJavaScriptDialog', {accept: false});
+  if (!accept || dlg.params.type !== 'prompt') {
+    await cdp.send('Page.handleJavaScriptDialog', {accept: false});
+    await clicking;
+    return;
+  }
+  // OK on what the dialog offered, as an operator would: the toast that
+  // follows is the hub's answer (Task 20376).
+  await cdp.send('Page.handleJavaScriptDialog', {accept: true, promptText: result.default_prompt});
   await clicking;
+  const toastDeadline = Date.now() + 40000;
+  let toast = '';
+  while (!toast && Date.now() < toastDeadline) {
+    toast = await cdp.eval(`((document.getElementById('toast') || {}).textContent || '').trim()`);
+    if (!toast) await sleep(200);
+  }
+  result.toast = toast;
 }
 
 async function main() {
@@ -350,7 +365,8 @@ async function main() {
       case 'project-fw': await stepProjectFirewall(cdp, ARGS[0], ARGS[1]); break;
       case 'feature': await stepFeature(cdp, ARGS[0], ARGS[1], ARGS[2]); break;
       case 'pr': await stepPR(cdp, ARGS[0]); break;
-      case 'upgrade-dialog': await stepUpgradeDialog(cdp, ARGS[0]); break;
+      case 'upgrade-dialog': await stepUpgradeDialog(cdp, ARGS[0], false); break;
+      case 'upgrade': await stepUpgradeDialog(cdp, ARGS[0], true); break;
       case 'start': await stepStart(cdp, ARGS[0] || PROJECT); break;
       case 'tasks':
         // The task list as the Tasks tab shows it, completed tasks included.

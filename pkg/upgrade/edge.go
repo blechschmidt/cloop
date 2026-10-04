@@ -336,6 +336,8 @@ func StageEdge(target, destDir string, opts Options, progress func(string)) (Sta
 	if err := verifyEdgeAsset(ctx, verifier, base, dir, manifestName, manifestData); err != nil {
 		return staged, err
 	}
+	_, identity := verifier.TrustRoot()
+	progress(fmt.Sprintf("Verified the signature of %s (identity %s).", manifestName, identity))
 	manifest, err := parseManifest(manifestData)
 	if err != nil {
 		return staged, err
@@ -365,6 +367,7 @@ func StageEdge(target, destDir string, opts Options, progress func(string)) (Sta
 	if err := verifyEdgeAsset(ctx, verifier, base, dir, name, archiveData); err != nil {
 		return staged, err
 	}
+	progress(fmt.Sprintf("Verified the signature of %s, and that it hashes to what the manifest lists.", name))
 	staged.ProvenanceVerified = true
 
 	binaryData, err := extractBinaryFromTarGz(archiveData)

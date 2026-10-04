@@ -442,6 +442,14 @@ func upgradeToTarget(cmd *cobra.Command, inst *install.Installer, spec install.S
 	return nil
 }
 
+// parenthesised is " (s)", or "" for an empty s.
+func parenthesised(s string) string {
+	if s = strings.TrimSpace(s); s == "" {
+		return ""
+	}
+	return " (" + s + ")"
+}
+
 func verifiedNote(verified bool) string {
 	if verified {
 		return ", signature verified"
@@ -466,10 +474,10 @@ func applyUpgradeRequest(cmd *cobra.Command, inst *install.Installer, spec insta
 	case err != nil && req.TargetVersion == "":
 		return err
 	case err != nil:
-		return fmt.Errorf("the request to move to %s (%s) was not carried out, and the device is on the build "+
-			"it had: %w", req.TargetVersion, req.Reason, err)
+		return fmt.Errorf("the request to move to %s%s was not carried out, and the device is on the build "+
+			"it had: %w", req.TargetVersion, parenthesised(req.Reason), err)
 	}
-	fmt.Fprintf(w, "Carried out the request to move to %s (%s).\n", req.TargetVersion, req.Reason)
+	fmt.Fprintf(w, "Carried out the request to move to %s%s.\n", req.TargetVersion, parenthesised(req.Reason))
 	fmt.Fprintf(w, "Installed from %s (%s channel%s).\n", staged.Tag, staged.Channel, verifiedNote(staged.ProvenanceVerified))
 	printUpgraded(w, res)
 	return nil

@@ -24,6 +24,7 @@ node drive.js $C $HUB $PROJECT start $PROJECT/.cloop/features/<slug>   # Start r
 node drive.js $C $HUB $PROJECT tasks $PROJECT/.cloop/features/<slug>   # the Tasks tab's list
 node drive.js $C $HUB $PROJECT pr <slug>
 node drive.js $C $HUB $PROJECT upgrade-dialog <executor-id>   # what Upgrade offers, cancelled
+node drive.js $C $HUB $PROJECT upgrade <executor-id>          # accept what it offers (Task 20376)
 ```
 
 ## The checks
