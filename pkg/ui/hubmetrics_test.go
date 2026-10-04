@@ -427,9 +427,13 @@ func TestMetricsEndToEnd(t *testing.T) {
 	t.Cleanup(origin.Close)
 	beforeEgress := scrape()
 	proxyGet(t, origin.URL, page)
-	afterEgress := scrape()
 	allowed := series("cloop_egress_requests_total", "result", "allowed")
 	down := series("cloop_egress_bytes_total", "direction", "down")
+	// The proxy records the verdict after the body is on the wire, so the
+	// client can have read it first.
+	afterEgress := waitScrape("the egress request to be counted", func(b string) bool {
+		return value(b, allowed)-value(beforeEgress, allowed) >= 1
+	})
 	if got := value(afterEgress, allowed) - value(beforeEgress, allowed); got != 1 {
 		t.Errorf("an egress request moved %s by %v, want 1", allowed, got)
 	}

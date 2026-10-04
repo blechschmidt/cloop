@@ -41,6 +41,22 @@ func scrapeValue(t *testing.T, family string, labels ...string) float64 {
 	return 0
 }
 
+// settled polls read until it has moved by want from base, or five seconds
+// pass, and returns the last movement. The proxy records a request's verdict
+// after it has written the response — the body is on the wire before the
+// audit row and its metric — so a client that has read the body can be ahead
+// of both; the package's audit assertions wait on the row for the same reason.
+func settled(read func() float64, base, want float64) float64 {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d := read() - base
+		if d == want || time.Now().After(deadline) {
+			return d
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestDenialReasonCoversEverySentinel: each refusal maps to the reason the
 // catalog documents, and each error that is not a policy decision maps to none
 // — so a failed DNS lookup can never move the denial rate.
@@ -84,6 +100,11 @@ func TestDenialReasonCoversEverySentinel(t *testing.T) {
 func TestHubMetricsFollowTheProxy(t *testing.T) {
 	const body = "hello, egress"
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read the whole request before answering. An origin that answers
+		// first races net/http's own write of the body: the transport can
+		// return the response before it notices the body failed — on the
+		// quota — and the proxy would rightly record an upload it forwarded.
+		_, _ = io.Copy(io.Discard, r.Body)
 		fmt.Fprint(w, body)
 	}))
 	defer origin.Close()
@@ -116,10 +137,10 @@ func TestHubMetricsFollowTheProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || string(got) != body {
 		t.Fatalf("GET = %d %q", resp.StatusCode, got)
 	}
-	if d := allowed() - allowed0; d != 1 {
+	if d := settled(allowed, allowed0, 1); d != 1 {
 		t.Errorf("an allowed request moved requests{allowed} by %v, want 1", d)
 	}
-	if d := down() - down0; d != float64(len(body)) {
+	if d := settled(down, down0, float64(len(body))); d != float64(len(body)) {
 		t.Errorf("bytes{down} rose by %v, want the %d body bytes", d, len(body))
 	}
 
@@ -133,10 +154,10 @@ func TestHubMetricsFollowTheProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("other port = %d, want 403", resp.StatusCode)
 	}
-	if d := denied() - denied0; d != 1 {
+	if d := settled(denied, denied0, 1); d != 1 {
 		t.Errorf("a refusal moved requests{denied} by %v, want 1", d)
 	}
-	if d := reason(hubmetrics.EgressPortNotAllowed) - port0; d != 1 {
+	if d := settled(func() float64 { return reason(hubmetrics.EgressPortNotAllowed) }, port0, 1); d != 1 {
 		t.Errorf("denials{port_not_allowed} rose by %v, want 1", d)
 	}
 
@@ -146,11 +167,14 @@ func TestHubMetricsFollowTheProxy(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 	}
+	// The client may give up on the upload before the proxy has recorded why,
+	// so the refusal is waited for before anything is read from it.
+	quota := func() float64 { return reason(hubmetrics.EgressQuotaExhausted) }
+	if d := settled(quota, quota0, 1); d != 1 {
+		t.Errorf("denials{quota_exhausted} rose by %v for an over-budget upload, want 1", d)
+	}
 	if d := up() - up0; d <= 0 {
 		t.Errorf("bytes{up} did not move for an upload (%v)", d)
-	}
-	if d := reason(hubmetrics.EgressQuotaExhausted) - quota0; d != 1 {
-		t.Errorf("denials{quota_exhausted} rose by %v for an over-budget upload, want 1", d)
 	}
 
 	// And now the session is spent: the next request is refused on the
@@ -164,10 +188,10 @@ func TestHubMetricsFollowTheProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Fatalf("GET on a spent session = %d, want 407", resp.StatusCode)
 	}
-	if d := denied() - denied0; d != 1 {
+	if d := settled(denied, denied0, 1); d != 1 {
 		t.Errorf("a spent session's request moved requests{denied} by %v, want 1", d)
 	}
-	if d := reason(hubmetrics.EgressQuotaExhausted) - quota0; d != 1 {
+	if d := settled(quota, quota0, 1); d != 1 {
 		t.Errorf("denials{quota_exhausted} rose by %v for a spent session, want 1", d)
 	}
 
