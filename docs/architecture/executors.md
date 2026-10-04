@@ -610,6 +610,46 @@ lists them to prove the leased identity really has it — a `403` there is a
 `fail`, because every `Start` will refuse rather than run a Pod with unfiltered
 egress.
 
+### Reaching the hub's egress proxy: `Spec.EgressProxy`
+
+A run whose project holds an egress grant is issued a session on the proxy the
+hub hosts (Task 20378, [Scoped network egress](../reference/configuration.md#scoped-network-egress)),
+and the session's URL goes into the workload's environment, declared sensitive.
+What the hub cannot do from where it stands is make the address in that URL
+reachable: which bridge a container lands on, and so which gateway the host
+answers at, is the engine's; what a sandbox's firewall lets through is decided
+when the driver compiles it. So the Spec carries a route, and the driver
+finishes it:
+
+```go
+type EgressProxyRoute struct {
+    Host    string // the host the proxy URL names
+    Port    int
+    Gateway bool   // pin Host, inside the sandbox, to its bridge's gateway
+}
+```
+
+It carries no credential, so it is safe to persist and to send to a device.
+
+| Executor | Route the hub chooses | What the driver does with it |
+| --- | --- | --- |
+| host process | the bound address | nothing: the workload is on the host |
+| container (hub's engine), proxy on every interface | `host.containers.internal`, `Gateway: true` | `--add-host host.containers.internal:<gateway>` for the bridge the sandbox joined, ahead of any operator pin; when a ruleset is installed, the gateway and port added to it as an allow, TCP only |
+| container, proxy on one host address | that address | the address and port added to a ruleset |
+| Kubernetes | `advertise_addr` | nothing: the hub has already proven, with `netfilter.Evaluate`, that the Pod's policy allows it |
+| remote agent, virtual executor | `advertise_addr` | a v18 agent's container driver does what the hub's does; a v17 one is given no session behind a firewall |
+
+Two consequences for the container driver. The proxy is opened in the compiled
+`Policy` itself — `provisionNetwork` asks the policy's own `Evaluate` whether the
+sandbox reaches `gateway:port` before anything is installed, and refuses the
+start when an operator deny list covers it, rather than start a sandbox holding
+a session it cannot use. And a ruleset that opens the proxy is a different
+ruleset from one that does not, so the proxy's port joins the confinement key:
+such sandboxes get a bridge and a table of their own (`cloop-sbx-<id>-…-x<port>`),
+and the second apply can never close the first's way out. An `--internal` bridge
+with no ruleset needs no opening — its gateway is on-link — so its sandboxes
+keep sharing one bridge.
+
 ### Seeing what a policy compiles to
 
 `cloop egress firewall` renders the policy without touching a host, in the same

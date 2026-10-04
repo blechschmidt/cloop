@@ -303,12 +303,48 @@ as a separate `egress-scope` finding — separate because burying it inside an
 the single configuration where the two layers describe the same set. With
 [`egress_filter`](../reference/configuration.md#ip-layer-egress-filtering)
 in `internal` mode the sandbox joins a runtime network the runtime installs no
-route off, the egress proxy shares that network, and the proxy is the only
-address on it the sandbox can reach. The host allowlist is then enforced by the
-only reachable destination. It needs no `nft`, no `CAP_NET_ADMIN` and no host
-privileges at all, and `TestBrokeredPolicyIsNarrowerThanAnyGrant` is the
-argument stated as a test: whatever the grant's hosts say, a brokered policy
-opens one endpoint.
+route off, the egress proxy answers at that network's gateway, and the proxy is
+the only address off the sandbox it can reach. The host allowlist is then
+enforced by the only reachable destination. It needs no `nft`, no
+`CAP_NET_ADMIN` and no host privileges at all, and
+`TestBrokeredPolicyIsNarrowerThanAnyGrant` is the argument stated as a test:
+whatever the grant's hosts say, a brokered policy opens one endpoint.
+`TestE2EEgressProxyInAContainer` runs the posture for real: a hub hosting the
+proxy, a container on an `--internal` bridge, a granted origin fetched and an
+ungranted one refused.
+
+**The hub hosts the proxy, and a session is a run's** (Task 20378). Until then
+the broker existed and the hub never bound it, so a grant gave a real run
+nothing. Now `cloop ui` binds `executors.egress.listen_addr` at startup — each
+cluster member its own, because a session lives in the memory of the broker that
+issued it — and every run whose project holds a grant is redeemed one session at
+dispatch. What holds the boundary there:
+
+- **The credential reaches the workload and nothing else.** It travels in the
+  proxy variables of the run's environment, declared sensitive, so the
+  executor scrubs it from the output it captures, the workload scrubs it from
+  its own transcript, artifacts and provider-call log, and the hub leaves it
+  out of the dispatch record it stores. No journal or audit row has a field that
+  could carry it. Building this found the provider-call log storing leased
+  values verbatim — the audit decorator sat outside the scrubber — which is
+  fixed for every lent credential, not only this one.
+- **A session never outlives its run or its grant.** It is renewed only while
+  its run's workload is still running, never past the grant's expiry, and
+  closed when the run ends, is stopped, or the hub stops. The grant is re-read
+  every minute of the run, so a revocation made anywhere — the dashboard, the
+  CLI, another hub member — closes the session, and cuts its open tunnels,
+  within a minute; through the dashboard of the hub holding it, at once.
+- **Opening the proxy in a firewall opens the proxy and nothing beside it.**
+  When a ruleset is installed for the sandbox the driver adds the proxy's
+  address and port, TCP only, and proves with the compiled policy's own
+  `Evaluate` that the sandbox reaches it before installing anything; an
+  operator deny list that covers it wins and the run is refused. A device needs
+  protocol v18 to do the same, and is issued no session behind a firewall
+  until it speaks it. On Kubernetes nothing is added: the Pod's policy must
+  already allow the proxy, and the hub proves that it does before redeeming.
+- **Nothing is granted by a repository.** `capabilities.network` in
+  `.cloop/sandbox.yaml` selects a grant the project already holds; one the hub
+  cannot serve is refused with a `409`, never quietly downgraded.
 
 **One deliberate disagreement with the proxy.** The proxy normalises the IPv6
 encodings that carry an IPv4 address and judges the address inside. A packet

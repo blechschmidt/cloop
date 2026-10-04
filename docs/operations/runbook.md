@@ -129,7 +129,7 @@ What it checks, and what each one catches that nothing else does:
 | `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
 | `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
 | `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it — and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
-| `egress` | whether the broker is on, whether the advertised address is one a sandbox could use, a bounded dial of it, and the trap of an `internal: true` filter with no broker to proxy through |
+| `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); whether the advertised address is one a sandbox could use, a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
 | `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
 | `config` | drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
@@ -1612,7 +1612,9 @@ nobody removed is an account somebody thinks still works.
 materialised survives up to 15 minutes, so stop the affected runs too. Rotate the
 credential at its source. `cloop audit-log list --entity secret --since 7d` shows
 who granted what and when. For egress, `cloop egress revoke` is immediate: live
-sessions are torn down mid-tunnel.
+sessions are torn down mid-tunnel — at once when revoked in the dashboard of the
+hub holding them, and within a minute from the CLI or another hub member, which
+the holding hub learns of by re-reading the grant every minute of a run.
 
 **An executor is compromised.**
 `cloop executor revoke <agent-id>` (cascades to the credential; the agent is told
@@ -1774,6 +1776,20 @@ Work down the layers; each step rules one out.
 If the destination is one the sandbox should reach through the **proxy** rather
 than directly, this is the wrong tool: `cloop egress test <url>` asks the
 layer-7 question, and a host allowlist is only ever enforced there.
+
+**A run's requests through the egress proxy fail.**
+Read the project's Event History for `egress` rows first: every run whose project
+holds a grant gets either a "proxy session … issued … reaches the proxy at X" row
+or a row saying why it got none — the grant revoked or expired, no proxy on the
+hub, no network for the run, or no route from its executor (a loopback-bound
+proxy and a container, an advertised address a device cannot reach, an agent
+older than v18 behind a device firewall). `cloop hub doctor` reports where each
+running hub's proxy listens (`egress.hosted`). The audit trail has the rest:
+`egress.redeem`, one `egress.connect` / `egress.request` per verdict with the
+host, port and reason, `egress.renew`, and `egress.close` with the session's
+byte counts. A harness that honours `HTTPS_PROXY` sends its model API traffic
+through the proxy too, so a grant that omits the model API's host is the usual
+cause of a harness that cannot reach its model.
 
 **"database is locked".**
 WAL and `busy_timeout` are already configured, so this points at a second writer.

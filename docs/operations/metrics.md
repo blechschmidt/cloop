@@ -564,11 +564,13 @@ what each reason means.
 The broker records these itself, from the same typed error each audit row is
 derived from, so a verdict cannot reach one and miss the other. All four are
 per process: a session lives in the broker that issued it, and so do its
-verdicts and its bytes. They come from whichever process runs the broker and
-its forward proxy — `cloop egress test` runs one, in its own process, for the
-length of a test. `cloop ui` does not yet run the proxy itself
-(`executors.egress` configures it but nothing in the hub binds it), so on a hub
-these families carry no samples until it does.
+verdicts and its bytes. On a hub they come from the proxy `cloop ui` hosts when
+[`executors.egress`](../reference/configuration.md#scoped-network-egress) is
+enabled, and move with the runs it issues sessions to; in a hub cluster every
+member hosts its own proxy and reports its own, and the cluster's is the sum.
+`cloop egress test` runs a proxy of its own, in its own process, for the length
+of one test, and its samples stay in that process. A hub with the section
+disabled exports the families with no samples.
 
 `cloop_egress_requests_total` counts the requests through the proxy that
 reached a policy verdict: a CONNECT tunnel opened or refused, a plain-HTTP
@@ -600,8 +602,9 @@ allowed, when a budget is spent or a session's TTL lapses inside an open tunnel
 `direction` on `cloop_egress_bytes_total` is `up` (from the sandbox) or
 `down` (to it), and includes the bytes of a transfer its quota then cut — they
 crossed the control plane all the same. `cloop_egress_sessions_live` counts the
-sessions a process has issued and not yet closed; an expired one is closed
-within the proxy's reap interval.
+sessions a process has issued and not yet closed: on a hub, roughly one per run
+holding a grant, since a session is renewed for as long as its run lives and
+closed when it ends. An expired one is closed within the proxy's reap interval.
 
 `destination_blocked` is the one to alert on: a sustained rate of it is a
 sandbox trying to reach the hub's own network.

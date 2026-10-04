@@ -686,11 +686,94 @@ Turn the proxy on under `executors.egress`:
 executors:
   egress:
     enabled: true
-    listen_addr: "10.88.0.1:8899"                      # reachable from the sandbox
-    advertise_addr: "host.containers.internal:8899"    # what goes into HTTPS_PROXY
-    max_session_minutes: 15
-    default_max_bytes_down: 1g
+    listen_addr: "0.0.0.0:8899"           # every interface: a container reaches it at its bridge's gateway
+    advertise_addr: "203.0.113.5:8899"    # what a Pod or an edge device is pointed at
+    max_session_minutes: 15               # one session period; renewed while the run lives
+    dial_timeout_seconds: 15
+    default_max_bytes_down: 1g            # quota for a grant that names none
 ```
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | `cloop ui` binds `listen_addr` at startup and hosts the proxy. Off by default |
+| `listen_addr` | Bind address. Empty binds an ephemeral loopback port, which only host-process runs can reach. Container sandboxes need `0.0.0.0:<port>` (or the bridge's own address) — the per-session credential is what protects the proxy, on every interface |
+| `advertise_addr` | The address a **Pod** or an **edge device** dials. A bare host takes the bound port. Not used for the hub's own containers, which are pointed at their bridge's gateway |
+| `max_session_minutes` | One session period, 15 by default, at most 240. A session is renewed while its run lives and never past its grant |
+| `dial_timeout_seconds` | Bounds the proxy's connection to an authorised origin |
+| `default_max_bytes_up` / `default_max_bytes_down` | The per-session quota for a grant that names none. A grant's own quota wins |
+
+**What the hub does with it.** `cloop ui` binds the proxy when it starts, before
+anything can dispatch, and logs `egress proxy listening on X, advertised as Y`;
+`cloop hub doctor` reports the same line for every running hub, or the reason one
+could not bind (`egress.hosted`). A proxy that will not bind does not stop the
+hub. Every member of a [hub cluster](../architecture/hub-cluster.md) binds its own
+— a session lives in the memory of the member that issued it, and the member that
+dispatches a run is the one that issues its session — so in a cluster
+`listen_addr` usually comes from each member's
+[per-instance overlay](#two-dashboards-in-one-directory) or uses port 0. `cloop serve`
+hosts no proxy (it dispatches nothing to a sandbox), and neither does a
+`cloop run` on a laptop or an executor agent on a device: a device's sandboxes
+use the proxy of the hub that dispatched to them. `cloop egress test` runs its
+own, for the length of one test. Sessions are never shared or persisted, so a run
+that outlives the process that issued its session — the hub restarted, or
+another cluster member adopted the run after the one that dispatched it died —
+keeps running without it: its proxy requests are refused (`407`) until it ends,
+and its next run is issued a session by whichever hub dispatches it.
+
+**One session per run.** When a run is dispatched — a task run, a helper
+subcommand such as `cloop suggest`, a `cloop task reproduce` — and its project
+holds an active grant aimed at it (`project:`, `executor:`, or `any`; a feature
+uses its parent project's grants, never its own path's), the hub redeems one
+session for it. The session is issued to the run's user and run id, which every
+audit row it produces carries; its quotas are the grant's (or the defaults
+above); it lasts one session period and is **renewed while the run lives**,
+never past the grant's expiry; and it is **closed** when the run ends, when it is
+stopped, and when the hub shuts down. Revoking the grant — in the dashboard, with
+`cloop egress revoke`, or on another hub member — closes the session within a
+minute at most (at once through the dashboard of the hub holding it) and cuts its
+open tunnels. The project's event journal records each of these as an `egress`
+row, and records why a project that holds a grant got no session: the hub has no
+proxy, the grant is spent, the run has no network, or the executor has no route
+to it. That row is never silence and never a credential.
+
+**What the workload receives.** `HTTPS_PROXY`, `HTTP_PROXY`, their lowercase
+forms and `NO_PROXY` (loopback plus the hub's own git proxy and Kubernetes
+monitor, which git and kubectl would otherwise send through the egress proxy),
+with `CLOOP_EGRESS_SESSION`, `CLOOP_EGRESS_ALLOW`, `CLOOP_EGRESS_GRANT_ID` and
+`CLOOP_EGRESS_EXPIRES` (the deadline at issue; renewal moves the real one). The
+proxy variables carry the session's credential, so they are declared sensitive:
+scrubbed from the run's live log, its artifacts, its transcript and the provider
+call log, left out of the dispatch record the hub stores, and absent from every
+journal and audit row. A harness that honours `HTTPS_PROXY` — Claude Code does,
+as do git, curl and Go's and Node's HTTP clients — sends *all* of its HTTP through
+the proxy, its own model API calls included, so a grant for a sandbox with no
+other way out must name the model API's host (`api.anthropic.com`).
+
+**How each executor reaches it.**
+
+| Executor | Address in `HTTPS_PROXY` | Needs |
+| --- | --- | --- |
+| host process | the bound address (`127.0.0.1` for a wildcard bind) | — |
+| container (the hub's engine) | `host.containers.internal`, pinned in the sandbox to the gateway of the bridge it joins — an `--internal` bridge's included | `listen_addr` on every interface, or on that bridge's address. A loopback bind is refused, naming the fix |
+| Kubernetes | `advertise_addr` (a Service) | the Pod's `NetworkPolicy` must already allow it when `egress_filter` or stored rules apply; the hub proves it does before issuing the session |
+| remote agent, virtual executor | `advertise_addr` | an address the device can reach — loopback, link-local, `host.docker.internal`/`host.containers.internal` and cluster-internal names are refused, with a journal row. Behind a device firewall it must be an IP address and the agent must speak protocol v18 |
+
+**Firewalls open the proxy, and nothing beside it.** When the container
+executor installs an nftables ruleset for a sandbox — its own `egress_filter`, a
+[device or project firewall](../guides/firewall.md) — the driver adds the proxy's
+address and port (the bridge gateway, TCP, that port only) to the compiled allow
+set and proves with the policy's own `Evaluate` that the sandbox can reach it
+before it installs anything. An operator deny list that covers it still wins, and
+the run is refused rather than started holding a session it cannot use. An
+`--internal` bridge with no ruleset needs no opening: its gateway is on-link. A v18
+agent does the same on a device.
+
+**`.cloop/sandbox.yaml`.** A spec that names a grant in `capabilities.network`
+asks for that grant's session. If the hub cannot serve it — no proxy, a proxy
+that failed to bind, or no route from the bound executor — the run is refused
+with a `409` (`sandbox_egress_unavailable`) and the remedy, rather than started
+without the egress its author asked for. A spec that names no grant takes the
+network away, so its runs get no session.
 
 A grant carries hosts, CIDRs, ports, methods, byte quotas, and a TTL, targeted
 with the same `--to` syntax as `cloop secret grant`. Redeeming one mints a
@@ -1605,6 +1688,7 @@ ui:
 | `executors.min_agent_build`, `executors.limits` | The oldest agent build the hub will place work on, and the fleet resource ceiling. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can lower either one. |
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
+| `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
@@ -1615,8 +1699,8 @@ ui:
 | `github.token` | The token the hub hands a pull request that runs on its own host. |
 
 Settings read at startup (the drivers, the git proxy, the Kubernetes monitor,
-the three executor ratchets) take effect at the next restart, whichever file
-they are in. The rest are read on each use.
+the egress proxy, the three executor ratchets) take effect at the next restart,
+whichever file they are in. The rest are read on each use.
 
 `cloop hub doctor --port N` diagnoses the hub on port `N` with its overlay
 merged. Without `--port` it reads `config.yaml` alone and names any overlay it

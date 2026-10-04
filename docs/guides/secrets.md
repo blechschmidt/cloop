@@ -1371,8 +1371,12 @@ the start-up window — is
 
 ## Egress leases
 
-A sandbox runs with `--network=none`. `cloop egress` is how it gets out, and
-`egress_proxy` is the fourth grantable resource type.
+A sandbox runs with `--network=none`, or on an `--internal` bridge with no route
+off the host. `cloop egress` is how it gets out: the hub hosts an authenticated
+forward proxy (`executors.egress`, see
+[the configuration reference](../reference/configuration.md#scoped-network-egress)),
+and every run whose project holds a grant is issued a session on it. `egress_proxy`
+is the fourth grantable resource type.
 
 ```console
 $ cloop egress grant \
@@ -1420,10 +1424,34 @@ tunnels, not just to new ones.
 What it does not enforce: anything inside a CONNECT tunnel. cloop holds no key
 for the origin, so it accounts bytes, not content.
 
-The sandbox receives `HTTPS_PROXY`/`HTTP_PROXY` (and the lowercase spellings)
-pointing at a session-scoped endpoint, plus `CLOOP_EGRESS_ALLOW` and an
-`egress-allow.txt` file. The session token is single-use, and only its SHA-256 is
-stored — a dump of the control plane does not yield a usable proxy credential.
+**What a run gets.** At dispatch the hub redeems one proxy session for the run,
+under the newest active grant aimed at its project (a feature uses its parent
+project's), or the grant its `.cloop/sandbox.yaml` names in
+`capabilities.network`. The sandbox receives `HTTPS_PROXY`/`HTTP_PROXY` (and the
+lowercase spellings) carrying the session's credential, `NO_PROXY` (loopback and
+the hub's own git proxy and Kubernetes monitor), and `CLOOP_EGRESS_SESSION`,
+`CLOOP_EGRESS_ALLOW` and `CLOOP_EGRESS_GRANT_ID`. The session token is
+single-use, only its SHA-256 is stored — a dump of the control plane does not
+yield a usable proxy credential — and the variables carrying it are declared
+sensitive, so they are scrubbed from the run's output and never written into the
+journal, the audit trail or the dispatch record.
+
+**How long it lasts.** One session period (`--session-ttl`, capped by
+`executors.egress.max_session_minutes`), renewed while the run lives — never
+past the grant's own expiry — and closed when the run ends, is stopped, or the
+hub shuts down. Each renewal is an `egress.renew` audit row.
+
+**When it gets none.** The project's event journal says why in an `egress` row:
+the grant is revoked or expired; the hub hosts no proxy, or its proxy did not
+bind; the run has no network to reach it over; or the executor the project is
+bound to has no route to it (a container sandbox and a loopback-bound proxy, a
+device and an advertised address it cannot reach). A `.cloop/sandbox.yaml` that
+*names* the grant is refused instead, with a `409` and the remedy.
+
+**Harness traffic counts.** A harness that honours `HTTPS_PROXY` sends all of its
+HTTP through the proxy, its own model API calls included. In a sandbox whose only
+way out is the proxy, name the model API's host in the grant
+(`--hosts api.anthropic.com`), or the harness cannot reach its model.
 
 ### Testing a grant without starting a sandbox
 
@@ -1481,7 +1509,11 @@ The two differ, and the difference matters during an incident:
   already materialised is taken back by revoking the *lease* (below), not the
   grant.
 - **Egress grants** are cut immediately: every live session under the grant is
-  closed at the proxy, mid-tunnel.
+  closed at the proxy, mid-tunnel. Revoked in the dashboard of the hub holding
+  the session, it closes at once; revoked with the CLI or on another hub member,
+  the hub holding it notices within a minute — it re-reads the grant every minute
+  of the run. The project's journal records the close and how many open tunnels
+  it cut.
 
 Revoking an already-revoked grant succeeds. Every grant, revoke and lease
 decision is audited with actor, subject, constraints and reason — and never with
