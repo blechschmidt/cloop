@@ -376,7 +376,21 @@ func githubStandIn(t *testing.T, commits map[string]string, runs []workflowRun) 
 			if _, ok := commits[r.URL.Query().Get("head_sha")]; !ok {
 				t.Errorf("runs were asked for an unknown commit: %s", r.URL.RawQuery)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
+			var ci []workflowRun
+			for _, run := range runs {
+				if strings.Contains(run.Path, "ci.yml") {
+					ci = append(ci, run)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": ci})
+		case strings.HasSuffix(r.URL.Path, "/actions/workflows/edge.yml/runs"):
+			var edge []workflowRun
+			for _, run := range runs {
+				if strings.Contains(run.Path, "edge.yml") {
+					edge = append(edge, run)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": edge})
 		default:
 			http.NotFound(w, r)
 		}
@@ -394,10 +408,16 @@ func TestResolveEdgeBuildSaysWhyABuildIsNotOffered(t *testing.T) {
 		return workflowRun{Path: ".github/workflows/ci.yml", Event: "push", HeadBranch: "main",
 			Status: status, Conclusion: conclusion, HTMLURL: "https://github.com/x/ci"}
 	}
+	// Filed under whatever main's head was, and found by the title naming
+	// the commit it built; another commit's run is listed first and ignored.
 	edge := func(status, conclusion string) workflowRun {
 		return workflowRun{Path: ".github/workflows/edge.yml", Event: "workflow_run", HeadBranch: "main",
-			Status: status, Conclusion: conclusion, HTMLURL: "https://github.com/x/edge"}
+			Status: status, Conclusion: conclusion, HTMLURL: "https://github.com/x/edge",
+			DisplayTitle: "Edge build of " + commitA}
 	}
+	otherEdge := workflowRun{Path: ".github/workflows/edge.yml", Event: "workflow_run", HeadBranch: "main",
+		Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/x/other",
+		DisplayTitle: "Edge build of " + commitB}
 	known := map[string]string{commitA: ""}
 	for _, c := range []struct {
 		name    string
@@ -414,8 +434,8 @@ func TestResolveEdgeBuildSaysWhyABuildIsNotOffered(t *testing.T) {
 		{"no CI run", "dev+ga0f3870", false, nil, EdgeNoCI, "no CI run on main"},
 		{"CI running", "dev+ga0f3870", false, []workflowRun{ci("in_progress", "")}, EdgeCIRunning, "still running"},
 		{"CI failed", "dev+ga0f3870", false, []workflowRun{ci("completed", "failure")}, EdgeCIFailed, "CI failed"},
-		{"publishing", "dev+ga0f3870", false, []workflowRun{edge("in_progress", ""), ci("completed", "success")}, EdgePublishing, "has not published it yet"},
-		{"edge not started", "dev+ga0f3870", false, []workflowRun{ci("completed", "success")}, EdgePublishing, "has not published it yet"},
+		{"publishing", "dev+ga0f3870", false, []workflowRun{otherEdge, edge("in_progress", ""), ci("completed", "success")}, EdgePublishing, "has not published it yet"},
+		{"edge not started", "dev+ga0f3870", false, []workflowRun{otherEdge, ci("completed", "success")}, EdgePublishing, "has not published it yet"},
 		{"publish failed", "dev+ga0f3870", false, []workflowRun{edge("completed", "failure"), ci("completed", "success")}, EdgePublishFailed, "failed"},
 		{"pruned", "dev+ga0f3870", false, []workflowRun{edge("completed", "success"), ci("completed", "success")}, EdgePruned, "pruned"},
 	} {

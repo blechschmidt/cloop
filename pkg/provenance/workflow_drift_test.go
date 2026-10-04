@@ -184,6 +184,8 @@ func TestEdgeWorkflowOnlyEverSignsMain(t *testing.T) {
 		{"releases/latest", "the workflow checks that latest is still a release"},
 		{"scripts/edge-prune.py", "builds beyond the newest commits are pruned"},
 		{"scripts/build-edge.sh", "the asset names come from the script the Go drift test reads"},
+		{"run-name: Edge build of ${{ github.event.workflow_run.head_sha }}",
+			"the hub finds the run that built its commit by this title (upgrade.workflowRuns)"},
 	} {
 		if !strings.Contains(wf, want.snippet) {
 			t.Errorf("edge.yml no longer contains %q: %s", want.snippet, want.why)

@@ -40,6 +40,13 @@ on:
     types: [completed]
     branches: [main]
 
+# A workflow_run run is filed under main's head when it starts, not under the
+# commit whose CI run triggered it — and main may have moved on by then. The
+# commit it builds is therefore named in its title, which is how the hub finds
+# the run that built (or failed to build) its own commit
+# (upgrade.ResolveEdgeBuild matches on it).
+run-name: Edge build of ${{ github.event.workflow_run.head_sha }}
+
 # contents: write creates the prerelease and uploads and prunes its assets.
 # id-token: write is keyless signing: not a key, but the right to ask GitHub
 # for an OIDC token saying which workflow, in which repository, at which ref is

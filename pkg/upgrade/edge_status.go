@@ -268,43 +268,71 @@ func resolveEdgeBuild(ctx context.Context, base, version, commit string) EdgeBui
 
 // workflowRun is the subset of a GitHub Actions run this file reads.
 type workflowRun struct {
-	Path       string `json:"path"`
-	Event      string `json:"event"`
-	HeadBranch string `json:"head_branch"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	HTMLURL    string `json:"html_url"`
-	RunNumber  int    `json:"run_number"`
+	Path         string `json:"path"`
+	Event        string `json:"event"`
+	HeadBranch   string `json:"head_branch"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	HTMLURL      string `json:"html_url"`
+	RunNumber    int    `json:"run_number"`
+	DisplayTitle string `json:"display_title"`
 }
 
 // workflowRuns returns the newest CI run on main for commit — a push to main —
-// and the newest edge workflow run for it. Either is nil when there is none.
+// and the newest edge workflow run that built it. Either is nil when there is
+// none.
+//
+// They are found differently. A CI run is filed under the commit it tested. An
+// edge run is a workflow_run run, which GitHub files under main's head when it
+// starts — a later commit, if main moved meanwhile — so it is found by its
+// title, which edge.yml sets to "Edge build of <commit>" (its run-name).
 func workflowRuns(ctx context.Context, commit string) (ci, edge *workflowRun, err error) {
 	q := url.Values{"head_sha": {commit}, "per_page": {"50"}}
-	resp, err := apiGet(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs?%s", repoOwner, repoName, q.Encode()), "")
+	runs, err := listRuns(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs?%s", repoOwner, repoName, q.Encode()), commit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("asking GitHub for the workflow runs of %s: %w", commit, err)
+		return nil, nil, err
+	}
+	// Newest first, as the API lists them; a re-run keeps its run number and
+	// is listed once.
+	for i := range runs {
+		r := &runs[i]
+		if strings.Contains(r.Path, "workflows/ci.yml") && r.Event == "push" && r.HeadBranch == "main" {
+			ci = r
+			break
+		}
+	}
+	if ci == nil || ci.Status != "completed" || ci.Conclusion != "success" {
+		return ci, nil, nil // the edge run is only worth a request once CI passed
+	}
+	runs, err = listRuns(ctx, fmt.Sprintf("/repos/%s/%s/actions/workflows/edge.yml/runs?per_page=50",
+		repoOwner, repoName), commit)
+	if err != nil {
+		return ci, nil, err
+	}
+	for i := range runs {
+		if strings.Contains(runs[i].DisplayTitle, commit) {
+			edge = &runs[i]
+			break
+		}
+	}
+	return ci, edge, nil
+}
+
+// listRuns fetches one page of workflow runs.
+func listRuns(ctx context.Context, path, commit string) ([]workflowRun, error) {
+	resp, err := apiGet(ctx, path, "")
+	if err != nil {
+		return nil, fmt.Errorf("asking GitHub for the workflow runs of %s: %w", commit, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("asking GitHub for the workflow runs of %s: HTTP %d", commit, resp.StatusCode)
+		return nil, fmt.Errorf("asking GitHub for the workflow runs of %s: HTTP %d", commit, resp.StatusCode)
 	}
 	var page struct {
 		Runs []workflowRun `json:"workflow_runs"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&page); err != nil {
-		return nil, nil, fmt.Errorf("decoding the workflow runs of %s: %w", commit, err)
+		return nil, fmt.Errorf("decoding the workflow runs of %s: %w", commit, err)
 	}
-	// Newest first, as the API lists them; a re-run keeps its run number and
-	// is listed once.
-	for i := range page.Runs {
-		r := &page.Runs[i]
-		switch {
-		case ci == nil && strings.Contains(r.Path, "workflows/ci.yml") && r.Event == "push" && r.HeadBranch == "main":
-			ci = r
-		case edge == nil && strings.Contains(r.Path, "workflows/edge.yml"):
-			edge = r
-		}
-	}
-	return ci, edge, nil
+	return page.Runs, nil
 }
