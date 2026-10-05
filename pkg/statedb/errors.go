@@ -167,6 +167,11 @@ var (
 	// (Task 20382): it was released, swept, or recorded by a binary that
 	// predates the table.
 	ErrSecretLeaseNotFound = errors.New("statedb: secret lease not found")
+
+	// ErrProxySessionNotFound indicates no proxy_sessions row names the
+	// session (Task 20383): it was retired, recorded by a binary that predates
+	// the table, or never recorded — a session nothing could restore.
+	ErrProxySessionNotFound = errors.New("statedb: proxy session not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
