@@ -691,6 +691,13 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		}
 		ev.SecretName, ev.Kind = s.Name, s.Kind
 
+		// After the secret is resolved, so the denial row names the credential
+		// the run went without, and before anything opens its payload.
+		if why, ok := r.Withhold[g.ID]; ok {
+			_ = b.denyf(ev, ErrGrantWithheld, "%s", why)
+			continue
+		}
+
 		mat, merr := b.materialFor(ctx, s, g, r, actor, &rec)
 		if merr != nil {
 			_ = b.denyErr(ev, merr)
@@ -1253,5 +1260,6 @@ func errIsDenial(err error) bool {
 		errors.Is(err, ErrNamespaceDenied) ||
 		errors.Is(err, ErrGrantExpired) ||
 		errors.Is(err, ErrGrantRevoked) ||
+		errors.Is(err, ErrGrantWithheld) ||
 		errors.Is(err, ErrMinimizedEmpty)
 }

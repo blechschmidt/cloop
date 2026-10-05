@@ -566,6 +566,16 @@ type Requester struct {
 	// caller that set it and then materialised the lease into a sandbox would
 	// be delivering a push the grant restricted, unrestricted.
 	GitHubProxied bool
+	// Withhold names grants this lease must not deliver even though their
+	// subject matches, each with the reason its denial row records (Task
+	// 20379). The hub fills it for a sandboxed run whose Claude credential
+	// follows the person who started it: another user's personal Claude token,
+	// granted to a project they share, is not spent on this run.
+	//
+	// It only ever narrows. Like RunID it plays no part in Subject.Matches, so
+	// no grant can be reached through it, and Renew re-evaluates under the same
+	// map, so a withheld grant stays withheld for the life of the lease.
+	Withhold map[string]string
 }
 
 // Wildcard reports whether this subject selects an open-ended set of

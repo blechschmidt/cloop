@@ -35,6 +35,10 @@ var (
 	ErrGrantExpired = errors.New("secretbroker: grant expired")
 	// ErrGrantRevoked: the grant was revoked.
 	ErrGrantRevoked = errors.New("secretbroker: grant revoked")
+	// ErrGrantWithheld: the grant matched, and the requester asked for it not
+	// to be delivered (Requester.Withhold). A denial like the two above, so
+	// the lease's trail says which credential a run did not get, and why.
+	ErrGrantWithheld = errors.New("secretbroker: grant withheld from this lease")
 	// ErrLeaseExpired: the lease's TTL elapsed; Renew or re-Lease.
 	ErrLeaseExpired = errors.New("secretbroker: lease expired")
 

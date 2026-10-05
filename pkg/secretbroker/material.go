@@ -100,12 +100,7 @@ func (b *Broker) envMaterial(mat Material, plaintext []byte) (Material, error) {
 	all := jsonUnmarshalEnv(plaintext, mat.SecretName)
 	var delivered []string
 	for k, v := range all {
-		if !mat.Constraints.AllowsEnvKey(k) {
-			continue
-		}
-		if err := validateEnvKey(k); err != nil {
-			// A key that cannot be encoded as K=V would corrupt the whole
-			// environment block, so drop it rather than the run.
+		if !deliverableEnvKey(mat.Constraints, k) {
 			continue
 		}
 		mat.Env[k] = v
