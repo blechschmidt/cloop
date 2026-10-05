@@ -60,8 +60,8 @@ func (c historyCursor) MarshalJSON() ([]byte, error) {
 
 // historyPlace is a statedb.HistoryPlace on the wire: [julian day, 1 for an
 // event or 0 for a step, step number or event id]. The day is the float
-// SQLite computed, written in the shortest form that reads back as the same
-// number — in Go and in JavaScript alike — so a page boundary sent back
+// SQLite computed, written as the shortest decimal that reads back as the same
+// number — the form JavaScript prints it in too — so a page boundary sent back
 // compares equal to the row it came from.
 type historyPlace statedb.HistoryPlace
 
@@ -70,7 +70,7 @@ func (p historyPlace) MarshalJSON() ([]byte, error) {
 	if p.Event {
 		kind = "1"
 	}
-	return []byte("[" + strconv.FormatFloat(p.Day, 'g', -1, 64) + "," + kind + "," + strconv.FormatInt(p.Key, 10) + "]"), nil
+	return []byte("[" + strconv.FormatFloat(p.Day, 'f', -1, 64) + "," + kind + "," + strconv.FormatInt(p.Key, 10) + "]"), nil
 }
 
 // parseHistoryCursor reads after= as the dashboard sends it: "step,event".

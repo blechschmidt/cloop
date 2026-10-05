@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,13 +127,32 @@ func entryNames(es []historyEntry) []string {
 }
 
 // place is a page's bottom as the dashboard sends it back: the array joined
-// with commas, which is what JavaScript's Array#toString produces.
+// with commas, which is what JavaScript's Array#toString produces, each number
+// in the shortest decimal that reads back the same.
 func place(b []float64) string {
 	parts := make([]string, len(b))
 	for i, v := range b {
-		parts[i] = strings.TrimSuffix(fmt.Sprintf("%v", v), ".0")
+		parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
 	}
 	return strings.Join(parts, ",")
+}
+
+// TestEventHistory_PlacesAreDecimal: a page's bottom carries the julian day as
+// a plain decimal, the form JavaScript reads and prints, and it survives the
+// trip back exactly.
+func TestEventHistory_PlacesAreDecimal(t *testing.T) {
+	raw, err := json.Marshal(historyPlace{Day: 2461318.9583449075, Event: true, Key: 7})
+	if err != nil || string(raw) != "[2461318.9583449075,1,7]" {
+		t.Fatalf("place on the wire = %s (%v), want [2461318.9583449075,1,7]", raw, err)
+	}
+	var back []float64
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	p, err := parseHistoryPlace(place(back))
+	if err != nil || p != (statedb.HistoryPlace{Day: 2461318.9583449075, Event: true, Key: 7}) {
+		t.Fatalf("the place read back as %+v (%v)", p, err)
+	}
 }
 
 // TestEventHistory_PagesTheJournal walks a project's journal through the HTTP
