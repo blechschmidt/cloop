@@ -130,7 +130,7 @@ What it checks, and what each one catches that nothing else does:
 | `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`) |
 | `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it — and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
 | `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); whether the advertised address is one a sandbox could use, a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
-| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
+| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)) |
 | `config` | drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
 
@@ -461,6 +461,68 @@ the column holds, then drop it (`ALTER TABLE plan_tasks DROP COLUMN <column>`)
 or rebuild it to match, and start cloop again.
 
 ---
+
+## Disk space low
+
+A run will not start work on a disk too full to record it (Task 20381). Before
+every task attempt and every evolve round it measures the volume holding the
+project's `.cloop` and the working tree's volume; below
+`orchestrator.min_free_disk_mb` (default 1024 MB) nothing starts and the run
+pauses with reason `disk_low`.
+
+**What you see.** The project reads *Paused: volume / has 812.3 MB free, below
+the 1.00 GB floor* — with a **Stop** button, because the run is still up: it
+measures again every minute and carries on by itself once every volume is back
+above the floor plus a tenth (1.1 GB with the default). The event history has a
+`session_paused` row with `pause_code: disk_low`, the volume, the free bytes,
+the floor and what was about to start; a `session_started` row "Run resumed:
+disk space recovered" follows when it carries on. In parallel mode the round in
+flight finishes and records its outcomes first; no new task starts. Admins also
+see a banner across the dashboard while the **hub's own** state volume is below
+the floor, `cloop hub doctor` fails `storage.free_space`, and
+`cloop_hub_disk_free_bytes{volume}` shows the trend — alert on it at twice the
+floor, before runs start pausing.
+
+**What to do.** Free space on the volume the message names; the run notices
+within a minute. The usual places, largest first on a busy hub:
+
+```console
+$ df -h /                                   # what the run measured
+$ cloop hub retention                       # dry run: what the janitor would reclaim
+$ cloop hub retention --apply               # ...and reclaim it, including VACUUM
+$ cloop compact --dry-run                   # per project: old artifacts, snapshots, checkpoints
+$ go clean -cache                           # on a build host: often gigabytes
+$ du -sh /tmp/* 2>/dev/null | sort -h | tail # test runs leave scratch here
+```
+
+Check what a file in `/tmp` belongs to before deleting it (`lsof +D`): another
+run's work may be in it. To end the wait instead, press Stop — the pause is
+recorded as stopped while waiting for disk space, and the next Run checks again.
+
+**The reserve.** Each project keeps `.cloop/reserve`, 16 MiB of preallocated
+blocks, put in place whenever the check passes. If the disk fills between the
+check and a task's verdict or outcome write anyway — a task's own build is the
+usual cause — the run deletes the reserve, writes again on the space that frees,
+and then pauses `disk_low` before starting anything else. Its pause detail
+then begins "task #N's verdict only reached the disk by releasing the 16.0 MB
+free-space reserve". The reserve comes back by itself at the next check that
+has room. Only if the second write fails too does the run stop with
+`state_not_persisted` — free space, then Run; the next run recovers the tasks
+that one left in progress. The reserve is not data: snapshots, `cloop compact`,
+the janitor and the disk-usage reports leave it out, and deleting it by hand is
+harmless.
+
+**Tuning.** Set the floor in **Settings → Disk & Retention** (admins), with
+`cloop config set orchestrator.min_free_disk_mb <MB>`, or in a project's
+`config.yaml`. `0` turns the check and the reserve off — the hub doctor then
+warns, because a full disk goes back to corrupting outcomes. A run of the hub's
+own directory gets the Settings value even when it lives in the per-instance
+overlay; every other project's run reads its own `config.yaml`. See
+[Free-space floor](../reference/configuration.md#free-space-floor).
+
+A run killed while it waited (an OOM kill, a host reboot) leaves the waiting
+pause behind; the hub settles it as *previous run ended unexpectedly* when it
+notices, exactly as for a stale "running".
 
 ## Audit chain verification
 

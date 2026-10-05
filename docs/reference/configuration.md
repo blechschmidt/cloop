@@ -1418,6 +1418,56 @@ breakdown and the reclaimable-page estimate; `cloop hub doctor` additionally
 reports per-table row counts and names any table the active policy leaves
 unbounded.
 
+### Free-space floor
+
+`orchestrator.min_free_disk_mb` is how much free space a run wants before it
+starts work (Task 20381). A full disk used to announce itself as a failed write,
+and the write that fails first is often the one recording a task's outcome: the
+run stopped with `state_not_persisted`, sometimes with the verdict sidecar lost
+in the same moment, and stale-task recovery then fell back to the agent's own
+`TASK_DONE`.
+
+```yaml
+orchestrator:
+  min_free_disk_mb: 1024   # the default; 0 turns the check and the reserve off
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `orchestrator.min_free_disk_mb` | `1024` | `0`, or `64`–`1048576` | Before every task attempt and every evolve round, the run measures the volume holding the project's `.cloop` and the working tree's volume (one, unless `.cloop` is a symlink onto another disk). Below the floor nothing starts: the run pauses with reason `disk_low` and checks again every minute, carrying on by itself once every volume is back above the floor plus a tenth. `0` turns the check off. |
+
+What a `disk_low` pause looks like:
+
+- **The run stays up.** Unlike every other pause, the process waits; Stop ends
+  it. The dashboard shows *Paused: volume / has 812.3 MB free, below the
+  1.00 GB floor* with a Stop button, and the event history has a
+  `session_paused` row naming the volume, the free space, the floor and what
+  was about to start, then a `session_started` row ("Run resumed: disk space
+  recovered") when it carries on. In parallel mode the round in flight
+  finishes and records its outcomes; no new task starts.
+- **A reserve stands behind it.** Each project keeps `.cloop/reserve`, 16 MiB
+  of preallocated blocks, created whenever the check passes. If a task's
+  verdict or outcome write still fails for want of space — its own build
+  filled the disk between the check and the write — the run deletes the
+  reserve and writes again, then pauses `disk_low` before starting anything
+  else. Only if that retry fails too does it stop with `state_not_persisted`.
+  Snapshots, `cloop compact`, the janitor and the disk-usage reports all leave
+  the reserve out.
+- **A run on another machine measures its own disk.** A container or device
+  run applies the project's own setting against the volume it writes to.
+
+The hub holds its own state volume to the same number: `cloop hub doctor`
+reports `storage.free_space` (a warning below twice the floor, a failure
+below it), admins see a banner across the dashboard while it is below, and
+every hub process exports `cloop_hub_disk_free_bytes{volume}`. The floor is
+editable in **Settings → Disk & Retention** (admins), which writes it where the
+hub reads it — its per-instance overlay when it has one, `config.yaml`
+otherwise. A run reads its project's `config.yaml`, so for runs of the hub's own
+directory the hub passes the Settings value down as `CLOOP_MIN_FREE_DISK_MB`.
+`cloop config set orchestrator.min_free_disk_mb <MB>` and `cloop config
+validate` apply the same bounds. A value outside the range in a file falls back
+to the default, not to "off".
+
 ### Interactive access: single sign-on and sessions
 
 `ui.oidc.*` configures OpenID Connect for the dashboard. The full setup is in
