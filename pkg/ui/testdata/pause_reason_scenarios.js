@@ -163,6 +163,55 @@ const scenarios = {
     return {badge: el ? (el.innerHTML || '') : ''};
   },
 
+  // A run waiting for disk space (Task 20381) is paused and alive: the badge
+  // says why, and the button is Stop — Start would be refused as a second
+  // harness, and the operator's move is to end the wait.
+  async disk_low_waiting() {
+    const st = clone(PROJECT);
+    st.pause_reason = {code: 'disk_low', detail: 'volume / has 812.3 MB free, below the 1.00 GB floor'};
+    await boot(st);
+    const badge = document.getElementById('statusBadge');
+    const runBar = document.getElementById('tasksRunStatus');
+    return {
+      badge: badge ? (badge.innerHTML || '') : '',
+      html: JSON.stringify({
+        stop: document.getElementById('ctrlStop').style.display,
+        run: document.getElementById('ctrlRun').style.display,
+        bar: runBar ? (runBar.innerHTML || '') : '',
+      }),
+    };
+  },
+
+  // The same pause with no detail of its own still reads as prose.
+  async disk_low_bare() {
+    const st = clone(PROJECT);
+    st.pause_reason = {code: 'disk_low'};
+    await boot(st);
+    const el = document.getElementById('statusBadge');
+    return {badge: el ? (el.innerHTML || '') : ''};
+  },
+
+  // The admin banner (Task 20381): /api/me carries hub_disk to admins while
+  // the hub's state volume is below its floor, and the hub's 'hub_disk' nudge
+  // is what makes an open page re-read it — both when the volume falls below
+  // the floor and when it recovers.
+  async hub_disk_banner() {
+    const me = {oidc_enabled: false, authenticated: true, permissions: null};
+    const h = await boot(PROJECT, null, {'/api/me': me});
+    const ws = h.sockets[h.sockets.length - 1];
+    const banner = document.getElementById('hubDiskBanner');
+    h.routes['/api/me'] = Object.assign({}, me, {
+      hub_disk: {volume: '/', free_bytes: 300 * 1048576, floor_bytes: 1024 * 1048576, low: true},
+    });
+    ws.deliver('hub_disk', {});
+    await globalThis.__settle(5);
+    const shown = {display: banner.style.display, text: document.getElementById('hubDiskText').textContent};
+    h.routes['/api/me'] = me;
+    ws.deliver('hub_disk', {});
+    await globalThis.__settle(5);
+    return {html: JSON.stringify({shown, after: banner.style.display})};
+  },
+
   // A running project must carry no pause text at all.
   async running_project() {
     const st = clone(PROJECT);

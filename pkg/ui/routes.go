@@ -992,6 +992,10 @@ func (s *Server) routeTable() []routeSpec {
 		// unable to look. See telemetry_config_api.go.
 		{Pattern: "GET /api/config/telemetry", Handler: s.handleTelemetrySettings, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "PUT /api/config/telemetry", Handler: s.handleTelemetrySettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		// The hub's free-space floor (Task 20381): admin only, like every
+		// other hub-scope setting the panel writes.
+		{Pattern: "GET /api/config/disk", Handler: s.handleDiskFloorSettings, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/disk", Handler: s.handleDiskFloorSave, Perm: userMgmt, Scope: scopeGlobal},
 
 		// ── Secrets, grants, and leases ──────────────────────────────
 		// Global, and never below maintainer. Reads are gated on

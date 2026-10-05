@@ -26,6 +26,7 @@ package ui
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,7 +171,44 @@ func registerHubCollectors() {
 			Families: []*hubmetrics.Metric{hubmetrics.KEKRotationRecords, hubmetrics.KEKRotationActive},
 			Collect:  withScrape(collectKEKRotation),
 		},
+		hubmetrics.CollectorSpec{
+			Name:     "disk_free",
+			Families: []*hubmetrics.Metric{hubmetrics.DiskFreeBytes},
+			Collect:  withScrape(collectDiskFree),
+		},
 	)
+}
+
+// collectDiskFree publishes the free space on each volume this process writes
+// to (Task 20381): its control-plane .cloop first, then each registered
+// project's .cloop and working tree, deduplicated by device. Every member
+// reports its own, leader or not — what is measured is this process's disk,
+// not a row in the shared database.
+//
+// Paths are probed one at a time so a project directory this process cannot
+// read costs its own volume and not the scrape; a project with no local tree
+// (one that only runs on a device) resolves to the nearest existing parent,
+// which is a volume this host does have.
+func collectDiskFree(sc *metricsScrape) {
+	s := sc.srv
+	paths := []string{filepath.Join(s.WorkDir, ".cloop")}
+	for _, e := range s.allProjectEntries() {
+		if e.Path != "" {
+			paths = append(paths, filepath.Join(e.Path, ".cloop"), e.Path)
+		}
+	}
+	seen := map[uint64]bool{}
+	for _, p := range paths {
+		if len(seen) >= hubmetrics.DiskVolumesMax {
+			return
+		}
+		vols, err := s.probeVolumes(p)
+		if err != nil || len(vols) == 0 || seen[vols[0].Device] {
+			continue
+		}
+		seen[vols[0].Device] = true
+		hubmetrics.DiskFreeBytes.Set(float64(vols[0].FreeBytes), vols[0].Mount)
+	}
 }
 
 // ── collectors ──────────────────────────────────────────────────────────────

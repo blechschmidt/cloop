@@ -322,6 +322,11 @@ function handleRealtimeMsg(type, data, scope) {
       // /api/suggest/status poll loop.
       try { applySuggestStatus(data); } catch(_) {}
       break;
+    case 'hub_disk':
+      // The hub's state volume crossed its free-space floor (Task 20381).
+      // /api/me decides who sees the banner, so the push only says re-read.
+      refreshPermissions();
+      break;
     case 'provider_call':
       // pkg/provideraudit pushes one envelope per Provider.Complete with the
       // summary fields (no prompt/response — those come from the detail

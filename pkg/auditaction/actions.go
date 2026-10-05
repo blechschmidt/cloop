@@ -381,6 +381,12 @@ const (
 	// being switched on or off, or narrowed to particular front ends.
 	ActionTelemetryConfigUpdated Action = "telemetry.config.updated"
 
+	// ── disk ───────────────────────────────────────────────────────────────
+
+	// ActionDiskFloorUpdated records the hub's free-space floor
+	// (orchestrator.min_free_disk_mb, Task 20381) being changed from Settings.
+	ActionDiskFloorUpdated Action = "disk.floor.updated"
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 
 	// ActionSTTCredentialSet records the speech-to-text key being configured.

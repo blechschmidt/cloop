@@ -22,6 +22,7 @@ package configvalidate
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -54,7 +55,7 @@ type taskRow struct {
 // checkStateDB validates the task statuses and the run status stored in the
 // project database at dbPath, and with fix repairs what it safely can.
 func checkStateDB(workdir, dbPath string, fix bool, rep *Report, add func(Finding)) error {
-	tasks, runStatus, err := readStateForValidation(dbPath)
+	tasks, runStatus, pause, err := readStateForValidation(dbPath)
 	if err != nil {
 		return err
 	}
@@ -68,7 +69,9 @@ func checkStateDB(workdir, dbPath string, fix bool, rep *Report, add func(Findin
 			inProgress = append(inProgress, t)
 		}
 	}
-	claimsRun := runStatus == "running" || runStatus == "evolving"
+	// A disk_low pause is a live run's claim too (Task 20381): its process
+	// waits for space and resumes by itself.
+	claimsRun := state.ClaimsLiveRun(runStatus, pause)
 	if len(invalid) == 0 && len(inProgress) == 0 && !claimsRun {
 		return nil
 	}
@@ -184,7 +187,7 @@ func repairDeadRun(workdir string, rep *Report, add func(Finding)) {
 	outcomes := taskrecover.Reconcile(workdir, st.Plan)
 
 	claimed := st.Status
-	stale := claimed == "running" || claimed == "evolving"
+	stale := st.ClaimsLiveRun()
 	if stale {
 		st.SetPaused(pausereason.New(pausereason.CodeStale, staleRunDetail))
 	}
@@ -244,37 +247,47 @@ func repairDeadRun(workdir string, rep *Report, add func(Finding)) {
 // readStateForValidation reads every task's status and the project's run status
 // through a read-only handle, so validating cannot change the database. A
 // database without a plan_tasks table yields no tasks and no error.
-func readStateForValidation(dbPath string) (tasks []taskRow, runStatus string, err error) {
+func readStateForValidation(dbPath string) (tasks []taskRow, runStatus string, pause *pausereason.Reason, err error) {
 	conn, err := statedb.OpenConn(dbPath, statedb.ReadOnly)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	defer conn.Close()
 
 	rows, err := conn.Query(`SELECT id, title, status FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
-			return nil, "", nil
+			return nil, "", nil, nil
 		}
-		return nil, "", fmt.Errorf("read plan_tasks: %w", err)
+		return nil, "", nil, fmt.Errorf("read plan_tasks: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var t taskRow
 		if err := rows.Scan(&t.id, &t.title, &t.status); err != nil {
-			return nil, "", fmt.Errorf("read plan_tasks: %w", err)
+			return nil, "", nil, fmt.Errorf("read plan_tasks: %w", err)
 		}
 		tasks = append(tasks, t)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("read plan_tasks: %w", err)
+		return nil, "", nil, fmt.Errorf("read plan_tasks: %w", err)
 	}
 
 	err = conn.QueryRow(`SELECT value FROM metadata WHERE key = 'status'`).Scan(&runStatus)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) && !strings.Contains(err.Error(), "no such table") {
-		return nil, "", fmt.Errorf("read the run status: %w", err)
+		return nil, "", nil, fmt.Errorf("read the run status: %w", err)
 	}
-	return tasks, runStatus, nil
+	// The pause reason only decides whether a paused status is a live run's
+	// (a disk_low wait). One that will not read is no reason, which is what
+	// every other reader makes of it.
+	var raw string
+	if qerr := conn.QueryRow(`SELECT value FROM metadata WHERE key = 'pause_reason'`).Scan(&raw); qerr == nil && raw != "" {
+		var r pausereason.Reason
+		if json.Unmarshal([]byte(raw), &r) == nil {
+			pause = pausereason.Normalize(runStatus, &r)
+		}
+	}
+	return tasks, runStatus, pause, nil
 }
 
 func taskField(id int) string {

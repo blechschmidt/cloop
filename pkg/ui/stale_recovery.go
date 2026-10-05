@@ -451,8 +451,14 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 	// along in the pause reason rather than only in the event journal, so a
 	// dashboard can distinguish "this crashed" from "this finished cleanly"
 	// without joining two stores (Task 20285).
+	// A paused run waiting out a full disk is a live run's claim as much as
+	// "running" is (Task 20381): its process holds the pause and resumes on
+	// its own, so one that died while it waited left the claim behind.
 	claimed := st.Status
-	staleStatus := claimed == "running" || claimed == "evolving"
+	if claimed == "paused" && st.PauseReason.RunWaits() {
+		claimed = "paused (waiting for disk space)"
+	}
+	staleStatus := st.ClaimsLiveRun()
 	if staleStatus {
 		st.SetPaused(deadRunPauseReason(verdict))
 	}

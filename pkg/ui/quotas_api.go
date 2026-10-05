@@ -423,7 +423,8 @@ func (s *Server) ReconcileQuotas() {
 		// pressed Run did not survive the process — and it is the right one:
 		// the owner is who the run's spend lands on either way.
 		if st, err := state.LoadLite(entry.Path); err == nil && st != nil {
-			if st.Status == "running" || st.Status == "evolving" {
+			// A run waiting out a full disk still holds its slot (Task 20381).
+			if st.ClaimsLiveRun() {
 				live.Tasks[entry.Owner]++
 			}
 		}

@@ -507,6 +507,7 @@ Press Ctrl+C to pause gracefully.`,
 			AutoPromoteThresholdDays: autoPromoteThresholdDays,
 			CoachMode:                coachMode,
 			TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
+			MinFreeDiskMB:            minFreeDiskMB(cfg),
 			// The review gate's reviewer may run on another provider than the
 			// work; with no model of its own it uses config.yaml's for that
 			// provider (Task 20357).

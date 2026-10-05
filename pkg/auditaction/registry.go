@@ -1257,6 +1257,20 @@ var registry = []Entry{
 			"`sources` is empty when every front end is collected. A save that changed nothing emits no row.",
 	},
 
+	// ── disk ───────────────────────────────────────────────────────────────
+	{
+		Action:    ActionDiskFloorUpdated,
+		Home:      HomeControlPlane,
+		Entity:    "config",
+		Trigger:   "The hub's free-space floor (orchestrator.min_free_disk_mb) is changed from Settings → Disk & Retention.",
+		Payload:   []string{"min_free_disk_mb", "was_min_free_disk_mb", "file"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "0 means the check is off: runs then start on any disk, and a task's outcome written onto a full one " +
+			"has no reserve to fall back on. `file` names where the value was written — the hub's per-instance " +
+			"overlay or config.yaml. A save that changed nothing emits no row.",
+	},
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 	{
 		Action:    ActionSTTCredentialSet,

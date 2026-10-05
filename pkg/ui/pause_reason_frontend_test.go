@@ -163,3 +163,58 @@ func TestDashboard_PauseReasonIsVisible(t *testing.T) {
 		}
 	})
 }
+
+// TestDashboard_DiskLowRendersAsAWaitingRun drives the bundle through the
+// free-space floor's dashboard surfaces (Task 20381): the pause reason, the
+// Stop button a waiting run needs, and the admin banner with its nudge.
+func TestDashboard_DiskLowRendersAsAWaitingRun(t *testing.T) {
+	results := runPauseScenarios(t)
+
+	t.Run("the badge names the volume, the free space and the floor", func(t *testing.T) {
+		got := results["disk_low_waiting"]
+		if !strings.Contains(got.Badge, "Paused: volume / has 812.3 MB free, below the 1.00 GB floor") {
+			t.Errorf("badge = %q", got.Badge)
+		}
+	})
+
+	t.Run("a waiting run offers Stop, not Start", func(t *testing.T) {
+		var ui struct{ Stop, Run, Bar string }
+		if err := json.Unmarshal([]byte(results["disk_low_waiting"].HTML), &ui); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if ui.Stop == "none" || ui.Run != "none" {
+			t.Errorf("Stop display %q, Run display %q: a run waiting for disk space is alive", ui.Stop, ui.Run)
+		}
+		if !strings.Contains(ui.Bar, "Paused: volume / has 812.3 MB free") {
+			t.Errorf("the Tasks run bar says %q, want the pause, not Running", ui.Bar)
+		}
+	})
+
+	t.Run("a bare disk_low code renders its label", func(t *testing.T) {
+		got := results["disk_low_bare"]
+		if !strings.Contains(got.Badge, "disk space low") || strings.Contains(got.Badge, "disk_low") {
+			t.Errorf("badge = %q", got.Badge)
+		}
+	})
+
+	t.Run("the admin banner shows, then clears on the nudge", func(t *testing.T) {
+		var b struct {
+			Shown struct{ Display, Text string }
+			After string
+		}
+		if err := json.Unmarshal([]byte(results["hub_disk_banner"].HTML), &b); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if b.Shown.Display != "" {
+			t.Errorf("banner display %q while /api/me carried hub_disk, want shown", b.Shown.Display)
+		}
+		for _, want := range []string{"volume /", "300.0 MB free", "1.00 GB floor"} {
+			if !strings.Contains(b.Shown.Text, want) {
+				t.Errorf("banner text %q lacks %q", b.Shown.Text, want)
+			}
+		}
+		if b.After != "none" {
+			t.Errorf("after the hub_disk nudge the banner display is %q, want hidden", b.After)
+		}
+	})
+}

@@ -30,6 +30,8 @@
 <meta name="cloop-members-src" content="{{asset:members.js}}">
 <!-- The Claude credential card and dialog, fetched by loadHarnessCred (Task 20379). -->
 <meta name="cloop-harness-src" content="{{asset:harness.js}}">
+<!-- The free-space floor editor, fetched by loadDiskUsage for admins (Task 20381). -->
+<meta name="cloop-diskfloor-src" content="{{asset:diskfloor.js}}">
 <!-- The offboarding form's script, fetched by offboardPreview (Task 20379). -->
 <meta name="cloop-offboard-src" content="{{asset:offboard.js}}">
 </head>
@@ -215,6 +217,8 @@
   </div>
 
   <main>
+    <!-- The hub's state volume is below its free-space floor (Task 20381); admins only, see renderHubDisk. -->
+    <div id="hubDiskBanner" class="exec-banner warn" role="alert" style="display:none"><span class="exec-banner-icon">&#9888;</span><span id="hubDiskText"></span></div>
     <!-- ═══════════════════════════════════════════════════════════ OVERVIEW -->
     <div id="tab-overview" class="tab-panel active">
 
@@ -1934,6 +1938,7 @@
         <div id="diskUsageBody">
           <div style="font-size:13px;color:var(--muted)">Loading...</div>
         </div>
+        <div id="diskFloorBody" data-global-perm="user.manage" data-perm-hide style="margin-top:12px"></div>
       </div>
 
       <!-- Claude Code authentication -->

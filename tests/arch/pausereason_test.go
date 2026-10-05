@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 )
 
 // This gate keeps a paused run explainable (Task 20285).
@@ -177,6 +179,36 @@ func TestEveryPauseReasonCodeIsRenderable(t *testing.T) {
 		if !declared[code] {
 			t.Errorf("pauseReasonLabels in 00-core.js has an entry for %q, which is not a "+
 				"pausereason.Code any more — remove it", code)
+		}
+	}
+}
+
+// TestPauseReasonCodesListsEveryCodeInOrder checks pausereason.Codes() against
+// the constants the package declares, in declaration order.
+//
+// Codes() is a hand-written list beside the const block, and it is what the
+// unit tests, the documentation and anything that enumerates the reasons walk.
+// A code declared but left out of it is one those never see — Task 20381 added
+// disk_low, the first code a live run holds, and a list that skipped it would
+// have hidden exactly the reason whose handling differs. A code moved within
+// it reorders every generated list for no reason, so order is checked too.
+func TestPauseReasonCodesListsEveryCodeInOrder(t *testing.T) {
+	root := repoRoot(t)
+	declared := pauseReasonCodes(t, root)
+	listed := pausereason.Codes()
+
+	got := make([]string, len(listed))
+	for i, c := range listed {
+		got[i] = string(c)
+	}
+	if strings.Join(got, ",") != strings.Join(declared, ",") {
+		t.Errorf("pausereason.Codes() = %v, but pkg/pausereason declares %v (in that order) — "+
+			"append a new code to Codes() in declaration order, and never reorder it", got, declared)
+	}
+	for _, c := range listed {
+		r := pausereason.Reason{Code: c}
+		if r.Label() == string(c) {
+			t.Errorf("code %q has no label in pausereason's codeLabels", c)
 		}
 	}
 }

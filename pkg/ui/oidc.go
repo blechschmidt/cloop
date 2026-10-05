@@ -381,6 +381,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// budget), which are not about the selected project.
 		"global_permissions": permissionStrings(s.permissionsFor(r, authz.GlobalScope).Permissions()),
 	}
+	// The hub's state volume below its free-space floor (Task 20381), for the
+	// admin banner. Only for callers who may manage the hub: what it says is
+	// for the people who can act on it.
+	if v := s.hubDiskBanner(r); v != nil {
+		body["hub_disk"] = v
+	}
 	if !s.oidcEnabled() {
 		body["authenticated"] = true
 		jsonOK(w, body)

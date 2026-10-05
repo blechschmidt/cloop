@@ -52,6 +52,11 @@ const _duAdvice = {
 };
 
 window.loadDiskUsage = function() {
+  // The hub's free-space floor (Task 20381), for those who may set it.
+  if (canGlobal('user.manage')) {
+    deferredPanel('diskfloor', 'cloopDiskFloorPanel', {api, apiMethod, esc, toast, fmt: _duFmtBytes})
+      .then(p => p.load()).catch(() => {});
+  }
   return api(pUrl('/api/disk-usage'))
     .then(d => { _renderDiskUsage(d || {}); return d; })
     .catch(err => {

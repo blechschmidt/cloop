@@ -74,6 +74,9 @@ func TestAutoResumableOnlyForARolledOverUsageCap(t *testing.T) {
 		{"plan-only", ptr(NewUntil(CodePlanOnly, "plan only", past)), false},
 		{"idle", ptr(NewUntil(CodeIdle, "nothing to run", past)), false},
 		{"state not persisted", ptr(NewUntil(CodeStateNotPersisted, "could not save task #3's completion", past)), false},
+		// The run waits a disk_low pause out itself, so a hub restarting it
+		// would put a second harness in a working tree the first still holds.
+		{"disk low", ptr(NewUntil(CodeDiskLow, "/ has 812 MB free, below the 1 GB floor", past)), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,6 +138,56 @@ func TestEveryCodeHasALabel(t *testing.T) {
 		r := Reason{Code: c}
 		if r.Label() == string(c) {
 			t.Errorf("code %q has no prose label; operators would see the raw identifier", c)
+		}
+	}
+}
+
+// TestCodesOrder pins Codes(). Generated documentation and the arch gate list
+// codes in this order, so a new code goes at the end and an existing one never
+// moves.
+func TestCodesOrder(t *testing.T) {
+	want := []Code{
+		"usage_cap", "budget", "token_budget", "step_limit",
+		"approval", "abort", "cancelled", "plan_only",
+		"idle", "operator", "stale", "state_not_persisted",
+		"uncommitted_work", "disk_low",
+	}
+	got := Codes()
+	if len(got) != len(want) {
+		t.Fatalf("Codes() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Codes()[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestDiskLowLabel(t *testing.T) {
+	r := Reason{Code: CodeDiskLow}
+	if got, want := r.Label(), "disk space low"; got != want {
+		t.Errorf("Label() = %q, want %q", got, want)
+	}
+	// A detail names the volume, the free space and the floor, and wins over
+	// the noun the way every other code's does.
+	r.Detail = "/ has 812 MB free, below the 1.0 GB floor"
+	if got := r.Summary(time.UTC); got != r.Detail {
+		t.Errorf("Summary() = %q, want the detail %q", got, r.Detail)
+	}
+}
+
+// TestRunWaitsOnlyForDiskLow: a disk_low pause is the one a live run holds.
+// Every other code is written by a run on its way out, and treating one of
+// them as live would keep a dead project showing Stop.
+func TestRunWaitsOnlyForDiskLow(t *testing.T) {
+	var nilReason *Reason
+	if nilReason.RunWaits() {
+		t.Error("a nil reason claims a waiting run")
+	}
+	for _, c := range Codes() {
+		r := New(c, "")
+		if got, want := r.RunWaits(), c == CodeDiskLow; got != want {
+			t.Errorf("Reason{%q}.RunWaits() = %v, want %v", c, got, want)
 		}
 	}
 }

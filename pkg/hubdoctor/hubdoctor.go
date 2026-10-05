@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/diskusage"
 )
 
 // Severity is how much a finding matters. The three values are ordered, and
@@ -301,6 +302,11 @@ type Options struct {
 	// terminal, because the alternative is a command that prints nothing for
 	// three minutes and looks hung.
 	ProbeLogf func(format string, args ...any)
+
+	// DiskProbe overrides how the free-space check measures the hub's state
+	// volume (Task 20381). Tests substitute one so a volume can sit below its
+	// floor without anything filling a disk; nil means diskusage.Volumes.
+	DiskProbe func(paths ...string) ([]diskusage.Volume, error)
 }
 
 // probeLogf is the narrator, or a no-op when the caller wants silence.
@@ -397,6 +403,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkKubeGuard(ctx, cfg, opts, add)
 	checkEgressBroker(ctx, dir, cfg, opts, add)
 	checkStorage(dir, add)
+	checkFreeSpace(dir, cfg, opts, add)
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)
 	checkAdmission(cfg, add)

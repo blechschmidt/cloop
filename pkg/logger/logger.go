@@ -101,6 +101,12 @@ const (
 	// disagree, and the next run acts on the database.
 	EventStateWrite Event = "state_write"
 
+	// EventDiskSpace tags the free-space floor (Task 20381): a run pausing
+	// because a volume it writes to fell below orchestrator.min_free_disk_mb,
+	// resuming once it recovered, and the reserve file given up so a task's
+	// outcome could still be written.
+	EventDiskSpace Event = "disk_space"
+
 	// EventAuthz tags access-control decisions and failures of the
 	// authorization machinery itself (Task 20164). Decisions are also
 	// written to the tamper-evident audit log; these entries exist so an

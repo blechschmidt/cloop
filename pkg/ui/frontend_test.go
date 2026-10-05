@@ -221,6 +221,13 @@ var suggestAPISource string
 //go:embed members.go
 var membersSource string
 
+// diskFloorSource is pkg/ui/diskfloor.go (Task 20381): the hub_disk nudge the
+// admin banner re-reads /api/me on when the hub's state volume crosses its
+// free-space floor.
+//
+//go:embed diskfloor.go
+var diskFloorSource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -249,7 +256,8 @@ func allUISources() string {
 		"\n" + executorPolicyAPISource +
 		"\n" + firewallAPISource +
 		"\n" + suggestAPISource +
-		"\n" + membersSource
+		"\n" + membersSource +
+		"\n" + diskFloorSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

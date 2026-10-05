@@ -134,13 +134,25 @@ func (o *Orchestrator) noteVerdict(task *pm.Task, status pm.TaskStatus, why verd
 	o.writeVerdict(v)
 }
 
+// writeVerdictFile is the seam every verdict write goes through, so a test can
+// make one fail the way a full disk does (Task 20381) without filling one.
+var writeVerdictFile = taskrecover.WriteVerdict
+
 // writeVerdict writes v, reporting a failure instead of returning it. A
 // parallel worker, which must not read the shared task, builds v itself.
+//
+// A write the disk refuses for want of space is tried once more on the space
+// the free-space reserve frees (writeOnReserve, Task 20381). That is what keeps
+// recovery from falling back to the agent's word on a full disk: the verdict
+// is the record recovery reads when the outcome write fails in the same moment.
 func (o *Orchestrator) writeVerdict(v taskrecover.Verdict) {
 	if o == nil || o.config.WorkDir == "" {
 		return
 	}
-	if err := taskrecover.WriteVerdict(o.config.WorkDir, v); err != nil {
+	err := o.writeOnReserve(fmt.Sprintf("task #%d's verdict", v.TaskID), func() error {
+		return writeVerdictFile(o.config.WorkDir, v)
+	})
+	if err != nil {
 		o.reportVerdictFailure(v.TaskID, fmt.Sprintf("record its verdict (%s)", v.Status), err)
 	}
 }

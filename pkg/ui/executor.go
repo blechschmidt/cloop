@@ -452,6 +452,17 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 			base.Env = append(os.Environ(), extra...)
 		}
 	}
+	// The hub's free-space floor, for a run of its own directory on this
+	// filesystem (Task 20381): Settings may have written it to the overlay,
+	// which `cloop run` does not read. Same inheritance as above, and only on
+	// an executor that shares this host — hubFloorEnv says "" for any other,
+	// so a sandbox's environment is not widened by it.
+	if kv := hubFloorEnv(workDir, ex); kv != "" {
+		if base.Env == nil {
+			base.Env = os.Environ()
+		}
+		base.Env = append(base.Env, kv)
+	}
 
 	// The lease outlives this call because the workload does. Wiping it here
 	// would pull the credential files out from under a process that has not

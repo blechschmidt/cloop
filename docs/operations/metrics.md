@@ -163,7 +163,10 @@ of a minute or more.
 member's value is its own share: `cloop_secret_leases_live` (the leases that
 member materialised and still holds), `cloop_egress_sessions_live` (the
 sessions its broker issued) and `cloop_mergequeue_depth` (its own queue).
-`sum()` is again the cluster's.
+`sum()` is again the cluster's. `cloop_hub_disk_free_bytes` is exported by
+every member too, but it is a reading rather than a share: members on one
+volume each report the same number, so aggregate it with `min()` by
+`volume`, never `sum()` (see [Disk](#disk)).
 
 ---
 
@@ -647,6 +650,33 @@ cloop_quota_usage / cloop_quota_limit > 0.9
 ```promql
 sum by (resource) (rate(cloop_quota_denials_total[5m])) > 0
 ```
+
+## Disk
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_hub_disk_free_bytes` | gauge | `volume` |
+
+The free space each hub process could still write on the volumes it writes to
+(Task 20381): the one holding its control-plane `.cloop`, where `state.db`
+lives, and those of the projects registered with it, one sample per
+filesystem. `volume` is the mount point. Free means writable by this process:
+a hub running as root counts the blocks the filesystem reserves for root, an
+unprivileged one does not.
+
+Runs pause before their next task or evolve round while a volume they write to
+is below `orchestrator.min_free_disk_mb` (default 1 GiB), and resume by
+themselves once it is back above the floor plus a tenth; `cloop hub doctor`'s
+`storage.free_space` finding warns below twice the floor and fails below it.
+Alert before the floor, not at it:
+
+```promql
+min by (volume) (cloop_hub_disk_free_bytes) < 2 * 1073741824
+```
+
+Every member exports it for its own disk, so members sharing a volume report
+the same reading; `min()` by volume is the answer, `sum()` is not. The series
+set resets at every scrape and is capped at 32 volumes.
 
 ## Registry self-monitoring
 

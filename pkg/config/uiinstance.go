@@ -54,6 +54,12 @@
 //	retention, audit       the janitor's policy for the hub's own directory
 //	backup                 auto-backup of the hub's own directory
 //	github.token           the token the hub hands a host-run pull request
+//	orchestrator.min_free_disk_mb
+//	                       the free-space floor: the hub's doctor and admin
+//	                       banner hold its state volume to it, and the hub
+//	                       hands it to the runs it starts of its own
+//	                       directory (CLOOP_MIN_FREE_DISK_MB), since `cloop
+//	                       run` reads no overlay (Task 20381)
 //
 // executors.allow_host_process, min_agent_build and limits are ratchets
 // across everything a hub reads (they only ever tighten), but the overlay
@@ -67,8 +73,9 @@
 // a provider written there.
 //
 // A settings panel writes the keys it edits into the overlay once one exists
-// (ui.oidc, ui.telemetry, ui.ci, stt.groq_api_key), and leaves config.yaml
-// byte for byte as it was.
+// (ui.oidc, ui.telemetry, ui.ci, stt.groq_api_key,
+// orchestrator.min_free_disk_mb), and leaves config.yaml byte for byte as it
+// was.
 
 package config
 
@@ -241,6 +248,19 @@ func SaveUIInstanceCI(path string, c CIConfig) error {
 func SaveUIInstanceSTTKey(path, key string) error {
 	return saveUIInstanceKeys(path, []string{"stt"}, []overlayKey{
 		{"groq_api_key", yamlScalar("!!str", key)},
+	})
+}
+
+// SaveUIInstanceMinFreeDisk writes orchestrator.min_free_disk_mb into an
+// overlay file, leaving every other key in it untouched (Task 20381). The value
+// is written even when it is the default or 0, for the reason the other savers
+// give: a key left out would let config.yaml's value show through the save.
+func SaveUIInstanceMinFreeDisk(path string, mb int) error {
+	if !ValidMinFreeDiskMB(mb) {
+		return MinFreeDiskMBError(mb)
+	}
+	return saveUIInstanceKeys(path, []string{"orchestrator"}, []overlayKey{
+		{"min_free_disk_mb", yamlScalar("!!int", strconv.Itoa(mb))},
 	})
 }
 

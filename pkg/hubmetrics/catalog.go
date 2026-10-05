@@ -463,6 +463,30 @@ var (
 	})
 )
 
+// Disk (Task 20381). Per process, not per cluster: each member reports the
+// volumes it writes to — the one holding its control-plane .cloop and those of
+// the projects registered with it, deduplicated by device — so a member whose
+// disk fills shows up as itself. Several members on one volume each report it;
+// aggregate with max() or min() by volume, not sum().
+//
+// `volume` is the mount point, a closed set at scrape time: the collector
+// resets the family before every run, so its cardinality is the number of
+// filesystems the hub writes to now, capped by DiskVolumesMax.
+var (
+	DiskFreeBytes = Default.MustRegister(Definition{
+		Name:      "cloop_hub_disk_free_bytes",
+		Help:      "Free space this hub process could still write on each volume it writes to, by mount point: its own state volume and its projects'. Runs pause below orchestrator.min_free_disk_mb. Each cluster member reports its own.",
+		Type:      TypeGauge,
+		Labels:    []string{"volume"},
+		MaxSeries: DiskVolumesMax,
+	})
+)
+
+// DiskVolumesMax caps the volumes cloop_hub_disk_free_bytes reports. A hub
+// writes to a handful of filesystems; one registering projects on hundreds is
+// past what a per-volume series is good for.
+const DiskVolumesMax = 32
+
 // Bounded reason vocabularies used by call sites whose own packages have no
 // enumeration to borrow. Declaring them here rather than as string literals at
 // the call site is what keeps the label a closed set: a typo becomes a compile

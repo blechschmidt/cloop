@@ -727,6 +727,31 @@ func (s *ProjectState) SetPaused(r pausereason.Reason) {
 	s.PauseReason = &r
 }
 
+// ClaimsLiveRun reports whether a stored status says a run is in flight:
+// running, evolving, or paused for a reason the run waits out itself — a
+// disk_low pause, whose process stays up and resumes on its own (Task 20381,
+// pausereason.RunWaits).
+//
+// It is a claim, not a fact: the run writes the status, and a run killed
+// before it could clear it leaves the claim behind. Comparing the claim with
+// what is actually executing is how the hub finds such a run — which is why a
+// waiting pause has to count here: one killed while it waited would otherwise
+// say "waiting for disk space" forever.
+func ClaimsLiveRun(status string, r *pausereason.Reason) bool {
+	switch status {
+	case "running", "evolving":
+		return true
+	case "paused":
+		return r.RunWaits()
+	}
+	return false
+}
+
+// ClaimsLiveRun is the package function for this state.
+func (s *ProjectState) ClaimsLiveRun() bool {
+	return s != nil && ClaimsLiveRun(s.Status, s.PauseReason)
+}
+
 // PausedFor reports whether the run is paused for the given reason code.
 func (s *ProjectState) PausedFor(code pausereason.Code) bool {
 	return s.Status == "paused" && s.PauseReason != nil && s.PauseReason.Code == code

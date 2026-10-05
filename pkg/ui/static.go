@@ -163,6 +163,9 @@ var deferredScripts = []struct{ token, path string }{
 	// The offboarding form in the Secrets tab (Task 20261), deferred by Task
 	// 20379 to pay for the line above.
 	{"offboard.js", "assets/js/deferred/offboard.js"},
+	// The free-space floor editor in Settings → Disk & Retention (Task
+	// 20381): admin-only, so only an admin's Settings ever fetches it.
+	{"diskfloor.js", "assets/js/deferred/diskfloor.js"},
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

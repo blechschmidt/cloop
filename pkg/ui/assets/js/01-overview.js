@@ -147,7 +147,7 @@ function render(s) {
 
   // Sync Run/Stop button state from project status.
   if (typeof updateRunButtonState === 'function') {
-    updateRunButtonState(isActiveRunStatus(s.status));
+    updateRunButtonState(isActiveRunStatus(s.status) || runWaits(s));
   }
 
   // In multi-project mode with no project selected, don't overwrite the UI
@@ -194,7 +194,7 @@ function render(s) {
   // buttons rely on WebSocket 'run_state' events, which may not have arrived
   // yet on initial render, page refresh, or project tab switch — leaving
   // both buttons visible (default HTML state).
-  updateRunButtonState(isActiveRunStatus(s.status));
+  updateRunButtonState(isActiveRunStatus(s.status) || runWaits(s));
 
   // Stats
   // Task 20125: backend now ships steps_count instead of the full steps[]

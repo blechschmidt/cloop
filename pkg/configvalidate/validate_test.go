@@ -1,6 +1,10 @@
 package configvalidate
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/config"
+)
 
 // TestKnownTopLevelKeys_CoversEveryConfigSection guards the repair path.
 //
@@ -51,3 +55,37 @@ rate_limit:
 		t.Fatalf("a hardened hub config reported unknown keys %v — `--fix` would strip them", unknown)
 	}
 }
+
+// TestCheckNumericBounds_FreeSpaceFloor: `cloop config validate` judges the
+// operator's own text for orchestrator.min_free_disk_mb (Task 20381) — Load
+// would quietly put a bad value back to the default, and a validator that only
+// saw the repaired config would call the file healthy.
+func TestCheckNumericBounds_FreeSpaceFloor(t *testing.T) {
+	for _, tc := range []struct {
+		v    *int
+		bad  bool
+		name string
+	}{
+		{nil, false, "unset"},
+		{intPtr(0), false, "off"},
+		{intPtr(2048), false, "in the band"},
+		{intPtr(10), true, "below the band"},
+		{intPtr(-1), true, "negative"},
+	} {
+		cfg := config.Default()
+		cfg.Orchestrator.MinFreeDiskMB = tc.v
+		var got []Finding
+		checkNumericBounds(cfg, func(f Finding) { got = append(got, f) })
+		flagged := false
+		for _, f := range got {
+			if f.Field == "config.orchestrator.min_free_disk_mb" && f.Severity == SeverityError {
+				flagged = true
+			}
+		}
+		if flagged != tc.bad {
+			t.Errorf("%s: flagged = %v, want %v (%+v)", tc.name, flagged, tc.bad, got)
+		}
+	}
+}
+
+func intPtr(v int) *int { return &v }

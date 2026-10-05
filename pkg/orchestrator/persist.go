@@ -196,8 +196,17 @@ func (o *Orchestrator) persistOutcome(s *state.ProjectState, task *pm.Task, what
 // saveOutcome is persistOutcome without the verdict, for a write that stores
 // more of a task whose outcome persistOutcome has already stored — the step
 // record after it — and so decides nothing recovery could need.
+//
+// Like the verdict, a write refused for want of space is tried once more on
+// the space the free-space reserve frees, and the run pauses disk_low before
+// it starts anything else (Task 20381). Only a retry that fails as well stops
+// the run here.
 func (o *Orchestrator) saveOutcome(s *state.ProjectState, task *pm.Task, what string) error {
-	if err := saveState(s, mergeExternal); err != nil {
+	writeName := what
+	if task != nil {
+		writeName = fmt.Sprintf("task #%d's %s", task.ID, what)
+	}
+	if err := o.writeOnReserve(writeName, func() error { return saveState(s, mergeExternal) }); err != nil {
 		pf := &persistFailure{what: what, err: err}
 		if task != nil {
 			pf.taskID, pf.taskTitle, pf.status = task.ID, task.Title, task.Status
@@ -280,7 +289,9 @@ func (o *Orchestrator) recordAbort(cause error) {
 	s := o.state
 	detail := pf.reasonDetail()
 	s.SetPaused(pausereason.New(pausereason.CodeStateNotPersisted, detail))
-	statusErr := saveState(s, statusOnly)
+	// A disk too full for the write that failed may be too full for this one:
+	// whatever the free-space reserve still holds is spent on it (Task 20381).
+	statusErr := o.writeOnReserve("the run's stop record", func() error { return saveState(s, statusOnly) })
 
 	details := map[string]any{
 		"cause":           string(pausereason.CodeStateNotPersisted),

@@ -419,6 +419,17 @@ func checkNumericBounds(cfg *config.Config, add func(Finding)) {
 			Message:  fmt.Sprintf("max_parallel is %d — must be 0 (default) or between %d and %d to avoid spawning unbounded goroutines", cfg.MaxParallel, config.MaxParallelLower, config.MaxParallelUpper),
 		})
 	}
+	// The free-space floor (Task 20381): 0 is "off", anything else must lie in
+	// the band. Load would put an out-of-range value back to the default, so
+	// this is the only place the operator's own text is judged.
+	if v := cfg.Orchestrator.MinFreeDiskMB; v != nil && !config.ValidMinFreeDiskMB(*v) {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.orchestrator.min_free_disk_mb",
+			Message: fmt.Sprintf("min_free_disk_mb is %d — must be 0 (off) or between %d and %d MB; until it is, runs use the default %d MB",
+				*v, config.MinFreeDiskMBLower, config.MinFreeDiskMBUpper, config.MinFreeDiskMBDefault),
+		})
+	}
 	// Rate limiter: zero = use HTTP server default; non-zero must be sane.
 	if cfg.RateLimit.RequestsPerSecond < 0 || (cfg.RateLimit.RequestsPerSecond > 0 && cfg.RateLimit.RequestsPerSecond < config.RateLimitRPSLower) {
 		add(Finding{

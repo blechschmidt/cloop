@@ -807,6 +807,7 @@ function refreshPermissions() {
       myRole = me.role || '';
       myOIDC = !!me.oidc_enabled;
       applyPermissionGating();
+      renderHubDisk(me.hub_disk);
       // The Members card's controls depend on the role just read (Task 20366).
       if (activeTab === 'overview') loadProjectMembers();
       // The same answer re-arms the silent sign-in renewal (32-renew.js): every
@@ -819,6 +820,18 @@ function refreshPermissions() {
       return me;
     })
     .catch(() => null);
+}
+
+// renderHubDisk shows the admin banner while the hub's state volume is below
+// its free-space floor (Task 20381). /api/me carries it to admins only; the
+// hub's 'hub_disk' push re-reads it when the volume crosses the floor.
+function renderHubDisk(d) {
+  const el = document.getElementById('hubDiskBanner');
+  if (!el) return;
+  el.style.display = d ? '' : 'none';
+  if (d) document.getElementById('hubDiskText').textContent = 'Hub disk space low: volume ' + d.volume +
+    ' has ' + _duFmtBytes(d.free_bytes) + ' free, below the ' + _duFmtBytes(d.floor_bytes) +
+    ' floor. Runs writing there start nothing until there is room again.';
 }
 
 // handleForbidden renders a 403/404-from-authorization as an explanation
@@ -913,6 +926,7 @@ const pauseReasonLabels = {
   stale:        'previous run ended unexpectedly',
   state_not_persisted: 'progress not saved',
   uncommitted_work: 'work left uncommitted',
+  disk_low: 'disk space low',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:
@@ -945,6 +959,12 @@ function pauseReasonText(pr) {
 // "Not running" (Task 20358).
 function isActiveRunStatus(status) {
   return status === 'running' || status === 'evolving';
+}
+
+// runWaits: a disk_low pause is held by a live run that resumes by itself once
+// there is space again (Task 20381), so its project offers Stop, not Start.
+function runWaits(s) {
+  return !!s && s.status === 'paused' && !!s.pause_reason && s.pause_reason.code === 'disk_low';
 }
 
 // statusParts is statusBadge's class and wording, for a caller that restyles

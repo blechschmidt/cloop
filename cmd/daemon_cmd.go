@@ -690,6 +690,8 @@ func runDaemonCycle(ctx context.Context, workdir string, s *daemon.State, cfg *c
 		StepsLimit:   1, // one task per cycle
 		ProviderName: providerName,
 		ProviderCfg:  provCfg,
+		// The free-space floor holds here as in `cloop run` (Task 20381).
+		MinFreeDiskMB: minFreeDiskMB(cfg),
 	}
 
 	orch, err := orchestrator.New(orchCfg, prov)

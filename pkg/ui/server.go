@@ -34,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/decompose"
+	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
@@ -457,6 +458,19 @@ type Server struct {
 	// test can assert *which* projects would be resumed without starting a
 	// real workload. Nil means the real dispatch.
 	autoResumeStart func(workDir string) error
+
+	// diskProbe replaces diskusage.Volumes for the hub's free-space checks
+	// (Task 20381) — the admin banner, Settings → Disk & Retention and the
+	// cloop_hub_disk_free_bytes collector — so a test can put the hub's state
+	// volume below its floor without filling it. Nil means the real probe.
+	diskProbe func(paths ...string) ([]diskusage.Volume, error)
+
+	// diskMu guards the hub disk watcher's last reading, so it tells the
+	// dashboards only when the state volume crosses its floor. See
+	// diskfloor.go.
+	diskMu      sync.Mutex
+	diskWasLow  bool
+	diskChecked bool
 
 	// MaxWebSocketConns caps the total number of concurrent WebSocket
 	// connections accepted across every remote IP. Zero substitutes
@@ -1280,6 +1294,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
+	// Every member watches its own state volume against the free-space floor
+	// (Task 20381): each one's disk is its own. See diskfloor.go.
+	go s.watchHubDisk(watcherCtx)
 	// Every member re-reads the project memberships on its own, so a removed
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
@@ -5697,7 +5714,7 @@ func (s *Server) cachedRunningClaims() map[string]struct{} {
 	defer s.projMu.RUnlock()
 	claims := make(map[string]struct{})
 	for _, st := range s.projStatuses {
-		if st.Status == "running" || st.Status == "evolving" {
+		if state.ClaimsLiveRun(st.Status, st.PauseReason) {
 			claims[st.Path] = struct{}{}
 		}
 	}

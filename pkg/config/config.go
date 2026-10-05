@@ -179,6 +179,23 @@ const (
 	OrchestratorTaskTimeoutMinutesUpper   = 7 * 24 * 60
 	OrchestratorTaskTimeoutMinutesDefault = 30
 
+	// Free-space floor (Task 20381): below orchestrator.min_free_disk_mb on a
+	// volume a run writes to, no task attempt or evolve round starts. Unset
+	// means MinFreeDiskMBDefault; 0 switches the check (and the .cloop/reserve
+	// file behind it) off.
+	//
+	// The default is a gigabyte because that is what one task can plausibly
+	// write before its outcome is recorded — a build, a test run's scratch,
+	// a few thousand plan-history snapshots — on a host whose state.db alone
+	// is gigabytes. The floor is 64 MB, the same as the workspace floor: below
+	// it, the check would pass on a disk too full to hold the 16 MiB reserve
+	// plus one SQLite checkpoint, which is the space the check exists to keep.
+	// The ceiling is the workspace ceiling, a terabyte, and is a guard against
+	// a value typed in bytes or kilobytes rather than a claim about disks.
+	MinFreeDiskMBDefault = 1024
+	MinFreeDiskMBLower   = 64
+	MinFreeDiskMBUpper   = 1 << 20 // 1 TiB
+
 	// Container executor limits (Task 20157). Zero means "no limit
 	// requested" for every one of these; a non-zero value must be usable.
 	//
@@ -1423,6 +1440,52 @@ type OrchestratorConfig struct {
 	// is set. Zero means no task timeout (Task 20148). A positive value is
 	// validated to OrchestratorTaskTimeoutMinutesLower..OrchestratorTaskTimeoutMinutesUpper.
 	TaskTimeoutMinutes int `yaml:"task_timeout_minutes,omitempty"`
+
+	// MinFreeDiskMB is the free space, in MiB, a run requires on the volume
+	// holding the project's .cloop and on the working tree's volume before it
+	// starts a task attempt or an evolve round (Task 20381). Below it the run
+	// pauses with reason disk_low and carries on by itself once both volumes
+	// are back above the floor plus a tenth. The hub's doctor and its admin
+	// banner hold the hub's own state volume to the same number.
+	//
+	// A pointer, because its zero is a setting rather than an absence: nil
+	// (the key left out) means MinFreeDiskMBDefault, and an explicit 0 turns
+	// the check off. Anything else is bounded to [MinFreeDiskMBLower,
+	// MinFreeDiskMBUpper]; Load puts an out-of-range value back to the default
+	// rather than to 0, because the failure the floor guards against is a run
+	// whose outcome a full disk swallows, and a typo should not reinstate it.
+	MinFreeDiskMB *int `yaml:"min_free_disk_mb,omitempty"`
+}
+
+// EffectiveMinFreeDiskMB returns the free-space floor in MiB: 0 when the check
+// is off, MinFreeDiskMBDefault when the key is unset. An out-of-band value —
+// which Load already repairs, so this only matters for a Config built in code —
+// also yields the default.
+func (o OrchestratorConfig) EffectiveMinFreeDiskMB() int {
+	if o.MinFreeDiskMB == nil {
+		return MinFreeDiskMBDefault
+	}
+	v := *o.MinFreeDiskMB
+	if v == 0 {
+		return 0
+	}
+	if v < MinFreeDiskMBLower || v > MinFreeDiskMBUpper {
+		return MinFreeDiskMBDefault
+	}
+	return v
+}
+
+// EnvMinFreeDiskMB carries a hub's floor to a run it dispatches of its own
+// directory (Task 20381). `cloop run` reads it ahead of config.yaml, because the
+// hub's Settings may have written the floor to its per-instance overlay, which
+// `cloop run` never reads. Nothing else reads it: Load does not, so a hub's own
+// doctor and banner go by its configuration alone.
+const EnvMinFreeDiskMB = "CLOOP_MIN_FREE_DISK_MB"
+
+// ValidMinFreeDiskMB reports whether v is a value orchestrator.min_free_disk_mb
+// may hold: 0 (off), or within [MinFreeDiskMBLower, MinFreeDiskMBUpper].
+func ValidMinFreeDiskMB(v int) bool {
+	return v == 0 || (v >= MinFreeDiskMBLower && v <= MinFreeDiskMBUpper)
 }
 
 // EffectiveTaskTimeoutMinutes returns the configured task timeout. Zero (the
@@ -2975,6 +3038,16 @@ func (c *Config) validateAndClamp(path string) {
 		warn("orchestrator.task_timeout_minutes", fmt.Sprintf("value %d outside [%d, %d]", c.Orchestrator.TaskTimeoutMinutes, OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper))
 		c.Orchestrator.TaskTimeoutMinutes = 0
 	}
+	// orchestrator.min_free_disk_mb: 0 is "off" and is honoured; anything else
+	// outside the band goes back to unset, i.e. the default floor. The repair
+	// runs toward keeping the check on, the opposite of task_timeout_minutes
+	// above, because what an unusable value costs here is a task outcome lost
+	// to a full disk.
+	if v := c.Orchestrator.MinFreeDiskMB; v != nil && !ValidMinFreeDiskMB(*v) {
+		warn("orchestrator.min_free_disk_mb", fmt.Sprintf("value %d outside [%d, %d] (use 0 to turn the check off); using the default %d",
+			*v, MinFreeDiskMBLower, MinFreeDiskMBUpper, MinFreeDiskMBDefault))
+		c.Orchestrator.MinFreeDiskMB = nil
+	}
 	// Container executor: every repair resets to the driver's default, which
 	// is always the more confined choice, so a bad value can never widen the
 	// sandbox. The field name is included in the warning key so each distinct
@@ -3137,10 +3210,21 @@ func (c *Config) ValidateNumeric() error {
 		return fmt.Errorf("orchestrator.task_timeout_minutes must be between %d and %d (or 0 for the default %d) (got %d)",
 			OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper, OrchestratorTaskTimeoutMinutesDefault, c.Orchestrator.TaskTimeoutMinutes)
 	}
+	if v := c.Orchestrator.MinFreeDiskMB; v != nil && !ValidMinFreeDiskMB(*v) {
+		return MinFreeDiskMBError(*v)
+	}
 	if err := ValidateExecutors(c.Executors); err != nil {
 		return err
 	}
 	return ValidateSandbox(c.Sandbox)
+}
+
+// MinFreeDiskMBError is the error every writer of orchestrator.min_free_disk_mb
+// returns for a value outside its band, so `cloop config set`, the Settings
+// panel and ValidateNumeric word the refusal the same way.
+func MinFreeDiskMBError(v int) error {
+	return fmt.Errorf("orchestrator.min_free_disk_mb must be 0 (off) or between %d and %d MB (got %d)",
+		MinFreeDiskMBLower, MinFreeDiskMBUpper, v)
 }
 
 // applyEnvVars overlays environment variable values onto config fields.

@@ -71,6 +71,18 @@ const (
 	// consecutive-abort ceiling it stops rather than loop. A human decides: the
 	// work is there to finish, commit or revert.
 	CodeUncommittedWork Code = "uncommitted_work"
+	// CodeDiskLow is a run that stopped starting work because a volume it
+	// writes to — the one holding the project's .cloop, or the working
+	// tree's — has less free space than orchestrator.min_free_disk_mb
+	// (Task 20381), or because a task's outcome only reached the disk by
+	// spending the space .cloop/reserve held back for it. A write that fails
+	// for want of space is how a run used to learn this, and the write that
+	// fails first is often the one recording what a task did.
+	//
+	// It is the one pause the run waits out itself: the process stays up,
+	// checks again every minute, and carries on once the volume is back above
+	// the floor plus a tenth — see RunWaits.
+	CodeDiskLow Code = "disk_low"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -97,6 +109,7 @@ var codeLabels = map[Code]string{
 	CodeStale:             "previous run ended unexpectedly",
 	CodeStateNotPersisted: "run progress could not be saved",
 	CodeUncommittedWork:   "work left uncommitted",
+	CodeDiskLow:           "disk space low",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -114,7 +127,7 @@ func Codes() []Code {
 		CodeUsageCap, CodeBudget, CodeTokenBudget, CodeStepLimit,
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
-		CodeUncommittedWork,
+		CodeUncommittedWork, CodeDiskLow,
 	}
 }
 
@@ -198,6 +211,24 @@ func (r *Reason) AutoResumable(now time.Time) bool {
 		return false
 	}
 	return !now.Before(*r.ResumesAt)
+}
+
+// RunWaits reports whether the run that recorded this pause is still alive,
+// waiting the condition out itself.
+//
+// Only CodeDiskLow qualifies (Task 20381). Every other pause ends the run that
+// wrote it, so "paused" means nothing is executing and a Start is in order. A
+// disk_low pause does not: the run holds its place, checks free space every
+// minute and carries on unprompted, and the operator's move is Stop. Whatever
+// shows a project as running, or decides that a run claiming to be alive has
+// died, has to count this pause as a live run — otherwise the dashboard offers
+// Start on a project that is executing, and a run killed while it waited keeps
+// saying it is waiting forever.
+//
+// Deliberately not AutoResumable: the hub restarting a run that is already
+// waiting would put a second harness in the same working tree.
+func (r *Reason) RunWaits() bool {
+	return r != nil && r.Code == CodeDiskLow
 }
 
 // Normalize returns the reason that should be stored against a run in the

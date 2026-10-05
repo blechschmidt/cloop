@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
+	"github.com/blechschmidt/cloop/pkg/diskusage"
 	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/eval"
@@ -404,6 +405,15 @@ type Config struct {
 	// from config.Orchestrator.TaskTimeoutMinutes by cmd/run.go.
 	TaskTimeoutMinutes int
 
+	// MinFreeDiskMB is the free-space floor in MiB (Task 20381): below it on
+	// the volume holding the project's .cloop or the working tree's, no task
+	// attempt or evolve round starts and the run pauses disk_low until there
+	// is room again. Zero turns the check — and the .cloop/reserve file behind
+	// it — off. cmd/run.go resolves it from orchestrator.min_free_disk_mb,
+	// where unset means config.MinFreeDiskMBDefault; a Config built in code,
+	// as tests build them, gets no check unless it asks for one.
+	MinFreeDiskMB int
+
 	// ProviderModels maps a provider name to the model config.yaml names for
 	// it (anthropic.model, openai.model, ...). The review gate uses it when
 	// its reviewer runs on another provider than the work and names no model
@@ -444,6 +454,23 @@ type Orchestrator struct {
 	// policy, so a test can put a usage window's reset in the past instead of
 	// sleeping until one really rolls over. Nil means time.Now. See now().
 	testNow func() time.Time
+
+	// diskProbe replaces diskusage.Volumes for the free-space floor (Task
+	// 20381), so a test can put a volume below the floor without filling one;
+	// testDiskPoll shortens the minute a disk_low pause waits between checks.
+	// Nil and zero mean the production behaviour. See diskfloor.go.
+	diskProbe    func(paths ...string) ([]diskusage.Volume, error)
+	testDiskPoll time.Duration
+
+	// diskMu guards what the floor remembers between checks: the note left
+	// by a write that needed the reserve (consumed by the next check, which
+	// then pauses), and whether a probe or reserve failure was already
+	// reported. Verdicts are written from parallel workers, so the reserve
+	// can be spent off the main goroutine.
+	diskMu          sync.Mutex
+	reserveSpent    string
+	diskProbeWarned bool
+	reserveWarned   bool
 
 	// capWarnMu guards the rate-limiting of the "subscription caps are not
 	// being enforced" warning, which is reached before every task and so
@@ -1171,6 +1198,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// in at New time), so closing here is safe.
 	defer o.Close()
 	defer pollCancel()
+	o.settleReserve()
 	err := o.runPM(ctx)
 	if errors.Is(err, ErrStateNotPersisted) {
 		// The pollers write state too, so they stop before the last word.
@@ -1628,6 +1656,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			continue
 		}
 		if s.Plan.IsComplete() {
+			// An evolve round is work like a task: it asks the provider for
+			// more and writes what comes back. Checked before the plan's
+			// completion is announced, so a run that waits for disk space
+			// does not announce it twice (Task 20381).
+			if s.AutoEvolve {
+				if waited, err := o.awaitDiskSpace(ctx, s, nil, "an evolve round"); err != nil {
+					return err
+				} else if waited {
+					continue
+				}
+			}
 			// A run that ends here stores that it did before saying so. One
 			// that goes on to evolve announces only what the tasks already
 			// recorded.
@@ -1836,6 +1875,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if stop {
 				return ccErr
 			}
+			continue
+		}
+
+		// The free-space floor (Task 20381): no attempt starts on a disk too
+		// full to record what it does. A run that had to wait goes back to
+		// the top, because the plan may have moved while it waited.
+		if waited, err := o.awaitDiskSpace(ctx, s, nil, fmt.Sprintf("task #%d", task.ID)); err != nil {
+			return err
+		} else if waited {
 			continue
 		}
 
@@ -3994,6 +4042,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			continue
 		}
 		if s.Plan.IsComplete() {
+			// Same check, same place, as the sequential loop's (Task 20381).
+			if s.AutoEvolve {
+				if waited, err := o.awaitDiskSpace(ctx, s, nil, "an evolve round"); err != nil {
+					return err
+				} else if waited {
+					continue
+				}
+			}
 			// A run that ends here stores that it did before saying so. One
 			// that goes on to evolve announces only what the tasks already
 			// recorded.
@@ -4154,6 +4210,17 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		maxParallel := s.LiveMaxParallel()
 		if maxParallel > 0 && len(ready) > maxParallel {
 			ready = ready[:maxParallel]
+		}
+
+		// The free-space floor (Task 20381), where a round would launch: the
+		// round before has finished and recorded its outcomes, so on a full
+		// disk the workers start nothing new and nothing in flight is cut
+		// short. The wait ends at the top of the loop, as in the sequential
+		// one.
+		if waited, err := o.awaitDiskSpace(ctx, s, nil, roundNoun(ready)); err != nil {
+			return err
+		} else if waited {
+			continue
 		}
 
 		// A stop that landed while the gates above ran must not launch the

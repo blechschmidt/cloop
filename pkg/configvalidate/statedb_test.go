@@ -329,3 +329,34 @@ func audited(t *testing.T, dir string, id int) int {
 	}
 	return n
 }
+
+// A run paused for disk space waits in place (Task 20381): its status says
+// paused, and its process is alive. One that died while it waited left a
+// claim nothing will clear — so --fix treats the claim like a stale
+// "running", and leaves it alone while the run is alive.
+func TestFixSettlesADeadDiskLowWait(t *testing.T) {
+	dir := newProject(t, "running", task(1, "pending", pm.TaskPending, nil))
+	st := load(t, dir)
+	st.SetPaused(pausereason.New(pausereason.CodeDiskLow, "volume / has 812.0 MB free, below the 1.00 GB floor"))
+	if err := st.SaveDirect(); err != nil {
+		t.Fatal(err)
+	}
+
+	stubProbe(t, live)
+	rep := validate(t, dir, true)
+	if got := load(t, dir); !got.PausedFor(pausereason.CodeDiskLow) {
+		t.Errorf("beside a live run the waiting pause became %q (%+v)", got.Status, got.PauseReason)
+	}
+	if n := len(findings(rep, SeverityWarn, "no run of it is live")); n != 0 {
+		t.Errorf("a live waiting run was reported dead: %+v", rep.Findings)
+	}
+
+	stubProbe(t, dead)
+	rep = validate(t, dir, true)
+	if n := len(findings(rep, SeverityWarn, "no run of it is live")); n != 1 {
+		t.Errorf("findings = %+v, want the dead wait reported once", rep.Findings)
+	}
+	if got := load(t, dir); !got.PausedFor(pausereason.CodeStale) {
+		t.Errorf("after --fix the status is %q (%+v), want paused as stale", got.Status, got.PauseReason)
+	}
+}
