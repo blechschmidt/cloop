@@ -782,6 +782,9 @@ type Server struct {
 	remotePresence map[string]map[string][]presenceUser
 	// lastAdoptSweep is when the watcher last looked for orphaned runs.
 	lastAdoptSweep time.Time
+	// lastSessionSweep is when the leader last retired the records of proxy
+	// sessions that ended or lapsed (Task 20383). Guarded by clusterMu.
+	lastSessionSweep time.Time
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1440,14 +1443,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeRoleStore()
 	// And the project memberships, read from the same path.
 	s.closeMemberStore()
-	// Stop the git interception proxy and close every live session, so the
-	// audit trail records why they ended rather than leaving rows that simply
-	// stop. Nil-safe when none is configured.
+	// Stop the git interception proxy. A session nothing will restore is
+	// closed, so the audit trail records why it ended rather than leaving rows
+	// that simply stop; a recorded one is suspended for the process that
+	// adopts its run. Nil-safe when none is configured.
 	activeGitProxy().Close()
+	// Then the GitHub App tokens those suspended sessions presented, on the
+	// leases this process holds, are destroyed — after the proxy stopped
+	// serving, so no request still in flight presents one. Whichever process
+	// restores the sessions with the lease mints its own (Task 20383). A token
+	// in a workload's files is left to the workload.
+	suspendLeaseTokensForShutdown()
 	// The egress proxy the same way (Task 20378): every run's session is
-	// closed and journaled, the listener and every open tunnel go, and the
-	// status row hub doctor reads is cleared. Only the proxy this server's
-	// control plane started; nil-safe when there is none.
+	// journaled — suspended when it is recorded, for the process that adopts
+	// its run (Task 20383), closed otherwise — the listener and every open
+	// tunnel go, and the status row hub doctor reads is cleared. Only the
+	// proxy this server's control plane started; nil-safe when there is none.
 	closeEgressProxy(s.WorkDir)
 	// Same for the CI relay (Task 20278): revoke every federated session so
 	// the audit trail records a close rather than a gap, and stop the reaper
@@ -5971,6 +5982,10 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 	// it) lets it go here if the handover message was missed.
 	s.verifyRunOwnership()
 	s.maybeAdoptOrphanedRuns(now)
+	s.maybeSweepProxySessionRecords(now)
+	// Egress restores of adopted runs that failed for a reason that may pass
+	// (Task 20383): cheap when there is none.
+	retryPendingEgress(now)
 	running := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		running[e.Path] = live.Contains(e.Path)

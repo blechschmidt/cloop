@@ -111,6 +111,13 @@ func (lr *leaseRegistry) forHandle(executorID, handleID string) []string {
 	return out
 }
 
+// get returns the open lease with that id, or nil.
+func (lr *leaseRegistry) get(id string) *secretLease {
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	return lr.active[id]
+}
+
 // held reports whether this process holds the lease with that id.
 func (lr *leaseRegistry) held(id string) bool {
 	lr.mu.Lock()
@@ -245,6 +252,17 @@ type secretLease struct {
 	// the run it was issued for (Task 20382): this process neither extends
 	// nor releases it any more. Guarded by mu.
 	handedOver bool
+	// pendingSessions are the sessions this lease feeds that this process
+	// took over with it and could not restore yet, for a reason that may
+	// pass (Task 20383): retried on the keepalive's tick. Guarded by mu.
+	pendingSessions map[string]pendingSession
+	// restoreMu serialises the restores of this lease's sessions, and is how
+	// handOver and Close wait for one in flight before they end what the
+	// lease fed.
+	restoreMu sync.Mutex
+	// closing: Close has begun, so nothing more is restored for the lease.
+	// Guarded by mu.
+	closing bool
 
 	once sync.Once
 }
@@ -296,6 +314,18 @@ func (sl *secretLease) handOver() {
 		return
 	}
 	liveLeases.removeIf(sl)
+	// What the lease fed goes with it (Task 20383): its sessions stop being
+	// served here — the new holder restores them — and a GitHub App token a
+	// session presented is destroyed, since the new holder mints its own. A
+	// token in the workload's files is left to it; the new holder renews it.
+	// Under restoreMu, so a restore in flight finishes first and what it
+	// brought back is suspended too; later ones see handedOver.
+	sl.restoreMu.Lock()
+	suspendLeaseSessions(sl.lease.ID, "taken over by the hub process that adopted its run")
+	if sl.broker != nil {
+		sl.broker.SuspendLeaseTokens(sl.lease.ID, "lease taken over by the hub process that adopted its run")
+	}
+	sl.restoreMu.Unlock()
 	fmt.Fprintf(os.Stderr, "ui: lease %s was taken over by another hub process with its run; "+
 		"no longer keeping it alive here\n", sl.lease.ID)
 }
@@ -441,6 +471,9 @@ func (sl *secretLease) startKeepalive(tick time.Duration) {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
+				// Sessions taken over with the lease that could not be
+				// restored at adoption are tried again first (Task 20383).
+				sl.retryPendingSessions()
 				if extending && !sl.keepAlive(ctx, now) {
 					extending = false
 				}
@@ -579,6 +612,10 @@ func (sl *secretLease) Close() {
 			sl.stopKeepalive()
 		}
 		liveLeases.removeIf(sl)
+		// Nothing more is restored for the lease (Task 20383).
+		sl.mu.Lock()
+		sl.closing = true
+		sl.mu.Unlock()
 		if sl.mount != nil {
 			err := sl.mount.Close()
 			if err != nil {
@@ -603,20 +640,36 @@ func (sl *secretLease) Close() {
 			// contain a credential this hub merely relayed.
 			_ = sl.delivery.Close()
 		}
-		// End the git proxy sessions this lease's credentials stood on.
-		//
-		// Wiping the lease directory removes the session *token* from the
-		// sandbox, but a workload that copied it out would otherwise keep
-		// PAT-backed access to the whole allowlist through the proxy until the
-		// session's own TTL expired — up to an hour by default, and surviving
-		// both the end of the task and an operator revoking the grant. The
-		// session is the thing that carries authority here, so it has to be
-		// closed along with everything else that does.
-		closeGuardedSessions(sl.lease)
-		// The Kubernetes monitor's sessions carry authority in exactly the
-		// same way, and outlive a released lease in exactly the same way if
-		// nothing closes them.
-		closeKubeGuardSessions(sl.lease)
+		// Under restoreMu, so a restore in flight finishes first and what it
+		// brought back is ended here too (Task 20383).
+		sl.restoreMu.Lock()
+		if sl.isHandedOver() || (sl.broker != nil && sl.broker.HeldElsewhere(sl.lease.ID)) {
+			// Another hub process took the lease over with its run (Task
+			// 20382) and serves its sessions now (Task 20383): they are its
+			// to end, with the run. This process only stops serving them, and
+			// destroys the App tokens it minted for them — Release, below,
+			// leaves a lease another process holds alone.
+			suspendLeaseSessions(sl.lease.ID, "taken over by the hub process that adopted its run")
+			if sl.broker != nil {
+				sl.broker.SuspendLeaseTokens(sl.lease.ID, "lease taken over by the hub process that adopted its run")
+			}
+		} else {
+			// End the git proxy sessions this lease's credentials stood on.
+			//
+			// Wiping the lease directory removes the session *token* from the
+			// sandbox, but a workload that copied it out would otherwise keep
+			// PAT-backed access to the whole allowlist through the proxy until
+			// the session's own TTL expired — up to an hour by default, and
+			// surviving both the end of the task and an operator revoking the
+			// grant. The session is the thing that carries authority here, so
+			// it has to be closed along with everything else that does.
+			closeGuardedSessions(sl.lease)
+			// The Kubernetes monitor's sessions carry authority in exactly the
+			// same way, and outlive a released lease in exactly the same way
+			// if nothing closes them.
+			closeKubeGuardSessions(sl.lease)
+		}
+		sl.restoreMu.Unlock()
 
 		if sl.broker != nil && sl.lease != nil {
 			sl.broker.Release(sl.lease.ID)

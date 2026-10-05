@@ -168,6 +168,25 @@ func (r *egressRegistry) byHandle(handleID string) *runEgress {
 	return nil
 }
 
+// idsForHandle returns the ids of the sessions the workload with handleID
+// holds, sorted: what a run's owner row names, so the process adopting the run
+// restores them (Task 20383).
+func (r *egressRegistry) idsForHandle(handleID string) []string {
+	if handleID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for egr, h := range r.all {
+		if h == handleID && egr.sess != nil {
+			out = append(out, egr.sess.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // snapshot returns every open session.
 func (r *egressRegistry) snapshot() []*runEgress {
 	r.mu.Lock()
@@ -188,6 +207,16 @@ func closeRunEgress(handleID, reason string) {
 func closeAllRunEgress(reason string) {
 	for _, egr := range liveEgress.snapshot() {
 		egr.close(reason)
+	}
+}
+
+// suspendAllRunEgress suspends every durable session this hub holds and closes
+// the rest — what a hub stopping gracefully does, so the process that adopts
+// each run restores its session with its counters rather than finding it
+// closed (Task 20383).
+func suspendAllRunEgress(reason string) {
+	for _, egr := range liveEgress.snapshot() {
+		egr.suspend(reason)
 	}
 }
 
@@ -298,6 +327,10 @@ func applyEgressSession(spec executor.Spec, ex executor.Executor, workDir string
 		GrantID:   grant.ID,
 		Endpoint:  route.String(),
 		NoProxy:   hubEndpointHosts(),
+		// Recorded with its counters, so the process that adopts the run
+		// after this one stops restores it against the same quota (Task
+		// 20383).
+		Durable: leaseHolderID() != "",
 	})
 	if err != nil {
 		return refuse(grant.ID, "the egress broker refused a session: "+secretbroker.RedactString(err.Error()), "")
@@ -688,6 +721,35 @@ func (r *runEgress) close(reason string) {
 	})
 }
 
+// suspend stops serving the session without ending it: its counters are
+// checkpointed, its sockets close and its record stays open for the process
+// that adopts the run. A session with no record is closed instead — nothing
+// could restore it, and its journal would otherwise never say it ended.
+// Nil-safe; shares close's once, so a session is either suspended or closed
+// here, never both.
+func (r *runEgress) suspend(reason string) {
+	if r == nil {
+		return
+	}
+	if r.sess == nil || !r.sess.Durable() {
+		r.close(reason)
+		return
+	}
+	r.once.Do(func() {
+		if r.stopKeepalive != nil {
+			r.stopKeepalive()
+		}
+		liveEgress.remove(r)
+		if r.sess.Closed() {
+			return
+		}
+		r.svc.broker.SuspendSession(r.sess.ID, reason)
+		logEgress(r.workDir, fmt.Sprintf("egress: proxy session %s suspended — %s; %d request(s), %s up, %s down "+
+			"so far, which the hub process that adopts the run counts on from", r.sess.ID, reason, r.sess.Requests(),
+			egressByteCount(r.sess.BytesUp()), egressByteCount(r.sess.BytesDown())))
+	})
+}
+
 // journalEnd writes the session's last row on the project's journal.
 func (r *runEgress) journalEnd() {
 	s := r.sess
@@ -748,6 +810,11 @@ func (r *runEgress) keepalive(ctx context.Context) {
 			}
 			return
 		case now := <-t.C:
+			// The counters, written into the session's record (Task 20383):
+			// what a process restoring the session after this one dies counts
+			// on from, so a SIGKILL loses at most a tick of traffic against
+			// the quota.
+			broker.CheckpointSession(id)
 			// The grant, re-read every tick: a revocation made where this
 			// broker did not see it — `cloop egress revoke`, another hub
 			// member — lands within a tick rather than at the session's TTL.

@@ -37,12 +37,16 @@ const (
 // proxySessionEvent extracts (session id, minted, closed) from a proxy event.
 type proxySessionEvent[E any] func(E) (id string, minted, closed bool)
 
+// A restored session is claimed as a minted one is: it is served here from
+// now on (Task 20383).
 func gitProxySessionEvent(ev gitproxy.Event) (string, bool, bool) {
-	return ev.SessionID, ev.Kind == gitproxy.EventSessionMinted, ev.Kind == gitproxy.EventSessionClosed
+	served := ev.Kind == gitproxy.EventSessionMinted || ev.Kind == gitproxy.EventSessionRestored
+	return ev.SessionID, served, ev.Kind == gitproxy.EventSessionClosed
 }
 
 func kubeGuardSessionEvent(ev kubeguard.Event) (string, bool, bool) {
-	return ev.SessionID, ev.Kind == kubeguard.EventSessionMinted, ev.Kind == kubeguard.EventSessionClosed
+	served := ev.Kind == kubeguard.EventSessionMinted || ev.Kind == kubeguard.EventSessionRestored
+	return ev.SessionID, served, ev.Kind == kubeguard.EventSessionClosed
 }
 
 func ciSessionEvent(ev claudeproxy.Event) (string, bool, bool) {
@@ -69,29 +73,59 @@ func withProxySessionOwnership[E any](kind string, parse proxySessionEvent[E], i
 	}
 }
 
+// releaseSuspendedSessions gives up this process's claim on sessions it
+// suspended (Task 20383), so a member a request for one reaches does not
+// forward it here: the process that restores a session claims it then.
+// Release is conditional on this member holding the claim, so one a restoring
+// process already took is left alone.
+func releaseSuspendedSessions(kind string, ids []string) {
+	n := currentCluster()
+	if n == nil {
+		return
+	}
+	for _, id := range ids {
+		if _, err := n.Release(kind, id); err != nil {
+			clusterLogf("release the claim on suspended %s session %s: %v", kind, id, err)
+		}
+	}
+}
+
 // clusterProxyFallback forwards a request naming a session this process does
 // not hold to the live member that does, under internalPath on that member's
 // hub listener — the proxy's own listener may not be reachable from other
-// members at all (it defaults to loopback). False, and the request is refused
-// here as unauthenticated, when no live member claims the session.
+// members at all (it defaults to loopback).
+//
+// When no live member claims the session, a request presenting a recorded
+// session whose holder stopped waits for the process adopting its run to
+// restore it (session_hold.go, Task 20383). False, and the request is refused
+// here as unauthenticated, when neither happens.
 func clusterProxyFallback(kind, internalPath string) func(http.ResponseWriter, *http.Request, string) bool {
 	return func(w http.ResponseWriter, r *http.Request, sessionID string) bool {
-		n := currentCluster()
-		if n == nil {
-			return false
+		if forwardProxyRequest(w, r, kind, internalPath, sessionID) {
+			return true
 		}
-		o, found, err := n.Lookup(kind, sessionID)
-		if err != nil || !found || o.Self || !o.Alive {
-			return false
-		}
-		fwd := r.Clone(r.Context())
-		fwd.URL.Path = internalPath + r.URL.Path
-		fwd.URL.RawPath = ""
-		if err := n.Forward(w, fwd, o.Member, remoteAddrIP(r)); err != nil {
-			clusterLogf("forward %s session %s to member %s: %v", kind, sessionID, o.InstanceID, err)
-		}
-		return true
+		return proxySessionHold(w, r, kind, internalPath, sessionID)
 	}
+}
+
+// forwardProxyRequest forwards r to the live member claiming the session, and
+// reports whether there was one.
+func forwardProxyRequest(w http.ResponseWriter, r *http.Request, kind, internalPath, sessionID string) bool {
+	n := currentCluster()
+	if n == nil {
+		return false
+	}
+	o, found, err := n.Lookup(kind, sessionID)
+	if err != nil || !found || o.Self || !o.Alive {
+		return false
+	}
+	fwd := r.Clone(r.Context())
+	fwd.URL.Path = internalPath + r.URL.Path
+	fwd.URL.RawPath = ""
+	if err := n.Forward(w, fwd, o.Member, remoteAddrIP(r)); err != nil {
+		clusterLogf("forward %s session %s to member %s: %v", kind, sessionID, o.InstanceID, err)
+	}
+	return true
 }
 
 // ciRelayFallback forwards a CI relay call to the member that minted its

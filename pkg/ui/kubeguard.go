@@ -170,6 +170,11 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 			"ui: kubernetes monitor decisions will go to stderr, not the audit trail: %v\n", dbErr)
 	}
 	reg.OnEvent = withProxySessionOwnership(ownerKubeGuard, kubeGuardSessionEvent, kubeGuardAuditSink(auditDB))
+	if auditDB != nil {
+		// Recorded for the process that adopts a run after this one stops
+		// (Task 20383).
+		reg.Store = newKubeSessionStore(auditDB)
+	}
 
 	px, err := kubeguard.New(reg, kubeguard.Options{
 		Fallback: clusterProxyFallback(ownerKubeGuard, clusterAPIProxyKube),
@@ -281,7 +286,18 @@ func (s *kubeGuardService) Close() {
 	if s.stopReaping != nil {
 		s.stopReaping()
 	}
+	// A request held for an adoption gets its answer now, not after the
+	// proxy's shutdown waited out the hold (Task 20383).
+	abortSessionHolds()
 	for _, sess := range s.reg.Sessions() {
+		// A recorded session is left for the process adopting its run to
+		// restore (Task 20383); see gitProxyService.Close.
+		if sess.Durable() {
+			if s.reg.Suspend(sess.ID, "the hub is shutting down") {
+				releaseSuspendedSessions(ownerKubeGuard, []string{sess.ID})
+			}
+			continue
+		}
 		s.reg.Close(sess.ID, "the hub is shutting down")
 	}
 	if s.proxy != nil {
@@ -371,6 +387,9 @@ func (g kubeGuard) GuardKubeconfig(ctx context.Context, req secretbroker.KubeGua
 		Actor:      actor,
 		GrantID:    req.GrantID,
 		LeaseID:    req.LeaseID,
+		RunID:      req.RunID,
+		// Recorded for the process that takes the lease over (Task 20383).
+		Durable: durableSession(req.LeaseID),
 	})
 	if err != nil {
 		return secretbroker.KubeGuardResult{}, err
@@ -437,6 +456,9 @@ func closeKubeGuardSessions(lease *secretbroker.Lease) {
 		}
 		svc.reg.Close(id, "lease released")
 	}
+	// And by lease, for the sessions restored with a lease taken over from
+	// another process (Task 20383).
+	svc.reg.CloseForLease(lease.ID, "lease released")
 }
 
 // kubeGuardAuditSink forwards the monitor's decisions to the hub's

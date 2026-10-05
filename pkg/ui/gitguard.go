@@ -110,6 +110,11 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		ProjectID:           req.ProjectID,
 		ExecutorID:          req.ExecutorID,
 		Actor:               actor,
+		RunID:               req.RunID,
+		// Recorded, so the process that takes the lease over with its run
+		// restores the session (Task 20383). Only a session standing on a
+		// recorded lease can be: anything else has nothing to restore it with.
+		Durable: durableSession(req.LeaseID),
 	})
 	if err != nil {
 		return secretbroker.GitGuardResult{}, err
@@ -307,6 +312,24 @@ func closeGuardedSessions(lease *secretbroker.Lease) {
 			continue
 		}
 		svc.reg.Close(id, "lease released")
+	}
+	// And by the lease they stand on, which is how a session restored with a
+	// lease taken over from another process is found (Task 20383): that
+	// lease's materials name grants, not the sessions delivered from them.
+	svc.reg.CloseForLease(lease.ID, "lease released")
+}
+
+// suspendLeaseSessions stops serving the git proxy and Kubernetes monitor
+// sessions leaseID feeds without ending them (Task 20383): their records stay
+// open for the hub process that adopts the lease's run — or that already took
+// it over — to restore. A session with no record is closed instead: nothing
+// could restore it.
+func suspendLeaseSessions(leaseID, reason string) {
+	if svc := activeGitProxy(); svc != nil && svc.reg != nil {
+		releaseSuspendedSessions(ownerGitProxy, svc.reg.SuspendForLease(leaseID, reason))
+	}
+	if svc := activeKubeGuard(); svc != nil && svc.reg != nil {
+		releaseSuspendedSessions(ownerKubeGuard, svc.reg.SuspendForLease(leaseID, reason))
 	}
 }
 

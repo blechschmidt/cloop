@@ -208,6 +208,9 @@ func startEgressProxy(cfg *config.Config, dir string, port int) (*egressProxySer
 		ListenAddr:  addr,
 		Endpoint:    svc.defaultEndpoint(),
 		DialTimeout: time.Duration(e.DialTimeoutSeconds) * time.Second,
+		// A run's session whose holder stopped waits for the process adopting
+		// the run to restore it (Task 20383).
+		AwaitSession: egressSessionHold,
 	})
 	if err != nil {
 		_ = ln.Close()
@@ -235,7 +238,11 @@ func newEgressBroker(db *statedb.DB, cfg *config.Config, endpoint string) (*egre
 	if err != nil {
 		return nil, err
 	}
-	return egressbroker.New(store, egressBrokerOptions(secretstore.NewAuditor(db), cfg, endpoint)...)
+	// Every run's session is recorded, so the process that adopts the run
+	// after this one stops restores it with its counters (Task 20383).
+	opts := append(egressBrokerOptions(secretstore.NewAuditor(db), cfg, endpoint),
+		egressbroker.WithSessionStore(newEgressSessionStore(db)))
+	return egressbroker.New(store, opts...)
 }
 
 // egressBrokerOptions are the broker options a hub's configuration implies.
@@ -321,9 +328,13 @@ func closeEgressProxy(dir string) {
 	egressProxyCurrent.Store(nil)
 	egressProxyMu.Unlock()
 
-	// The runs first: their keepalives stop and each session's end is
-	// journaled on its project, before the broker closes it underneath them.
-	closeAllRunEgress("the hub is shutting down")
+	// The runs first: their keepalives stop and each session is journaled on
+	// its project, before the broker closes what is left underneath them. A
+	// recorded run's session is suspended rather than closed (Task 20383):
+	// the run outlives this process on its executor, and the process that
+	// adopts it restores the session, counters and all.
+	suspendAllRunEgress("the hub is shutting down")
+	abortSessionHolds()
 	svc.broker.CloseAllSessions("the hub is shutting down")
 	_ = svc.proxy.Close()
 	select {

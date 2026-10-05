@@ -65,7 +65,10 @@ type runOwnerMeta struct {
 	// Leases are the secret leases the run holds, which the member adopting
 	// it takes over: keeps alive while the run is live and releases when it
 	// ends (Task 20382).
-	Leases  []string  `json:"leases,omitempty"`
+	Leases []string `json:"leases,omitempty"`
+	// Egress are the egress proxy sessions the run holds, which the member
+	// adopting it restores with their counters (Task 20383).
+	Egress  []string  `json:"egress,omitempty"`
 	Started time.Time `json:"started,omitzero"`
 	// RunClaimMeta carries Dispatching, which every observer of the claim
 	// judges by — members and, since Task 20374, processes that are not
@@ -137,6 +140,7 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 		meta.Feature = d.feature
 	}
 	meta.Leases = liveLeases.forHandle(ex.ID(), handleID)
+	meta.Egress = liveEgress.idsForHandle(handleID)
 	if _, found, _ := n.Lookup(ownerRun, workDir); !found {
 		// Standalone-era callers and adoption paths reach here without a
 		// prior claim; take one now so the run is visible cluster-wide.
@@ -340,11 +344,56 @@ func (s *Server) detachRun(workDir string) bool {
 	if run.cancel != nil {
 		run.cancel()
 	}
+	// The run's credentials go with it (Task 20383): the leases its adopter
+	// takes over hand over now rather than at their next extension, so the
+	// sessions they feed stop being served here. The adopter announces itself
+	// before it takes them (adoptRun), so a lease not taken yet is watched
+	// until it is. The run's egress session stays: no proxy forwards egress,
+	// and the workload's proxy address may well be this process's, so the
+	// adopter restores it only from a process that is gone.
+	for _, id := range liveLeases.forHandle(run.ex.ID(), run.handleID) {
+		sl := liveLeases.get(id)
+		if sl == nil || sl.broker == nil {
+			continue
+		}
+		if sl.broker.HeldElsewhere(id) {
+			sl.handOver()
+			continue
+		}
+		go awaitLeaseTakeover(sl)
+	}
 	s.untrackRunKeepClaim(workDir)
 	s.liveLogSetRunning(workDir, false)
 	s.log().Info("cluster", 0, "run handed over to another hub member; stopped streaming it here",
 		map[string]interface{}{"project": workDir, "handle": run.handleID})
 	return true
+}
+
+// leaseTakeoverWait bounds how long a member that handed a run over watches
+// for the adopter to take the run's lease, and leaseTakeoverPoll how often it
+// looks. Variables so tests can shorten them.
+var (
+	leaseTakeoverWait = 2 * time.Minute
+	leaseTakeoverPoll = time.Second
+)
+
+// awaitLeaseTakeover hands sl over once another process holds its lease, or
+// gives up after leaseTakeoverWait — an adopter that has not taken it by then
+// is not going to, and the lease's own keepalive learns the rest at its next
+// extension.
+func awaitLeaseTakeover(sl *secretLease) {
+	defer recoverGoroutine("await lease takeover")
+	deadline := time.Now().Add(leaseTakeoverWait)
+	for time.Now().Before(deadline) {
+		time.Sleep(leaseTakeoverPoll)
+		if sl.isHandedOver() || sl.isClosing() {
+			return
+		}
+		if sl.broker.HeldElsewhere(sl.lease.ID) {
+			sl.handOver()
+			return
+		}
+	}
 }
 
 // verifyRunOwnership detaches from every run this member streams but no
@@ -497,6 +546,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		// leases, released, and its executor session, closed with how the
 		// workload ended rather than left running for failover to find.
 		s.retireRunLeases(meta.Leases, "its run ended while no hub process held the lease")
+		retireRunEgressRecords(meta.Egress, "its run ended while no hub process held the session")
 		closeAdoptedSessions(ex, meta.Handle, st, stErr)
 		s.reconcileDeadRun(workDir, verdict)
 		// Settled here, so counted here: the member that dispatched it, and
@@ -511,6 +561,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	// Before resumeRun, which rewrites the owner row from what this member
 	// holds: the leases have to be held here by then to stay on it.
 	s.takeOverRunLeases(workDir, ex, meta.Handle, meta.Leases)
+	s.restoreRunEgress(workDir, ex, meta.Handle, meta.Egress)
 	go watchAdoptedSessions(ex, meta.Handle)
 	s.resumeRun(workDir, ex, meta.Handle)
 }

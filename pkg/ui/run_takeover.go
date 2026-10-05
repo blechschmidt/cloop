@@ -95,6 +95,10 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			s.log().Info("cluster", 0, "took over the secret lease of an adopted run",
 				map[string]interface{}{"project": workDir, "lease": id, "executor": ex.ID(), "handle": handleID,
 					"expires_at": sl.ExpiresAt().UTC().Format(time.RFC3339)})
+			// And what it feeds: the run's git proxy and Kubernetes monitor
+			// sessions, under the ids and tokens its workload holds, and the
+			// App tokens behind them (Task 20383).
+			restoreLeaseSessions(sl)
 		case errors.Is(err, secretbroker.ErrLeaseMoved), errors.Is(err, secretbroker.ErrLeaseNotFound):
 			// Held by the process that adopted the run first, or already
 			// released: either way not this process's to keep.
@@ -158,13 +162,15 @@ func (s *Server) retireRunLeases(leaseIDs []string, reason string) {
 	}
 }
 
-// retireLeaseRecord retires leaseID's record, if it still has one.
+// retireLeaseRecord retires leaseID's record, if it still has one, and the
+// records of the sessions it fed (Task 20383): nothing will restore those now.
 func retireLeaseRecord(leaseID, reason string) {
-	broker, _, closeDB, err := openUIBrokerDB(controlPlaneDir())
+	broker, db, closeDB, err := openUIBrokerDB(controlPlaneDir())
 	if err != nil {
 		return
 	}
 	defer closeDB()
+	retireLeaseSessionRecords(db, leaseID, "its lease was retired: "+reason)
 	rec, err := broker.LeaseRecordFor(leaseID)
 	if err != nil {
 		return
@@ -219,7 +225,7 @@ func (s *Server) sweepOrphanedLeaseRecords(now time.Time) []remote.ExpiredLease 
 	if len(due) == 0 {
 		return nil
 	}
-	broker, _, closeDB, err := openUIBrokerDB(dir)
+	broker, bdb, closeDB, err := openUIBrokerDB(dir)
 	if err != nil {
 		return nil
 	}
@@ -236,6 +242,9 @@ func (s *Server) sweepOrphanedLeaseRecords(now time.Time) []remote.ExpiredLease 
 		if err != nil || !retired {
 			continue
 		}
+		// The sessions it fed go with it (Task 20383): nothing restores a
+		// session whose lease is gone.
+		retireLeaseSessionRecords(bdb, rec.ID, "its lease was retired: "+reason)
 		out = append(out, remote.ExpiredLease{LeaseID: rec.ID, Reason: reason})
 	}
 	return out

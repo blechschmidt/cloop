@@ -192,6 +192,11 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	// Sessions are recorded as owned by this process, so another hub process
 	// the sandbox's git request reaches can forward it here (Task 20354).
 	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent, gitProxyAuditSink(auditDB))
+	if auditDB != nil {
+		// Lease-path sessions are recorded (Task 20383), so the process that
+		// adopts a run after this one stops can restore them.
+		reg.Store = newGitSessionStore(auditDB)
+	}
 
 	px, err := gitproxy.New(reg, gitproxy.Options{
 		Fallback: clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
@@ -319,9 +324,12 @@ func (s *gitProxyService) Wrap(execID string, src executor.WorkspaceCredentialSo
 
 // Close stops serving and drops every live session.
 //
-// Sessions are closed rather than merely abandoned so the audit trail records
-// why they ended, and so their counters land in the closing rows instead of
-// disappearing with the process.
+// A session that is not recorded is closed rather than merely abandoned, so
+// the audit trail records why it ended. A recorded one — a lease-path session,
+// standing on a lease the process adopting its run takes over — is suspended
+// instead (Task 20383): its workload outlives this process on its executor, and
+// closing it would turn the restart into a 401 for that workload's next fetch.
+// Its record stays open, and the adopter restores it.
 func (s *gitProxyService) Close() {
 	if s == nil {
 		return
@@ -329,7 +337,16 @@ func (s *gitProxyService) Close() {
 	if s.stopReaping != nil {
 		s.stopReaping()
 	}
+	// A request held for an adoption gets its answer now, not after the
+	// proxy's shutdown waited out the hold (Task 20383).
+	abortSessionHolds()
 	for _, sess := range s.reg.Sessions() {
+		if sess.Durable() {
+			if s.reg.Suspend(sess.ID, "the hub is shutting down") {
+				releaseSuspendedSessions(ownerGitProxy, []string{sess.ID})
+			}
+			continue
+		}
 		s.reg.Close(sess.ID, "the hub is shutting down")
 	}
 	if s.proxy != nil {
