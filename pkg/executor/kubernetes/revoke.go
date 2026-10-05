@@ -404,3 +404,21 @@ func markWorkspaceSecretDeleted(st *workspaceState) {
 	st.deleted = true
 	st.mu.Unlock()
 }
+
+// Compile-time proof that a workload's output can be scrubbed of values
+// learned after it started.
+var _ executor.HandleRedactor = (*Executor)(nil)
+
+// AddHandleRedactions implements executor.HandleRedactor: a handle adopted
+// after a hub restart has no redaction set of its own, and the process that
+// took its run's lease over hands the values here (Task 20382).
+func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
+	rec, err := e.lookup(handleID)
+	if err != nil {
+		return false
+	}
+	if rec.bus != nil && len(values) > 0 {
+		rec.bus.AddRedactions(values...)
+	}
+	return true
+}

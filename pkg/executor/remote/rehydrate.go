@@ -260,3 +260,22 @@ func taskIDFromLabels(labels map[string]string) int {
 	}
 	return 0
 }
+
+// Compile-time proof that a device's output can be scrubbed of values learned
+// after its workload started.
+var _ executor.HandleRedactor = (*Executor)(nil)
+
+// AddHandleRedactions implements executor.HandleRedactor. An adopted handle
+// starts with no redaction set (see adopt), so without this the hub would
+// stream — and merge into its own copy of the project — a taken-over run's
+// output scrubbed only by the device (Task 20382).
+func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
+	hs, err := e.lookup(handleID)
+	if err != nil || hs.bus == nil {
+		return false
+	}
+	if len(values) > 0 {
+		hs.bus.AddRedactions(values...)
+	}
+	return true
+}

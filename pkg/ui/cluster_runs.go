@@ -62,7 +62,11 @@ type runOwnerMeta struct {
 	// Feature is, for a feature's run on an isolating executor, what its
 	// returned work is landed against (Task 20367).
 	Feature *featureReturn `json:"feature,omitempty"`
-	Started time.Time      `json:"started,omitzero"`
+	// Leases are the secret leases the run holds, which the member adopting
+	// it takes over: keeps alive while the run is live and releases when it
+	// ends (Task 20382).
+	Leases  []string  `json:"leases,omitempty"`
+	Started time.Time `json:"started,omitzero"`
 	// RunClaimMeta carries Dispatching, which every observer of the claim
 	// judges by — members and, since Task 20374, processes that are not
 	// members at all. It is embedded rather than restated so the field is
@@ -132,6 +136,7 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 		meta.Seeded, meta.Provenance = true, &prov
 		meta.Feature = d.feature
 	}
+	meta.Leases = liveLeases.forHandle(ex.ID(), handleID)
 	if _, found, _ := n.Lookup(ownerRun, workDir); !found {
 		// Standalone-era callers and adoption paths reach here without a
 		// prior claim; take one now so the run is visible cluster-wide.
@@ -488,6 +493,11 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 			rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 			s.collectRunResult(workDir, ex, meta.Handle)
 		}
+		// What the owner would have ended with the run (Task 20382): its
+		// leases, released, and its executor session, closed with how the
+		// workload ended rather than left running for failover to find.
+		s.retireRunLeases(meta.Leases, "its run ended while no hub process held the lease")
+		closeAdoptedSessions(ex, meta.Handle, st, stErr)
 		s.reconcileDeadRun(workDir, verdict)
 		// Settled here, so counted here: the member that dispatched it, and
 		// counted its start, is gone, and the cluster's sum needs the end.
@@ -498,6 +508,10 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
 		rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 	}
+	// Before resumeRun, which rewrites the owner row from what this member
+	// holds: the leases have to be held here by then to stay on it.
+	s.takeOverRunLeases(workDir, ex, meta.Handle, meta.Leases)
+	go watchAdoptedSessions(ex, meta.Handle)
 	s.resumeRun(workDir, ex, meta.Handle)
 }
 

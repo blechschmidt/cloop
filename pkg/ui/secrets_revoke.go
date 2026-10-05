@@ -342,12 +342,22 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 		if sl == nil || sl.lease == nil || !sl.Expired(now) {
 			continue
 		}
+		// Lapsed here because another hub process took it over with its run
+		// and keeps it alive there (Task 20382): sweeping it would pull the
+		// credential off a device whose run the new holder is still serving.
+		if sl.broker != nil && sl.broker.HeldElsewhere(sl.lease.ID) {
+			sl.handOver()
+			continue
+		}
 		age := now.Sub(sl.ExpiresAt()).Round(time.Second)
 		out = append(out, remote.ExpiredLease{
 			LeaseID: sl.lease.ID,
 			Reason:  fmt.Sprintf("lease TTL expired %s ago", age),
 		})
 	}
+	// And the leases whose holder stopped without anyone taking them over,
+	// which no process's registry lists any more (Task 20382).
+	out = append(out, s.sweepOrphanedLeaseRecords(now)...)
 	if len(out) == 0 {
 		return nil
 	}

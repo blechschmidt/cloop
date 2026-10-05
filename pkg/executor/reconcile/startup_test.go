@@ -238,9 +238,10 @@ func TestSweepKeepsSessionWhenTheDriverCannotAnswer(t *testing.T) {
 }
 
 // TestSweepClosesSessionForAnUnregisteredExecutor: the executor was removed
-// from config, or is an edge device that has not dialled back in. The session
-// is over either way — a device that reconnects opens a new one — and leaving
-// the row would wedge drain on an executor that no longer exists.
+// from config, and nothing persisted says its workload may come back. Leaving
+// the row would wedge drain on an executor that no longer exists. (An edge
+// device that has not dialled back in yet is the other case of an executor
+// this sweep cannot see — TestSweepKeepsADeviceSessionUntilItsAgentReconnects.)
 func TestSweepClosesSessionForAnUnregisteredExecutor(t *testing.T) {
 	dir := t.TempDir()
 	db, sched := openSweepDB(t, dir)
@@ -256,6 +257,61 @@ func TestSweepClosesSessionForAnUnregisteredExecutor(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("want the orphaned session closed, got %d in flight", n)
+	}
+}
+
+// TestSweepKeepsADeviceSessionUntilItsAgentReconnects (Task 20382): enrolled
+// agents are registered after this sweep runs, so an edge device's executor is
+// always "unregistered" here — and its workload, which the hub still holds a
+// handle for, is adopted with its run when the agent dials back in. Closing
+// the session recorded a run that went on to succeed as failed, and left
+// nothing for failover to find if the device then died holding it. A
+// container's session on an executor that is gone is still closed.
+func TestSweepKeepsADeviceSessionUntilItsAgentReconnects(t *testing.T) {
+	dir := t.TempDir()
+	db, sched := openSweepDB(t, dir)
+	defer db.Close()
+	handles, err := executorstore.NewHandles(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(execID, handleID, driver string) {
+		t.Helper()
+		if err := handles.PutHandle(executor.HandleRecord{
+			HandleID: handleID, ExecutorID: execID, Driver: driver, ExternalID: handleID,
+			ProjectPath: dir, StartedAt: time.Now().UTC().Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("put handle: %v", err)
+		}
+	}
+	put("edge-1", "device-run", executor.KindRemoteAgent)
+	put("gone-container", "container-run", executor.KindContainer)
+	device := openRunningSession(t, sched, "edge-1", "device-run", dir, 1)
+	// Dispatched through a virtual executor: the session names it, the
+	// device's handle row names the agent.
+	virtual := openRunningSession(t, sched, "edge-1-vx", "device-run", dir, 2)
+	openRunningSession(t, sched, "gone-container", "container-run", dir, 3)
+
+	opts := sweepOptions(executor.NewRegistry())
+	opts.DisableHandleStore = false
+	opts.HandleStore = handles
+	Sweep(context.Background(), dir, opts)
+
+	for _, id := range []string{device, virtual} {
+		running, err := sched.RunningSessions("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, sess := range running {
+			found = found || sess.ID == id
+		}
+		if !found {
+			t.Errorf("session %s of a device that has not reconnected yet was closed", id)
+		}
+	}
+	if n, _ := sched.CountRunning("gone-container"); n != 0 {
+		t.Errorf("the session of a removed container executor was left running")
 	}
 }
 

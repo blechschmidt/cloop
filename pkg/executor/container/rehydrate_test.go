@@ -847,3 +847,32 @@ rm)
 		t.Error("the peer's just-exited container was removed before the peer could reap it")
 	}
 }
+
+// TestAdoptedHandleTakesItsLeasesRedactions (Task 20382): a container adopted
+// after a hub restart has no redaction set — the dispatched Spec's secrets were
+// never persisted — so the process that took its run's lease over hands the
+// values here, and the hub scrubs the container's output with them.
+func TestAdoptedHandleTakesItsLeasesRedactions(t *testing.T) {
+	store := executor.NewMemoryHandleStore()
+	rt := stubRuntime(t, liveContainerStub)
+	rec := savedHandle("c-redact01", "test-redact", "cloop-project-redact01", time.Now())
+	if err := store.PutHandle(rec); err != nil {
+		t.Fatalf("PutHandle: %v", err)
+	}
+	ex := storeExecutor(t, "test-redact", rt, store)
+	ex.rehydrate()
+
+	if ex.AddHandleRedactions("c-unknown", "leased-value-0123456789") {
+		t.Fatal("an unknown handle accepted redactions")
+	}
+	if !ex.AddHandleRedactions(rec.HandleID, "leased-value-0123456789") {
+		t.Fatal("the adopted handle refused its redactions")
+	}
+	r, err := ex.lookup(rec.HandleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.bus.Redactor().String("token leased-value-0123456789"); strings.Contains(got, "leased-value") {
+		t.Fatalf("the adopted handle's output is not scrubbed: %q", got)
+	}
+}

@@ -594,6 +594,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	}
 	egress.bindHandle(ex, handle.ID)
 	egressHandedOff = true
+	// Bound before anything can read the run's owner row: the lease ids it
+	// carries are how a process adopting the run takes the lease over
+	// (Task 20382).
+	lease.bindHandle(ex.ID(), handle.ID)
 	// Whom the run was started for, which its automatic resume acts for.
 	clear.started()
 	go wipeLeaseOnExit(ex, handle.ID, lease, egress)

@@ -219,10 +219,15 @@ func Sweep(ctx context.Context, dir string, opts Options) {
 //     is gone. Close the row with the terminal state the driver reports, or
 //     failed when it reports nothing.
 //   - the executor is not registered at all: it was removed from config, or
-//     is an edge device that has not dialled back in. Closing the row is
-//     still right — the *session* is over either way, and a device that
-//     reconnects opens a new one — but it is recorded as failed rather than
-//     finished, because we genuinely do not know how the work ended.
+//     is an edge device that has not dialled back in. The first is over and
+//     is closed as failed, because we genuinely do not know how the work
+//     ended. The second is not over: enrolled agents are registered after
+//     this sweep runs, and since Task 20354 the process the device reconnects
+//     to adopts its run rather than starting a new one — so a session whose
+//     workload is a persisted edge-device handle is left running for that
+//     process to watch to its end (Task 20382). Closing it here recorded a
+//     run that went on to succeed as failed, and left nothing for failover
+//     to find if the device then died holding it.
 func sweepSessions(ctx context.Context, dir string, opts Options) map[string]map[int]bool {
 	active := map[string]map[int]bool{}
 
@@ -249,6 +254,7 @@ func sweepSessions(ctx context.Context, dir string, opts Options) map[string]map
 	}
 
 	reg := opts.registry()
+	awaiting := deviceHandles(opts.handleStore(dir))
 	now := time.Now().UTC()
 	var closed, kept int
 	for _, sess := range sessions {
@@ -256,7 +262,7 @@ func sweepSessions(ctx context.Context, dir string, opts Options) map[string]map
 			opts.logf("executor: session sweep stopped early: %v", ctx.Err())
 			break
 		}
-		state, live := sessionOutcome(ctx, reg, sess)
+		state, live := sessionOutcome(ctx, reg, sess, awaiting)
 		if live {
 			kept++
 			if sess.TaskID > 0 {
@@ -297,7 +303,7 @@ func sweepSessions(ctx context.Context, dir string, opts Options) map[string]map
 // session whose workload is actually running would let the scheduler re-place
 // its task, producing two agents editing one repository. Leaving it open costs
 // a drain that waits, and the next restart re-evaluates it.
-func sessionOutcome(ctx context.Context, reg *executor.Registry, sess executor.Session) (string, bool) {
+func sessionOutcome(ctx context.Context, reg *executor.Registry, sess executor.Session, awaiting map[string]bool) (string, bool) {
 	if strings.TrimSpace(sess.HandleID) == "" {
 		// A session that never obtained a handle cannot have a workload to
 		// reattach to: Start failed, or the hub died inside it.
@@ -305,6 +311,12 @@ func sessionOutcome(ctx context.Context, reg *executor.Registry, sess executor.S
 	}
 	ex, err := reg.Get(sess.ExecutorID)
 	if err != nil {
+		if awaiting[sess.HandleID] {
+			// An edge device's workload this control plane still has a handle
+			// for: its agent is registered when it dials back in, and its run
+			// is adopted then. Live until then, the safe direction above.
+			return "", true
+		}
 		return statedb.ExecutorSessionFailed, false
 	}
 
@@ -324,6 +336,28 @@ func sessionOutcome(ctx context.Context, reg *executor.Registry, sess executor.S
 		return statedb.ExecutorSessionFinished, false
 	}
 	return statedb.ExecutorSessionFailed, false
+}
+
+// deviceHandles returns the ids of the edge-device workloads store has a
+// handle for. Keyed by handle alone because a session dispatched through a
+// virtual executor names the virtual executor while the device's handle row
+// names its agent; handle ids are unique across the store, so the match is
+// exact either way. Nil — nothing awaited — when there is no store to ask.
+func deviceHandles(store executor.HandleStore) map[string]bool {
+	if store == nil {
+		return nil
+	}
+	rows, err := store.ListHandles("")
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, r := range rows {
+		if strings.TrimSpace(r.Driver) == executor.KindRemoteAgent && r.HandleID != "" {
+			out[r.HandleID] = true
+		}
+	}
+	return out
 }
 
 // pruneWorktrees collects task worktrees and merged task branches that a

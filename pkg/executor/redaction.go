@@ -93,3 +93,17 @@ func sensitiveEnvValues(env []string) []string {
 	}
 	return out
 }
+
+// HandleRedactor is implemented by a driver that scrubs a workload's output on
+// the hub and can be handed more values to scrub after the workload started.
+//
+// A hub process that adopts a run after the one that dispatched it stopped
+// needs it (Task 20382): the handle it rehydrated carries no redaction set,
+// because a dispatched Spec's secrets are never persisted, so the process that
+// takes the run's lease over re-derives the values from the lease's grants and
+// installs them here.
+type HandleRedactor interface {
+	// AddHandleRedactions extends the redaction of handleID's output with
+	// values, from its next chunk on, and reports whether the handle is known.
+	AddHandleRedactions(handleID string, values ...string) bool
+}

@@ -495,3 +495,32 @@ func TestRehydrate_NilStoreKeepsThePreviousBehaviour(t *testing.T) {
 	// And attaching nothing is a no-op rather than a nil-store panic.
 	ex.AttachHandleStore(nil)
 }
+
+// TestRehydrate_AdoptedPodTakesItsLeasesRedactions (Task 20382): a Pod adopted
+// after a hub restart has no redaction set of its own; the process that took
+// its run's lease over hands the values here.
+func TestRehydrate_AdoptedPodTakesItsLeasesRedactions(t *testing.T) {
+	store := executor.NewMemoryHandleStore()
+	ex1, api, src := newTestExecutor(t, func(o *Options) { o.HandleStore = store })
+	h, err := ex1.Start(context.Background(), testSpec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ex1.Close()
+	src.waitOutstandingEmpty(t, 3*time.Second)
+
+	ex2 := newRestartedExecutor(t, api, src, store)
+	if ex2.AddHandleRedactions("no-such-pod", "leased-value-0123456789") {
+		t.Fatal("an unknown handle accepted redactions")
+	}
+	if !ex2.AddHandleRedactions(h.ID, "leased-value-0123456789") {
+		t.Fatal("the adopted Pod refused its redactions")
+	}
+	rec, err := ex2.lookup(h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.bus.Redactor().String("token leased-value-0123456789"); strings.Contains(got, "leased-value") {
+		t.Fatalf("the adopted Pod's output is not scrubbed: %q", got)
+	}
+}

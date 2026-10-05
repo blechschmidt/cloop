@@ -81,7 +81,8 @@ type leaseRegistry struct {
 	active map[string]*secretLease
 }
 
-// add records an open lease. Called once per successful materialisation.
+// add records an open lease. Called once per successful materialisation, and
+// once per lease taken over with an adopted run (run_takeover.go).
 func (lr *leaseRegistry) add(sl *secretLease) {
 	if sl == nil || sl.lease == nil {
 		return
@@ -91,8 +92,50 @@ func (lr *leaseRegistry) add(sl *secretLease) {
 	lr.mu.Unlock()
 }
 
-// remove forgets a lease without wiping it. Close calls this; callers that
-// want the credentials gone want revoke instead.
+// forHandle returns the ids of the open leases bound to handleID on
+// executorID, sorted: the leases a run's owner row names, so a process
+// adopting the run can take them over (Task 20382).
+func (lr *leaseRegistry) forHandle(executorID, handleID string) []string {
+	if executorID == "" || handleID == "" {
+		return nil
+	}
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	var out []string
+	for id, sl := range lr.active {
+		if ex, h := sl.boundHandle(); ex == executorID && h == handleID {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// held reports whether this process holds the lease with that id.
+func (lr *leaseRegistry) held(id string) bool {
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	_, ok := lr.active[id]
+	return ok
+}
+
+// removeIf forgets sl if it is the lease registered under its id. Close and
+// handOver use it rather than remove, so that letting go of one lease object
+// can never drop a different one registered under the same id — the one this
+// process took over with an adopted run, say (Task 20382).
+func (lr *leaseRegistry) removeIf(sl *secretLease) {
+	if sl == nil || sl.lease == nil {
+		return
+	}
+	lr.mu.Lock()
+	if lr.active[sl.lease.ID] == sl {
+		delete(lr.active, sl.lease.ID)
+	}
+	lr.mu.Unlock()
+}
+
+// remove forgets a lease without wiping it; callers that want the credentials
+// gone want revoke instead.
 func (lr *leaseRegistry) remove(id string) {
 	lr.mu.Lock()
 	delete(lr.active, id)
@@ -194,7 +237,67 @@ type secretLease struct {
 	// ticks running it has repeated. Guarded by mu.
 	refreshFailed map[string]refreshFailure
 
+	// executorID and handleID name the workload the lease was dispatched
+	// with, once it has one (bindHandle), so the run's owner row can carry
+	// the lease to a process that adopts the run. Guarded by mu.
+	executorID, handleID string
+	// handedOver records that another hub process took the lease over with
+	// the run it was issued for (Task 20382): this process neither extends
+	// nor releases it any more. Guarded by mu.
+	handedOver bool
+
 	once sync.Once
+}
+
+// bindHandle records the workload this lease was dispatched with.
+func (sl *secretLease) bindHandle(executorID, handleID string) {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	sl.executorID, sl.handleID = executorID, handleID
+	sl.mu.Unlock()
+}
+
+// boundHandle returns what bindHandle recorded.
+func (sl *secretLease) boundHandle() (executorID, handleID string) {
+	if sl == nil {
+		return "", ""
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	return sl.executorID, sl.handleID
+}
+
+// isHandedOver reports whether handOver ran.
+func (sl *secretLease) isHandedOver() bool {
+	if sl == nil {
+		return false
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	return sl.handedOver
+}
+
+// handOver lets go of a lease another hub process took over. It leaves the
+// registry at once — so neither the TTL janitor nor the leases panel treats it
+// as this process's any more, and the janitor cannot sweep a credential the
+// new holder keeps alive off the device it is on — and its eventual Close
+// releases nothing at the broker, whose record names the new holder.
+func (sl *secretLease) handOver() {
+	if sl == nil || sl.lease == nil {
+		return
+	}
+	sl.mu.Lock()
+	already := sl.handedOver
+	sl.handedOver = true
+	sl.mu.Unlock()
+	if already {
+		return
+	}
+	liveLeases.removeIf(sl)
+	fmt.Fprintf(os.Stderr, "ui: lease %s was taken over by another hub process with its run; "+
+		"no longer keeping it alive here\n", sl.lease.ID)
 }
 
 // ExpiresAt returns the lease's current deadline, including any extension.
@@ -270,6 +373,10 @@ func (sl *secretLease) keepAlive(ctx context.Context, now time.Time) bool {
 		if ctx.Err() != nil {
 			return false
 		}
+		if errors.Is(err, secretbroker.ErrLeaseMoved) {
+			sl.handOver()
+			return false
+		}
 		if leaseExtensionIsFinal(err) {
 			fmt.Fprintf(os.Stderr, "ui: lease %s will not be extended and lapses at %s: %v\n",
 				sl.lease.ID, current.UTC().Format(time.RFC3339), err)
@@ -301,6 +408,7 @@ func leaseExtensionIsFinal(err error) bool {
 		secretbroker.ErrLeaseNotFound,
 		secretbroker.ErrLeaseExpired,
 		secretbroker.ErrInvalidGrant,
+		secretbroker.ErrLeaseMoved,
 	} {
 		if errors.Is(err, final) {
 			return true
@@ -470,9 +578,7 @@ func (sl *secretLease) Close() {
 		if sl.stopKeepalive != nil {
 			sl.stopKeepalive()
 		}
-		if sl.lease != nil {
-			liveLeases.remove(sl.lease.ID)
-		}
+		liveLeases.removeIf(sl)
 		if sl.mount != nil {
 			err := sl.mount.Close()
 			if err != nil {
@@ -721,6 +827,11 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 	return attachKubeGuard(attachGitGuard(broker)), db, func() { _ = db.Close() }, nil
 }
 
+// leaseHolderID names the hub process the leases it issues are recorded as
+// held by: its cluster member id. A variable so a test can play the process a
+// lease is issued by and the one that takes it over in one binary.
+var leaseHolderID = processInstanceID
+
 // testBrokerOptions are appended to every broker this hub opens. Nil in
 // production. Tests set it to stand a fake GitHub (secretbroker.WithGitHubApp)
 // and a clock they drive in for api.github.com and the wall clock, so a GitHub
@@ -728,8 +839,17 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 var testBrokerOptions []secretbroker.Option
 
 // brokerOptions is the option list every broker the hub opens is built with.
+//
+// Every lease it issues is recorded as held by this process (Task 20382), so
+// the process that adopts the lease's run after this one stops — a restart in
+// the same directory, or another member of its cluster — can take it over.
+// A process outside any cluster has no name to hold a lease under, and keeps
+// its leases in memory as before.
 func brokerOptions(auditor secretbroker.Auditor) []secretbroker.Option {
 	opts := []secretbroker.Option{secretbroker.WithAuditor(auditor)}
+	if holder := leaseHolderID(); holder != "" {
+		opts = append(opts, secretbroker.WithLeaseRecords(holder))
+	}
 	return append(opts, testBrokerOptions...)
 }
 

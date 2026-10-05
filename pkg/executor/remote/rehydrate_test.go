@@ -587,3 +587,52 @@ func connectWithWelcome(
 		return nil, nil
 	}
 }
+
+// TestARehydratedHandleIsScrubbedOfWhatItsLeaseCarries (Task 20382): a hub
+// that adopted a run after a restart has no redaction set for it — the Spec's
+// secrets were never persisted — so the process that took the run's lease
+// over hands the driver the lease's values, and the device's output reaches
+// the hub's stream without them from then on.
+func TestARehydratedHandleIsScrubbedOfWhatItsLeaseCarries(t *testing.T) {
+	store := executor.NewMemoryHandleStore()
+	first := newStoredExecutor(t, store)
+	p, sess := connect(t, first, remote.AgentRecord{AgentID: "agent-1"}, defaultHello(), nil)
+	handle := startHandle(t, first, p)
+	sess.Close()
+
+	revived := newStoredExecutor(t, store)
+	if revived.AddHandleRedactions("no-such-handle", "x") {
+		t.Fatal("an unknown handle accepted redactions")
+	}
+	const secret = "leased-credential-value-0123456789"
+	if !revived.AddHandleRedactions(handle.ID, secret) {
+		t.Fatal("the rehydrated handle refused its redactions")
+	}
+
+	lines, err := revived.Stream(context.Background(), handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	sink := newStreamSink(lines)
+	p2, _ := connectWithWelcome(t, revived, remote.AgentRecord{AgentID: "agent-1"},
+		helloOffering(remote.ProtocolVersion, handle.ID, 0), nil)
+	out := "token is " + secret + "\n"
+	p2.sendLog(handle.ID, 0, out)
+	statusFrame, err := remote.NewFrame(remote.TypeStatus, "", handle.ID, remote.StatusPayload{
+		Status:      executor.Status{HandleID: handle.ID, State: executor.StateExited},
+		FinalOffset: int64(len(out)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2.write(statusFrame)
+	sink.waitClosed(t, 3*time.Second)
+
+	got := sink.text()
+	if strings.Contains(got, secret) {
+		t.Fatalf("the leased credential reached the hub's stream: %q", got)
+	}
+	if !strings.Contains(got, "token is ") {
+		t.Fatalf("the device's output did not arrive: %q", got)
+	}
+}

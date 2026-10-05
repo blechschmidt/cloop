@@ -64,7 +64,9 @@ type refreshFailure struct {
 // refreshAppTokens runs the file refresh for one keepalive tick. It reports
 // whether the lease has App tokens the keepalive should keep watching.
 func (sl *secretLease) refreshAppTokens(ctx context.Context, now time.Time) bool {
-	if sl == nil || sl.lease == nil || sl.broker == nil {
+	if sl == nil || sl.lease == nil || sl.broker == nil || sl.isHandedOver() {
+		// A lease another hub process took over is not this one's to renew
+		// anything for (Task 20382).
 		return false
 	}
 	leaseID := sl.lease.ID
