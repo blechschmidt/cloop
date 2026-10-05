@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -36,7 +37,7 @@ func TestEdgeScriptNamesWhatStageEdgeFetches(t *testing.T) {
 		goos, goarch, _ := strings.Cut(platform, "/")
 		want = append(want, EdgeArchiveName(commitA, goos, goarch))
 	}
-	want = append(want, EdgeManifestName(commitA))
+	want = append(want, EdgeManifestV2Name(commitA), EdgeManifestName(commitA))
 	if !slices.Equal(names, want) {
 		t.Errorf("build-edge.sh publishes\n  %v\nbut pkg/upgrade fetches\n  %v", names, want)
 	}
@@ -133,5 +134,31 @@ func TestEdgePruneKeepsTheNewestCommitsOnMain(t *testing.T) {
 	}
 	if doomed["README.txt"] {
 		t.Error("the prune deleted an asset it cannot account for")
+	}
+}
+
+// TestEdgeScriptWritesTheManifestSchemaThisBuildReads: the schema build-edge.sh
+// writes is the one StageEdge reads (Task 20380). A script that moved ahead
+// would publish manifests every device refuses; one left behind would publish
+// builds with no sequence, which every device running a sequenced build
+// refuses as older.
+func TestEdgeScriptWritesTheManifestSchemaThisBuildReads(t *testing.T) {
+	b, err := os.ReadFile("../../scripts/build-edge.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`"schema":\s*([0-9]+),`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal(`build-edge.sh no longer writes "schema": N`)
+	}
+	if got, _ := strconv.Atoi(string(m[1])); got != EdgeManifestSchema {
+		t.Errorf("build-edge.sh writes schema %d, this build reads up to %d", got, EdgeManifestSchema)
+	}
+	// And the schema-1 manifest beside it, under the old name, for devices
+	// whose cloop reads nothing else.
+	for _, want := range []string{`legacy["schema"] = 1`, `_manifest.v2.json`, `_manifest.json`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("build-edge.sh no longer contains %q", want)
+		}
 	}
 }

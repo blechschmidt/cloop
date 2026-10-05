@@ -106,13 +106,41 @@ if [ -z "$VERSION" ]; then
 fi
 
 OUTDIR="${2:-$REPO_ROOT/dist/release}"
+
+# The build's place on main (Task 20380): the commit it is a build of and that
+# commit's first-parent position, stamped beside the version. A device's root
+# helper refuses to install a build whose sequence is lower than the installed
+# binary's, and the stamp is the only ordering two builds of main have — so a
+# release carries its tagged commit's position, and moves between releases and
+# edge builds are ordered in both directions.
+#
+# Counted on the checkout being built, which must be the whole history: a
+# shallow clone counts only the commits it fetched, and a release stamped with
+# that number would be refused as older by every device that ever ran an edge
+# build. CI checks out with fetch-depth: 0 for exactly this.
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "build-release: $REPO_ROOT is not a git checkout; a build is stamped with its place on main" >&2
+  exit 1
+fi
+if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)" != "false" ]; then
+  echo "build-release: $REPO_ROOT is a shallow clone, so the first-parent count of HEAD would be wrong;" >&2
+  echo "               fetch the whole history (git fetch --unshallow, or fetch-depth: 0)" >&2
+  exit 1
+fi
+COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+SEQUENCE="$(git -C "$REPO_ROOT" rev-list --count --first-parent HEAD)"
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ]; then
+  echo "build-release: WARNING: the checkout has uncommitted changes, but the build is stamped as" >&2
+  echo "               ${COMMIT} (sequence ${SEQUENCE}); CI builds only clean checkouts" >&2
+fi
+
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-echo "==> building cloop $VERSION for ${#PLATFORMS[@]} platforms"
+echo "==> building cloop $VERSION (${COMMIT}, sequence ${SEQUENCE} on main) for ${#PLATFORMS[@]} platforms"
 
 for platform in "${PLATFORMS[@]}"; do
   os="${platform%/*}"
@@ -130,10 +158,13 @@ for platform in "${PLATFORMS[@]}"; do
   # -trimpath so build-host paths stay out of it, and the -X that stamps the
   # version. Without that -X the released binary reports "dev", and
   # `cloop upgrade --check` compares "dev" against the latest tag and concludes
-  # there is nothing to do, forever.
+  # there is nothing to do, forever. The sequence and commit are stamped the
+  # same way, for the same silent failure: an -X naming a symbol that does not
+  # exist is ignored, and build-edge.sh and the release workflow check that the
+  # binary reports both.
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
     "$GO" build -trimpath \
-      -ldflags "-s -w -X github.com/blechschmidt/cloop/pkg/version.Version=$VERSION" \
+      -ldflags "-s -w -X github.com/blechschmidt/cloop/pkg/version.Version=$VERSION -X github.com/blechschmidt/cloop/pkg/version.Sequence=$SEQUENCE -X github.com/blechschmidt/cloop/pkg/version.Commit=$COMMIT" \
       -o "$workdir/$binary" \
       "$REPO_ROOT"
 

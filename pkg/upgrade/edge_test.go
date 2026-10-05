@@ -28,6 +28,7 @@ import (
 
 	"github.com/blechschmidt/cloop/internal/cosigntest"
 	"github.com/blechschmidt/cloop/pkg/provenance"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 const (
@@ -88,17 +89,30 @@ func (er *edgeRelease) publish(t *testing.T, commit, san, binary string) EdgeMan
 	name := EdgeArchiveName(commit, runtime.GOOS, runtime.GOARCH)
 	m := EdgeManifest{
 		Schema: EdgeManifestSchema, Commit: commit, Version: EdgeVersion(commit), Protocol: 17,
-		Archives: map[string]string{name: sha256Hex(archive)},
+		Sequence: edgeTestSequence, Archives: map[string]string{name: sha256Hex(archive)},
 	}
 	er.put(t, name, archive, san)
 	er.putManifest(t, commit, m, san)
 	return m
 }
 
+// putManifest publishes m under commit's name for its schema — the schema-2
+// manifest, or the schema-1 one — and, for a schema-2 manifest, the schema-1
+// copy without the sequence that every edge build also carries (Task 20380).
 func (er *edgeRelease) putManifest(t *testing.T, commit string, m EdgeManifest, san string) {
 	t.Helper()
 	data, err := json.Marshal(m)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Schema < 2 {
+		er.put(t, EdgeManifestName(commit), data, san)
+		return
+	}
+	er.put(t, EdgeManifestV2Name(commit), data, san)
+	legacy := m
+	legacy.Schema, legacy.Sequence = 1, 0
+	if data, err = json.Marshal(legacy); err != nil {
 		t.Fatal(err)
 	}
 	er.put(t, EdgeManifestName(commit), data, san)
@@ -113,6 +127,9 @@ func (er *edgeRelease) put(t *testing.T, name string, data []byte, san string) {
 func (er *edgeRelease) opts(t *testing.T) Options {
 	return Options{Verifier: &provenance.Verifier{Binary: cosigntest.Install(t)}, EdgeBaseURL: er.srv.URL}
 }
+
+// edgeTestSequence is the place on main publish gives a build.
+const edgeTestSequence = 4000
 
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -138,8 +155,10 @@ func TestStageEdgeStagesAVerifiedBuild(t *testing.T) {
 	if !staged.ProvenanceVerified || staged.Channel != provenance.ChannelEdge {
 		t.Errorf("staged = %+v, want verified on the edge channel", staged)
 	}
-	if staged.Version != m.Version || staged.Protocol != 17 || staged.Commit != commitA {
-		t.Errorf("staged = %+v, want version %s, protocol 17, commit %s", staged, m.Version, commitA)
+	if staged.Version != m.Version || staged.Protocol != 17 || staged.Commit != commitA ||
+		staged.Sequence != edgeTestSequence {
+		t.Errorf("staged = %+v, want version %s, protocol 17, commit %s, sequence %d", staged, m.Version, commitA,
+			edgeTestSequence)
 	}
 	if staged.Tag != "edge:"+commitA {
 		t.Errorf("staged.Tag = %q", staged.Tag)
@@ -285,14 +304,21 @@ func TestStageEdgeRefusals(t *testing.T) {
 	})
 }
 
-// TestEdgeManifestValidate pins what a manifest must say.
+// TestEdgeManifestValidate pins what a manifest must say: schema 2 names the
+// build's place on main (Task 20380), and a schema-1 manifest — a build from
+// before sequences — is still read, as one that names none.
 func TestEdgeManifestValidate(t *testing.T) {
 	good := EdgeManifest{
-		Schema: 1, Commit: commitA, Version: "dev+ga0f3870", Protocol: 17,
+		Schema: 2, Commit: commitA, Version: "dev+ga0f3870", Protocol: 17, Sequence: 4100,
 		Archives: map[string]string{EdgeArchiveName(commitA, "linux", "amd64"): strings.Repeat("ab", 32)},
 	}
 	if err := good.Validate(commitA); err != nil {
 		t.Fatalf("a good manifest was refused: %v", err)
+	}
+	legacy := good
+	legacy.Schema, legacy.Sequence = 1, 0
+	if err := legacy.Validate(commitA); err != nil {
+		t.Fatalf("a schema-1 manifest was refused: %v", err)
 	}
 	longer := good
 	longer.Version = "dev+ga0f38702"
@@ -300,13 +326,18 @@ func TestEdgeManifestValidate(t *testing.T) {
 		t.Errorf("a longer abbreviation of the same commit was refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*EdgeManifest){
-		"schema":          func(m *EdgeManifest) { m.Schema = 2 },
-		"other commit":    func(m *EdgeManifest) { m.Commit = commitB },
-		"other version":   func(m *EdgeManifest) { m.Version = "dev+gf25fd69" },
-		"release version": func(m *EdgeManifest) { m.Version = "v0.0.4" },
-		"short version":   func(m *EdgeManifest) { m.Version = "dev+ga0f38" },
-		"no protocol":     func(m *EdgeManifest) { m.Protocol = 0 },
-		"no archives":     func(m *EdgeManifest) { m.Archives = nil },
+		"schema 3":                    func(m *EdgeManifest) { m.Schema = 3 },
+		"schema 0":                    func(m *EdgeManifest) { m.Schema = 0 },
+		"schema 2 without a sequence": func(m *EdgeManifest) { m.Sequence = 0 },
+		"a negative sequence":         func(m *EdgeManifest) { m.Sequence = -1 },
+		"an impossible sequence":      func(m *EdgeManifest) { m.Sequence = version.MaxSequence + 1 },
+		"schema 1 with a sequence":    func(m *EdgeManifest) { m.Schema = 1 },
+		"other commit":                func(m *EdgeManifest) { m.Commit = commitB },
+		"other version":               func(m *EdgeManifest) { m.Version = "dev+gf25fd69" },
+		"release version":             func(m *EdgeManifest) { m.Version = "v0.0.4" },
+		"short version":               func(m *EdgeManifest) { m.Version = "dev+ga0f38" },
+		"no protocol":                 func(m *EdgeManifest) { m.Protocol = 0 },
+		"no archives":                 func(m *EdgeManifest) { m.Archives = nil },
 		"foreign archive": func(m *EdgeManifest) {
 			m.Archives = map[string]string{"cloop_linux_amd64.tar.gz": strings.Repeat("ab", 32)}
 		},
@@ -461,5 +492,94 @@ func TestResolveEdgeBuildSaysWhyABuildIsNotOffered(t *testing.T) {
 				t.Errorf("published build: target %q, protocol %d", b.Target(), b.Manifest.Protocol)
 			}
 		})
+	}
+}
+
+// TestStageEdgeReadsTheManifestThatNamesTheSequence (Task 20380): a build
+// carries a schema-2 manifest, which names its place on main, and a schema-1
+// copy for devices whose cloop reads nothing else. This build reads the
+// schema-2 one; a build from before sequences has only the schema-1 one, and
+// is staged as carrying none.
+func TestStageEdgeReadsTheManifestThatNamesTheSequence(t *testing.T) {
+	er := newEdgeRelease(t)
+	er.publish(t, commitA, cosigntest.Edge, "the edge binary")
+	staged, err := StageEdge(EdgeTarget(commitA), t.TempDir(), er.opts(t), nil)
+	if err != nil || staged.Sequence != edgeTestSequence {
+		t.Fatalf("staged = %+v, %v; want the schema-2 manifest's sequence", staged, err)
+	}
+
+	old := newEdgeRelease(t)
+	archive := tarGz(t, "an old binary")
+	name := EdgeArchiveName(commitB, runtime.GOOS, runtime.GOARCH)
+	old.put(t, name, archive, cosigntest.Edge)
+	old.putManifest(t, commitB, EdgeManifest{Schema: 1, Commit: commitB, Version: EdgeVersion(commitB), Protocol: 16,
+		Archives: map[string]string{name: sha256Hex(archive)}}, cosigntest.Edge)
+	staged, err = StageEdge(EdgeTarget(commitB), t.TempDir(), old.opts(t), nil)
+	if err != nil || staged.Sequence != 0 || staged.Protocol != 16 {
+		t.Fatalf("an old build: staged = %+v, %v", staged, err)
+	}
+	if m, err := fetchEdgeManifestFrom(context.Background(), old.srv.URL+"/", commitB); err != nil || m.Schema != 1 {
+		t.Errorf("the hub's read of an old build: %+v, %v", m, err)
+	}
+}
+
+// TestEdgeManifestSchemaIsBoundToItsName: neither manifest can stand in for
+// the other — a schema-2 manifest under the schema-1 name is what a device
+// whose cloop predates sequences would refuse, and a schema-1 manifest under
+// the schema-2 name would let a build that names its place pass as one that
+// does not.
+func TestEdgeManifestSchemaIsBoundToItsName(t *testing.T) {
+	archive := tarGz(t, "binary")
+	name := EdgeArchiveName(commitA, runtime.GOOS, runtime.GOARCH)
+	m := EdgeManifest{Commit: commitA, Version: EdgeVersion(commitA), Protocol: 17,
+		Archives: map[string]string{name: sha256Hex(archive)}}
+	for _, c := range []struct {
+		asset  string
+		schema int
+		seq    int
+	}{
+		{EdgeManifestV2Name(commitA), 1, 0},
+		{EdgeManifestName(commitA), 2, edgeTestSequence},
+	} {
+		er := newEdgeRelease(t)
+		er.put(t, name, archive, cosigntest.Edge)
+		wrong := m
+		wrong.Schema, wrong.Sequence = c.schema, c.seq
+		data, _ := json.Marshal(wrong)
+		er.put(t, c.asset, data, cosigntest.Edge)
+		if _, err := StageEdge(EdgeTarget(commitA), t.TempDir(), er.opts(t), nil); !errors.Is(err, ErrEdgeManifest) {
+			t.Errorf("schema %d under %s: %v, want ErrEdgeManifest", c.schema, c.asset, err)
+		}
+	}
+}
+
+// TestTheSchema1ManifestIsWhatAnOlderReaderAccepts holds the copy to what a
+// device running a build from before Task 20380 checks, word for word from its
+// Validate: exactly schema 1, and fields it knows — an unknown field such as
+// a sequence would be ignored by encoding/json, but there is none.
+func TestTheSchema1ManifestIsWhatAnOlderReaderAccepts(t *testing.T) {
+	er := newEdgeRelease(t)
+	er.publish(t, commitA, cosigntest.Edge, "binary")
+	raw := er.files[EdgeManifestName(commitA)]
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["schema"] != float64(1) {
+		t.Errorf("schema = %v, want 1: an older reader refuses anything else", fields["schema"])
+	}
+	if _, ok := fields["sequence"]; ok {
+		t.Error("the schema-1 manifest names a sequence")
+	}
+	var older struct {
+		Schema   int               `json:"schema"`
+		Commit   string            `json:"commit"`
+		Version  string            `json:"version"`
+		Protocol int               `json:"protocol"`
+		Archives map[string]string `json:"archives"`
+	}
+	if err := json.Unmarshal(raw, &older); err != nil || older.Schema != 1 || older.Commit != commitA ||
+		older.Version != EdgeVersion(commitA) || older.Protocol < 1 || len(older.Archives) == 0 {
+		t.Errorf("an older reader would refuse it: %+v, %v", older, err)
 	}
 }

@@ -27,10 +27,18 @@ package upgrade
 //     signed archive swapped in under a newer commit's name fails the first
 //     check even though its signature is genuine.
 //  3. The installer then runs the extracted binary and requires it to report
-//     the manifest's version (install.UpgradeOptions.ExpectVersion).
+//     the manifest's version, commit and sequence (install.UpgradeOptions.
+//     ExpectVersion, ExpectCommit, ExpectSequence).
 //
 // So an attacker who can replace release assets but cannot make edge.yml on
 // main sign for them can, at most, make an edge upgrade fail.
+//
+// What the signature cannot say is whether a build is *newer* than the one a
+// device runs: every edge build is genuinely signed, including the thirty-odd
+// older ones still published. That is the manifest's sequence (schema 2, Task
+// 20380) — the commit's first-parent position on main, also stamped into the
+// binary — and the device's installer refuses a build whose sequence is lower
+// than the installed binary's, whoever asked for it.
 
 import (
 	"context"
@@ -62,8 +70,15 @@ const (
 	// "edge:<commit>".
 	EdgeTargetPrefix = "edge:"
 
-	// EdgeManifestSchema is the manifest version this build reads.
-	EdgeManifestSchema = 1
+	// EdgeManifestSchema is the newest manifest version scripts/build-edge.sh
+	// writes and this build reads. Schema 2 added the sequence (Task 20380) and
+	// is published as EdgeManifestV2Name; a schema-1 manifest is still read, as
+	// a build that carries no sequence — which a device running a sequenced
+	// build refuses as older.
+	EdgeManifestSchema = 2
+
+	// minEdgeManifestSchema is the oldest manifest this build reads.
+	minEdgeManifestSchema = 1
 
 	// EdgeRetainedCommits is how many commits' builds edge.yml keeps. Older
 	// ones are pruned, so a device cannot be sent a build from months ago —
@@ -123,9 +138,37 @@ func EdgeArchiveName(commit, goos, goarch string) string {
 	return fmt.Sprintf("cloop_%s_%s_%s.tar.gz", commit, goos, goarch)
 }
 
-// EdgeManifestName is the asset name of commit's manifest.
+// EdgeManifestName is the asset name of commit's schema-1 manifest.
+//
+// Every edge build still publishes one (Task 20380), with no sequence in it,
+// because it is the only manifest a device whose cloop predates sequences can
+// read: its reader accepts exactly schema 1 under exactly this name. Such a
+// device installs the build from it — its first sequenced build, the bootstrap
+// the installer allows — and from then on reads EdgeManifestV2Name. Retire it
+// once no device on the edge channel runs a build without a sequence (hub
+// doctor's executors.edge_lag names any that do).
 func EdgeManifestName(commit string) string {
 	return fmt.Sprintf("cloop_%s_manifest.json", commit)
+}
+
+// EdgeManifestV2Name is the asset name of commit's schema-2 manifest, which
+// names the build's place on main (Task 20380). This build reads it first.
+func EdgeManifestV2Name(commit string) string {
+	return fmt.Sprintf("cloop_%s_manifest.v2.json", commit)
+}
+
+// edgeManifest is one manifest asset of a build and the schema it must carry.
+type edgeManifest struct {
+	name   string
+	schema int
+}
+
+// edgeManifests lists commit's manifests in the order this build reads them:
+// schema 2, then — for a build from before Task 20380, which has no other —
+// schema 1. Each name carries exactly one schema, so neither can stand in for
+// the other.
+func edgeManifests(commit string) []edgeManifest {
+	return []edgeManifest{{EdgeManifestV2Name(commit), 2}, {EdgeManifestName(commit), 1}}
 }
 
 // EdgeManifest describes one commit's edge build. edge.yml writes it, signs it,
@@ -142,6 +185,11 @@ type EdgeManifest struct {
 	// the built binary itself (`cloop version --json`). The hub offers a
 	// device this build only if it does not lower the device's protocol.
 	Protocol int `json:"protocol"`
+	// Sequence is the commit's first-parent position on main (schema 2), the
+	// same number stamped into the binaries; zero in a schema-1 manifest,
+	// whose builds carry none. A device refuses a build whose sequence is
+	// lower than its own, and the hub never offers one.
+	Sequence int `json:"sequence,omitempty"`
 	// Archives maps each archive's asset name to its SHA-256.
 	Archives map[string]string `json:"archives"`
 	// BuiltAt and Run say when and by which workflow run, for a human.
@@ -154,8 +202,13 @@ type EdgeManifest struct {
 func (m EdgeManifest) Validate(commit string) error {
 	commit = strings.ToLower(strings.TrimSpace(commit))
 	switch {
-	case m.Schema != EdgeManifestSchema:
-		return fmt.Errorf("%w: schema %d, this build reads %d", ErrEdgeManifest, m.Schema, EdgeManifestSchema)
+	case m.Schema < minEdgeManifestSchema || m.Schema > EdgeManifestSchema:
+		return fmt.Errorf("%w: schema %d, this build reads %d to %d", ErrEdgeManifest, m.Schema,
+			minEdgeManifestSchema, EdgeManifestSchema)
+	case m.Schema >= 2 && (m.Sequence < 1 || m.Sequence > version.MaxSequence):
+		return fmt.Errorf("%w: schema %d names no valid sequence (%d)", ErrEdgeManifest, m.Schema, m.Sequence)
+	case m.Schema < 2 && m.Sequence != 0:
+		return fmt.Errorf("%w: a schema-%d manifest cannot name a sequence", ErrEdgeManifest, m.Schema)
 	case m.Commit != commit:
 		return fmt.Errorf("%w: it describes commit %q, not %s", ErrEdgeManifest, m.Commit, commit)
 	case !versionNamesCommit(m.Version, commit):
@@ -256,13 +309,39 @@ func fetchEdgeManifestFrom(ctx context.Context, base, commit string) (EdgeManife
 	if !IsFullCommit(commit) {
 		return EdgeManifest{}, fmt.Errorf("%w: %q is not a full commit id", ErrEdgeTarget, commit)
 	}
-	data, err := downloadEdge(ctx, base, EdgeManifestName(commit), maxManifestBytes)
+	which, data, err := downloadEdgeManifest(ctx, base, commit)
 	if err != nil {
 		return EdgeManifest{}, err
 	}
+	return decodeEdgeManifest(which, data, commit)
+}
+
+// downloadEdgeManifest fetches the first of commit's manifests that is
+// published (edgeManifests), and says which one it was. A failure other than
+// "not published" is returned rather than skipped: a network error is not
+// evidence that a build has no schema-2 manifest.
+func downloadEdgeManifest(ctx context.Context, base, commit string) (edgeManifest, []byte, error) {
+	for _, m := range edgeManifests(commit) {
+		data, err := downloadEdge(ctx, base, m.name, maxManifestBytes)
+		switch {
+		case err == nil:
+			return m, data, nil
+		case !errors.Is(err, ErrEdgeNotPublished):
+			return m, nil, err
+		}
+	}
+	return edgeManifest{}, nil, fmt.Errorf("%w: %s is not published", ErrEdgeNotPublished, EdgeManifestName(commit))
+}
+
+// decodeEdgeManifest parses and validates the manifest which held data, and
+// requires the schema its name carries.
+func decodeEdgeManifest(which edgeManifest, data []byte, commit string) (EdgeManifest, error) {
 	m, err := parseManifest(data)
 	if err != nil {
 		return m, err
+	}
+	if m.Schema != which.schema {
+		return m, fmt.Errorf("%w: %s carries schema %d, not %d", ErrEdgeManifest, which.name, m.Schema, which.schema)
 	}
 	return m, m.Validate(commit)
 }
@@ -326,27 +405,26 @@ func StageEdge(target, destDir string, opts Options, progress func(string)) (Sta
 	defer os.RemoveAll(dir)
 
 	// The manifest first, verified, because it is what says which commit the
-	// archives are and what they must hash to.
-	manifestName := EdgeManifestName(commit)
-	progress(fmt.Sprintf("Downloading %s...", manifestName))
-	manifestData, err := downloadEdge(ctx, base, manifestName, maxManifestBytes)
+	// archives are and what they must hash to — the schema-2 one when the
+	// build has it, which also says where on main the build is.
+	progress(fmt.Sprintf("Downloading %s...", EdgeManifestV2Name(commit)))
+	which, manifestData, err := downloadEdgeManifest(ctx, base, commit)
 	if err != nil {
 		return staged, err
 	}
+	manifestName := which.name
 	if err := verifyEdgeAsset(ctx, verifier, base, dir, manifestName, manifestData); err != nil {
 		return staged, err
 	}
 	_, identity := verifier.TrustRoot()
 	progress(fmt.Sprintf("Verified the signature of %s (identity %s).", manifestName, identity))
-	manifest, err := parseManifest(manifestData)
+	manifest, err := decodeEdgeManifest(which, manifestData, commit)
 	if err != nil {
-		return staged, err
-	}
-	if err := manifest.Validate(commit); err != nil {
 		return staged, err
 	}
 	staged.Version = manifest.Version
 	staged.Protocol = manifest.Protocol
+	staged.Sequence = manifest.Sequence
 
 	name := EdgeArchiveName(commit, runtime.GOOS, runtime.GOARCH)
 	want, ok := manifest.Archives[name]
@@ -382,7 +460,8 @@ func StageEdge(target, destDir string, opts Options, progress func(string)) (Sta
 		return staged, fmt.Errorf("writing staged binary: %w", err)
 	}
 	staged.BinaryPath = path
-	progress(fmt.Sprintf("Staged %s (%s, protocol v%d).", staged.Tag, staged.Version, staged.Protocol))
+	progress(fmt.Sprintf("Staged %s (%s, protocol v%d, %s).", staged.Tag, staged.Version, staged.Protocol,
+		version.SequenceLabel(staged.Sequence)))
 	return staged, nil
 }
 

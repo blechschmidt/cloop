@@ -45,6 +45,13 @@ func Version() string { return version.String() }
 //     exec-format error already catches the usual case, but a binary that runs
 //     and then reports the wrong platform is worth naming rather than
 //     installing.
+//   - Sequence: is this earlier on main than what is installed? The one
+//     ordering two builds of main have (Task 20380): a device's root helper
+//     refuses a staged build whose sequence is lower than the installed
+//     binary's, both read from here.
+//   - Commit: is this the build its signed manifest describes? An edge build's
+//     manifest names its commit and sequence, and the installer requires the
+//     binary to report both.
 type versionReport struct {
 	Version string `json:"version"`
 	Go      string `json:"go"`
@@ -54,6 +61,11 @@ type versionReport struct {
 	// speaks; MinProtocol is the oldest it accepts from the other end.
 	Protocol    int `json:"protocol"`
 	MinProtocol int `json:"min_protocol"`
+	// Commit is the full commit the build was made from, absent when it is
+	// not known (see version.BuildCommit). Sequence is its first-parent
+	// position on main, absent for a build that was not stamped with one.
+	Commit   string `json:"commit,omitempty"`
+	Sequence int    `json:"sequence,omitempty"`
 }
 
 var versionCmd = &cobra.Command{
@@ -83,6 +95,7 @@ staged binary before it replaces a running agent.`,
 		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
+			seq, _ := version.BuildSequence()
 			return enc.Encode(versionReport{
 				Version:     Version(),
 				Go:          runtime.Version(),
@@ -90,12 +103,23 @@ staged binary before it replaces a running agent.`,
 				Arch:        runtime.GOARCH,
 				Protocol:    remote.ProtocolVersion,
 				MinProtocol: remote.MinProtocolVersion,
+				Commit:      version.BuildCommit(),
+				Sequence:    seq,
 			})
 		}
+		// The first line is "cloop <version>" and stays so: older installers
+		// and the hub's deploy script read exactly that line.
 		fmt.Fprintf(w, "cloop %s\n", Version())
 		fmt.Fprintf(w, "Go %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		fmt.Fprintf(w, "executor protocol v%d (accepts v%d and newer)\n",
 			remote.ProtocolVersion, remote.MinProtocolVersion)
+		if seq, ok := version.BuildSequence(); ok {
+			if commit := version.BuildCommit(); commit != "" {
+				fmt.Fprintf(w, "built from %s, %s\n", commit, version.SequenceLabel(seq))
+			} else {
+				fmt.Fprintf(w, "%s\n", version.SequenceLabel(seq))
+			}
+		}
 		return nil
 	},
 }

@@ -59,6 +59,11 @@ type Staged struct {
 	Protocol int
 	// Commit is the full commit an edge build was made from.
 	Commit string
+	// Sequence is the place on main an edge build's signed manifest names
+	// (Task 20380), zero for a schema-1 manifest and for a release. The
+	// installer requires the binary to report it, and orders the install by
+	// the binary's own stamp.
+	Sequence int
 }
 
 // FetchRelease queries the GitHub releases API for one release by tag.

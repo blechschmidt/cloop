@@ -67,11 +67,22 @@ type BuildInfo struct {
 	// cannot be told apart — the case worth surfacing to an operator rather
 	// than hiding behind a version string that looks like it means something.
 	Identified bool
+	// Sequence is the build's first-parent position on main (Task 20380),
+	// zero when the build was not stamped with one. See sequence.go.
+	Sequence int
 }
 
 // Build returns this binary's provenance, computed once.
 func Build() BuildInfo {
-	builtOnce.Do(func() { builtValue = buildInfo(Version, readBuildInfo, executableModTime) })
+	builtOnce.Do(func() {
+		builtValue = buildInfo(Version, readBuildInfo, executableModTime)
+		builtValue.Sequence, _ = BuildSequence()
+		// A `git archive` build carries no VCS data, but the deploy can stamp
+		// the commit beside the sequence; it names the same revision.
+		if builtValue.Revision == "" {
+			builtValue.Revision = BuildCommit()
+		}
+	})
 	return builtValue
 }
 

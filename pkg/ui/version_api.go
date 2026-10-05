@@ -62,6 +62,12 @@ type buildInfoResponse struct {
 	Identified bool   `json:"identified"`
 	Revision   string `json:"revision,omitempty"`
 	Modified   bool   `json:"modified,omitempty"`
+	// Sequence is the build's first-parent position on main (Task 20380),
+	// absent for a build not stamped with one. It is what devices on the edge
+	// channel are ranked against: hub doctor warns about one that trails it by
+	// more than 20, and the Upgrade dialog never offers a device anything
+	// earlier than the build it runs.
+	Sequence int `json:"sequence,omitempty"`
 
 	BuiltAt *time.Time `json:"built_at,omitempty"`
 	// BuiltAtSource names what BuiltAt actually measures ("commit" or
@@ -104,6 +110,7 @@ func (s *Server) buildInfo(now time.Time) buildInfoResponse {
 		Identified:    b.Identified,
 		Revision:      b.Revision,
 		Modified:      b.Modified,
+		Sequence:      b.Sequence,
 		BuiltAtSource: b.BuiltAtSource,
 		StartedAt:     processStart.UTC(),
 		UptimeSeconds: int64(now.Sub(processStart).Seconds()),

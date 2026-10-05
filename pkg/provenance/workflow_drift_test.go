@@ -188,6 +188,13 @@ func TestEdgeWorkflowOnlyEverSignsMain(t *testing.T) {
 			"the hub finds the run that built its commit by this title (upgrade.workflowRuns)"},
 		{"group: edge-${{ github.event.workflow_run.head_sha }}",
 			"publishes are serialised per commit at the job, so a skipped run cannot cancel a pending build"},
+		{"fetch-depth: 0",
+			"the build is stamped with its first-parent count on main, which a shallow clone gets wrong (Task 20380)"},
+		{"git rev-list --first-parent origin/main",
+			"the commit must be on main's first-parent history for its count to be a position on main"},
+		{"for f in *.tar.gz *_manifest.v2.json *_manifest.json; do",
+			"both manifests — schema 2 with the sequence, and schema 1 for devices that read nothing else — are signed and verified"},
+		{`"cloop_${COMMIT}_manifest.v2.json.sigstore.json"`, "the schema-2 manifest's bundle is checked to be served"},
 	} {
 		if !strings.Contains(wf, want.snippet) {
 			t.Errorf("edge.yml no longer contains %q: %s", want.snippet, want.why)
@@ -206,5 +213,49 @@ func TestEdgeWorkflowOnlyEverSignsMain(t *testing.T) {
 	}
 	if strings.Count(wf, "--target") != 1 {
 		t.Errorf("edge.yml sets a release target %d times; only the create that makes the tag may", strings.Count(wf, "--target"))
+	}
+}
+
+// TestEdgeManifestNamesTheBuildsPlaceOnMain is the manifest's half of Task
+// 20380's drift gate. Every edge build is stamped with its commit's
+// first-parent position on main, and the signed manifest names the same
+// number (schema 2): a device's installer refuses a build whose sequence is
+// lower than the installed binary's, and requires the binary's stamp to match
+// the manifest. If build-edge.sh stopped writing the field, or stopped
+// checking the binary against it, every device would refuse every new edge
+// build as "naming no sequence" — or accept a binary its manifest does not
+// describe. pkg/upgrade's TestEdgeScriptWritesTheManifestSchemaThisBuildReads
+// holds the schema number to upgrade.EdgeManifestSchema.
+func TestEdgeManifestNamesTheBuildsPlaceOnMain(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "build-edge.sh")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	script := string(b)
+	for _, want := range []struct{ snippet, why string }{
+		{`"schema": 2`, "the manifest is schema 2, the first to name a sequence"},
+		{`"sequence": sequence`, "the manifest names the build's place on main"},
+		{"git -C \"$REPO_ROOT\" rev-list --count --first-parent \"$commit\"",
+			"the sequence is the commit's first-parent count, the number build-release.sh stamps"},
+		{"rev-parse --is-shallow-repository", "a shallow checkout's count is wrong, so it is refused"},
+		{`reported.get("sequence") != sequence`, "the binary must report the sequence the manifest names"},
+		{`reported.get("commit") != commit`, "the binary must report the commit the manifest names"},
+	} {
+		if !strings.Contains(script, want.snippet) {
+			t.Errorf("build-edge.sh no longer contains %q: %s", want.snippet, want.why)
+		}
+	}
+	// A release is stamped with its tagged commit's place too, and its
+	// workflow checks the binary says so.
+	wf := releaseWorkflow(t)
+	for _, want := range []string{
+		"fetch-depth: 0",
+		"want_sequence=$(git rev-list --count --first-parent HEAD)",
+		`got.get("sequence") != sequence`,
+	} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("release.yml no longer contains %q; a release's sequence would go unchecked", want)
+		}
 	}
 }

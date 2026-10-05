@@ -152,6 +152,8 @@ function _buildRenderPanel(d) {
       (d.modified ? ' <span class="build-warn">+ uncommitted changes</span>' : '')]);
   }
 
+  if (d.sequence) rows.push(['Sequence on main', esc(d.sequence)]);
+
   if (d.built_at) {
     const age = _buildFmtAge(d.build_age_seconds);
     // Label the timestamp with what it actually measures. An executable's

@@ -98,3 +98,35 @@ func repoRoot(t *testing.T) string {
 	// pkg/version/stamp_test.go -> repo root
 	return filepath.Dir(filepath.Dir(filepath.Dir(thisFile)))
 }
+
+// TestBuildScriptsStampTheSequence is TestBuildScriptsStampTheRightSymbol for
+// the build's place on main (Task 20380). An -X naming a symbol that does not
+// exist is silently ignored, and a release whose sequence did not take would be
+// refused by every device that ever ran an edge build — so the release script,
+// which every edge build goes through too, must name both symbols, and both
+// must stay patchable.
+func TestBuildScriptsStampTheSequence(t *testing.T) {
+	root := repoRoot(t)
+	pkgPath := reflect.TypeOf(parsed{}).PkgPath()
+	body, err := os.ReadFile(filepath.Join(root, "scripts", "build-release.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, symbol := range []string{pkgPath + ".Sequence=$SEQUENCE", pkgPath + ".Commit=$COMMIT"} {
+		if !strings.Contains(string(body), symbol) {
+			t.Errorf("scripts/build-release.sh does not stamp %s", symbol)
+		}
+	}
+	if !strings.Contains(string(body), "rev-list --count --first-parent HEAD") {
+		t.Error("scripts/build-release.sh no longer counts HEAD's first-parent position")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "pkg", "version", "sequence.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range []string{`var Sequence = ""`, `var Commit = ""`} {
+		if !strings.Contains(string(src), decl) {
+			t.Errorf("sequence.go no longer declares %q; -X needs a constant initialiser", decl)
+		}
+	}
+}

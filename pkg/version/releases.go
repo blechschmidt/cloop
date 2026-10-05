@@ -30,6 +30,12 @@ type Release struct {
 	// Protocol is the newest executor-agent protocol version the release's
 	// binaries speak: remote.ProtocolVersion at that tag.
 	Protocol int
+	// Sequence is the tagged commit's first-parent position on main, which
+	// the release's binaries are stamped with (Task 20380): what a device
+	// orders an install by. Zero for every release made before builds were
+	// stamped — their binaries carry none, and a device whose build carries
+	// one refuses them as older.
+	Sequence int
 }
 
 // publishedReleases lists every cloop release that was published with
@@ -40,7 +46,10 @@ type Release struct {
 // later build inherits the entry. The protocol is the `ProtocolVersion = N` line
 // of pkg/executor/remote/proto.go at that commit; TestPublishedReleaseProtocols
 // MatchTheirTags checks every entry against its tag wherever git and the tags
-// are available. A tag whose release was never published with binaries stays
+// are available. The sequence is `git rev-list --count --first-parent HEAD` at
+// that commit — what scripts/build-release.sh stamps — and is checked against
+// the tag the same way (TestPublishedReleaseSequencesMatchTheirTags); a release
+// whose build script did not stamp one has none. A tag whose release was never published with binaries stays
 // out — v0.0.2 (protocol v7) and v0.0.3 (v13) are tags no device can install —
 // and if a tagged release then fails to publish, remove its entry again.
 //
@@ -50,6 +59,20 @@ type Release struct {
 var publishedReleases = []Release{
 	{Tag: "v0.0.1", Protocol: 6},
 	{Tag: "v0.0.4", Protocol: 13},
+}
+
+// ReleaseSequence returns the sequence the release tag's binaries carry, and
+// whether the tag is in the published table at all. A listed release with a
+// zero sequence is known to carry none; an unlisted one — a release newer than
+// this build, say — is unknown, and only the device can judge it.
+func ReleaseSequence(tag string) (seq int, known bool) {
+	tag = strings.TrimSpace(tag)
+	for _, r := range publishedReleases {
+		if r.Tag == tag {
+			return r.Sequence, true
+		}
+	}
+	return 0, false
 }
 
 // PublishedReleases returns the published releases this build knows of, oldest

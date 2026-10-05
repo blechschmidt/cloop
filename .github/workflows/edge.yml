@@ -12,8 +12,11 @@ name: Edge builds
 # This workflow is that artifact. After CI passes on a push to main, it builds
 # the commit for every release platform, stamped dev+g<short sha> exactly as the
 # deploy stamps the same commit, and signs each archive plus a manifest
-# {commit, version, protocol, archive hashes} with Sigstore keyless signing. The
-# results are commit-named assets of one "edge" prerelease:
+# {commit, version, protocol, sequence, archive hashes} with Sigstore keyless
+# signing. The sequence is the commit's first-parent position on main, stamped
+# into the binaries too: a device's root helper refuses to install a build
+# whose sequence is lower than the one it runs (Task 20380). The results are
+# commit-named assets of one "edge" prerelease:
 #
 #   - never marked latest, so `cloop upgrade` and the installer — which only
 #     ever ask for /releases/latest — cannot see it;
@@ -86,20 +89,37 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-          # The whole history: the commit must be shown to be on main, and the
-          # prune step ranks builds by their place in main's history.
+          # The whole history: the commit must be shown to be on main, the
+          # prune step ranks builds by their place in main's history, and the
+          # build is stamped with that place — its sequence, the first-parent
+          # count build-edge.sh takes (Task 20380), which a shallow clone would
+          # get wrong. build-edge.sh refuses a shallow checkout.
           fetch-depth: 0
           persist-credentials: false
 
       - name: The commit is on main
         # Belt and braces after the job's `if`: a build is published under the
         # identity of this workflow on main, so it must be a build of main.
+        #
+        # And on main's first-parent history, not merely reachable from it: the
+        # sequence a device orders builds by is the commit's first-parent count,
+        # which is a position on main only for a commit on that chain. A commit
+        # that reached main inside a merge has a count of its own branch's, and
+        # stamping it would let it be ordered against main's builds wrongly.
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$COMMIT" origin/main || {
             echo "::error::$COMMIT is not an ancestor of origin/main; refusing to build it"
             exit 1
           }
+          # Through a file: `rev-list | grep -q` under pipefail fails with
+          # SIGPIPE whenever grep matches before rev-list has finished writing.
+          git rev-list --first-parent origin/main > /tmp/first-parent.txt
+          grep -qx "$COMMIT" /tmp/first-parent.txt || {
+            echo "::error::$COMMIT is not on origin/main's first-parent history, so its first-parent count is not a position on main; refusing to build it"
+            exit 1
+          }
+          echo "ok: $COMMIT is sequence $(git rev-list --count --first-parent "$COMMIT") on main"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -117,10 +137,13 @@ jobs:
         uses: sigstore/cosign-installer@v3
 
       - name: Sign every archive and the manifest
+        # Both manifests: the schema-2 one this build's devices read, and the
+        # schema-1 one under the old name that a device whose cloop predates
+        # sequences reads (Task 20380) — signed alike, verified alike.
         run: |
           set -euo pipefail
           cd dist/edge
-          for f in *.tar.gz *_manifest.json; do
+          for f in *.tar.gz *_manifest.v2.json *_manifest.json; do
             echo "==> signing $f"
             cosign sign-blob --yes "$f" --bundle "$f.sigstore.json"
           done
@@ -135,7 +158,7 @@ jobs:
           cd dist/edge
           issuer="https://token.actions.githubusercontent.com"
           identity="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/edge\.yml@refs/heads/main$"
-          for f in *.tar.gz *_manifest.json; do
+          for f in *.tar.gz *_manifest.v2.json *_manifest.json; do
             cosign verify-blob "$f" --bundle "$f.sigstore.json" \
               --certificate-oidc-issuer "$issuer" --certificate-identity-regexp "$identity"
             echo "ok: $f"
@@ -210,7 +233,8 @@ jobs:
         run: |
           set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/edge"
-          for asset in "cloop_${COMMIT}_manifest.json" "cloop_${COMMIT}_manifest.json.sigstore.json" \
+          for asset in "cloop_${COMMIT}_manifest.v2.json" "cloop_${COMMIT}_manifest.v2.json.sigstore.json" \
+                       "cloop_${COMMIT}_manifest.json" "cloop_${COMMIT}_manifest.json.sigstore.json" \
                        "cloop_${COMMIT}_linux_amd64.tar.gz" "cloop_${COMMIT}_linux_amd64.tar.gz.sigstore.json"; do
             for attempt in 1 2 3 4 5; do
               code=$(curl -sSL -o /dev/null -w '%{http_code}' "$base/$asset" || true)

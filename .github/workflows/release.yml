@@ -72,6 +72,34 @@ jobs:
             exit 1
           }
 
+      - name: The published binary reports its tagged commit's place on main
+        # The sequence is what a device's root helper orders builds by (Task
+        # 20380): it refuses to install one whose sequence is lower than the
+        # installed binary's. A release stamped with the wrong number — or none,
+        # because an -X named a symbol that moved — would be refused by every
+        # device that ever ran an edge build, or would let older edge builds
+        # replace it. Counted here exactly as build-release.sh counts it, on the
+        # full history this job checks out.
+        run: |
+          set -euo pipefail
+          want_commit=$(git rev-parse HEAD)
+          want_sequence=$(git rev-list --count --first-parent HEAD)
+          /tmp/verify/cloop version --json > /tmp/verify/version.json
+          python3 - "$want_commit" "$want_sequence" /tmp/verify/version.json <<'PY'
+          import json, sys
+          commit, sequence, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+          got = json.load(open(path))
+          if got.get("commit") != commit or got.get("sequence") != sequence:
+              sys.exit(f"::error::the binary reports commit {got.get('commit')!r} sequence {got.get('sequence')!r}, "
+                       f"expected {commit} sequence {sequence}")
+          print(f"ok: {commit} is sequence {sequence} on main's first-parent history")
+          PY
+          # Ordered against edge builds only if the tag is on main's first-parent
+          # history; a tag elsewhere still installs, but say so.
+          git rev-list --first-parent origin/main > /tmp/first-parent.txt || true
+          grep -qx "$want_commit" /tmp/first-parent.txt ||
+            echo "::warning::${GITHUB_REF_NAME} is not on origin/main's first-parent history, so its sequence is its own branch's count and orders against edge builds only approximately"
+
       - name: The checksums match the artifacts
         # Published so `cloop upgrade` can verify a download before unpacking
         # it; verified here so a corrupt upload is caught before anyone's

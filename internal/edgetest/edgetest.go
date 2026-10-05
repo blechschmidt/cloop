@@ -32,13 +32,30 @@ import (
 )
 
 // FakeCloop is a stand-in cloop binary reporting version and protocol, with a
-// marker a test can read back to tell which one is installed.
+// marker a test can read back to tell which one is installed. It reports no
+// commit and no sequence: a build from before builds were stamped with their
+// place on main (Task 20380).
 func FakeCloop(version string, protocol int, marker string) string {
+	return FakeCloopAt(version, protocol, "", 0, marker)
+}
+
+// FakeCloopAt is FakeCloop stamped with a commit and its place on main, as
+// scripts/build-release.sh stamps every build since Task 20380. A zero
+// sequence and an empty commit are left out of the report, as a real build
+// leaves them out.
+func FakeCloopAt(version string, protocol int, commit string, sequence int, marker string) string {
+	stamp := ""
+	if commit != "" {
+		stamp += ",\"commit\":\"" + commit + "\""
+	}
+	if sequence > 0 {
+		stamp += ",\"sequence\":" + strconv.Itoa(sequence)
+	}
 	return "#!/bin/sh\n" +
 		"# edgetest-marker: " + marker + "\n" +
 		"if [ \"$1\" = \"version\" ] && [ \"$2\" = \"--json\" ]; then\n" +
 		"  printf '{\"version\":\"" + version + "\",\"protocol\":" + strconv.Itoa(protocol) + ",\"min_protocol\":1," +
-		"\"os\":\"" + runtime.GOOS + "\",\"arch\":\"" + runtime.GOARCH + "\"}\\n'\n" +
+		"\"os\":\"" + runtime.GOOS + "\",\"arch\":\"" + runtime.GOARCH + "\"" + stamp + "}\\n'\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"if [ \"$1\" = \"version\" ]; then echo \"cloop " + version + "\"; exit 0; fi\n" +
@@ -61,7 +78,8 @@ type Device struct {
 }
 
 // NewDevice stages an install running installedVersion at protocol, on
-// channel, with the packet-filter grant and the remote-upgrade helper.
+// channel, with the packet-filter grant and the remote-upgrade helper. Its
+// binary carries no sequence; InstallBuild replaces it with one that does.
 func NewDevice(t testing.TB, installedVersion string, protocol int, channel provenance.Channel) *Device {
 	t.Helper()
 	root := t.TempDir()
@@ -100,6 +118,15 @@ func NewDevice(t testing.TB, installedVersion string, protocol int, channel prov
 		t.Fatal(err)
 	}
 	return &Device{Spec: spec}
+}
+
+// InstallBuild puts a binary in place as if the device ran body — for a
+// device whose installed build is stamped (FakeCloopAt).
+func (d *Device) InstallBuild(t testing.TB, body string) {
+	t.Helper()
+	if err := os.WriteFile(d.Spec.BinaryPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Target answers agent.Config.InstallTarget.
@@ -166,24 +193,73 @@ func NewRelease(t testing.TB) *Release {
 	return r
 }
 
+// DefaultSequence is the place on main Publish gives a build.
+const DefaultSequence = 4000
+
 // Publish puts commit's build up, every asset signed by san, its binary a
-// FakeCloop reporting the edge version at protocol with the given marker.
+// FakeCloopAt reporting the edge version at protocol, stamped with commit and
+// DefaultSequence, with the given marker.
 func (r *Release) Publish(t testing.TB, commit, san string, protocol int, marker string) upgrade.EdgeManifest {
 	t.Helper()
-	archive := TarGz(t, FakeCloop(upgrade.EdgeVersion(commit), protocol, marker))
-	name := upgrade.EdgeArchiveName(commit, runtime.GOOS, runtime.GOARCH)
+	return r.PublishBuild(t, Build{Commit: commit, SAN: san, Protocol: protocol, Sequence: DefaultSequence,
+		Marker: marker})
+}
+
+// Build is one edge build to publish.
+type Build struct {
+	Commit   string
+	SAN      string
+	Protocol int
+	// Sequence is the commit's place on main. Zero publishes a build from
+	// before Task 20380: a schema-1 manifest, and a binary carrying none.
+	Sequence int
+	Marker   string
+	// Binary, when set, is the archived binary instead of the stand-in the
+	// manifest describes — a validly signed manifest paired with the bytes
+	// of another build.
+	Binary string
+}
+
+// PublishBuild puts b up, every asset signed by b.SAN.
+func (r *Release) PublishBuild(t testing.TB, b Build) upgrade.EdgeManifest {
+	t.Helper()
+	binary := b.Binary
+	if binary == "" {
+		stamped := b.Commit
+		if b.Sequence <= 0 {
+			stamped = ""
+		}
+		binary = FakeCloopAt(upgrade.EdgeVersion(b.Commit), b.Protocol, stamped, b.Sequence, b.Marker)
+	}
+	archive := TarGz(t, binary)
+	name := upgrade.EdgeArchiveName(b.Commit, runtime.GOOS, runtime.GOARCH)
 	sum := sha256.Sum256(archive)
 	m := upgrade.EdgeManifest{
-		Schema: upgrade.EdgeManifestSchema, Commit: commit, Version: upgrade.EdgeVersion(commit),
-		Protocol: protocol, Archives: map[string]string{name: hex.EncodeToString(sum[:])},
+		Schema: upgrade.EdgeManifestSchema, Commit: b.Commit, Version: upgrade.EdgeVersion(b.Commit),
+		Protocol: b.Protocol, Sequence: b.Sequence, Archives: map[string]string{name: hex.EncodeToString(sum[:])},
 	}
-	data, err := json.Marshal(m)
+	r.put(name, archive, b.SAN)
+	// A sequenced build carries both manifests, as scripts/build-edge.sh
+	// writes them: schema 2 with the sequence, and the schema-1 copy without
+	// it that a device whose cloop predates sequences reads.
+	legacy := m
+	legacy.Schema, legacy.Sequence = 1, 0
+	if b.Sequence > 0 {
+		r.put(upgrade.EdgeManifestV2Name(b.Commit), mustJSON(t, m), b.SAN)
+	} else {
+		m = legacy
+	}
+	r.put(upgrade.EdgeManifestName(b.Commit), mustJSON(t, legacy), b.SAN)
+	return m
+}
+
+func mustJSON(t testing.TB, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.put(name, archive, san)
-	r.put(upgrade.EdgeManifestName(commit), data, san)
-	return m
+	return data
 }
 
 func (r *Release) put(name string, data []byte, san string) {
