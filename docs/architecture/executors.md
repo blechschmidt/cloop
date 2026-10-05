@@ -2970,21 +2970,31 @@ cloop project, against `cloop version --json`:
 
 ```json
 { "version": "v0.1.0", "go": "go1.25.9", "os": "linux", "arch": "amd64",
-  "protocol": 6, "min_protocol": 1 }
+  "protocol": 6, "min_protocol": 1,
+  "commit": "4453c682382a8fbdf49952966fdfd0b205f02d2b", "sequence": 921 }
 ```
+
+`commit` and `sequence` are the build's place on main (Task 20380): the commit
+it was made from and that commit's first-parent position,
+`git rev-list --count --first-parent <commit>`, which `scripts/build-release.sh`
+stamps into every release and edge build. A build that was not stamped — a
+developer's `go build`, and every build before the stamp existed — reports
+neither.
 
 A binary older than that flag exits non-zero on it, which is information rather
 than failure: the probe falls back to plain `cloop version`, whose first line has
 read `cloop <version>` since the command existed, and records the protocol
 numbers as unknown rather than inventing them.
 
-Four refusals come out of this, and they divide on whether `--force` can override
+The refusals that come out of this divide on whether `--force` can override
 them:
 
 | Refusal | `--force`? | Why |
 | --- | --- | --- |
 | will not execute here (`ENOEXEC`, timeout, non-zero exit) | **no** | a binary that will not run before the rename will not run after it |
 | ran, but did not identify itself as cloop | **no** | the likely cause is a path typo pointing at another tool |
+| does not report the version, commit and sequence its signed edge manifest names | **no** | these are not the bytes the manifest describes — a validly signed manifest for one commit paired with a binary of another |
+| earlier on main than the installed build: a lower sequence, or none while the installed binary has one (`ErrRollback`) | **only a local root `--force`** | the one ordering two builds of main have; the upgrade request the agent files and the frame the hub sends carry a force flag that cannot reach this — see [rollback protection](#rollback-protection) |
 | older build than the one installed | yes | a deliberate rollback is a real operation |
 | speaks an older executor protocol than the installed binary | yes | it would take away whatever the hub can only ask of the newer protocol — checked whether or not the two builds can be ordered, so a release cannot replace a newer `dev+g…` build unnoticed |
 | speaks a protocol below the hub's `MinProtocolVersion` | yes | installing it would take the device out of the fleet — the hub would refuse its hello frame |
@@ -2996,11 +3006,43 @@ two downgrade cases are overridable because refusing them outright would send an
 operator backing out a bad release to `cp` and `systemctl`, bypassing every other
 check here.
 
-An unreleased `dev+g…` build is *allowed*. It cannot be ordered against a
-release, and a developer testing a fix on a device is legitimate — the binary has
-already been shown to run, which is the check that matters. What it may not do
-is speak an older protocol than the binary it replaces: both report their
-protocol, and that comparison needs no version order.
+An unreleased `dev+g…` build is *allowed* by the version comparison. It cannot be
+ordered against a release by version, and a developer testing a fix on a device
+is legitimate — the binary has already been shown to run, which is the check that
+matters. What it may not do is speak an older protocol than the binary it
+replaces, or sit earlier on main: both report their protocol and their sequence,
+and neither comparison needs a version order.
+
+#### Rollback protection
+
+Every edge build is genuinely signed, including the thirty-odd older ones the
+edge release keeps, and all of them report `dev+g<sha>` — so before Task 20380
+the guard above could not order two of them, and the root helper would install
+any older signed edge build at the same protocol that an unprivileged agent, or a
+compromised hub, asked for: one from before a fix to the agent or to the helper
+itself.
+
+The sequence orders them. The installer refuses a staged build whose sequence is
+lower than the installed binary's, reading **both from the binaries' own
+`version --json`** — never from the request file, the hub's frame or the agent:
+
+- An installed binary with no sequence is the bootstrap case (a build from before
+  the stamp, or a hand-made one): allowed, with a journal line saying the device
+  enforces the order from then on.
+- A staged binary with no sequence over one that has one is refused: every signed
+  build since the stamp carries one, so a signed build without one is older.
+- When the probe of the installed binary fails and the installer *is* that binary
+  — the root helper always is (`ExecStart=<binary> executor agent install
+  --upgrade --apply-request`) — the installer reads its own identity instead, so
+  a probe a hostile agent could make fail cannot make the installed build look
+  sequence-less.
+
+Only `UpgradeOptions.AllowRollback` overrides the refusal, and only the CLI sets
+it — from `--force` on an `install --upgrade` (with `--from` or `--to`) run by
+root on the device. `--apply-request --force` is refused outright, because the
+request names the target. A refusal is logged in the helper's journal
+(`journalctl -u <service>-upgrade.service`): `refused: … would move this device
+back on main from … (sequence N on main) to … (sequence M on main)`.
 
 #### A failed upgrade is reverted
 

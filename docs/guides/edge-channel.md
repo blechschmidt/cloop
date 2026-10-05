@@ -29,16 +29,28 @@ a fork's branch that happens to be called `main` — are never built.
 For a commit that qualifies it runs [`scripts/build-edge.sh`](https://github.com/blechschmidt/cloop/blob/main/scripts/build-edge.sh),
 which builds exactly what [`scripts/build-release.sh`](https://github.com/blechschmidt/cloop/blob/main/scripts/build-release.sh)
 builds, stamped `dev+g<first seven digits>` — the version the hub's own
-deploy gives the same commit — and writes:
+deploy gives the same commit — and with the commit's **sequence**, its place on
+`main` ([rollback protection](#rollback-protection)), and writes:
 
 | Asset | What it is |
 | --- | --- |
 | `cloop_<commit>_<os>_<arch>.tar.gz` | one per release platform (linux amd64/arm64/arm, darwin amd64/arm64) |
-| `cloop_<commit>_manifest.json` | `{schema, commit, version, protocol, archives: {name: sha256}, built_at, run}` |
-| `<asset>.sigstore.json` | a Sigstore bundle for every archive and for the manifest |
+| `cloop_<commit>_manifest.v2.json` | schema 2: `{schema, commit, version, protocol, sequence, archives: {name: sha256}, built_at, run}` |
+| `cloop_<commit>_manifest.json` | schema 1: the same without `sequence`, for devices whose cloop predates it |
+| `<asset>.sigstore.json` | a Sigstore bundle for every archive and for both manifests |
 
 The manifest's `protocol` is read from the built binary (`cloop version
---json`), not from the source, so it is what the binary will negotiate.
+--json`), not from the source, so it is what the binary will negotiate; so are
+its `commit` and `sequence`, which the script requires the binary to report
+exactly as it counted them.
+
+The schema-1 manifest is kept for one reason: a device running a build from
+before sequences reads exactly schema 1 at exactly that name, and refuses
+anything else. It installs the new build from it — its first sequenced build —
+and reads the schema-2 manifest from then on. Without it, every such device
+would have been stranded off the channel by the change that added the sequence.
+A current build reads the schema-2 manifest, and the schema-1 one only for a
+build that predates it; each name must carry its own schema.
 
 Everything is attached to **one prerelease tagged `edge`**:
 
@@ -91,11 +103,71 @@ upgrade fail:
    carry its own valid signature. An older genuine archive swapped in under a
    newer commit's name fails the hash.
 3. The installer runs the extracted binary and requires it to report the
-   manifest's version before it replaces anything.
+   manifest's version, commit and sequence before it replaces anything — a
+   validly signed manifest for one commit paired with a binary of another is
+   refused, and nothing overrides that.
+
+A signature cannot say whether a build is *newer* than the one a device runs:
+every retained edge build is genuinely signed. That is the sequence's job.
 
 A fork that publishes its own edge channel repoints the pin with
 `CLOOP_PROVENANCE_EDGE_IDENTITY` — a separate variable from
 `CLOOP_PROVENANCE_IDENTITY`, so repointing one never moves the other.
+
+---
+
+## Rollback protection
+
+Every release and edge build is stamped with its **sequence**: its commit's
+first-parent position on `main`,
+
+```bash
+git rev-list --count --first-parent <commit>
+```
+
+counted on a full-depth checkout (`build-release.sh` and `build-edge.sh` refuse a
+shallow one, and `edge.yml` builds only commits on `main`'s first-parent
+history, where the count is a position). `cloop version` prints it
+(`built from <commit>, sequence N on main`) and `cloop version --json` reports
+`commit` and `sequence`. A release is stamped with its tagged commit's sequence,
+so a move from a release to an edge build, or back, is ordered too.
+
+The device's installer refuses a staged build whose sequence is lower than the
+installed binary's — reading both from the binaries themselves, never from the
+upgrade request or the agent:
+
+| Installed build | Staged build | Outcome |
+| --- | --- | --- |
+| sequence 4150 | sequence 4160 | installed, logged as a move forward |
+| sequence 4150 | sequence 4150 | the same commit: allowed (a reinstall, or a release of that commit) |
+| sequence 4150 | sequence 4100 | **refused** — `install: refusing to install an older build` |
+| sequence 4150 | no sequence (any build from before the stamp, e.g. v0.0.4) | **refused** — every signed build since carries one |
+| no sequence (the bootstrap) | anything | allowed, with a journal line; the device enforces the order from then on |
+
+**Who can override it:** only root on the device, with `--force` on an
+operator's own `cloop executor agent install --upgrade --to <target>` (or
+`--from <binary>`). The request the agent files for the root helper carries a
+`force` flag, and so does the hub's upgrade frame; neither reaches this refusal,
+and `--apply-request --force` is refused outright. So a compromised agent, a
+workload running as the agent's user, or a compromised hub can still ask for an
+older signed build — and the helper refuses it, logging
+
+```text
+refused: … would move this device back on main from dev+g4453c68 (sequence 4150 on main)
+to dev+ga0f3870 (sequence 4100 on main); only root on the device can do that
+(install --upgrade --force), not the hub or the agent
+```
+
+in `journalctl -u cloop-executor-upgrade.service`.
+
+The hub follows the same order: each device reports its build's sequence in its
+hello (`build_sequence`, shown as a **seq N** chip in the Executors panel), and
+the Upgrade dialog, `POST /api/executors/{id}/upgrade` and the auto-update
+policy never offer or send a build earlier than it — 409, whatever `force` says.
+`cloop hub doctor` warns (`executors.edge_lag`) about a device on the edge
+channel more than 20 sequences behind the hub's own build, and about one whose
+build carries no sequence yet, which rollback protection does not cover until it
+has been upgraded once.
 
 ---
 
@@ -212,11 +284,12 @@ dialog offers **this hub's build (`<short commit>`)** — target
 verifies the build itself, files the request for the helper, and reconnects on
 the new build; that reconnection is the confirmation, as for any upgrade.
 
-The hub never offers a build that would lower the device's protocol: it reads
-the protocol from the build's manifest. (It reads the manifest without
-verifying it, because what it decides is only what to offer; the device
-verifies everything, and its installer independently refuses a binary that
-speaks less than the one it replaces.)
+The hub never offers a build that would lower the device's protocol, or one
+earlier on `main` than the device's build: it reads both from the build's
+manifest. (It reads the manifest without verifying it, because what it decides
+is only what to offer; the device verifies everything, and its installer
+independently refuses a binary that speaks less than the one it replaces or sits
+earlier on `main`.)
 
 When the hub's build is not offered, the dialog says why, in place of the
 offer:
@@ -231,6 +304,7 @@ offer:
 | … the edge workflow that publishes it failed | `edge.yml` failed | re-run it from the Actions tab |
 | … has since been pruned | the hub is older than the newest 30 commits | upgrade the hub |
 | it speaks v16, below the device's v17 | the build would lower the device's protocol | upgrade the hub |
+| … runs a build at sequence 4200 on main, and this hub's build … is sequence 4150 on main | the device is later on `main` than the hub; it would refuse the hub's build | upgrade the hub |
 | this build … was made from a tree with uncommitted changes | a dirty hub build | build the hub from a commit |
 
 The hub resolves this through GitHub and caches the answer like "latest": a
@@ -243,14 +317,17 @@ plain download.
 digits), and on an edge-channel device the hub's own version string
 (`dev+ga0f3870`) means its edge build. A device on the stable channel is
 refused with **409** and the command that would change that; so is a build
-that would lower the device's protocol, unless the request sets `force`.
+that would lower the device's protocol, unless the request sets `force`; and so
+is a build — edge or release — earlier on `main` than the device's, **whatever**
+`force` says, because the device would refuse it anyway.
 
 ### Auto-update
 
 With the fleet auto-update policy's target left empty — "match the hub" — a
 device on the edge channel converges on the hub's edge build, under the same
 rules as releases: never while it runs work, never more than `max_in_flight`
-at once, never a cordoned device, never lower protocol. A device on the stable
+at once, never a cordoned device, never lower protocol, never earlier on
+`main`. A device on the stable
 channel is left alone with the reason. A pinned release reaches devices on
 either channel; a pinned `edge:<commit>` other than the hub's own is refused,
 because the hub can judge the protocol of its own build and not of an
@@ -269,7 +346,8 @@ restores it by itself if the agent does not come back within the settle window
 sudo install -m 0755 /usr/local/bin/cloop.prev /usr/local/bin/cloop
 sudo systemctl restart cloop-executor
 
-# Or to a release, verified, staying on the edge channel.
+# Or to an earlier edge build or a release, verified, staying on the channel.
+sudo cloop executor agent install --upgrade --to edge:<commit> --force
 sudo cloop executor agent install --upgrade --to v0.0.4 --force
 
 # Or off the channel: releases only from now on.
@@ -277,7 +355,9 @@ sudo cloop executor agent install --upgrade --channel stable
 ```
 
 `--force` is needed to move to an older build or a lower protocol, here as
-anywhere.
+anywhere — and moving back on `main` takes *this* `--force`, run as root on the
+device: the dashboard's Upgrade and the auto-update policy cannot do it, with or
+without `force` ([rollback protection](#rollback-protection)).
 
 A release older than the channel — v0.0.4 is one — knows neither the channel
 nor the helper. Its agent does not file requests, so on a device rolled back
@@ -318,6 +398,10 @@ the difference is worth stating plainly:
 - **The short commit is matched by prefix.** The deploy stamps
   `git log --format=%h` and CI stamps seven digits; both name one commit, and
   the hub treats them as one build.
+- **The order is `main`'s first-parent history.** A release tagged off `main`
+  carries its own branch's count (the release workflow warns), and a history
+  rewritten on `main` would renumber it — `main` is never force-pushed, and
+  neither is any tag.
 
 ---
 

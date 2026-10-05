@@ -2562,8 +2562,15 @@ is the property:
   and nothing else.
 - A signature says `edge.yml` built *a* commit; the signed manifest says which,
   each archive must hash to what it lists, and the installed binary must report
-  the manifest's version. A genuine build renamed to another commit fails one
-  of the three.
+  the manifest's version, commit and sequence. A genuine build renamed to another
+  commit fails one of the three.
+- A signature cannot say a build is *newer*: every retained edge build is
+  genuinely signed. Every build is stamped with its commit's first-parent
+  position on `main` — its sequence — and the installer refuses one earlier than
+  the installed binary, read from both binaries, overridable only by `--force` on
+  an operator's own command as root on the device; the request file and the
+  hub's frame cannot (Task 20380, [rollback
+  protection](../guides/edge-channel.md#rollback-protection)).
 
 What the pin vouches for is weaker than a release, and it is stated, not
 implied: *a commit on `main` that passed CI*. Anyone who can push to `main` can
@@ -2734,6 +2741,10 @@ conformance suite deliberately does not require. Run them with
 | An edge build signed by anything but `edge.yml` on `main` is refused, and a release signed by `edge.yml` is refused | `pkg/upgrade`: `TestStageEdgeRefusesEveryOtherSigner`, `TestStageReleaseRefusesAnEdgeSignature` |
 | A genuine manifest or archive of another commit, renamed, is refused | `pkg/upgrade`: `TestStageEdgeRefusesAManifestForAnotherCommit`, `TestStageEdgeRefusesASwappedArchive` |
 | The installed binary must report the version its signed manifest names — not overridable by `--force` | `pkg/executor/install`: `TestExpectVersionBindsTheBinaryToItsSignature` |
+| …and the commit and sequence it names: a signed manifest for one commit paired with a binary of another is refused | `pkg/executor/install`: `TestManifestStampBindsTheBinaryToItsManifest`; `pkg/executor/agent`: `TestApplyUpgradeRequestRefusesAManifestForAnotherBinary` |
+| A build earlier on `main` than the installed one is refused; only a local root `--force` overrides it, never the request file's or the hub's `force` | `pkg/executor/install`: `TestCheckUpgradeSafetyOrdersBuildsByTheirPlaceOnMain`, `TestUpgradeForceDoesNotRollBackAndAllowRollbackDoes`, `TestInstalledIdentityFallsBackToThisProcess`; `pkg/executor/agent`: `TestApplyUpgradeRequestCannotForceARollback` |
+| The hub never offers or sends a build earlier on `main` than the device's, force or not | `pkg/executor`: `TestEdgeUpgradeOfferNeverOffersAnEarlierBuild`; `pkg/executor/remote`: `TestRequestUpgradeNeverAsksForARollback`; `pkg/ui`: `TestExecutorUpgrade_RefusesARollback` |
+| Every build is stamped with its place on `main` and the signed manifest names it; the schema-1 manifest stays for devices that read nothing else | `pkg/provenance`: `TestEdgeManifestNamesTheBuildsPlaceOnMain`; `pkg/version`: `TestBuildScriptsStampTheSequence`; `pkg/upgrade`: `TestTheSchema1ManifestIsWhatAnOlderReaderAccepts` |
 | A device not on the edge channel refuses an edge target, and the hub refuses to send one | `pkg/executor/agent`: `TestAgentRefusesEdgeTargetsWithoutOptIn`; `pkg/executor/remote`: `TestRequestUpgradeLeavesTheChannelToTheDevice`, `TestLoopbackNeverSendsMainToAStableDevice` |
 | The root helper takes the channel from the unit, not the request, and refuses another signer | `pkg/executor/agent`: `TestApplyUpgradeRequestUsesTheDevicesChannel`, `TestApplyUpgradeRequestRefusesAnotherSigner` |
 | The request file is read defensively by root: no symlink, no oversized or stale request, deleted before it is acted on | `pkg/executor/install`: `TestUpgradeRequestRoundTrip` |

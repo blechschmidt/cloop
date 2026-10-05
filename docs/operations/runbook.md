@@ -127,7 +127,7 @@ What it checks, and what each one catches that nothing else does:
 | `secret_key` | `CLOOP_SECRET_KEY` present, and generated key material rather than a passphrase or a placeholder out of the docs |
 | `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
 | `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
-| `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
+| `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`) |
 | `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it — and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
 | `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); whether the advertised address is one a sandbox could use, a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
 | `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
@@ -1154,12 +1154,17 @@ $ journalctl -u cloop-executor-upgrade
 ```
 
 When the dialog does not offer the hub's build it says why — an unpushed commit,
-CI still running, CI or the edge workflow failed, the build pruned, or a
-protocol the build would lower — and the
+CI still running, CI or the edge workflow failed, the build pruned, a
+protocol the build would lower, or a device already later on `main` than the
+hub — and the
 [guide's table](../guides/edge-channel.md#upgrading-from-the-dashboard) names the
 remedy for each. To go back: `/usr/local/bin/cloop.prev` is the previous
 binary, `--to <release> --force` installs a release verified, and
-`--channel stable` takes the device off the channel.
+`--channel stable` takes the device off the channel. Moving a device back on
+`main` takes that `--force` on the device: its installer refuses an earlier
+build however the hub or its agent asks
+([rollback protection](../guides/edge-channel.md#rollback-protection)), and the
+refusal is a `refused:` line in `journalctl -u cloop-executor-upgrade`.
 
 **The hub's deploy builds the local `main`.** If it deploys a commit before
 it is pushed, the dialog says so ("the deploy built commit … which is not on

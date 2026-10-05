@@ -65,9 +65,10 @@ is.
 | **D**enial of service | Malicious agent exhausts hub memory | Frame size cap enforced before allocation (`TestOversizedFrameIsRejected`, `TestFrameSizeCapIsSane`); decoders fuzzed for panics (`FuzzFrameDecoding`, `FuzzFrameTruncation`) | An enrolled agent can still hold a connection and heartbeat while doing nothing useful; `cordon`/`revoke` are the answer |
 | **D**enial of service | Node vanishes mid-task | Three missed heartbeats (~45 s) → `unreachable` → sessions re-placed exactly once via claim-token rotation | If no candidate satisfies the requirements, the task is marked failed-with-retry rather than moved. There is **no failover attempt limit**, so a `Spec` that itself kills nodes could migrate repeatedly |
 | **E**levation of privilege | Agent requests credentials beyond its grants | Leases are computed hub-side from grants matching (executor, project); the agent's request cannot widen them | A compromised agent gets everything granted to it — which is the argument for narrow, short-TTL grants |
-| **T**ampering | A compromised hub moves devices onto a build of its choosing | The upgrade frame names a version and nothing else; the device resolves it from its own pinned repository and verifies it against the pin for that channel — releases against `release.yml` on a tag, `edge:<commit>` against `edge.yml` on `main`, and only on a device whose operator opted into the edge channel with a drop-in the hub cannot write (`TestAgentRefusesEdgeTargetsWithoutOptIn`, `TestChannelVerificationMatrix`) | Within those, the hub chooses: any published release (a downgrade with `force`), and any retained edge build on an edge device. An edge build is "a commit on `main` that passed CI", not a release — anyone who can push to `main` controls what it contains ([edge channel](../guides/edge-channel.md#limits)) |
+| **T**ampering | A compromised hub moves devices onto a build of its choosing | The upgrade frame names a version and nothing else; the device resolves it from its own pinned repository and verifies it against the pin for that channel — releases against `release.yml` on a tag, `edge:<commit>` against `edge.yml` on `main`, and only on a device whose operator opted into the edge channel with a drop-in the hub cannot write (`TestAgentRefusesEdgeTargetsWithoutOptIn`, `TestChannelVerificationMatrix`); and never one earlier on `main` than the device's build (next row) | Within those, the hub chooses among the published releases and retained edge builds that are not earlier on `main` than the device's. An edge build is "a commit on `main` that passed CI", not a release — anyone who can push to `main` controls what it contains ([edge channel](../guides/edge-channel.md#limits)) |
+| **T**ampering | **Rollback:** a compromised agent or hub has root install an older, genuinely signed build — one from before a fix to the agent or to the root helper itself | Every release and edge build is stamped with its commit's first-parent position on `main` (its sequence), and the installer refuses a staged build whose sequence is lower than the installed binary's, or that carries none when the installed binary does — both read from the binaries' own `version --json`, never from the request or the agent, and from the helper's own identity if the probe of the installed binary fails. Only `--force` on an operator's own `install --upgrade` as root overrides it; the request file's and the frame's `force` cannot, and `--apply-request --force` is refused. The edge manifest names the sequence and commit, and the binary must report both (`TestCheckUpgradeSafetyOrdersBuildsByTheirPlaceOnMain`, `TestApplyUpgradeRequestCannotForceARollback`, `TestUpgradeForceDoesNotRollBackAndAllowRollbackDoes`, `TestInstalledIdentityFallsBackToThisProcess`, `TestApplyUpgradeRequestRefusesAManifestForAnotherBinary`, `TestRequestUpgradeNeverAsksForARollback`) | A device whose installed build carries no sequence — any build from before Task 20380 — is not covered until it has been upgraded once (`cloop hub doctor` names such devices under `executors.edge_lag`). Root on the device can still roll back, by design. The order is `main`'s first-parent history: whoever can rewrite `main` or push a tag can also change what is built, which no ordering protects against |
 | **T**ampering | Release assets replaced so an edge device installs another commit's genuine build | The signed manifest names its commit, every archive must hash to what it lists, and the installed binary must report the manifest's version (`TestStageEdgeRefusesAManifestForAnotherCommit`, `TestStageEdgeRefusesASwappedArchive`, `TestExpectVersionBindsTheBinaryToItsSignature`) | Withholding a build is still possible: an attacker who can delete assets makes an upgrade fail, and the dialog then says the build is not published |
-| **E**levation of privilege | A workload running as the agent's user uses the remote-upgrade helper to gain root | The helper is root, but what it accepts is what the hub's frame carries — version, force, settle, reason; it takes the channel from systemd's view of the unit, opens the request without following symlinks, bounds it, deletes it first, ignores it when stale and quotes it in its journal only with control characters removed (`TestApplyUpgradeRequestUsesTheDevicesChannel`, `TestUpgradeRequestRoundTrip`, `TestUpgradeRequestCannotForgeJournalLines`) | Such a workload can ask for anything the hub could — including a forced downgrade to an old signed release — and can trigger restarts by filing requests repeatedly |
+| **E**levation of privilege | A workload running as the agent's user uses the remote-upgrade helper to gain root | The helper is root, but what it accepts is what the hub's frame carries — version, force, settle, reason; it takes the channel from systemd's view of the unit, opens the request without following symlinks, bounds it, deletes it first, ignores it when stale and quotes it in its journal only with control characters removed (`TestApplyUpgradeRequestUsesTheDevicesChannel`, `TestUpgradeRequestRoundTrip`, `TestUpgradeRequestCannotForgeJournalLines`) | Such a workload can ask for anything the hub could, and can trigger restarts by filing requests repeatedly; a request for a build earlier on `main` than the installed one — forced or not — is refused (previous row), except on a device whose installed build predates the sequence |
 
 ---
 
@@ -250,6 +251,29 @@ against the parent commit.
 Recorded because a threat model that lists only theoretical threats is less
 useful than one that lists the threats that were actually present. All are
 fixed and all have a regression test.
+
+**The downgrade guard could not order two builds of `main`, so root would roll a
+device back on request.** Since the edge channel (Task 20376) a device follows
+the hub's own build: its unprivileged agent files `upgrade-request.json`, and
+the root helper installs whatever `edge:<commit>` it names once cosign has
+verified it against `edge.yml` on `main`. Every retained edge build passes that
+— up to thirty of them — and the guard meant to stop a device moving backwards
+compared versions, which for two `dev+g<sha>` builds are "not comparable", so
+only the protocol was checked. A compromised agent process, or a compromised hub,
+could therefore have root install any older signed build at the same protocol,
+including one from before a fix to the helper itself; the request's `force` flag
+waved through even a protocol downgrade, so an old release was reachable too. The
+signed manifest's `built_at` could not order them either: it is when a build ran,
+and a re-run of an old commit is "newer". Fixed in Task 20380 by stamping every
+build with its commit's first-parent position on `main` — build scripts, signed
+manifest (schema 2) and `cloop version --json` — and refusing in the installer a
+staged build earlier than the installed one, read from the binaries themselves,
+overridable only by a local root `--force` and never by the request or the hub
+(`TestApplyUpgradeRequestCannotForceARollback`,
+`TestCheckUpgradeSafetyOrdersBuildsByTheirPlaceOnMain`). The schema-1 manifest
+is still published beside schema 2: the code already on devices reads nothing
+else, and dropping it would have stranded every one of them off the channel
+(`TestTheSchema1ManifestIsWhatAnOlderReaderAccepts`).
 
 **`--cidrs 0.0.0.0/0` waived the entire SSRF block set.** An explicit CIDR is
 what waives the block set — that is the design, and it is why there is no
