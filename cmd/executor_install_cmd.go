@@ -96,6 +96,13 @@ a working agent's binary; now they are refused. A build older than the one
 installed, or one speaking a protocol this control plane no longer accepts, is
 refused too — pass --force for a deliberate rollback.
 
+Builds are ordered by their place on main: every release and edge build is
+stamped with its commit's first-parent position (its sequence), and a staged
+build whose sequence is lower than the installed binary's is refused whoever
+asked for it. Only --force, run as root on this device, overrides that — the
+upgrade the hub asks for, and the request the agent files for the root helper,
+carry a force flag that cannot.
+
 The replaced binary is kept beside the new one. If the service was running before
 the upgrade and does not come back on the new build, the old one is restored and
 restarted, so a bad rollout leaves the device in the fleet rather than offline.
@@ -200,6 +207,10 @@ Examples:
 				PacketFilter:  upgradePacketFilter(cmd),
 				Channel:       channel,
 				RemoteUpgrade: upgradeRemoteUpgrade(cmd, channel),
+				// An operator's --force on the device, as root, is the only
+				// thing that may move it back on main (Task 20380). Not the
+				// request path below: its target is whatever the agent filed.
+				AllowRollback: force && !applyRequest,
 			}
 
 			if applyRequest {
@@ -209,6 +220,15 @@ Examples:
 				if dryRun || inst.Root != "" {
 					return fmt.Errorf("--apply-request carries out the request the agent filed and takes no " +
 						"--dry-run or --root; use --to <target> --dry-run to see what an upgrade would do")
+				}
+				// Nor --force: the target is the request's, written by the
+				// agent's user, and a forced rollback to it would hand that
+				// user the one move only root may make. The request's own force
+				// flag is honoured as far as the hub's would be.
+				if force {
+					return fmt.Errorf("--apply-request carries out the request the agent filed and takes no " +
+						"--force: the request names the target, and only an operator's own --upgrade --to " +
+						"<target> --force may move this device back on main")
 				}
 				return applyUpgradeRequest(cmd, inst, spec, out)
 			}
@@ -807,7 +827,9 @@ func init() {
 			"the proof that the binary came from cloop's release workflow")
 	f.Bool("force", false,
 		"with --upgrade, replace and restart even when the installed binary is already identical, "+
-			"or when the new one is a downgrade")
+			"or when the new one is a downgrade — including one earlier on main than the installed "+
+			"build, which only this flag, run as root on the device, can allow: the hub and the agent "+
+			"cannot")
 	f.Duration("settle-timeout", 0,
 		"with --upgrade, how long to wait for the restarted service to come back before rolling "+
 			"back to the previous binary (default 30s)")

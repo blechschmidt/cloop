@@ -42,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -76,6 +77,30 @@ var ErrBinaryUnusable = errors.New("install: the staged binary failed verificati
 // in this file.
 var ErrDowngrade = errors.New("install: refusing to install an older build")
 
+// ErrRollback means the staged build is earlier on main than the installed
+// one: its sequence is lower, or it carries none while the installed binary
+// does (Task 20380). Every rollback is also an ErrDowngrade — errors.Is
+// matches both — but it is the one downgrade Force does not override.
+//
+// The sequence is the only ordering two builds of main have, and before it the
+// guard below could not order them at all: both report "dev+g<sha>", so a
+// compromised agent, or a compromised hub, could have the root helper install
+// any older signed edge build at the same protocol — one from before a fix to
+// the agent or to the helper itself. So only UpgradeOptions.AllowRollback
+// overrides this, and only a local root invocation's --force sets that
+// (`cloop executor agent install --upgrade --force`). The upgrade request the
+// agent files, and the upgrade frame the hub sends an agent running as root,
+// carry a force flag that cannot reach it.
+var ErrRollback = errors.New("install: refusing to roll this device back to a build earlier on main")
+
+// rollbackError is a refusal that is both ErrDowngrade (through its message's
+// wrapped error) and ErrRollback.
+type rollbackError struct{ err error }
+
+func (e *rollbackError) Error() string        { return e.err.Error() }
+func (e *rollbackError) Unwrap() error        { return e.err }
+func (e *rollbackError) Is(target error) bool { return target == ErrRollback }
+
 // BinaryIdentity is what a candidate binary said about itself.
 type BinaryIdentity struct {
 	// Version is the build version it reported, e.g. "v0.1.0" or
@@ -88,6 +113,13 @@ type BinaryIdentity struct {
 	Protocol, MinProtocol int
 	// OS and Arch are the platform it was built for, empty when unreported.
 	OS, Arch string
+	// Commit is the full commit it says it was built from, and Sequence that
+	// commit's first-parent position on main (Task 20380). Empty and zero for
+	// a build that does not report them — a developer's unstamped build, and
+	// every build made before builds were stamped with a sequence. Zero is
+	// "carries none", never "position zero".
+	Commit   string
+	Sequence int
 	// Structured records that the machine-readable form was available, which
 	// is what makes the protocol fields meaningful.
 	Structured bool
@@ -102,6 +134,9 @@ func (id BinaryIdentity) String() string {
 	}
 	if id.Structured {
 		fmt.Fprintf(&b, ", protocol v%d", id.Protocol)
+	}
+	if id.Sequence > 0 {
+		fmt.Fprintf(&b, ", %s", version.SequenceLabel(id.Sequence))
 	}
 	return b.String()
 }
@@ -203,6 +238,8 @@ func parseVersionJSON(out []byte) (BinaryIdentity, bool) {
 		Arch        string `json:"arch"`
 		Protocol    int    `json:"protocol"`
 		MinProtocol int    `json:"min_protocol"`
+		Commit      string `json:"commit"`
+		Sequence    int    `json:"sequence"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(out), &rep); err != nil {
 		return BinaryIdentity{}, false
@@ -211,14 +248,41 @@ func parseVersionJSON(out []byte) (BinaryIdentity, bool) {
 	if v == "" {
 		return BinaryIdentity{}, false
 	}
-	return BinaryIdentity{
+	id := BinaryIdentity{
 		Version:     v,
 		Protocol:    rep.Protocol,
 		MinProtocol: rep.MinProtocol,
 		OS:          strings.TrimSpace(rep.OS),
 		Arch:        strings.TrimSpace(rep.Arch),
 		Structured:  true,
-	}, true
+	}
+	// Taken only when well-formed. A commit that is not forty hex digits, or
+	// a sequence outside what a history can have, is not something to order
+	// an install by; it reads as "reports none", which the rules below treat
+	// as the oldest possible build when it is the staged one.
+	if c := strings.ToLower(strings.TrimSpace(rep.Commit)); version.IsCommit(c, 40) {
+		id.Commit = c
+	}
+	if rep.Sequence > 0 && rep.Sequence <= version.MaxSequence {
+		id.Sequence = rep.Sequence
+	}
+	return id, true
+}
+
+// selfIdentity is this process's own identity, in the shape identify reads
+// from a probe — for the one installer that is itself the installed binary.
+func selfIdentity() BinaryIdentity {
+	seq, _ := version.BuildSequence()
+	return BinaryIdentity{
+		Version:     version.String(),
+		Protocol:    remote.ProtocolVersion,
+		MinProtocol: remote.MinProtocolVersion,
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		Commit:      version.BuildCommit(),
+		Sequence:    seq,
+		Structured:  true,
+	}
 }
 
 // parseVersionText reads the human form, whose first line has been
@@ -285,7 +349,15 @@ func describeProbeFailure(path string, out []byte, err error) string {
 // best-effort, because an agent whose binary is already broken is precisely the
 // one that most needs replacing, and refusing to upgrade because the *old*
 // binary would not run is the wrong way round.
+//
+// The order (main) is checked first and reported as ErrRollback, which Force
+// does not override: see that error. The rest are ErrDowngrade, which Force
+// does.
 func checkUpgradeSafety(staged, installed BinaryIdentity, minProtocol int) error {
+	if err := checkSequence(staged, installed); err != nil {
+		return err
+	}
+
 	// The control plane's floor. Only checked when the binary reported it:
 	// zero means "did not say", and treating silence as v0 would refuse every
 	// build older than machine-readable version reporting on a protocol
@@ -339,6 +411,46 @@ func checkUpgradeSafety(staged, installed BinaryIdentity, minProtocol int) error
 			ErrDowngrade, staged.Version, installed.Version)
 	}
 	return nil
+}
+
+// checkSequence refuses a staged build that is earlier on main than the
+// installed one (Task 20380). Both sequences are what the binaries themselves
+// reported when they were run, never anything the request names.
+//
+//   - The installed binary carries none: it was built before builds carried a
+//     sequence, or by hand. There is nothing to order against, so the move is
+//     allowed — it is how a device gets its first sequenced build (the caller
+//     logs it).
+//   - The staged binary carries none while the installed one does: every
+//     signed build since sequences were introduced carries one, so a signed
+//     build without one is older than the installed binary, and a local build
+//     without one cannot be ordered. Refused either way.
+//   - The staged sequence is lower: refused. Equal is the same commit — a
+//     reinstall, or a release of the commit an edge build was made from.
+func checkSequence(staged, installed BinaryIdentity) error {
+	if installed.Sequence <= 0 {
+		return nil
+	}
+	if staged.Sequence > 0 && staged.Sequence >= installed.Sequence {
+		return nil
+	}
+	const remedy = "\nOnly root on this device can roll it back: " +
+		"`cloop executor agent install --upgrade --to <target> --force` (or --from <binary> --force). " +
+		"Neither the hub nor the device's agent can"
+	if staged.Sequence <= 0 {
+		return &rollbackError{fmt.Errorf("%w: the staged binary (%s) carries no sequence, and the installed "+
+			"one (%s) is %s.\n"+
+			"Every signed build since builds were stamped with their place on main carries one, so a signed "+
+			"build without one is older than the installed binary — and a local build without one cannot be "+
+			"ordered against it."+remedy,
+			ErrDowngrade, staged.Version, installed.Version, version.SequenceLabel(installed.Sequence))}
+	}
+	return &rollbackError{fmt.Errorf("%w: the staged binary (%s) is %s, earlier than the installed one "+
+		"(%s) at %s.\n"+
+		"Installing it would move this device backwards on main — back past whatever was fixed in the "+
+		"%d commits between them."+remedy,
+		ErrDowngrade, staged.Version, version.SequenceLabel(staged.Sequence), installed.Version,
+		version.SequenceLabel(installed.Sequence), installed.Sequence-staged.Sequence)}
 }
 
 // firstLine returns the first non-empty line of output, bounded, for embedding

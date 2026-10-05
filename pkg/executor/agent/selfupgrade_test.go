@@ -7,6 +7,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/install"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/provenance"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 const commit = "a0f387020b4df29e9f39ebe0369ec0de0ca8c674"
@@ -375,5 +377,131 @@ func TestOwnInstallIsTheUnitThatRunsThisBinary(t *testing.T) {
 	}
 	if _, out, err := ownInstall("0::/", exe, "", unitDir, initDir); err != nil || out != install.OutputShell {
 		t.Errorf("init script: %s, %v", out, err)
+	}
+}
+
+// newerCommit is a later commit on main than commit, for the rollback tests.
+const newerCommit = "4453c68e1c2b3a4d5e6f708192a3b4c5d6e7f809"
+
+// TestApplyUpgradeRequestCannotForceARollback is the helper's half of Task
+// 20380: the request is the agent user's to write, and a request for an
+// older, genuinely signed edge build — with force set, as a compromised agent
+// or hub would set it — is taken, verified and refused. Root installs nothing,
+// restarts nothing, and the request is gone.
+func TestApplyUpgradeRequestCannotForceARollback(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		build edgetest.Build
+	}{
+		{"an older sequenced build", edgetest.Build{Commit: commit, SAN: cosigntest.Edge, Protocol: 18,
+			Sequence: 4100, Marker: "OLDER"}},
+		{"a build from before sequences (schema 1)", edgetest.Build{Commit: commit, SAN: cosigntest.Edge,
+			Protocol: 18, Marker: "UNSEQUENCED"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, d := deviceAgent(t, provenance.ChannelEdge)
+			d.InstallBuild(t, edgetest.FakeCloopAt("dev+g4453c68", 18, newerCommit, 4150, "NEWER"))
+			rel := edgetest.NewRelease(t)
+			rel.PublishBuild(t, c.build)
+			if err := install.FileUpgradeRequest(d.Spec, install.UpgradeRequest{TargetVersion: "edge:" + commit,
+				Force: true, Reason: "requested by a compromised agent"}); err != nil {
+				t.Fatal(err)
+			}
+
+			inst, cmds := edgetest.Recorder()
+			var journal []string
+			inst.Logf = func(format string, a ...any) { journal = append(journal, fmt.Sprintf(format, a...)) }
+			req, res, staged, err := ApplyUpgradeRequest(d.Spec, install.OutputSystemd, ApplyOptions{
+				Installer: inst, Fetch: rel.Options(t),
+			})
+			if !req.Force || !staged.ProvenanceVerified {
+				t.Fatalf("fixture: the request did not ask for force (%+v) or the build did not verify (%+v)", req, staged)
+			}
+			if !errors.Is(err, install.ErrRollback) || !errors.Is(err, install.ErrDowngrade) {
+				t.Fatalf("err = %v, want ErrRollback", err)
+			}
+			if cur, prev := d.Installed(t); cur != "NEWER" || prev != "" || res.BinaryReplaced {
+				t.Errorf("the device was moved back: installed %q, kept %q, result %+v", cur, prev, res)
+			}
+			if len(cmds()) != 0 {
+				t.Errorf("a refused rollback ran commands: %v", cmds())
+			}
+			if !strings.Contains(strings.Join(journal, "\n"), "refused:") {
+				t.Errorf("no journal line says it was refused: %q", journal)
+			}
+			if _, _, _, err := ApplyUpgradeRequest(d.Spec, install.OutputSystemd, ApplyOptions{Installer: inst}); !errors.Is(err, install.ErrNoRequest) {
+				t.Errorf("the refused request was left to be retried: %v", err)
+			}
+		})
+	}
+}
+
+// TestApplyUpgradeRequestMovesForward: the same helper installs a later
+// build over a sequenced one, and the first sequenced build over one that
+// carries none.
+func TestApplyUpgradeRequestMovesForward(t *testing.T) {
+	_, d := deviceAgent(t, provenance.ChannelEdge) // installed: no sequence
+	rel := edgetest.NewRelease(t)
+	rel.PublishBuild(t, edgetest.Build{Commit: commit, SAN: cosigntest.Edge, Protocol: 18, Sequence: 4100,
+		Marker: "FIRST SEQUENCED"})
+	rel.PublishBuild(t, edgetest.Build{Commit: newerCommit, SAN: cosigntest.Edge, Protocol: 18, Sequence: 4150,
+		Marker: "LATER"})
+	inst, _ := edgetest.Recorder()
+	for _, step := range []struct{ target, want string }{
+		{"edge:" + commit, "FIRST SEQUENCED"},
+		{"edge:" + newerCommit, "LATER"},
+	} {
+		if err := install.FileUpgradeRequest(d.Spec, install.UpgradeRequest{TargetVersion: step.target}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := ApplyUpgradeRequest(d.Spec, install.OutputSystemd, ApplyOptions{Installer: inst,
+			Fetch: rel.Options(t)}); err != nil {
+			t.Fatalf("%s: %v", step.target, err)
+		}
+		if cur, _ := d.Installed(t); cur != step.want {
+			t.Fatalf("%s: installed %q", step.target, cur)
+		}
+	}
+}
+
+// TestApplyUpgradeRequestRefusesAManifestForAnotherBinary: a validly signed
+// manifest for one commit, whose archive — correctly hashed and signed —
+// holds a binary stamped with another commit, is refused after the signature
+// check, whatever the request's force says.
+func TestApplyUpgradeRequestRefusesAManifestForAnotherBinary(t *testing.T) {
+	_, d := deviceAgent(t, provenance.ChannelEdge)
+	rel := edgetest.NewRelease(t)
+	rel.PublishBuild(t, edgetest.Build{Commit: commit, SAN: cosigntest.Edge, Protocol: 18, Sequence: 4150,
+		Binary: edgetest.FakeCloopAt("dev+ga0f3870", 18, newerCommit, 4150, "SWAPPED")})
+	if err := install.FileUpgradeRequest(d.Spec, install.UpgradeRequest{TargetVersion: "edge:" + commit,
+		Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	inst, _ := edgetest.Recorder()
+	_, _, staged, err := ApplyUpgradeRequest(d.Spec, install.OutputSystemd, ApplyOptions{Installer: inst,
+		Fetch: rel.Options(t)})
+	if !staged.ProvenanceVerified {
+		t.Fatalf("fixture: the swapped build did not verify: %v", err)
+	}
+	if !errors.Is(err, install.ErrBinaryUnusable) || !strings.Contains(err.Error(), newerCommit) {
+		t.Fatalf("err = %v, want ErrBinaryUnusable naming the binary's commit", err)
+	}
+	if cur, _ := d.Installed(t); cur != "INSTALLED" {
+		t.Errorf("the device changed: %q", cur)
+	}
+}
+
+// TestHelloReportsTheBuildSequence: the agent advertises its build's place on
+// main, so the hub never offers it a build its installer would refuse.
+func TestHelloReportsTheBuildSequence(t *testing.T) {
+	prev := version.Sequence
+	t.Cleanup(func() { version.Sequence = prev })
+	version.Sequence = "4150"
+	if got := (&Agent{}).Capabilities().BuildSequence; got != 4150 {
+		t.Errorf("reported sequence %d", got)
+	}
+	version.Sequence = ""
+	if got := (&Agent{}).Capabilities().BuildSequence; got != 0 {
+		t.Errorf("an unstamped build reported sequence %d", got)
 	}
 }

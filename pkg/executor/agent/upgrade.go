@@ -165,8 +165,11 @@ func (a *Agent) runUpgrade(p remote.UpgradePayload, current string) {
 	}
 
 	t := UpgradeTarget{
-		Target:   p.TargetVersion,
-		Channel:  a.channel(),
+		Target:  p.TargetVersion,
+		Channel: a.channel(),
+		// The frame's force is the hub's, and the hub cannot move a device
+		// backwards on main: AllowRollback stays false (Task 20380), exactly
+		// as it does for a request filed for the root helper.
 		Install:  install.UpgradeOptions{Force: p.Force},
 		Progress: func(line string) { a.logf("upgrade: %s", line) },
 	}

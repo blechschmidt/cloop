@@ -487,6 +487,9 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 	// always; whether the device can carry out an upgrade is a probe of the
 	// install around it, and only an agent with host probes asks (Task 20376).
 	caps.UpdateChannel = string(a.channel())
+	// The build's place on main, which the device's installer orders upgrades
+	// by (Task 20380); reported so the hub never offers a build it would refuse.
+	caps.BuildSequence, _ = version.BuildSequence()
 	if a.cfg.HostProbes {
 		mode, _, _, issue := a.remoteUpgradeReadiness()
 		caps.RemoteUpgrade = mode != remoteUpgradeUnavailable

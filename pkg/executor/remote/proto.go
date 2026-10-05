@@ -873,6 +873,16 @@ type AgentCapabilities struct {
 	// agent older than the fields, whose answer is unknown.
 	RemoteUpgrade      bool   `json:"remote_upgrade,omitempty"`
 	RemoteUpgradeIssue string `json:"remote_upgrade_issue,omitempty"`
+	// BuildSequence is the agent build's first-parent position on main (Task
+	// 20380), the number the device's root helper orders installs by: it
+	// refuses a build whose sequence is lower than the installed one's. The
+	// hub reads it to show in the fleet inventory, to never offer a device a
+	// build it would refuse, and for hub doctor to say how far behind its own
+	// build a device is. Absent from a build that was not stamped with one —
+	// and from every agent older than the field, which the hub reads the same
+	// way: unknown. Informational to the hub, so no protocol bump: the
+	// device's own installer is what enforces the order.
+	BuildSequence int `json:"build_sequence,omitempty"`
 }
 
 // Executor projects the device's advertised capabilities onto the

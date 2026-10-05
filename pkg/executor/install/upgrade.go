@@ -64,6 +64,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/provenance"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // UpgradeOptions parameterises an in-place upgrade.
@@ -80,8 +81,22 @@ type UpgradeOptions struct {
 	// It also permits a deliberate rollback: installing a build older than
 	// the one in place, or one speaking a protocol this control plane no
 	// longer accepts. It does *not* permit installing a binary that failed
-	// verification — see ErrBinaryUnusable for why that line is where it is.
+	// verification — see ErrBinaryUnusable for why that line is where it is —
+	// nor one earlier on main than the installed binary, which takes
+	// AllowRollback.
 	Force bool
+
+	// AllowRollback permits installing a build whose sequence is lower than
+	// the installed binary's, or one carrying none when the installed binary
+	// does (ErrRollback, Task 20380).
+	//
+	// It is not Force, because Force arrives from places that must not be able
+	// to do this: the upgrade request the agent files for the root helper, and
+	// the upgrade frame the hub sends an agent running as root, both carry a
+	// force flag, and a compromised agent or hub could set either. Only the
+	// CLI sets this, from --force on an `install --upgrade` run by root on the
+	// device — never from --apply-request, whose target the request names.
+	AllowRollback bool
 	// DryRun performs every check and reports what would happen without
 	// writing a byte or restarting anything.
 	//
@@ -157,6 +172,17 @@ type UpgradeOptions struct {
 	// than another genuine one renamed. Unlike a downgrade, a mismatch is not
 	// overridable by Force.
 	ExpectVersion string
+
+	// ExpectCommit and ExpectSequence are the rest of what the signed manifest
+	// says about the build (Task 20380): the full commit it was made from and
+	// that commit's place on main. Checked whenever ExpectVersion is set,
+	// against what the binary reports when it is run, and not overridable: a
+	// validly signed manifest for one commit paired with a binary of another
+	// is refused even when the versions happen to agree. ExpectSequence zero
+	// means the manifest names none (schema 1), and then the binary must carry
+	// none either.
+	ExpectCommit   string
+	ExpectSequence int
 
 	// SettleTimeout bounds the wait for a restarted service to report itself
 	// active before the upgrade concludes the new build is bad and rolls back.
@@ -667,9 +693,14 @@ func (in *Installer) verifyUpgrade(res *UpgradeResult, source, target string, op
 	// The build the caller proved it was fetching (an edge build's signed
 	// manifest names it) must be the build that runs. Not overridable: a
 	// mismatch means these are not the bytes that were verified for.
-	if want := strings.TrimSpace(opts.ExpectVersion); want != "" && staged.Version != want {
-		return fmt.Errorf("%w: %s reports version %q, but the build being installed is %q — these are not "+
-			"the bytes its signature was checked for", ErrBinaryUnusable, source, staged.Version, want)
+	if want := strings.TrimSpace(opts.ExpectVersion); want != "" {
+		if staged.Version != want {
+			return fmt.Errorf("%w: %s reports version %q, but the build being installed is %q — these are not "+
+				"the bytes its signature was checked for", ErrBinaryUnusable, source, staged.Version, want)
+		}
+		if err := checkManifestStamp(source, staged, opts); err != nil {
+			return err
+		}
 	}
 
 	// Platform check for the case exec cannot catch: a binary that runs and
@@ -685,17 +716,127 @@ func (in *Installer) verifyUpgrade(res *UpgradeResult, source, target string, op
 	// Best-effort on the installed side: an agent whose binary is already
 	// broken is exactly the one that most needs replacing, so a probe failure
 	// here must not block the upgrade. It only costs the downgrade comparison.
-	if installed, iErr := in.identify(target); iErr == nil {
+	if installed, ok := in.installedIdentity(target); ok {
 		res.InstalledBuild = installed
 	}
 
-	if err := checkUpgradeSafety(res.StagedBuild, res.InstalledBuild, remote.MinProtocolVersion); err != nil {
+	err = checkUpgradeSafety(res.StagedBuild, res.InstalledBuild, remote.MinProtocolVersion)
+	if errors.Is(err, ErrRollback) {
+		if !opts.AllowRollback {
+			// The journal line: on a device this runs in the root helper,
+			// whose output is the unit's journal, and an operator reading why
+			// the hub's Upgrade did nothing finds it there.
+			in.logf("refused: %s would move this device back on main from %s to %s; only root on the "+
+				"device can do that (install --upgrade --force), not the hub or the agent",
+				source, describeSequence(res.InstalledBuild), describeSequence(res.StagedBuild))
+			return err
+		}
+		in.logf("--force, as root on this device: rolling back from %s to %s",
+			describeSequence(res.InstalledBuild), describeSequence(res.StagedBuild))
+		// The rest of the rules still apply to the rollback, under the same
+		// --force that allowed it.
+		installed := res.InstalledBuild
+		installed.Sequence = 0
+		err = checkUpgradeSafety(res.StagedBuild, installed, remote.MinProtocolVersion)
+	}
+	if err != nil {
 		if !opts.Force {
 			return err
 		}
 		in.logf("--force: proceeding despite %v", err)
 	}
+	switch installed, staged := res.InstalledBuild, res.StagedBuild; {
+	case installed.Sequence <= 0 && staged.Sequence > 0:
+		// The bootstrap case: nothing to order against yet. From the next
+		// upgrade on, this device refuses anything earlier than staged.
+		in.logf("the installed binary (%s) carries no sequence, so this move cannot be ordered and is allowed; "+
+			"from now on this device refuses builds earlier on main than %s", installedLabel(installed),
+			version.SequenceLabel(staged.Sequence))
+	case installed.Sequence <= 0:
+		in.logf("neither the installed binary (%s) nor the staged one (%s) carries a sequence, so this move "+
+			"cannot be ordered and is allowed", installedLabel(installed), installedLabel(staged))
+	case staged.Sequence > installed.Sequence:
+		in.logf("moving forward on main, %s -> %s", version.SequenceLabel(installed.Sequence),
+			version.SequenceLabel(staged.Sequence))
+	}
 	return nil
+}
+
+// installedIdentity is what the installed binary says it is, and whether it
+// could be asked.
+//
+// Probed by running it, like the staged binary. When the probe cannot answer
+// and this process is itself the installed binary — the root helper always
+// is: its unit runs `<binary> executor agent install --upgrade --apply-request`
+// — the answer is this process's own identity. A probe that a hostile agent
+// could make fail must not be a way to make the installed build look
+// sequence-less, which is the one case the rollback rule lets through.
+func (in *Installer) installedIdentity(target string) (BinaryIdentity, bool) {
+	id, err := in.identify(target)
+	if err == nil && id.Structured {
+		return id, true
+	}
+	if in.Exec == nil && !in.staged() && runningBinaryIs(target) {
+		self := selfIdentity()
+		if err != nil {
+			in.logf("note: %s did not identify itself (%v); it is the binary running this upgrade, so its "+
+				"identity is read from this process", target, err)
+		}
+		return self, true
+	}
+	return id, err == nil
+}
+
+// runningBinaryIs reports whether this process runs the binary at path.
+// Indirected so tests can claim either answer.
+var runningBinaryIs = func(path string) bool {
+	self, err := os.Executable()
+	return err == nil && sameFile(self, path)
+}
+
+// checkManifestStamp holds the staged binary's own stamp against what the
+// signed manifest says about the build: the same commit, the same sequence
+// (Task 20380). A manifest of schema 1 names no sequence, so the binary must
+// carry none either; one that names a sequence also names its commit, and the
+// binary must report that commit.
+func checkManifestStamp(source string, staged BinaryIdentity, opts UpgradeOptions) error {
+	wantCommit := strings.ToLower(strings.TrimSpace(opts.ExpectCommit))
+	wantSeq := opts.ExpectSequence
+	if staged.Sequence != wantSeq {
+		return fmt.Errorf("%w: %s reports %s, but its signed manifest names %s — these are not the bytes "+
+			"the manifest describes", ErrBinaryUnusable, source, version.SequenceLabel(staged.Sequence),
+			version.SequenceLabel(wantSeq))
+	}
+	if wantCommit == "" {
+		return nil
+	}
+	if staged.Commit == "" && wantSeq <= 0 {
+		// A build from before the stamp reports no commit; its version, which
+		// names the commit's prefix, was checked above.
+		return nil
+	}
+	if staged.Commit != wantCommit {
+		reported := staged.Commit
+		if reported == "" {
+			reported = "no commit"
+		}
+		return fmt.Errorf("%w: %s reports %s, but its signed manifest describes commit %s — a manifest "+
+			"for one commit paired with a binary of another", ErrBinaryUnusable, source, reported, wantCommit)
+	}
+	return nil
+}
+
+// describeSequence names a build and its place on main for a journal line.
+func describeSequence(id BinaryIdentity) string {
+	return installedLabel(id) + " (" + version.SequenceLabel(id.Sequence) + ")"
+}
+
+// installedLabel names a build, or says that it could not be identified.
+func installedLabel(id BinaryIdentity) string {
+	if strings.TrimSpace(id.Version) == "" {
+		return "an unidentified build"
+	}
+	return id.Version
 }
 
 // rollback restores the previous binary after a failed restart and returns the

@@ -86,8 +86,10 @@ type UpgradeTarget struct {
 	Channel provenance.Channel
 	// Install carries everything else install.Upgrade takes — Force, DryRun,
 	// SettleTimeout, and any unit changes an operator asked for in the same
-	// command. Source, the provenance fields and ExpectVersion are filled in
-	// here from what was staged.
+	// command. Source, the provenance fields and the Expect* fields are filled
+	// in here from what was staged. AllowRollback is passed through as the
+	// caller set it, and only an operator's own command may set it: a
+	// request the agent filed, or a frame the hub sent, never does.
 	Install install.UpgradeOptions
 	// Fetch is the staging options: verification against the release
 	// identity can be skipped for a release (an operator's --insecure-skip-
@@ -138,6 +140,12 @@ func UpgradeTo(spec install.Spec, out install.Output, t UpgradeTarget) (install.
 	opts.ProvenanceEstablished = staged.ProvenanceVerified
 	opts.SkipVerify = !staged.ProvenanceVerified
 	opts.ExpectVersion = staged.Version
+	// What else the signed manifest says: the binary must report the same
+	// commit and place on main, or it is not the build the manifest describes
+	// (Task 20380). Only meaningful with ExpectVersion, which a release leaves
+	// empty — a release's binary is bound by its archive's signature.
+	opts.ExpectCommit = staged.Commit
+	opts.ExpectSequence = staged.Sequence
 	inst := t.Installer
 	if inst == nil {
 		inst = &install.Installer{}
@@ -282,8 +290,14 @@ func ApplyUpgradeRequest(spec install.Spec, out install.Output, o ApplyOptions) 
 		return req, install.UpgradeResult{}, upgrade.Staged{}, err
 	}
 	t := UpgradeTarget{
-		Target:    req.TargetVersion,
-		Channel:   channel,
+		Target:  req.TargetVersion,
+		Channel: channel,
+		// The request's force reinstalls a build and permits the downgrades
+		// a hub may ask for; it never permits a rollback on main
+		// (install.ErrRollback). AllowRollback stays false here whatever the
+		// request says: the file is written by the agent's user, so it can
+		// ask for no more than the hub could, and the hub cannot move a
+		// device backwards (Task 20380).
 		Install:   install.UpgradeOptions{Force: req.Force},
 		Fetch:     o.Fetch,
 		Installer: inst,
