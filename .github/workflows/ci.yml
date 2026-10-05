@@ -264,9 +264,15 @@ jobs:
           go test -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $pkgs
 
       - name: End-to-end integration tests
+        # Includes the hub-restart circuit (Task 20382, hubrestart_test.go): a
+        # real hub stopped with SIGTERM and with SIGKILL under a real agent's
+        # run, for a plain project and a feature — about 12 s here, bash and
+        # git only. -timeout 300s rather than 120s because each of its waits is
+        # bounded at up to 90 s, and a wait that fails should report what it
+        # was waiting for, not be cut off by the package timeout.
         run: |
           go build -o cloop .
-          go test -v -timeout 120s ./tests/e2e/
+          go test -v -timeout 300s ./tests/e2e/
 
       - name: The seeded home directory was left untouched
         # The assertion that makes the seeding meaningful, and it has to run
