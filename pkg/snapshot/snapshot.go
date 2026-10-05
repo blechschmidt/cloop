@@ -8,7 +8,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"fmt"
-	"github.com/blechschmidt/cloop/pkg/feature"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +15,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/diskreserve"
+	"github.com/blechschmidt/cloop/pkg/feature"
 )
 
 const snapshotsDir = "snapshots"
@@ -173,6 +175,12 @@ func Restore(workDir, id string) error {
 		if e.Name() == feature.DirName {
 			continue // feature worktrees are live work, not project state (Task 20341)
 		}
+		if diskreserve.IsName(e.Name()) && e.Type().IsRegular() {
+			// The free-space reserve (Task 20381) is this disk's, not the
+			// snapshot's: no archive holds one, and deleting it here would
+			// hand its space to whatever fills the disk next.
+			continue
+		}
 		if err := os.RemoveAll(filepath.Join(dst, e.Name())); err != nil {
 			return fmt.Errorf("remove %s: %w", e.Name(), err)
 		}
@@ -303,6 +311,13 @@ func writeArchive(destPath, srcDir, excludeDir string) error {
 		if absPath == filepath.Join(absSrc, feature.DirName) {
 			return filepath.SkipDir
 		}
+		// And the free-space reserve (Task 20381): 16 MiB of placeholder
+		// blocks in every archive, restoring which would give back nothing.
+		// A file, so nil rather than SkipDir — SkipDir on a file skips the
+		// rest of its directory.
+		if absPath == filepath.Join(absSrc, diskreserve.Name) && fi.Mode().IsRegular() {
+			return nil
+		}
 
 		// Compute the in-archive name relative to srcDir's parent, prefixed
 		// with ".cloop/".
@@ -413,7 +428,10 @@ func copyDir(src, dst string) error {
 		// which archives written before Task 20341 contain and which must
 		// not be copied over the live worktrees.
 		if rel == snapshotsDir || strings.HasPrefix(rel, snapshotsDir+string(os.PathSeparator)) ||
-			rel == feature.DirName || strings.HasPrefix(rel, feature.DirName+string(os.PathSeparator)) {
+			rel == feature.DirName || strings.HasPrefix(rel, feature.DirName+string(os.PathSeparator)) ||
+			// Nor a reserve some archive carries: the live one, kept
+			// above, is this disk's (Task 20381).
+			rel == diskreserve.Name {
 			if fi.IsDir() {
 				return filepath.SkipDir
 			}

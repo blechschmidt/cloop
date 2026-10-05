@@ -151,3 +151,55 @@ func writeArchiveIncludingEverything(dest, src string) error {
 		return err
 	})
 }
+
+// TestSnapshotLeavesTheReserveAlone: .cloop/reserve (Task 20381) is
+// placeholder space for the disk, not project state. No archive carries it,
+// and a restore neither deletes the live one nor copies one over it.
+func TestSnapshotLeavesTheReserveAlone(t *testing.T) {
+	work := t.TempDir()
+	cloop := filepath.Join(work, ".cloop")
+	writeFile(t, filepath.Join(cloop, "config.yaml"), "provider: mock\n")
+	writeFile(t, filepath.Join(cloop, "reserve"), "placeholder\n")
+	// Entries that sort after the reserve. Skipping a file with SkipDir
+	// would silently drop every one of them from the archive.
+	writeFile(t, filepath.Join(cloop, "state.json"), "{}\n")
+	writeFile(t, filepath.Join(cloop, "tasks", "1-x.md"), "done\n")
+
+	meta, err := Save(work, "before")
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	names := archiveNames(t, filepath.Join(snapshotsPath(work), meta.ID+".tar.gz"))
+	joined := strings.Join(names, "\n")
+	if strings.Contains(joined, ".cloop/reserve") {
+		t.Errorf("the snapshot archived the reserve: %v", names)
+	}
+	for _, want := range []string{".cloop/state.json", ".cloop/tasks/1-x.md", ".cloop/config.yaml"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the snapshot lost %s, which sorts after the reserve: %v", want, names)
+		}
+	}
+
+	writeFile(t, filepath.Join(cloop, "reserve"), "live\n")
+	if err := Restore(work, meta.ID); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cloop, "reserve")); err != nil || string(b) != "live\n" {
+		t.Errorf("the restore touched the live reserve: %q, %v", b, err)
+	}
+
+	// An archive that does carry one (made by hand, or by a writer that
+	// did not skip it) does not overwrite the live reserve either.
+	carrying := filepath.Join(snapshotsPath(work), "20260101-000000-carrying.tar.gz")
+	writeFile(t, filepath.Join(cloop, "reserve"), "archived\n")
+	if err := writeArchiveIncludingEverything(carrying, cloop); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cloop, "reserve"), "live\n")
+	if err := Restore(work, "20260101-000000-carrying"); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(cloop, "reserve")); string(b) != "live\n" {
+		t.Errorf("an archived reserve was copied over the live one: %q", b)
+	}
+}

@@ -20,12 +20,13 @@ package diskusage
 
 import (
 	"fmt"
-	"github.com/blechschmidt/cloop/pkg/feature"
 	"os"
 	"path/filepath"
 	"sort"
 	"syscall"
 
+	"github.com/blechschmidt/cloop/pkg/diskreserve"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -170,6 +171,13 @@ func MeasureFiles(workDir string) (*Usage, error) {
 		// state, and send an operator to `cloop compact` for bytes it cannot
 		// touch.
 		if e.Name() == feature.DirName && e.IsDir() {
+			continue
+		}
+		// The free-space reserve (Task 20381) is a placeholder the run deletes
+		// when the disk fills, not something .cloop costs: counting it would
+		// report 16 MiB nothing can reclaim, on the panel an operator reads
+		// when the disk is full.
+		if diskreserve.IsName(e.Name()) && e.Type().IsRegular() {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
