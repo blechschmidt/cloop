@@ -293,3 +293,79 @@ func TestEdgeBuildCacheSpendsFewLookups(t *testing.T) {
 		t.Errorf("a failure to ask was cached: %d lookups, want 4", *calls)
 	}
 }
+
+// publishedAt is published(protocol) with the manifest naming a place on main.
+func publishedAt(protocol, sequence int) func(string, string) upgrade.EdgeBuild {
+	return func(version, commit string) upgrade.EdgeBuild {
+		b := published(protocol)(version, commit)
+		b.Manifest.Schema, b.Manifest.Sequence = 2, sequence
+		return b
+	}
+}
+
+// TestUpgradeDialog_NeverOffersAnEarlierBuild (Task 20380): a device whose
+// build is later on main than the hub's is not offered the hub's — its
+// installer would refuse it — and the inventory shows where each device is.
+func TestUpgradeDialog_NeverOffersAnEarlierBuild(t *testing.T) {
+	withHubVersion(t, "dev+ga0f3870")
+	withEdgeResolution(t, publishedAt(18, 4150))
+
+	behind := edgeCaps
+	behind.BuildSequence = 4100
+	ex, _ := edgeDevice(t, "edge-seq-1", 18, behind)
+	v := dialog(t, ex)
+	if v.UpgradeTarget != "edge:"+hubCommit || !strings.Contains(v.UpgradeNote, "sequence 4150 on main") {
+		t.Fatalf("a later hub build: offer %q, note %q", v.UpgradeTarget, v.UpgradeNote)
+	}
+	if v.Inventory == nil || v.Inventory.BuildSequence != 4100 {
+		t.Errorf("inventory = %+v, want the device's sequence", v.Inventory)
+	}
+
+	ahead := edgeCaps
+	ahead.BuildSequence = 4200
+	ex, _ = edgeDevice(t, "edge-seq-2", 18, ahead)
+	v = dialog(t, ex)
+	if v.UpgradeTarget != "" || !strings.Contains(v.UpgradeNote, "50 commit(s) earlier") ||
+		!strings.Contains(v.UpgradeNote, "move the hub forward") {
+		t.Errorf("an earlier hub build: offer %q, note %q", v.UpgradeTarget, v.UpgradeNote)
+	}
+}
+
+// TestAnnotateInventoryReadsTheStoredSequence: an offline device shows the
+// sequence from the advertisement stored at its last connect.
+func TestAnnotateInventoryReadsTheStoredSequence(t *testing.T) {
+	view := executorView{}
+	annotateInventory(context.Background(), &view, statedb.ExecutorRow{Kind: executor.KindRemoteAgent,
+		Inventory:    statedb.ExecutorInventory{AgentVersion: "dev+g06e06ed"},
+		Capabilities: []byte(`{"update_channel":"edge","build_sequence":4123}`)}, nil)
+	if view.Inventory == nil || view.Inventory.BuildSequence != 4123 || view.Inventory.Live {
+		t.Fatalf("inventory = %+v", view.Inventory)
+	}
+	for _, raw := range []string{`{}`, `{"build_sequence":-1}`, `not json`, ``} {
+		if got := storedBuildSequence([]byte(raw)); got != 0 {
+			t.Errorf("storedBuildSequence(%q) = %d", raw, got)
+		}
+	}
+}
+
+// TestExecutorUpgrade_RefusesARollback: the REST route refuses an edge build
+// earlier on main than the device's with 409, force or not, and asks nothing.
+func TestExecutorUpgrade_RefusesARollback(t *testing.T) {
+	withHubVersion(t, "dev+ga0f3870")
+	withLatestRelease(t, "v0.0.4", nil)
+	dir := setupProjectDir(t, "edge rollbacks", nil)
+	withEdgeResolution(t, publishedAt(18, 4100))
+	ahead := edgeCaps
+	ahead.BuildSequence = 4150
+	_, asked := edgeDevice(t, "edge-api-rb", 18, ahead)
+	for _, force := range []bool{false, true} {
+		code, body := postUpgrade(t, dir, "edge-api-rb", map[string]any{"target_version": "edge:" + hubCommit,
+			"force": force})
+		if code != http.StatusConflict || !strings.Contains(errorText(body), "only root on the device can roll it back") {
+			t.Fatalf("force=%t: status %d, %q", force, code, errorText(body))
+		}
+	}
+	if len(asked()) != 0 {
+		t.Error("the device was asked anyway")
+	}
+}

@@ -203,6 +203,8 @@ function _execInventoryChips(ex) {
   }
   // Task 20376: the device follows the hub's signed builds, not releases only.
   if (ex.update_channel === 'edge') chips.push('<span class="exec-chip" title="Edge channel: installs this hub\'s signed builds">edge</span>');
+  // Task 20380: its build's place on main; it refuses any earlier build.
+  if (inv.build_sequence) chips.push('<span class="exec-chip" title="Sequence on main: the device refuses any build earlier than this">seq ' + esc(inv.build_sequence) + '</span>');
   if (inv.os) {
     chips.push('<span class="exec-chip">' + esc(inv.os)
       + (inv.arch ? '/' + esc(inv.arch) : '') + '</span>');

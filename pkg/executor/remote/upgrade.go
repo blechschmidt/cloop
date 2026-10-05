@@ -44,6 +44,13 @@ var ErrUpgradeLowersProtocol = errors.New("remote: upgrade would lower the devic
 // says so before a frame is sent, and says that only the device can change it.
 var ErrUpgradeChannel = errors.New("remote: the device does not follow the edge channel")
 
+// ErrUpgradeRollback reports a target earlier on main than the device's build
+// (Task 20380): its sequence is lower, or it carries none while the device's
+// build does. The device's installer refuses such a build whoever asks, and the
+// frame's force flag does not reach that refusal — so neither does
+// UpgradeRequest.Force here. Only root on the device can roll it back.
+var ErrUpgradeRollback = errors.New("remote: the target is earlier on main than the device's build")
+
 // UpgradeRequest is what a caller asks for. It is the hub-side mirror of
 // UpgradePayload, and it carries no more than that one does on purpose: a field
 // here would have to reach the device somehow, and the set of things the device
@@ -73,6 +80,15 @@ type UpgradeRequest struct {
 	TargetProtocol int
 	// TargetProtocolIssue says why TargetProtocol is unknown, for the refusal.
 	TargetProtocolIssue string
+	// TargetSequence is an edge target's place on main, from the same
+	// manifest as TargetProtocol, when TargetSequenceKnown (Task 20380): zero
+	// then means the build carries none. Like TargetProtocol it never reaches
+	// the wire — the device reads the signed manifest and its binary's stamp
+	// itself — and it is what keeps the hub from asking a device for a build
+	// its installer will refuse as earlier on main. A release target's
+	// sequence comes from the published table instead.
+	TargetSequence      int
+	TargetSequenceKnown bool
 	// SettleTimeout bounds the device's wait for its restarted service.
 	SettleTimeout time.Duration
 	// Reason is recorded in the device's log: who asked, and whether it was a
@@ -166,6 +182,11 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 	// would be refused until the agent reconnected. The device answers the
 	// request from a preflight it runs now, before it acknowledges anything.
 	caps := sess.Capabilities()
+	// The device's place on main. Unlike the protocol checks below, a target
+	// earlier than it is refused whatever req.Force says: the device's
+	// installer refuses it whoever asks (Task 20380), so sending it would only
+	// trade this sentence for a refusal in the device's journal.
+	haveSeq := caps.BuildSequence
 	switch {
 	case version.IsEdgeTarget(target):
 		commit, err := version.ParseEdgeTarget(target)
@@ -176,6 +197,11 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 		if caps.UpdateChannel != executor.ChannelEdge {
 			return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeChannel,
 				executor.EdgeChannelRefusal(e.subject(), target))
+		}
+		if req.TargetSequenceKnown {
+			if why := executor.RollbackRefusal(e.subject(), haveSeq, target, req.TargetSequence); why != "" {
+				return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeRollback, why)
+			}
 		}
 		if !req.Force {
 			if req.TargetProtocol <= 0 {
@@ -190,9 +216,17 @@ func (e *Executor) RequestUpgrade(ctx context.Context, req UpgradeRequest) (Upgr
 	case target != LatestVersion && !version.IsRelease(target):
 		return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeTarget,
 			executor.UnpublishedTarget(e.subject(), target, have))
-	case !req.Force:
-		if err := checkProtocolDrop(e.subject(), have, target); err != nil {
-			return UpgradeOutcome{}, err
+	default:
+		// A release the hub knows to be earlier on main than the device's
+		// build. An unresolved "latest" is not judged: a release newer than
+		// this hub's table may well be later, and the device decides.
+		if why := executor.ReleaseRollbackRefusal(e.subject(), haveSeq, target); why != "" {
+			return UpgradeOutcome{}, fmt.Errorf("%w: %s", ErrUpgradeRollback, why)
+		}
+		if !req.Force {
+			if err := checkProtocolDrop(e.subject(), have, target); err != nil {
+				return UpgradeOutcome{}, err
+			}
 		}
 	}
 

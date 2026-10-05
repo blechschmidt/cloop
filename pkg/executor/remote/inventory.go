@@ -56,6 +56,19 @@ func (e *Executor) AgentInventory() (AgentCapabilities, bool) {
 	return sess.Capabilities(), true
 }
 
+// BuildSequence reports the connected agent build's place on main (Task
+// 20380), or 0 when the device is not connected or its build carries none.
+func (e *Executor) BuildSequence() int {
+	sess := e.currentSession()
+	if sess == nil {
+		return 0
+	}
+	if n := sess.Capabilities().BuildSequence; n > 0 {
+		return n
+	}
+	return 0
+}
+
 // UpdateChannel reports the update channel the connected agent says its
 // device follows (Task 20376): "edge" or "stable". It is "" when the device is
 // not connected, and when its agent predates the field — which follows

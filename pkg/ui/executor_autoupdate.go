@@ -126,6 +126,7 @@ func (a *autoUpdater) sweepOnce(ctx context.Context) {
 		req := remote.UpgradeRequest{TargetVersion: v.Target, Reason: "fleet auto-update policy"}
 		if hub.Edge != nil && hub.Edge.Published && v.Target == hub.Edge.Target {
 			req.TargetProtocol = hub.Edge.Protocol
+			req.TargetSequence, req.TargetSequenceKnown = hub.Edge.Sequence, true
 		}
 		outcome, err := a.sendFn(reqCtx, ex, req)
 		cancel()
@@ -181,6 +182,7 @@ func (a *autoUpdater) fleet() ([]autoupdate.Device, map[string]*remote.Executor)
 			Busy:            len(rex.Handles()) > 0,
 			Upgrading:       a.recentlyAsked(id),
 			Channel:         rex.UpdateChannel(),
+			Sequence:        rex.BuildSequence(),
 		}
 		if a.sv != nil {
 			h := a.sv.Health(id)

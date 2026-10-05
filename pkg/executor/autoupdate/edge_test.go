@@ -104,3 +104,44 @@ func TestPlanStillOffersReleasesToEdgeDevices(t *testing.T) {
 		t.Fatalf("verdict = %+v, want the release", v)
 	}
 }
+
+// TestPlanNeverAsksAnEdgeDeviceToRollBack (Task 20380): the hub's build is
+// the target only when it is not earlier on main than the device's — or from
+// before sequences, when the device's build carries one — because the
+// device's installer refuses anything earlier whoever asks.
+func TestPlanNeverAsksAnEdgeDeviceToRollBack(t *testing.T) {
+	withHubBuild(t, "dev+ga0f3870")
+	at := func(hubSeq, deviceSeq int) Verdict {
+		h := edgeHub(true, 18)
+		h.Edge.Sequence = hubSeq
+		d := edgeReady("sgx", executor.ChannelEdge, 18)
+		d.Sequence = deviceSeq
+		return Plan(enabled(), h, []Device{d})[0]
+	}
+	if v := at(4150, 4100); !v.Upgrade || v.Target != "edge:"+edgeHubCommit {
+		t.Errorf("a later hub build was not the target: %+v", v)
+	}
+	if v := at(4150, 0); !v.Upgrade {
+		t.Errorf("a device without a sequence was not moved to the hub's build: %+v", v)
+	}
+	for _, c := range []struct{ hubSeq, deviceSeq int }{{4100, 4150}, {0, 4150}} {
+		v := at(c.hubSeq, c.deviceSeq)
+		if v.Upgrade || !strings.Contains(v.Reason, "The device refuses a build earlier on main than its own") {
+			t.Errorf("hub at %d, device at %d: %+v", c.hubSeq, c.deviceSeq, v)
+		}
+	}
+}
+
+// TestPlanNeverPinsAnEarlierRelease: a pinned release the hub knows to carry
+// no sequence is refused for a device whose build carries one.
+func TestPlanNeverPinsAnEarlierRelease(t *testing.T) {
+	withHubBuild(t, "dev+ga0f3870")
+	d := edgeReady("sgx", executor.ChannelEdge, 13)
+	d.Version, d.Sequence = "dev+g06e06ed", 4150
+	p := enabled()
+	p.TargetVersion = "v0.0.4"
+	v := Plan(p, edgeHub(true, 18), []Device{d})[0]
+	if v.Upgrade || !strings.Contains(v.Reason, "carries no sequence") {
+		t.Fatalf("verdict = %+v", v)
+	}
+}

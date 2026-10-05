@@ -133,6 +133,10 @@ type Device struct {
 	// Channel is the update channel the device reports: "edge" lets it follow
 	// the hub's own build, anything else is releases only (Task 20376).
 	Channel string
+	// Sequence is the device's build's place on main (Task 20380), zero when
+	// it carries none. Its installer refuses anything earlier, so the planner
+	// never asks for it.
+	Sequence int
 }
 
 // Verdict is what the planner decided about one device.
@@ -254,6 +258,9 @@ func deviceTarget(d Device, target string, hub Hub) (string, string, bool) {
 		if have > 0 && e.Protocol < have {
 			return "", executor.ProtocolDrop(subject, have, e.Target, e.Protocol), true
 		}
+		if why := executor.RollbackRefusal(subject, d.Sequence, e.Target, e.Sequence); why != "" {
+			return "", why, true
+		}
 		return e.Target, "", false
 	case version.IsEdgeTarget(target) && !edgeDevice:
 		return "", executor.EdgeChannelRefusal(subject, target), true
@@ -312,6 +319,11 @@ func refuseTarget(d Device, target string, hub Hub) (string, bool) {
 	if !version.IsRelease(target) {
 		return executor.UnpublishedTarget("this device", target, have) +
 			" Or pin a published release as the auto-update policy's target.", true
+	}
+	// Rule 4 by place on main (Task 20380): a release the hub knows to be
+	// earlier than the device's build is one its installer refuses.
+	if why := executor.ReleaseRollbackRefusal(subject, d.Sequence, target); why != "" {
+		return why, true
 	}
 	hi := targetProtocolBound(target, hub)
 	if have > 0 && hi > 0 && hi < have {

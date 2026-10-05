@@ -38,9 +38,12 @@ type EdgeBuild struct {
 	// Target is "edge:<full commit>" once the commit is resolved.
 	Target string
 	// Published reports that CI published the build; Protocol is what its
-	// manifest says it speaks.
+	// manifest says it speaks, and Sequence its place on main (Task 20380) —
+	// zero when the manifest names none, i.e. a build from before builds were
+	// stamped with one, which a device whose build carries one refuses.
 	Published bool
 	Protocol  int
+	Sequence  int
 	// WhyNot is the sentence saying why it is not published, when it is not
 	// (pkg/upgrade.EdgeBuild.Reason).
 	WhyNot string
@@ -74,30 +77,49 @@ func EdgeProtocolUnknown(subject, target, why string) string {
 
 // EdgeUpgradeOffer is UpgradeOffer for a device on the edge channel: this
 // hub's own build when CI has published it and it would not lower the device's
-// protocol; otherwise what UpgradeOffer would offer, with the reason the hub's
-// build is not offered in front of it. edge is nil when the hub has no edge
-// build to speak of — it runs a release, which UpgradeOffer already offers.
+// protocol or move it back on main; otherwise what UpgradeOffer would offer,
+// with the reason the hub's build is not offered in front of it. edge is nil
+// when the hub has no edge build to speak of — it runs a release, which
+// UpgradeOffer already offers.
+//
+// Builds are ordered by sequence (Task 20380): a device whose build is later on
+// main than the hub's is never offered the hub's, because its installer would
+// refuse it — nor a release the hub knows to be earlier.
 //
 // label names the target for the dialog ("this hub's build (a0f3870)"), empty
 // for a release, which names itself.
-func EdgeUpgradeOffer(subject string, have, hubProtocol int, edge *EdgeBuild) (target, label, note string) {
+func EdgeUpgradeOffer(subject string, dev DeviceBuild, hubProtocol int, edge *EdgeBuild) (target, label, note string) {
 	subject = strings.TrimSpace(subject)
 	if subject == "" {
 		subject = "This device's agent"
 	}
+	have := dev.Protocol
 	fallback, fallbackNote := UpgradeOffer(subject, have, hubProtocol)
+	fallback, fallbackNote = GuardReleaseOffer(subject, dev.Sequence, fallback, fallbackNote)
 	if edge == nil || (have > 0 && have < MinRemoteUpgradeVersion) {
 		return fallback, "", fallbackNote
 	}
+	rollback := ""
+	if edge.Published {
+		rollback = RollbackRefusal(subject, dev.Sequence, edge.Label(), edge.Sequence)
+	}
 	switch {
-	case edge.Published && edge.Target != "" && (have <= 0 || edge.Protocol >= have):
+	case edge.Published && edge.Target != "" && (have <= 0 || edge.Protocol >= have) && rollback == "":
 		return edge.Target, edge.Label(), fmt.Sprintf("Upgrade installs %s from the edge channel: CI built and "+
-			"signed commit %s on main, and it speaks protocol v%d. The device verifies the signature against "+
-			"the edge workflow's identity before installing it.", edge.Label(), edge.Short, edge.Protocol)
-	case edge.Published:
+			"signed commit %s on main%s, and it speaks protocol v%d. The device verifies the signature against "+
+			"the edge workflow's identity before installing it.", edge.Label(), edge.Short,
+			sequenceClause(edge.Sequence), edge.Protocol)
+	case edge.Published && edge.Protocol < have && have > 0:
 		return edgeFallback(fmt.Sprintf("%s is not offered: it speaks v%d, below the device's v%d, so installing "+
 			"it would lower the device's protocol — the device is ahead of the hub, so move the hub forward rather "+
 			"than the device back", capitalize(edge.Label()), edge.Protocol, have), fallback, fallbackNote)
+	case edge.Published && rollback != "":
+		return edgeFallback(fmt.Sprintf("%s is not offered: %s The device is ahead of the hub, so move the hub "+
+			"forward rather than the device back", capitalize(edge.Label()), uncapitalize(rollback)), fallback,
+			fallbackNote)
+	case edge.Published:
+		return edgeFallback(fmt.Sprintf("%s is not offered: the hub could not name its commit",
+			capitalize(edge.Label())), fallback, fallbackNote)
 	}
 	why := strings.TrimSpace(edge.WhyNot)
 	if why == "" {
@@ -121,6 +143,24 @@ func edgeFallback(lead, fallback, fallbackNote string) (target, label, note stri
 			"the newest this hub knows of, %s, speaks v%d.", newest.Tag, newest.Protocol)
 	}
 	return "", "", joinSentences(lead, tail)
+}
+
+// sequenceClause is ", sequence N" for a build that names its place on main,
+// for the offer's sentence; "" when it names none.
+func sequenceClause(seq int) string {
+	if seq <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%s)", version.SequenceLabel(seq))
+}
+
+// uncapitalize lower-cases the first letter, for a sentence continued after a
+// colon.
+func uncapitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
 // capitalize upper-cases the first letter, for a label that starts a sentence.

@@ -157,8 +157,7 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 	// hub's build" — means its signed edge build. An edge target is then
 	// looked up so the hub can hold it to the device's protocol; the device
 	// verifies the build itself either way.
-	var targetProtocol int
-	var protocolIssue string
+	var edgeInfo edgeTargetInfo
 	if remoteEx.UpdateChannel() == executor.ChannelEdge {
 		if hub := hubVersion(); !version.IsRelease(hub) && !version.IsEdgeTarget(target) &&
 			(target == hub || version.SameCommit(target, hub)) {
@@ -169,7 +168,8 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if version.IsEdgeTarget(target) {
 		lookupCtx, lookupCancel := context.WithTimeout(r.Context(), edgeLookupTimeout)
-		target, targetProtocol, protocolIssue = resolveEdgeTarget(lookupCtx, target)
+		edgeInfo = resolveEdgeTarget(lookupCtx, target)
+		target = edgeInfo.Target
 		lookupCancel()
 	}
 
@@ -180,8 +180,13 @@ func (s *Server) handleExecutorUpgrade(w http.ResponseWriter, r *http.Request) {
 		TargetVersion:       target,
 		Force:               req.Force,
 		Reason:              "requested from the dashboard by " + s.auditActor(r),
-		TargetProtocol:      targetProtocol,
-		TargetProtocolIssue: protocolIssue,
+		TargetProtocol:      edgeInfo.Protocol,
+		TargetProtocolIssue: edgeInfo.Issue,
+		// The manifest's place on main, when it was read (Task 20380): a
+		// build earlier than the device's is refused here, force or not,
+		// because the device refuses it whoever asks.
+		TargetSequence:      edgeInfo.Sequence,
+		TargetSequenceKnown: edgeInfo.Published,
 	})
 	if err != nil {
 		// Recorded even though nothing happened on the device. An upgrade that
@@ -223,7 +228,7 @@ func upgradeRefusalStatus(err error) int {
 	case errors.Is(err, remote.ErrUpgradeTarget):
 		return http.StatusBadRequest
 	case errors.Is(err, remote.ErrUpgradeLowersProtocol), errors.Is(err, remote.ErrUpgradeUnsupported),
-		errors.Is(err, remote.ErrUpgradeChannel):
+		errors.Is(err, remote.ErrUpgradeChannel), errors.Is(err, remote.ErrUpgradeRollback):
 		return http.StatusConflict
 	}
 	return http.StatusServiceUnavailable

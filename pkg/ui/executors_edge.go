@@ -127,36 +127,52 @@ func edgeOfferFrom(b upgrade.EdgeBuild) *executor.EdgeBuild {
 		Target:    b.Target(),
 		Published: b.Published(),
 		Protocol:  b.Manifest.Protocol,
+		Sequence:  b.Manifest.Sequence,
 		WhyNot:    b.Reason(),
 	}
 }
 
+// edgeTargetInfo is what the hub could learn about the edge build a request
+// names: the normalised target and, once its manifest was read (Published),
+// the protocol and place on main the manifest claims. Issue says why it is
+// unknown otherwise.
+type edgeTargetInfo struct {
+	Target    string
+	Published bool
+	Protocol  int
+	Sequence  int
+	Issue     string
+}
+
 // resolveEdgeTarget looks up the edge build a request names, for the
-// protocol check: the hub's own from the cache, any other commit directly.
-// It returns the normalised target, the protocol its manifest claims (0 when
-// unknown), and why it is unknown.
-func resolveEdgeTarget(ctx context.Context, target string) (string, int, string) {
+// protocol and sequence checks: the hub's own from the cache, any other commit
+// directly.
+func resolveEdgeTarget(ctx context.Context, target string) edgeTargetInfo {
 	commit, err := version.ParseEdgeTarget(target)
 	if err != nil {
-		return target, 0, err.Error()
+		return edgeTargetInfo{Target: target, Issue: err.Error()}
+	}
+	published := func(b upgrade.EdgeBuild) edgeTargetInfo {
+		return edgeTargetInfo{Target: b.Target(), Published: true, Protocol: b.Manifest.Protocol,
+			Sequence: b.Manifest.Sequence}
 	}
 	if hub := hubVersion(); !version.IsRelease(hub) && version.SameCommit(hub, commit) {
 		b := hubEdgeCache.get(ctx, hub)
 		if b.Published() {
-			return b.Target(), b.Manifest.Protocol, ""
+			return published(b)
 		}
-		return version.EdgeTarget(commit), 0, b.Reason()
+		return edgeTargetInfo{Target: version.EdgeTarget(commit), Issue: b.Reason()}
 	}
 	full := commit
 	if !upgrade.IsFullCommit(full) {
 		var err error
 		if full, err = upgrade.ResolveCommit(ctx, commit); err != nil {
-			return version.EdgeTarget(commit), 0, err.Error()
+			return edgeTargetInfo{Target: version.EdgeTarget(commit), Issue: err.Error()}
 		}
 	}
 	b := resolveEdgeBuild(ctx, "", full)
 	if b.Published() {
-		return b.Target(), b.Manifest.Protocol, ""
+		return published(b)
 	}
-	return version.EdgeTarget(full), 0, b.Reason()
+	return edgeTargetInfo{Target: version.EdgeTarget(full), Issue: b.Reason()}
 }

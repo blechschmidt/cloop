@@ -14,7 +14,7 @@ const edgeTarget = "edge:a0f387020b4df29e9f39ebe0369ec0de0ca8c674"
 func TestEdgeUpgradeOfferOffersThePublishedBuild(t *testing.T) {
 	withHub(t, "dev+ga0f3870")
 	withKnownReleases(t)
-	target, label, note := EdgeUpgradeOffer("This device's agent", 16, 17,
+	target, label, note := EdgeUpgradeOffer("This device's agent", DeviceBuild{Protocol: 16}, 17,
 		&EdgeBuild{Short: "a0f3870", Target: edgeTarget, Published: true, Protocol: 17})
 	if target != edgeTarget || label != "this hub's build (a0f3870)" {
 		t.Fatalf("offer = %q, %q", target, label)
@@ -34,7 +34,7 @@ func TestEdgeUpgradeOfferSaysWhyNot(t *testing.T) {
 	withHub(t, "dev+ga0f3870")
 	withKnownReleases(t)
 
-	target, label, note := EdgeUpgradeOffer("This device's agent", 12, 17, &EdgeBuild{Short: "a0f3870",
+	target, label, note := EdgeUpgradeOffer("This device's agent", DeviceBuild{Protocol: 12}, 17, &EdgeBuild{Short: "a0f3870",
 		Target: edgeTarget, WhyNot: "CI failed on commit a0f3870 (https://github.com/x/run), so no edge build " +
 			"was published for it."})
 	if target != "v0.0.4" || label != "" {
@@ -48,7 +48,7 @@ func TestEdgeUpgradeOfferSaysWhyNot(t *testing.T) {
 
 	// A device ahead of every release: nothing to fall back to, and no advice
 	// to join a channel it is already on.
-	target, _, note = EdgeUpgradeOffer("This device's agent", 17, 17, &EdgeBuild{Short: "a0f3870",
+	target, _, note = EdgeUpgradeOffer("This device's agent", DeviceBuild{Protocol: 17}, 17, &EdgeBuild{Short: "a0f3870",
 		Target: edgeTarget, WhyNot: "CI has not published commit a0f3870 yet: CI is still running on it."})
 	want := "This hub's build (a0f3870) is not offered yet: CI has not published commit a0f3870 yet: CI is " +
 		"still running on it. It is offered here once CI has published it. No published release can be offered " +
@@ -57,7 +57,7 @@ func TestEdgeUpgradeOfferSaysWhyNot(t *testing.T) {
 		t.Errorf("nothing to offer:\n got %q, %q\nwant %q", target, note, want)
 	}
 
-	target, _, note = EdgeUpgradeOffer("This device's agent", 17, 17, &EdgeBuild{Short: "a0f3870",
+	target, _, note = EdgeUpgradeOffer("This device's agent", DeviceBuild{Protocol: 17}, 17, &EdgeBuild{Short: "a0f3870",
 		Target: edgeTarget, Published: true, Protocol: 16})
 	if target != "" || !strings.HasPrefix(note, "This hub's build (a0f3870) is not offered: it speaks v16, below "+
 		"the device's v17, so installing it would lower the device's protocol — the device is ahead of the hub") {
@@ -70,7 +70,7 @@ func TestEdgeUpgradeOfferSaysWhyNot(t *testing.T) {
 func TestEdgeUpgradeOfferOnAReleasedHubIsTheRelease(t *testing.T) {
 	withHub(t, "v0.2.0")
 	withKnownReleases(t)
-	target, label, _ := EdgeUpgradeOffer("This device's agent", 16, 17, nil)
+	target, label, _ := EdgeUpgradeOffer("This device's agent", DeviceBuild{Protocol: 16}, 17, nil)
 	if target != "v0.2.0" || label != "" {
 		t.Errorf("offer = %q, %q", target, label)
 	}

@@ -160,6 +160,11 @@ type executorInventoryView struct {
 	Harnesses         []string `json:"harnesses,omitempty"`
 	ContainerRuntimes []string `json:"container_runtimes,omitempty"`
 	WorkDirRoot       string   `json:"workdir_root,omitempty"`
+	// BuildSequence is the device's build's first-parent position on main
+	// (Task 20380): the order its installer holds every upgrade to, refusing a
+	// build earlier than this. Zero when the build carries none — one from
+	// before builds were stamped, which no rollback protection covers yet.
+	BuildSequence int `json:"build_sequence,omitempty"`
 	// Live reports that these values came from a connected session rather than
 	// from the stored row, so the panel can mark an offline device's inventory
 	// as last-known rather than current.
@@ -209,10 +214,14 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 
 	inv := row.Inventory
 	fromSession := false
+	// The full advertisement is stored beside the inventory columns, so an
+	// offline device's last-known sequence survives without a column of its own.
+	sequence := storedBuildSequence(row.Capabilities)
 	if live != nil {
 		if caps, ok := live.AgentInventory(); ok {
 			inv = inventoryFromCaps(caps, live.AgentVersion())
 			fromSession = true
+			sequence = max(caps.BuildSequence, 0)
 		}
 	}
 
@@ -228,6 +237,7 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 			Harnesses:         inv.Harnesses,
 			ContainerRuntimes: inv.ContainerRuntimes,
 			WorkDirRoot:       inv.WorkDirRoot,
+			BuildSequence:     sequence,
 			Live:              fromSession,
 		}
 	}
@@ -248,15 +258,25 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 		channel = live.UpdateChannel()
 	}
 	view.UpdateChannel = channel
+	// Ordered by the device's place on main too (Task 20380): a build its
+	// installer would refuse as earlier is never offered. Only a connected
+	// device's sequence is current enough to decide an offer on.
+	liveSequence := 0
+	if live != nil {
+		liveSequence = live.BuildSequence()
+	}
 	switch channel {
 	case executor.ChannelEdge:
 		lookupCtx, cancel := context.WithTimeout(ctx, edgeLookupTimeout)
 		view.UpgradeTarget, view.UpgradeLabel, view.UpgradeNote = executor.EdgeUpgradeOffer(
-			"This device's agent", deviceProtocol, remote.ProtocolVersion, hubEdgeOffer(lookupCtx))
+			"This device's agent", executor.DeviceBuild{Protocol: deviceProtocol, Sequence: liveSequence},
+			remote.ProtocolVersion, hubEdgeOffer(lookupCtx))
 		cancel()
 	default:
 		view.UpgradeTarget, view.UpgradeNote = executor.UpgradeOffer("This device's agent", deviceProtocol,
 			remote.ProtocolVersion)
+		view.UpgradeTarget, view.UpgradeNote = executor.GuardReleaseOffer("This device's agent", liveSequence,
+			view.UpgradeTarget, view.UpgradeNote)
 		if channel == executor.ChannelStable && !strings.Contains(view.UpgradeNote, executor.EdgeOptIn) {
 			if hint := executor.StableChannelHint(); hint != "" {
 				view.UpgradeNote += " " + hint
@@ -307,6 +327,22 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 			sv.Note = note + " " + upgradeHint()
 		}
 	}
+}
+
+// storedBuildSequence reads the build sequence out of a device's stored
+// capability advertisement (Task 20380): 0 when there is none, or the row
+// predates the field.
+func storedBuildSequence(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var caps struct {
+		BuildSequence int `json:"build_sequence"`
+	}
+	if json.Unmarshal(raw, &caps) != nil || caps.BuildSequence <= 0 || caps.BuildSequence > version.MaxSequence {
+		return 0
+	}
+	return caps.BuildSequence
 }
 
 // sessionProtocolOf is the protocol the live session to ex's device

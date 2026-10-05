@@ -131,3 +131,66 @@ func TestRequestUpgradeAsksADeviceThatSaidItCouldNot(t *testing.T) {
 		t.Errorf("asked = %v", got)
 	}
 }
+
+// TestRequestUpgradeNeverAsksForARollback is the hub's half of Task 20380: an
+// edge build earlier on main than the device's — or one from before builds
+// carried a sequence — is refused before a frame is sent, and force does not
+// change that, because the device's installer would refuse it whoever asked.
+func TestRequestUpgradeNeverAsksForARollback(t *testing.T) {
+	withHubBuild(t, "dev+ga0f3870")
+	ex, up := connectWithCaps(t, 18, remote.AgentCapabilities{UpdateChannel: "edge", RemoteUpgrade: true,
+		BuildSequence: 4150})
+	if got := ex.BuildSequence(); got != 4150 {
+		t.Fatalf("BuildSequence = %d", got)
+	}
+	for _, seq := range []int{4100, 0} {
+		for _, force := range []bool{false, true} {
+			_, err := ex.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: "edge:" + edgeCommit,
+				TargetProtocol: 18, TargetSequence: seq, TargetSequenceKnown: true, Force: force})
+			if !errors.Is(err, remote.ErrUpgradeRollback) {
+				t.Fatalf("sequence %d, force=%t: err = %v, want ErrUpgradeRollback", seq, force, err)
+			}
+			if !strings.Contains(err.Error(), executor.RollbackOptIn) {
+				t.Errorf("the refusal does not name the one way that remains: %v", err)
+			}
+		}
+	}
+	if got := up.asked(); len(got) != 0 {
+		t.Fatalf("sent %v despite the refusals", got)
+	}
+
+	// A later build is sent; an unknown sequence (the manifest was not read)
+	// is the protocol rule's to judge, as before.
+	if _, err := ex.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: "edge:" + edgeCommit,
+		TargetProtocol: 18, TargetSequence: 4160, TargetSequenceKnown: true}); err != nil {
+		t.Fatalf("a later build was refused: %v", err)
+	}
+	if got := up.asked(); len(got) != 1 {
+		t.Errorf("asked = %v", got)
+	}
+}
+
+// TestRequestUpgradeNeverAsksForAnEarlierRelease: a release the hub knows to
+// carry no sequence — every release before Task 20380 — is refused for a
+// device whose build carries one, force or not; for a device whose build
+// carries none, the protocol rule decides as it always did.
+func TestRequestUpgradeNeverAsksForAnEarlierRelease(t *testing.T) {
+	withHubBuild(t, "dev+ga0f3870")
+	ex, up := connectWithCaps(t, 13, remote.AgentCapabilities{UpdateChannel: "edge", RemoteUpgrade: true,
+		BuildSequence: 4150})
+	_, err := ex.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: "v0.0.4", Force: true})
+	if !errors.Is(err, remote.ErrUpgradeRollback) || !strings.Contains(err.Error(), "carries no sequence") {
+		t.Fatalf("err = %v, want ErrUpgradeRollback", err)
+	}
+	if got := up.asked(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+
+	plain, up2 := connectWithCaps(t, 13, remote.AgentCapabilities{UpdateChannel: "edge", RemoteUpgrade: true})
+	if _, err := plain.RequestUpgrade(upgradeCtx(t), remote.UpgradeRequest{TargetVersion: "v0.0.4"}); err != nil {
+		t.Fatalf("a device without a sequence was refused v0.0.4: %v", err)
+	}
+	if got := up2.asked(); len(got) != 1 {
+		t.Errorf("asked = %v", got)
+	}
+}

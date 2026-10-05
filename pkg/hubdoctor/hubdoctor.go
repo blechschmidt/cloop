@@ -387,6 +387,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkRBAC(cfg, add)
 	checkImagePolicy(ctx, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
+	checkEdgeLag(dir, add)
 	// After checkExecutors, and not optional about the ordering: the probe
 	// needs a driver in the registry holding a live cluster credential, and
 	// reconciliation is what puts one there.
