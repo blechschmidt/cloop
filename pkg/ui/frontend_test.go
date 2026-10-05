@@ -68,6 +68,14 @@ var virtualExecutorsAPISource string
 //go:embed firewall_api.go
 var firewallAPISource string
 
+// historySource is pkg/ui/history.go (Task 20384), embedded for the same two
+// reasons: it sends `history_append`, and handleEventHistory is registered
+// without a method prefix, so the verbs it accepts are discoverable only from
+// its body.
+//
+//go:embed history.go
+var historySource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
@@ -255,6 +263,7 @@ func allUISources() string {
 		"\n" + executorSandboxAPISource +
 		"\n" + executorPolicyAPISource +
 		"\n" + firewallAPISource +
+		"\n" + historySource +
 		"\n" + suggestAPISource +
 		"\n" + membersSource +
 		"\n" + diskFloorSource

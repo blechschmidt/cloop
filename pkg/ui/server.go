@@ -690,6 +690,11 @@ type Server struct {
 	// something to diff against.
 	diffCache *stateCache
 
+	// history is the per-project position of the Event History push (Task
+	// 20384): the journal cursor each project's last history_append ended
+	// at. See history.go.
+	history historyFeeds
+
 	// OIDC is the optional OpenID Connect authenticator (Task 20152). Nil
 	// (the default) means OIDC is disabled and the dashboard behaves
 	// exactly as before: token auth if Token is set, otherwise open. Set
@@ -1911,6 +1916,9 @@ func (s *Server) watchState(ctx context.Context) {
 			// state_diff event with only the changed fields (Task 20132).
 			s.broadcast(s.WorkDir, string(data))
 			s.broadcastStateDiff(s.WorkDir, ps)
+			// The journal rows behind the same change, to the same room
+			// (Task 20384).
+			s.pushHistory(s.WorkDir)
 		}()
 	}
 }
@@ -2624,134 +2632,6 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEventHistory returns the unified event journal (Task 20118) merged
-// with the steps table, latest-first, with pagination. Each entry has:
-//
-//	id          unique within the merged feed (positive = step, negative = event)
-//	kind        "step" | event_type ("task_started", "evolve_discovered", ...)
-//	timestamp   ISO-8601
-//	task_id     0 when not task-bound
-//	task_title  may be empty
-//	step        step number when kind="step"; -1 otherwise
-//	message     short, human-readable summary
-//	output      step output (kind="step" only)
-//	exit_code   step exit code (kind="step" only)
-//	duration    step duration (kind="step" only)
-//	details     JSON blob (event-only; may be empty)
-//
-// GET /api/event-history?offset=0&limit=50 → {entries:[...], total:N, offset:O, limit:L}
-func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
-	const (
-		defaultLimit = 50
-		maxLimit     = 500
-	)
-	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
-	if err != nil {
-		jsonErr(w, "no cloop project found", http.StatusNotFound)
-		return
-	}
-	q := r.URL.Query()
-	offset := 0
-	if v := q.Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			offset = n
-		}
-	}
-	limit := defaultLimit
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	if limit > maxLimit {
-		limit = maxLimit
-	}
-
-	type entry struct {
-		ID        int64     `json:"id"`
-		Kind      string    `json:"kind"`
-		Timestamp time.Time `json:"timestamp"`
-		TaskID    int       `json:"task_id,omitempty"`
-		TaskTitle string    `json:"task_title,omitempty"`
-		// Step has no omitempty: step 0 is a real step number and events
-		// set Step=-1 explicitly when not step-bound — both must round-trip.
-		Step int `json:"step"`
-		// ExitCode has no omitempty: 0 is the success case for steps; the
-		// renderer keys off Kind=="step" to know whether ExitCode is meaningful.
-		ExitCode int         `json:"exit_code"`
-		Message  string      `json:"message,omitempty"`
-		Output   string      `json:"output,omitempty"`
-		Duration string      `json:"duration,omitempty"`
-		Details  interface{} `json:"details,omitempty"`
-	}
-
-	// Build the full merged sequence in memory, then page it. The two streams
-	// are typically dwarfed by step count, so we walk both, sort by time desc,
-	// and slice. This keeps the SQLite queries simple and is fast enough for
-	// the projects we expect — under ~20k combined rows.
-	merged := make([]entry, 0, len(ps.Steps)+8)
-	for _, st := range ps.Steps {
-		merged = append(merged, entry{
-			// Step IDs are step+1 to keep them positive and stable across runs.
-			ID:        int64(st.Step) + 1,
-			Kind:      "step",
-			Timestamp: st.Time,
-			Step:      st.Step,
-			Message:   st.Task,
-			Output:    st.Output,
-			ExitCode:  st.ExitCode,
-			Duration:  st.Duration,
-		})
-	}
-	// Pull the entire events page; we already cap merged size by paging below.
-	// Pull at most a safe upper bound so we don't read a runaway row count.
-	const maxEventsRead = 5000
-	rows, _, evErr := state.ListEvents(workDir, 0, maxEventsRead)
-	if evErr == nil {
-		for _, ev := range rows {
-			var det interface{}
-			if ev.Details != "" {
-				_ = json.Unmarshal([]byte(ev.Details), &det)
-			}
-			merged = append(merged, entry{
-				// Event IDs are negated so they cannot collide with step IDs.
-				ID:        -ev.ID,
-				Kind:      string(ev.Type),
-				Timestamp: ev.Timestamp,
-				TaskID:    ev.TaskID,
-				TaskTitle: ev.TaskTitle,
-				Step:      ev.Step,
-				Message:   ev.Message,
-				Details:   det,
-			})
-		}
-	}
-
-	// Sort latest-first. Stable so that events with identical timestamps keep
-	// their relative insertion order (events table is monotonically inserted).
-	sort.SliceStable(merged, func(i, j int) bool {
-		return merged[i].Timestamp.After(merged[j].Timestamp)
-	})
-
-	total := len(merged)
-	start := offset
-	if start > total {
-		start = total
-	}
-	end := start + limit
-	if end > total {
-		end = total
-	}
-
-	jsonOK(w, map[string]interface{}{
-		"entries": merged[start:end],
-		"total":   total,
-		"offset":  offset,
-		"limit":   limit,
-	})
-}
-
 // handleGetTasks returns tasks filtered by query params: q, status (csv), tags (csv), assignee, priority (1-4).
 // GET /api/tasks?q=text&status=pending,in_progress&tags=backend&assignee=alice&priority=1
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
@@ -2853,6 +2733,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.clients, c)
 		s.mu.Unlock()
+		s.dropHistoryFeedIfIdle(c.workDir)
 	}()
 	// As on the WebSocket path: a revocation between the gate and now was
 	// evicted before this stream was registered to be found (Task 20366).
@@ -2880,6 +2761,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
 					return
 				}
+			}
+		}
+
+		// The Event History sync point, as on the WebSocket path (Task 20384).
+		if raw, ok := s.historySyncPoint(c.workDir); ok {
+			if werr := writeSSE(w, flusher, "event: history_append\ndata: %s\n\n", raw); werr != nil {
+				return
 			}
 		}
 
@@ -3253,6 +3141,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			delete(s.hubClients, workDir)
 		}
 		s.hubMu.Unlock()
+		s.dropHistoryFeedIfIdle(workDir)
 		// Broadcast updated presence list after disconnection.
 		s.broadcastPresence(workDir)
 	}()
@@ -3285,6 +3174,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 					_ = wsWrite(ctx, conn, msg)
 				}
+			}
+		}
+
+		// Where the Event History pushes this stream will receive begin
+		// (Task 20384). A page loaded before the socket opened, or a list
+		// that missed pushes while it was down, ends below it, and the client
+		// reads the difference once.
+		if raw, ok := s.historySyncPoint(workDir); ok {
+			if msg, err := json.Marshal(wsMessage{Type: "history_append", Data: raw}); err == nil {
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 
@@ -6046,12 +5945,15 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			if path == primaryAbs {
 				continue
 			}
-			if _, hasSubs := subscribed[path]; !hasSubs {
-				continue
+			if _, hasSubs := subscribed[path]; hasSubs {
+				if ps, err := state.LoadLite(path); err == nil {
+					s.broadcastStateDiff(path, ps)
+				}
 			}
-			if ps, err := state.LoadLite(path); err == nil {
-				s.broadcastStateDiff(path, ps)
-			}
+			// The journal rows behind the same change (Task 20384), to
+			// WebSocket and SSE subscribers alike; nothing is read for a
+			// project nobody has open.
+			s.pushHistory(path)
 		}
 	}
 

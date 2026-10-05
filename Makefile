@@ -113,10 +113,11 @@ fuzz:
 
 ## bench: benchmark the hub control-plane hot paths
 ##
-## Covers the four things whose cost scales with something no operator sets
+## Covers the things whose cost scales with something no operator sets
 ## deliberately: the wire snapshot and WebSocket fanout (pkg/ui), the
-## hash-chained audit trail and plan persistence (pkg/statedb), and per-identity
-## quota admission (pkg/quota).
+## hash-chained audit trail and plan persistence (pkg/statedb), per-identity
+## quota admission (pkg/quota), and a page of a project's Event History at two
+## journal sizes ten times apart (pkg/ui), which should cost the same.
 ##
 ## Deliberately not run under -race: the detector inflates every number by
 ## roughly an order of magnitude and unevenly, so a race-instrumented

@@ -25,14 +25,19 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // benchProjectDir initialises a real project directory carrying n tasks.
@@ -404,4 +409,142 @@ func BenchmarkWatchProjectsTick(b *testing.B) {
 func stateFilesFor(dir string) []string {
 	db := state.StateDBPath(dir)
 	return []string{db, db + "-wal", state.StatePath(dir)}
+}
+
+// ── the Event History page ──────────────────────────────────────────────────
+
+// benchJournalDir builds a project whose journal holds the given numbers of
+// steps and events, interleaved in time the way a run writes them. Step
+// outputs follow this hub's own journal: most a few hundred bytes, one in
+// fifty several kilobytes.
+//
+// Written in one transaction through a raw handle: through AppendStep, fifty
+// thousand rows would be fifty thousand transactions, and the setup would be
+// most of the benchmark's run time.
+func benchJournalDir(b *testing.B, steps, events int) string {
+	b.Helper()
+	dir := statedbtest.Dir(b)
+	if _, err := state.Init(dir, "benchmark the event history", 0); err != nil {
+		b.Fatalf("state.Init: %v", err)
+	}
+	conn, err := statedb.OpenConn(state.StateDBPath(dir), statedb.ReadWrite)
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+	tx, err := conn.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	stepStmt, err := tx.Prepare(`INSERT INTO steps(step, task, output, exit_code, duration, time) VALUES(?,?,?,0,'2m10s',?)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	eventStmt, err := tx.Prepare(`INSERT INTO events(timestamp, type, task_id, task_title, step, message, details) VALUES(?,?,?,?,-1,?,?)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	short := strings.Repeat("A task's summary of what it changed and why. ", 10)
+	long := strings.Repeat("A long transcript tail, the kind a failing build leaves. ", 300)
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	perEvent := steps / max(events, 1)
+	for i, e := 0, 0; i < steps; i++ {
+		at = at.Add(97 * time.Second)
+		out := short
+		if i%50 == 0 {
+			out = long
+		}
+		if _, err := stepStmt.Exec(i, fmt.Sprintf("Task %d: work", i/3), out, at.Format(time.RFC3339Nano)); err != nil {
+			b.Fatal(err)
+		}
+		if e < events && i%perEvent == 0 {
+			e++
+			if _, err := eventStmt.Exec(at.Add(time.Second).Format(time.RFC3339Nano), "task_done", i/3, "work",
+				fmt.Sprintf("Task #%d completed in 2m10s", i/3), `{"attempt":1}`); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+	return dir
+}
+
+// BenchmarkEventHistoryPage measures GET /api/event-history at two journal
+// sizes ten times apart — 5,000 steps and 500 events, and 50,000 and 5,000,
+// ten times this hub's own — for the three reads the dashboard makes: the
+// newest page, a page halfway down the history, and the rows written since a
+// cursor (what a reconnect or a gap reads; the hub's own push reads the same).
+//
+// The sizes are the point (Task 20384). The handler used to load the whole
+// project, every step's output included, and every event, then sort them all
+// to return fifty rows, so its cost grew with the journal: 38 ms a page at the
+// smaller size and 244 ms, with 155 MB allocated, at the larger. Now each read
+// is an index seek and a LIMIT per table — about 3 ms at either size, most of
+// it opening the database — so the two sizes should cost the same; a read
+// that grows tenfold between them has stopped using the index (see
+// TestHistory_PagesSeekTheIndex).
+func BenchmarkEventHistoryPage(b *testing.B) {
+	for _, size := range []struct{ steps, events int }{{5000, 500}, {50000, 5000}} {
+		dir := benchJournalDir(b, size.steps, size.events)
+		srv := New(dir, 0, "")
+		get := func(b *testing.B, query string) historyResponse {
+			rec := httptest.NewRecorder()
+			srv.handleEventHistory(rec, httptest.NewRequest(http.MethodGet, "/api/event-history?"+query, nil))
+			if rec.Code != http.StatusOK {
+				b.Fatalf("GET ?%s: HTTP %d: %s", query, rec.Code, rec.Body)
+			}
+			var resp struct {
+				Entries []json.RawMessage `json:"entries"`
+				Bottom  []float64         `json:"bottom"`
+				Top     []int64           `json:"top"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				b.Fatal(err)
+			}
+			if len(resp.Entries) == 0 {
+				b.Fatalf("GET ?%s returned no entries", query)
+			}
+			return historyResponse{Entries: make([]historyEntry, len(resp.Entries)), Bottom: wirePlace(resp.Bottom), Top: wireCursor(resp.Top)}
+		}
+		// Halfway down: the bottom of the page at the middle of the journal.
+		middle := get(b, fmt.Sprintf("offset=%d&limit=50", (size.steps+size.events)/2))
+		top := get(b, "limit=50").Top
+		reads := []struct{ name, query string }{
+			{"newest", "limit=50"},
+			{"halfway", "limit=50&before=" + url.QueryEscape(fmt.Sprintf("%v,%d,%d", middle.Bottom.Day, b2i(middle.Bottom.Event), middle.Bottom.Key))},
+			{"since", fmt.Sprintf("limit=500&after=%d,%d", top.Step-3, top.Event-1)},
+		}
+		for _, r := range reads {
+			b.Run(fmt.Sprintf("steps=%d,events=%d/%s", size.steps, size.events, r.name), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					get(b, r.query)
+				}
+			})
+		}
+	}
+}
+
+func wirePlace(v []float64) *historyPlace {
+	if len(v) != 3 {
+		return nil
+	}
+	return &historyPlace{Day: v[0], Event: v[1] == 1, Key: int64(v[2])}
+}
+
+func wireCursor(v []int64) *historyCursor {
+	if len(v) != 2 {
+		return nil
+	}
+	return &historyCursor{Step: v[0], Event: v[1]}
+}
+
+func b2i(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

@@ -146,7 +146,7 @@ if (!_clientID) {
 // stream identity rather than by project — see below.
 const PROJECT_SCOPED_EVENTS = new Set([
   'task_update', 'state_diff', 'task_added', 'task_deleted', 'task_mutation',
-  'step_output', 'run_state', 'suggest_status', 'provider_call',
+  'step_output', 'run_state', 'suggest_status', 'provider_call', 'history_append',
 ]);
 
 // _streamScope captures what the current selection is, to be frozen into a
@@ -194,21 +194,6 @@ function handleRealtimeMsg(type, data, scope) {
   const dot = document.getElementById('liveDot');
   if (dot) dot.classList.add('connected');
 
-  // Task 20118: every realtime kind below corresponds to one or more rows
-  // freshly written to the events journal (task_started, task_done,
-  // evolve_round_start, plan_complete, …). Schedule a debounced top-page
-  // reload so the Event History panel stays live without polling.
-  switch (type) {
-    case 'task_update':
-    case 'state_diff':
-    case 'task_added':
-    case 'task_deleted':
-    case 'task_mutation':
-    case 'run_state':
-      try { _scheduleEventHistoryRefresh(); } catch(_) {}
-      break;
-  }
-
   // Task 20126: any push that could change a chart triggers a debounced
   // analytics refresh; if the analytics tab is hidden, the scheduler is a
   // cheap no-op. Replaces the old 30s self-poll inside loadAnalytics.
@@ -252,6 +237,12 @@ function handleRealtimeMsg(type, data, scope) {
       break;
     case 'step_output':
       try { if (data.chunk) appendLiveLog(data.chunk); } catch(_) {}
+      break;
+    case 'history_append':
+      // Journal rows written since the last push (Task 20384). The Event
+      // History panel used to refetch its pages on every message above; it
+      // now reads only to fill a gap these frames' cursors reveal.
+      try { _historyPush(data); } catch(_) {}
       break;
     case 'projects':
       try {
@@ -374,6 +365,8 @@ function handleRealtimeMsg(type, data, scope) {
       // Server signalled that this client fell behind and dropped events.
       // Re-fetch full state so the UI catches up. (See Task 20040.)
       try {
+        // Pushes may have been among the dropped frames.
+        _historyPush({gap: 1});
         const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
         api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
         if (isMultiProject) {
@@ -568,21 +561,13 @@ function connectSSE() {
       handleRealtimeMsg('task_update', JSON.parse(e.data), scope);
     } catch(_) {}
   };
-  evtSource.addEventListener('log', (e) => {
-    try { handleRealtimeMsg('step_output', JSON.parse(e.data), scope); } catch(_) {}
-  });
-  evtSource.addEventListener('projects', (e) => {
-    try { handleRealtimeMsg('projects', JSON.parse(e.data), scope); } catch(_) {}
-  });
-  evtSource.addEventListener('run_state', (e) => {
-    try { handleRealtimeMsg('run_state', JSON.parse(e.data), scope); } catch(_) {}
-  });
-  evtSource.addEventListener('suggest_status', (e) => {
-    try { handleRealtimeMsg('suggest_status', JSON.parse(e.data), scope); } catch(_) {}
-  });
-  evtSource.addEventListener('resync', (e) => {
-    try { handleRealtimeMsg('resync', JSON.parse(e.data), scope); } catch(_) {}
-  });
+  // Named SSE events carry the WebSocket message of the same type; 'log' is
+  // step_output's older name.
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append']) {
+    evtSource.addEventListener(t, (e) => {
+      try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
+    });
+  }
   evtSource.onerror = () => {
     dot.classList.remove('connected');
     evtSource.close();

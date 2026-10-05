@@ -385,7 +385,7 @@ jobs:
                    BenchmarkAppendAuditEvent BenchmarkAppendAuditEvents \
                    BenchmarkVerifyAuditChain BenchmarkAdmit \
                    BenchmarkAdmitDistinctIdentities BenchmarkAdmitParallel \
-                   BenchmarkAdmitDenied; do
+                   BenchmarkAdmitDenied BenchmarkEventHistoryPage; do
             if ! grep -q "^${b}[-/]" bench.txt; then
               echo "::error::${b} produced no output — renamed, deleted, or failing to match"
               missing=1

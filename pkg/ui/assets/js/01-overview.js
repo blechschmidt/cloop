@@ -228,9 +228,8 @@ function render(s) {
     costCard.style.display = 'none';
   }
 
-  // Steps — lazy-loaded from /api/steps with infinite scroll. The state's
-  // s.steps.length tells us when new steps appear so we can refresh the top
-  // page; older steps stay loaded and scroll-position is preserved.
+  // Event history: a project switch loads the newest page; rows written
+  // later arrive as history_append pushes, never by re-reading (Task 20384).
   syncStepHistory(s);
 
   // Rebuild filter dropdowns from current task list.
@@ -388,38 +387,38 @@ function renderMultiProjectOverview() {
   }).join('');
 }
 
-window.toggleStep = function(el) { el.classList.toggle('expanded'); };
-
-// ── Event history lazy loading (Task 20118) ─────────────────────────────────
+// ── Event history (Tasks 20118, 20384) ──────────────────────────────────────
 //
-// The history panel was previously a step-only feed sourced from /api/steps.
-// Task 20118 replaced it with a unified event journal that merges step
-// results with task starts, completions, skips, kills, evolve rounds,
-// status changes, etc. Backend feed: GET /api/event-history.
+// One feed of the project's steps and events — task starts, completions,
+// skips, kills, evolve rounds, status changes — newest first, read from
+// GET /api/event-history a page at a time. Rows written after the newest page
+// arrive pushed (history_append, handled in 04-realtime.js), so a live run
+// costs the panel no requests. It fetches only to fill a gap the cursors
+// show: when the hub's sync point on connect is above the list's top, when a
+// push does not continue from it, or after a resync. Pages it holds are never
+// read again.
+//
+// Two positions, sent back as the hub gave them: top, the newest step and
+// event the list has seen ([step, event]), and bottom, the place of its last
+// row ([day, kind, key]), where the next page down starts.
 //
 // State variable names keep the "steps" prefix for git-blame readability —
 // they hold heterogeneous entries now (each has a .kind discriminator).
 
 const STEP_PAGE_SIZE = 50;
 
-let stepsState = {
-  loaded: [],     // entries, latest-first (kind === "step" or event type)
-  total: 0,       // total entry count on the server (steps + events)
-  loading: false, // a fetch is in flight
-  hasMore: true,  // more pages may exist
-  scopeKey: '',   // identifies which project's entries are loaded
-};
+// loaded: entries, newest first (kind === "step" or an event type); top and
+// bottom: the positions above; held: frames that arrived during the fetch in
+// flight, unset when none is; hasMore: more pages may exist; scopeKey: which
+// project's entries these are. Unset fields read as their empty values.
+let stepsState = {loaded: []};
 
 function _stepsScopeKey() {
   return (isMultiProject ? ('p' + (selectedProjectIdx === null ? '-' : selectedProjectIdx)) : 'single');
 }
 
 function _resetStepsState() {
-  stepsState = { loaded: [], total: 0, loading: false, hasMore: true, scopeKey: _stepsScopeKey() };
-}
-
-async function _fetchStepsPage(offset, limit) {
-  return api(pUrl('/api/event-history?offset=' + offset + '&limit=' + limit));
+  stepsState = {loaded: [], hasMore: true, scopeKey: _stepsScopeKey()};
 }
 
 // _entryKey returns a stable identifier for an entry across re-renders so
@@ -431,87 +430,72 @@ function _entryKey(e) {
   return 'e' + e.id;
 }
 
-// syncStepHistory is called from render(s). It decides whether to reload the
-// top page (because new entries appeared, or the project changed) or just
-// re-render the panel (e.g. running-step indicator update). Non-step events
-// are picked up via _scheduleEventHistoryRefresh() called from the WS handler.
+// An expanded row whose output or details the feed shortened loads in full.
+window.toggleStep = function(el) {
+  el.classList.toggle('expanded');
+  const e = stepsState.loaded.find(x => _entryKey(x) === el.dataset.idx);
+  if (e && e.cut) api(pUrl('/api/event-history?' + (e.kind === 'step' ? 'step=' + e.step : 'event=' + -e.id))).then(d => {
+    Object.assign(e, d.entries[0], {cut: 0});
+    renderStepListPanel();
+  }, () => {});
+};
+
+// syncStepHistory is called from render(s): a project switch loads the new
+// project's newest page; anything else only redraws (the running step).
 function syncStepHistory(s) {
-  const newScope = _stepsScopeKey();
-  if (newScope !== stepsState.scopeKey) {
+  if (_stepsScopeKey() !== stepsState.scopeKey) {
     _resetStepsState();
-    _loadInitialSteps();
-    return;
-  }
-  // s.steps_count is a strict lower bound on the merged entry total — enough
-  // to detect new step writes from the orchestrator. Non-step events arrive
-  // via the WS-triggered refresh in handleRealtimeMsg.
-  let stepsCount = 0;
-  if (s && typeof s.steps_count === 'number') stepsCount = s.steps_count;
-  else if (s && Array.isArray(s.steps))       stepsCount = s.steps.length;
-  if (stepsCount > 0 && stepsState.loaded.length === 0) {
-    _reloadStepsTopPage(STEP_PAGE_SIZE);
-    return;
-  }
-  renderStepListPanel();
+    _historyFetch('limit=' + STEP_PAGE_SIZE);
+  } else renderStepListPanel();
 }
 
-// _scheduleEventHistoryRefresh debounces refetches of the top page after
-// WebSocket events that may have appended event rows (task starts, task
-// completions, evolves, etc.). Multiple rapid events collapse into a single
-// /api/event-history fetch.
-let _eventHistoryRefreshTimer = null;
-function _scheduleEventHistoryRefresh() {
-  if (_eventHistoryRefreshTimer) clearTimeout(_eventHistoryRefreshTimer);
-  _eventHistoryRefreshTimer = setTimeout(() => {
-    _eventHistoryRefreshTimer = null;
-    const wanted = Math.max(STEP_PAGE_SIZE, stepsState.loaded.length);
-    _reloadStepsTopPage(wanted);
-  }, 250);
-}
-
-async function _loadInitialSteps() {
-  await _reloadStepsTopPage(STEP_PAGE_SIZE);
-}
-
-async function _reloadStepsTopPage(limit) {
-  if (stepsState.loading) return;
-  stepsState.loading = true;
+// _historyFetch reads one page. how: 'older' for the page below bottom, 1 for
+// the rows above top, absent for the newest page — which an above-top read
+// answering with a gap also is.
+async function _historyFetch(q, how) {
+  const st = stepsState;
+  if (st.held) return;
+  st.held = [];
   renderStepListPanel();
   try {
-    const data = await _fetchStepsPage(0, limit);
-    if (data && Array.isArray(data.entries)) {
-      stepsState.loaded = data.entries;
-      stepsState.total  = (typeof data.total === 'number') ? data.total : data.entries.length;
-      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
-    }
-  } catch (_) { /* leave previous loaded list intact */ }
-  stepsState.loading = false;
+    const d = await api(pUrl('/api/event-history?' + q)), e = d.entries || [];
+    if (st !== stepsState) return;
+    if (how === 'older') { _historyAdd(e); st.bottom = d.bottom; st.hasMore = d.more; }
+    else if (how && !d.gap) { _historyAdd(e, 1); st.top = d.top; }
+    else Object.assign(st, {loaded: e, top: d.top, bottom: d.bottom, hasMore: d.more});
+  } catch (_) { /* a failed page down keeps what arrived meanwhile; a failed first page waits for the next push */ }
+  const held = st.held;
+  st.held = null;
+  if (st.top) held.forEach(_historyPush);
   renderStepListPanel();
 }
 
-async function loadMoreSteps() {
-  if (stepsState.loading || !stepsState.hasMore) return;
-  stepsState.loading = true;
+// _historyPush applies a history_append frame: rows written above m.from, up
+// to m.to. One that does not continue from the list's top means the list
+// missed rows, which one read past the top fills.
+function _historyPush(m) {
+  const st = stepsState, t = st.top;
+  if (st.held) return st.held.push(m);
+  // Nothing loaded: a failed first page is retried; before the first one
+  // starts, the page will be newer than the frame anyway.
+  if (!t) return st.scopeKey === _stepsScopeKey() && _historyFetch('limit=' + STEP_PAGE_SIZE);
+  if (m.gap || m.from[0] > t[0] || m.from[1] > t[1]) return _historyFetch('after=' + t + '&limit=500', 1);
+  _historyAdd(m.entries, 1);
+  st.top = [Math.max(t[0], m.to[0]), Math.max(t[1], m.to[1])];
   renderStepListPanel();
-  try {
-    const data = await _fetchStepsPage(stepsState.loaded.length, STEP_PAGE_SIZE);
-    if (data && Array.isArray(data.entries) && data.entries.length) {
-      // Server may have more entries now than when we started; keep total fresh.
-      stepsState.total = (typeof data.total === 'number') ? data.total : (stepsState.loaded.length + data.entries.length);
-      // Dedup by stable key (rare race when a new entry arrives mid-fetch).
-      const seen = new Set(stepsState.loaded.map(_entryKey));
-      for (const ent of data.entries) {
-        const k = _entryKey(ent);
-        if (!seen.has(k)) { stepsState.loaded.push(ent); seen.add(k); }
-      }
-      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
-    } else if (data && typeof data.total === 'number') {
-      stepsState.total = data.total;
-      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
-    }
-  } catch (_) { /* swallow; user can scroll again */ }
-  stepsState.loading = false;
-  renderStepListPanel();
+}
+
+// _historyAdd puts entries above (atTop) or below the list, skipping any it
+// already holds.
+function _historyAdd(list, atTop) {
+  const seen = new Set(stepsState.loaded.map(_entryKey));
+  const add = (list || []).filter(e => !seen.has(_entryKey(e)));
+  stepsState.loaded = atTop ? add.concat(stepsState.loaded) : stepsState.loaded.concat(add);
+}
+
+function loadMoreSteps() {
+  const b = stepsState.bottom;
+  if (b && stepsState.hasMore) _historyFetch('before=' + b + '&limit=' + STEP_PAGE_SIZE, 'older');
 }
 
 // _eventVisuals maps an event kind to icon glyph + CSS class + short label.
@@ -560,16 +544,10 @@ function _eventVisuals(kind) {
   }
 }
 
+// Local HH:MM:SS: toTimeString starts with exactly that (ECMA-262 TimeString).
 function _formatEntryTime(ts) {
-  if (!ts) return '';
-  try {
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return '';
-    const hh = String(d.getHours()).padStart(2,'0');
-    const mm = String(d.getMinutes()).padStart(2,'0');
-    const ss = String(d.getSeconds()).padStart(2,'0');
-    return hh + ':' + mm + ':' + ss;
-  } catch(_) { return ''; }
+  const d = new Date(ts || NaN);
+  return isNaN(d) ? '' : d.toTimeString().slice(0, 8);
 }
 
 function _renderStepRow(e, expanded) {
@@ -598,7 +576,7 @@ function _renderEventRow(e, expanded) {
   const taskRef = e.task_id ? ('#' + e.task_id + (e.task_title ? ' ' + e.task_title : '')) : '';
   const detailsTxt = (e.details && typeof e.details === 'object' && Object.keys(e.details).length)
     ? JSON.stringify(e.details, null, 2) : '';
-  const expandable = !!detailsTxt;
+  const expandable = !!(detailsTxt || e.cut);
   const cls = 'step-item event-row' + (expandable ? ' expandable' : '') + isExp;
   const onclick = expandable ? ' onclick="toggleStep(this)"' : '';
   const chevron = expandable ? '<span class="step-chevron">&#9654;</span>' : '';
@@ -624,7 +602,7 @@ function renderStepListPanel() {
   const s = appState || {};
   const isRunning = isActiveRunStatus(s.status);
 
-  if (!stepsState.loaded.length && !isRunning && !stepsState.loading) {
+  if (!stepsState.loaded.length && !isRunning && !stepsState.held) {
     stepListEl.innerHTML = '<div class="empty-state"><h3>No events yet</h3><p>Start a run to see history here.</p></div>';
     return;
   }
@@ -636,8 +614,8 @@ function renderStepListPanel() {
   let html = '';
   if (isRunning) {
     const runningExp = expanded['running'] ? ' expanded' : '';
-    // Use steps_count (not stepsState.total — which now counts events) as
-    // the running step number; the orchestrator increments per shell step.
+    // Use steps_count (not the history's length — which counts events too)
+    // as the running step number; the orchestrator increments per shell step.
     const stepsTotal = (typeof s.steps_count === 'number') ? s.steps_count : 0;
     const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : stepsTotal) + 1;
     let runningTitle = '';
@@ -670,16 +648,12 @@ function renderStepListPanel() {
       : _renderEventRow(entry, expanded);
   }).join('');
 
-  // Footer: progress + sentinel for the IntersectionObserver.
-  if (stepsState.total > 0) {
-    if (stepsState.hasMore) {
-      const label = stepsState.loading
-        ? 'Loading more events…'
-        : 'Showing ' + stepsState.loaded.length + ' of ' + stepsState.total + ' — scroll to load more';
-      html += '<div class="step-load-more" id="stepLoadMore">'+esc(label)+'</div>';
-    } else {
-      html += '<div class="step-load-more">All ' + stepsState.total + ' events loaded</div>';
-    }
+  // Footer: progress + sentinel for the IntersectionObserver. No total: the
+  // feed does not count its rows (Task 20384), so the sum is shown once known.
+  if (stepsState.loaded.length) {
+    html += stepsState.hasMore
+      ? '<div class="step-load-more" id="stepLoadMore">' + (stepsState.held ? 'Loading more events…' : 'Scroll to load more') + '</div>'
+      : '<div class="step-load-more">All ' + stepsState.loaded.length + ' events loaded</div>';
   }
 
   stepListEl.innerHTML = html;
@@ -694,9 +668,7 @@ function _attachStepScrollObserver() {
   if (_stepIO) { try { _stepIO.disconnect(); } catch(_){} _stepIO = null; }
   _stepIO = new IntersectionObserver(entries => {
     for (const e of entries) {
-      if (e.isIntersecting && stepsState.hasMore && !stepsState.loading) {
-        loadMoreSteps();
-      }
+      if (e.isIntersecting) loadMoreSteps();
     }
   }, { rootMargin: '300px' });
   _stepIO.observe(sentinel);
@@ -706,7 +678,7 @@ function _attachStepScrollObserver() {
 // catch the case where the sentinel is already in-viewport on render (rare).
 window.addEventListener('scroll', function() {
   if (activeTab !== 'overview') return;
-  if (!stepsState.hasMore || stepsState.loading) return;
+  if (!stepsState.hasMore || stepsState.held) return;
   const sentinel = document.getElementById('stepLoadMore');
   if (!sentinel) return;
   const rect = sentinel.getBoundingClientRect();

@@ -262,7 +262,10 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		"\n" + virtualExecutorsAPISource +
 		// firewall_api.go holds handleExecutorFirewall and
 		// handleProjectFirewall, prefix-less for the same reason (Task 20363).
-		"\n" + firewallAPISource
+		"\n" + firewallAPISource +
+		// history.go holds handleEventHistory, registered prefix-less with its
+		// methods listed beside it, as it was in server.go (Task 20384).
+		"\n" + historySource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -331,6 +334,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"executor_policy_api.go", executorPolicyAPISource},
 		{"virtual_executors_api.go", virtualExecutorsAPISource},
 		{"firewall_api.go", firewallAPISource},
+		{"history.go", historySource},
 		{"suggest_api.go", suggestAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {
