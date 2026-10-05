@@ -104,11 +104,22 @@ type Session struct {
 	TaskID     string
 	ExecutorID string
 	Actor      string
+	// RunID, GrantID and LeaseID say which run the session serves and which
+	// grant of which lease its upstream credential stands on (Task 20383): the
+	// lease it is closed with, and the record a restore finds it by. None is
+	// secret.
+	RunID   string
+	GrantID string
+	LeaseID string
 
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 
 	tokenHash [sha256.Size]byte
+
+	// durable: the registry's Store holds a record of the session, which its
+	// end must close (durable.go). Set before the session is visible.
+	durable bool
 
 	// The upstream credential, in generations (refresh.go). credMu guards all
 	// four fields; cred is never nil on a minted session.
@@ -223,6 +234,17 @@ type MintRequest struct {
 	TaskID     string
 	ExecutorID string
 	Actor      string
+	// RunID names the run the session is for, recorded with it.
+	RunID string
+
+	// Durable records the session in the registry's Store (Task 20383), so
+	// that the hub process adopting its run after this one stops can restore
+	// it under the same id and token. The lease path sets it: its sessions
+	// stand on the run's lease, which the adopter takes over and re-derives
+	// the upstream credential from. A session no lease is taken over for —
+	// a workspace's, whose credential stands on a lease of its own — would
+	// have nothing to be restored with, and is left out.
+	Durable bool
 
 	// OnEnd, when set, runs once after the session has left the registry —
 	// closed, reaped after its TTL, or closed at shutdown — on the goroutine
@@ -267,6 +289,10 @@ type Registry struct {
 	// OnEvent, if set, receives every authorisation decision. It runs on the
 	// request goroutine, so an implementation that blocks blocks a push.
 	OnEvent func(Event)
+	// Store, if set, records every Durable session and its end (durable.go),
+	// so another hub process can restore it. Nil keeps sessions in memory
+	// only, as every registry did before Task 20383.
+	Store SessionStore
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -393,12 +419,26 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		TaskID:       req.TaskID,
 		ExecutorID:   req.ExecutorID,
 		Actor:        req.Actor,
+		RunID:        strings.TrimSpace(req.RunID),
+		GrantID:      strings.TrimSpace(req.Credential.GrantID),
+		LeaseID:      strings.TrimSpace(req.Credential.LeaseID),
 		IssuedAt:     now,
 		ExpiresAt:    now.Add(ttl),
 		tokenHash:    sha256.Sum256([]byte(token)),
 		cred:         &credentialGen{cred: req.Credential, expiresAt: req.CredentialExpiresAt},
 		refresh:      req.Refresh,
 		onEnd:        req.OnEnd,
+	}
+
+	// Durable before the session is handed out, so a hub that dies the moment
+	// Mint returns leaves a record its successor can restore. A record that
+	// cannot be written costs the session its survival, not its use: it works
+	// here, and the minted row says what was lost.
+	var recordErr error
+	if req.Durable && r.Store != nil {
+		if recordErr = r.Store.SaveSession(s.record()); recordErr == nil {
+			s.durable = true
+		}
 	}
 
 	r.mu.Lock()
@@ -423,7 +463,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		TaskID:    req.TaskID,
 		Actor:     req.Actor,
 		At:        now,
-		Detail:    fmt.Sprintf("allow %s until %s", pol.RefSummary(), s.ExpiresAt.UTC().Format(time.RFC3339)),
+		Detail:    mintDetail(pol, s.ExpiresAt, recordErr),
 	})
 
 	// A pinned session hands back the one remote URL the sandbox clones. A
@@ -511,6 +551,7 @@ func (r *Registry) Close(id, reason string) {
 		reason = "closed"
 	}
 	s.reason.Store(reason)
+	r.closeRecord(s, reason)
 	st := s.Stats()
 	r.emit(Event{
 		Kind:      EventSessionClosed,
@@ -547,6 +588,7 @@ func (r *Registry) ReapExpired() int {
 	for _, s := range dead {
 		if s.closed.CompareAndSwap(false, true) {
 			s.reason.Store("expired")
+			r.closeRecord(s, "expired")
 			r.emit(Event{
 				Kind:      EventSessionClosed,
 				SessionID: s.ID,

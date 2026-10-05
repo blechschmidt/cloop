@@ -110,6 +110,10 @@ const (
 	// ActionEgressRenew is a live proxy session renewed for a run that is
 	// still going (Task 20378), after its grant was re-read and found active.
 	ActionEgressRenew Action = "egress.renew"
+	// ActionEgressRestore is a proxy session restored by the hub process that
+	// adopted its run after the one serving it stopped (Task 20383) — or
+	// refused, because its grant was revoked or expired meanwhile.
+	ActionEgressRestore Action = "egress.restore"
 )
 
 // Event is one audit record. Every field on it is metadata about a

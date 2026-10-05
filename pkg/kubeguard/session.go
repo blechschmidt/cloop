@@ -95,9 +95,15 @@ type Session struct {
 	Actor      string
 	GrantID    string
 	LeaseID    string
+	// RunID names the run the session serves (Task 20383).
+	RunID string
 
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+
+	// durable: the registry's Store holds a record of the session, which its
+	// end must close (durable.go). Set before the session is visible.
+	durable bool
 
 	// upstream is the real cluster credential. Unexported, and never
 	// serialised: Session has no MarshalJSON and every exported field above
@@ -175,6 +181,13 @@ type MintRequest struct {
 	Actor      string
 	GrantID    string
 	LeaseID    string
+	// RunID names the run the session is for, recorded with it.
+	RunID string
+
+	// Durable records the session in the registry's Store (Task 20383), so the
+	// hub process that adopts its run after this one stops can restore it under
+	// the same id and token. The lease path sets it; see durable.go.
+	Durable bool
 }
 
 // Minted is a new session plus the one copy of its token.
@@ -210,6 +223,10 @@ type Registry struct {
 	// SampleAllowed, when true, emits an EventRequestAllowed for every
 	// forwarded request. Off by default; see OnEvent.
 	SampleAllowed bool
+	// Store, if set, records every Durable session and its end (durable.go),
+	// so another hub process can restore it. Nil keeps sessions in memory
+	// only, as every registry did before Task 20383.
+	Store SessionStore
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -320,6 +337,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		Actor:       strings.TrimSpace(req.Actor),
 		GrantID:     strings.TrimSpace(req.GrantID),
 		LeaseID:     strings.TrimSpace(req.LeaseID),
+		RunID:       strings.TrimSpace(req.RunID),
 		IssuedAt:    now,
 		ExpiresAt:   now.Add(ttl),
 		upstream:    rc,
@@ -329,6 +347,16 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	doc, err := r.renderKubeconfig(s, bearerToken(id, secret), rc.Namespace)
 	if err != nil {
 		return nil, err
+	}
+
+	// Durable before the session is handed out, so a hub that dies the moment
+	// Mint returns leaves a record its successor can restore. A record that
+	// cannot be written costs the session its survival, not its use.
+	var recordErr error
+	if req.Durable && r.Store != nil {
+		if recordErr = r.Store.SaveSession(s.record()); recordErr == nil {
+			s.durable = true
+		}
 	}
 
 	r.mu.Lock()
@@ -342,9 +370,8 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		Kind: EventSessionMinted, SessionID: id, Cluster: rc.Server, Context: rc.Context,
 		ProjectID: s.ProjectID, TaskID: s.TaskID, ExecutorID: s.ExecutorID,
 		Actor: s.Actor, GrantID: s.GrantID, LeaseID: s.LeaseID,
-		Detail: fmt.Sprintf("%s until %s", policy.Summary(),
-			s.ExpiresAt.UTC().Format(time.RFC3339)),
-		At: now,
+		Detail: mintDetail(policy, s.ExpiresAt, recordErr),
+		At:     now,
 	})
 
 	return &Minted{Session: s, Token: bearerToken(id, secret), Kubeconfig: doc}, nil
@@ -441,6 +468,7 @@ func (r *Registry) Close(id, reason string) {
 	if already {
 		return
 	}
+	r.closeRecord(s, reason)
 
 	st := s.Stats()
 	r.emit(Event{
@@ -500,6 +528,7 @@ func (r *Registry) ReapExpired() int {
 		s.mu.Lock()
 		s.closed, s.reason = true, "expired"
 		s.mu.Unlock()
+		r.closeRecord(s, "expired")
 		st := s.Stats()
 		r.emit(Event{
 			Kind: EventSessionClosed, SessionID: s.ID, Cluster: s.ClusterURL,

@@ -231,6 +231,8 @@ const (
 	ActionEgressClose Action = "egress.close"
 	// ActionEgressRenew records a live proxy session being renewed for its run.
 	ActionEgressRenew Action = "egress.renew"
+	// ActionEgressRestore records a proxy session restored with its adopted run.
+	ActionEgressRestore Action = "egress.restore"
 
 	// ── gitproxy ───────────────────────────────────────────────────────────
 
@@ -238,6 +240,8 @@ const (
 	ActionGitProxySessionMinted Action = "gitproxy.session_minted"
 	// ActionGitProxySessionClosed records a git proxy session ending.
 	ActionGitProxySessionClosed Action = "gitproxy.session_closed"
+	// ActionGitProxySessionRestored records a git proxy session restored with its adopted run.
+	ActionGitProxySessionRestored Action = "gitproxy.session_restored"
 	// ActionGitProxyPushAllowed records a push admitted by branch policy.
 	ActionGitProxyPushAllowed Action = "gitproxy.push_allowed"
 	// ActionGitProxyPushDenied records a push refused by branch policy.
@@ -253,6 +257,8 @@ const (
 	ActionKubeGuardSessionMinted Action = "kubeguard.session_minted"
 	// ActionKubeGuardSessionClosed records a Kubernetes proxy session ending.
 	ActionKubeGuardSessionClosed Action = "kubeguard.session_closed"
+	// ActionKubeGuardSessionRestored records a Kubernetes proxy session restored with its adopted run.
+	ActionKubeGuardSessionRestored Action = "kubeguard.session_restored"
 	// ActionKubeGuardRequestDenied records a Kubernetes request refused by policy.
 	ActionKubeGuardRequestDenied Action = "kubeguard.request_denied"
 	// ActionKubeGuardRequestAllowed records a Kubernetes request admitted by policy.

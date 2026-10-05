@@ -712,6 +712,19 @@ var registry = []Entry{
 		Note: "Allowed rows carry the new `expires_at`. A refused renewal is a `deny` row; " +
 			"the session it concerned then closes with an `egress.close` row saying why.",
 	},
+	{
+		Action:    ActionEgressRestore,
+		Home:      HomeControlPlane,
+		Entity:    "secret",
+		Trigger:   "The hub process that adopted a run after the one serving it stopped restores the run's proxy session, after re-reading its grant.",
+		Payload:   secretPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Allowed rows carry the counters the session resumes from (`bytes_up`, `bytes_down`), " +
+			"which keep counting against the grant's quota, and the reason names the process that held it. " +
+			"A `deny` row is a session that will not come back: its grant was revoked or expired, or it " +
+			"lapsed, while no hub process held it (Task 20383).",
+	},
 
 	// ── gitproxy ───────────────────────────────────────────────────────────
 	// The git interception proxy runs outside the sandbox, so these rows are
@@ -735,6 +748,19 @@ var registry = []Entry{
 		Payload:   gitProxyPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+		Note: "Also written for a session that ended while no hub process served it — not restored with " +
+			"its run, or retired by the leader's janitor once it lapsed — with the reason in `detail`.",
+	},
+	{
+		Action:    ActionGitProxySessionRestored,
+		Home:      HomeControlPlane,
+		Entity:    "gitproxy",
+		Trigger:   "The hub process that adopted a run restores the run's proxy session under its original id and token, with an upstream credential re-derived from the run's lease.",
+		Payload:   gitProxyPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`detail` names the hub process that held the session until then. A session that could not " +
+			"be restored gets a `gitproxy.session_closed` row instead (Task 20383).",
 	},
 	{
 		Action:    ActionGitProxyPushAllowed,
@@ -793,6 +819,17 @@ var registry = []Entry{
 		Payload:   kubeGuardPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+		Note:      "Also written for a session that ended while no hub process served it, with the reason in `detail`.",
+	},
+	{
+		Action:    ActionKubeGuardSessionRestored,
+		Home:      HomeControlPlane,
+		Entity:    "kubeguard",
+		Trigger:   "The hub process that adopted a run restores the run's Kubernetes proxy session under its original id and token, with the cluster credential re-derived from the run's lease and its policy narrowed to what the grant and the hub allow now.",
+		Payload:   kubeGuardPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "`detail` names the hub process that held the session until then (Task 20383).",
 	},
 	{
 		Action:    ActionKubeGuardRequestDenied,

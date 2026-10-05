@@ -43,6 +43,10 @@ type Broker struct {
 	// defaultUp and defaultDown are the per-session quotas a grant that names
 	// none is redeemed under; zero means unlimited. See WithDefaultQuotas.
 	defaultUp, defaultDown int64
+
+	// sessionStore records Durable sessions so another hub process can
+	// restore them (durable.go). Nil keeps them in memory only.
+	sessionStore SessionStore
 }
 
 // Option configures a Broker.
@@ -322,6 +326,10 @@ type RedeemRequest struct {
 	// NoProxy lists hosts the workload reaches directly; see
 	// Redemption.NoProxy.
 	NoProxy []string
+	// Durable records the session in the broker's SessionStore (Task 20383),
+	// so the hub process that adopts its run after this one stops can restore
+	// it with its counters. A hub sets it for every run's session.
+	Durable bool
 }
 
 // Redeem mints a single-use proxy credential for the first active grant that
@@ -448,6 +456,14 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 		return nil, b.deny(base, err)
 	}
 
+	// Durable before the session is visible, so a hub that dies the moment
+	// Redeem returns leaves a record its successor can restore. A record that
+	// cannot be written costs the session its survival, not its use.
+	var recordErr error
+	if req.Durable {
+		recordErr = b.saveRecord(sess)
+	}
+
 	b.mu.Lock()
 	b.sessions[sess.ID] = sess
 	b.mu.Unlock()
@@ -483,6 +499,10 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 	ev.ExpiresAt = sess.ExpiresAt()
 	ev.Decision = secretbroker.DecisionAllow
 	ev.Reason = "proxy session issued"
+	if recordErr != nil {
+		ev.Reason += "; not recorded durably, so it will not be restored if this hub process stops: " +
+			recordErr.Error()
+	}
 	b.emit(ev)
 
 	return &Redemption{Session: sess, Token: token, ProxyURL: proxyURL,
@@ -540,6 +560,7 @@ func (b *Broker) ExtendSession(ctx context.Context, id string) (time.Time, error
 	if !sess.extendTo(deadline) {
 		return sess.ExpiresAt(), nil
 	}
+	b.recordExtension(sess)
 	ev.Subject = g.Subject.String()
 	ev.ExpiresAt = sess.ExpiresAt()
 	ev.Decision = secretbroker.DecisionAllow
@@ -646,6 +667,7 @@ func (b *Broker) CloseSession(id, reason string) {
 		return
 	}
 	hubmetrics.EgressSessionsLive.Add(-1)
+	b.recordClose(sess, reason)
 	b.emit(secretbroker.Event{
 		Action:     secretbroker.ActionEgressClose,
 		Actor:      sess.Actor,

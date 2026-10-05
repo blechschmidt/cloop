@@ -115,6 +115,9 @@ type harness struct {
 	forge    *httptest.Server
 	proxySrv *httptest.Server
 	reg      *gitproxy.Registry
+	// handler is what proxySrv serves; swapping it stands a new proxy — a
+	// restarted hub process — behind the same URL (Task 20383).
+	handler atomic.Value // http.Handler
 
 	upstream string // https://<forge>/acme/tool.git — never reaches the client
 
@@ -201,9 +204,8 @@ func (h *harness) startForge(t *testing.T) {
 func (h *harness) startProxy(t *testing.T) {
 	t.Helper()
 
-	var installed atomic.Value // http.Handler
 	h.proxySrv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, _ := installed.Load().(http.Handler)
+		handler, _ := h.handler.Load().(http.Handler)
 		if handler == nil {
 			http.Error(w, "proxy handler not installed yet", http.StatusServiceUnavailable)
 			return
@@ -227,7 +229,7 @@ func (h *harness) startProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitproxy.New: %v", err)
 	}
-	installed.Store(http.Handler(px))
+	h.handler.Store(http.Handler(px))
 }
 
 // --- the forge ---------------------------------------------------------------

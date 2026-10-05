@@ -40,11 +40,20 @@ const DefaultSessionTTL = 15 * time.Minute
 // Session is one redemption of a grant: a live proxy credential, the policy
 // snapshot it was issued under, and the byte counters that bound it.
 //
-// Sessions are memory-resident and die with the process. That is deliberate
-// and matches pkg/secretbroker's decision not to persist leases: a session is
-// a usable credential, and persisting one would create a durable artifact
-// that outlives the proxy able to enforce its quota. A restarted control
-// plane issues new sessions; it does not resurrect old ones.
+// A session is served from the memory of the process whose proxy redeemed it,
+// and nothing about it that authenticates is ever written down: the token
+// exists only in the sandbox, and this process keeps its SHA-256. What may be
+// written down, since Task 20383, is everything else — on a broker with a
+// SessionStore, a Durable session's id, token hash, grant snapshot, deadline
+// and byte counters are recorded when it is redeemed, kept in step as it is
+// renewed, checkpointed as it moves bytes, and closed when it ends
+// (durable.go). That is what lets the process adopting a run after a restart
+// restore the run's session under the same credential, and it is why a
+// restored session is not a meterless credential: it resumes counting from
+// the checkpointed totals, against the same quota, and its grant is re-read
+// before it is served again. A session whose grant was revoked or expired
+// meanwhile is never restored. What a SIGKILL can lose is the traffic since
+// the last checkpoint, not the quota.
 //
 // Safe for concurrent use — a single session is shared by every connection
 // the sandbox opens.
@@ -104,6 +113,10 @@ type Session struct {
 	// transfer can be cancelled through its context.
 	doneOnce sync.Once
 	doneCh   chan struct{}
+
+	// rec links the session to its durable record, if it has one
+	// (durable.go).
+	rec durability
 }
 
 // connSet is a group of connections closed together.

@@ -9,11 +9,10 @@ import (
 
 // Store persists egress grants.
 //
-// Only grants: sessions are memory-resident by design (see Session), so
-// there is deliberately no session method here. A store that could write a
-// session would be a store that could be asked to read one back after a
-// restart, and a resurrected proxy credential is exactly what the TTL exists
-// to prevent.
+// Only grants. A session's record, where a hub keeps one, goes through a
+// SessionStore instead (durable.go): it holds no credential, only the token's
+// hash, and a restore re-reads the grant from here before serving the session
+// again, so a revocation made while no process held it still lands.
 //
 // Implementations must be safe for concurrent use.
 type Store interface {

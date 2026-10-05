@@ -65,6 +65,13 @@ type Options struct {
 	// Dial overrides the outbound dialer. Tests use it to avoid the network;
 	// production leaves it nil.
 	Dial DialFunc
+	// AwaitSession, when set, is asked about a credential naming a session
+	// the broker does not hold, before it is refused (Task 20383): a hub
+	// waits there, bounded, for the process adopting the session's run to
+	// restore it. It reports whether the broker holds the session now; the
+	// credential is then authenticated as usual. A credential naming a session
+	// the broker does hold — right token or wrong — is never offered.
+	AwaitSession func(ctx context.Context, sessionID, token string) bool
 }
 
 func (o Options) dialTimeout() time.Duration {
@@ -319,7 +326,12 @@ func (p *Proxy) authenticate(r *http.Request) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.broker.Authenticate(id, token)
+	sess, err := p.broker.Authenticate(id, token)
+	if err != nil && p.opts.AwaitSession != nil && p.broker.Session(id) == nil &&
+		p.opts.AwaitSession(r.Context(), id, token) {
+		return p.broker.Authenticate(id, token)
+	}
+	return sess, err
 }
 
 // handleConnect authorises and opens a TLS tunnel.
