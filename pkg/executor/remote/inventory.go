@@ -1,6 +1,11 @@
 package remote
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/version"
+)
 
 // inventory.go exposes what a connected device said about itself, so the hub
 // can answer "which cloop build is each edge device running?" without inferring
@@ -67,6 +72,23 @@ func (e *Executor) BuildSequence() int {
 		return n
 	}
 	return 0
+}
+
+// StoredBuildSequence reads the build sequence out of a device's stored
+// capability advertisement — the JSON the hub records at every connect — for a
+// device that is not connected now (Task 20380). It returns 0 when there is
+// none, the advertisement predates the field, or the value is out of range.
+func StoredBuildSequence(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var caps struct {
+		BuildSequence int `json:"build_sequence"`
+	}
+	if json.Unmarshal(raw, &caps) != nil || caps.BuildSequence <= 0 || caps.BuildSequence > version.MaxSequence {
+		return 0
+	}
+	return caps.BuildSequence
 }
 
 // UpdateChannel reports the update channel the connected agent says its

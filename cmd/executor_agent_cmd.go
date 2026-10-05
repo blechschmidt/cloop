@@ -505,9 +505,13 @@ what placement matches on.`,
 		// executors row (an agent enrolled but never connected), and that agent
 		// must still be listed.
 		inventory := map[string]statedb.ExecutorInventory{}
+		// And each device's place on main, from the advertisement stored with
+		// its row (Task 20380): its installer refuses any build earlier.
+		sequences := map[string]int{}
 		if rows, lErr := db.ListExecutors(); lErr == nil {
 			for _, r := range rows {
 				inventory[r.ID] = r.Inventory
+				sequences[r.ID] = remote.StoredBuildSequence(r.Capabilities)
 			}
 		} else {
 			dim.Printf("  note: could not read device inventory: %v\n", lErr)
@@ -544,7 +548,7 @@ what placement matches on.`,
 				fmt.Printf("  %-20s %-16s %-10s %-20s %s\n", a.AgentID, a.Name, st, build, last)
 
 				if showInventory {
-					printAgentInventory(dim, inv)
+					printAgentInventory(dim, inv, sequences[a.AgentID])
 				}
 			}
 		}
@@ -614,11 +618,14 @@ func agentBuildCell(v string) string {
 // Only fields the device actually reported are printed. A zero CPU count means
 // the agent could not detect it, and rendering "0 cores" would report a fault
 // that does not exist.
-func printAgentInventory(dim *color.Color, inv statedb.ExecutorInventory) {
+func printAgentInventory(dim *color.Color, inv statedb.ExecutorInventory, sequence int) {
 	if !inv.Known() {
 		dim.Printf("      (no inventory reported — the device has not connected since " +
 			"this hub learned to record it)\n")
 		return
+	}
+	if sequence > 0 {
+		dim.Printf("      sequence:  %d on main (its installer refuses any earlier build)\n", sequence)
 	}
 	if inv.OS != "" || inv.Arch != "" {
 		platform := strings.TrimPrefix(inv.OS+"/"+inv.Arch, "/")

@@ -413,6 +413,10 @@ func StageEdge(target, destDir string, opts Options, progress func(string)) (Sta
 		return staged, err
 	}
 	manifestName := which.name
+	if which.schema < EdgeManifestSchema {
+		progress(fmt.Sprintf("%s is not published, so the build predates sequences; reading %s.",
+			EdgeManifestV2Name(commit), manifestName))
+	}
 	if err := verifyEdgeAsset(ctx, verifier, base, dir, manifestName, manifestData); err != nil {
 		return staged, err
 	}

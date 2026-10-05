@@ -330,20 +330,8 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 }
 
 // storedBuildSequence reads the build sequence out of a device's stored
-// capability advertisement (Task 20380): 0 when there is none, or the row
-// predates the field.
-func storedBuildSequence(raw json.RawMessage) int {
-	if len(raw) == 0 {
-		return 0
-	}
-	var caps struct {
-		BuildSequence int `json:"build_sequence"`
-	}
-	if json.Unmarshal(raw, &caps) != nil || caps.BuildSequence <= 0 || caps.BuildSequence > version.MaxSequence {
-		return 0
-	}
-	return caps.BuildSequence
-}
+// capability advertisement (Task 20380); see remote.StoredBuildSequence.
+func storedBuildSequence(raw json.RawMessage) int { return remote.StoredBuildSequence(raw) }
 
 // sessionProtocolOf is the protocol the live session to ex's device
 // negotiated, for a refusal that has to say which one the device speaks: 0 when

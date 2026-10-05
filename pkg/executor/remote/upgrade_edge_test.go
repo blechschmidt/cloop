@@ -194,3 +194,18 @@ func TestRequestUpgradeNeverAsksForAnEarlierRelease(t *testing.T) {
 		t.Errorf("asked = %v", got)
 	}
 }
+
+func TestStoredBuildSequence(t *testing.T) {
+	for raw, want := range map[string]int{
+		`{"update_channel":"edge","build_sequence":925}`: 925,
+		`{"update_channel":"edge"}`:                      0,
+		`{"build_sequence":-4}`:                          0,
+		`{"build_sequence":2147483647}`:                  0,
+		`not json`:                                       0,
+		``:                                               0,
+	} {
+		if got := remote.StoredBuildSequence([]byte(raw)); got != want {
+			t.Errorf("StoredBuildSequence(%q) = %d, want %d", raw, got, want)
+		}
+	}
+}

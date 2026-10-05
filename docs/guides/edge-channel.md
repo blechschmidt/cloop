@@ -161,7 +161,8 @@ to dev+ga0f3870 (sequence 4100 on main); only root on the device can do that
 in `journalctl -u cloop-executor-upgrade.service`.
 
 The hub follows the same order: each device reports its build's sequence in its
-hello (`build_sequence`, shown as a **seq N** chip in the Executors panel), and
+hello (`build_sequence`, shown as a **seq N** chip in the Executors panel and by
+`cloop executor list --inventory`), and
 the Upgrade dialog, `POST /api/executors/{id}/upgrade` and the auto-update
 policy never offer or send a build earlier than it — 409, whatever `force` says.
 `cloop hub doctor` warns (`executors.edge_lag`) about a device on the edge
