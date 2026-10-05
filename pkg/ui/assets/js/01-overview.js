@@ -1,32 +1,56 @@
 // ── Render overview ─────────────────────────────────────────────────────────
 
-// ── Members card (Task 20366) ────────────────────────────────────────────────
-// Fetched the first time an Overview needs it rather than bundled: most
-// sessions never share a project, and first paint has no room for a panel
-// they do not use. The script runs outside this IIFE, so it is handed the few
-// helpers it calls; the one global it defines is its factory.
-let _membersPanel = null;
-// No project on screen: none selected, or in single-project mode none loaded.
-const _membersOff = () => !myOIDC || (isMultiProject ? selectedProjectIdx === null : !appState);
-function loadProjectMembers() {
-  if (_membersOff()) return;
-  if (!_membersPanel) {
-    _membersPanel = new Promise((ok, no) => {
-      const m = document.querySelector('meta[name="cloop-members-src"]');
+// ── Deferred Overview panels (Tasks 20366, 20379) ──────────────────────────
+// Fetched the first time an Overview needs them rather than bundled: first
+// paint has no room for panels most sessions never open (static.go,
+// deferredScripts). Each runs outside this IIFE, so it is handed the few
+// helpers it calls; the one global it defines is its factory. A failed fetch
+// is retried by the next Overview, not replayed forever.
+const _deferred = {};
+function deferredPanel(name, factory, helpers) {
+  if (!_deferred[name]) {
+    _deferred[name] = new Promise((ok, no) => {
+      const m = document.querySelector('meta[name="cloop-' + name + '-src"]');
       const el = document.createElement('script');
       el.src = m ? m.getAttribute('content') : '';
-      el.onload = () => window.cloopMembersPanel ? ok(window.cloopMembersPanel({
-        api, apiMethod, esc, toast, left: clearProjectSelection,
-        idx: () => selectedProjectIdx === null ? 0 : selectedProjectIdx,
-        hidden: _membersOff,
-      })) : no();
+      el.onload = () => window[factory] ? ok(window[factory](helpers)) : no();
       el.onerror = no;
       document.head.appendChild(el);
     });
-    // A failed fetch is retried by the next Overview, not replayed forever.
-    _membersPanel.catch(() => { _membersPanel = null; });
+    _deferred[name].catch(() => { delete _deferred[name]; });
   }
-  return _membersPanel.then(p => p.load()).catch(() => {});
+  return _deferred[name];
+}
+// No project on screen: none selected, or in single-project mode none loaded.
+const _noProject = () => isMultiProject ? selectedProjectIdx === null : !appState;
+const _overviewIdx = () => selectedProjectIdx === null ? 0 : selectedProjectIdx;
+// The Members card (Task 20366): project sharing exists only with sign-on.
+const _membersOff = () => !myOIDC || _noProject();
+function loadProjectMembers() {
+  loadHarnessCred();
+  if (_membersOff()) return;
+  return deferredPanel('members', 'cloopMembersPanel', {
+    api, apiMethod, esc, toast, left: clearProjectSelection, idx: _overviewIdx, hidden: _membersOff,
+  }).then(p => p.load()).catch(() => {});
+}
+// The Claude credential card and dialog (Task 20379). opts.open shows the
+// dialog — for opts.idx, the grid's project, and with opts.refusal, the 409
+// that sent the user there.
+function loadHarnessCred(opts) {
+  if (!opts && _noProject()) return;
+  return deferredPanel('harness', 'cloopHarnessPanel', {
+    api, esc, toast, openOverlay, closeOverlay, idx: _overviewIdx,
+  }).then(p => p.load(opts)).catch(() => opts && opts.refusal && toast(opts.refusal.error, 'err'));
+}
+// harnessRefused handles a dispatch's 409 for a sandbox with no Claude login:
+// a short toast, and the dialog that grants one opens with the full reason —
+// the whole sentence in a toast would sit over the dialog's own buttons on a
+// phone for as long as it shows.
+function harnessRefused(d, idx) {
+  if (!d || !/^harness_cred/.test(d.code)) return false;
+  toast('Refused: this sandbox has no usable Claude credential', 'err');
+  loadHarnessCred({open: true, refusal: d, idx});
+  return true;
 }
 
 // applyStateDiff merges a server-side state_diff envelope into the local

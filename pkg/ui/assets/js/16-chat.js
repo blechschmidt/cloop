@@ -100,6 +100,7 @@ window.submitChat = async function() {
     if (resp.status === 401) { handleUnauthorized(resp); removeChatThinking(); return; }
     const data = await resp.json();
     removeChatThinking();
+    harnessRefused(data);
     const content = data.response || (data.ok ? 'Done.' : (data.error || 'Error'));
     appendChatBubble('assistant', content, {ts: new Date(), error: !data.ok, action: data.action});
     if (data.ok) speakText(content);

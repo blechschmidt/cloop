@@ -47,6 +47,7 @@ window.runSuggest = function() {
   api(pUrl('/api/suggest/generate'), {count, input}).then(d => {
     if (!d.ok && path === selectedProjectPath) {
       _suggestFail('Error: '+(d.error||'failed'));
+      harnessRefused(d);
     }
   }).catch(() => { if (path === selectedProjectPath) _suggestFail('Request failed'); });
 };

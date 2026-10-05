@@ -282,7 +282,7 @@ window.apiRun = function() {
     if (d.ok) {
       toast('Started: '+d.command, 'ok');
       updateRunButtonState(true);
-    } else {
+    } else if (!harnessRefused(d)) {
       toast(d.error||'Failed to start', 'err');
       // The server refuses a second harness on a project that is already
       // running (Task 20253) and says so with running:true. Believe it over

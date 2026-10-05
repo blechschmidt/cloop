@@ -350,7 +350,7 @@ window.taskDetailsReproduce = function() {
       if (!d || !d.ok) {
         const msg = (d && (d.message || d.error)) || 'The reproduction could not be run';
         if (host) host.innerHTML = '<div class="td-empty">'+esc(msg)+'</div>';
-        toast(msg, false);
+        if (!harnessRefused(d)) toast(msg, false);
         return;
       }
       if (_tdCurrentId === id) _tdLoadReproductions(id);

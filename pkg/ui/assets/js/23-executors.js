@@ -16,7 +16,9 @@ window.loadExecutors = function() {
     _renderExecutorCard(execData);
     // The project's firewall card shows its executor's rules, so it moves with
     // every fleet change the Overview hears about (Task 20363).
-    if (activeTab === 'overview') loadProjectFirewall();
+    // And the Claude credential card, which exists only on an isolating
+    // executor (Task 20379).
+    if (activeTab === 'overview') { loadProjectFirewall(); loadHarnessCred(); }
     // Cached behind its own guard. loadExecutors runs on every executor event,
     // and a policy that re-fetched with it would put a second request behind
     // each one for a value that only changes when an admin edits it — the

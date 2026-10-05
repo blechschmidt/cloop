@@ -158,6 +158,11 @@ var bundleFiles = []string{
 var deferredScripts = []struct{ token, path string }{
 	// The Members card on a project's Overview (Task 20366).
 	{"members.js", "assets/js/deferred/members.js"},
+	// The Claude credential card and dialog (Task 20379).
+	{"harness.js", "assets/js/deferred/harness.js"},
+	// The offboarding form in the Secrets tab (Task 20261), deferred by Task
+	// 20379 to pay for the line above.
+	{"offboard.js", "assets/js/deferred/offboard.js"},
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

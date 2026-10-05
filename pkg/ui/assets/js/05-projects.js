@@ -298,7 +298,7 @@ window.projectRun = function(idx, pm) {
     // success there would tell the user their click did something it did not.
     .then(d => {
       if (d && d.ok) toast('Run started', 'ok');
-      else toast((d && d.error) || 'Failed to start run', 'err');
+      else if (!harnessRefused(d, idx)) toast((d && d.error) || 'Failed to start run', 'err');
     })
     .catch(() => toast('Failed to start run', 'err'));
 };
@@ -1295,6 +1295,8 @@ window.submitNewProject = function() {
       updateProjectSelector();
       if (d.project_idx !== undefined && d.project_idx >= 0) {
         openProject(d.project_idx, dir.split('/').pop());
+        // Its first run was refused for want of a Claude credential (Task 20379).
+        harnessRefused(d.autorun_refused, d.project_idx);
       }
     }).catch(() => {});
   }).catch(err => {

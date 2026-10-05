@@ -361,6 +361,8 @@ function handleRealtimeMsg(type, data, scope) {
       // trigger is refused by the route gate. Only the open panel re-reads.
       try {
         if (activeTab === 'secrets') { loadSecretsPanel(); }
+        // The Overview's Claude credential card shows a grant (Task 20379).
+        if (activeTab === 'overview') loadHarnessCred();
       } catch(_) {}
       break;
     case 'resync':
