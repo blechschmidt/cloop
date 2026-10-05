@@ -219,6 +219,12 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 		recorded: true,
 	}
 	b.mu.Unlock()
+	// The App tokens the lease feeds come with it (Task 20383): their slots,
+	// holding no token yet, to be re-minted at the recorded scope. Slots that
+	// cannot be read just now are retried before they are needed.
+	b.slotRestoreMu.Lock()
+	_ = b.restoreSlots(ev, rec, from)
+	b.slotRestoreMu.Unlock()
 	for _, k := range rec.Kinds {
 		hubmetrics.LeaseEvents.Inc(string(k), hubmetrics.LeaseRenewed)
 	}
@@ -281,6 +287,11 @@ func (b *Broker) RetireRecord(rec LeaseRecord, reason string) (bool, error) {
 	deleted, err := ls.DeleteLease(rec.ID, rec.Holder)
 	if err != nil || !deleted {
 		return false, err
+	}
+	// Its App token slots go with it — held by the same process as the
+	// record was, which need not be this one.
+	if ss, ok := b.store.(AppSlotStore); ok {
+		_, _ = ss.DeleteAppSlots(rec.ID, rec.Holder)
 	}
 	b.mu.Lock()
 	delete(b.leases, rec.ID)

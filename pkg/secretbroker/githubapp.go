@@ -1063,6 +1063,70 @@ func (m *githubAppMinter) remint(ctx context.Context, cred *AppCredential, scope
 	return tok, nil
 }
 
+// confirmScope holds a scope read back from a slot's record to what the grant
+// admits in the installation now, before the first token is minted at it by a
+// process that did not mint the slot's first one (Task 20383).
+//
+// A refresh replays the recorded repository ids instead of re-resolving the
+// grant's allowlist. That is right for a scope this process resolved, and not
+// enough for one read back from a database: an id the record names and the
+// grant never admitted would be minted into the token, and a token delivered
+// into a workload's file is not held to the allowlist by any proxy. So the
+// installation's inventory is read once, the allowlist resolved against it as a
+// first mint resolves it, and the recorded ids kept only where they meet it —
+// never more than were recorded, never one the grant does not admit. None left
+// is a refusal. It returns the scope to mint at and what was dropped, if
+// anything.
+func (m *githubAppMinter) confirmScope(ctx context.Context, cred *AppCredential, scope appTokenScope,
+	c Constraints) (appTokenScope, string, error) {
+	if allowsAllRepos(c.Repos) {
+		return scope, "", nil
+	}
+	if len(scope.repositoryIDs) == 0 {
+		return appTokenScope{}, "", fmt.Errorf("%w: %w: the recorded token was installation-wide, and the grant "+
+			"names repositories", ErrGitHubAppMint, ErrGitHubAppRefused)
+	}
+	if m == nil || m.api == nil {
+		return appTokenScope{}, "", wrapf(ErrGitHubAppMint, "this hub has no GitHub API client")
+	}
+	appJWT, err := cred.signJWT(m.now())
+	if err != nil {
+		return appTokenScope{}, "", err
+	}
+	repos, err := m.inventory(ctx, cred, appJWT)
+	if err != nil {
+		return appTokenScope{}, "", err
+	}
+	admitted := make(map[int64]string, len(repos))
+	for _, r := range repos {
+		if c.AllowsRepo(r.FullName) {
+			admitted[r.ID] = r.FullName
+		}
+	}
+	out := scope.clone()
+	out.repositoryIDs = out.repositoryIDs[:0]
+	var names []string
+	for _, id := range scope.repositoryIDs {
+		if name, ok := admitted[id]; ok {
+			out.repositoryIDs = append(out.repositoryIDs, id)
+			names = append(names, name)
+		}
+	}
+	if len(out.repositoryIDs) == 0 {
+		return appTokenScope{}, "", fmt.Errorf("%w: %w: none of the %d repositor%s recorded for the token is one "+
+			"the grant's allowlist admits in installation %d now", ErrGitHubAppMint, ErrGitHubAppRefused,
+			len(scope.repositoryIDs), plural(len(scope.repositoryIDs), "y", "ies"), scope.installationID)
+	}
+	sort.Strings(names)
+	out.summary = strings.Join(names, "|")
+	note := ""
+	if dropped := len(scope.repositoryIDs) - len(out.repositoryIDs); dropped > 0 {
+		note = fmt.Sprintf("%d recorded repositor%s the grant does not admit now dropped", dropped,
+			plural(dropped, "y", "ies"))
+	}
+	return out, note, nil
+}
+
 func (m *githubAppMinter) now() time.Time {
 	if m == nil || m.clock == nil {
 		return time.Now().UTC()

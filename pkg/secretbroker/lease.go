@@ -92,6 +92,11 @@ type Material struct {
 	executorID string
 	actor      string
 	owner      string
+	// leaseID is the lease the material is being issued in. A guard records
+	// it on the session it mints, so the session can be found again — and
+	// restored with the lease — by the process that takes the lease over
+	// (Task 20383).
+	leaseID string
 
 	// heldByProxy is Requester.GitHubProxied: the caller routes this
 	// material's GitHub credential through the git proxy itself. Unlike the

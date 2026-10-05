@@ -33,9 +33,15 @@ type memStore struct {
 
 	// leases back the LeaseStore half (leaserecord_test.go, Task 20382).
 	leases map[string]LeaseRecord
+	// appSlots back the AppSlotStore half (appslots_test.go, Task 20383),
+	// keyed by lease id and grant id.
+	appSlots map[[2]string]AppSlotRecord
 	// beforeTake, when set, runs at the start of TakeLease: where a test puts
 	// the other process that wins a race to take a lease over.
 	beforeTake func()
+	// slotErr, when set, fails TakeAppSlots and ListAppSlots as a busy
+	// database would.
+	slotErr error
 }
 
 func newMemStore() *memStore {
@@ -46,6 +52,7 @@ func newMemStore() *memStore {
 		requests: make(map[string]AccessRequest),
 		uses:     make(map[string][]RequestUse),
 		leases:   make(map[string]LeaseRecord),
+		appSlots: make(map[[2]string]AppSlotRecord),
 	}
 }
 

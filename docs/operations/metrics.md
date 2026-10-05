@@ -616,6 +616,37 @@ sandbox trying to reach the hub's own network.
 rate(cloop_egress_denials_total{reason="destination_blocked"}[5m]) > 0
 ```
 
+## Sessions restored with an adopted run
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_proxy_session_restores_total` | counter | `kind`, `outcome` |
+
+When a hub process adopts a device run another stopped serving — a restart in
+the same directory, or a cluster member that died — it brings back what the
+run's lease feeds (Task 20383): the run's git proxy, Kubernetes monitor and
+egress sessions, under the ids and tokens the workload already holds, and the
+GitHub App token slots that keep its tokens alive past GitHub's hour. Each one
+it tries is counted here, by the process that adopted the run. `kind` is `git`,
+`kube`, `egress` or `app_token`.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `restored` | served again by this process; the workload noticed nothing |
+| `refused` | will not come back: its grant was revoked or expired while no process held it, its recorded scope is wider than the grant or this hub's proxy policy allow now, its upstream is not the forge this hub's git proxy fronts, or this process runs no proxy to serve it. Closed with the reason |
+| `expired` | lapsed while no process held it |
+| `lost` | another process restored it first, or took it — or its lease — over before a retry; or the lease was handed over or released while it waited |
+| `failed` | its upstream credential could not be re-derived for a reason that may pass — the store busy, GitHub unreachable. Held by this process and retried every lease keepalive tick (egress: every 30 seconds), and at once when the workload's next request presents it |
+
+After a restart, `refused` and `expired` are the ones to read: each is a
+workload that gets a 401 on its next git, kubectl or proxied request, and the
+session's `*.session_closed` or `egress.close` row says why. A rising `failed`
+that does not turn into `restored` is GitHub out of reach from the hub.
+
+```promql
+sum by (kind, outcome) (increase(cloop_proxy_session_restores_total[1h]))
+```
+
 ## Quotas and admission control
 
 | Metric | Type | Labels |

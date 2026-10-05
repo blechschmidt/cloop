@@ -125,6 +125,16 @@ type appTokenSlot struct {
 	// ended: the lease was released, the grant revoked, or a refresh refused.
 	// Nothing refreshes an ended slot, and its tokens have been destroyed.
 	ended bool
+	// fileName is the lease file an unguarded token is delivered in, as the
+	// lease rendered it: kept for a slot restored with a lease taken over from
+	// another hub process, whose materials carry no files (Task 20383).
+	fileName string
+	// restored: rebuilt from its record by the process that took the lease
+	// over. It held no token until its first refresh.
+	restored bool
+	// confirmed: a restored slot's scope was held to its grant and the
+	// installation (confirmScope) before its first token was minted.
+	confirmed bool
 }
 
 // retiringToken is a superseded token awaiting destruction.
@@ -255,7 +265,7 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 	previous := slot.current
 	b.mu.Unlock()
 
-	cred, final, cause := b.refreshAuthority(slot)
+	cred, g, final, cause := b.refreshAuthority(slot)
 	if cause != nil {
 		if final {
 			return AppTokenRefresh{}, b.refuseRefresh(ctx, slot, ev, cause)
@@ -268,7 +278,30 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 				"expires %s): %v", slot.grantID, previous.expiresAt.UTC().Format(time.RFC3339), cause)
 	}
 
-	tok, err := b.appMinter.remint(ctx, cred, slot.scope)
+	b.mu.Lock()
+	scope := slot.scope
+	confirm := slot.restored && !slot.confirmed
+	b.mu.Unlock()
+	var narrowed string
+	if confirm {
+		// The scope came from a record another process wrote: held to the
+		// grant before anything is minted at it.
+		confirmed, note, err := b.appMinter.confirmScope(ctx, cred, scope, g.Constraints)
+		if err != nil {
+			if errors.Is(err, ErrGitHubAppRefused) {
+				return AppTokenRefresh{}, b.refuseRefresh(ctx, slot, ev, err)
+			}
+			return AppTokenRefresh{}, b.denyf(ev, ErrGitHubAppMint,
+				"github app token for grant %s: its recorded scope could not be checked against the installation "+
+					"(will retry): %v", slot.grantID, err)
+		}
+		scope, narrowed = confirmed, note
+		b.mu.Lock()
+		slot.scope, slot.confirmed = confirmed, true
+		b.mu.Unlock()
+	}
+
+	tok, err := b.appMinter.remint(ctx, cred, scope)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAppRefused) {
 			return AppTokenRefresh{}, b.refuseRefresh(ctx, slot, ev, err)
@@ -284,7 +317,7 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 		grantID:    slot.grantID,
 		secretID:   slot.secretID,
 		secretName: slot.secretName,
-		baseURL:    slot.scope.baseURL,
+		baseURL:    scope.baseURL,
 		token:      tok.Token,
 		expiresAt:  tok.ExpiresAt,
 	}
@@ -303,13 +336,31 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 	slot.current = fresh
 	slot.delivered = slot.guarded
 	sessionID := slot.sessionID
+	takenOver := slot.restored && previous.token == ""
+	guarded := slot.guarded
 	b.mu.Unlock()
+	if guarded {
+		// A session presents it from now on, so its expiry is what the
+		// record's successor needs; a file token's is recorded once the file
+		// reaches the workload (LeaseFileRefresh.Delivered).
+		b.recordSlotState(slot)
+	}
 
 	ev.Decision = DecisionAllow
 	ev.ExpiresAt = tok.ExpiresAt
 	ev.Reason = fmt.Sprintf("github app installation %d token re-minted at its original scope (%s, %s), "+
-		"expires %s", slot.scope.installationID, slot.scope.summary, describePermissions(slot.scope.permissions),
+		"expires %s", scope.installationID, scope.summary, describePermissions(scope.permissions),
 		tok.ExpiresAt.UTC().Format(time.RFC3339))
+	if takenOver {
+		// The first token of a slot restored with a taken-over lease: the one
+		// the stopped process minted is out of reach and lapses at its hour.
+		ev.Reason = fmt.Sprintf("github app installation %d token re-minted at the scope recorded for it (%s, %s) "+
+			"by the hub process that took the lease over, expires %s", scope.installationID, scope.summary,
+			describePermissions(scope.permissions), tok.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if narrowed != "" {
+		ev.Reason += "; " + narrowed
+	}
 	if sessionID != "" {
 		ev.Reason += "; presented upstream by git proxy session " + sessionID
 	} else {
@@ -346,48 +397,48 @@ func (b *Broker) slotEvent(slot *appTokenSlot) Event {
 // reissued, a secret that is gone or changed kind, a payload that no longer
 // parses. A store or keyring that failed to answer is not final — a busy
 // database says nothing about the grant.
-func (b *Broker) refreshAuthority(slot *appTokenSlot) (cred *AppCredential, final bool, cause error) {
+func (b *Broker) refreshAuthority(slot *appTokenSlot) (cred *AppCredential, g Grant, final bool, cause error) {
 	now := b.now()
 	g, err := b.store.GetGrant(slot.grantID)
 	if err != nil {
 		if errors.Is(err, ErrGrantNotFound) {
-			return nil, true, fmt.Errorf("%w: grant %s is gone", ErrGrantNotFound, slot.grantID)
+			return nil, Grant{}, true, fmt.Errorf("%w: grant %s is gone", ErrGrantNotFound, slot.grantID)
 		}
-		return nil, false, fmt.Errorf("read grant %s: %w", slot.grantID, err)
+		return nil, Grant{}, false, fmt.Errorf("read grant %s: %w", slot.grantID, err)
 	}
 	if reason := g.DenyReason(now); reason != "" {
 		sentinel := ErrGrantExpired
 		if !g.RevokedAt.IsZero() {
 			sentinel = ErrGrantRevoked
 		}
-		return nil, true, fmt.Errorf("%w: grant %s: %s", sentinel, g.ID, reason)
+		return nil, Grant{}, true, fmt.Errorf("%w: grant %s: %s", sentinel, g.ID, reason)
 	}
 	if !g.Subject.Matches(slot.requester) {
-		return nil, true, fmt.Errorf("%w: grant %s is no longer issued to this lease's holder", ErrInvalidGrant, g.ID)
+		return nil, Grant{}, true, fmt.Errorf("%w: grant %s is no longer issued to this lease's holder", ErrInvalidGrant, g.ID)
 	}
 	if g.SecretID != slot.secretID {
-		return nil, true, fmt.Errorf("%w: grant %s now points at another secret", ErrInvalidGrant, g.ID)
+		return nil, Grant{}, true, fmt.Errorf("%w: grant %s now points at another secret", ErrInvalidGrant, g.ID)
 	}
 	s, err := b.store.GetSecret(slot.secretID)
 	if err != nil {
 		if errors.Is(err, ErrSecretNotFound) {
-			return nil, true, fmt.Errorf("%w: secret %s behind grant %s is gone", ErrSecretNotFound, slot.secretID, g.ID)
+			return nil, Grant{}, true, fmt.Errorf("%w: secret %s behind grant %s is gone", ErrSecretNotFound, slot.secretID, g.ID)
 		}
-		return nil, false, fmt.Errorf("read secret %s: %w", slot.secretID, err)
+		return nil, Grant{}, false, fmt.Errorf("read secret %s: %w", slot.secretID, err)
 	}
 	if s.Kind != KindGitHubApp {
-		return nil, true, fmt.Errorf("%w: secret %s is no longer a github_app secret", ErrInvalidSecret, s.Name)
+		return nil, Grant{}, true, fmt.Errorf("%w: secret %s is no longer a github_app secret", ErrInvalidSecret, s.Name)
 	}
 	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
 	if err != nil {
-		return nil, false, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
+		return nil, Grant{}, false, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
 	}
 	defer zero(plaintext)
 	parsed, err := ParseGitHubApp(plaintext)
 	if err != nil {
-		return nil, true, err
+		return nil, Grant{}, true, err
 	}
-	return parsed, false, nil
+	return parsed, g, false, nil
 }
 
 // refuseRefresh ends slot after a final refusal: no further refresh, every token
@@ -396,10 +447,12 @@ func (b *Broker) refreshAuthority(slot *appTokenSlot) (cred *AppCredential, fina
 func (b *Broker) refuseRefresh(ctx context.Context, slot *appTokenSlot, ev Event, cause error) error {
 	b.mu.Lock()
 	doomed := slot.end()
+	leaseID := slot.leaseID
 	b.mu.Unlock()
 	reason := fmt.Sprintf("github app token for grant %s will not be renewed, so its access ends: %v",
 		slot.grantID, cause)
 	b.destroyAppTokens(ctx, doomed, "refresh refused")
+	b.forgetSlotRecords(leaseID, slot.grantID)
 	err := fmt.Errorf("%w: %w", ErrRefreshRefused, cause)
 	ev.Decision = DecisionDeny
 	ev.Reason = reason
@@ -514,6 +567,15 @@ func (r *LeaseFileRefresh) Delivered(eventual bool) {
 		return
 	}
 	now := r.b.now()
+	var delivered []*appTokenSlot
+	defer func() {
+		// The record learns when the workload's token now expires, after the
+		// lock: a successor taking the lease over decides from it when the
+		// file is next due.
+		for _, slot := range delivered {
+			r.b.recordSlotState(slot)
+		}
+	}()
 	r.b.mu.Lock()
 	defer r.b.mu.Unlock()
 	for i, slot := range r.slots {
@@ -521,6 +583,7 @@ func (r *LeaseFileRefresh) Delivered(eventual bool) {
 			continue
 		}
 		slot.delivered = true
+		delivered = append(delivered, slot)
 		for j := range slot.retiring {
 			if !slot.retiring[j].retireAfter.IsZero() {
 				continue
@@ -540,10 +603,16 @@ func (r *LeaseFileRefresh) Delivered(eventual bool) {
 // nothing, so the keepalive can ask on every tick — and ask where the new file
 // would go before a token is minted for a workload that cannot receive it.
 func (b *Broker) AppTokensDue(leaseID string) bool {
+	leaseID = strings.TrimSpace(leaseID)
+	if b.retryPendingSlots(leaseID) != nil {
+		// Slots a takeover could not read yet: nothing to renew until they
+		// are.
+		return false
+	}
 	now := b.now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, slot := range b.minted[strings.TrimSpace(leaseID)] {
+	for _, slot := range b.minted[leaseID] {
 		if slot.guarded || slot.abandoned || slot.ended {
 			continue
 		}
@@ -593,9 +662,15 @@ func (b *Broker) HeldAppTokenExpiry(leaseID string) time.Time {
 // HoldsFileAppTokens reports whether leaseID carries a GitHub App token the
 // workload holds as a file — the only kind the keepalive refreshes.
 func (b *Broker) HoldsFileAppTokens(leaseID string) bool {
+	leaseID = strings.TrimSpace(leaseID)
+	if b.retryPendingSlots(leaseID) != nil {
+		// Slots a takeover could not read yet may hold some: the keepalive
+		// keeps asking until they are read (Task 20383).
+		return true
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, slot := range b.minted[strings.TrimSpace(leaseID)] {
+	for _, slot := range b.minted[leaseID] {
 		if !slot.guarded && !slot.abandoned && !slot.ended {
 			return true
 		}
@@ -626,6 +701,9 @@ func (r *LeaseFileRefresh) Close() {
 func (b *Broker) RefreshLeaseFiles(ctx context.Context, lease *Lease) (*LeaseFileRefresh, error) {
 	if lease == nil || strings.TrimSpace(lease.ID) == "" {
 		return nil, wrapf(ErrLeaseNotFound, "nil lease")
+	}
+	if err := b.retryPendingSlots(lease.ID); err != nil {
+		return nil, fmt.Errorf("the github app token slots of lease %s could not be read yet: %w", lease.ID, err)
 	}
 	now := b.now()
 	b.mu.Lock()
@@ -664,6 +742,14 @@ func (b *Broker) RefreshLeaseFiles(ctx context.Context, lease *Lease) (*LeaseFil
 			}
 		}
 		name, ok := names[slot.grantID]
+		if !ok {
+			// A lease taken over from another hub process carries no rendered
+			// files; its slots remember the name the lease gave the file.
+			b.mu.Lock()
+			name = slot.fileName
+			b.mu.Unlock()
+			ok = name != ""
+		}
 		if !ok {
 			// The lease delivered no token file for this grant — guarded after
 			// all, or a material shape this function does not know. Nothing

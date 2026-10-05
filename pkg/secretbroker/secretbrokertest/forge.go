@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -79,6 +80,19 @@ func NewForge(t testing.TB, gh *GitHub, repos ...string) *Forge {
 // docker bridge can reach, for instance.
 func NewForgeOn(t testing.TB, addr string, gh *GitHub, repos ...string) *Forge {
 	t.Helper()
+	return newForge(t, addr, gh, nil, repos...)
+}
+
+// NewForgeWithCert is NewForgeOn serving cert — one issued for github.com by
+// a test CA, so a hub in another process, trusting that CA and reaching the
+// forge through a ConnectProxy, takes it for GitHub (Task 20383).
+func NewForgeWithCert(t testing.TB, addr string, gh *GitHub, cert tls.Certificate, repos ...string) *Forge {
+	t.Helper()
+	return newForge(t, addr, gh, &cert, repos...)
+}
+
+func newForge(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, repos ...string) *Forge {
+	t.Helper()
 	gitBin, backend := GitTools(t)
 	f := &Forge{gh: gh, git: gitBin, backend: backend, Root: t.TempDir(), home: t.TempDir()}
 	for _, repo := range repos {
@@ -91,6 +105,9 @@ func NewForgeOn(t testing.TB, addr string, gh *GitHub, repos ...string) *Forge {
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	_ = f.srv.Listener.Close()
 	f.srv.Listener = ln
+	if cert != nil {
+		f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{*cert}}
+	}
 	f.srv.StartTLS()
 	t.Cleanup(f.srv.Close)
 	f.URL = f.srv.URL

@@ -88,7 +88,11 @@ type KubeGuardRequest struct {
 	SecretName string
 	SecretID   string
 	GrantID    string
+	// LeaseID is the lease the kubeconfig is being issued in, and RunID the
+	// run it is for: recorded on the session so it can be restored with the
+	// lease (Task 20383).
 	LeaseID    string
+	RunID      string
 	ProjectID  string
 	ExecutorID string
 	Actor      string

@@ -37,7 +37,7 @@ func (m *mints) add(slot *appTokenSlot) {
 // KindGitHubApp is the one branch that does not narrow a payload at all: it
 // mints a new credential from it, so rec collects what was minted and ctx is
 // the lease request's own deadline.
-func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Requester, actor string, rec *mints) (Material, error) {
+func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Requester, actor, leaseID string, rec *mints) (Material, error) {
 	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
 	if err != nil {
 		// Both sentinels are chained. Callers that only know about
@@ -67,6 +67,7 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		executorID:  req.ExecutorID,
 		actor:       actor,
 		owner:       s.Owner,
+		leaseID:     leaseID,
 		heldByProxy: req.GitHubProxied,
 		requester:   req,
 	}
@@ -159,6 +160,8 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 			SecretName:  mat.SecretName,
 			SecretID:    mat.SecretID,
 			GrantID:     mat.GrantID,
+			LeaseID:     mat.leaseID,
+			RunID:       mat.requester.RunID,
 			ProjectID:   mat.projectID,
 			ExecutorID:  mat.executorID,
 			Actor:       mat.actor,
@@ -324,6 +327,8 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			SecretName:     mat.SecretName,
 			SecretID:       mat.SecretID,
 			GrantID:        mat.GrantID,
+			LeaseID:        mat.leaseID,
+			RunID:          mat.requester.RunID,
 			ProjectID:      mat.projectID,
 			ExecutorID:     mat.executorID,
 			Actor:          mat.actor,
@@ -541,6 +546,8 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 			SecretName: mat.SecretName,
 			SecretID:   mat.SecretID,
 			GrantID:    mat.GrantID,
+			LeaseID:    mat.leaseID,
+			RunID:      mat.requester.RunID,
 			ProjectID:  mat.projectID,
 			ExecutorID: mat.executorID,
 			Actor:      mat.actor,

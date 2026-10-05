@@ -115,7 +115,11 @@ type GitGuardRequest struct {
 	SecretName string
 	SecretID   string
 	GrantID    string
+	// LeaseID is the lease the token is being issued in, and RunID the run
+	// it is for (Task 20383): a guard records both on the session it mints,
+	// so the process that takes the lease over with the run can restore it.
 	LeaseID    string
+	RunID      string
 	ProjectID  string
 	ExecutorID string
 	Actor      string

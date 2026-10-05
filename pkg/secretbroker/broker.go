@@ -78,6 +78,9 @@ type Broker struct {
 	// hub brought into existence at GitHub, and nothing but a DELETE takes it
 	// back. Losing this map would leave live tokens with no owner.
 	minted map[string][]*appTokenSlot
+	// slotRestoreMu serialises restoring a lease's App-token slots, so a
+	// retry and the request that needs the slots cannot both add them.
+	slotRestoreMu sync.Mutex
 
 	clock       func() time.Time
 	maxLeaseTTL time.Duration
@@ -120,6 +123,10 @@ type leaseState struct {
 	// recorded reports that the lease has a durable record held by this
 	// broker's leaseHolder, which Extend and Release must keep in step.
 	recorded bool
+	// slotsPending: Restore took the lease over but could not take over or
+	// read its App-token slot records just then. They are restored before a
+	// slot of the lease is next needed (appslots.go, Task 20383).
+	slotsPending *pendingSlots
 }
 
 // Option configures a Broker.
@@ -664,6 +671,16 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	}
 	now := b.now()
 
+	// The lease's id exists before its materials do (Task 20383), so a guard
+	// minting a proxy session for one of them records which lease the session
+	// stands on: that is how the process taking the lease over with its run
+	// finds the sessions to restore. Drawn before anything is minted, so a
+	// failure here leaves no App token behind.
+	id, err := newLeaseID()
+	if err != nil {
+		return nil, err
+	}
+
 	var (
 		materials []Material
 		earliest  time.Time
@@ -707,7 +724,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 			continue
 		}
 
-		mat, merr := b.materialFor(ctx, s, g, r, actor, &rec)
+		mat, merr := b.materialFor(ctx, s, g, r, actor, id, &rec)
 		if merr != nil {
 			_ = b.denyErr(ev, merr)
 			continue
@@ -723,20 +740,6 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		}
 	}
 
-	id, err := newLeaseID()
-	if err != nil {
-		// Any App token minted above now belongs to a lease that will never
-		// exist. Destroy it here rather than let it live out GitHub's hour as
-		// a credential no record points at.
-		b.mu.Lock()
-		var doomed []appToken
-		for _, slot := range rec.slots {
-			doomed = append(doomed, slot.end()...)
-		}
-		b.mu.Unlock()
-		b.destroyAppTokens(ctx, doomed, "lease creation failed")
-		return nil, err
-	}
 	lease := &Lease{
 		ID:         id,
 		ExecutorID: r.ExecutorID,
@@ -787,6 +790,18 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		b.minted[lease.ID] = rec.slots
 	}
 	b.mu.Unlock()
+	// The App tokens' slots are recorded with the lease (Task 20383), so the
+	// process that takes it over re-mints at the same scope rather than
+	// letting each token die at its hour.
+	if st.recorded {
+		if err := b.recordSlots(rec.slots, tokenFileNames(materials)); err != nil {
+			if recordErr == nil {
+				recordErr = err
+			} else {
+				recordErr = errors.Join(recordErr, err)
+			}
+		}
+	}
 	for _, k := range kinds {
 		hubmetrics.LeaseEvents.Inc(string(k), hubmetrics.LeaseIssued)
 	}
@@ -1150,6 +1165,9 @@ func (b *Broker) destroyLeaseTokens(ctx context.Context, leaseID, reason string)
 		tokens = append(tokens, slot.end()...)
 	}
 	b.mu.Unlock()
+	if len(slots) > 0 {
+		b.forgetSlotRecords(leaseID)
+	}
 	if len(tokens) == 0 {
 		return
 	}
@@ -1168,7 +1186,10 @@ func (b *Broker) destroyGrantTokens(ctx context.Context, grantID, reason string)
 	if strings.TrimSpace(grantID) == "" {
 		return
 	}
-	var doomed []appToken
+	var (
+		doomed []appToken
+		leases []string
+	)
 	b.mu.Lock()
 	for leaseID, slots := range b.minted {
 		var keep []*appTokenSlot
@@ -1177,6 +1198,7 @@ func (b *Broker) destroyGrantTokens(ctx context.Context, grantID, reason string)
 				// Ended, not merely dropped: a refresh of this slot must find
 				// it ended rather than renew a grant that was just withdrawn.
 				doomed = append(doomed, slot.end()...)
+				leases = append(leases, leaseID)
 				continue
 			}
 			keep = append(keep, slot)
@@ -1188,6 +1210,9 @@ func (b *Broker) destroyGrantTokens(ctx context.Context, grantID, reason string)
 		}
 	}
 	b.mu.Unlock()
+	for _, leaseID := range leases {
+		b.forgetSlotRecords(leaseID, grantID)
+	}
 	b.destroyAppTokens(ctx, doomed, reason)
 }
 
