@@ -715,13 +715,141 @@ pointing at the lease directory.
 ## Environment secrets
 
 ```console
-$ printf 'API_KEY=abc\nWEBHOOK_SECRET=def\n' | cloop secret mint app-env --kind env
+$ printf '{"API_KEY":"abc","WEBHOOK_SECRET":"def"}' | cloop secret mint app-env --kind env
 $ cloop secret grant app-env --to project:/srv/app --env-keys API_KEY --ttl 8h
 ```
 
 Only the allowlisted keys are set in the workload's environment; the rest are
 dropped. Omitting `--env-keys` delivers every key in the secret — which is fine
 when the secret was minted narrow in the first place.
+
+**The payload is a JSON object of names to values.** Anything else is one value,
+delivered under a name derived from the secret's: `KEY=value` lines piped into
+`cloop secret mint app-env` become a single variable `APP_ENV` holding all of
+them, and a grant limited to `API_KEY` then delivers nothing — `cloop secret
+lease --project /srv/app` says so (*env secret app-env has no key matching
+API_KEY*). The bare form is for one value whose name the secret already spells:
+`cloop secret mint anthropic_api_key --kind env` delivers `ANTHROPIC_API_KEY`.
+Through `POST /api/secrets` the object is itself a JSON string, so it is encoded
+twice: `"payload": "{\"API_KEY\":\"abc\"}"`.
+
+### The Claude credential of a sandboxed run
+
+A `claudecode` project whose executor isolates from the host — a container, a
+Pod, an enrolled device or a virtual executor on one — gets no Claude login from
+the hub: [it is not given a configuration
+directory](../security/claude-code-identity.md#isolating-executors-do-not-get-a-directory),
+and the hub's own login never leaves the hub. Its harness authenticates with one
+of these, delivered by a grant:
+
+| Provider | Any one of |
+| --- | --- |
+| `claudecode` | `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` together with `ANTHROPIC_BASE_URL` (a gateway), or `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` (the cloud's own credentials beside it, in the secret or the machine's role) |
+| `anthropic` | `ANTHROPIC_API_KEY` or `CLOOP_ANTHROPIC_API_KEY`, or `anthropic.api_key` in the project's `config.yaml` on a container executor, which reads the project's tree |
+
+Other providers are not checked, and neither is a host executor, which runs the
+harness under the hub's or the requesting user's own login. The provider is the
+one the sandbox will run: a device or a Pod is sent the project's state and never
+its `config.yaml`, so for them it is the provider the state records; the hub's
+own `CLOOP_PROVIDER` reaches no sandbox and counts for none. An executor that
+brings its own credential — a device signed in to `claude` as its agent user, an
+image with a key baked in — is listed in the hub's
+[`executors.harness_credential_exempt`](../reference/configuration.md#executors-that-bring-their-own-claude-credential).
+
+**The hub checks before it dispatches.** A run, an automatic resume, a
+brainstorm or plan from the Tasks tab, an assistant message and a reproduction
+are all refused, with no workload started, when the lease the sandbox would get
+carries none of the above — or when the sandbox would lose it within ten
+minutes, before a run could finish its first task. The refusal is a `409`:
+
+```json
+{
+  "code": "harness_credential_missing",
+  "error": "No active grant gives app's sandbox on executor sgx (remote) a Claude credential (…): a sandbox has no Claude login but what is granted to its project.",
+  "remediation": "Open the project's Overview and use Claude credential to grant …",
+  "executor_id": "sgx",
+  "executor_kind": "remote",
+  "provider": "claudecode",
+  "needed": [["CLAUDE_CODE_OAUTH_TOKEN"], ["ANTHROPIC_API_KEY"], ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+             ["CLAUDE_CODE_USE_BEDROCK"], ["CLAUDE_CODE_USE_VERTEX"]]
+}
+```
+
+`harness_credential_expiring` carries `expires_at` as well. The check predicts
+the lease exactly: the same grants (a feature's are its parent project's), the
+same `--env-keys` narrowing, the same `.cloop/sandbox.yaml` `env:` list, which
+forwards only the variables it names — a granted token that list leaves out is
+named in the refusal — and the same end. **A lease ends with the first of its
+grants to expire, whatever kind that grant is**, so a GitHub grant ending in five
+minutes takes a thirty-day Claude credential out of the sandbox with it; the
+refusal names that grant, and the card's expiry is the lease's. A grant that
+lapsed is named too. The margin covers the start only: a run that outlives its
+lease loses the credential then, so grant for the length of the work — an
+auto-evolving project included.
+
+**Granting one takes one step.** On the project's Overview a *Claude credential*
+card sits beside the Executor card whenever the executor isolates: green with
+the credential's expiry, amber within three days of it, red when there is none.
+It opens a dialog — and so does a Run refused for this reason — that offers the
+env secrets you could grant (your own, and shared ones if you hold
+`secret.grant` on the project) by name and by the key names they hold, or takes
+a token pasted from `claude setup-token` or an Anthropic API key. A pasted token
+is checked against the [credential registry](../reference/credential-patterns.md)
+every scanner in cloop shares, stored as a personal `env` secret holding that one
+key (a shared one on a hub without single sign-on), and granted to the project;
+it is never echoed, logged, or stored anywhere but the secret store, and the
+field is emptied as the request leaves. Grants made here last 30 days unless
+another lifetime is chosen, within the 90-day ceiling every grant the dashboard
+makes is held to, and carry the scope `claude-credential`. Granting again for
+longer replaces what the dialog granted before: its earlier grants to the project
+of the same owner's (or shared) secrets that end sooner are revoked — they would
+otherwise end the lease first — and the response lists them under `superseded`.
+Grants made from the Secrets panel or the CLI are left alone. The dialog grants
+by narrowing a secret to the keys the harness reads, so a Bedrock or Vertex
+secret, which has to travel whole, is granted from the Secrets panel instead.
+
+The same through the API:
+
+```console
+$ curl -s -H "Authorization: Bearer $TOKEN" https://hub.example/api/projects/0/harness-credential
+{"state":"missing","applies":true,"executor":{"id":"sgx","kind":"remote","isolates":true},
+ "needed":[["CLAUDE_CODE_OAUTH_TOKEN"],["ANTHROPIC_API_KEY"],["ANTHROPIC_AUTH_TOKEN","ANTHROPIC_BASE_URL"],…],
+ "satisfied_by":null,"candidates":[{"id":"sec_…","name":"team-claude","keys":["CLAUDE_CODE_OAUTH_TOKEN"],
+ "complete":true,"personal":false,…}],…}
+$ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"secret":"team-claude","ttl_minutes":43200}' \
+    https://hub.example/api/projects/0/harness-credential
+```
+
+`POST` takes `{"secret": …}` — an env secret's id or name, optionally with
+`env_keys` to choose among the keys it holds — or `{"token": …}` with an optional
+`name`, never both. Reading the card needs `project.read`; granting needs
+`secret.own` on the project, plus `secret.grant` for a shared secret, and a
+personal secret can only be granted by its owner. Both the mint and the grant
+are audited like any other (`secret.mint`, `secret.grant`). `{idx}` is the
+project's index in your project list, as for every `/api/projects/{idx}` route.
+
+**On a hub with single sign-on a personal Claude credential is spent only on
+runs its owner starts.** Granting your own token to a project you share does not
+let the other members run on your subscription: their runs do not count it, and
+no lease but its owner's is given it — not a run on the host, not a pull request,
+not a reproduction's test suite. Each lease that meets one records a
+`secret.lease` denial naming the grant and why. A member who needs one grants
+their own, or a maintainer grants a shared secret. An automatic resume acts for
+whoever started the run it resumes, as the hub recorded at its dispatch. Every
+other kind of personal secret is unaffected and still reaches the project's runs
+whoever starts them.
+
+From a shell on the hub the equivalent is a mint and a grant. Run `claude
+setup-token` wherever you are signed in to Claude, then, so the token reaches
+neither your shell history nor the process table:
+
+```console
+$ read -rs CLAUDE_TOKEN    # paste the sk-ant-oat01-… token, then Enter
+$ printf '{"CLAUDE_CODE_OAUTH_TOKEN":"%s"}' "$CLAUDE_TOKEN" | cloop secret mint claude-code --kind env
+$ unset CLAUDE_TOKEN
+$ cloop secret grant claude-code --to project:/srv/app --env-keys CLAUDE_CODE_OAUTH_TOKEN --ttl 720h
+```
 
 ---
 

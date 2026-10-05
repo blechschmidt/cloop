@@ -1057,6 +1057,28 @@ refusal says which bundle was too large and names this setting. Values outside
 It is a hub-scope key: read once at startup, from `config.yaml` with the hub's
 overlay merged in.
 
+### Executors that bring their own Claude credential
+
+A `claudecode` or `anthropic` run on an executor that isolates from the hub gets
+a Claude credential only through a secret grant, and the hub refuses to dispatch
+one whose lease would carry none (`harness_credential_missing`; see [the Claude
+credential of a sandboxed run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run)).
+An executor that supplies the credential itself — a device whose agent user is
+signed in to `claude`, an image with a key in its environment, a cloud role
+behind Bedrock or Vertex — is listed here, and the check is waived for it:
+
+```yaml
+executors:
+  harness_credential_exempt: [sgx, build-box-2]   # executor IDs
+```
+
+The waiver is the check and nothing else: the grants such a run holds are
+delivered exactly as before, and another user's personal Claude credential is
+still withheld from it. Only the hub's own configuration can grant it — a
+project's `config.yaml` is written by whoever can push to the project — and an
+entry that is empty or contains whitespace is refused when the configuration is
+loaded.
+
 ### Automatic harness installation
 
 A project driven by the `claudecode` provider needs the `claude` CLI on whatever
@@ -1691,6 +1713,7 @@ ui:
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
+| `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
 | `ui.*` | Sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
 | `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |

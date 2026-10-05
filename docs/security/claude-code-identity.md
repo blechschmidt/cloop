@@ -208,6 +208,7 @@ time a user sees it.
 | In-flight `claude auth login` sessions | keyed by owner key in `claudecodeauth.Manager` |
 | Dispatched runs | `startWorkloadAs` — `/api/run`, project run, and new-project autorun |
 | Provider-invoking subcommands | `runCloopSubcommandFor` — the Tasks tab's **brainstorm** (`cloop suggest`) and the assistant chat (`cloop do`), both of which spend tokens on the caller's behalf |
+| A sandboxed run's personal Claude credential | `harnessClearance` — counted for, and leased to, only runs its owner starts (see [isolating executors](#isolating-executors-do-not-get-a-directory)) |
 
 Two consequences worth stating outright. One user's expired token no longer
 raises a "re-authenticate" banner on everyone else's dashboard, and one user's
@@ -265,15 +266,68 @@ as a leased `env` grant scoped to a project or an executor, delivered for the
 life of one workload:
 
 ```console
-$ printf 'ANTHROPIC_API_KEY=sk-ant-…\n' | cloop secret mint claude-api --kind env
+$ printf '{"ANTHROPIC_API_KEY":"sk-ant-…"}' | cloop secret mint claude-api --kind env
 $ cloop secret grant claude-api --to project:/srv/app --env-keys ANTHROPIC_API_KEY --ttl 8h
 ```
 
+The payload is a JSON object. Until Task 20379 this page showed
+`ANTHROPIC_API_KEY=sk-ant-…` piped in as a line, which the broker stores as one
+bare value under the name `CLAUDE_API` — the grant above then delivers nothing,
+and the run reaches `claude` logged out. The dashboard's *Claude credential*
+dialog (below) builds the object itself.
+
+### Checked before dispatch
+
+A sandbox with no credential used to start anyway — a device sometimes
+installing `claude` first — and fail its first task `auth_refused`, with *Not
+logged in* in a transcript that said nothing about grants. Expired grants failed
+the same way. Since Task 20379 every path that dispatches a harness to an
+isolating executor — `/api/run`, a project's Run, the new-project autorun, the
+automatic resume after a usage cap, the Tasks tab's brainstorm and plan, the
+assistant chat and a reproduction — settles one preflight
+(`pkg/ui/harness_credential.go`) against the executor it resolved, before
+anything is leased or started. It computes the environment the run's lease would
+carry — the same grants, matched as a lease matches them (a feature through its
+parent project), narrowed by each grant's `env_keys` and by the project's
+`.cloop/sandbox.yaml` `env:` list — and refuses with a `409` when that holds no
+credential the provider reads (`harness_credential_missing`), or when the only
+grant that does ends within ten minutes (`harness_credential_expiring`) — or
+the lease itself does, since a lease ends with the first of its grants to expire,
+whatever kind. The provider is judged as the sandbox will choose it, from the
+project's state on a device or a Pod, which are never sent its config, and never
+from the hub's own environment. The refusal names the executor and the remedy.
+`tests/arch` pins that every dispatch path builds the preflight and that the
+dispatch primitives settle it before they lease. Host executors, providers other
+than `claudecode` and `anthropic`, and executors the hub lists in
+`executors.harness_credential_exempt` (a device signed in as its agent user, an
+image that brings a key) are not refused.
+
+The project's Overview shows the result as a *Claude credential* card whenever
+the executor isolates, and its dialog grants an existing `env` secret or a
+pasted token in one step — see [the Claude credential of a sandboxed
+run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run). The API is
+`GET`/`POST /api/projects/{idx}/harness-credential`.
+
 **Say plainly what that means:** on an isolating executor the split is
-per-project or per-executor, not per-user. Every task placed there uses whatever
-the grant carries, whoever pressed Run. If a deployment needs per-user billing
-end to end, it needs one grant per user's project — or host execution, which is
-the thing most hubs are configured to forbid.
+per-project or per-executor for a *shared* credential: every task placed there
+uses whatever the grant carries, whoever pressed Run. A *personal* one — an
+`env` secret a signed-in user owns, which is what the dialog stores a pasted
+token as — is per-user, as the configuration directory is on the hub: with OIDC
+on, the preflight counts it only for runs its owner starts, and every other
+lease the hub issues — runs on any executor, the host included, and workloads
+that run no harness at all — is told to withhold it
+(`secretbroker.Requester.Withhold`), recording a `secret.lease` denial that names
+the grant and why. Without that, a token granted to a shared project would bill
+its owner's subscription for every member's runs, and a project holding two
+people's tokens would authenticate with whichever the lease rendered last. On the
+host it would also undo this page's work: a leased token is appended after
+`ScopeHarnessEnv`'s cleared assignment, and the last occurrence of a key is the
+one exec keeps. An automatic resume acts for whoever started the run it resumes,
+recorded in the hub's own database at dispatch — never in the project's tree,
+which the sandbox can write. A static-token or service-token run acts for no
+one, so only a shared credential satisfies it. If a deployment needs per-user
+billing end to end, each user grants their own; if it needs a team account, a
+maintainer grants a shared one.
 
 Note the direction of `IsolatesFromHost`: a driver that declares no isolation
 level is treated as **not** isolated, so it does receive the directory. That is
@@ -345,7 +399,8 @@ an empty one, and the user is simply logged out.
 - **It does not separate quota.** Each user spends their own subscription,
   which is the point — but cloop enforces no ceiling across users. Use
   [quotas](model.md#quotas-how-much-not-whether) for hub-side limits.
-- **It does not reach isolating executors**, as above.
+- **It does not reach isolating executors** with a directory, as above; there a
+  user's own Claude login is a personal `env` grant, spent only on their runs.
 - **It does not survive a hostile host.** Every identity's directory lives under
   one uid on one filesystem. `0700` stops other *users* of that machine; it
   stops nothing that already runs as the hub, which includes any agent executed

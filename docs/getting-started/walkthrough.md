@@ -164,10 +164,20 @@ mistyped secret name costs you nothing.
 Settings authenticates harnesses that run on the hub itself. A harness in a
 container, a Pod or on an enrolled device receives credentials only through a
 grant — [why](../security/claude-code-identity.md#isolating-executors-do-not-get-a-directory)
-— so a `claudecode` project bound to one also needs an `env` secret holding
-`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`,
-granted to it with that key. Without it the first task stops with *Not logged
-in*. Repositories work the same way, with one default to watch: the project's
+— so a `claudecode` project bound to one also needs a Claude credential granted
+to it: `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
+`ANTHROPIC_API_KEY`. The hub checks before it starts anything. Without one —
+or with one the sandbox would lose within ten minutes — Run is refused with
+`harness_credential_missing` (or `_expiring`), naming the executor, and no
+sandbox starts; the project's Overview shows a red **Claude credential** card
+beside the Executor card. Either one opens a dialog that grants an `env` secret
+you already have, or takes a token pasted from `claude setup-token` and stores
+it as your own secret, in one step — granted for 30 days unless you choose
+otherwise, and the card turns amber three days before it lapses. On a hub with
+single sign-on that personal token is used only for runs *you* start; others
+on the project need their own, or a shared one
+([details](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run)).
+Repositories work the same way, with one default to watch: the project's
 **Repositories** panel assigns *Read only* unless you pick *Read and write*,
 which is enough to clone and not to push. *Read and write* can be limited to
 particular branches — `cloop/*`, say, to keep the agent off `main` — which the
