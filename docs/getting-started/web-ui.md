@@ -139,7 +139,7 @@ The Overview tab is the control panel for one project, top to bottom:
 | **Claude Code Subscription Caps** | weekly / 5-hour / Opus / Sonnet utilisation ceilings, shown only on the `claudecode` provider |
 | **Controls** | **Run**, **Pause / Stop** while running, **Refresh**, **Voice** |
 | **Live Output** | the running step's output as it arrives, with **Clear** |
-| **Event History** | steps merged with task starts, completions, failures, skips, heals, evolve cycles and status changes |
+| **Event History** | steps merged with task starts, completions, failures, skips, heals, evolve cycles and status changes, newest first; new rows are pushed as they are written and older pages load as you scroll |
 
 Two of the stat cards are also buttons. **Provider** opens a Provider & Model
 picker whose choice is saved on the project and used by every subsequent run

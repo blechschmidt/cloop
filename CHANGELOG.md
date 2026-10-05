@@ -151,6 +151,23 @@ schema and the hub's HTTP API may change in any release.
 
 ### Changed
 
+- **The Event History panel is pushed its rows instead of re-reading them.**
+  Every `task_update`, `state_diff`, `task_added`, `task_deleted`,
+  `task_mutation` and `run_state` message used to make the dashboard fetch
+  `GET /api/event-history` again — every row it held, after a scroll up to
+  500 — and each fetch loaded the whole project, every step's output included,
+  to return fifty rows: half of all dashboard requests on the hub that runs
+  cloop's own project, 244 ms and 155 MB of allocation per request on a journal
+  of 50,000 steps. A page is now two index reads (migration 0059 indexes
+  `julianday()` of each table's timestamp, so offsets and trimmed fractions
+  sort as instants) — about 3 ms at any journal size — paged with `before=`,
+  and the rows written since a page arrive as `history_append` messages to the
+  project's room, from the watcher that computes its `state_diff`. The panel
+  reads only to fill a gap the cursors show: on connect, when the hub's sync
+  point is above what it holds, and when a push does not continue from it.
+  `offset=` still works; responses no longer carry `total`. A step's output or
+  an event's details over 4 KB arrives cut and loads whole when the row is
+  opened (`?step=N`, `?event=N`) (Task 20384).
 - **Browser telemetry is off by default.** An unset `ui.telemetry.enabled` now
   means off, and the dashboard and the glasses page ask the hub
   (`GET /api/telemetry/config`, `/api/glasses/telemetry/config`) before sending
