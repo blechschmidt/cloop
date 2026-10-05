@@ -41,6 +41,10 @@ var (
 	ErrGrantWithheld = errors.New("secretbroker: grant withheld from this lease")
 	// ErrLeaseExpired: the lease's TTL elapsed; Renew or re-Lease.
 	ErrLeaseExpired = errors.New("secretbroker: lease expired")
+	// ErrLeaseMoved: another hub process holds the lease now — it adopted the
+	// run the lease was issued for (Task 20382) — so this one may neither
+	// extend nor release it.
+	ErrLeaseMoved = errors.New("secretbroker: lease is held by another hub process")
 
 	// ErrRepoDenied: the repository is outside the grant's allowlist, or
 	// could not be normalised into owner/repo form.

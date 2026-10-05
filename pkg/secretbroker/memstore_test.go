@@ -30,6 +30,12 @@ type memStore struct {
 	putRequestErr error
 	// getGrantErr makes the next GetGrant fail as a busy database would.
 	getGrantErr error
+
+	// leases back the LeaseStore half (leaserecord_test.go, Task 20382).
+	leases map[string]LeaseRecord
+	// beforeTake, when set, runs at the start of TakeLease: where a test puts
+	// the other process that wins a race to take a lease over.
+	beforeTake func()
 }
 
 func newMemStore() *memStore {
@@ -39,6 +45,7 @@ func newMemStore() *memStore {
 		meta:     make(map[string]string),
 		requests: make(map[string]AccessRequest),
 		uses:     make(map[string][]RequestUse),
+		leases:   make(map[string]LeaseRecord),
 	}
 }
 

@@ -81,6 +81,12 @@ type Broker struct {
 
 	clock       func() time.Time
 	maxLeaseTTL time.Duration
+
+	// leaseHolder, when set, is the hub process this broker issues and takes
+	// over leases for, and makes every non-empty lease durable under that name
+	// (leaserecord.go, Task 20382). Empty — every CLI and test broker — keeps
+	// leases in memory only, as before.
+	leaseHolder string
 }
 
 // appToken is one GitHub App installation token the hub minted, remembered for
@@ -111,6 +117,9 @@ type leaseState struct {
 	// re-checks exactly these, so a lease is never kept alive by a grant it
 	// does not hold, nor past one it does that was revoked.
 	grantIDs []string
+	// recorded reports that the lease has a durable record held by this
+	// broker's leaseHolder, which Extend and Release must keep in step.
+	recorded bool
 }
 
 // Option configures a Broker.
@@ -751,11 +760,23 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	for _, mat := range materials {
 		grantIDs = append(grantIDs, mat.GrantID)
 	}
-	b.mu.Lock()
-	b.leases[lease.ID] = &leaseState{
+	st := &leaseState{
 		requester: r, actor: actor, expiresAt: lease.ExpiresAt, kinds: kinds,
 		grantIDs: grantIDs,
 	}
+	// Durable before the lease is handed out, so a hub that dies the moment
+	// it returns leaves a record its successor can take over or sweep. A lease
+	// that carries nothing is released by its caller at once and has nothing
+	// to outlive anyone.
+	var recordErr error
+	if len(materials) > 0 {
+		st.recorded, recordErr = b.recordLease(LeaseRecord{
+			ID: lease.ID, Requester: r, Actor: actor, IssuedAt: lease.IssuedAt,
+			ExpiresAt: lease.ExpiresAt, Kinds: kinds, GrantIDs: grantIDs,
+		})
+	}
+	b.mu.Lock()
+	b.leases[lease.ID] = st
 	if len(rec.slots) > 0 {
 		// The lease ID exists only now, so the slots learn it here — before
 		// the lease is returned, and so before anything could ask one to
@@ -776,6 +797,13 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	summary.ExpiresAt = lease.ExpiresAt
 	summary.Reason = fmt.Sprintf("issued %d material(s): %s",
 		len(materials), strings.Join(lease.SecretNames(), ","))
+	if recordErr != nil {
+		// The lease works; what is lost is that it can outlive this process.
+		// Said on the lease's own row, where an operator chasing a credential
+		// nobody released after a restart will look.
+		summary.Reason += "; not recorded durably, so it will not be taken over if this hub process stops: " +
+			recordErr.Error()
+	}
 	b.emit(summary)
 
 	return lease, nil
@@ -888,10 +916,12 @@ func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) 
 		actor     string
 		expiresAt time.Time
 		grantIDs  []string
+		recorded  bool
 	)
 	if ok {
 		requester, actor, expiresAt = st.requester, st.actor, st.expiresAt
 		grantIDs = append([]string(nil), st.grantIDs...)
+		recorded = st.recorded
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -911,6 +941,63 @@ func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) 
 			"lease %s lapsed at %s and cannot be extended", leaseID, expiresAt.UTC().Format(time.RFC3339))
 	}
 
+	earliest, err := b.recheckGrants(ev, leaseID, requester, grantIDs, now)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	deadline := b.leaseDeadline(now, earliest)
+	if deadline.Before(expiresAt) {
+		deadline = expiresAt
+	}
+	if recorded {
+		// The durable record first, and only if this process still holds it:
+		// a lease the process adopting its run took over (Task 20382) is that
+		// process's to extend, and one this process kept extending in memory
+		// would be a credential two hub processes both believe they hold.
+		if moved, rerr := b.extendRecord(leaseID, deadline); moved {
+			b.mu.Lock()
+			delete(b.leases, leaseID)
+			b.mu.Unlock()
+			return time.Time{}, b.denyf(ev, ErrLeaseMoved,
+				"lease %s is held by another hub process now, which keeps it alive and releases it", leaseID)
+		} else if rerr != nil {
+			// Extended here all the same; what is lost is that a successor
+			// taking the lease over would see the earlier deadline.
+			ev.Reason = "durable record not updated: " + rerr.Error()
+		}
+	}
+	b.mu.Lock()
+	st, ok = b.leases[leaseID]
+	if ok && deadline.After(st.expiresAt) {
+		st.expiresAt = deadline
+	}
+	if ok {
+		deadline = st.expiresAt
+	}
+	b.mu.Unlock()
+	if !ok {
+		// Released while the grants were being read. Nothing to keep alive,
+		// and recreating the record would resurrect a lease its holder gave up.
+		return time.Time{}, b.denyf(ev, ErrLeaseNotFound, "lease %s was released", leaseID)
+	}
+
+	ev.Decision = DecisionAllow
+	ev.ExpiresAt = deadline
+	if ev.Reason != "" {
+		ev.Reason = "extended in place while its run is live; " + ev.Reason
+	} else {
+		ev.Reason = "extended in place while its run is live"
+	}
+	b.emit(ev)
+	return deadline, nil
+}
+
+// recheckGrants applies to every grant a live lease carries the checks its
+// issue made — not revoked, not expired, still issued to this requester, its
+// secret still there — and returns the earliest grant expiry, which bounds the
+// lease. A failure is a denial, emitted on ev.
+func (b *Broker) recheckGrants(ev Event, leaseID string, requester Requester, grantIDs []string, now time.Time) (time.Time, error) {
 	var earliest time.Time
 	for _, id := range grantIDs {
 		g, err := b.store.GetGrant(id)
@@ -941,28 +1028,7 @@ func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) 
 			earliest = g.ExpiresAt
 		}
 	}
-
-	deadline := b.leaseDeadline(now, earliest)
-	b.mu.Lock()
-	st, ok = b.leases[leaseID]
-	if ok && deadline.After(st.expiresAt) {
-		st.expiresAt = deadline
-	}
-	if ok {
-		deadline = st.expiresAt
-	}
-	b.mu.Unlock()
-	if !ok {
-		// Released while the grants were being read. Nothing to keep alive,
-		// and recreating the record would resurrect a lease its holder gave up.
-		return time.Time{}, b.denyf(ev, ErrLeaseNotFound, "lease %s was released", leaseID)
-	}
-
-	ev.Decision = DecisionAllow
-	ev.ExpiresAt = deadline
-	ev.Reason = "extended in place while its run is live"
-	b.emit(ev)
-	return deadline, nil
+	return earliest, nil
 }
 
 // Release drops a lease's server-side record and destroys any credential the
@@ -979,6 +1045,13 @@ func (b *Broker) Release(leaseID string) {
 	st, ok := b.leases[leaseID]
 	delete(b.leases, leaseID)
 	b.mu.Unlock()
+
+	if ok && st.recorded && b.dropRecord(leaseID) {
+		// Another hub process took the lease over with the run it was issued
+		// for (Task 20382). The release is that process's to make, when the
+		// run ends; making it here would end a credential a live run holds.
+		return
+	}
 
 	// Before the early return: a lease whose state record is already gone —
 	// swept, or released twice — may still have tokens to destroy, and

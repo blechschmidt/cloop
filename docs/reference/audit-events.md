@@ -274,8 +274,8 @@ Payload keys:
 | `secret.grant` | `secret` | control-plane | stable | A grant is written authorising a subject to lease a secret. |
 | `secret.lease` | `secret` | control-plane | stable | A lease is issued — or refused — against the grants matching a request. |
 | `secret.mint` | `secret` | control-plane | stable | A credential is sealed and stored as a new secret. |
-| `secret.release` | `secret` | control-plane | stable | A workload finishes with a lease and it is dropped from the server-side record. |
-| `secret.renew` | `secret` | control-plane | stable | A live lease is renewed before it expires: re-issued to the same holder, or extended in place while its run is live. |
+| `secret.release` | `secret` | control-plane | stable | A workload finishes with a lease and it is dropped from the server-side record — or a recorded lease nobody holds any more is retired: its run ended while no hub process held it, or it lapsed after its holder stopped. |
+| `secret.renew` | `secret` | control-plane | stable | A live lease is renewed before it expires: re-issued to the same holder, extended in place while its run is live, or taken over by the hub process that adopted its run after the one holding it stopped. |
 | `secret.request` | `secret` | control-plane | stable | A developer files a self-service request for access they do not have. |
 | `secret.request_approve` | `secret` | control-plane | stable | A reviewer approves a pending request and the grant it asked for is minted. |
 | `secret.request_deny` | `secret` | control-plane | stable | A reviewer refuses a pending request. |

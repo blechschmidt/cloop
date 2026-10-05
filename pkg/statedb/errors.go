@@ -162,6 +162,11 @@ var (
 	// answer — "that person is not on this project" — which the REST layer
 	// reports as 404 and the CLI as a plain sentence.
 	ErrProjectMemberNotFound = errors.New("statedb: project member not found")
+
+	// ErrSecretLeaseNotFound indicates no secret_leases row names the lease
+	// (Task 20382): it was released, swept, or recorded by a binary that
+	// predates the table.
+	ErrSecretLeaseNotFound = errors.New("statedb: secret lease not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
