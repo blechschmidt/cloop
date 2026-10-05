@@ -745,10 +745,13 @@ sweeps it within a minute, closing the session. Each extension is a
 `secret.renew` naming the grant. See
 [how long a session lives](../architecture/git-proxy.md#how-long-a-session-lives).
 
-There is no command that ends one workspace session early. Sessions live in the
-hub's memory, so a hub restart closes every live one — recorded as
-`gitproxy.session_closed` with the reason *"the hub is shutting down"* — and
-short of that a session expires on its own TTL, which is enforced at
+There is no command that ends one workspace session early. A workspace session
+lives only in the hub's memory, so a hub restart closes every live one —
+recorded as `gitproxy.session_closed` with the reason *"the hub is shutting
+down"* (a guarded session, the one a GitHub lease is delivered as, is suspended
+instead and restored with its run; see [after a control-plane
+restart](#after-a-control-plane-restart)) — and short of that a session expires
+on its own TTL, which is enforced at
 authentication whether or not the five-minute reaper has swept it. That is the
 blunt instrument; the sharp one is
 revoking the underlying grant with `cloop secret revoke`, which stops the *next*
@@ -1273,6 +1276,47 @@ the device instead (`lease.revoke_sent` by `janitor`), and the run carries on
 without those credentials. A run whose agent never comes back keeps its session
 open for failover, and its lease until it lapses, when the leader's lease
 janitor sweeps it.
+
+**What the lease feeds comes back with it** (Task 20383). The run's git proxy
+and Kubernetes monitor sessions are restored in the adopting process under the
+ids and tokens the workload already holds, one line each:
+
+```
+ui: restored git session 3K2x… of lease lease_9f1c…, held until then by hub_7d0e…
+ui: restored kube session qT8w… of lease lease_9f1c…, held until then by hub_7d0e…
+```
+
+and a `gitproxy.session_restored` / `kubeguard.session_restored` row. A GitHub App
+token behind the git session is minted again at the scope recorded for it (an
+allowed `secret.renew` row: *"re-minted at the scope recorded for it by the hub
+process that took the lease over"*), and an App token the workload holds as a
+file is renewed before its hour by the new process's keepalive. The run's egress
+session is restored too, with its byte counters — the project's journal says
+*"egress: proxy session … restored by the hub process that adopted this run"*.
+A request the workload makes in the seconds before its agent reconnects waits up
+to 60 seconds for this instead of failing.
+
+A session that does not come back says why on its close row: a
+`gitproxy.session_closed`, `kubeguard.session_closed` or `egress.close` whose
+reason starts *"not restored by the hub process that adopted its run"* (its grant
+was revoked or expired while the hub was down, its recorded scope is wider than
+the grant or the proxy's policy now allow, its record names an upstream other
+than the forge this hub's git proxy fronts, or this hub runs no such proxy), or
+*"lapsed … while no hub process held it"*. A record naming another upstream was
+not written by this hub: treat it as a sign the database was edited, and look at
+who could write to it. The workload then gets a 401 (git,
+kubectl) or a 407 (egress) from there on; stop and start the run to lease it
+afresh. A line ending *"(will retry)"* is a restore that failed for a reason
+that may pass — the database busy, GitHub unreachable for the App token — and is
+retried every minute by the lease's keepalive (every 30 seconds for egress), and
+at once by a request presenting the session. Count them with
+`cloop_proxy_session_restores_total{kind,outcome}` (see
+[metrics](metrics.md#sessions-restored-with-an-adopted-run)).
+
+A git workspace's pinned session — cloop's own provisioning fetch and a
+write-back push — is not restored: it stands on a lease nothing takes over. A
+write-back after a restart fails with a 401 and is reported like any failed
+write-back.
 
 **"killed N container(s) still running from a previous control plane" is the one
 to read carefully.** It means a sandbox was *executing a harness* when it was

@@ -57,6 +57,7 @@ Three facts carry most of it:
  │            ├─ TLS listener (pkg/tlsconf) ◀─────────────── sandboxes' git    │
  │            ├─ gitproxy.Proxy     smart-HTTP handler, policy per ref ─▶ forge│
  │            ├─ gitproxy.Registry  live sessions, in memory                   │
+ │            ├─ Registry.Store     lease-path session records, no credential  │
  │            ├─ reaper             drops lapsed sessions every 5 minutes      │
  │            └─ audit sink ──────▶ audit_events (control-plane database)      │
  │                                                                             │
@@ -91,12 +92,18 @@ Three facts carry most of it:
 A session is minted when a workload is dispatched and authenticated when that
 workload's git connects, possibly much later. The registry is memory, so a
 `cloop git-proxy` command in another process would authenticate against an empty
-map and refuse every request the hub had authorised. Making that work would mean
-a shared session store, which means the forge credential at rest in a second
-place. The proxy is therefore a service *of* the hub, and a process-wide
-singleton for the same reason the executor registry is one: two `Server`
-instances in one process share their executors, so they must share the sessions
-those executors' sandboxes present.
+map and refuse every request the hub had authorised. Serving a session takes the
+forge credential it presents, and a store that held that would be the credential
+at rest in a second place. The proxy is therefore a service *of* the hub, and a
+process-wide singleton for the same reason the executor registry is one: two
+`Server` instances in one process share their executors, so they must share the
+sessions those executors' sandboxes present.
+
+What *is* written down, since Task 20383, is everything about a lease-path
+session except a credential — its id, the SHA-256 of its token, its scope and
+deadline, and which hub process serves it — so the process that adopts a run
+after this one stops can bring the session back and re-derive its credential
+from the run's lease. See [a hub restarted mid-run](#a-hub-restarted-mid-run).
 
 The [Kubernetes access monitor](kubernetes-access.md) keeps its own registry in
 the same process for the same reason, and the two are deliberately shaped alike.
@@ -689,12 +696,94 @@ Without the proxy the same broker slot is refreshed by the lease's keepalive, an
 the new token travels to the executor holding the file — see
 [keeping the token past GitHub's hour](../guides/secrets.md#keeping-the-token-past-githubs-hour).
 
-A hub restart drops every session of both kinds — the registry is memory — and a
-workload that survives the restart on an edge device keeps a credential that no
-longer authenticates. Its next git operation gets a 401. The run's lease is
-taken over by the process that adopts the run (Task 20382), but a session is an
-entry in the stopped process's registry, not part of the lease, and is not
-restored with it.
+### A hub restarted mid-run
+
+A device keeps running its task while its hub restarts — :8888 restarts nightly,
+and sometimes off schedule. Since Task 20382 the process that adopts the run takes
+its lease over; since Task 20383 it also brings back the lease sessions that lease
+fed, so the workload's next fetch or push is served as if nothing happened.
+
+**Recorded.** A lease-path session is minted `Durable`, and the registry's store
+(`pkg/sessionrecord`) writes a `proxy_sessions` row before the session is handed
+out: the session id, the SHA-256 of its token, the lease and grant it stands on,
+the run, project, executor and actor, the scope (the repository allowlist, the
+forge host and the ref policy), the deadline, and the hub process serving it.
+Never the token, and never the PAT or App token presented upstream —
+`tests/security/sessionrecords_test.go` scans the table for them after a
+realistic run. The App token behind a session has a row of its own in
+`app_token_slots`: the installation, the repository ids, the permissions asked
+for and the ones GitHub granted. The session's end is written to its row as it
+happens, fenced on the holder.
+
+**Stopping.** A hub stopped gracefully *suspends* a recorded session rather than
+closing it: it stops serving it and destroys the App token it presented, but
+writes no close row and leaves the record open. A SIGKILL leaves the same
+state, without the token's destruction — that token lapses at GitHub's hour.
+
+**Restored.** When the agent reconnects and the new process adopts the run
+(`takeOverRunLeases`, `pkg/ui/session_restore.go`), every open session the run's
+lease feeds is:
+
+1. retired with a `gitproxy.session_closed` row if its TTL ran out meanwhile;
+2. taken over by a conditional write on its holder — of two processes adopting
+   the run, one gets it;
+3. held to what its grant and this hub's proxy policy allow *now*: every
+   recorded repository pattern must be in the grant's allowlist, every ref
+   pattern in the hub's, every write the session may make allowed by both. A
+   scope this cannot prove within bounds is refused, never widened;
+4. held to where and how long this hub mints a session now, whatever the record
+   says: its upstream must be the forge this hub's proxy fronts
+   (`github_upstream`, else `https://github.com`), and its deadline is clamped to
+   the session TTL from when it was issued. A record is read back from a
+   database, and nothing in it decides where a credential is presented;
+5. given an upstream credential re-derived from the lease: a PAT opened from the
+   grant's secret, or an App installation token minted at once at the slot's
+   recorded scope — the installation and GitHub host the sealed secret names,
+   only those recorded repository ids the grant's allowlist still admits in the
+   installation, the recorded permissions, never wider — whose refresh then
+   carries on from the session's request path;
+6. put back into the registry under its id and token hash, with its policy and
+   deadline: a [`gitproxy.session_restored`](../reference/audit-events.md#gitproxy)
+   row names the process that held it.
+
+A grant revoked or expired while no process held the lease refuses the lease
+itself, and the lease path closes the lease's sessions with a reason and scrubs
+the device. A failure that may pass — the database busy, GitHub unreachable for
+the re-mint — leaves the session held by the new process and unrestored, and the
+lease's keepalive tries again every minute, as does the next request presenting
+it. A retry reads the record again first: a session another process has taken
+over since is left to it, and a lease another process has taken is handed over
+— its sessions suspended, its App tokens destroyed.
+
+**Handing over a live run.** When a run moves between two live members, the old
+one learns at once and watches, for up to two minutes, for the new one to take
+the lease; then it suspends the sessions the lease fed and releases its claim on
+them, so a request reaching any member is forwarded to the one that restored
+them.
+
+**Before adoption.** The new process comes up before the device's agent has
+reconnected, and it is the reconnect that adopts the run. A request presenting a
+session in that gap names one no process serves. It is not restored on demand:
+a session restored by a process that does not hold its lease would outlive the
+lease's revocation and release. Instead a request whose credential hashes to an
+open, unexpired record whose holder is not a live hub process *waits*, up to 60
+seconds — a device's agent reconnects on a backoff that has grown to tens of
+seconds by the time a restarted hub is back — for the run to be adopted, and is
+then served here, or forwarded to the member that restored it, and otherwise
+gets the 401 it always got. A wrong token is refused at once, as before.
+Requests presenting one session share one wait, at most 64 sessions are waited
+for at a time, and a proxy that stops ends every wait. To git a restart becomes
+a slow response rather than a failure.
+
+The leader's janitor retires the records of sessions that closed; of open ones
+whose holder is gone, once they lapse or their lease does; and of any open one
+well past its TTL, whoever holds it.
+
+A workspace session — the pinned one cloop's own provisioning fetch and a
+write-back push use — is not recorded: its credential stands on a workspace
+lease of its own, which no process takes over. It is closed when a hub stops
+gracefully and lost when one is killed, and a write-back through it after a
+restart gets a 401; see [limits that remain](#limits-that-remain).
 
 ---
 
@@ -715,6 +804,8 @@ restored with it.
 | An App token's renewal failed for a reason that may pass — GitHub unreachable, rate limiting | a denied `secret.renew` saying it will retry | git carries on with the held token while it is valid; past its expiry, HTTP 502 naming why, until a retry succeeds | the same |
 | A repository outside the session's scope | HTTP 403, `session is scoped to …`; a `gitproxy.rejected` row | — | refused |
 | A ref outside the policy | `! [remote rejected] … (…)`; a `gitproxy.push_denied` row | refused | refused |
+| The hub restarted mid-run | `ui: restored git session … of lease …, held until then by …` when the run is adopted; a `gitproxy.session_restored` row | the session is gone: a later push gets a 401 | restored; a request made before the run was adopted waits up to 60 s for it |
+| A restored session was refused — its grant revoked or expired while the hub was down, its recorded scope wider than the grant or the proxy's policy now allows, its upstream not the forge this hub's proxy fronts, or this process runs no proxy | a `gitproxy.session_closed` row whose detail begins *not restored by the hub process that adopted its run* | — | git: HTTP 401 |
 
 Two properties of that table are deliberate, and the second is easy to miss.
 A proxy the operator asked for and did not get **fails closed** — the dashboard
@@ -737,7 +828,8 @@ Every decision the proxy makes is a row in `audit_events`, with `entity_type`
 [`gitproxy.fetch`](../reference/audit-events.md#gitproxy),
 [`gitproxy.push_allowed`](../reference/audit-events.md#gitproxy),
 [`gitproxy.push_denied`](../reference/audit-events.md#gitproxy),
-[`gitproxy.rejected`](../reference/audit-events.md#gitproxy) and
+[`gitproxy.rejected`](../reference/audit-events.md#gitproxy),
+[`gitproxy.session_restored`](../reference/audit-events.md#gitproxy) and
 [`gitproxy.session_closed`](../reference/audit-events.md#gitproxy). The payload
 carries the session, the repository the request addressed, the project and task
 ids, the refs and the reason — never a credential, because `gitproxy.Event` has no
@@ -814,6 +906,7 @@ all of it is reconnaissance.
 | Session and lease lifetimes | a pinned session releases its lease exactly once when it ends, an unused one is closed on release, a lease is extended only while its grants hold and its run is live | `pkg/gitproxy` `session_test.go`, `pkg/executor/gitproxycreds`, `pkg/secretbroker` `extend_test.go`, `pkg/ui` `secrets_keepalive_test.go` |
 | Live GitHub, opt-in | a grant assigned through the panel's endpoint pushes through the proxy to a real repository — outside its branches refused, inside them landed, no token in the sandbox | `TestLiveBranchRestrictionThroughTheGitProxy` in `pkg/ui` |
 | An App token past its hour | the clocks of a fake GitHub App API and of the broker are driven past the first token's expiry, against a forge that refuses expired tokens: a real git fetches and pushes through the proxy after it, at the first token's scope; a session that cannot renew is refused by the same forge; a revoked grant closes the session and mints nothing | `pkg/gitproxy` `refresh_e2e_test.go`, `refresh_test.go`; the hub's own adapter and lease files in `pkg/ui` `secrets_refresh_test.go`; the broker's rules in `pkg/secretbroker` `apprefresh_test.go` |
+| A hub restarted mid-run | a session recorded without its token and restored by a second registry under the same id and token hash, its policy intact, with real git pushing through it; the restore refusing what a mint would; a graceful stop suspending rather than closing; the hub's restore at adoption — a fetch held across it, a burst sharing one wait, the App token re-minted at the recorded scope and renewed past its hour, a revoked grant, a lapsed session, a lost race, a record naming another upstream, a retry after another process took the session or the lease; repository ids the grant no longer admits dropped before a re-mint; the janitor; and a real hub killed (and stopped) under a real device whose workload then pushes through the restored session | `pkg/gitproxy` `durable_test.go`, `durable_e2e_test.go`; `pkg/ui` `session_restore_test.go`; `tests/e2e/hubrestart_proxies_test.go`; `tests/security/sessionrecords_test.go` |
 | The same without a proxy | the token file rewritten under a running workload — on the host, in a real container (`CLOOP_REFRESH_CONTAINER_E2E=1`), on a device over the v17 frame (and in a container on it, `CLOOP_AGENT_SANDBOX_E2E=1`) — whose own git then fetches and pushes past the hour, with the new token scrubbed from its output | `pkg/ui` `secrets_refresh_test.go`, `pkg/executor/container` `refresh_e2e_test.go`, `pkg/executor/remote` `refresh_e2e_test.go`, `pkg/executor/agent` `driver_integration_test.go` |
 
 The [guarantee → test table](../security/model.md#git-interception-proxy--the-package-suites)
@@ -880,7 +973,12 @@ What remains is either deliberate or beyond what the hub can reach today:
    pinned by unit tests against the objects the driver sends the API server; no
    test yet runs a Pod through the proxy, the way
    [the live kit](#on-a-real-device) runs a device.
-4. **A device checkout provisioned through the proxy before Task 20349 has no
+4. **A workspace session does not survive a restart.** The pinned session of the
+   workspace path stands on a workspace lease of its own, which nothing takes
+   over, so it is not recorded: a hub stopped or killed mid-run takes it with
+   it, and a write-back push through it afterwards gets a 401. Lease-path
+   sessions — everything the workload's own git uses — [are restored](#a-hub-restarted-mid-run).
+5. **A device checkout provisioned through the proxy before Task 20349 has no
    recorded upstream.** Turning the proxy *on*, or moving it, works for every
    checkout, because the forge URL is the new route's upstream; turning it
    *off* refuses such a checkout once, naming the directory to remove.

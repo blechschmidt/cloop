@@ -1663,18 +1663,33 @@ memory is taken over too:
   extended from then on by its keepalive, listed in its Secrets panel, released
   by it when the run ends — and re-derives from the lease's grants the values it
   scrubs from the run's output (env secrets and personal access tokens; a GitHub
-  App token the stopped process minted is left to the pattern scrubbers and
-  lapses on GitHub's hour, because nothing renews it). A lease that lapsed, or
-  whose grants were withdrawn, while no hub held it is taken back from the
-  device instead, and the leader's lease janitor sweeps one whose holder never
-  came back once it lapses.
+  App token is left to the pattern scrubbers, which recognise its shape). A lease
+  that lapsed, or whose grants were withdrawn, while no hub held it is taken back
+  from the device instead, and the leader's lease janitor sweeps one whose holder
+  never came back once it lapses.
+- **What the lease feeds (Task 20383).** The run's git proxy and Kubernetes
+  monitor sessions are recorded in `proxy_sessions` (token hashes and scopes,
+  never a credential) and restored in the adopting process under the ids and
+  tokens the workload holds — their scope held to what the grant and the hub
+  allow now, their upstream credentials re-derived from the lease, a GitHub App
+  token minted afresh at its recorded scope. The App token slots recorded in
+  `app_token_slots` come with the lease, so a token delivered as a file is
+  renewed before its hour by the new holder's keepalive. The run's egress session,
+  named in the owner row, is restored with its byte counters, so its quota keeps
+  binding. A session whose grant was revoked or expired meanwhile is closed with
+  the reason instead; nothing in a record decides where a credential goes — the
+  upstream is the hub's own, an App token's repositories are re-checked against
+  the grant. See [a hub restarted mid-run](git-proxy.md#a-hub-restarted-mid-run).
 - **The run's executor session.** The restart sweep leaves a device's session
   open until its agent reconnects, and the adopting process watches it to its
   end, so it records how the run ended and stays visible to failover meanwhile.
 
 `tests/e2e/hubrestart_test.go` stops a real hub with SIGTERM and with SIGKILL
 under a real agent and checks all of the above, for a plain project and for a
-feature. Helper subcommands dispatched to a device (`cloop reset` from the
+feature; `tests/e2e/hubrestart_proxies_test.go` does the same to a hub running
+the git proxy and the Kubernetes monitor, whose device workload pushes through
+the restored git session and reads a cluster through the restored monitor
+session after the restart. Helper subcommands dispatched to a device (`cloop reset` from the
 dashboard) are still not merged: they are not runs, and a reset expressed as a
 diff would not reset anything the diff cannot name.
 

@@ -196,6 +196,13 @@ tenant-supplied kubeconfig apply here too and cannot drift apart from the
 driver's: an `exec` credential plugin, an `auth-provider` block, and a
 credential that points at a file path on the control-plane host.
 
+**What it writes down (Task 20383).** Each session is also recorded in
+`proxy_sessions` — its id, the token's SHA-256, the cluster URL, the context, the
+policy, the lease and grant it stands on, the run, and which hub process serves
+it — so the process that adopts a run after this one stops can restore it. Never
+the token, and never the cluster credential: a restored session re-derives the
+kubeconfig from the lease's grant. See [a hub restarted mid-run](#a-hub-restarted-mid-run).
+
 ### What a leaked session token is worth
 
 | Leaked | Worth |
@@ -635,12 +642,50 @@ Sessions live in a `kubeguard.Registry`, which is memory, and they hold the
 cluster credential. **The process that mints must be the process that serves.** A
 separate `cloop kube-guard` would authenticate against an empty registry and
 refuse every request the hub had authorised. The alternative that would make one
-work is a shared session store, which means a kubeconfig at rest in a second
-place for a topology nobody has asked for.
+work is a shared session store holding what a session spends, which means a
+kubeconfig at rest in a second place for a topology nobody has asked for. The
+session *record* (Task 20383) holds none of that, and is for a different job:
+bringing a session back in the process that adopts its run.
 
 It follows that the monitor is a process-wide singleton and must start before any
 executor registers, for the same reason the git proxy does: a broker constructed
 before the monitor existed would route nothing.
+
+### A hub restarted mid-run
+
+A device keeps running its task while its hub restarts. Since Task 20382 the
+process that adopts the run takes its lease over; since Task 20383 it restores the
+monitor sessions that lease fed, so the workload's next `kubectl` call is served
+with the bearer token it already holds.
+
+A hub stopped gracefully suspends a recorded session — it stops serving it,
+writes no close row, and leaves the record open; a SIGKILL leaves the same. When
+the device's agent reconnects and the run is adopted, each open session the
+run's lease feeds is retired if it lapsed meanwhile, taken over by a conditional
+write on its holder (of two processes adopting the run, one gets it), and
+restored under its id and token hash with:
+
+- **its cluster credential re-derived from the grant** — the grant's kubeconfig,
+  minimised exactly as the monitor was given it at mint, refused if it no longer
+  names the cluster the session was pinned to;
+- **its policy narrowed, never widened** — the deployment floor intersected with
+  the grant as a fresh mint would compute it, intersected again with what the
+  session was given;
+- **its deadline held to this hub's session TTL** from when it was issued, and a
+  record no mint could have written — a deadline beyond the 12-hour ceiling, no
+  issue time — refused.
+
+A [`kubeguard.session_restored`](../reference/audit-events.md#kubeguard) row names
+the process that held it. A grant revoked or expired while no process held the
+lease refuses the lease, and its sessions are closed with the reason and the
+device scrubbed. A request made before the run was adopted, presenting a session
+whose holder stopped, waits up to 60 seconds for the restore instead of failing —
+kubectl's discovery burst shares one wait — see [the git
+proxy's](git-proxy.md#a-hub-restarted-mid-run) account of why it is not restored
+on demand, and gets a 401 if nothing restores it. A restore that failed for a
+reason that may pass is retried on the lease's keepalive and by the next request,
+unless another process has taken the session or the lease over since. The
+leader's janitor retires the records of sessions that closed or lapsed.
 
 ---
 
@@ -710,7 +755,8 @@ export to a SIEM.
 | `request_denied` | policy refused a request | **The row that matters.** The only place a sandbox's attempt to write to, or read outside, its granted scope is written down. Nothing else in cloop would record it. Alert on it. |
 | `request_allowed` | a request was forwarded | Sampled, and **off** in the shipped hub: a `kubectl get pods` is several requests and a watch is one that never ends, so a row per allowed request would bury the denials in discovery traffic. |
 | `session_minted` | a session was created | `Detail` carries the policy summary and the expiry. |
-| `session_closed` | a session was revoked, released or reaped | `Detail` carries the reason and the allowed/denied counters. |
+| `session_closed` | a session was revoked, released or reaped | `Detail` carries the reason and the allowed/denied counters. Also written for a session that ended while no hub process served it — not restored with its run, or retired once it lapsed. |
+| `session_restored` | the hub process that adopted a run restored its session (Task 20383) | `Detail` names the process that held it until then. |
 | `rejected` | refused *before* a session was identified, or a hub-side failure | No credential, an unknown token, an expired or revoked session, an unreachable cluster. Distinct from `request_denied`: nothing here got as far as a policy decision. |
 
 `OnEvent` runs on the request goroutine, so a slow sink delays a sandbox's API
@@ -719,7 +765,8 @@ call. The hub's own sink does a single insert for that reason.
 They land in the same hash-chained `audit_events` table as the credential broker,
 with `entity_type` `kubeguard`, the session id as the entity, and the kind
 prefixed: `kubeguard.request_denied`, `kubeguard.request_allowed`,
-`kubeguard.session_minted`, `kubeguard.session_closed`, `kubeguard.rejected`.
+`kubeguard.session_minted`, `kubeguard.session_closed`,
+`kubeguard.session_restored`, `kubeguard.rejected`.
 
 ```console
 $ cloop audit-log list --entity kubeguard --since 7d
@@ -812,9 +859,12 @@ start of each dispatch`** — the run outlived `session_minutes`. Raise it (ceil
 message differs from the unauthenticated one.
 
 **`no valid cloop Kubernetes session: the credential is missing, unknown, or has
-been revoked`** — the lease was released, the hub restarted (sessions are in
-memory and do not survive it), or nothing is sending the token at all. The three
-cases are deliberately not distinguished to the caller.
+been revoked`** — the lease was released, or nothing is sending the token at all,
+or the hub restarted and the session was not restored: its run was not adopted
+within 60 seconds of the request, or the session was refused when it was — its
+grant revoked or expired while the hub was down, or it lapsed. The cases are
+deliberately not distinguished to the caller; the session's
+`kubeguard.session_closed` row says which.
 
 **A lease fails with `executors.kube_guard is enabled but the Kubernetes access
 monitor is not running`** — the section is on and start-up failed. The hub

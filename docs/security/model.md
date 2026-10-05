@@ -754,6 +754,39 @@ across a restart as it does within one process. A host-process run's lease
 directory is still wiped by the startup sweep, and its lease is ended rather
 than taken over.
 
+**What the lease feeds (Task 20383).** A lease delivered through the git proxy
+or the Kubernetes monitor is spent as proxy sessions, and an App grant as
+installation tokens the hub keeps renewing; both lived only in the issuing
+process too. They are now recorded — `proxy_sessions` and `app_token_slots`
+(`migrations/0058_proxy_sessions.sql`) — with the token's SHA-256, the session's
+scope, the App token's mint scope, and the holder, and never a token or an
+upstream credential. The process that takes the lease over restores them: each
+session moves to it by a conditional write on its holder; its recorded scope is
+held to what the grant and the hub's proxy policy allow *now* (refused, not
+widened, when it cannot be proven within them); its upstream credential is
+re-derived from the lease's grants — a PAT or kubeconfig opened from the secret,
+an App token minted afresh at the recorded scope and never wider. A session
+whose grant was revoked or expired while no process held it is never restored:
+the lease is refused, and its sessions are closed with the reason and scrubbed
+from the device. A request presenting a session whose holder stopped is not
+served by a process that does not hold its lease — it waits, bounded, for the
+adoption, then gets a 401. An egress session resumes its byte counters, so its
+quota binds across the restart. `tests/security/sessionrecords_test.go` scans
+both tables after a realistic run for every credential it involved.
+
+The records are not signed: they carry the trust of the rest of the
+control-plane database, whose writer can already impersonate an enrolled device
+(its credential is stored as a hash). What the restore guarantees instead is that
+a record can only narrow a session, never send a credential somewhere new or
+widen what it reaches. Where a git credential is presented is this hub's
+configured upstream, never the record's (`TestARecordNamingAnotherUpstreamIsRefused`);
+an App token's installation and GitHub host come from the sealed secret, which a
+re-mint refuses to leave; its recorded repository ids are held to what the
+grant's allowlist admits in the installation before the first token is minted
+for them (`TestRestoredSlotIsHeldToItsGrantsRepositories`); a Kubernetes session
+stays pinned to the cluster its grant's kubeconfig names; deadlines are held to
+the configured session TTLs and quotas to the tighter of recorded and current.
+
 ### What it is worth when the agent is unreachable
 
 **Nothing, until the agent comes back.** The credential is on a machine the hub
@@ -2876,6 +2909,7 @@ scanners to one registry and one corpus — see
 | A hub that cannot rebuild a binding reports a failure naming the handle, never a success — and the doubt clears when that workload exits | `TestAHubThatCannotRebuildABindingSaysSo` |
 | The same holds for a remote agent: a rehydrated device is still a holder, so an offline revocation is queued for replay rather than never issued | `TestTheRemoteDriverAlsoRestoresBindingsOnRehydration` |
 | The bindings persisted to `executor_handles.secrets_json` carry no material, and "unrecorded" (`''`) never collapses into "recorded, none" (`'[]'`) | `TestPersistedBindingsCarryNoMaterialThroughSQLite` |
+| What a restarted hub restores a run's sessions from — `proxy_sessions` and `app_token_slots` — holds no PAT, App key or installation token, cluster credential, kubeconfig, session token or egress credential, verbatim or base64, after a realistic guarded and unguarded run; and each session's `token_sha256` is its token's hash | `TestSessionRecordsHoldNoCredential` (`sessionrecords_test.go`) |
 | No driver drops the wiring: every backend both records bindings at dispatch and restores them on adoption | `TestEveryDriverRehydratesItsLeaseBindings` |
 | The shared adoption rule itself — doubt is not absence, doubt is not scoped to one lease, `Bind` resolves it, `Release` clears it | `TestLeaseIndexAdoptOfAnUnrecordedRecordIsDoubtNotAbsence` and siblings (`pkg/executor`) |
 | A revoke mid-run really removes the credential: the running workload observes its token file disappear | `TestLoopbackRevokeScrubsMaterialMidRun` (`pkg/executor/remote`) |
@@ -3156,6 +3190,12 @@ not installed.
 | A session is pinned to one repository and one TTL, and unknown session, wrong token, revoked and expired are one indistinguishable error | `pkg/gitproxy: TestMintTTL`, `TestAuthenticateFailuresAreOneError`, `TestAuthenticateExpiryBoundary` |
 | The ref-pattern table in [the policy model](../git-interception-proxy.md#ref-patterns) is the matching the code performs, not a description of it | `pkg/gitproxy: TestPolicyAllowsRefMatchesTheDocumentedTable` |
 | A policy that permits nothing, an uncompilable pattern, or an over-long allowlist is refused at construction rather than silently denying everything | `pkg/gitproxy: TestPolicyValidateRefusesAPolicyThatPermitsNothing`, `TestPolicyValidateRejectsMalformedPatterns`, `TestPolicyValidateBoundsTheAllowlistLength` |
+| A session restored by a restarted hub serves the workload's original token under the same policy, and nothing else: a real `git` pushes an allowed branch through it and is refused `main` | `pkg/gitproxy: TestRestoredSessionServesTheSandboxAfterARestart`, `TestRestoreBringsBackTheSameSession` |
+| A record read back from the database is checked as strictly as a mint — a lapsed session, a malformed hash, a policy that permits nothing, credentials in the upstream, a deadline no mint could have set are refused | `pkg/gitproxy: TestRestoreRefusesWhatMintWouldRefuse`; `pkg/kubeguard: TestKubeRestoreRefusesWhatMintWouldRefuse` |
+| A restored session's recorded scope is held to what its grant and the hub allow now, its App token is minted at the recorded scope and never wider, a grant revoked while the hub was down restores nothing, and of two adopters one wins | `pkg/ui: TestAdoptedRunsSessionsAreRestored`, `TestSessionsOfARevokedGrantAreNotRestored`, `TestLosingTheSessionRaceRestoresNothing`; `pkg/secretbroker: TestRestoreDropsASlotWiderThanItsGrant` |
+| Nothing in a record decides where a credential goes or widens what it reaches: a git record naming another forge is refused before a token is minted for it; an App slot's recorded repository ids are held to what the grant admits in the installation; an egress session's quota and deadline are never wider than the hub's now | `pkg/ui: TestARecordNamingAnotherUpstreamIsRefused`; `pkg/secretbroker: TestRestoredSlotIsHeldToItsGrantsRepositories`; `pkg/egressbroker: TestEgressRestoreHoldsTheRecordToTodaysLimits` |
+| A retried restore leaves a session another process took over since to it, and hands over a lease another process took | `pkg/ui: TestARetryLeavesWhatAnotherProcessTookOver` |
+| A request presenting a stopped holder's session is never served by a process that does not hold its lease: it waits for the adoption, then gets a 401; a wrong token is refused at once; a burst on one session shares one wait | `pkg/ui: TestHeldRequestIsRefusedWithoutAdoption`, `TestAdoptedRunsSessionsAreRestored` |
 | End to end: a real `git push` to an allowed branch lands on a real forge — the control, without which every refusal below could be a proxy that refuses everything | `pkg/gitproxy: TestPushToAllowedBranchSucceeds` |
 | End to end: a real `git push` to `refs/heads/main` is refused, git reports it, no `push_allowed` is emitted, and the upstream ref does not move — and the identical push lands once `main` is added to the allowlist, so what stopped it was the policy and nothing else | `pkg/gitproxy: TestPushToProtectedBranchIsRefused` |
 | End to end: a delete of an *allowed* ref is still refused, and a fetch without `AllowFetch` is refused | `pkg/gitproxy: TestDeleteOfAllowedRefIsRefused`, `TestFetchRequiresAllowFetch` |

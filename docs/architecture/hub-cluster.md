@@ -253,9 +253,21 @@ An adopting member takes over what the owner held for the run besides its
 output (Task 20382): its secret lease — recorded in `secret_leases` under the
 member holding it, and named in the run's owner row — which the adopter keeps
 alive and releases, and its executor session, which it watches to the run's
-end. A cluster of one is the same: a hub restarted in its own directory adopts
-the runs its previous process left, by the same rows. See [a hub restarted
-mid-run](executors.md#the-project-comes-back-task-20339).
+end. And what that lease feeds (Task 20383): the run's git proxy and Kubernetes
+monitor sessions, recorded in `proxy_sessions` and restored in the adopter's
+registries under the ids and tokens the workload holds, with their upstream
+credentials re-derived from the lease; the GitHub App token slots recorded in
+`app_token_slots`, so the adopter renews the run's App tokens at the recorded
+scope; and the run's egress session, named in the owner row and restored with
+its byte counters from a member that is gone. An owner that is still alive when
+its run moves — its agent reconnected elsewhere — stops serving the lease's
+sessions once the adopter has taken the lease, and gives up its claim on them so
+requests are forwarded to the adopter; it keeps the run's egress session, which
+no member forwards.
+A cluster of one is the same: a hub restarted in its own directory adopts the
+runs its previous process left, by the same rows. See [a hub restarted
+mid-run](executors.md#the-project-comes-back-task-20339) and
+[the git proxy's account](git-proxy.md#a-hub-restarted-mid-run).
 
 Executor health probes are divided the same way: an agent is probed by the
 member holding its connection, every other executor by the leader, so an
@@ -359,9 +371,19 @@ readiness does not depend on leadership: every member serves.
 - **Host-executor runs end with their member**, as described
   [above](#runs-agents-and-failover). Use an isolating executor for runs that
   must survive a member.
-- **Credentials minted by a member that dies** — a git proxy or Kubernetes
-  monitor session, a CI relay session — are forgotten with it; a sandbox using
-  one fails its next request and its run is settled like any other.
+- **Credentials minted by a member that dies** are restored by the member that
+  adopts their run when they stand on the run's lease or belong to the run — its
+  git proxy, Kubernetes monitor and egress sessions (Task 20383). A request made
+  before the adoption waits up to 60 seconds for it. A restored git or
+  Kubernetes session is served by its adopter and a request reaching another
+  member is forwarded there, so the proxies' `advertise_url` has to reach some
+  live member — a load balancer, or one address a restarted process binds again.
+  Egress is not forwarded: a restored egress session is served by the adopter's
+  own listener, so the egress `advertise_addr` has to reach the adopter, which
+  on a single hub is the address the restarted process binds again. What is
+  still forgotten: a git workspace's pinned session, which stands on a lease
+  nothing takes over, and a CI relay session; a sandbox using one fails its next
+  request.
 - **Rate limits and connection caps are per member.** Five members admit five
   times the per-address request rate one would.
 - **`cloop serve`**, the standalone REST server, is not a member. It sweeps

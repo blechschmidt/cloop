@@ -714,11 +714,28 @@ dispatches a run is the one that issues its session — so in a cluster
 hosts no proxy (it dispatches nothing to a sandbox), and neither does a
 `cloop run` on a laptop or an executor agent on a device: a device's sandboxes
 use the proxy of the hub that dispatched to them. `cloop egress test` runs its
-own, for the length of one test. Sessions are never shared or persisted, so a run
-that outlives the process that issued its session — the hub restarted, or
-another cluster member adopted the run after the one that dispatched it died —
-keeps running without it: its proxy requests are refused (`407`) until it ends,
-and its next run is issued a session by whichever hub dispatches it.
+own, for the length of one test. A session is never shared between processes,
+and its token is never written down; since Task 20383 its *record* is — the
+token's SHA-256, the grant snapshot, the deadline and the byte counters, in
+`proxy_sessions`, checkpointed every minute — so a run that outlives the process
+that issued its session (the hub restarted, or another cluster member adopted
+the run after the one that dispatched it died) gets it back: the process that
+adopts the run re-reads the grant and restores the session under the same
+credential, counting on from the checkpointed totals against the same quota —
+never a wider one: a quota the grant leaves to the defaults above is the tighter
+of the one it was redeemed with and today's, and its deadline is held to the
+session ceiling from now. A hub stopped gracefully checkpoints and suspends each
+run's session rather than closing it; a SIGKILL can lose at most a minute of
+traffic from the count. A session whose grant was revoked or expired meanwhile is
+not restored, and its proxy requests are refused (`407`) from then on; one that
+could not be restored for a reason that may pass — the grant store unreadable —
+is tried again every 30 seconds and by its next request. A request made before
+the run is adopted waits up to 60 seconds for the restore. The restored session
+is served by the adopting process's proxy, at the address the run was given, so
+`advertise_addr` must reach that process: on a single hub it is the address the
+restarted process binds again. Nothing forwards egress between cluster members,
+so a session is restored only from a member that is gone; when a run moves
+between two live members, the old one keeps serving its egress session.
 
 **One session per run.** When a run is dispatched — a task run, a helper
 subcommand such as `cloop suggest`, a `cloop task reproduce` — and its project

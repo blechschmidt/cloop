@@ -429,15 +429,28 @@ at its hour rather than destroyed early. `CLOOP_GITHUB_TOKEN_EXPIRES_AT` keeps
 naming the first token's expiry for the same reason; git, which reads the file,
 is not affected.
 
-Nor does a refresh survive a restart of the hub process that minted the token.
-The run's lease does — the process that adopts the run takes it over, keeps it
-alive and releases it (Task 20382, see [a hub restarted
-mid-run](../architecture/executors.md#the-project-comes-back-task-20339)) — but
-the token was minted by the process that stopped, and what it would take to mint
-its successor at the same scope was in that process's memory. The token in the
-workload's files works until its hour ends, and git fails after that; a run
-that still needs GitHub then has to be stopped and started again, which leases
-it afresh.
+The refresh survives a restart of the hub process that minted the token (Task
+20383). The run's lease does — the process that adopts the run takes it over,
+keeps it alive and releases it (Task 20382, see [a hub restarted
+mid-run](../architecture/executors.md#the-project-comes-back-task-20339)) — and
+the token's slot comes with it: the scope the first token was minted at
+(installation, repository ids, the permissions asked for and the ones GitHub
+granted), the file it was delivered in, and when the token the workload holds
+expires are recorded beside the lease in `app_token_slots`, never the token
+itself. The new holder's keepalive then renews the file before that expiry
+exactly as the first process would have — a fresh token minted at the recorded
+scope, delivered over the same v17 `secret_refresh` frame — and the old token,
+which only the stopped process knew, lapses at its hour. A recorded scope wider
+than the grant allows now (an edited record, a narrowed grant) is not renewed:
+a denied `secret.renew` row says why, and the file keeps its token until its
+hour. Before the new holder mints the first token at a recorded scope, it also
+reads the installation's repositories once and keeps only the recorded ones the
+grant's allowlist still admits — the allowed `secret.renew` row notes any it
+dropped, and a record left with none is refused. If the slots cannot be read
+when the lease is taken over (the database busy), nothing is refused: the
+keepalive reads them again before a token is due. Under the git proxy the session presenting the token is restored the same
+way and mints its own at once; see [a hub restarted
+mid-run](../architecture/git-proxy.md#a-hub-restarted-mid-run).
 
 ### Limiting pushes to particular branches
 

@@ -535,7 +535,8 @@ coordination.
 
 No command exposes it, and for a *workspace* session the hub closes only on
 shutdown — so an operator ending one early either restarts the hub, which closes
-all of them, or waits for the TTL, which is enforced at authentication whether or
+every workspace session (a guarded one is suspended and restored with its run), or
+waits for the TTL, which is enforced at authentication whether or
 not the reaper has swept it. Revoking the underlying grant with
 `cloop secret revoke` stops the *next* dispatch from minting anything; it does
 not reach a session already minted.
@@ -752,8 +753,13 @@ when the sandbox's git connects. Sessions live in a `gitproxy.Registry`, which i
 memory — so **the process that mints must be the process that serves.** A
 separate `cloop git-proxy` would authenticate against an empty registry and
 refuse every request the hub had authorised. The alternative that would make one
-work is a shared session store, which means the forge credential at rest in a
-second place, for a topology nobody has asked for.
+work is a shared store of what a session presents, which means the forge
+credential at rest in a second place, for a topology nobody has asked for. What
+the hub does record (Task 20383) is a session's id, token hash and scope —
+nothing that authenticates and nothing presented upstream — so the hub process
+that adopts a run after this one stops can restore the run's sessions, re-deriving
+their credentials from the run's lease; see
+[a hub restarted mid-run](architecture/git-proxy.md#a-hub-restarted-mid-run).
 
 Two consequences follow from that:
 
