@@ -749,9 +749,13 @@ of these, delivered by a grant:
 
 Other providers are not checked, and neither is a host executor, which runs the
 harness under the hub's or the requesting user's own login. The provider is the
-one the sandbox will run: a device or a Pod is sent the project's state and never
-its `config.yaml`, so for them it is the provider the state records; the hub's
-own `CLOOP_PROVIDER` reaches no sandbox and counts for none. An executor that
+one the sandbox will run. A container on the hub's tree reads the project's
+`config.yaml`, then its state, and none of the hub's environment. A device or a
+Pod reads the `config.yaml` its repository commits, if it commits one, and
+otherwise the provider in the state the hub seeds it with — the hub's own choice
+for the project: its `config.yaml`, the hub's `CLOOP_PROVIDER`, then its state.
+Where the hub cannot tell which of the two a device will read, it does not refuse
+on the guess. An executor that
 brings its own credential — a device signed in to `claude` as its agent user, an
 image with a key baked in — is listed in the hub's
 [`executors.harness_credential_exempt`](../reference/configuration.md#executors-that-bring-their-own-claude-credential).

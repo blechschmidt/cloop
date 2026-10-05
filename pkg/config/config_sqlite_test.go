@@ -174,3 +174,40 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// WrittenYAML is the project's configuration as written: the file, else the
+// mirror, and never the environment overlay Load applies (Task 20379).
+func TestWrittenYAML_FileThenMirrorWithoutTheEnvironment(t *testing.T) {
+	dir := tempDir(t)
+	if data, ok := WrittenYAML(dir); ok || data != nil {
+		t.Fatalf("a directory with no configuration reported %q", data)
+	}
+	initStateDB(t, dir)
+	if _, ok := WrittenYAML(dir); ok {
+		t.Fatal("an empty state.db reported configuration")
+	}
+
+	cfg := Default()
+	cfg.Provider = "mock"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	t.Setenv("CLOOP_PROVIDER", "ollama")
+	data, ok := WrittenYAML(dir)
+	if !ok || !contains(string(data), "provider: mock") || contains(string(data), "provider: ollama") {
+		t.Fatalf("file: ok %v\n%s", ok, data)
+	}
+
+	// The mirror answers once the file is gone, as Load's fallback does, and
+	// Explicit agrees with both answers.
+	if err := os.Remove(ConfigPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	data, ok = WrittenYAML(dir)
+	if !ok || !contains(string(data), "provider: mock") {
+		t.Fatalf("mirror: ok %v\n%s", ok, data)
+	}
+	if !Explicit(dir) {
+		t.Error("Explicit disagrees: the mirror is configuration")
+	}
+}

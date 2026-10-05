@@ -16,6 +16,7 @@ import (
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -185,7 +186,7 @@ func setProvider(t *testing.T, dir, provider string) {
 }
 
 // remoteExec is a stub for an executor that works on a tree of its own — a
-// Pod, a device — and so is sent the project's state and never its config.
+// Pod, a device — fetched, with the project's state seeded into it.
 func remoteExec(id, kind string) *harnessExec {
 	e := newHarnessExec(id, kind, executor.IsolationRemote)
 	e.shares = false
@@ -203,8 +204,8 @@ var (
 	hostExec    = func() *harnessExec { return newHarnessExec("local", executor.KindLocalProcess, executor.IsolationNone) }
 )
 
-// setStateProvider records provider in a project's state, which is what a
-// device or a Pod reads.
+// setStateProvider records provider in a project's state, which decides where
+// the project has no config.
 func setStateProvider(t *testing.T, dir, provider string) {
 	t.Helper()
 	st, err := state.Init(dir, "provider "+provider, 0)
@@ -615,28 +616,100 @@ func TestClearanceSettlesOncePerExecutor(t *testing.T) {
 func TestPreflightJudgesTheProviderTheSandboxRuns(t *testing.T) {
 	newHarnessFixture(t)
 
+	sandboxes := []*harnessExec{containerExec(), deviceExec(), podExec()}
+	judge := func(dir, want string, applies bool, why string) {
+		t.Helper()
+		for _, ex := range sandboxes {
+			if rep := harnessPreflight(dir, ex, harnessWho{}, "", true); rep.Provider != want || rep.Applies != applies {
+				t.Errorf("%s, %s: provider %q applies %v, want %q applies %v", why, ex.kind, rep.Provider, rep.Applies, want, applies)
+			}
+		}
+	}
+
+	// A config that names mock and a state that names nothing — the eval
+	// stack's project (deploy/eval/seed-project.sh). A container reads the
+	// config from the hub's tree; a device reads it committed in the tree it
+	// fetched, or as the provider its seed carries, the hub's own resolution.
 	configMock := t.TempDir()
 	setProvider(t, configMock, "mock")
-	if rep := harnessPreflight(configMock, containerExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
-		t.Errorf("config says mock, container: provider %q applies %v", rep.Provider, rep.Applies)
-	}
-	if rep := harnessPreflight(configMock, deviceExec(), harnessWho{}, "", true); !rep.Applies || rep.Provider != "claudecode" {
-		t.Errorf("config says mock, device (which never sees the config): provider %q applies %v", rep.Provider, rep.Applies)
-	}
+	judge(configMock, "mock", false, "config says mock")
 
+	// The config outranks the state (preferProjectChoice), and the seed
+	// carries the config's choice, not the state's.
+	configClaude := t.TempDir()
+	setStateProvider(t, configClaude, "mock")
+	setProvider(t, configClaude, "claudecode")
+	judge(configClaude, "claudecode", true, "config says claudecode, state mock")
+
+	// Without a config the state decides, and the seed carries it.
 	stateMock := t.TempDir()
 	setStateProvider(t, stateMock, "mock")
-	setProvider(t, stateMock, "claudecode")
-	if rep := harnessPreflight(stateMock, deviceExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
-		t.Errorf("state says mock, device: provider %q applies %v", rep.Provider, rep.Applies)
-	}
-	if rep := harnessPreflight(stateMock, containerExec(), harnessWho{}, "", true); !rep.Applies || rep.Provider != "claudecode" {
-		t.Errorf("state says mock, config claudecode, container: provider %q applies %v", rep.Provider, rep.Applies)
-	}
+	judge(stateMock, "mock", false, "state says mock")
 
+	// The hub's CLOOP_PROVIDER: a container on the hub's tree gets none of
+	// the hub's environment, while a device's seed carries the hub's
+	// resolution, variable included.
+	stateClaude := t.TempDir()
+	setStateProvider(t, stateClaude, "claudecode")
 	t.Setenv("CLOOP_PROVIDER", "mock")
-	if rep := harnessPreflight(t.TempDir(), deviceExec(), harnessWho{}, "", true); !rep.Applies {
-		t.Error("the hub's own CLOOP_PROVIDER, which no sandbox receives, switched the check off")
+	if rep := harnessPreflight(stateClaude, containerExec(), harnessWho{}, "", true); !rep.Applies || rep.Provider != "claudecode" {
+		t.Errorf("hub CLOOP_PROVIDER=mock, container: provider %q applies %v", rep.Provider, rep.Applies)
+	}
+	if rep := harnessPreflight(stateClaude, deviceExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
+		t.Errorf("hub CLOOP_PROVIDER=mock, device: provider %q applies %v", rep.Provider, rep.Applies)
+	}
+	// Where a config.yaml says otherwise, a device reads the file if the
+	// repository commits it and the seed if not. The hub cannot tell which,
+	// and refuses on neither guess.
+	if rep := harnessPreflight(configClaude, deviceExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
+		t.Errorf("hub CLOOP_PROVIDER=mock, config claudecode, device: provider %q applies %v", rep.Provider, rep.Applies)
+	}
+	t.Setenv("CLOOP_PROVIDER", "claudecode")
+	if rep := harnessPreflight(configMock, deviceExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
+		t.Errorf("hub CLOOP_PROVIDER=claudecode, config mock, device: provider %q applies %v", rep.Provider, rep.Applies)
+	}
+	if rep := harnessPreflight(configMock, containerExec(), harnessWho{}, "", true); rep.Applies || rep.Provider != "mock" {
+		t.Errorf("hub CLOOP_PROVIDER=claudecode, config mock, container: provider %q applies %v", rep.Provider, rep.Applies)
+	}
+}
+
+// The seed is what makes a device's provider the hub's resolution: this pins
+// the two together, so the preflight cannot drift from what projectSeedFor
+// sends.
+func TestPreflightJudgesADeviceByTheProviderItsSeedCarries(t *testing.T) {
+	newHarnessFixture(t)
+	for _, tc := range []struct {
+		name   string
+		config string // "" for no config.yaml
+		state  string
+	}{
+		{"config mock, empty state", "mock", ""},
+		{"config claudecode, state mock", "claudecode", "mock"},
+		{"no config, state mock", "", "mock"},
+		{"no config, state anthropic", "", "anthropic"},
+		{"no config, state empty", "", ""},
+	} {
+		dir := t.TempDir()
+		setStateProvider(t, dir, tc.state)
+		if tc.config != "" {
+			setProvider(t, dir, tc.config)
+		}
+		seed, err := projectSeedFor(dir)
+		if err != nil || len(seed) == 0 {
+			t.Fatalf("%s: projectSeedFor: %d bytes, %v", tc.name, len(seed), err)
+		}
+		// Placed as a device places it, in a tree that commits no config.
+		device := t.TempDir()
+		if err := projectseed.Write(device, seed); err != nil {
+			t.Fatalf("%s: place the seed: %v", tc.name, err)
+		}
+		sent, err := state.LoadLite(device)
+		if err != nil {
+			t.Fatalf("%s: read the seeded state: %v", tc.name, err)
+		}
+		if rep := harnessPreflight(dir, deviceExec(), harnessWho{}, "", true); rep.Provider != sent.Provider {
+			t.Errorf("%s: preflight judged %q, the seed carries %q", tc.name, rep.Provider, sent.Provider)
+		}
 	}
 }
 

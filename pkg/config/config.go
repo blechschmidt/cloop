@@ -2718,6 +2718,29 @@ func Explicit(workdir string) bool {
 	return loadFromSQLite(workdir) != ""
 }
 
+// WrittenYAML returns workdir's own configuration as written — the bytes of
+// its .cloop/config.yaml, else of the SQLite mirror Load falls back to —
+// without Default()'s values or the environment overlay Load applies, and
+// whether there is any (Explicit's answer). A file that cannot be read is
+// configuration that says nothing.
+//
+// It is for judging a process that reads this project's configuration in an
+// environment other than the caller's: a sandbox on the project's tree gets
+// none of its control plane's CLOOP_PROVIDER or API keys (Task 20379).
+func WrittenYAML(workdir string) ([]byte, bool) {
+	data, err := os.ReadFile(ConfigPath(workdir))
+	switch {
+	case err == nil:
+		return data, true
+	case !os.IsNotExist(err):
+		return nil, true
+	}
+	if blob := loadFromSQLite(workdir); blob != "" {
+		return []byte(blob), true
+	}
+	return nil, false
+}
+
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
 // Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 // ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER,

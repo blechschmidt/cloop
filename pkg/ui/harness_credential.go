@@ -191,30 +191,46 @@ func leaseRequester(workDir string, ex executor.Executor, runID string, withhold
 // sandbox will choose (cmd/run.go, preferProjectChoice), judged from what
 // reaches the sandbox rather than from the hub's own view of the project.
 //
-// The hub's CLOOP_PROVIDER never counts: a sandbox gets none of the hub's
-// environment. The project's config.yaml counts only where the executor works
-// on the hub's own tree — the container driver's bind mount — because a device
-// or a Pod is sent the project's state and never its config. Then the provider
-// the state records; then the default.
+// A sandbox on the hub's own tree — the container driver's bind mount — reads
+// the project's configuration as written and none of the hub's environment:
+// its config, then the provider its state records, then the default.
+//
+// A sandbox on a fetched tree — a device, a Pod — reads the config.yaml the
+// repository commits, if it commits one, and otherwise the provider its seed
+// carries, which is the hub's own resolution: projectSeedFor writes
+// resolveProviderName into the seeded state (Task 20339), the hub's
+// CLOOP_PROVIDER included. Without that variable the two agree. With it they
+// can differ where the project has a config.yaml, and which one the sandbox
+// reads turns on whether that file is committed, which the hub does not know —
+// so a provider that needs no credential wins: a refusal has to be right, and
+// a run let through on a guess fails as it did before there was a check.
 func sandboxProviderName(workDir string, ex executor.Executor) string {
+	doc, explicit := readProjectConfigFile(workDir)
+	written := strings.TrimSpace(doc.Provider)
+	if written == "" {
+		written = claudecode.ProviderName // Default()'s, for a config that names none
+	}
 	if ex != nil && ex.Capabilities().SharesHostFilesystem {
-		if doc, ok := readProjectConfigFile(workDir); ok {
-			if p := strings.TrimSpace(doc.Provider); p != "" {
+		if explicit {
+			return written
+		}
+		if st, err := state.LoadLite(workDir); err == nil && st != nil {
+			if p := strings.TrimSpace(st.Provider); p != "" {
 				return p
 			}
-			// An explicit config without a provider is Default()'s.
-			return claudecode.ProviderName
+		}
+		return claudecode.ProviderName
+	}
+	seeded := resolveProviderName(workDir)
+	if written != seeded && len(harnessKeySets(written)) == 0 {
+		if _, err := os.Stat(config.ConfigPath(workDir)); err == nil {
+			return written // the file, should the repository commit it
 		}
 	}
-	if st, err := state.LoadLite(workDir); err == nil && st != nil {
-		if p := strings.TrimSpace(st.Provider); p != "" {
-			return p
-		}
-	}
-	return claudecode.ProviderName
+	return seeded
 }
 
-// projectConfigFile is the part of a project's config.yaml the preflight
+// projectConfigFile is the part of a project's configuration the preflight
 // reads, as written — without the environment overlay config.Load applies,
 // which is the hub's environment and reaches no sandbox.
 type projectConfigFile struct {
@@ -224,12 +240,13 @@ type projectConfigFile struct {
 	} `yaml:"anthropic"`
 }
 
-// readProjectConfigFile parses workDir's .cloop/config.yaml, reporting whether
-// there is one to read.
+// readProjectConfigFile parses workDir's own configuration — its
+// .cloop/config.yaml, else the database mirror config.Load falls back to —
+// reporting whether there is any to read (config.Explicit).
 func readProjectConfigFile(workDir string) (projectConfigFile, bool) {
 	var doc projectConfigFile
-	data, err := os.ReadFile(config.ConfigPath(workDir))
-	if err != nil {
+	data, ok := config.WrittenYAML(workDir)
+	if !ok {
 		return doc, false
 	}
 	if yaml.Unmarshal(data, &doc) != nil {

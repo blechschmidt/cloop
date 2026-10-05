@@ -293,9 +293,11 @@ parent project), narrowed by each grant's `env_keys` and by the project's
 credential the provider reads (`harness_credential_missing`), or when the only
 grant that does ends within ten minutes (`harness_credential_expiring`) — or
 the lease itself does, since a lease ends with the first of its grants to expire,
-whatever kind. The provider is judged as the sandbox will choose it, from the
-project's state on a device or a Pod, which are never sent its config, and never
-from the hub's own environment. The refusal names the executor and the remedy.
+whatever kind. The provider is judged as the sandbox will choose it: a container
+from the project's own `config.yaml` and state, never the hub's environment; a
+device or a Pod from the provider its seeded state carries — the hub's resolution
+for the project — or a `config.yaml` its repository commits, refusing on neither
+where the two could differ. The refusal names the executor and the remedy.
 `tests/arch` pins that every dispatch path builds the preflight and that the
 dispatch primitives settle it before they lease. Host executors, providers other
 than `claudecode` and `anthropic`, and executors the hub lists in
