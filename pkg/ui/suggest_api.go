@@ -155,6 +155,15 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	count := suggestCount(req.Count, request != "")
 	workDir := s.resolveWorkDir(r)
 
+	// A brainstorm and a plan both call the provider inside the project's
+	// executor, so a sandbox with no Claude login is refused here, with the
+	// 409 the dialog opens on, rather than minutes later as a job that failed
+	// (Task 20379). Before the job is announced.
+	suggestClear := s.harnessClearanceFor(r, workDir)
+	if s.refuseWithoutHarnessCredential(w, suggestClear) {
+		return
+	}
+
 	s.suggestMu.Lock()
 	if j := s.suggestJobs[workDir]; j != nil && j.running {
 		s.suggestMu.Unlock()
@@ -195,7 +204,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		// Hard timeout: nothing else cancels this goroutine, and a hung
 		// sub-binary would otherwise leave the job running forever — every
 		// later generate for this project refused with 409.
-		out, runErr := runCloopSubcommandFor(context.Background(), exe, workDir, suggestSubprocessTimeout, claudeEnv, args...)
+		out, runErr := runCloopSubcommandFor(context.Background(), exe, workDir, suggestSubprocessTimeout, claudeEnv, suggestClear, args...)
 		if runErr != nil {
 			msg := strings.TrimSpace(string(out))
 			if msg == "" {

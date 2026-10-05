@@ -70,7 +70,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-227 endpoints, by the permission each one requires:
+229 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -79,14 +79,14 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 15 |
 | `executor.manage` | 28 |
 | `executor.read` | 3 |
-| `project.read` | 51 |
+| `project.read` | 52 |
 | `project.share` | 3 |
 | `project.write` | 12 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 10 |
+| `secret.own` | 11 |
 | `secret.request` | 4 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
@@ -231,6 +231,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/projects/{idx}/features/{slug}` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/features/{slug}/pr` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/features/{slug}/pr/refresh` | `project.write` | project-index |
+| GET | `/api/projects/{idx}/harness-credential` | `project.read` | project-index |
+| POST | `/api/projects/{idx}/harness-credential` | `secret.own` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
 | GET | `/api/projects/{idx}/members` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/members` | `project.share` | project-index |

@@ -12,6 +12,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -46,17 +47,25 @@ func projectHarness(workDir string) string {
 	return harnessForProvider(resolveProviderName(workDir))
 }
 
-// resolveProviderName applies the same precedence as buildProjectProvider:
-// the project's config, then its persisted state, then the default.
+// resolveProviderName applies the precedence `cloop run` applies
+// (cmd/run.go, preferProjectChoice): an explicit config — the project's
+// config.yaml or its database mirror, or CLOOP_PROVIDER — then the provider
+// recorded in the project's state, then the default.
 //
-// Kept in step with that function deliberately — if the two disagreed, the
-// placement decision would be made about a provider other than the one the run
-// goes on to use, and the refusal (or the absence of one) would be about the
-// wrong binary.
+// Kept in step with the run deliberately — if the two disagreed, the placement
+// decision and the harness-credential preflight (Task 20379) would be made
+// about a provider other than the one the run goes on to use, and the refusal
+// (or the absence of one) would be about the wrong binary. Until Task 20379
+// this read config.Load's provider unconditionally, and config.Load fills in
+// Default()'s claudecode when there is no file — so a project that recorded
+// another provider in its state was treated as claudecode here while its run,
+// since Task 20339, used the provider it had chosen.
 func resolveProviderName(workDir string) string {
-	if cfg, err := config.Load(workDir); err == nil {
-		if name := strings.TrimSpace(cfg.Provider); name != "" {
-			return name
+	if config.Explicit(workDir) || os.Getenv("CLOOP_PROVIDER") != "" {
+		if cfg, err := config.Load(workDir); err == nil {
+			if name := strings.TrimSpace(cfg.Provider); name != "" {
+				return name
+			}
 		}
 	}
 	if st, err := state.LoadLite(workDir); err == nil && st != nil {

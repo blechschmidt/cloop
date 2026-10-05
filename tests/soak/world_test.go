@@ -365,6 +365,14 @@ func (w *world) buildTenants(t *testing.T) {
 			if _, err := state.Init(pr.dir, "soak project "+pname, 0); err != nil {
 				t.Fatalf("init %s: %v", pr.dir, err)
 			}
+			// The image's cloop is a stand-in that calls no model, so the
+			// project names a provider that needs no Claude credential: the
+			// hub refuses a sandboxed claudecode dispatch without one (Task
+			// 20379), and granting one per project would be noise here.
+			if err := os.WriteFile(filepath.Join(pr.dir, ".cloop", "config.yaml"),
+				[]byte("provider: mock\n"), 0o600); err != nil {
+				t.Fatalf("config %s: %v", pr.dir, err)
+			}
 			// Seed the canary so a dispatch that races ahead of plantCanary
 			// still prints something attributable rather than MISSING-CANARY.
 			if err := os.WriteFile(filepath.Join(pr.dir, canaryFile),

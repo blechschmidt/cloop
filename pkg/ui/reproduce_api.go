@@ -64,6 +64,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
@@ -205,6 +206,24 @@ func (s *Server) handleTaskReproduce(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 
+	// The agent re-run needs the Claude credential the original had (Task
+	// 20379), and is refused here, before a slot is taken: the runner settles
+	// the same check, but taskreplay records a runner's refusal as an
+	// INCONCLUSIVE verdict rather than returning it, so this is the one place a
+	// 409 can still reach the dashboard. Under the provider the task recorded.
+	workDir := s.resolveWorkDir(r)
+	if prov, perr := taskreplay.ReadProvenance(workDir, id); perr == nil && prov != nil {
+		if ex, eerr := resolveIsolatingExecutor(workDir); eerr == nil {
+			reproClear := newHarnessClearance(workDir, s.harnessWhoFor(r), strings.TrimSpace(prov.Provider))
+			if _, err := reproClear.settle(ex, workDir); err != nil {
+				if refused, ok := asHarnessRefusal(err); ok {
+					writeHarnessRefusal(w, refused)
+					return
+				}
+			}
+		}
+	}
+
 	if !s.admitQuota(w, r, quota.ResConcurrentReproductions, 1) {
 		return
 	}
@@ -219,7 +238,7 @@ func (s *Server) handleTaskReproduce(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rep, err := taskreplay.Reproduce(ctx, s.resolveWorkDir(r), id, taskreplay.ReproduceOptions{
-		Runner:    NewReproduceRunner(s.selfExe()),
+		Runner:    newReproduceRunnerAs(s.selfExe(), s.harnessWhoFor(r)),
 		Timeout:   reproduceHTTPTimeout,
 		SkipTests: req.SkipTests,
 	})

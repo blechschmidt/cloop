@@ -624,6 +624,21 @@ type ExecutorsConfig struct {
 	// it may have.
 	FeatureBundleMB int `yaml:"feature_bundle_mb,omitempty"`
 
+	// HarnessCredentialExempt names executors that supply their harness's
+	// Claude credential themselves, so the hub does not refuse to dispatch to
+	// them for want of one (Task 20379): a device whose agent user is signed in
+	// to claude, an image with a key in its environment, a cloud role behind
+	// Bedrock or Vertex. Every other executor that isolates from the host is
+	// refused a claudecode or anthropic run whose lease would carry no
+	// credential, because such a run reaches claude logged out.
+	//
+	// Read from the hub's own configuration only, like MinAgentBuild: a
+	// project's config.yaml is authored by whoever can push to it, and must not
+	// be able to waive a check that protects the fleet's operators from
+	// half-started sandboxes. An exemption waives the check and nothing else —
+	// the grants a run holds are delivered exactly as before.
+	HarnessCredentialExempt []string `yaml:"harness_credential_exempt,omitempty"`
+
 	// Limits is the hub-wide ceiling on what any single workload may be given,
 	// whichever executor runs it.
 	//

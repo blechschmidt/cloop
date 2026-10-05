@@ -1731,6 +1731,13 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		}, "")
 		return
 	}
+	// The sandbox would get no Claude login (Task 20379). A 409 with its own
+	// code, so the dashboard opens the dialog that grants one rather than
+	// showing a remediation the user would have to act on elsewhere.
+	if refused, ok := asHarnessRefusal(err); ok {
+		writeHarnessRefusal(w, refused)
+		return
+	}
 
 	// A project's .cloop/sandbox.yaml asked for something the deployment does
 	// not offer. These are 409s for the same reason the policy refusal is: the

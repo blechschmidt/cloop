@@ -864,7 +864,7 @@ func TestEgressSessionEndsWithItsRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { executor.DefaultRegistry.Unbind(project) })
-		_, handle, err := startWorkloadAs(nil, "bob", project, []string{"cloop", "run"}, nil)
+		_, handle, err := startWorkloadAs(nil, nil, "bob", project, []string{"cloop", "run"}, nil)
 		if err != nil {
 			t.Fatalf("start: %v", err)
 		}
@@ -928,7 +928,7 @@ func TestEgressSessionEndsWithItsRun(t *testing.T) {
 	stub.startErr = errors.New("engine unavailable")
 	defer func() { stub.startErr = nil }()
 	before := len(svc.broker.Sessions())
-	if _, _, err := startWorkloadAs(nil, "", refused, []string{"cloop", "run"}, nil); err == nil {
+	if _, _, err := startWorkloadAs(nil, nil, "", refused, []string{"cloop", "run"}, nil); err == nil {
 		t.Fatal("the start should have failed")
 	}
 	if after := len(svc.broker.Sessions()); after != before {

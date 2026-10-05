@@ -374,8 +374,11 @@ func uiSpec(workDir string, argv []string, labels map[string]string) executor.Sp
 // It returns the executor alongside the handle because the caller needs the
 // same instance to Stream and Status the handle — re-resolving later could
 // pick a different executor if bindings changed mid-run.
+//
+// It settles no harness preflight, so it is for tests and for workloads that
+// run no harness; tests/arch keeps production dispatches off it.
 func startWorkload(workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
-	return startWorkloadAs(nil, "", workDir, argv, labels)
+	return startWorkloadAs(nil, nil, "", workDir, argv, labels)
 }
 
 // startWorkloadAs is startWorkload with the requesting identity attached, so
@@ -401,7 +404,13 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 // — is a failure at start. The named results are what let one deferred call
 // see all of them: a return path added later is counted without anyone having
 // to remember to.
-func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir string, argv []string, labels map[string]string) (_ executor.Executor, _ executor.Handle, err error) {
+//
+// clear is the dispatch's harness-credential preflight (Task 20379), settled
+// here against the executor actually resolved — the guarantee that no harness
+// reaches a sandbox that would get no Claude login. A handler may have settled
+// it earlier to answer before claiming anything; the answer is reused unless
+// the binding moved in between. Nil only for workloads that run no harness.
+func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClearance, identity, workDir string, argv []string, labels map[string]string) (_ executor.Executor, _ executor.Handle, err error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
@@ -409,6 +418,12 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	}
 	defer func() { countRunStart(ex, err) }()
 	if err := checkFeatureExecutor(workDir, ex); err != nil {
+		return nil, executor.Handle{}, err
+	}
+	// Before anything is minted or acquired: a refused run leaves no run id, no
+	// lease row and no egress session behind.
+	withhold, err := clear.settle(ex, workDir)
+	if err != nil {
 		return nil, executor.Handle{}, err
 	}
 
@@ -442,7 +457,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	// would pull the credential files out from under a process that has not
 	// read them yet, so cleanup is deferred to a watcher that waits for the
 	// handle to reach a terminal state.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID)
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID, withhold)
 	spec, err := applyLease(base, ex, lease)
 	if err != nil {
 		lease.Close()
@@ -568,6 +583,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	}
 	egress.bindHandle(ex, handle.ID)
 	egressHandedOff = true
+	// Whom the run was started for, which its automatic resume acts for.
+	clear.started()
 	go wipeLeaseOnExit(ex, handle.ID, lease, egress)
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
 	if len(spec.ProjectSeed) > 0 {
@@ -691,20 +708,28 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 	if len(extraEnv) > 0 {
 		envFor = func(executor.Executor) []string { return extraEnv }
 	}
-	return runWorkloadEnvFor(ctx, workDir, argv, envFor, labels)
+	return runWorkloadEnvFor(ctx, workDir, argv, envFor, nil, labels)
 }
 
 // runWorkloadEnvFor is runWorkloadEnv with the extra environment decided from
 // the resolved executor rather than fixed up front. A per-user Claude config
 // directory is a path on the hub's filesystem, so whether it may be passed at
 // all depends on which backend the workload lands on (Task 20241).
-func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, labels map[string]string) ([]byte, error) {
+//
+// clear is settled here exactly as startWorkloadAs settles it: a helper
+// subcommand that calls the provider (`cloop suggest`, `cloop do`) needs the
+// harness credential as much as a run does. Nil for one that calls none.
+func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, clear *harnessClearance, labels map[string]string) ([]byte, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
 	if err := checkFeatureExecutor(workDir, ex); err != nil {
+		return nil, err
+	}
+	withhold, err := clear.settle(ex, workDir)
+	if err != nil {
 		return nil, err
 	}
 	var extraEnv []string
@@ -716,7 +741,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// task.dispatch will reference it: these are helper subcommands
 	// (`cloop suggest`, `cloop do`), not task executions.
 	runID := artifact.NewRunID()
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID)
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID, withhold)
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)

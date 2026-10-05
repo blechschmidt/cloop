@@ -96,6 +96,10 @@ func TestE2EEgressProxyInAContainer(t *testing.T) {
 		"HOME="+home,
 		"CLOOP_HOME="+filepath.Join(home, ".cloop"),
 		"CLOOP_UI_TOKEN="+token,
+		// A secret broker, so the project can be granted the Claude
+		// credential a sandboxed claudecode run is refused without (Task
+		// 20379). The stand-in harness ignores it.
+		"CLOOP_SECRET_KEY=e2e-egress-container",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+gitconfig,
 		"NO_COLOR=1",
@@ -137,6 +141,7 @@ func TestE2EEgressProxyInAContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(hubDir, "init", "--provider", "mock", "--skip-clarify", "hub")
+	grantHarnessCredential(t, run, hubDir, proj)
 	f, err := os.OpenFile(filepath.Join(hubDir, ".cloop", "config.yaml"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)

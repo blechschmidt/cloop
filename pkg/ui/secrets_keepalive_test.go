@@ -183,7 +183,7 @@ func TestAcquiredLeaseIsKeptAliveUntilClosed(t *testing.T) {
 	ex := stubExec{id: "sandbox-keepalive", caps: executor.Capabilities{
 		SupportsSecretFiles: true, SecretFilesFromHostPath: false,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_keepalive_acquire")
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_keepalive_acquire", nil)
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}

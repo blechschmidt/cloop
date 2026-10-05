@@ -877,6 +877,16 @@ func (s *Server) routeTable() []routeSpec {
 		// whoever is about to grant from it, and a project-pinned binding never
 		// satisfies a global request.
 		{Pattern: "GET /api/projects/{idx}/repositories/available", Handler: s.handleGitHubAppRepositories, Perm: secGrant, Scope: scopeProjectIdx},
+		// The Claude credential a sandboxed run would authenticate with (Task
+		// 20379). Reading it is project.read, like the repositories list: it
+		// names a grant and key names, never a value, and the chip on the
+		// Overview is for everyone who can start the run it describes. Granting
+		// is secret.own here, the floor POST /api/grants has, narrowed in the
+		// handler exactly as that route narrows: a shared secret also needs
+		// secret.grant on this project, a personal one may be granted by its
+		// owner alone. See harness_credential_api.go.
+		{Pattern: "GET /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredential, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredentialGrant, Perm: secOwn, Scope: scopeProjectIdx},
 
 		// ── Executor fleet ───────────────────────────────────────────
 		// Registered without a method prefix so the handler's own method

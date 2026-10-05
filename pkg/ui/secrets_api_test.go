@@ -248,7 +248,7 @@ func TestSecretsAPINeverDisclosesLeaseMaterial(t *testing.T) {
 	lease := acquireSecretLease(dir, "/srv/leaseproj", stubExec{
 		id:   "edge-lease",
 		caps: executor.Capabilities{SupportsSecretFiles: true, SecretFilesFromHostPath: true},
-	}, "run_test")
+	}, "run_test", nil)
 	if lease == nil {
 		t.Fatal("acquireSecretLease returned nil — the fixture did not produce a lease, so this test would be vacuous")
 	}

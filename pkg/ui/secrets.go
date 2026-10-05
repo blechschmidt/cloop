@@ -538,7 +538,11 @@ func (sl *secretLease) Close() {
 // Without it a secret.lease row names only an executor and a project, and
 // answering "which leases did this task hold" means reconstructing a time
 // window and hoping no other run of the same project overlapped it.
-func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, runID string) *secretLease {
+//
+// withhold is what the dispatch's harness preflight decided this run must not
+// be handed — another user's personal Claude credential (Task 20379). Nil for
+// a dispatch that settled none.
+func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, runID string, withhold map[string]string) *secretLease {
 	executorID := ""
 	if ex != nil {
 		executorID = ex.ID()
@@ -559,11 +563,9 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 	// A feature holds its parent project's grants (features.go): it is the
 	// same project's code on another branch, and a grant made to the project
 	// is a grant to its work, wherever in the project that work happens.
-	lease, err := broker.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID: executorID,
-		ProjectID:  policyProjectPath(workDir),
-		RunID:      runID,
-	}, "ui")
+	// leaseRequester is shared with the harness preflight, which has to
+	// predict this lease exactly.
+	lease, err := broker.LeaseFor(ctx, leaseRequester(workDir, ex, runID, withhold), "ui")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ui: lease secrets for %s: %v\n", workDir, err)
 		closeDB()

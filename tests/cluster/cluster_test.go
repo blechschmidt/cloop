@@ -385,6 +385,10 @@ func (w *world) env() []string {
 		"CLOOP_HOME=" + w.cloopH,
 		"PATH=" + w.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"CLOOP_UI_TOKEN=" + token,
+		// A secret broker, shared by every hub through the one database, so
+		// the project can hold the Claude credential a sandboxed claudecode
+		// run is refused without (Task 20379).
+		"CLOOP_SECRET_KEY=e2e-hub-cluster",
 		"NO_COLOR=1",
 	}
 }
@@ -404,6 +408,15 @@ func (w *world) initProjects() {
 	w.run(w.hubDir, "init", "--provider", "mock", "--skip-clarify", "hub cluster control plane")
 	w.run(w.projDir, "init", "--provider", "claudecode", "--skip-clarify", "hub cluster e2e project")
 	w.addTask("Write hello.txt")
+	// The project runs claudecode on an enrolled device, which the hub
+	// dispatches only with a Claude credential granted to it (Task 20379). The
+	// stub claude ignores the token, which is made of parts so no literal here
+	// has the shape a secret scanner refuses a push over.
+	token := "sk-" + "ant-oat01-" + strings.Repeat("e2eCluster", 4) + "Qx7_Lm2-Pz9"
+	w.run(w.hubDir, "secret", "mint", "e2e-claude-credential", "--kind", "env",
+		"--value", `{"CLAUDE_CODE_OAUTH_TOKEN":"`+token+`"}`)
+	w.run(w.hubDir, "secret", "grant", "e2e-claude-credential", "--to", "project:"+w.projDir,
+		"--env-keys", "CLAUDE_CODE_OAUTH_TOKEN", "--ttl", "2h")
 }
 
 func (w *world) addTask(title string) {

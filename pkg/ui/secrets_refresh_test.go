@@ -145,7 +145,7 @@ func TestKeepaliveRefreshesAHostWorkloadsTokenFile(t *testing.T) {
 	}
 	t.Cleanup(func() { executor.DefaultRegistry.Unregister(execID) })
 
-	lease := acquireSecretLease(rh.dir, "/srv/refresh-proj", ex, "run_refresh_host")
+	lease := acquireSecretLease(rh.dir, "/srv/refresh-proj", ex, "run_refresh_host", nil)
 	if lease == nil || lease.mount == nil {
 		t.Fatal("no hub-materialised lease was issued for the host executor")
 	}
@@ -314,7 +314,7 @@ func TestKeepaliveJournalsAHolderThatCannotTakeARefresh(t *testing.T) {
 	if _, err := state.Init(project, "old device project", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
-	lease := acquireSecretLease(rh.dir, project, ex, "run_old_device")
+	lease := acquireSecretLease(rh.dir, project, ex, "run_old_device", nil)
 	if lease == nil || lease.delivery == nil {
 		t.Fatal("no delivered lease was issued")
 	}
@@ -384,7 +384,7 @@ func TestKeepaliveGivesUpOnAHolderThatKeepsFailing(t *testing.T) {
 	if _, err := state.Init(project, "full disk project", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
-	lease := acquireSecretLease(rh.dir, project, ex, "run_full_disk")
+	lease := acquireSecretLease(rh.dir, project, ex, "run_full_disk", nil)
 	if lease == nil || lease.delivery == nil {
 		t.Fatal("no delivered lease was issued")
 	}
@@ -445,7 +445,7 @@ func TestAppTokenDeadlineFollowsADeliveredRefresh(t *testing.T) {
 	}
 	t.Cleanup(func() { executor.DefaultRegistry.Unregister(execID) })
 
-	lease := acquireSecretLease(rh.dir, t.TempDir(), ex, "run_deadline")
+	lease := acquireSecretLease(rh.dir, t.TempDir(), ex, "run_deadline", nil)
 	if lease == nil {
 		t.Fatal("no lease was issued")
 	}
@@ -490,7 +490,7 @@ func TestKeepaliveRefusedRefreshEndsAccessAndSaysWhy(t *testing.T) {
 	if _, err := state.Init(project, "revoked grant project", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}
-	lease := acquireSecretLease(rh.dir, project, ex, "run_revoked")
+	lease := acquireSecretLease(rh.dir, project, ex, "run_revoked", nil)
 	if lease == nil {
 		t.Fatal("no lease was issued")
 	}

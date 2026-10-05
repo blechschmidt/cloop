@@ -75,26 +75,33 @@ func runCloopSubcommand(ctx context.Context, exe, workDir string, timeout time.D
 // entries for the child, for handlers that must pass a credential without
 // exposing it on the argv (Task 20188).
 func runCloopSubcommandEnv(ctx context.Context, exe, workDir string, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
-	var envFor func(executor.Executor) []string
-	if len(extraEnv) > 0 {
-		envFor = func(executor.Executor) []string { return extraEnv }
+	return runCloopSubcommandFor(ctx, exe, workDir, timeout, fixedEnv(extraEnv), nil, args...)
+}
+
+// fixedEnv is an environment resolver that answers the same for every
+// executor, or nil when there is nothing to add.
+func fixedEnv(extraEnv []string) func(executor.Executor) []string {
+	if len(extraEnv) == 0 {
+		return nil
 	}
-	return runCloopSubcommandFor(ctx, exe, workDir, timeout, envFor, args...)
+	return func(executor.Executor) []string { return extraEnv }
 }
 
 // runCloopSubcommandFor is runCloopSubcommandEnv with the child's extra
 // environment decided from the resolved executor. Handlers that invoke a
 // provider on a user's behalf — `cloop do`, `cloop suggest` — pass the
 // caller's Claude scope through here so the tokens are spent on their own
-// subscription rather than the hub operator's (Task 20241).
-func runCloopSubcommandFor(ctx context.Context, exe, workDir string, timeout time.Duration, envFor func(executor.Executor) []string, args ...string) ([]byte, error) {
+// subscription rather than the hub operator's (Task 20241), and their harness
+// preflight, so a sandbox with no Claude login is refused before it starts
+// (Task 20379). A subcommand that calls no provider passes a nil clear.
+func runCloopSubcommandFor(ctx context.Context, exe, workDir string, timeout time.Duration, envFor func(executor.Executor) []string, clear *harnessClearance, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, runErr := runWorkloadEnvFor(cctx, workDir, append([]string{exe}, args...), envFor,
+	out, runErr := runWorkloadEnvFor(cctx, workDir, append([]string{exe}, args...), envFor, clear,
 		map[string]string{"handler": "subcommand"})
 
 	// Distinguish ctx-driven kills from actual workload failures so the

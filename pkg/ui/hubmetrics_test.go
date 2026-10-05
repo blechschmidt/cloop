@@ -198,6 +198,9 @@ func value(body, name string) float64 {
 func TestMetricsEndToEnd(t *testing.T) {
 	idp := newUIFakeIdP(t)
 	dir := setupProjectDir(t, cloopGoal, nil)
+	// The stub runs nothing, so the project needs no Claude credential on the
+	// isolating executor it is bound to below (Task 20379).
+	setProvider(t, dir, "mock")
 	srv := New(dir, 0, "")
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {

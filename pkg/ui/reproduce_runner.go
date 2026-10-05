@@ -80,12 +80,21 @@ type reproduceRunner struct {
 	// selfExe is the cloop binary the sandbox runs. Injected so tests do not
 	// need a real binary on PATH.
 	selfExe string
+	// who is whom a reproduction acts for, for the harness preflight (Task
+	// 20379). Zero from the CLI, where every grant is the operator's.
+	who harnessWho
 }
 
 // NewReproduceRunner returns a taskreplay.SandboxRunner backed by the hub's
 // executor fleet. exe is the cloop binary to invoke inside the sandbox.
 func NewReproduceRunner(exe string) taskreplay.SandboxRunner {
 	return &reproduceRunner{selfExe: exe}
+}
+
+// newReproduceRunnerAs is NewReproduceRunner acting for who, which the hub
+// resolves from the request that asked for the reproduction.
+func newReproduceRunnerAs(exe string, who harnessWho) taskreplay.SandboxRunner {
+	return &reproduceRunner{selfExe: exe, who: who}
 }
 
 // RunReproduction re-executes the task in a fresh isolating sandbox.
@@ -107,6 +116,9 @@ func (r *reproduceRunner) RunReproduction(ctx context.Context, req taskreplay.Ru
 		Prompt:      req.Provenance.Prompt,
 		Timeout:     req.Timeout,
 		WantCommits: true,
+		// The agent runs again, under the provider it ran with the first time.
+		Harness:  true,
+		Provider: strings.TrimSpace(req.Provenance.Provider),
 	})
 }
 
@@ -155,6 +167,11 @@ type runSpec struct {
 	// WantCommits asks for bundle-mode write-back.
 	WantCommits bool
 	Timeout     time.Duration
+	// Harness says the sandbox runs an agent, which needs the Claude
+	// credential a run does (Task 20379); a test-only verification does not.
+	Harness bool
+	// Provider is the provider the agent runs under; "" for the project's.
+	Provider string
 }
 
 // run assembles the spec, dispatches it, and recovers the outcome.
@@ -170,8 +187,21 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	// not the original's: it holds its own leases, and filing them under the run
 	// being reproduced would put credentials the original never held into that
 	// run's trail (Task 20282).
+	// An agent re-run needs the same credential the original did. Settled
+	// before the run id and the lease, so a refused reproduction leaves
+	// neither behind. A test-only verification runs no agent and is checked
+	// for nothing, but its lease withholds a colleague's personal credential
+	// exactly as a run's does.
+	harnessClear := newLeaseClearance(rs.ProjectDir, r.who)
+	if rs.Harness {
+		harnessClear = newHarnessClearance(rs.ProjectDir, r.who, rs.Provider)
+	}
+	withhold, err := harnessClear.settle(ex, rs.ProjectDir)
+	if err != nil {
+		return nil, err
+	}
 	runID := artifact.NewRunID()
-	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, runID)
+	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, runID, withhold)
 	defer lease.Close()
 
 	base := uiSpec(rs.ProjectDir, rs.Argv, map[string]string{

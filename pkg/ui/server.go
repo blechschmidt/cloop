@@ -3541,6 +3541,17 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A sandbox that would get no Claude login (Task 20379). After the
+	// audience, which says whether this person may use the executor at all —
+	// granting a credential for one they may not use would help nobody — and
+	// before the quota gates take a slot, for the audience's reason: it is an
+	// answer waiting will not change. startWorkloadAs settles the same
+	// clearance again and is what actually guarantees it.
+	harnessClear := s.harnessClearanceFor(r, s.resolveWorkDir(r))
+	if s.refuseWithoutHarnessCredential(w, harnessClear) {
+		return
+	}
+
 	quotaID := s.quotaIdentity(r)
 	if !s.admitSpend(w, r) {
 		return
@@ -3587,7 +3598,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// could finish and have its row skipped as pre-existing.
 	s.openSpendCursor(workDir, payer)
 
-	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), payer,
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
 		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
 	if err != nil {
 		// 409 when strict no-host-execution mode refused the dispatch, so
@@ -5228,7 +5239,11 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	// upload handler doesn't keep the STT subprocess alive after the client
 	// gives up, plus a hard timeout in case the STT provider hangs.
 	exe := s.selfExe()
-	out, cmdErr := runCloopSubcommandEnv(r.Context(), exe, "", voiceSubprocessTimeout, listenEnv, listenArgs...)
+	// A lease clearance, not a harness one: transcription calls the hub's
+	// speech-to-text provider, not Claude, but its lease still withholds other
+	// people's personal Claude credentials (Task 20379).
+	out, cmdErr := runCloopSubcommandFor(r.Context(), exe, "", voiceSubprocessTimeout, fixedEnv(listenEnv),
+		s.leaseClearanceFor(r, ""), listenArgs...)
 	output := strings.TrimSpace(string(out))
 
 	if cmdErr != nil {
@@ -5307,6 +5322,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	msg := strings.TrimSpace(req.Message)
 	chatWorkDir := s.resolveWorkDir(r)
 
+	// `cloop do` calls the provider to read the message, so on an isolating
+	// executor it needs the harness credential a run does (Task 20379). Before
+	// the message is stored: a refused request leaves no half of a
+	// conversation behind.
+	chatClear := s.harnessClearanceFor(r, chatWorkDir)
+	if s.refuseWithoutHarnessCredential(w, chatClear) {
+		return
+	}
+
 	// Store user message.
 	s.appendChatMessage(chatWorkDir, ChatMessage{
 		Role:      "user",
@@ -5319,7 +5343,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// a hard timeout so a wedged provider call can't pin this goroutine.
 	exe := s.selfExe()
 	out, cmdErr := runCloopSubcommandFor(r.Context(), exe, chatWorkDir, chatSubprocessTimeout,
-		s.claudeEnvResolver(r), "do", msg)
+		s.claudeEnvResolver(r), chatClear, "do", msg)
 	output := strings.TrimSpace(string(out))
 
 	ok := cmdErr == nil
@@ -5530,7 +5554,9 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exe := s.selfExe()
-	out, err := runCloopSubcommand(r.Context(), exe, s.resolveWorkDir(r), resetSubprocessTimeout, "reset")
+	resetDir := s.resolveWorkDir(r)
+	out, err := runCloopSubcommandFor(r.Context(), exe, resetDir, resetSubprocessTimeout, nil,
+		s.leaseClearanceFor(r, resetDir), "reset")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -6679,6 +6705,13 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 
+	// The grid's Run button meets the same Claude-credential check as the
+	// Overview's (Task 20379), before the run is claimed.
+	harnessClear := s.harnessClearanceFor(r, entry.Path)
+	if s.refuseWithoutHarnessCredential(w, harnessClear) {
+		return
+	}
+
 	exe := s.selfExe()
 	args := []string{"run"}
 	if req.PM {
@@ -6692,7 +6725,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.openSpendCursor(entry.Path, payer)
-	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), payer,
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
 		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
@@ -6912,8 +6945,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	// did not.
 	initCtx, cancelInit := context.WithTimeout(context.WithoutCancel(r.Context()), initSubprocessTimeout)
 	defer cancelInit()
-	if out, initErr := runWorkload(initCtx, abs, append([]string{exe}, args...),
-		map[string]string{"handler": "project-new"}); initErr != nil {
+	// Init calls no model; its lease clearance only withholds other people's
+	// personal Claude credentials (Task 20379).
+	if out, initErr := runWorkloadEnvFor(initCtx, abs, append([]string{exe}, args...), nil,
+		s.leaseClearanceFor(r, abs), map[string]string{"handler": "project-new"}); initErr != nil {
 		releaseProject()
 		if errors.Is(initErr, executor.ErrHostExecutionDenied) {
 			jsonWorkloadErr(w, initErr)
@@ -6957,6 +6992,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Optionally start a run immediately.
+	var autorunRefused map[string]any
 	if req.AutoRun {
 		runArgs := []string{"run"}
 		if req.PMMode {
@@ -6967,10 +7003,21 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s skipped: %v\n", abs, claimErr)
 		} else {
 			s.openSpendCursor(abs, autoPayer)
-			runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), autoPayer,
+			// A project created on an isolating executor with no Claude
+			// credential among its grants is refused here like any other run
+			// (Task 20379); the refusal is logged and returned beside the new
+			// project, which itself was created, so the dashboard can open the
+			// dialog that grants one.
+			runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), s.harnessClearanceFor(r, abs), autoPayer,
 				abs, append([]string{exe}, runArgs...),
 				map[string]string{"handler": "project-new-autorun"})
 			streamCtx, cancelStream := context.WithCancel(context.Background())
+			if refused, ok := asHarnessRefusal(startErr); ok {
+				autorunRefused = map[string]any{
+					"code": refused.Code, "error": refused.Error(), "remediation": refused.Remediation(),
+					"executor_id": refused.ExecutorID, "executor_kind": refused.ExecutorKind,
+				}
+			}
 			if startErr != nil {
 				// Non-fatal: the project was created successfully, only the
 				// optional immediate run failed. Surfacing it in the server log
@@ -7013,7 +7060,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonOK(w, map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx})
+	resp := map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx}
+	if autorunRefused != nil {
+		resp["autorun_refused"] = autorunRefused
+	}
+	jsonOK(w, resp)
 }
 
 // handleProjectHidden serves POST /api/projects/{idx}/hidden, recording

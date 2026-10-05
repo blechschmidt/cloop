@@ -213,6 +213,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 		return fmt.Errorf("executors.feature_bundle_mb: %d is outside 0..%d (0 uses the default of 32)",
 			e.FeatureBundleMB, MaxFeatureBundleMB)
 	}
+	if err := validateHarnessCredentialExempt(e.HarnessCredentialExempt); err != nil {
+		return err
+	}
 	if err := ValidateExecutorLimits(e.Limits); err != nil {
 		return err
 	}
@@ -921,4 +924,25 @@ func clampContainerExecutor(c *ContainerExecutorConfig) []string {
 		}
 	}
 	return changed
+}
+
+// maxHarnessCredentialExempt bounds executors.harness_credential_exempt. A
+// list longer than any fleet's self-credentialed devices is a list that has
+// stopped naming exceptions.
+const maxHarnessCredentialExempt = 256
+
+// validateHarnessCredentialExempt refuses an exemption list a hub could not
+// honour as written: an empty or whitespace-bearing entry matches no executor
+// ID, so the operator would believe a device exempt that is still refused.
+func validateHarnessCredentialExempt(ids []string) error {
+	if len(ids) > maxHarnessCredentialExempt {
+		return fmt.Errorf("executors.harness_credential_exempt: %d entries, at most %d are allowed",
+			len(ids), maxHarnessCredentialExempt)
+	}
+	for i, id := range ids {
+		if id == "" || len(id) > 128 || strings.ContainsAny(id, " \t\r\n") {
+			return fmt.Errorf("executors.harness_credential_exempt[%d]: %q is not an executor ID", i, id)
+		}
+	}
+	return nil
 }

@@ -475,7 +475,7 @@ func (s *Server) handleProjectFeaturePR(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	out, status, err := s.openFeaturePR(context.WithoutCancel(r.Context()), dir, req, s.auditActor(r))
+	out, status, err := s.openFeaturePR(context.WithoutCancel(r.Context()), dir, req, s.auditActor(r), s.harnessWhoFor(r))
 	if err != nil {
 		if status == 0 {
 			jsonWorkloadErr(w, err)
@@ -495,7 +495,7 @@ func (s *Server) handleProjectFeaturePR(w http.ResponseWriter, r *http.Request) 
 // openFeaturePR dispatches `cloop feature pr` for the feature at dir. A
 // non-zero status is a refusal decided here; status 0 with an error is a
 // dispatch failure for jsonWorkloadErr.
-func (s *Server) openFeaturePR(ctx context.Context, dir string, req featurePRRequest, actor string) (*featurePROutcome, int, error) {
+func (s *Server) openFeaturePR(ctx context.Context, dir string, req featurePRRequest, actor string, who harnessWho) (*featurePROutcome, int, error) {
 	if featureOpsOnHub(policyProjectPath(dir)) {
 		// From the branch the run's work was written back to, on the hub,
 		// with the project's own grant (Task 20367).
@@ -516,7 +516,10 @@ func (s *Server) openFeaturePR(ctx context.Context, dir string, req featurePRReq
 	var out featurePROutcome
 	// Dispatched in the feature's own directory, so it resolves the same
 	// executor and leases the same credentials the feature's runs do.
-	raw, err := runCloopSubcommandFor(ctx, s.selfExe(), dir, featurePRTimeout, s.featureTokenEnv(), args...)
+	// A lease clearance: opening a pull request calls GitHub, not a model, but
+	// its lease withholds other people's personal Claude credentials (Task 20379).
+	raw, err := runCloopSubcommandFor(ctx, s.selfExe(), dir, featurePRTimeout, s.featureTokenEnv(),
+		newLeaseClearance(dir, who), args...)
 	if perr := clijson.Unmarshal(raw, &out); perr != nil {
 		if err != nil {
 			return nil, 0, err
@@ -607,7 +610,7 @@ func (s *Server) handleProjectFeaturePRRefresh(w http.ResponseWriter, r *http.Re
 		}
 	} else {
 		raw, err := runCloopSubcommandFor(context.WithoutCancel(r.Context()), s.selfExe(), dir, featureRefreshTimout, s.featureTokenEnv(),
-			"feature", "pr-status", "--json")
+			s.leaseClearanceFor(r, dir), "feature", "pr-status", "--json")
 		if perr := clijson.Unmarshal(raw, &out); perr != nil {
 			if err != nil {
 				jsonWorkloadErr(w, err)
@@ -636,7 +639,9 @@ func (s *Server) dispatchFeatureCommand(w http.ResponseWriter, r *http.Request, 
 	// is being created or removed must not kill git halfway through, which
 	// would leave a half-made feature for the next attempt to trip over. The
 	// timeout still bounds it.
-	raw, err := runCloopSubcommandFor(context.WithoutCancel(r.Context()), s.selfExe(), dir, timeout, envFor, args...)
+	// A lease clearance: a feature command is git and GitHub, not a model.
+	raw, err := runCloopSubcommandFor(context.WithoutCancel(r.Context()), s.selfExe(), dir, timeout, envFor,
+		s.leaseClearanceFor(r, dir), args...)
 	// The subcommand exits non-zero on every refusal and still prints a
 	// framed result saying why, so the frame is read before the exit status.
 	if perr := clijson.Unmarshal(raw, out); perr == nil {
@@ -769,7 +774,7 @@ func (s *Server) maybeAutoOpenFeaturePR(workDir string) {
 		defer recoverGoroutine("automatic feature pull request")
 		ctx, cancel := context.WithTimeout(context.Background(), featurePRTimeout+time.Minute)
 		defer cancel()
-		out, _, err := s.openFeaturePR(ctx, workDir, featurePRRequest{}, "hub")
+		out, _, err := s.openFeaturePR(ctx, workDir, featurePRRequest{}, "hub", s.harnessWhoForNobody())
 		if err != nil || out == nil || !out.OK || out.Result == nil || out.Result.PR == nil {
 			reason := "unknown error"
 			switch {

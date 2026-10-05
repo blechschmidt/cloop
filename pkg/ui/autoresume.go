@@ -205,7 +205,12 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 	s.openSpendCursor(workDir, payer)
 
 	exe := s.selfExe()
-	ex, handle, err := startWorkloadAs(nil, payer, workDir,
+	// The resume acts for whoever started the run it resumes, as recorded at
+	// that run's dispatch, so a run on its starter's personal Claude credential
+	// resumes on it (Task 20379). A refusal leaves the project paused; the
+	// sweep logs it and tries again on its next tick, by when someone may have
+	// granted one.
+	ex, handle, err := startWorkloadAs(nil, newHarnessClearance(workDir, s.harnessWhoForResume(workDir), ""), payer, workDir,
 		[]string{exe, "run"}, map[string]string{"handler": "auto_resume"})
 	if err != nil {
 		s.releaseRunClaim(workDir)

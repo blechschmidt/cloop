@@ -172,6 +172,10 @@ func newFeatureScene(t *testing.T, bin, hubConfig string) *featureScene {
 		t.Fatal(err)
 	}
 	s.cloop(s.hubDir, "init", "--provider", "mock", "--skip-clarify", "hub")
+	// The project runs claudecode in a sandbox, which the hub refuses to
+	// dispatch without a Claude credential granted to it (Task 20379). One on
+	// the parent is what its features run on; the stub claude ignores it.
+	grantHarnessCredential(t, s.cloop, s.hubDir, s.proj)
 	// The forge the pull request is opened on, and the hub's own token for
 	// it: a hub without sign-in hands that to a feature it publishes itself.
 	s.forge = &fakeForge{token: "e2e-forge-token", prs: map[int]map[string]any{}, next: 70}
