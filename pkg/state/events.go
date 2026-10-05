@@ -129,3 +129,64 @@ func ListEvents(workDir string, offset, limit int) ([]EventRow, int, error) {
 	defer db.Close()
 	return db.ListEvents(offset, limit)
 }
+
+// EventHistory reads one page of the project's journal — its steps and events
+// as one feed, newest first — through a single database handle (Task 20384).
+// It never loads the project: a page reads the rows it shows and no others.
+// A project with no state database is statedb.ErrProjectNotFound.
+func EventHistory(workDir string, q statedb.HistoryQuery) (statedb.HistoryPage, error) {
+	var page statedb.HistoryPage
+	err := withJournal(workDir, func(db *statedb.DB) (err error) {
+		page, err = db.History(q)
+		return err
+	})
+	return page, err
+}
+
+// EventHistoryTop returns the newest step and event in the project's journal.
+func EventHistoryTop(workDir string) (statedb.HistoryCursor, error) {
+	var top statedb.HistoryCursor
+	err := withJournal(workDir, func(db *statedb.DB) (err error) {
+		top, err = db.HistoryTop()
+		return err
+	})
+	return top, err
+}
+
+// EventHistoryRow returns one journal row whole — step n when isStep, else
+// event n — or ok=false when there is no such row.
+func EventHistoryRow(workDir string, isStep bool, n int64) (row statedb.HistoryRow, ok bool, err error) {
+	err = withJournal(workDir, func(db *statedb.DB) error {
+		if isStep {
+			st, err := db.HistoryStep(n)
+			row.Step, ok = st, st != nil
+			return err
+		}
+		ev, err := db.HistoryEvent(n)
+		row.Event, ok = ev, ev != nil
+		return err
+	})
+	return row, ok, err
+}
+
+// withJournal opens the project's state database once for fn. Unlike Load it
+// neither migrates a legacy state.json nor creates a database that is not
+// there: a read of the journal has no business doing either.
+func withJournal(workDir string, fn func(*statedb.DB) error) error {
+	if workDir == "" {
+		return statedb.ErrProjectNotFound
+	}
+	dbPath := effectiveDBPath(ActiveDir(workDir))
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return statedb.UserErrorf(statedb.ErrProjectNotFound, "no cloop project found")
+		}
+		return err
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return fn(db)
+}
