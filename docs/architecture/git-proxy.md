@@ -629,7 +629,11 @@ deadline, and the janitor takes the material back — a revocation still lands
 within one lease period. A workload the executor reports finished is not
 extended, and the keepalive stops when its holder closes the lease. Each
 extension is a `secret.renew` row reading *"extended in place while its run is
-live"*.
+live"*. The keepalive moves with the run: a lease is recorded in `secret_leases`
+under the hub process holding it, and when that process stops mid-run the one
+that adopts the run takes the lease over and keeps it alive from there (Task
+20382; a `secret.renew` row reading *"taken over by the hub process that adopted
+its run"*).
 
 Before the keepalive (Task 20349), nothing on the dispatch path renewed a lease,
 so every run's lease lapsed a quarter of an hour in: its lease sessions were
@@ -687,7 +691,10 @@ the new token travels to the executor holding the file — see
 
 A hub restart drops every session of both kinds — the registry is memory — and a
 workload that survives the restart on an edge device keeps a credential that no
-longer authenticates. Its next git operation gets a 401.
+longer authenticates. Its next git operation gets a 401. The run's lease is
+taken over by the process that adopts the run (Task 20382), but a session is an
+entry in the stopped process's registry, not part of the lease, and is not
+restored with it.
 
 ---
 

@@ -510,8 +510,9 @@ three-hour task is a fifteen-minute *label* on three hours of access.
 
 `POST /api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to
 every executor holding the lease; a TTL janitor sweeps live sessions once a
-minute; and cordon/drain scrubs everything a device is holding. All three go
-through one path, so they cannot drift apart.
+minute — on the cluster leader, also the leases a stopped hub process left
+behind (Task 20382); and cordon/drain scrubs everything a device is holding.
+All three go through one path, so they cannot drift apart.
 
 Revocation is a capability of the *executor*, expressed as the optional
 `executor.Revoker` interface. A driver that does not implement it is refused
@@ -734,6 +735,24 @@ whose row predates the column, so at most one upgrade's worth — but it is the
 case in which the system has to admit it does not know. Rotation at the source
 remains the only action that does not depend on machinery, and the lease TTL
 still expires the grant.
+
+**The lease itself (Task 20382).** Reaching the workload is half of it; the
+other half is that something still holds the lease — keeps it alive while the
+run is, sweeps it when it lapses, releases it when the run ends. That used to
+live only in the memory of the process that issued it, so after a restart a
+device's run kept its credentials and no hub held them. A lease is now recorded
+in `secret_leases` (`migrations/0057_secret_leases.sql`) — lease, grant and
+executor ids, the requester, the kinds; never a value — under the hub process
+holding it, and the run's owner row names it. The process that adopts the run
+takes the lease over with a conditional write, so two adopters cannot both hold
+it: from then on it extends the lease, lists it, scrubs the run's output of it
+and releases it, and the process that lost it can neither extend nor release it
+(`ErrLeaseMoved`). A lease that lapsed, or whose grant was revoked, while no hub
+held it is scrubbed from the device instead of taken over, and the leader's
+janitor sweeps one whose holder never came back once it lapses — the TTL binds
+across a restart as it does within one process. A host-process run's lease
+directory is still wiped by the startup sweep, and its lease is ended rather
+than taken over.
 
 ### What it is worth when the agent is unreachable
 
@@ -3151,6 +3170,7 @@ not installed.
 | A pinned session holds the lease behind its upstream token until the session ends, and releases it exactly once — a `github_app` token is not destroyed while a session still presents it — while a session nothing used is closed when the driver hands it back | `pkg/gitproxy: TestOnEndRunsOnceWhenTheSessionLeaves`, `pkg/executor/gitproxycreds: TestInnerLeaseOutlivesTheDelivery`, `TestUnusedSessionIsClosedOnRelease`, `TestReapedSessionReleasesTheInnerLease` |
 | In a Pod the workspace fetch presents the session id the proxy looks up, from the run's Secret rather than the Pod spec, and the lease credential helper is executable but never writable | `pkg/executor/kubernetes: TestStart_WorkspaceSecretCarriesTheSessionUsername`, `TestBuildPod_CredentialHelperIsExecutable` |
 | A running workload's lease is extended in place only while every grant it holds is still valid, so a revocation still lands within one lease period, and the janitor sweeps at the extended deadline rather than the issued one | `pkg/secretbroker: TestExtendRefusesARevokedGrant`, `TestExtendIsClampedToTheGrant`, `pkg/ui: TestLeaseKeepaliveOutlivesTheIssuedTTL`, `TestLeaseKeepaliveStopsOnARevokedGrant` |
+| A run's lease outlives the hub process that issued it: the process that adopts the run takes it over (one adopter only), keeps it alive and releases it; one that lapsed or lost its grant meanwhile is scrubbed instead, one nobody took over is swept once it lapses, and the process that lost a lease can neither extend nor release it | `pkg/secretbroker: TestALeaseIsTakenOverWithItsRun`, `TestRestoreRefusesWhatExtendWould`, `pkg/ui: TestAdoptedRunTakesOverItsLease`, `TestAdoptedRunWhoseLeaseLapsedIsScrubbed`, `TestJanitorSweepsALeaseItsHolderLeftBehind`, `tests/e2e: TestE2EDeviceRunSurvivesHubRestart` |
 | A virtual executor's workspace is leased as the virtual executor — never under its device's grants | `pkg/executor/gitcreds: TestVirtualExecutorLeasesItsOwnGrant`, `TestVirtualExecutorDoesNotBorrowTheDevicesGrant`, `pkg/executor/remote: TestVirtualDispatchLeasesAsTheVirtualExecutor` |
 
 ### Result write-back — `writeback_bundle_test.go`
@@ -3322,18 +3342,23 @@ upgrade wide and closes when that workload exits; until then, an operator
 decommissioning a device should rotate its credentials at the source rather than
 treat the drain as proof.
 
-**Output redaction is a known-value match, and the hub half does not survive a
-restart.** It removes the material a lease actually delivered, so a credential
-the workload *derives* — a session cookie exchanged using the PAT, a token
-minted from the kubeconfig — is not covered. And the hub-side half is rebuilt
-from the dispatched `Spec`, which is stored with its leased variables replaced by
-a placeholder: after a hub restart, a reattached workload streams through a
-driver that can no longer name its credentials. The in-sandbox half still
-applies, because that process still holds its own lease, so what is exposed is
-narrowly the output a workload produced outside the provider path during the
-window between a restart and the task ending. Closing it properly would mean
-persisting plaintext to survive a restart, which is the thing the store exists
-not to do.
+**Output redaction is a known-value match, and the hub half is only partly
+rebuilt after a restart.** It removes the material a lease actually delivered,
+so a credential the workload *derives* — a session cookie exchanged using the
+PAT, a token minted from the kubeconfig — is not covered. And the hub-side half
+is built from the dispatched `Spec`, which is stored with its leased variables
+replaced by a placeholder, so a workload reattached after a hub restart streams
+through a driver that cannot name its credentials. Since Task 20382 the process
+that adopts the run re-derives them from the grants of the lease it takes over
+and hands them to the driver (`executor.HandleRedactor`) — the delivered keys of
+env secrets and the token of a personal access token — but not a GitHub App
+token the stopped process minted (the pattern scrubbers recognise its shape), not
+a kubeconfig's contents, and nothing for a run whose lease could not be taken
+over. The in-sandbox half still applies, because that process still holds its
+own lease, so what is exposed is narrowly that remainder of the output a
+workload produced outside the provider path between a restart and the task
+ending. Closing it entirely would mean persisting plaintext to survive a
+restart, which is the thing the store exists not to do.
 
 **DEKs live in process memory.** The suite asserts that a plaintext DEK never
 reaches disk or a log. It cannot assert that the kernel never paged one out of

@@ -1645,10 +1645,37 @@ the executor and the upgrade. The rule that is enforced runs the other way: an
 agent never sends the frame on a session below v13, because an older hub has no
 handler for it.
 
-**Not yet covered.** A hub that restarts while a remote run is in flight no
-longer holds the dispatch record the merge needs, and does not merge that run's
-result. Helper subcommands dispatched to a device (`cloop reset` from the
-dashboard) are not merged either: they are not runs, and a reset expressed as a
+**A hub restarted mid-run (Task 20382).** A hub that restarts while a device
+is running a seeded task — :8888 restarts nightly — no longer loses the run. The
+dispatch record the merge needs is the run's owner row (`hub_owners`, Task
+20354), which carries the executor, the handle, the provenance a result is
+merged under and, for a feature, what its returned work lands against; it
+survives a graceful stop and a SIGKILL alike. The new process rehydrates the
+handle, the agent reconnects and offers it back, and the process adopts the run:
+it streams it, merges its result once — one `project_result` row, its cost rows
+booked once — lands a feature's commits fast-forward or keeps them on
+`cloop/returned/…`, and settles it. What the dispatching process held only in
+memory is taken over too:
+
+- **The run's secret lease.** Leases are recorded in `secret_leases` (ids and
+  names, never values) under the hub process holding them, and the owner row
+  names the run's lease. The adopting process takes it over — the same lease id,
+  extended from then on by its keepalive, listed in its Secrets panel, released
+  by it when the run ends — and re-derives from the lease's grants the values it
+  scrubs from the run's output (env secrets and personal access tokens; a GitHub
+  App token the stopped process minted is left to the pattern scrubbers and
+  lapses on GitHub's hour, because nothing renews it). A lease that lapsed, or
+  whose grants were withdrawn, while no hub held it is taken back from the
+  device instead, and the leader's lease janitor sweeps one whose holder never
+  came back once it lapses.
+- **The run's executor session.** The restart sweep leaves a device's session
+  open until its agent reconnects, and the adopting process watches it to its
+  end, so it records how the run ended and stays visible to failover meanwhile.
+
+`tests/e2e/hubrestart_test.go` stops a real hub with SIGTERM and with SIGKILL
+under a real agent and checks all of the above, for a plain project and for a
+feature. Helper subcommands dispatched to a device (`cloop reset` from the
+dashboard) are still not merged: they are not runs, and a reset expressed as a
 diff would not reset anything the diff cannot name.
 
 ---
@@ -2364,7 +2391,8 @@ flight during the restart. Every `running` row now gets a verdict:
 | --- | --- |
 | executor registered, reports a live handle | left alone; its task ID is returned so the worktree sweep spares it |
 | executor registered, does not know the handle | closed with the terminal state the driver reports, or `failed` when it reports nothing |
-| executor not registered at all | closed as `failed` — the session is over either way, but we genuinely do not know how the work ended |
+| executor not registered, but the hub holds an edge-device handle for the workload | left alone: enrolled agents register after this sweep runs, and the process the device reconnects to adopts the run and watches the session to its end ([below](#the-project-comes-back-task-20339)) |
+| executor not registered at all | closed as `failed` — the executor was removed, and we genuinely do not know how the work ended |
 | session never obtained a handle | closed as `failed`: `Start` failed, or the hub died inside it |
 
 `sessionOutcome` biases towards **live**, and the bias is the safe direction: a

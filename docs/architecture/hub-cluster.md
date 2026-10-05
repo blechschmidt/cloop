@@ -249,6 +249,14 @@ the run exactly as the owner would have. A run that was claimed but never
 dispatched — the member died between the two — is cleared by the leader so the
 project can start again.
 
+An adopting member takes over what the owner held for the run besides its
+output (Task 20382): its secret lease — recorded in `secret_leases` under the
+member holding it, and named in the run's owner row — which the adopter keeps
+alive and releases, and its executor session, which it watches to the run's
+end. A cluster of one is the same: a hub restarted in its own directory adopts
+the runs its previous process left, by the same rows. See [a hub restarted
+mid-run](executors.md#the-project-comes-back-task-20339).
+
 Executor health probes are divided the same way: an agent is probed by the
 member holding its connection, every other executor by the leader, so an
 executor is never marked offline by a member that simply cannot see it.

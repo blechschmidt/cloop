@@ -429,6 +429,16 @@ at its hour rather than destroyed early. `CLOOP_GITHUB_TOKEN_EXPIRES_AT` keeps
 naming the first token's expiry for the same reason; git, which reads the file,
 is not affected.
 
+Nor does a refresh survive a restart of the hub process that minted the token.
+The run's lease does — the process that adopts the run takes it over, keeps it
+alive and releases it (Task 20382, see [a hub restarted
+mid-run](../architecture/executors.md#the-project-comes-back-task-20339)) — but
+the token was minted by the process that stopped, and what it would take to mint
+its successor at the same scope was in that process's memory. The token in the
+workload's files works until its hour ends, and git fails after that; a run
+that still needs GitHub then has to be stopped and started again, which leases
+it afresh.
+
 ### Limiting pushes to particular branches
 
 A grant that authorises a push can say where pushes may go:

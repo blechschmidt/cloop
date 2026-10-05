@@ -1258,6 +1258,22 @@ executor: pruned 2 leaked task worktree(s) in /srv/app: worktree gc: removed 2 w
 **"reattached" is the good line.** Those runs survived the restart: their output
 continues in the dashboard and their exit codes are still collected.
 
+**An edge device's run is adopted when its agent dials back in** (Task 20382).
+The sweep runs before any agent has reconnected, so it leaves a device's session
+open rather than closing it as failed. When the agent reconnects, the process it
+reaches adopts the run — `adopting a run from another hub member … reason="its
+agent reconnected to this hub member"` — and takes over the run's secret lease,
+one `took over the secret lease of an adopted run` line per lease. From then on
+the run is that process's: it streams it, merges the device's result into the
+project once, keeps the lease alive, releases it when the run ends, and closes
+the session with how the run ended. A lease that lapsed while the hub was down —
+down for longer than the lease had left, which the keepalive keeps between about
+five and fifteen minutes — or whose grant was revoked meanwhile is scrubbed from
+the device instead (`lease.revoke_sent` by `janitor`), and the run carries on
+without those credentials. A run whose agent never comes back keeps its session
+open for failover, and its lease until it lapses, when the leader's lease
+janitor sweeps it.
+
 **"killed N container(s) still running from a previous control plane" is the one
 to read carefully.** It means a sandbox was *executing a harness* when it was
 collected — work in progress was destroyed, not litter tidied away — and it is
@@ -1917,7 +1933,10 @@ interrupt work in progress. Runs are orphaned rather than killed
 run whose output pipe breaks keeps working and still records its outcome, so
 losing the hub costs the live-log stream and nothing else. Progress keeps landing
 in `state.db`, so the task list stays current even while the log panel is empty;
-streaming resumes with the *next* run, not the one that was in flight.
+streaming resumes with the *next* run, not the one that was in flight. A run on
+an edge device is better off: the restarted hub adopts it when its agent dials
+back in, and streams, merges and settles it as the stopped one would have — see
+[after a control-plane restart](#after-a-control-plane-restart).
 
 Before this, such a run died — not of the kill, but of its own next log line,
 because Go makes `SIGPIPE` fatal on file descriptors 1 and 2. That committed the
