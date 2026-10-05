@@ -99,6 +99,10 @@ type restartScene struct {
 	fifo   string
 	stub   string // the stub's start log
 
+	// hubEnv is added to the hub process's environment alone: the routes
+	// and trust a variant gives the hub to reach its fake upstreams.
+	hubEnv []string
+
 	mu       sync.Mutex
 	hub      *exec.Cmd
 	hubDone  chan struct{}
@@ -109,8 +113,27 @@ type restartScene struct {
 	executorID string
 }
 
+// restartOptions vary the scene for a variant.
+type restartOptions struct {
+	// gitRepo makes the project a git checkout.
+	gitRepo bool
+	// executors is YAML appended under the hub's executors: section.
+	executors string
+	// stub replaces restartStub; vars are its further @NAME@ substitutions.
+	stub string
+	vars map[string]string
+	// hubEnv is the hub's own extra environment.
+	hubEnv []string
+}
+
 func newRestartScene(t *testing.T, gitRepo bool) *restartScene {
 	t.Helper()
+	return newRestartSceneWith(t, restartOptions{gitRepo: gitRepo})
+}
+
+func newRestartSceneWith(t *testing.T, opt restartOptions) *restartScene {
+	t.Helper()
+	gitRepo := opt.gitRepo
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for the stand-in harness")
 	}
@@ -125,7 +148,7 @@ func newRestartScene(t *testing.T, gitRepo bool) *restartScene {
 		root = resolved
 	}
 	s := &restartScene{
-		t: t, bin: binaryPath(t), root: root,
+		t: t, bin: binaryPath(t), root: root, hubEnv: opt.hubEnv,
 		hubDir: filepath.Join(root, "hub"),
 		proj:   filepath.Join(root, "proj"),
 		home:   filepath.Join(root, "home"),
@@ -177,12 +200,20 @@ func newRestartScene(t *testing.T, gitRepo bool) *restartScene {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("\nexecutors:\n    allow_host_process: false\n"); err != nil {
+	if _, err := f.WriteString("\nexecutors:\n    allow_host_process: false\n" + opt.executors); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.Close()
 
-	stub := strings.NewReplacer("@LOG@", s.stub, "@FIFO@", s.fifo).Replace(restartStub)
+	script := restartStub
+	if opt.stub != "" {
+		script = opt.stub
+	}
+	pairs := []string{"@LOG@", s.stub, "@FIFO@", s.fifo}
+	for k, v := range opt.vars {
+		pairs = append(pairs, "@"+k+"@", v)
+	}
+	stub := strings.NewReplacer(pairs...).Replace(script)
 	devBin := filepath.Join(root, "device-bin")
 	writeTestFile(t, filepath.Join(devBin, "claude"), stub)
 	if err := os.Chmod(filepath.Join(devBin, "claude"), 0o755); err != nil {
@@ -202,7 +233,7 @@ func (s *restartScene) startHub() {
 	s.t.Helper()
 	cmd := exec.Command(s.bin, "ui", "--port", strconv.Itoa(s.port), "--no-browser", "--projects", s.proj)
 	cmd.Dir = s.hubDir
-	cmd.Env = s.env
+	cmd.Env = append(append([]string(nil), s.env...), s.hubEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	log := &strings.Builder{}
 	w := &syncWriter{w: log}
