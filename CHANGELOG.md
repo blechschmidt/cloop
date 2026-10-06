@@ -310,6 +310,35 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Executor failover is capped, and a task that takes nodes down is
+  quarantined.** A run stranded on an executor that stopped answering was
+  re-dispatched to the next healthy one with no ceiling, so a workload that
+  takes its node down — a fork bomb, one that exhausts memory, one that panics
+  the kernel — went on to take down every enrolled device in turn.
+  `executors.failover.max_attempts` (2 by default, `0` for none, at most 10;
+  hub-scope, so a per-instance overlay applies) bounds it, decided inside the
+  claim that makes a failover exactly-once so that racing supervisors and hub
+  members agree. Past the cap the session closes `failover_exhausted`, nothing
+  re-dispatches it, and the tasks it was running fail with every lost node and
+  when it went unreachable named in the reason — written through the verdict
+  sidecar, journalled, and audited as `executor.failover_exhausted`. A task two
+  distinct executors went down under is quarantined as a suspected node killer
+  (`task.quarantine`), shown in its details and by `cloop executor list
+  --inventory` (a new flag), and runs again only after an explicit reset, which
+  is audited as `task.quarantine_release`; `--retry-failed` and the
+  orchestrator's gate hold it. A failover with nowhere to go now also returns
+  the lost node's tasks to pending, as it was always documented to, and a late
+  session close no longer overwrites what a failover's claim recorded (Task
+  20391).
+- **The Projects grid's Run button and a new project's auto-run meet the same
+  admission gates as the Overview's Run.** They checked neither the executor's
+  access list nor the tenant's daily budget and concurrency quota, so an
+  identity left off a restricted executor's access list was refused on the
+  Overview and admitted from the project card (Task 20391).
+- **The threat model's residual-risk column matches the code again**, and a
+  docs gate fails the build when `docs/security/*.md` cites a test that does not
+  exist (Task 20391).
+
 - **One credential registry for every scanner; `cloop audit` sees the tokens
   GitHub issues now.** Four places recognise credentials by shape and each kept
   its own list. `cloop audit` matched `ghp_`/`ghs_` followed by 30 letters and
