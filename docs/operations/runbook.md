@@ -774,17 +774,18 @@ sweeps it within a minute, closing the session. Each extension is a
 `secret.renew` naming the grant. See
 [how long a session lives](../architecture/git-proxy.md#how-long-a-session-lives).
 
-There is no command that ends one workspace session early. A workspace session
-lives only in the hub's memory, so a hub restart closes every live one —
-recorded as `gitproxy.session_closed` with the reason *"the hub is shutting
-down"* (a guarded session, the one a GitHub lease is delivered as, is suspended
-instead and restored with its run; see [after a control-plane
-restart](#after-a-control-plane-restart)) — and short of that a session expires
-on its own TTL, which is enforced at
-authentication whether or not the five-minute reaper has swept it. That is the
-blunt instrument; the sharp one is
-revoking the underlying grant with `cloop secret revoke`, which stops the *next*
-dispatch from minting anything, and rotating the PAT at the forge.
+A workspace session ends early when its lease is revoked: since Task 20390 the
+lease it stands on is kept alive while it lives and listed with the hub's other
+leases (`GET /api/leases`, the Secrets panel), and revoking it there closes the
+session at once. A hub restart suspends a recorded session rather than closing
+it — a guarded one, the one a GitHub lease is delivered as, and a workspace one
+whose lease is recorded — and the process that adopts its run restores it (see
+[after a control-plane restart](#after-a-control-plane-restart)); one with no
+record is closed, as `gitproxy.session_closed` with the reason *"the hub is
+shutting down"*. Short of that a session expires on its own TTL, which is
+enforced at authentication whether or not the five-minute reaper has swept it.
+Revoking the underlying grant with `cloop secret revoke` stops the *next*
+dispatch from minting anything; rotate the PAT at the forge as well.
 
 The lease keepalive does not stretch the GitHub App **token** a session presents
 upstream, which GitHub honours for an hour: the session renews that itself, at
@@ -1511,10 +1512,62 @@ at once by a request presenting the session. Count them with
 `cloop_proxy_session_restores_total{kind,outcome}` (see
 [metrics](metrics.md#sessions-restored-with-an-adopted-run)).
 
-A git workspace's pinned session — cloop's own provisioning fetch and a
-write-back push — is not restored: it stands on a lease nothing takes over. A
-write-back after a restart fails with a 401 and is reported like any failed
-write-back.
+**A device workspace's pinned session comes back too** (Task 20390), when the
+device keeps it for a push write-back (`executors.write_back: push`): the run's
+owner row names its workspace lease, which the adopting process takes over —
+one `took over the workspace lease of an adopted run` line — and the session is
+restored like the lease's, with the same `restored git session …` line. Its
+upstream is the project's own `origin` as the hub's checkout names it now, so a
+record whose repository no longer matches is refused with *"it is pinned to …,
+and the project's origin is … now"*. The device's write-back push, whenever it
+comes, then lands, and the project's journal records it as a `write_back` row
+naming the branch. A Pod's workspace session is not restored — see
+[limits that remain](../architecture/git-proxy.md#limits-that-remain).
+
+**A CI relay session is restored by the next call that presents it** (Task
+20390), not by an adoption: no run or lease stands behind it. A hub stopped
+gracefully writes a `ci.session.suspended` row per live session; the job's next
+call to any hub process restores it, with a `ci.session.restored` row whose
+`detail` names the process that held it and anything its rule narrowed. A
+session whose rule was deleted, disabled or no longer admits its pipeline gets a
+`ci.session.closed` row instead — *"not restored by the hub process that received
+its next request: its rule is disabled"* — and the job a 401. A session killed
+with its hub may have counted up to its last 15 seconds of spend short. The
+**Live sessions** panel lists a session no process serves as *suspended*;
+**Revoke** there ends it before its job calls again. A revocation, rule edit or
+switch-off that ends a record another member serves — or one a member is
+restoring at that moment — reaches that member at its next checkpoint, within
+15 seconds; the API has answered by then. A **Revoke** answered `503` (*"its
+record could not be closed"*) ended the session on the member that answered but
+left its record open, so another process could still restore it: revoke it
+again.
+
+**Switching CI federation off is per hub instance** — the `cloop ui` port,
+whose [overlay](../reference/configuration.md#two-dashboards-in-one-directory)
+may set `ui.ci.enabled` — and each session's record names the instance that
+served it. When an instance's configuration turns federation off:
+
+- **The process serving it** ends its sessions: at once through Settings,
+  which also tells the other members to re-read their own configuration, or
+  within 15 seconds when the file is edited.
+- **Its suspended records** end at once through Settings, and otherwise
+  within a minute. The leader reads every instance's configuration the way
+  that instance does, since the overlays live in the hub's directory, so
+  this happens whether or not the instance is running. Before then, a
+  restore refuses such a record (*"federation is switched off on the hub
+  instance that served it (port …)"*).
+- **An instance that keeps federation on** keeps its records.
+
+So:
+
+- **To stop every pipeline at once** in a cluster whose overlays differ,
+  disable or delete the rules. That closes their records wherever they are
+  held, and members drop the sessions within 15 seconds.
+- **A quick off-and-on** ends only what was noticed while it was off. Every
+  relay call is refused while it is off, whichever member receives it.
+- **A record a live member took over but could not restore** stays until it
+  lapses or its rule changes. It is restored only under its rule as the rule
+  stands then.
 
 **"killed N container(s) still running from a previous control plane" is the one
 to read carefully.** It means a sandbox was *executing a harness* when it was

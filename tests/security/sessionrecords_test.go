@@ -1,24 +1,30 @@
 package security
 
 // Guarantee: what a restarted hub restores a session from is never a
-// credential (Task 20383).
+// credential (Tasks 20383, 20390).
 //
 // A run's git proxy, Kubernetes monitor and egress sessions are recorded in
 // proxy_sessions, and the GitHub App tokens behind them in app_token_slots, so
 // the hub process that adopts the run after the one serving it stops can bring
-// them back. Those rows outlive the process, the run and every revocation, and
-// are copied into every backup of the control plane — exactly where a token
-// must not be. The restore re-derives every upstream credential from the
-// lease's grants; the rows hold token hashes and scopes only.
+// them back; since Task 20390 so is a workspace's pinned git proxy session,
+// and every CI relay session is recorded in ci_sessions. Those rows outlive the
+// process, the run and every revocation, and are copied into every backup of
+// the control plane — exactly where a token must not be. The restore
+// re-derives every upstream credential from the lease's grants or the hub's
+// own configuration; the rows hold token hashes and scopes only.
 //
 // The check is on the bytes that reach SQLite after a realistic run, not on the
 // record structs: a guarded PAT, a guarded GitHub App token, an App token
-// delivered as a file, a guarded kubeconfig and an egress session, through the
-// real broker, registries and the stores the hub writes with. Every credential
-// any of them involves — the PAT, the App's private key, every installation
-// token GitHub minted, the cluster token and kubeconfig, every session token
-// the sandbox holds, the egress proxy URL — is then looked for in every column
-// of every row, verbatim and base64-encoded.
+// delivered as a file, a guarded kubeconfig, an egress session, a workspace's
+// pinned sessions over a PAT and over an App, and a CI relay session that
+// relayed a call with the hub's Anthropic key, was suspended, restored by
+// another process and closed — through the real broker, registries and the
+// stores the hub writes with. Every credential any of them involves — the PAT,
+// the App's private key, every installation token GitHub minted, the cluster
+// token and kubeconfig, every session token a sandbox or a pipeline holds, the
+// egress proxy URL, the hub's Anthropic key, the pipeline's OIDC assertion and
+// its signature — is then looked for in every column of every row, verbatim
+// and base64-encoded.
 
 import (
 	"context"
@@ -27,6 +33,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +42,11 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
+	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
+	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -212,6 +224,117 @@ users:
 		t.Fatalf("file lease = %+v, %v", fileLease, err)
 	}
 
+	// A workspace's pinned sessions, as an edge device's provisioning fetch
+	// and write-back push get them (Task 20390): leased through a broker
+	// with no guard, as the hub's workspace source is, and held by the proxy.
+	wsBroker := newBroker()
+	// A payload of its own: Mint zeroes the buffer it was handed.
+	wsPayload := secretbrokertest.AppPayload(401, 402)
+	var wsApp struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.Unmarshal(wsPayload, &wsApp); err != nil || wsApp.PrivateKey == "" {
+		t.Fatalf("workspace app payload: %v", err)
+	}
+	for _, s := range []struct {
+		name    string
+		kind    secretbroker.Kind
+		payload []byte
+		c       secretbroker.Constraints
+	}{
+		{"ws-app", secretbroker.KindGitHubApp, wsPayload, secretbroker.Constraints{Repos: []string{"acme/tool"}, Permissions: []string{"contents:write"}}},
+		{"ws-pat", secretbroker.KindGitHubPAT, []byte(recordPAT), secretbroker.Constraints{Repos: []string{"acme/*"}}},
+	} {
+		sec, err := wsBroker.Mint(ctx, secretbroker.MintRequest{Name: s.name, Kind: s.kind, Payload: s.payload, Actor: "t"})
+		if err != nil {
+			t.Fatalf("mint %s: %v", s.name, err)
+		}
+		if _, err := wsBroker.Grant(ctx, secretbroker.GrantRequest{SecretRef: sec.ID,
+			Subject: recordSubject(t, "executor:edge-ws"), Constraints: s.c, TTL: 24 * time.Hour, Actor: "t"}); err != nil {
+			t.Fatalf("grant %s: %v", s.name, err)
+		}
+	}
+	inner, err := gitcreds.New(wsBroker, "edge-ws", "ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsSource, err := gitproxycreds.New(inner, gitReg, gitproxy.Policy{}, 0, "edge-ws", "ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wsReleases []func()
+	for _, grant := range []string{"ws-app", "ws-pat"} {
+		access, release, err := wsSource.ForWorkspace(ctx, "/srv/ws", executor.Workspace{
+			Kind: executor.WorkspaceGit, Repo: "https://github.com/acme/tool", Ref: "main", CredentialGrant: grant,
+		})
+		if err != nil {
+			t.Fatalf("workspace over %s: %v", grant, err)
+		}
+		wsReleases = append(wsReleases, release)
+		guards.tokens = append(guards.tokens, access.Credential.Password)
+		sum := sha256.Sum256([]byte(access.Credential.Password))
+		guards.hashes[access.Credential.SessionID] = hex.EncodeToString(sum[:])
+	}
+
+	// A CI relay session (Task 20390): minted with the pipeline's verified
+	// claims, relaying one call with the hub's Anthropic key, checkpointed,
+	// suspended as a stopping hub does, restored by another process, closed.
+	const hubAnthropicKey = "sk-ant-record-canary-hub-key-0123456789"
+	assertion := "eyJhbGciOiJSUzI1NiJ9.eyJyZXBvc2l0b3J5IjoiYWNtZS90b29sIn0.c2lnbmF0dXJlLW9mLXRoZS1wYXNzZXJ0aW9uLWNhbmFyeQ"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","usage":{"input_tokens":3,"output_tokens":4}}`))
+	}))
+	defer upstream.Close()
+	ciReg := claudeproxy.NewRegistry("https://hub.internal/api/ci/anthropic")
+	ciReg.Store = sessionrecord.NewCIStore(db, holder, "8081", nil)
+	claims, _ := json.Marshal(map[string]any{"iss": "https://token.actions.githubusercontent.com", "aud": "cloop",
+		"sub": "repo:acme/tool:ref:refs/heads/main", "repository": "acme/tool", "ref": "refs/heads/main", "jti": "j-1"})
+	minted, err := ciReg.Mint(claudeproxy.MintRequest{
+		Policy: claudeproxy.Policy{Models: []string{"claude-sonnet-*"}, MaxRequests: 10}, RuleID: "rule-1",
+		RuleName: "acme tool", Repository: "acme/tool", TTL: time.Hour, Claims: claims,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	px, err := claudeproxy.New(ciReg, claudeproxy.Options{
+		Upstream: claudeproxy.Upstream{BaseURL: upstream.URL, APIKey: hubAnthropicKey}, PathPrefix: "/api/ci/anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/ci/anthropic/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","max_tokens":8,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+minted.Token)
+	rec := httptest.NewRecorder()
+	px.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relay = %d %s", rec.Code, rec.Body)
+	}
+	ciReg.Checkpoint()
+	ciReg.SuspendAll("the hub is shutting down")
+	ciRow, err := db.GetCISession(minted.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciRec, _, err := sessionrecord.CIRecord(ciRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.TakeCISession(minted.Session.ID, "hub_conformance", "hub_conformance_2", "8082"); err != nil || !ok {
+		t.Fatalf("take over the CI session: %v %v", ok, err)
+	}
+	ciReg2 := claudeproxy.NewRegistry("https://hub.internal/api/ci/anthropic")
+	ciReg2.Store = sessionrecord.NewCIStore(db, func() string { return "hub_conformance_2" }, "8082", nil)
+	if _, err := ciReg2.Restore(claudeproxy.RestoreRequest{Record: ciRec, From: "hub_conformance"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ciReg2.Close(minted.Session.ID, "revoked by operator"); err != nil {
+		t.Fatal(err)
+	}
+	ciSum := sha256.Sum256([]byte(minted.Token))
+	_, ciSecret, _ := strings.Cut(strings.TrimPrefix(minted.Token, claudeproxy.TokenPrefix), ".")
+	sig := assertion[strings.LastIndex(assertion, ".")+1:]
+
 	// An egress session, redeemed durably.
 	estore, err := secretstore.NewEgressStore(db)
 	if err != nil {
@@ -236,17 +359,23 @@ users:
 	guards.hashes[red.Session.ID] = hex.EncodeToString(egressSum[:])
 
 	// Every credential the run involved.
-	secrets := []string{recordPAT, recordClusterToken, kubeconfig, app.PrivateKey, red.Token, red.ProxyURL}
+	secrets := []string{recordPAT, recordClusterToken, kubeconfig, app.PrivateKey, wsApp.PrivateKey, red.Token,
+		red.ProxyURL, minted.Token, ciSecret, hubAnthropicKey, assertion, sig}
 	secrets = append(secrets, guards.tokens...)
 	for _, m := range gh.Minted() {
 		secrets = append(secrets, m.Token)
 	}
-	if len(gh.Scoped()) != 2 {
-		t.Fatalf("installation tokens minted = %d, want the guarded run's and the file run's", len(gh.Scoped()))
+	// The guarded run's, the file run's, and one for each workspace lease:
+	// a lease carries every grant issued to its executor, so the PAT's
+	// workspace lease minted an App token too.
+	if len(gh.Scoped()) != 4 {
+		t.Fatalf("installation tokens minted = %d, want the guarded run's, the file run's and the two "+
+			"workspace leases'", len(gh.Scoped()))
 	}
 	// Close one of each, so a closing write is scanned too.
 	gitReg.CloseForLease(lease.ID, "lease released")
 	ebroker.CloseSession(red.Session.ID, "run ended")
+	wsReleases[1]()
 	_ = db.Close()
 
 	raw, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
@@ -255,7 +384,7 @@ users:
 	}
 	defer raw.Close()
 	rows := map[string]int{}
-	for _, table := range []string{"proxy_sessions", "app_token_slots"} {
+	for _, table := range []string{"proxy_sessions", "app_token_slots", "ci_sessions"} {
 		for _, row := range dumpTable(t, raw, table) {
 			rows[table]++
 			for col, val := range row {
@@ -269,17 +398,25 @@ users:
 					}
 				}
 			}
-			if table == "proxy_sessions" {
+			switch table {
+			case "proxy_sessions":
 				id := row["session_id"]
 				if want, ok := guards.hashes[id]; !ok || row["token_sha256"] != want {
 					t.Fatalf("proxy_sessions row %s: token_sha256 %q is not the SHA-256 of its token (%q)",
 						id, row["token_sha256"], want)
 				}
+			case "ci_sessions":
+				if want := hex.EncodeToString(ciSum[:]); row["token_sha256"] != want {
+					t.Fatalf("ci_sessions row %s: token_sha256 %q is not the SHA-256 of its token",
+						row["session_id"], row["token_sha256"])
+				}
 			}
 		}
 	}
-	// git ×2 (App and PAT), kube ×1, egress ×1; one guarded and one file slot.
-	if rows["proxy_sessions"] != 4 || rows["app_token_slots"] != 2 {
+	// git ×4 (lease-path App and PAT, workspace App and PAT), kube ×1,
+	// egress ×1; one guarded, one file and one workspace slot (the PAT's
+	// workspace lease was released with its session); one CI session.
+	if rows["proxy_sessions"] != 6 || rows["app_token_slots"] != 3 || rows["ci_sessions"] != 1 {
 		t.Fatalf("rows scanned = %v; the run did not record what it should have", rows)
 	}
 }

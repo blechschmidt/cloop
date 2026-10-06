@@ -787,6 +787,55 @@ for them (`TestRestoredSlotIsHeldToItsGrantsRepositories`); a Kubernetes session
 stays pinned to the cluster its grant's kubeconfig names; deadlines are held to
 the configured session TTLs and quotas to the tighter of recorded and current.
 
+**A workspace's pinned session and a CI relay session (Task 20390).** The pinned
+session a device's provisioning fetch and write-back push use stands on a
+workspace lease of its own. That lease is now kept alive for as long as the
+session lives and recorded like any other, the session is recorded beside the
+lease path's, and the run's owner row names both when the device keeps the
+credential for a push write-back; the adopting process restores them under the
+same rules — and the one repository the session reaches, and where its
+credential is presented, come from the project's own git origin as the hub reads
+it then, never from the record (`TestAWorkspaceSessionIsHeldToTheProjectAndTheGrant`).
+A CI relay session is recorded in `ci_sessions` (`migrations/0060_ci_sessions.sql`):
+its token's SHA-256, its rule, the verified claims of the OIDC token it was
+minted for — the job's identity, not the signed token — its policy and its spend.
+It stands on no lease, so the hub process that receives a call presenting it
+after its holder stopped restores it on the spot — but only for a caller that
+presents the token (`TestCI_RestoreNeedsTheSessionsToken`), only after taking the
+record over by a conditional write, and only under its rule as the rule stands
+then: a rule deleted, disabled or no longer admitting the recorded claims, or an
+issuer or audience the hub no longer federates, closes the session with a 401;
+models, budget, output cap and TTL are the tighter of recorded and current, never
+wider (`TestCI_RestoredSessionIsHeldToItsRuleAsItStandsNow`, `TestNarrow`,
+`TestIntersectModelsIsNeverWider`). The hub's Anthropic credential is
+configuration and never part of the record. Operator actions reach a session no
+process serves: deleting or editing its rule, revoking it, or switching
+federation off ends its record (`TestCI_OperatorChangesReachSuspendedSessions`).
+Federation is switched per hub instance, and each record names the instance
+it is held to. An instance ends what it serves when its own configuration
+turns federation off, however that happened
+(`TestCI_AHubProcessEnforcesItsOwnSwitch`). Its suspended records are ended
+by the leader whether or not the instance is running
+(`TestCI_TheJanitorHoldsEachRecordToItsInstancesSwitch`), and no other
+instance restores one (`TestCI_ARestoreIsHeldToItsInstancesSwitch`). A switch
+on one instance does not end what a live peer or another instance holds
+(`TestCI_SwitchingFederationOffLeavesALivePeersSessions`). A
+configuration read once in a changed form ends nothing until a second read
+agrees (`TestCI_ATornReadSwitchesNothingOff`,
+`TestCI_ATornConfigurationReadEndsNothing`). Disabling or deleting a rule
+ends its sessions wherever they are held.
+`tests/security/sessionrecords_test.go` scans `ci_sessions` and the workspace
+sessions' rows as well.
+
+A `ci_sessions` row is not signed either, and is worth noting because it is an
+authenticator: a row with a token hash of the writer's choosing, under an
+enabled rule and claims that rule admits, restores into a session that relays
+with the hub's Anthropic key — skipping the forge's signature and the jti
+guard. That gives a writer of the control-plane database nothing it lacked: it
+can already store an API token or a session for an admin (both are kept there
+as hashes), or an allowlist rule. The restore leaves a `ci.session.restored`
+row naming the session either way.
+
 ### What it is worth when the agent is unreachable
 
 **Nothing, until the agent comes back.** The credential is on a machine the hub

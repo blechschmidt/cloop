@@ -394,17 +394,37 @@ readiness does not depend on leadership: every member serves.
   must survive a member.
 - **Credentials minted by a member that dies** are restored by the member that
   adopts their run when they stand on the run's lease or belong to the run — its
-  git proxy, Kubernetes monitor and egress sessions (Task 20383). A request made
-  before the adoption waits up to 60 seconds for it. A restored git or
-  Kubernetes session is served by its adopter and a request reaching another
-  member is forwarded there, so the proxies' `advertise_url` has to reach some
-  live member — a load balancer, or one address a restarted process binds again.
-  Egress is not forwarded: a restored egress session is served by the adopter's
-  own listener, so the egress `advertise_addr` has to reach the adopter, which
-  on a single hub is the address the restarted process binds again. What is
-  still forgotten: a git workspace's pinned session, which stands on a lease
-  nothing takes over, and a CI relay session; a sandbox using one fails its next
-  request.
+  git proxy, Kubernetes monitor and egress sessions (Task 20383), and since Task
+  20390 a device workspace's pinned session, whose workspace lease the run's
+  owner row names. A request made before the adoption waits up to 60 seconds
+  for it. A restored git or Kubernetes session is served by its adopter and a
+  request reaching another member is forwarded there, so the proxies'
+  `advertise_url` has to reach some live member — a load balancer, or one
+  address a restarted process binds again. Egress is not forwarded: a restored
+  egress session is served by the adopter's own listener, so the egress
+  `advertise_addr` has to reach the adopter, which on a single hub is the
+  address the restarted process binds again.
+- **A CI relay session** stands on no lease and belongs to no run, so it is
+  restored by whichever member receives the job's next call once its holder is
+  gone (Task 20390): the record taken over by a conditional write, the session
+  held to its rule as the rule stands now, its request budget the one it had
+  left. A member that loses the race forwards the call to the winner. Counters
+  are flushed every 15 seconds and when a member stops gracefully, so a member
+  killed outright can lose at most that much of a session's count. Federation
+  is switched per instance — the `cloop ui` port, whose overlay may set
+  `ui.ci.enabled` — and each record names the instance whose configuration
+  governs it:
+  - Switching federation off ends that member's sessions, and a member
+    reading the same configuration ends its own when the bus tells it or at
+    its next checkpoint.
+  - The leader ends the suspended records of every instance whose
+    configuration has federation off, running or not.
+  - A restore refuses a record whose instance has federation off.
+  - An instance that keeps federation on keeps its own.
+
+  What is still forgotten: a Kubernetes Pod's workspace session, minted over a broker
+  that keeps no lease records — an init container that fetches after its member
+  died gets a 401.
 - **Rate limits and connection caps are per member.** Five members admit five
   times the per-address request rate one would.
 - **`cloop serve`**, the standalone REST server, is not a member. It sweeps
