@@ -779,6 +779,15 @@ type KubeGuardConfig struct {
 	Namespaces []string `yaml:"namespaces,omitempty"`
 	Resources  []string `yaml:"resources,omitempty"`
 
+	// AuditAllowed records every request the monitor forwards as a
+	// kubeguard.request_allowed row, not only the ones it refuses (Task 20385).
+	//
+	// Off by default, and the default is the right one for most hubs: a single
+	// `kubectl get pods` is a burst of discovery requests and a watch is a
+	// request that never ends, so a row per allowed request buries the
+	// denials that matter. Turn it on where the question "what did this
+	// sandbox read from the cluster" has to be answerable from the trail.
+	AuditAllowed bool `yaml:"audit_allowed,omitempty"`
 }
 
 // GitProxyConfig configures the git interception proxy.

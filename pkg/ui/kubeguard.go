@@ -159,6 +159,10 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		return nil, err
 	}
 	reg.CABundle = bundle
+	// Every forwarded request becomes an audit row only when the operator asks
+	// (Task 20385): a `kubectl get pods` is several requests and a watch is
+	// one that never ends, which is why denials are the default record.
+	reg.SampleAllowed = k.AuditAllowed
 
 	var auditDB *statedb.DB
 	if db, dbErr := statedb.Open(state.DBPath(dir)); dbErr == nil {
