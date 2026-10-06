@@ -7,7 +7,10 @@ Kubernetes counterpart of [the device kit](../../scripts/e2e/gitproxy/README.md)
 and it runs in CI on the `deploy-artifacts` job's kind cluster.
 
 It changes the release it is pointed at — both monitors stay on afterwards —
-so point it only at a throwaway cluster.
+so point it only at a throwaway cluster. CI runs it twice: on the release as
+installed, one replica, and again once the job has scaled it to a hub cluster of
+three, where a workload's git and kubectl reach members other than the one that
+minted their sessions and are forwarded.
 
 ## What it builds
 
@@ -25,10 +28,10 @@ so point it only at a throwaway cluster.
    --probe-network-policy`) and logs the verdict. Egress blocking is asserted
    only when the probe proved the CNI enforces policies; otherwise the log says
    it is not asserted.
-3. Serves the forge in `cloop-e2e-forge` with a certificate for `github.com`
+3. Serves the forge in `cloop-e2e-forge-<stamp>` with a certificate for `github.com`
    from a throwaway CA, and seeds `acme/granted` with the project the Pod runs —
    a Kubernetes run reads its project from the tree it fetches.
-4. Creates `cloop-e2e-target` and a ServiceAccount that may *edit* it, so a
+4. Creates `cloop-e2e-target-<stamp>` and a ServiceAccount that may *edit* it, so a
    refused write can only have been refused by the monitor.
 5. `helm upgrade --reuse-values` with `executor.gitProxy`, `executor.kubeGuard`
    (with `auditAllowed`), a self-signed `executor.monitorTLS`, the harness
@@ -38,7 +41,7 @@ so point it only at a throwaway cluster.
 6. Registers a project whose origin is `https://github.com/acme/granted.git`,
    then over the API: a `github_pat` secret granted for `acme/granted` only,
    writes limited to `cloop/e2e-allowed-*`; a kubeconfig grant for
-   `cloop-e2e-target` with no verbs (read-only); a harness credential; the
+   the target namespace with no verbs (read-only); a harness credential; the
    binding to the `kubernetes` executor. Then `POST /api/run`.
 7. Reads the run's live log and checks:
 
@@ -54,10 +57,12 @@ so point it only at a throwaway cluster.
 | R1 | a push to `acme/other` — which the PAT reaches on the forge — is refused by the proxy |
 | K0 | the delivered kubeconfig names the monitor, not the API server |
 | K1 | `kubectl get pods` succeeds through the monitor |
-| K2 | `kubectl create configmap` is refused by the monitor as read-only |
+| K2 | `kubectl create configmap` is refused by the monitor as read-only — and, checked from outside, no configmap was created |
+| K3 | no cluster token (a JWT) is readable in the Pod: not in the environment, the lease directory or the delivered kubeconfig |
 | E1 | (only when the CNI enforces NetworkPolicy) the forge is unreachable from the Pod directly |
 
-   Then: the PAT is nowhere in the Pod object; the forge holds the allowed
+   Then: neither the PAT nor the cluster's ServiceAccount token is anywhere in
+   the Pod object; the forge holds the allowed
    branch at the probe's commit and not the denied one, and `acme/other` gained
    nothing; the audit trail holds `gitproxy.push_denied` for the denied branch,
    `gitproxy.push_allowed`, a refusal naming `acme/other`,

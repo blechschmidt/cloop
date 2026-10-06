@@ -1863,13 +1863,40 @@ jobs:
           kubectl -n cloop rollout status deploy/cloop-cloop-hub --timeout 5m
           expect_one_cluster "after a rolling restart"
 
+      - name: Git proxy and kube guard end to end on a hub cluster of three
+        id: kube-e2e-cluster
+        # The same test against the three replicas the step above left: the
+        # Service sends a workload's git and kubectl to any member, so most of
+        # its requests reach one that did not mint the session and are
+        # forwarded to the one that did (docs/architecture/hub-cluster.md).
+        #
+        # Advisory until it has passed twice on main; then this line goes.
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
+        run: |
+          set -euo pipefail
+          CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
+            go test ./tests/kube/ -run TestGitProxyAndKubeGuardOnKubernetes -count=1 -v -timeout 28m 2>&1 |
+            tee "$RUNNER_TEMP/kube-e2e-cluster.log"
+          grep -q 'the hub runs 3 replica' "$RUNNER_TEMP/kube-e2e-cluster.log" || {
+            echo "::error::the end-to-end test did not run against three replicas"; exit 1
+          }
+          grep -q -- '--- PASS: TestGitProxyAndKubeGuardOnKubernetes' "$RUNNER_TEMP/kube-e2e-cluster.log" || {
+            echo "::error::the Kubernetes end-to-end test did not pass on the hub cluster (see the log above)"
+            exit 1
+          }
+
       - name: Hub diagnostics on failure
-        # Also after the advisory end-to-end step fails, which does not fail
+        # Also after an advisory end-to-end step fails, which does not fail
         # the job while it is continue-on-error.
-        if: failure() || steps.kube-e2e.outcome == 'failure'
+        if: failure() || steps.kube-e2e.outcome == 'failure' || steps.kube-e2e-cluster.outcome == 'failure'
         run: |
           kubectl -n cloop get pods -o wide || true
           kubectl -n cloop describe pods || true
           kubectl -n cloop logs deploy/cloop-cloop-hub --tail=300 || true
           kubectl -n cloop-workloads get pods,secrets,networkpolicies -o wide || true
-          kubectl -n cloop-e2e-forge logs deploy/forge --tail=100 || true
+          for ns in $(kubectl get ns -o name | grep cloop-e2e-forge- | cut -d/ -f2); do
+            kubectl -n "$ns" logs deploy/forge --tail=100 || true
+          done

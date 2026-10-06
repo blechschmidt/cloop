@@ -148,6 +148,18 @@ if kubectl get pods -n "$K8S_NS" >"$O" 2>&1; then
 else
 	res K1 FAIL "kubectl get pods -n $K8S_NS: $(brief "$O")"
 fi
+# The cluster credential stays in the hub: a ServiceAccount token is a JWT,
+# and nothing the Pod can read holds one — the kubeconfig carries a session.
+JWTRE='eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}'
+jwt=""
+env | grep -Eq "$JWTRE" && jwt="$jwt env"
+[ -n "${CLOOP_LEASE_DIR:-}" ] && grep -rEqs "$JWTRE" "$CLOOP_LEASE_DIR" && jwt="$jwt lease-dir"
+grep -Eqs "$JWTRE" "${KUBECONFIG:-/nonexistent}" && jwt="$jwt kubeconfig"
+if [ -z "$jwt" ]; then
+	res K3 PASS "no cluster token (JWT) in the environment, the lease directory or the delivered kubeconfig"
+else
+	res K3 FAIL "a cluster token (JWT) is readable in:$jwt"
+fi
 if kubectl create configmap "e2e-$STAMP" -n "$K8S_NS" --from-literal=probe=1 >"$O" 2>&1; then
 	res K2 FAIL "kubectl create configmap was ALLOWED on a read-only grant"
 elif grep -q 'read-only access to the cluster' "$O"; then

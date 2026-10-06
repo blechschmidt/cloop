@@ -104,9 +104,6 @@ const (
 	forgeImage   = "cloop-kube-e2e-forge:local"
 	harnessImage = "cloop-kube-e2e-harness:local"
 
-	forgeNS  = "cloop-e2e-forge"
-	targetNS = "cloop-e2e-target"
-
 	grantedRepo = "acme/granted"
 	otherRepo   = "acme/other"
 
@@ -116,6 +113,12 @@ const (
 
 //go:embed probe.sh
 var probeScript string
+
+// forgeNS and targetNS are this run's namespaces — the forge's, and the one
+// the kubeconfig grant covers. Named per run: CI runs the test twice against
+// one cluster, and the first run's namespaces are still terminating when the
+// second starts.
+var forgeNS, targetNS string
 
 func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	kubeconfig := os.Getenv(kubeconfigEnv)
@@ -149,6 +152,9 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	t.Logf("release %s (%s) in %s, workloads in %s", release, fullname, ns, workloadNS)
 
 	stamp := fmt.Sprintf("%d", time.Now().Unix())
+	forgeNS, targetNS = "cloop-e2e-forge-"+stamp, "cloop-e2e-target-"+stamp
+	replicas := x.out(ctx, "get", "deploy", "-n", ns, fullname, "-o", "jsonpath={.spec.replicas}")
+	t.Logf("the hub runs %s replica(s)", replicas)
 	allowed, denied := "cloop/e2e-allowed-"+stamp, "cloop/e2e-other-"+stamp
 	branchRule := "cloop/e2e-allowed-*"
 	pat := "ghp_" + randomAlnum(t, 36)
@@ -177,7 +183,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	t.Logf("forge %s at %s serving %s and %s", forgePod, forgeIP, grantedRepo, otherRepo)
 
 	// ── 4. A namespace the kubeconfig grant covers, and its credential ────
-	kubeconfigPayload := targetKubeconfig(ctx, t, x)
+	kubeconfigPayload, clusterToken := targetKubeconfig(ctx, t, x)
 
 	// ── 5. The release, with both monitors on ──────────────────────────────
 	nodeCIDR := x.out(ctx, "get", "nodes", "-o", "jsonpath={.items[0].spec.podCIDR}")
@@ -258,7 +264,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	results := parseResults(lines)
 
 	// ── 9. What the Pod saw ────────────────────────────────────────────────
-	for _, id := range append([]string{"H1", "T1", "C1", "WS1", "WS2", "P1", "B1", "B2", "R1", "K0", "K1", "K2"},
+	for _, id := range append([]string{"H1", "T1", "C1", "WS1", "WS2", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
 		conditional(enforced, "E1")...) {
 		r, ok := results[id]
 		switch {
@@ -279,6 +285,14 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	// in an annotation, not anywhere the API server stores.
 	if strings.Contains(podJSON, pat) {
 		t.Error("the workload Pod's object contains the PAT")
+	}
+	if strings.Contains(podJSON, clusterToken) {
+		t.Error("the workload Pod's object contains the cluster's ServiceAccount token")
+	}
+	// The refused write did not happen behind the refusal: the credential the
+	// monitor holds may edit this namespace, so only the monitor stood between.
+	if out, err := x.kubectlMay(ctx, "get", "configmap", "-n", targetNS, "e2e-"+stamp, "-o", "name"); err == nil {
+		t.Errorf("configmap e2e-%s exists in %s (%s): the monitor's refusal did not stop the write", stamp, targetNS, out)
 	}
 
 	// ── 10. What the forge holds ───────────────────────────────────────────
@@ -520,7 +534,7 @@ func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertes
 // ServiceAccount that may *edit* it — so a refused write can only have been
 // refused by the monitor — and returns a kubeconfig for that account as the
 // hub Pod reaches the API server.
-func targetKubeconfig(ctx context.Context, t *testing.T, x tool) string {
+func targetKubeconfig(ctx context.Context, t *testing.T, x tool) (string, string) {
 	t.Helper()
 	x.apply(ctx,
 		map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": targetNS}},
@@ -555,7 +569,7 @@ contexts:
     user: e2e-editor
     namespace: %s
 current-context: e2e
-`, caData, token, targetNS)
+`, caData, token, targetNS), token
 }
 
 // upgradeRelease turns the monitors on, keeping every value the release had.
