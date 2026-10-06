@@ -924,6 +924,32 @@ var registry = []Entry{
 		Payload:   ciRulePayload,
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
+		Note: "Also written for a suspended session — one no hub process serves — whose record the " +
+			"revocation ends, so its job's next call is refused rather than restored (Task 20390).",
+	},
+	{
+		Action:    ActionCISessionSuspended,
+		Home:      HomeControlPlane,
+		Entity:    "ci_session",
+		Trigger:   "A hub process stops serving a recorded relay session without ending it here: it is stopping gracefully, and the session's spend is written and its record stays open; or the record was closed or taken over by another hub process, whose row says why.",
+		Payload:   ciPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "After a graceful stop the session is restored by the hub process that receives its job's next call " +
+			"(Task 20390); a session with no record is closed instead, with a `ci.session.closed` row. One whose " +
+			"record another process closed or took over is ended, or served, there.",
+	},
+	{
+		Action:    ActionCISessionRestored,
+		Home:      HomeControlPlane,
+		Entity:    "ci_session",
+		Trigger:   "A hub process receives a call presenting the token of a recorded relay session whose holder stopped, takes the record over, holds the session to its rule as the rule stands now, and serves it under its original id and token.",
+		Payload:   ciPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`detail` names the hub process that held it until then and anything its rule narrowed. A " +
+			"session whose rule was deleted, disabled or no longer admits the pipeline gets a " +
+			"`ci.session.closed` row instead, and its call a 401 (Task 20390).",
 	},
 	{
 		Action:    ActionCIExchangeAccepted,

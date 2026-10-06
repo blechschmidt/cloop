@@ -83,18 +83,18 @@ var allowedPaths = []struct {
 type Policy struct {
 	// Models is a glob allowlist of model IDs. Empty denies everything: the
 	// caller resolves "unset" to the hub default before minting.
-	Models []string
+	Models []string `json:"models"`
 
 	// MaxOutputTokens clamps `max_tokens` on every request. Zero uses
 	// DefaultMaxOutputTokens.
-	MaxOutputTokens int
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 
 	// MaxRequests caps the session's lifetime request count. Zero means
 	// unlimited, which the minting path does not produce.
-	MaxRequests int
+	MaxRequests int `json:"max_requests,omitempty"`
 
 	// MaxBodyBytes bounds one request body. Zero uses DefaultMaxBodyBytes.
-	MaxBodyBytes int64
+	MaxBodyBytes int64 `json:"max_body_bytes,omitempty"`
 }
 
 // OutputCap returns the effective max_tokens ceiling.

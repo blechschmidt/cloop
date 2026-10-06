@@ -400,12 +400,13 @@ var (
 
 // What a hub process adopting a run brings back of what the run's lease feeds
 // (Task 20383): its git proxy, Kubernetes monitor and egress sessions, and its
-// GitHub App token slots. Per process, like the leases themselves: the member
-// that adopts the run counts its restores.
+// GitHub App token slots — and, since Task 20390, the CI relay sessions a hub
+// process restores for the job call that presents one. Per process, like the
+// leases themselves: the member that restores counts its restores.
 var (
 	SessionRestores = Default.MustRegister(Definition{
 		Name:   "cloop_proxy_session_restores_total",
-		Help:   "Sessions and GitHub App token slots a hub process adopting a run tried to bring back, by kind (git, kube, egress, app_token) and outcome (restored; refused — its grant was revoked, expired or narrowed while no process held it; expired — it lapsed first; lost — another process restored it first; failed — its credential could not be re-derived for a reason that may pass, and it is retried).",
+		Help:   "Sessions and GitHub App token slots a hub process adopting a run, or receiving a CI job's call, tried to bring back, by kind (git, kube, egress, app_token, ci) and outcome (restored; refused — its grant or rule was revoked, expired or narrowed while no process held it; expired — it lapsed first; lost — another process restored it first; failed — its credential could not be re-derived for a reason that may pass, and it is retried).",
 		Type:   TypeCounter,
 		Labels: []string{"kind", "outcome"},
 	})
@@ -417,6 +418,7 @@ const (
 	RestoreKindKube     = "kube"
 	RestoreKindEgress   = "egress"
 	RestoreKindAppToken = "app_token"
+	RestoreKindCI       = "ci"
 
 	RestoreRestored = "restored"
 	RestoreRefused  = "refused"

@@ -172,6 +172,11 @@ var (
 	// session (Task 20383): it was retired, recorded by a binary that predates
 	// the table, or never recorded — a session nothing could restore.
 	ErrProxySessionNotFound = errors.New("statedb: proxy session not found")
+
+	// ErrCISessionNotFound indicates no ci_sessions row names the session
+	// (Task 20390): it was retired, minted by a binary that predates the
+	// table, or never recorded — a session nothing could restore.
+	ErrCISessionNotFound = errors.New("statedb: CI session not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite

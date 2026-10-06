@@ -627,8 +627,11 @@ the same directory, or a cluster member that died — it brings back what the
 run's lease feeds (Task 20383): the run's git proxy, Kubernetes monitor and
 egress sessions, under the ids and tokens the workload already holds, and the
 GitHub App token slots that keep its tokens alive past GitHub's hour. Each one
-it tries is counted here, by the process that adopted the run. `kind` is `git`,
-`kube`, `egress` or `app_token`.
+it tries is counted here, by the process that adopted the run. Since Task 20390
+a CI relay session whose holder stopped is restored by the process receiving
+the job's next call, and counted by it under `kind` `ci` (its `refused` means
+its rule was deleted, disabled or no longer admits the pipeline). `kind` is
+`git`, `kube`, `egress`, `app_token` or `ci`.
 
 | `outcome` | Meaning |
 | --- | --- |

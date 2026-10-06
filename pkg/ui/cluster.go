@@ -79,6 +79,9 @@ const (
 	invalidateSession  = "session"
 	invalidateAgent    = "agent"
 	invalidateProjects = "projects"
+	// invalidateCIConfig: CI federation's settings were saved on a member
+	// (Task 20390); each re-reads its own and stops serving if it is off.
+	invalidateCIConfig = "ci_config"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -559,6 +562,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 	case invalidateProjects:
 		s.refreshProjectStatuses()
 		s.broadcastProjectsUpdate()
+	case invalidateCIConfig:
+		go func() {
+			defer recoverGoroutine("recheck CI federation")
+			s.recheckCIService()
+		}()
 	case invalidateMembers:
 		// Another member, or `cloop project members`, changed who may
 		// reach a project (Task 20366). Reload now rather than at the TTL;

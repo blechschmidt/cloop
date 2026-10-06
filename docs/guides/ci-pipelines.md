@@ -12,6 +12,7 @@ long-lived secret in the repository.
 - [The workflow](#the-workflow)
 - [What a session may do](#what-a-session-may-do)
 - [Watching and revoking](#watching-and-revoking)
+- [When the hub restarts](#when-the-hub-restarts)
 - [Debugging a refusal](#debugging-a-refusal)
 - [Threat model](#threat-model)
 
@@ -367,7 +368,13 @@ Three things revoke a session immediately, mid-job:
 - **Revoke** on the session row;
 - **editing or deleting its rule** — a session minted under the old text would
   otherwise keep spending under a policy that no longer exists;
-- **turning federation off**.
+- **turning federation off**. Each hub instance keeps to its own switch, which
+  its [instance overlay](../reference/configuration.md#two-dashboards-in-one-directory)
+  may set. Off through Settings, it ends that process's sessions at once, and
+  every member reading the same configuration ends its own within seconds.
+  Off by editing the file, a process notices within 15 seconds. To stop every
+  pipeline across a cluster whose members' overlays differ, disable or delete
+  the rules instead: that ends their sessions wherever they are served.
 
 Revocation stops the spend at once — every call after it is refused — but it
 does not end the job at once. A revoked or expired session is answered with a
@@ -380,6 +387,45 @@ Every relay decision — allowed and denied, with the model and the token counts
 — lands in the hub's audit trail as `ci.relay.allowed` / `ci.relay.denied`,
 alongside `ci.exchange.accepted` / `ci.exchange.rejected` and the
 `ci.rule.*` changes an operator made.
+
+## When the hub restarts
+
+A job outlives a restart of the hub it relays through — a nightly deploy, a
+rolling update of a [hub cluster](../architecture/hub-cluster.md). Its session
+is recorded when it is minted: the SHA-256 of its token, the rule and the
+verified claims of the OIDC token it was minted for, its policy and what it has
+spent. Never the token, and never the hub's Anthropic credential, which is the
+hub's configuration and not the session's.
+
+- A hub **stopped** gracefully suspends its sessions (`ci.session.suspended`)
+  instead of ending them, and writes what each had spent. One **killed**
+  outright leaves the same record, minus at most the last 15 seconds of its
+  spend: the counters are flushed every 15 seconds.
+- The job's next call reaches a hub process that has never heard of the
+  session, and that process restores it on the spot (`ci.session.restored`) —
+  no new token exchange, which the job could not make anyway: its OIDC token
+  has been spent, and the replay guard refuses it a second time. The call has
+  to present the session's token, which must hash to the record's; the record
+  moves to that process by a conditional write, so of two members receiving a
+  job's calls one restores the session and the other forwards to it.
+- The restored session is held to **its rule as the rule stands now**:
+
+  | Since the session was minted… | Its next call |
+  | --- | --- |
+  | its rule was deleted or disabled | `401`, and the session is closed |
+  | its rule no longer admits the pipeline, or the hub's `issuer` or `audience` changed | `401`, and the session is closed |
+  | its rule's models, `max_requests`, `max_output_tokens` or TTL were narrowed | served under the narrower policy |
+  | its rule was widened | served under the policy it was minted with |
+
+  Its request budget is what it had left, not a fresh one.
+
+**Live sessions** lists a session no hub process serves right now as
+*suspended*. **Revoke** ends its record, so the job's next call is refused
+rather than restored. Editing or deleting its rule ends it too, and so does
+turning federation off on the instance that served it — through Settings or
+in the file, whether or not that instance is running: the hub ends such
+records within a minute, and refuses to restore one before then. A suspended
+session of an instance that keeps federation on is left alone.
 
 ## Debugging a refusal
 
@@ -396,7 +442,7 @@ attempt with the claims the token actually carried. The common causes:
 | `403`, "not on the allowlist" | no rule matched — compare the recorded claims against your rule |
 | `403` and the detail says *undecidable rules* | a rule reads a claim this token does not carry, usually `environment` |
 | `503` | federation is off, or the hub has no Anthropic credential |
-| relay `401`, "session token was not accepted" | the session expired or was revoked — Claude Code retries for minutes, then says `Not logged in` |
+| relay `401`, "session token was not accepted" | the session expired or was revoked, or a restarted hub found its rule no longer admits it — Claude Code retries for minutes, then says `Not logged in` |
 | relay `403`, "model is not permitted" | the harness asked for a model outside the rule's allowlist |
 | relay `429` | the session's request budget is spent |
 

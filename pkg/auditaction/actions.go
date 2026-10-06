@@ -282,6 +282,10 @@ const (
 	ActionCISessionClosed Action = "ci.session.closed"
 	// ActionCISessionRevoked records an operator revoking a live relay session.
 	ActionCISessionRevoked Action = "ci.session.revoked"
+	// ActionCISessionSuspended records a hub process that stops serving a recorded relay session without ending it there: it is stopping gracefully, or another process closed or took over the record.
+	ActionCISessionSuspended Action = "ci.session.suspended"
+	// ActionCISessionRestored records a recorded relay session restored by the hub process that received its next call.
+	ActionCISessionRestored Action = "ci.session.restored"
 	// ActionCIExchangeAccepted records a pipeline's OIDC token being exchanged.
 	ActionCIExchangeAccepted Action = "ci.exchange.accepted"
 	// ActionCIExchangeRejected records a token exchange being refused.

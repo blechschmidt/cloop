@@ -49,8 +49,13 @@ func kubeGuardSessionEvent(ev kubeguard.Event) (string, bool, bool) {
 	return ev.SessionID, served, ev.Kind == kubeguard.EventSessionClosed
 }
 
+// A restored session is claimed as a minted one is, and a suspended one is
+// released as a closed one is: the process that restores it claims it then
+// (Task 20390).
 func ciSessionEvent(ev claudeproxy.Event) (string, bool, bool) {
-	return ev.SessionID, ev.Kind == claudeproxy.EventSessionMinted, ev.Kind == claudeproxy.EventSessionClosed
+	served := ev.Kind == claudeproxy.EventSessionMinted || ev.Kind == claudeproxy.EventSessionRestored
+	ended := ev.Kind == claudeproxy.EventSessionClosed || ev.Kind == claudeproxy.EventSessionSuspended
+	return ev.SessionID, served, ended
 }
 
 // withProxySessionOwnership records each minted session as owned by this
@@ -128,22 +133,21 @@ func forwardProxyRequest(w http.ResponseWriter, r *http.Request, kind, internalP
 	return true
 }
 
-// ciRelayFallback forwards a CI relay call to the member that minted its
+// ciRelayFallback forwards a CI relay call to the member that serves its
 // session. The relay is served on the hub's own listener, so the path is
-// forwarded unchanged.
-func (s *Server) ciRelayFallback(w http.ResponseWriter, r *http.Request, sessionID string) bool {
-	n := s.clusterNode()
-	if n == nil {
-		return false
-	}
+// forwarded unchanged. When no live member serves it, a recorded session
+// whose holder stopped is restored here (Task 20390, ci_sessions.go); the
+// relay then decides the request against this member's registry.
+func (s *Server) ciRelayFallback(w http.ResponseWriter, r *http.Request, svc *ciService, sessionID string) bool {
 	if _, forwarded := peerCallFrom(r); forwarded {
 		return false
 	}
-	o, found, err := n.Lookup(ownerCISession, sessionID)
-	if err != nil || !found || o.Self || !o.Alive {
-		return false
+	if n := s.clusterNode(); n != nil {
+		if o, found, err := n.Lookup(ownerCISession, sessionID); err == nil && found && !o.Self && o.Alive {
+			return s.forwardTo(w, r, o.Member)
+		}
 	}
-	return s.forwardTo(w, r, o.Member)
+	return s.restoreCISessionOnDemand(w, r, svc, sessionID)
 }
 
 // serveForwardedProxy answers a proxy request another member forwarded here:

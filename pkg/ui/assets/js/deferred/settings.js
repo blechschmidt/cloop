@@ -1182,7 +1182,9 @@
         return '<tr>' +
           '<td>' + who + '<div class="muted" style="font-size:11px">' +
             esc(s.ref || '') + ' ' + esc(s.workflow || '') + '</div></td>' +
-          '<td style="font-size:11px">' + esc(s.rule_name || '') + '</td>' +
+          '<td style="font-size:11px">' + esc(s.rule_name || '') +
+            (s.suspended ? ' <span class="badge" title="No hub process serves it right now; the next call from its job restores it">suspended</span>' : '') +
+            '</td>' +
           '<td style="font-size:11px">' + (u.requests || 0) + ' req' +
             (u.denied ? ' <span class="badge failed">' + u.denied + ' denied</span>' : '') +
             '<br>' + tokens.toLocaleString() + ' tokens</td>' +

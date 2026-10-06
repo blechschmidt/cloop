@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 134 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 136 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 117 |
+| `control-plane` | the hub's own state.db | 119 |
 | `project` | the project's .cloop/state.db | 15 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-134 actions in 37 families. Every action is listed: this section is the whole
+136 actions in 37 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (5) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -405,13 +405,21 @@ Payload keys, on every action above: `kind`, `session_id`, `rule_id`, `rule_name
 | --- | --- | --- | --- | --- |
 | `ci.session.closed` | `ci_session` | control-plane | beta | A relay session ends, by expiry or by revocation. |
 | `ci.session.minted` | `ci_session` | control-plane | beta | A pipeline's OIDC token matches an allowlist rule and a relay session is issued. |
+| `ci.session.restored` | `ci_session` | control-plane | beta | A hub process receives a call presenting the token of a recorded relay session whose holder stopped, takes the record over, holds the session to its rule as the rule stands now, and serves it under its original id and token. |
 | `ci.session.revoked` | `ci_rule` | control-plane | beta | An operator revokes a live relay session from the CI panel. |
+| `ci.session.suspended` | `ci_session` | control-plane | beta | A hub process stops serving a recorded relay session without ending it here: it is stopping gracefully, and the session's spend is written and its record stays open; or the record was closed or taken over by another hub process, whose row says why. |
 
 Payload keys:
 
 - `ci.session.closed` — `kind`, `session_id`, `rule_id`, `rule_name`, `project`, `subject`, `repository`, `ref`, `workflow`, `actor`, `run_id`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
 - `ci.session.minted` — `kind`, `session_id`, `rule_id`, `rule_name`, `project`, `subject`, `repository`, `ref`, `workflow`, `actor`, `run_id`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
+- `ci.session.restored` — `kind`, `session_id`, `rule_id`, `rule_name`, `project`, `subject`, `repository`, `ref`, `workflow`, `actor`, `run_id`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
 - `ci.session.revoked` — `rule_id`, `rule_name`, `repository`, `ref`, `condition`, `models`, `detail`, `error`
+- `ci.session.suspended` — `kind`, `session_id`, `rule_id`, `rule_name`, `project`, `subject`, `repository`, `ref`, `workflow`, `actor`, `run_id`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
+
+- `ci.session.restored` — `detail` names the hub process that held it until then and anything its rule narrowed. A session whose rule was deleted, disabled or no longer admits the pipeline gets a `ci.session.closed` row instead, and its call a 401 (Task 20390).
+- `ci.session.revoked` — Also written for a suspended session — one no hub process serves — whose record the revocation ends, so its job's next call is refused rather than restored (Task 20390).
+- `ci.session.suspended` — After a graceful stop the session is restored by the hub process that receives its job's next call (Task 20390); a session with no record is closed instead, with a `ci.session.closed` row. One whose record another process closed or took over is ended, or served, there.
 
 ### ci.exchange.*
 

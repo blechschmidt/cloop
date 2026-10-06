@@ -36,6 +36,11 @@ type hub struct {
 	cmd    *exec.Cmd
 	log    *lockedBuffer
 	done   chan struct{}
+
+	// argv and env start the process, so restart can start it again in the
+	// same directory, on the same port, as a restarted service is.
+	argv []string
+	env  []string
 }
 
 // hubOptions is what differs between the worlds the tests build.
@@ -112,14 +117,13 @@ func startHub(t *testing.T, pki *testPKI, opts hubOptions) *hub {
 	port := freePort(t)
 	h.url = "https://127.0.0.1:" + strconv.Itoa(port)
 
-	h.cmd = exec.Command(bin, "ui", "--port", strconv.Itoa(port), "--no-browser",
-		"--tls-cert", pki.certFile, "--tls-key", pki.keyFile)
-	h.cmd.Dir = dir
+	h.argv = []string{bin, "ui", "--port", strconv.Itoa(port), "--no-browser",
+		"--tls-cert", pki.certFile, "--tls-key", pki.keyFile}
 	// A clean environment, not os.Environ(): an ANTHROPIC_API_KEY or a
 	// CLAUDE_CONFIG_DIR inherited from whoever runs the suite must not become
 	// the hub's credential, and the hub must reach the fakes only through the
 	// trust it was given here.
-	h.cmd.Env = []string{
+	h.env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + home,
 		"LANG=C.UTF-8",
@@ -131,21 +135,34 @@ func startHub(t *testing.T, pki *testPKI, opts hubOptions) *hub {
 		"SSL_CERT_FILE=" + pki.bundleFile,
 		"CLOOP_UI_TOKEN=" + h.token,
 	}
+	h.launch(t)
+	t.Cleanup(func() { h.stop(t) })
+	return h
+}
+
+// launch starts the hub process and waits for it to report ready.
+func (h *hub) launch(t *testing.T) {
+	t.Helper()
+	h.cmd = exec.Command(h.argv[0], h.argv[1:]...)
+	h.cmd.Dir = h.dir
+	h.cmd.Env = h.env
 	h.cmd.Stdout, h.cmd.Stderr = h.log, h.log
 	h.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := h.cmd.Start(); err != nil {
 		t.Fatalf("start hub: %v", err)
 	}
+	done := make(chan struct{})
+	h.done = done
+	cmd := h.cmd
 	go func() {
-		_ = h.cmd.Wait()
-		close(h.done)
+		_ = cmd.Wait()
+		close(done)
 	}()
-	t.Cleanup(func() { h.stop(t) })
 
 	deadline := time.Now().Add(readyTimeout)
 	for {
 		select {
-		case <-h.done:
+		case <-done:
 			t.Fatalf("hub exited during startup:\n%s", h.tail())
 		default:
 		}
@@ -154,7 +171,7 @@ func startHub(t *testing.T, pki *testPKI, opts hubOptions) *hub {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				break
+				return
 			}
 		}
 		if time.Now().After(deadline) {
@@ -163,7 +180,26 @@ func startHub(t *testing.T, pki *testPKI, opts hubOptions) *hub {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return h
+}
+
+// halt signals the hub's process group and waits for it to exit: SIGTERM as
+// systemd stops a service, SIGKILL as a crash or an OOM kill does.
+func (h *hub) halt(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	_ = syscall.Kill(-h.cmd.Process.Pid, sig)
+	select {
+	case <-h.done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the hub did not exit within 30s of %v:\n%s", sig, h.tail())
+	}
+}
+
+// restart stops the hub with sig and starts it again in the same directory,
+// on the same port — a nightly deploy, or a rolling update of one replica.
+func (h *hub) restart(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	h.halt(t, sig)
+	h.launch(t)
 }
 
 // stop terminates the hub's process group and waits for it.

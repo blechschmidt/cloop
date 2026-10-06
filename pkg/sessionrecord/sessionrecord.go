@@ -1,8 +1,11 @@
 // Package sessionrecord records the hub's proxy sessions durably (Task 20383):
-// the git proxy's and the Kubernetes monitor's lease-path sessions and every
-// run's egress session, in statedb's proxy_sessions
+// the git proxy's lease-path and workspace sessions, the Kubernetes monitor's
+// sessions and every run's egress session, in statedb's proxy_sessions
 // (migrations/0058_proxy_sessions.sql), so the hub process that adopts a run
-// after the one serving it stops can restore them.
+// after the one serving it stops can restore them; and the CI relay's
+// sessions, in ci_sessions (migrations/0060_ci_sessions.sql, Task 20390), so
+// the hub process that receives a job's next call after the one serving it
+// stops can restore the job's session.
 //
 // It is the seam between three registries that must not know about the
 // database — pkg/gitproxy, pkg/kubeguard, pkg/egressbroker each define a
@@ -24,6 +27,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
@@ -311,9 +315,140 @@ func EgressCounters(row statedb.ProxySessionRow) egressbroker.SessionCounters {
 	return c
 }
 
+// ── ci ───────────────────────────────────────────────────────────────────────
+
+// CIProvenance is a CI relay session's provenance_json (Task 20390): which
+// pipeline its rule admitted. Claims is the verified payload of the OIDC token
+// the session was minted for — the job's identity, not a credential: the
+// token's signature is not kept, so nothing here can be exchanged again.
+type CIProvenance struct {
+	RuleName   string          `json:"rule_name,omitempty"`
+	Project    string          `json:"project,omitempty"`
+	Subject    string          `json:"subject,omitempty"`
+	Repository string          `json:"repository,omitempty"`
+	Ref        string          `json:"ref,omitempty"`
+	Workflow   string          `json:"workflow,omitempty"`
+	Actor      string          `json:"actor,omitempty"`
+	RunID      string          `json:"run_id,omitempty"`
+	RunURL     string          `json:"run_url,omitempty"`
+	Claims     json.RawMessage `json:"claims,omitempty"`
+}
+
+// CIStore is a claudeproxy.SessionStore over the control plane's database,
+// recording CI relay sessions in ci_sessions (Task 20390). Its writes after
+// the insert are fenced on the holder, like the other stores'.
+type CIStore struct {
+	base
+	// instance names the hub instance whose configuration governs the
+	// sessions it records (ci_sessions.instance).
+	instance string
+}
+
+// NewCIStore returns a store writing as holder, for the hub instance named
+// instance.
+func NewCIStore(db *statedb.DB, holder func() string, instance string,
+	onError func(kind, id, what string, err error)) CIStore {
+	return CIStore{base: base{DB: db, Holder: holder, OnError: onError}, instance: instance}
+}
+
+// ciKind names CI sessions in error reports.
+const ciKind = "ci"
+
+// SaveSession implements claudeproxy.SessionStore.
+func (c CIStore) SaveSession(rec claudeproxy.SessionRecord) error {
+	holder, err := c.holder()
+	if err != nil {
+		return err
+	}
+	prov, err := json.Marshal(CIProvenance{
+		RuleName: rec.RuleName, Project: rec.Project, Subject: rec.Subject, Repository: rec.Repository,
+		Ref: rec.Ref, Workflow: rec.Workflow, Actor: rec.Actor, RunID: rec.RunID, RunURL: rec.RunURL,
+		Claims: rec.Claims,
+	})
+	if err != nil {
+		return err
+	}
+	pol, err := json.Marshal(rec.Policy)
+	if err != nil {
+		return err
+	}
+	counters, err := json.Marshal(rec.Usage)
+	if err != nil {
+		return err
+	}
+	return c.DB.InsertCISession(statedb.CISessionRow{
+		SessionID: rec.ID, TokenSHA256: rec.TokenSHA256, RuleID: rec.RuleID, Holder: holder, Instance: c.instance,
+		Provenance: string(prov), Policy: string(pol), Counters: string(counters),
+		IssuedAt: rec.IssuedAt, ExpiresAt: rec.ExpiresAt, LastUsedAt: rec.LastUsed,
+	})
+}
+
+// CheckpointSession implements claudeproxy.SessionStore. A checkpoint that
+// lands on no row is an error, so the registry writes it again next time
+// rather than believing the record holds it.
+func (c CIStore) CheckpointSession(id string, u claudeproxy.Usage, lastUsed time.Time) error {
+	holder, err := c.holder()
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(u)
+	if err != nil {
+		return err
+	}
+	ok, err := c.DB.CheckpointCISession(id, holder, string(raw), lastUsed)
+	if err == nil && !ok {
+		// Closed or taken over by another hub process: the registry stops
+		// serving it. Not reported — it is how a revocation made elsewhere
+		// reaches this process.
+		return claudeproxy.ErrRecordGone
+	}
+	return c.report(ciKind, id, "checkpoint its counters", err)
+}
+
+// CloseSession implements claudeproxy.SessionStore.
+func (c CIStore) CloseSession(id, reason string, at time.Time, u claudeproxy.Usage) error {
+	holder, err := c.holder()
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(u)
+	if err != nil {
+		return err
+	}
+	_, err = c.DB.CloseCISession(id, holder, at, reason, string(raw))
+	return c.report(ciKind, id, "record its end", err)
+}
+
+// CIRecord reads a row back into what claudeproxy.Registry.Restore takes, and
+// its provenance.
+func CIRecord(row statedb.CISessionRow) (claudeproxy.SessionRecord, CIProvenance, error) {
+	var prov CIProvenance
+	if err := json.Unmarshal([]byte(row.Provenance), &prov); err != nil {
+		return claudeproxy.SessionRecord{}, CIProvenance{}, fmt.Errorf("decode the provenance of CI session %s: %w",
+			row.SessionID, err)
+	}
+	var pol claudeproxy.Policy
+	if err := json.Unmarshal([]byte(row.Policy), &pol); err != nil {
+		return claudeproxy.SessionRecord{}, CIProvenance{}, fmt.Errorf("decode the policy of CI session %s: %w",
+			row.SessionID, err)
+	}
+	var u claudeproxy.Usage
+	if err := json.Unmarshal([]byte(row.Counters), &u); err != nil {
+		return claudeproxy.SessionRecord{}, CIProvenance{}, fmt.Errorf("decode the counters of CI session %s: %w",
+			row.SessionID, err)
+	}
+	return claudeproxy.SessionRecord{
+		ID: row.SessionID, TokenSHA256: row.TokenSHA256, Policy: pol, RuleID: row.RuleID,
+		RuleName: prov.RuleName, Project: prov.Project, Subject: prov.Subject, Repository: prov.Repository,
+		Ref: prov.Ref, Workflow: prov.Workflow, Actor: prov.Actor, RunID: prov.RunID, RunURL: prov.RunURL,
+		Claims: prov.Claims, IssuedAt: row.IssuedAt, ExpiresAt: row.ExpiresAt, Usage: u, LastUsed: row.LastUsedAt,
+	}, prov, nil
+}
+
 // Interface checks.
 var (
 	_ gitproxy.SessionStore     = GitStore{}
 	_ kubeguard.SessionStore    = KubeStore{}
 	_ egressbroker.SessionStore = EgressStore{}
+	_ claudeproxy.SessionStore  = CIStore{}
 )

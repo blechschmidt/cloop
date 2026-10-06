@@ -55,6 +55,16 @@ const (
 	EventSessionMinted EventKind = "ci.session.minted"
 	EventSessionClosed EventKind = "ci.session.closed"
 
+	// EventSessionSuspended: a hub process stopping gracefully stopped
+	// serving a recorded session without ending it, so the process that
+	// receives the pipeline's next request can restore it (Task 20390).
+	EventSessionSuspended EventKind = "ci.session.suspended"
+
+	// EventSessionRestored: a hub process took over the record of a session
+	// whose holder had stopped, held it to its rule as the rule stands now,
+	// and serves it under its original id and token.
+	EventSessionRestored EventKind = "ci.session.restored"
+
 	// EventRelayAllowed is one forwarded request. It carries the token counts
 	// the upstream reported, which is what makes per-pipeline spend
 	// answerable.

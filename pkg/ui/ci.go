@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,6 +87,10 @@ type ciService struct {
 	// whether to tear down every live session.
 	fingerprint string
 
+	// instance is this hub instance's name in the records of the sessions it
+	// serves (ciInstance).
+	instance string
+
 	// auditDB is held open for the service's lifetime rather than opened per
 	// event. A relay emits one event per request, and opening a second
 	// connection to a SQLite file this process already has open produces
@@ -109,7 +114,16 @@ type ciState struct {
 	// alternative is an operator reading "enabled: true" while every pipeline
 	// gets a 503.
 	lastErr atomic.Pointer[string]
+
+	// stopped: closeCI ran — the hub is shutting down — and no service is
+	// built again, or a call arriving before the listener closes would
+	// restore a just-suspended session into a registry nothing suspends.
+	// Never reset: a Server serves once.
+	stopped atomic.Bool
 }
+
+// errCIStopped refuses a CI call that reaches a hub shutting down.
+var errCIStopped = errors.New("this hub process is shutting down")
 
 // ciEnabled reports whether CI federation is configured on.
 func (s *Server) ciEnabled() bool {
@@ -127,6 +141,9 @@ func (s *Server) ciEnabled() bool {
 // usual fix is to add one — which should take effect on the next request, not
 // on the next restart.
 func (s *Server) ciSvc() (*ciService, error) {
+	if s.ci.stopped.Load() {
+		return nil, errCIStopped
+	}
 	cfg, err := s.loadHubConfig()
 	if err != nil {
 		return nil, fmt.Errorf("load hub config: %w", err)
@@ -136,12 +153,35 @@ func (s *Server) ciSvc() (*ciService, error) {
 	}
 
 	fingerprint := ciFingerprint(cfg)
-	if svc := s.ci.svc.Load(); svc != nil && svc.fingerprint == fingerprint {
-		return svc, nil
+	cur := s.ci.svc.Load()
+	if cur != nil && cur.fingerprint == fingerprint {
+		return cur, nil
+	}
+	if cur != nil {
+		// A rebuild ends every session cur serves (Task 20390: and its
+		// instance's records nobody serves). Believe the change only if the
+		// configuration says it again a moment later — a file an editor is
+		// half-way through writing must not end them — and serve this call
+		// as before if it does not.
+		time.Sleep(ciSwitchConfirm)
+		if again, err := s.loadHubConfig(); err != nil || again == nil || ciFingerprint(again) != fingerprint {
+			// With the service there is now: the one read before the wait
+			// may have been replaced, or stopped, since.
+			if s.ci.stopped.Load() {
+				return nil, errCIStopped
+			}
+			if now := s.ci.svc.Load(); now != nil {
+				return now, nil
+			}
+			return nil, ciauth.ErrDisabled // retired meanwhile: switched off
+		}
 	}
 
 	s.ci.mu.Lock()
 	defer s.ci.mu.Unlock()
+	if s.ci.stopped.Load() {
+		return nil, errCIStopped
+	}
 	// Re-check under the lock: two concurrent exchanges on a cold hub would
 	// otherwise build two services, and the loser's sessions would be minted
 	// into a registry nothing serves.
@@ -161,7 +201,7 @@ func (s *Server) ciSvc() (*ciService, error) {
 	// settings change that left already-minted sessions relaying under the
 	// old policy would be a settings change that did not happen.
 	if old := s.ci.svc.Swap(svc); old != nil {
-		old.shutdown("configuration changed")
+		old.shutdown("configuration changed", s.ciSessionServed)
 	}
 	return svc, nil
 }
@@ -239,49 +279,140 @@ func (s *Server) buildCIService(cfg *config.Config) (*ciService, error) {
 
 	reg := claudeproxy.NewRegistry(strings.TrimSuffix(cfg.UI.ExternalURL, "/") + ciMountPath)
 	reg.OnEvent = withProxySessionOwnership(ownerCISession, ciSessionEvent, ciAuditSink(auditDB))
-
-	px, err := claudeproxy.New(reg, claudeproxy.Options{
-		Upstream:   upstream,
-		PathPrefix: ciMountPath,
-		// A CI session is minted by the hub process that took the pipeline's
-		// token exchange; its relayed calls reach any of them (Task 20354).
-		Fallback: s.ciRelayFallback,
-	})
-	if err != nil {
-		return nil, err
+	if auditDB != nil {
+		// Every session is recorded (Task 20390), so a job relaying through
+		// this hub when it restarts carries on: the process that receives its
+		// next call restores the session (ci_sessions.go).
+		reg.Store = newCISessionStore(auditDB, s.ciInstance())
 	}
 
 	reapCtx, stop := context.WithCancel(context.Background())
 	svc := &ciService{
 		verifier:    verifier,
 		reg:         reg,
-		proxy:       px,
 		models:      c.Models(),
 		upstream:    upstream.Redacted(),
 		fingerprint: ciFingerprint(cfg),
+		instance:    s.ciInstance(),
 		auditDB:     auditDB,
 		stopReaping: stop,
 	}
-	go svc.reap(reapCtx)
+	px, err := claudeproxy.New(reg, claudeproxy.Options{
+		Upstream:   upstream,
+		PathPrefix: ciMountPath,
+		// A CI session is minted by the hub process that took the pipeline's
+		// token exchange; its relayed calls reach any of them (Task 20354),
+		// and one whose holder stopped is restored by whichever receives it
+		// (Task 20390).
+		Fallback: func(w http.ResponseWriter, r *http.Request, sessionID string) bool {
+			return s.ciRelayFallback(w, r, svc, sessionID)
+		},
+	})
+	if err != nil {
+		stop()
+		if auditDB != nil {
+			_ = auditDB.Close()
+		}
+		return nil, err
+	}
+	svc.proxy = px
+	go svc.reap(reapCtx, s.ciSwitchedOff, func() { s.retireCIService(svc, "CI federation is disabled") })
 	return svc, nil
 }
 
-// reap sweeps lapsed sessions until the service is replaced or the hub stops.
-func (svc *ciService) reap(ctx context.Context) {
+// reap sweeps lapsed sessions and checkpoints the live ones' counters until
+// the service is replaced or the hub stops — or this hub process's own
+// configuration switched federation off, which retire then acts on: the
+// sessions it serves end within ciCheckpointInterval of the switch, however
+// it was thrown (Task 20390).
+func (svc *ciService) reap(ctx context.Context, switchedOff func() bool, retire func()) {
+	defer recoverGoroutine("ci session reaper")
 	t := time.NewTicker(ciReapInterval)
 	defer t.Stop()
+	cp := time.NewTicker(ciCheckpointInterval)
+	defer cp.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			svc.reg.ReapExpired()
+		case <-cp.C:
+			if switchedOff() {
+				retire()
+				return
+			}
+			svc.reg.Checkpoint()
+			svc.reconcileHeld()
 		}
 	}
 }
 
-// shutdown revokes every session and stops the reaper.
-func (svc *ciService) shutdown(reason string) {
+// ciSwitchConfirm is how long ciSwitchedOff waits before it reads the
+// configuration a second time: what it decides ends every session this
+// process serves, and a file an editor is half-way through writing must not.
+var ciSwitchConfirm = 500 * time.Millisecond
+
+// ciSwitchedOff reports whether this hub process's own configuration has CI
+// federation off, as ciInstanceSwitchedOff reads it.
+func (s *Server) ciSwitchedOff() bool {
+	return s.ciInstanceSwitchedOff(s.ciInstance())
+}
+
+// ciInstanceConfiguredOff reports whether the hub instance named instance — a
+// port, as ciInstance names one — has CI federation off, read once as that
+// instance reads it: this directory's config.yaml under that port's overlay,
+// which lives here too (config.UIInstanceConfigPath), so any member can answer
+// for any instance. Unlike ciEnabled's, its answer for a configuration that
+// cannot be read is "no": that switches nothing off.
+func (s *Server) ciInstanceConfiguredOff(instance string) bool {
+	port, err := strconv.Atoi(instance)
+	if err != nil || port < 0 {
+		port = 0 // no overlay: config.yaml alone
+	}
+	cfg, err := loadHubConfigAt(s.WorkDir, port)
+	return err == nil && cfg != nil && !cfg.UI.CI.Enabled
+}
+
+// ciInstanceSwitchedOff is ciInstanceConfiguredOff confirmed by a second read
+// ciSwitchConfirm later: what it decides ends sessions. It may take
+// ciSwitchConfirm to answer.
+func (s *Server) ciInstanceSwitchedOff(instance string) bool {
+	if !s.ciInstanceConfiguredOff(instance) {
+		return false
+	}
+	time.Sleep(ciSwitchConfirm)
+	return s.ciInstanceConfiguredOff(instance)
+}
+
+// retireCIService tears svc down if it is still this hub's service, as
+// switching federation off through Settings does.
+func (s *Server) retireCIService(svc *ciService, reason string) {
+	s.ci.mu.Lock()
+	retired := s.ci.svc.CompareAndSwap(svc, nil)
+	s.ci.mu.Unlock()
+	if retired {
+		svc.shutdown(reason, s.ciSessionServed)
+	}
+}
+
+// recheckCIService retires this hub's service at once if its configuration
+// now has federation off: another member's Settings change said the
+// configuration moved, and one this process shares should not wait for the
+// next checkpoint tick. Not on the bus goroutine: it may wait ciSwitchConfirm.
+func (s *Server) recheckCIService() {
+	if svc := s.ci.svc.Load(); svc != nil && s.ciSwitchedOff() {
+		s.retireCIService(svc, "CI federation is disabled")
+	}
+}
+
+// shutdown revokes every session and stops the reaper: the configuration
+// changed, or CI federation was switched off. The records of this instance's
+// sessions no live process serves end too, so none is restored under a
+// configuration that no longer stands — but not one served reports served
+// here: the service that replaced this one may have minted or restored it
+// already.
+func (svc *ciService) shutdown(reason string, served func(string) bool) {
 	if svc == nil {
 		return
 	}
@@ -291,15 +422,39 @@ func (svc *ciService) shutdown(reason string) {
 	// Sessions are closed before the audit handle, so the closing events
 	// reach the trail rather than stderr.
 	svc.reg.CloseAll(reason)
+	closeDormantCISessionRecords(svc.auditDB, svc.instance, reason, served)
 	if svc.auditDB != nil {
 		_ = svc.auditDB.Close()
 	}
 }
 
-// closeCI tears the service down. Called from the hub's shutdown path.
+// suspend stops serving every session without ending the recorded ones, for a
+// hub stopping gracefully (Task 20390): their spend is written and their
+// records stay open, so the process that receives a job's next call restores
+// its session. A session with no record is closed.
+func (svc *ciService) suspend(reason string) {
+	if svc == nil {
+		return
+	}
+	if svc.stopReaping != nil {
+		svc.stopReaping()
+	}
+	svc.reg.SuspendAll(reason)
+	if svc.auditDB != nil {
+		_ = svc.auditDB.Close()
+	}
+}
+
+// closeCI tears the service down. Called from the hub's shutdown path, which
+// suspends the sessions rather than revoking them: a hub restarting is not an
+// operator withdrawing a pipeline's access.
 func (s *Server) closeCI() {
-	if old := s.ci.svc.Swap(nil); old != nil {
-		old.shutdown("hub shutting down")
+	s.ci.mu.Lock()
+	s.ci.stopped.Store(true)
+	old := s.ci.svc.Swap(nil)
+	s.ci.mu.Unlock()
+	if old != nil {
+		old.suspend("the hub is shutting down")
 	}
 }
 

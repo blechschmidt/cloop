@@ -176,6 +176,13 @@ func (s *Server) handleCIExchange(w http.ResponseWriter, r *http.Request) {
 	if len(models) == 0 {
 		models = svc.models
 	}
+	// The verified claims are recorded with the session (Task 20390), so a
+	// hub process that restores it after this one stops can hold it to its
+	// rule as the rule stands then. The token's signature is not kept.
+	claimsDoc, err := json.Marshal(claims.All)
+	if err != nil {
+		claimsDoc = nil
+	}
 	minted, err := svc.reg.Mint(claudeproxy.MintRequest{
 		Policy: claudeproxy.Policy{
 			Models:          models,
@@ -193,6 +200,7 @@ func (s *Server) handleCIExchange(w http.ResponseWriter, r *http.Request) {
 		RunID:      claims.RunID,
 		RunURL:     claims.RunURL(""),
 		TTL:        res.Rule.Policy.TTL(),
+		Claims:     claimsDoc,
 	})
 	if err != nil {
 		s.log().Error(logger.EventAuthz, 0, "ci: mint session",
@@ -673,13 +681,21 @@ func (s *Server) touchCIRule(id string) {
 	_ = db.TouchCIPipelineRule(id, time.Now().UTC())
 }
 
-// closeCISessionsForRule revokes the live sessions a rule minted.
+// closeCISessionsForRule revokes the sessions a rule minted: the live ones
+// here, and the records of the ones no process serves right now (Task 20390),
+// which would otherwise be restored later under a rule that no longer stands.
+// It returns how many it ended.
 func (s *Server) closeCISessionsForRule(id, reason string) int {
-	svc := s.ci.svc.Load()
-	if svc == nil {
-		return 0
+	n := 0
+	if svc := s.ci.svc.Load(); svc != nil {
+		n = svc.reg.CloseByRule(id, reason)
 	}
-	return svc.reg.CloseByRule(id, reason)
+	db, err := s.controlPlaneDB()
+	if err != nil {
+		return n
+	}
+	defer db.Close() //nolint:errcheck
+	return n + closeCISessionRecordsForRule(db, id, reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -703,13 +719,21 @@ type ciSessionView struct {
 
 	Remaining int               `json:"remaining_requests"`
 	Usage     claudeproxy.Usage `json:"usage"`
+
+	// Suspended marks a recorded session no live hub process serves right
+	// now — its holder stopped — which its job's next call restores
+	// (Task 20390).
+	Suspended bool `json:"suspended,omitempty"`
 }
 
-// handleCISessionsList serves GET /api/ci/sessions.
+// handleCISessionsList serves GET /api/ci/sessions: the sessions this member
+// serves, and the recorded ones no live member serves.
 func (s *Server) handleCISessionsList(w http.ResponseWriter, r *http.Request) {
 	out := []ciSessionView{}
+	served := map[string]bool{}
 	if svc := s.ci.svc.Load(); svc != nil {
 		for _, sess := range svc.reg.Sessions() {
+			served[sess.ID] = true
 			out = append(out, ciSessionView{
 				ID: sess.ID, RuleID: sess.RuleID, RuleName: sess.RuleName,
 				Project: sess.Project, Repository: sess.Repository, Ref: sess.Ref,
@@ -720,23 +744,125 @@ func (s *Server) handleCISessionsList(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	out = append(out, s.suspendedCISessionViews(served)...)
 	jsonOK(w, map[string]any{"sessions": out})
 }
 
-// handleCISessionRevoke serves DELETE /api/ci/sessions/{id}.
+// suspendedCISessionViews renders the open, unexpired session records whose
+// holder is not a live hub process.
+func (s *Server) suspendedCISessionViews(served map[string]bool) []ciSessionView {
+	db, err := s.controlPlaneDB()
+	if err != nil {
+		return nil
+	}
+	defer db.Close() //nolint:errcheck
+	rows, err := db.ListCISessions(statedb.CISessionFilter{OpenOnly: true})
+	if err != nil {
+		return nil
+	}
+	self := leaseHolderID()
+	now := time.Now()
+	var out []ciSessionView
+	for _, row := range rows {
+		if served[row.SessionID] || !now.Before(row.ExpiresAt) {
+			continue
+		}
+		if row.Holder != "" && row.Holder != self && ciHolderAlive(row.Holder) {
+			continue // served by a live member, which lists it
+		}
+		rec, _, err := ciRecordOf(row)
+		if err != nil {
+			continue
+		}
+		remaining := -1
+		if rec.Policy.MaxRequests > 0 {
+			remaining = max(rec.Policy.MaxRequests-int(rec.Usage.Requests), 0)
+		}
+		out = append(out, ciSessionView{
+			ID: rec.ID, RuleID: rec.RuleID, RuleName: rec.RuleName, Project: rec.Project,
+			Repository: rec.Repository, Ref: rec.Ref, Workflow: rec.Workflow, Actor: rec.Actor,
+			RunURL: rec.RunURL, IssuedAt: rec.IssuedAt, ExpiresAt: rec.ExpiresAt, LastUsedAt: rec.LastUsed,
+			Models: rec.Policy.Models, Remaining: remaining, Usage: rec.Usage, Suspended: true,
+		})
+	}
+	return out
+}
+
+// handleCISessionRevoke serves DELETE /api/ci/sessions/{id}: a session this
+// member serves is closed here; one a live peer serves is closed there; one no
+// live process serves has its record ended, so its job's next call is refused
+// rather than restored (Task 20390).
 func (s *Server) handleCISessionRevoke(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	svc := s.ci.svc.Load()
-	if svc == nil {
+	const reason = "revoked by operator"
+	if svc := s.ci.svc.Load(); svc != nil && svc.reg.Close(id, reason) == nil {
+		// Closed here, and never restored here. Its record is closed too,
+		// whoever it names — a close that did not land would leave the
+		// session restorable by the next process to receive its job's call.
+		if _, err := s.closeCISessionRecord(id, reason, true); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeUnavailable,
+				"the session was revoked on this hub process, but its record could not be closed, so "+
+					"another process could still restore it: "+err.Error()))
+			return
+		}
+		s.auditCIRule(r, auditaction.ActionCISessionRevoked, ciauth.Rule{ID: id}, reason)
+		jsonOK(w, map[string]any{"ok": true})
+		return
+	}
+	if n := s.clusterNode(); n != nil {
+		if _, forwarded := peerCallFrom(r); !forwarded {
+			if o, found, err := n.Lookup(ownerCISession, id); err == nil && found && !o.Self && o.Alive {
+				s.forwardTo(w, r, o.Member)
+				return
+			}
+		}
+	}
+	// No live process claims to serve it: end its record, whoever it names.
+	// A process that holds the record without serving the session — one whose
+	// restore failed part-way — finds it closed when it tries again.
+	closed, err := s.closeCISessionRecord(id, reason, false)
+	if err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, err.Error()))
+		return
+	}
+	if !closed {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such session"))
 		return
 	}
-	if err := svc.reg.Close(id, "revoked by operator"); err != nil {
-		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such session"))
-		return
-	}
-	s.auditCIRule(r, auditaction.ActionCISessionRevoked, ciauth.Rule{ID: id}, "revoked by operator")
+	s.auditCIRule(r, auditaction.ActionCISessionRevoked, ciauth.Rule{ID: id},
+		"revoked by operator while no hub process served it")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// closeCISessionRecord ends session id's record whoever holds it, writes the
+// close row no registry will — closedHere: this process's registry just
+// closed the session, and wrote its own — and reports whether an open record
+// was closed. A holder still serving it stops at its next checkpoint, finding
+// the record gone.
+func (s *Server) closeCISessionRecord(id, reason string, closedHere bool) (bool, error) {
+	db, err := s.controlPlaneDB()
+	if err != nil {
+		return false, err
+	}
+	defer db.Close() //nolint:errcheck
+	row, err := db.GetCISession(id)
+	if errors.Is(err, statedb.ErrCISessionNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !row.Open() {
+		return false, nil
+	}
+	ok, err := db.CloseCISessionAny(id, time.Now().UTC(), reason)
+	if err != nil || !ok {
+		return false, err
+	}
+	if !closedHere {
+		appendCIRecordEnd(db, row, reason)
+	}
+	return true, nil
 }
 
 // handleCIExchanges serves GET /api/ci/exchanges.
@@ -923,10 +1049,23 @@ func (s *Server) handleCISettingsSave(w http.ResponseWriter, r *http.Request) {
 	if was && !cfg.UI.CI.Enabled {
 		s.ci.mu.Lock()
 		if old := s.ci.svc.Swap(nil); old != nil {
-			old.shutdown("CI federation disabled")
+			old.shutdown("CI federation disabled", s.ciSessionServed)
 		}
 		s.ci.mu.Unlock()
+		// And this instance's recorded sessions no live hub process serves
+		// (Task 20390) — its predecessor's suspended ones — so turning
+		// federation back on brings none back. Another instance keeps to its
+		// own ui.ci.enabled: one reading this configuration ends its own as
+		// soon as the notice below reaches it, one whose overlay sets it
+		// otherwise does not.
+		if db, err := s.controlPlaneDB(); err == nil {
+			closeDormantCISessionRecords(db, s.ciInstance(), "CI federation disabled", s.ciSessionServed)
+			_ = db.Close()
+		}
 	}
+	// The other members re-read their own configuration now rather than at
+	// their next checkpoint tick.
+	s.publishInvalidate(invalidateCIConfig, nil)
 	s.auditCIRule(r, auditaction.ActionCIConfigUpdated, ciauth.Rule{},
 		fmt.Sprintf("enabled=%v issuer=%q audience=%q",
 			cfg.UI.CI.Enabled, cfg.UI.CI.Issuer, cfg.UI.CI.Audience))

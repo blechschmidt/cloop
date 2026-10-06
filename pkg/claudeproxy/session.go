@@ -2,18 +2,22 @@ package claudeproxy
 
 // session.go is the registry of live CI sessions.
 //
-// Sessions live in memory and nowhere else, for the same reason gitproxy's and
-// kubeguard's do: a session holds a policy and is authenticated by a secret
-// this process minted, and the process that mints must be the process that
-// serves. Persisting them would put a bearer credential at rest to survive a
-// restart that a CI job does not outlive anyway — a runner whose hub restarts
-// mid-job has already lost, and re-federating costs it one HTTP request.
+// A session is served from memory by the process holding it, and is
+// authenticated by a secret only the pipeline holds: the registry keeps the
+// token's SHA-256, never the token. Since Task 20390 a registry with a Store
+// also records every session — the hash, the rule and pipeline it was minted
+// for, its policy and spend — so a hub restarted while a GitHub Actions job is
+// relaying through it can restore the session on the job's next call instead
+// of answering it with a 401 (durable.go). A job cannot simply federate again:
+// the OIDC token it exchanged has been spent, and the jti replay guard refuses
+// it a second time.
 
 import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -64,6 +68,12 @@ type Session struct {
 
 	closed       atomic.Bool
 	closedReason atomic.Pointer[string]
+
+	// durable: the registry's Store holds a record of the session, so its
+	// end, its spend and its suspension are written there (durable.go).
+	durable bool
+	// flushed is the account last checkpointed to the Store.
+	flushed atomic.Pointer[checkpoint]
 
 	requests   atomic.Int64
 	denied     atomic.Int64
@@ -192,6 +202,11 @@ type MintRequest struct {
 
 	// TTL is the session lifetime, clamped to [MinTTL, MaxTTL].
 	TTL time.Duration
+
+	// Claims is the verified assertion the pipeline federated with, recorded
+	// with the session for the hub that restores it (Task 20390). Opaque
+	// here, never read, never retained in memory past the record's write.
+	Claims json.RawMessage
 }
 
 // Minted is the one-time result of creating a session.
@@ -218,6 +233,17 @@ type Registry struct {
 	// OnEvent receives audit events. It is called on the calling goroutine,
 	// so a sink that blocks blocks a request.
 	OnEvent func(Event)
+
+	// Store, if set, records every session and keeps the record in step
+	// (durable.go), so another hub process can restore it. Nil keeps
+	// sessions in memory only, as every registry did before Task 20390.
+	Store SessionStore
+
+	// closedHere are the sessions this registry closed, until each would
+	// have lapsed: Restore refuses them, so a session ended here is never
+	// brought back here even when its record's close failed to land.
+	// Guarded by mu.
+	closedHere map[string]time.Time
 }
 
 // NewRegistry returns an empty registry. baseURL is the externally reachable
@@ -289,18 +315,46 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	}
 	if len(r.sessions) >= MaxSessions {
 		r.mu.Unlock()
-		return nil, fmt.Errorf("claudeproxy: %d sessions are live, which is the limit", MaxSessions)
+		return nil, fmt.Errorf("%w: %d sessions are live", ErrTooManySessions, MaxSessions)
+	}
+	r.mu.Unlock()
+
+	// Durable before the token is handed out, so a hub that dies the moment
+	// Mint returns leaves a record its successor can restore. A record that
+	// cannot be written costs the session its survival, not its use: it works
+	// here, and the minted row says what was lost.
+	var recordErr error
+	if r.Store != nil {
+		if recordErr = r.Store.SaveSession(s.record(req.Claims)); recordErr == nil {
+			s.durable = true
+			s.flushed.Store(&checkpoint{usage: s.Usage()})
+		}
+	}
+
+	r.mu.Lock()
+	if len(r.sessions) >= MaxSessions {
+		// Filled up while the record was being written.
+		r.mu.Unlock()
+		if s.durable {
+			_ = r.Store.CloseSession(id, "not issued: the session limit was reached", now, Usage{})
+		}
+		return nil, fmt.Errorf("%w: %d sessions are live", ErrTooManySessions, MaxSessions)
 	}
 	r.sessions[id] = s
 	r.mu.Unlock()
 
+	detail := fmt.Sprintf("models=%s ttl=%s max_requests=%d",
+		strings.Join(s.Policy.Models, ","), ttl, s.Policy.MaxRequests)
+	if recordErr != nil {
+		detail += "; not recorded durably, so it will not be restored if this hub process stops: " +
+			recordErr.Error()
+	}
 	r.emit(Event{
 		Kind: EventSessionMinted, SessionID: id, RuleID: s.RuleID, RuleName: s.RuleName,
 		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
 		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject,
-		Detail: fmt.Sprintf("models=%s ttl=%s max_requests=%d",
-			strings.Join(s.Policy.Models, ","), ttl, s.Policy.MaxRequests),
-		At: now,
+		Detail: detail,
+		At:     now,
 	})
 	return &Minted{Session: s, Token: token, BaseURL: r.baseURL}, nil
 }
@@ -439,6 +493,8 @@ func (r *Registry) closeSession(s *Session, reason string) {
 		return
 	}
 	s.closedReason.Store(&reason)
+	r.tombstone(s)
+	r.closeRecord(s, reason)
 	u := s.Usage()
 	r.emit(Event{
 		Kind: EventSessionClosed, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
@@ -464,6 +520,7 @@ func (r *Registry) ReapExpired() int {
 }
 
 func (r *Registry) reapLocked(now time.Time) []*Session {
+	r.pruneTombstonesLocked(now)
 	var gone []*Session
 	for id, s := range r.sessions {
 		if s.Expired(now) {

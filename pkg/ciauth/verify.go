@@ -581,6 +581,30 @@ func claimsFrom(all map[string]any) *Claims {
 	return c
 }
 
+// ClaimsFromPayload rebuilds Claims from a payload Verify accepted earlier and
+// the hub kept: the record of a CI session (Task 20390), so the session's rule
+// can be asked again whether it admits the pipeline. It verifies nothing — the
+// signature is not kept, and the payload is trusted only because the hub wrote
+// it after Verify.
+func ClaimsFromPayload(all map[string]any) *Claims { return claimsFrom(all) }
+
+// Federates reports why claims Verify accepted earlier are not ones this
+// verifier would accept now for its issuer and audience, or nil. It checks
+// nothing about time or replay: it is asked of a session minted earlier, held
+// to the hub's configuration as it stands now (Task 20390).
+func (v *Verifier) Federates(c *Claims) error {
+	if c == nil {
+		return fmt.Errorf("%w: no claims", ErrUnverified)
+	}
+	if !issuerEqual(c.Issuer, v.issuer) {
+		return fmt.Errorf("%w: issued by %q, and this hub federates %q", ErrUnverified, c.Issuer, v.issuer)
+	}
+	if !containsString(c.Audience, v.audience) {
+		return fmt.Errorf("%w: audience %v does not include %q", ErrUnverified, c.Audience, v.audience)
+	}
+	return nil
+}
+
 // claimString reads a string claim, rendering a number as its decimal form so
 // a run_id that arrived unquoted still populates the field.
 func claimString(all map[string]any, key string) string {

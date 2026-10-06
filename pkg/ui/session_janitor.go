@@ -66,7 +66,32 @@ func (s *Server) sweepProxySessionRecords(now time.Time) int {
 		return 0
 	}
 	defer db.Close()
-	return sweepSessionRecords(db, now, leaseHolderID(), n.IsAlive)
+	// And the CI relay's (Task 20390), which stand on no lease.
+	ci := s.closeCIRecordsSwitchedOff(db)
+	ci += sweepCISessionRecords(db, now, leaseHolderID(), n.IsAlive, s.ciSessionServed)
+	return sweepSessionRecords(db, now, leaseHolderID(), n.IsAlive) + ci
+}
+
+// closeCIRecordsSwitchedOff ends the CI session records no live hub process
+// serves whose instance has federation switched off — the sessions a stopped
+// process suspended, its configuration switched off since, by Settings on
+// another member or in the file, while it was down or after it came back on
+// another port — as that process would have had it been serving them: none
+// may relay again (Task 20390). Each record is held to its own instance's
+// configuration, which this process reads as that instance does: every
+// instance's overlay lives in this directory. It returns how many it closed.
+func (s *Server) closeCIRecordsSwitchedOff(db *statedb.DB) int {
+	byInstance := map[string][]statedb.CISessionRow{}
+	for _, row := range dormantCISessionRecords(db, s.ciSessionServed) {
+		byInstance[row.Instance] = append(byInstance[row.Instance], row)
+	}
+	n := 0
+	for instance, rows := range byInstance {
+		if s.ciInstanceSwitchedOff(instance) {
+			n += closeCISessionRecordRows(db, rows, "CI federation is disabled", s.ciSessionServed)
+		}
+	}
+	return n
 }
 
 // sweepSessionRecords is sweepProxySessionRecords over db, as the process
