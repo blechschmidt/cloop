@@ -1790,6 +1790,18 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Prepare the Kubernetes end-to-end test
+        # What both runs of tests/kube below take: the cluster's kubeconfig, and
+        # the cloop the hub image carries — the build under test, statically
+        # linked, so it runs on the harness image's alpine.
+        run: |
+          set -euo pipefail
+          # 0600, or helm and kubectl warn on every call that it is readable.
+          (umask 077 && kind get kubeconfig --name cloop-ci > "$RUNNER_TEMP/kubeconfig")
+          id=$(docker create cloop-hub:ci)
+          docker cp "$id:/usr/local/bin/cloop" "$RUNNER_TEMP/cloop"
+          docker rm "$id" >/dev/null
+
       - name: Git proxy and kube guard end to end on kind
         id: kube-e2e
         # Task 20385: the only check that runs a workload Pod through the git
@@ -1801,20 +1813,13 @@ jobs:
         # the forge's refs, the audit trail, and that the run's Pod, Secrets
         # and NetworkPolicy are gone. See tests/kube/README.md.
         #
-        # Advisory until it has passed twice on main; then this line goes.
-        continue-on-error: true
+        # Gating: it landed advisory and passed on main twice (runs
+        # 37422497088 and 37423088052) before this.
         timeout-minutes: 30
         env:
           CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
         run: |
           set -euo pipefail
-          # 0600, or helm and kubectl warn on every call that it is readable.
-          (umask 077 && kind get kubeconfig --name cloop-ci > "$RUNNER_TEMP/kubeconfig")
-          # The workload runs the cloop the hub image carries: the build under
-          # test, and statically linked, so it runs on the harness's alpine.
-          id=$(docker create cloop-hub:ci)
-          docker cp "$id:/usr/local/bin/cloop" "$RUNNER_TEMP/cloop"
-          docker rm "$id" >/dev/null
           CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
             go test ./tests/kube/ -run TestGitProxyAndKubeGuardOnKubernetes -count=1 -v -timeout 28m 2>&1 |
             tee "$RUNNER_TEMP/kube-e2e.log"
