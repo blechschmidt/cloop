@@ -63,11 +63,23 @@ Commands are grouped below. Every group has more in it than the examples show â€
 // config.yaml here would let a shared file that forbids host execution
 // override an overlay that allows it for this one hub. That contradicts the
 // overlay's documented merge, in which a key it states replaces config.yaml's.
-// Every other command reads config.yaml alone, because nothing but `cloop ui`
-// reads an overlay.
+// `cloop hub doctor` reads the same view for the hub it diagnoses (its --port),
+// because the doctor reproduces that hub's executor registry in this process:
+// applying config.yaml's ratchets here first evicted a host driver the hub's
+// overlay allows, and the doctor then failed a working hub with "no executor
+// is registered at all" (Task 20387). Every other command reads config.yaml
+// alone, because nothing else reads an overlay.
 func loadCommandConfig(cmd *cobra.Command, dir string) (*config.Config, error) {
-	if cmd == uiCmd {
+	switch cmd {
+	case uiCmd:
 		cfg, _, err := config.LoadUIInstance(dir, uiPort)
+		return cfg, err
+	case hubDoctorCmd:
+		port, err := cmd.Flags().GetInt("port")
+		if err != nil {
+			return nil, err
+		}
+		cfg, _, err := config.LoadUIInstance(dir, port)
 		return cfg, err
 	}
 	return config.Load(dir)

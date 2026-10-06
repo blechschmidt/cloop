@@ -115,40 +115,54 @@ $ cloop hub doctor --port 8081        # the hub on :8081, with its overlay
 
 Where two dashboards share a directory, each takes its hub-scope settings
 from its own `.cloop/config.ui-<port>.yaml` merged over `config.yaml`. Pass
-`--port` to diagnose one of them as it runs. Without it the doctor reads
-`config.yaml` alone, and names on stderr any overlay it did not merge. See
+`--port` to diagnose one of them as it runs. It defaults to 8080, the port
+`cloop ui` serves on without `--port`, so a bare run diagnoses the hub a bare
+`cloop ui` starts; `--port 0` reads `config.yaml` alone. Either way the report
+names on stderr any overlay it did not merge. See
 [two dashboards in one directory](../reference/configuration.md#two-dashboards-in-one-directory).
+
+Every verdict is the hub's own: a check asks the code the hub runs rather than
+restating its rule. Whether `cloop ui` would start with `ui.oidc` is
+`oidcauth.New`'s answer, whether a redirect path is servable is the rule the
+router is built from, whether the git proxy starts is `tlsconf` loading its key
+pair and `gitproxy.NormalizeBaseURL` judging its base, and so on. A doctor that
+kept its own copies used to fail working hubs — one registered its callback at
+`/auth/oidc`, which the hub serves, and was told the hub "only serves the
+callback at /auth/callback" — and to pass broken ones.
 
 What it checks, and what each one catches that nothing else does:
 
 | Group | Checks |
 | --- | --- |
 | `policy` | whether `executors.allow_host_process` was *decided* or merely defaulted |
-| `oidc` | issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with, redirect URI origin and path against `ui.external_url`, client secret from the environment rather than the committed config |
-| `tls` | cert and key are a matching pair, chain ordering, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case |
-| `secret_key` | `CLOOP_SECRET_KEY` present, and generated key material rather than a passphrase or a placeholder out of the docs |
-| `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
-| `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
-| `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`) |
-| `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it — and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
-| `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); whether the advertised address is one a sandbox could use, a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
-| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)) |
-| `config` | drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
-| `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
+| `oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config |
+| `tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
+| `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
+| `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's |
+| `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable where the container or Kubernetes executor verifies signatures — and a warning that enrolled devices do not — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names |
+| `executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`) |
+| `gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
+| `kubeguard` | whether kubeconfig grants are brokered at all; whether the monitor would start — its TLS material and CA bundle read as the hub reads them, its base judged by `kubeguard.NormalizeBaseURL` — where sandboxes are pointed and whether only this machine can reach it, plus a bounded dial; and the verb ceiling |
+| `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); how each kind of sandbox this hub runs reaches the proxy, by the hub's own routing rules — containers by the bind address (`egress.listen_addr`), Pods and devices by `advertise_addr` (`egress.advertise_addr`) — and a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
+| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema, and failing only where the hub's guard refuses the database (one ahead by additive migrations opens) — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)) |
+| `config` | every value loading had to repair (`config.repaired`): a value reset to its default is a warning, and a section switched off because it could not start as written is a failure — reported under the section's own check for the git proxy, the Kubernetes monitor and the egress proxy, which would otherwise read as "disabled"; and drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
+| `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited — except `max_sessions`, where it is no cap), all judged as `quota.New` holds them (a negative ceiling is unlimited); and unbounded spend on a multi-tenant hub, by the daily caps `budget.Enforce` holds a run to — the project's own, read from `config.yaml`, which is where runs read a budget; the host-wide caps in the doctor's `~/.config/cloop` are reported beside them, since they hold back only runs on the host's own driver (an isolated run is not given them); and never counting `monthly_usd`, which nothing enforces |
 
 Exit is 1 on any failure and 0 with only warnings, so it is usable as a
 deployment gate. `--strict` fails on warnings too. Every non-pass finding
 carries a one-line remediation; the `check` ids in `--json` are stable.
 
-Two of those checks dial rather than read, because `executors.git_proxy.advertise_url`
-and `executors.egress.advertise_addr` are the only config values a hub hands to a
-sandbox and never uses itself — so a value that is right on the hub and unroutable
+Three of those checks dial rather than read, because `executors.git_proxy.advertise_url`,
+`executors.kube_guard.advertise_url` and `executors.egress.advertise_addr` are the only
+config values a hub hands to a sandbox and never uses itself — so a value that is right on the hub and unroutable
 from a Pod is invisible everywhere else. The dial is bounded (3 s, or `--timeout`)
-and never fails the run: the hub is not on the sandbox's network, and a Kubernetes
-Service name that does not resolve on the hub is frequently the *correct* setting.
-Read `gitproxy.advertise_reachable` and `egress.advertise_reachable` as "nothing is
-listening" versus "this was never checked" — which were previously the same green
-line. `--offline` reports them as skipped rather than passing.
+and never fails the run: the hub is not on the sandbox's network, and for the git
+proxy and the Kubernetes monitor a Service name that does not resolve on the hub is
+frequently the *correct* setting. (Not for the egress proxy: the hub refuses to hand
+Pods a cluster-internal name, and `egress.advertise_addr` fails on one.)
+Read `gitproxy.advertise_reachable`, `kubeguard.advertise_reachable` and
+`egress.advertise_reachable` as "nothing is listening" versus "this was never
+checked" — which were previously the same green line. `--offline` reports them as skipped rather than passing.
 
 Run it twice: once before the first `helm install` or `docker compose up`, and
 once in CI against the config repo. `--offline` makes the second cheap.

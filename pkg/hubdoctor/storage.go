@@ -21,21 +21,23 @@ package hubdoctor
 // cannot read the broken thing has nothing to report about it.
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/dbverify"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func checkStorage(dir string, add addFn) {
-	dbPath := filepath.Join(dir, ".cloop", "state.db")
+	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		add(Finding{
 			Check: "storage.database", Title: "State database", Severity: SeverityWarn,
-			Message: "no .cloop/state.db yet; it is created on first start, so nothing could be verified",
+			Message: fmt.Sprintf("no state database at %s yet; it is created on first start, so nothing "+
+				"could be verified", dbPath),
 			Remediation: "Start the hub once (`cloop ui`) or run `cloop hub bootstrap` in this directory, " +
 				"then re-run",
 		})
@@ -123,6 +125,7 @@ func checkSchemaVersion(dbPath string, add addFn) {
 		return
 	}
 
+	blocked := current > latest // until the guard says otherwise, below
 	switch {
 	case current == latest:
 		add(Finding{
@@ -139,16 +142,48 @@ func checkSchemaVersion(dbPath string, add addFn) {
 			Remediation: "Run `cloop migrate` and read the error it reports",
 		})
 	default:
+		// Ahead is not necessarily refused: the hub's guard opens a database
+		// whose newer migrations are all recorded as additive. Asked of the
+		// guard itself (statedb.CheckSchemaAhead), not inferred from the
+		// numbers — the doctor used to fail every database that was ahead.
+		guardErr := statedb.CheckSchemaAhead(dbPath)
+		if guardErr == nil {
+			blocked = false
+			add(Finding{
+				Check: "storage.schema", Title: "Schema version", Severity: SeverityPass,
+				Message: fmt.Sprintf("database is at version %d, ahead of this binary's %d%s, but every "+
+					"migration ahead is recorded as additive, so this build opens it", current, latest,
+					appliedByClause(db)),
+				Details: map[string]any{"db_version": current, "binary_version": latest},
+			})
+			break
+		}
+		var tooNew *statedb.SchemaTooNewError
+		if !errors.As(guardErr, &tooNew) {
+			// Not the guard's verdict — the question could not be put to it.
+			add(Finding{
+				Check: "storage.schema", Title: "Schema version", Severity: SeverityWarn,
+				Message: fmt.Sprintf("database is at version %d, ahead of this binary's %d, and whether "+
+					"this build would open it could not be read: %v", current, latest, guardErr),
+				Remediation: "Run `cloop db verify`, and check the database is readable by this user",
+				Details:     map[string]any{"db_version": current, "binary_version": latest},
+			})
+			break
+		}
+		blockedBy := ""
+		if tooNew.Blockers() != "" {
+			blockedBy = "; blocked by " + tooNew.Blockers()
+		}
 		// What happens next depends on whether the guard is suppressed, and
 		// saying "this build will not open it" to an operator who has already
 		// set the opt-out would be simply wrong.
-		consequence := "and this build will refuse to open it"
+		consequence := "and this build will refuse to open it" + blockedBy
 		remediation := "Roll forward to that cloop version, or restore a backup taken before the " +
 			"upgrade (`cloop db restore`). If the schemas are known-compatible, set " +
 			statedb.EnvAllowSchemaDowngrade + "=1 to start anyway"
 		if statedb.AllowSchemaDowngradeFromEnv() {
 			consequence = "and this build opens it only because " +
-				statedb.EnvAllowSchemaDowngrade + " is set"
+				statedb.EnvAllowSchemaDowngrade + " is set" + blockedBy
 			remediation = "Roll forward to that cloop version, or restore a backup taken before the " +
 				"upgrade (`cloop db restore`), then unset " + statedb.EnvAllowSchemaDowngrade
 		}
@@ -161,7 +196,7 @@ func checkSchemaVersion(dbPath string, add addFn) {
 		})
 	}
 
-	checkSchemaGuard(current, latest, add)
+	checkSchemaGuard(current, latest, blocked, add)
 }
 
 // appliedByClause names the build that applied the database's current schema
@@ -189,7 +224,7 @@ func appliedByClause(db *statedb.DB) string {
 // survives three upgrades, and is still there the day it stops being true. So
 // the off state is itself a finding — a warning when the schemas do agree, a
 // failure when the thing it is suppressing is actually present.
-func checkSchemaGuard(current, latest int, add addFn) {
+func checkSchemaGuard(current, latest int, blocked bool, add addFn) {
 	if !statedb.AllowSchemaDowngradeFromEnv() {
 		return
 	}
@@ -199,7 +234,7 @@ func checkSchemaGuard(current, latest int, add addFn) {
 			"migrated by a newer cloop instead of refusing it",
 		Remediation: "Unset " + statedb.EnvAllowSchemaDowngrade + " once the rollback that needed it is over",
 	}
-	if current > latest {
+	if current > latest && blocked {
 		f.Severity = SeverityFail
 		f.Message = fmt.Sprintf("%s is set and the database is at version %d against this binary's %d: "+
 			"the hub is running on a schema it does not fully know",

@@ -53,6 +53,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 )
 
 // Severity is how much a finding matters. The three values are ordered, and
@@ -307,6 +308,19 @@ type Options struct {
 	// volume (Task 20381). Tests substitute one so a volume can sit below its
 	// floor without anything filling a disk; nil means diskusage.Volumes.
 	DiskProbe func(paths ...string) ([]diskusage.Volume, error)
+
+	// GlobalBudget overrides how the host-wide spend caps are read, which
+	// budget.Enforce reads from the running user's config directory. Tests
+	// substitute one so a machine's own caps cannot decide them; nil means
+	// globalbudget.Load.
+	GlobalBudget func() (globalbudget.GlobalBudgetConfig, error)
+}
+
+func (o Options) globalBudget() (globalbudget.GlobalBudgetConfig, error) {
+	if o.GlobalBudget != nil {
+		return o.GlobalBudget()
+	}
+	return globalbudget.Load()
 }
 
 // probeLogf is the narrator, or a no-op when the caller wants silence.
@@ -387,26 +401,28 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	rep.StrictMode = !cfg.Executors.HostProcessAllowed()
 
 	checkExecutionPolicy(cfg, add)
+	// What loading changed comes first: every check below reads the result.
+	checkLoadRepairs(cfg, add)
 	checkOIDC(ctx, cfg, opts, add)
 	checkTLS(cfg, opts, add)
 	checkSecretKey(dir, cfg, add)
 	checkRBAC(cfg, add)
-	checkImagePolicy(ctx, cfg, opts, add)
+	checkImagePolicy(ctx, dir, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
 	checkEdgeLag(dir, add)
 	// After checkExecutors, and not optional about the ordering: the probe
 	// needs a driver in the registry holding a live cluster credential, and
 	// reconciliation is what puts one there.
 	checkNetworkPolicyEnforcement(ctx, dir, cfg, opts, add)
-	checkGitProxy(ctx, cfg, opts, add)
+	checkGitProxy(ctx, dir, cfg, opts, add)
 	checkBranchRestrictedGrants(dir, cfg, add)
-	checkKubeGuard(ctx, cfg, opts, add)
+	checkKubeGuard(ctx, dir, cfg, opts, add)
 	checkEgressBroker(ctx, dir, cfg, opts, add)
 	checkStorage(dir, add)
 	checkFreeSpace(dir, cfg, opts, add)
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)
-	checkAdmission(cfg, add)
+	checkAdmission(dir, cfg, opts, add)
 	// Last, and after checkExecutors for the same reason the NetworkPolicy
 	// probe is: it dispatches to the registry reconciliation builds. Running
 	// it last also means an operator watching a terminal has read every

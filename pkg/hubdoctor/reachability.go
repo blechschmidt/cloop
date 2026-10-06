@@ -157,27 +157,6 @@ func dialTarget(raw string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// addrTarget normalises an advertised "host:port" for dialling.
-//
-// A bare host is legitimate in config — the egress broker appends the
-// listener's port — but there is nothing to dial without one, so it is
-// reported as unprobeable rather than guessed at.
-func addrTarget(raw string) (string, error) {
-	a := strings.TrimSpace(raw)
-	if a == "" {
-		return "", fmt.Errorf("is empty")
-	}
-	host, port, err := net.SplitHostPort(a)
-	if err != nil {
-		return "", fmt.Errorf("carries no port, so there is nothing to dial " +
-			"(the broker appends the listener's port at run time)")
-	}
-	if host == "" {
-		return "", fmt.Errorf("names no host")
-	}
-	return net.JoinHostPort(host, port), nil
-}
-
 // reachFinding renders a probe result as the finding for one advertised
 // address.
 //

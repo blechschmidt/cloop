@@ -10,23 +10,12 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
-// gitProxyTLS writes a readable cert/key pair and returns their paths. The
-// checks only stat them, so the contents do not have to be real TLS material.
-func gitProxyTLS(t *testing.T) (cert, key string) {
-	t.Helper()
-	dir := t.TempDir()
-	cert = filepath.Join(dir, "proxy.crt")
-	key = filepath.Join(dir, "proxy.key")
-	for _, p := range []string{cert, key} {
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
-			t.Fatalf("write %s: %v", p, err)
-		}
-	}
-	return cert, key
-}
+// gitProxyTLS returns a real certificate and key for the proxy.
+func gitProxyTLS(t *testing.T) (cert, key string) { return tlsPair(t, "proxy") }
 
 // hostOnlyConfig is a single-machine install: nothing clones, so nothing hands
 // a credential to a sandbox.
@@ -48,7 +37,7 @@ func TestGitProxyDisabledOnAHostOnlyHubIsAPass(t *testing.T) {
 	got := findingsFor(t, t.TempDir(), hostOnlyConfig(), Options{Offline: true})
 	f := only(t, got, "gitproxy.enabled")
 	wantSeverity(t, f, SeverityPass)
-	if !strings.Contains(f.Message, "no configured executor provisions a git workspace") {
+	if !strings.Contains(f.Message, "no configured executor or enrolled device provisions a git workspace") {
 		t.Fatalf("message does not explain why this is fine: %q", f.Message)
 	}
 }
@@ -90,16 +79,16 @@ func TestGitProxyEnabledWithoutTLSMaterialFails(t *testing.T) {
 		Enabled: true, AdvertiseURL: "https://hub.internal:8443",
 	}
 	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
-	if len(got["gitproxy.tls"]) != 2 {
-		t.Fatalf("want one finding per missing file, got %d", len(got["gitproxy.tls"]))
+	f := only(t, got, "gitproxy.tls")
+	wantSeverity(t, f, SeverityFail)
+	// The consequence matters as much as the fault: an operator needs to
+	// know this does not silently fall back to handing over the PAT.
+	if !strings.Contains(f.Message, "will not start") || !strings.Contains(f.Message, "refused") {
+		t.Fatalf("message does not state the consequence: %q", f.Message)
 	}
-	for _, f := range got["gitproxy.tls"] {
-		wantSeverity(t, f, SeverityFail)
-		// The consequence matters as much as the fault: an operator needs to
-		// know this does not silently fall back to handing over the PAT.
-		if !strings.Contains(f.Message, "git workspaces will be refused") {
-			t.Fatalf("message does not state the consequence: %q", f.Message)
-		}
+	// A proxy that does not start is not reported as one that works.
+	if fs := got["gitproxy.enabled"]; len(fs) != 0 {
+		t.Fatalf("a proxy that will not start was also passed: %+v", fs)
 	}
 }
 
@@ -111,8 +100,29 @@ func TestGitProxyUnreadableTLSMaterialFails(t *testing.T) {
 		KeyFile:  filepath.Join(t.TempDir(), "absent.key"),
 	}
 	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
-	if len(got["gitproxy.tls"]) != 2 {
-		t.Fatalf("want one finding per unreadable file, got %d", len(got["gitproxy.tls"]))
+	wantSeverity(t, only(t, got, "gitproxy.tls"), SeverityFail)
+}
+
+// TestGitProxyMismatchedPairFails: two readable files that are not a pair.
+// The check used to stat them, and passed; the proxy loads them with
+// tlsconf.ServerConfig, refuses, and every git workspace is then refused
+// (Task 20387).
+func TestGitProxyMismatchedPairFails(t *testing.T) {
+	cert, _ := tlsPair(t, "proxy")
+	_, otherKey := tlsPair(t, "other")
+	cfg := cloningConfig()
+	cfg.Executors.GitProxy = config.GitProxyConfig{
+		Enabled: true, CertFile: cert, KeyFile: otherKey,
+		AdvertiseURL: "https://hub.internal:8443",
+	}
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "gitproxy.tls")
+	wantSeverity(t, f, SeverityFail)
+	if !strings.Contains(f.Message, "private key does not match") {
+		t.Errorf("want the loader's own refusal, got %q", f.Message)
+	}
+	if fs := got["gitproxy.enabled"]; len(fs) != 0 {
+		t.Fatalf("a proxy that will not start was also passed: %+v", fs)
 	}
 }
 
@@ -179,9 +189,15 @@ func TestGitProxyAllowDeleteWarns(t *testing.T) {
 // counted, into dir's control plane.
 func seedBranchGrants(t *testing.T, dir string) {
 	t.Helper()
-	t.Setenv("CLOOP_SECRET_KEY", "hubdoctor-branch-grants")
 	mustInitStateDB(t, dir)
-	db, err := statedb.Open(filepath.Join(dir, ".cloop", "state.db"))
+	seedBranchGrantsAt(t, filepath.Join(dir, ".cloop", "state.db"))
+}
+
+// seedBranchGrantsAt seeds the grants into the database at dbPath.
+func seedBranchGrantsAt(t *testing.T, dbPath string) {
+	t.Helper()
+	t.Setenv("CLOOP_SECRET_KEY", "hubdoctor-branch-grants")
+	db, err := statedb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)
 	}
@@ -245,4 +261,111 @@ func TestNoBranchRestrictedGrantsIsSilent(t *testing.T) {
 	if fs := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})["gitproxy.branch_grants"]; len(fs) != 0 {
 		t.Errorf("reported branch grants on a hub that has none: %+v", fs)
 	}
+}
+
+// TestGitProxyLoopbackJudgedByTheHubsRule: whether the advertised base names
+// this machine only is decided by parsing its host with tlsconf.IsLoopbackHost
+// — the rule the hub's own endpoint checks use — not by a substring match,
+// which missed 127.0.0.2 and *.localhost and flagged localhost.example.com
+// (Task 20387).
+func TestGitProxyLoopbackJudgedByTheHubsRule(t *testing.T) {
+	cert, key := gitProxyTLS(t)
+	for adv, wantWarn := range map[string]bool{
+		"https://127.0.0.2:8443":                    true,
+		"https://[::ffff:127.0.0.1]:8443":           true,
+		"https://git.localhost:8443":                true,
+		"https://[::]:8443":                         true,
+		"https://localhost.example.com:8443":        false,
+		"https://localhost-gitproxy.cloop.svc:8443": false,
+	} {
+		t.Run(adv, func(t *testing.T) {
+			cfg := cloningConfig()
+			cfg.Executors.GitProxy = config.GitProxyConfig{
+				Enabled: true, CertFile: cert, KeyFile: key, AdvertiseURL: adv,
+			}
+			got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+			if warned := len(got["gitproxy.advertise_url"]) > 0; warned != wantWarn {
+				t.Errorf("warned=%v, want %v: %+v", warned, wantWarn, got["gitproxy.advertise_url"])
+			}
+		})
+	}
+}
+
+// TestGitProxyUnsetAdvertiseIsTheBoundAddress: with advertise_url unset the
+// hub advertises its bound address (gitproxy.AdvertisedBaseURL), naming an
+// unspecified bind as loopback. The doctor said "the hub's own bound address"
+// for all of them and warned even when that address is a routable one.
+func TestGitProxyUnsetAdvertiseIsTheBoundAddress(t *testing.T) {
+	cert, key := gitProxyTLS(t)
+	run := func(listen string) (map[string][]Finding, []string) {
+		var seen []string
+		cfg := cloningConfig()
+		cfg.Executors.GitProxy = config.GitProxyConfig{
+			Enabled: true, CertFile: cert, KeyFile: key, ListenAddr: listen,
+		}
+		return findingsFor(t, t.TempDir(), cfg, Options{DialContext: fakeDial(&seen, nil)}), seen
+	}
+
+	got, seen := run("10.0.0.5:8443")
+	if fs := got["gitproxy.advertise_url"]; len(fs) != 0 {
+		t.Errorf("a routable bind was warned about: %+v", fs)
+	}
+	if len(seen) != 1 || seen[0] != "10.0.0.5:8443" {
+		t.Errorf("dialled %v, want the advertised bound address", seen)
+	}
+
+	got, _ = run("0.0.0.0:8443")
+	f := only(t, got, "gitproxy.advertise_url")
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Message, "https://127.0.0.1:8443") {
+		t.Errorf("the hub advertises an unspecified bind as loopback; message says %q", f.Message)
+	}
+
+	got, seen = run("")
+	f = only(t, got, "gitproxy.advertise_url")
+	if !strings.Contains(f.Message, "port chosen at startup") {
+		t.Errorf("the default bind's port is not knowable before startup; message says %q", f.Message)
+	}
+	if len(seen) != 0 {
+		t.Errorf("dialled %v, a port nobody has bound", seen)
+	}
+}
+
+// TestGitProxyDisabledWithAGitHubGrantWarns: a GitHub grant puts the forge
+// credential into a sandbox of any kind when the proxy is off, so a host-only
+// hub holding one is not "no forge credential is delivered".
+func TestGitProxyDisabledWithAGitHubGrantWarns(t *testing.T) {
+	dir := t.TempDir()
+	seedBranchGrants(t, dir)
+	got := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})
+	wantSeverity(t, only(t, got, "gitproxy.enabled"), SeverityWarn)
+}
+
+// TestDoctorReadsTheActiveSessionDatabase: the hub opens its control plane
+// through state.DBPath, which follows .cloop/active_session. The doctor
+// hardcoded .cloop/state.db in four checks, and read a database the hub was
+// not using.
+func TestDoctorReadsTheActiveSessionDatabase(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, ".cloop", "sessions", "s1")
+	if err := os.MkdirAll(session, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(session, "session.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cloop", "active_session"), []byte("s1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(session, "state.db"); state.DBPath(dir) != want {
+		t.Fatalf("premise: the hub's database is %s, want %s", state.DBPath(dir), want)
+	}
+	seedBranchGrantsAt(t, state.DBPath(dir))
+
+	got := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})
+	wantSeverity(t, only(t, got, "gitproxy.branch_grants"), SeverityWarn)
+	if fs := got["storage.database"]; len(fs) != 0 {
+		t.Errorf("storage looked for a database other than the hub's: %+v", fs)
+	}
+	wantSeverity(t, only(t, got, "storage.integrity"), SeverityPass)
 }

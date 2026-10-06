@@ -21,15 +21,14 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -45,7 +44,7 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 	external := strings.TrimSpace(cfg.UI.ExternalURL)
 
 	if certFile == "" && keyFile == "" {
-		checkProxyTermination(external, add)
+		checkProxyTermination(external, cfg.UI.OIDC, add)
 		return
 	}
 	// A half-configuration is refused at startup, so a hub in this state
@@ -60,16 +59,25 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 		return
 	}
 
-	// LoadX509KeyPair is the same call the server makes, so a pass here means
-	// the server will get past this point too — including the check that the
-	// private key actually belongs to the leaf certificate, which is a
-	// mismatch no amount of reading the two files separately would catch.
-	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
-		add(Finding{
+	// The material as the listener loads it: tlsconf.LoadServerConfig is
+	// ServerConfig without its stderr line, and ServerConfig is what the
+	// dashboard serves with. So a pass here means the server gets past this
+	// point too — including the check that the private key belongs to the
+	// leaf, which no amount of reading the two files separately would catch —
+	// and a refusal is reported in the order startup refuses, not in an order
+	// this file chose.
+	served, permWarning, err := tlsconf.LoadServerConfig(certFile, keyFile, cfg.UI.TLS.MinVersion)
+	if err != nil {
+		f := Finding{
 			Check: "tls.material", Title: "TLS material", Severity: SeverityFail,
-			Message:     fmt.Sprintf("certificate and key could not be loaded as a pair: %v", err),
+			Message:     "the hub will not start: " + err.Error(),
 			Remediation: "Regenerate with `cloop hub tls-init --force`, or point ui.tls at a matching pair",
-		})
+		}
+		if _, verr := tlsconf.ParseMinVersion(cfg.UI.TLS.MinVersion); verr != nil {
+			f.Check, f.Title = "tls.min_version", "TLS floor"
+			f.Remediation = `Set ui.tls.min_version to "1.2" or "1.3"`
+		}
+		add(f)
 		return
 	}
 	add(Finding{
@@ -77,10 +85,10 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 		Message: fmt.Sprintf("%s and its key load as a matching pair", certFile),
 	})
 
-	if msg := tlsconf.CheckKeyPermissions(keyFile); msg != "" {
+	if permWarning != "" {
 		add(Finding{
 			Check: "tls.key_permissions", Title: "Private key permissions", Severity: SeverityWarn,
-			Message:     msg,
+			Message:     permWarning,
 			Remediation: fmt.Sprintf("Run: chmod 600 %s", keyFile),
 		})
 	} else {
@@ -90,14 +98,16 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 		})
 	}
 
-	chain := parseChain(certFile)
-	if len(chain) == 0 {
-		// LoadX509KeyPair succeeded, so this only happens if the file
-		// changed underneath us. Report rather than assume.
+	// The chain the listener presents, not the file re-read: the server sends
+	// every CERTIFICATE block LoadX509KeyPair kept, in file order, and parses
+	// only the leaf — so an intermediate that does not parse is sent anyway
+	// and breaks every client that needs it.
+	chain, err := servedChain(served.Certificates[0])
+	if err != nil {
 		add(Finding{
-			Check: "tls.chain", Title: "Certificate chain", Severity: SeverityWarn,
-			Message:     "the certificate file contains no PEM CERTIFICATE block that could be re-read",
-			Remediation: "Confirm " + certFile + " is a PEM chain with the leaf first",
+			Check: "tls.chain", Title: "Certificate chain", Severity: SeverityFail,
+			Message:     fmt.Sprintf("the chain in %s is presented as loaded, and %v", certFile, err),
+			Remediation: "Replace the unparseable block in " + certFile + " with the issuing intermediate, leaf first",
 		})
 		return
 	}
@@ -105,7 +115,10 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 	checkChain(chain, certFile, add)
 	checkExpiry(leaf, opts.now(), add)
 	checkSANs(leaf, external, add)
-	checkMinVersion(cfg.UI.TLS.MinVersion, add)
+	add(Finding{
+		Check: "tls.min_version", Title: "TLS floor", Severity: SeverityPass,
+		Message: "minimum negotiated version is TLS " + tlsconf.VersionName(served.MinVersion),
+	})
 }
 
 // checkProxyTermination handles the no-certificate case, which is a correct
@@ -115,7 +128,7 @@ func checkTLS(cfg *config.Config, opts Options, add addFn) {
 // session cookie a proxied hub issues is missing the Secure attribute, and the
 // symptom of that is not an error anywhere — it is a cookie that a downgrade
 // attack can replay.
-func checkProxyTermination(external string, add addFn) {
+func checkProxyTermination(external string, oidc config.OIDCConfig, add addFn) {
 	if external == "" {
 		add(Finding{
 			Check: "tls.termination", Title: "TLS termination", Severity: SeverityWarn,
@@ -126,26 +139,36 @@ func checkProxyTermination(external string, add addFn) {
 		})
 		return
 	}
-	u, err := url.Parse(external)
-	if err != nil || u.Host == "" {
+	// Classified by the rule an edge agent applies to the same URL when it
+	// dials the hub (tlsconf.CheckEndpoint): TLS, or loopback, or refused.
+	// The doctor once kept its own list of three loopback names and failed
+	// http://127.0.1.1 and http://hub.localhost, both of which agents
+	// connect to without --insecure-transport.
+	ep, err := tlsconf.ParseEndpoint(external)
+	if err != nil {
 		add(Finding{
 			Check: "tls.termination", Title: "TLS termination", Severity: SeverityFail,
-			Message:     fmt.Sprintf("ui.external_url %q is not a URL, so the transport could not be assessed", external),
+			Message:     fmt.Sprintf("ui.external_url %q is not a URL an agent can dial, so the transport could not be assessed: %v", external, err),
 			Remediation: "Set ui.external_url to e.g. https://cloop.example.com",
 		})
 		return
 	}
-	if strings.EqualFold(u.Scheme, "https") {
-		add(Finding{
+	if ep.Secure {
+		f := Finding{
 			Check: "tls.termination", Title: "TLS termination", Severity: SeverityPass,
-			Message: "no certificate here; TLS is expected to terminate at a proxy in front of " + u.Host,
-			Details: map[string]any{
+			Message: "no certificate here; TLS is expected to terminate at a proxy in front of " + ep.URL.Host,
+		}
+		// Only where it is so: with cookie_secure always or never, the
+		// header changes nothing about the session cookie.
+		if oidc.Enabled && oidcauth.CookieSecureFollowsRequest(oidc.CookieSecure) {
+			f.Details = map[string]any{
 				"requires": "the proxy MUST set X-Forwarded-Proto: https, or session cookies lose the Secure attribute",
-			},
-		})
+			}
+		}
+		add(f)
 		return
 	}
-	if isLoopbackHost(u.Hostname()) {
+	if ep.Loopback {
 		add(Finding{
 			Check: "tls.termination", Title: "TLS termination", Severity: SeverityPass,
 			Message: "plaintext to loopback only",
@@ -155,35 +178,26 @@ func checkProxyTermination(external string, add addFn) {
 	add(Finding{
 		Check: "tls.termination", Title: "TLS termination", Severity: SeverityFail,
 		Message: fmt.Sprintf("ui.external_url is %s: sessions, enrollment tokens and API tokens "+
-			"cross the network in the clear", external),
+			"cross the network in the clear, and edge agents refuse it without --insecure-transport", external),
 		Remediation: "Terminate TLS at a proxy and change ui.external_url to https://, or set ui.tls",
 	})
 }
 
-// parseChain reads every CERTIFICATE block from a PEM file, leaf first.
-func parseChain(path string) []*x509.Certificate {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var out []*x509.Certificate
-	rest := data
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
+// servedChain parses the certificates a listener built from pair presents,
+// leaf first.
+func servedChain(pair tls.Certificate) ([]*x509.Certificate, error) {
+	out := make([]*x509.Certificate, 0, len(pair.Certificate))
+	for i, der := range pair.Certificate {
+		c, err := x509.ParseCertificate(der)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("certificate %d does not parse: %w", i, err)
 		}
-		out = append(out, cert)
+		out = append(out, c)
 	}
-	return out
+	if len(out) == 0 {
+		return nil, fmt.Errorf("it holds no certificate")
+	}
+	return out, nil
 }
 
 // checkChain reports whether intermediates were shipped, and whether they are
@@ -319,29 +333,6 @@ func checkSANs(leaf *x509.Certificate, external string, add addFn) {
 	add(Finding{
 		Check: "tls.san", Title: "Certificate names", Severity: SeverityPass,
 		Message: fmt.Sprintf("valid for %s (%s)", host, strings.Join(names, ", ")),
-	})
-}
-
-// checkMinVersion reports the negotiated floor. ParseMinVersion rejects 1.0 and
-// 1.1 outright, so an invalid value is a hub that will not start.
-func checkMinVersion(raw string, add addFn) {
-	v, err := tlsconf.ParseMinVersion(raw)
-	if err != nil {
-		add(Finding{
-			Check: "tls.min_version", Title: "TLS floor", Severity: SeverityFail,
-			Message:     err.Error(),
-			Remediation: `Set ui.tls.min_version to "1.2" or "1.3"`,
-		})
-		return
-	}
-	label := "1.2"
-	sev := SeverityPass
-	if v >= tls.VersionTLS13 {
-		label = "1.3"
-	}
-	add(Finding{
-		Check: "tls.min_version", Title: "TLS floor", Severity: sev,
-		Message: "minimum negotiated version is TLS " + label,
 	})
 }
 

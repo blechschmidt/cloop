@@ -24,7 +24,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -79,37 +79,12 @@ func checkBranchRestrictedGrants(dir string, cfg *config.Config, add addFn) {
 // branchRestrictedGrants counts the active GitHub grants that carry a branch
 // allowlist, by kind. Zeros when there is no database to read.
 func branchRestrictedGrants(dir string) (apps, pats int) {
-	dbPath := filepath.Join(dir, ".cloop", "state.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return 0, 0
-	}
-	db, err := statedb.Open(dbPath)
-	if err != nil {
-		return 0, 0
-	}
-	defer func() { _ = db.Close() }()
-	store, err := secretstore.New(db)
-	if err != nil {
-		return 0, 0
-	}
-	secrets, err := store.ListSecrets()
-	if err != nil {
-		return 0, 0
-	}
-	kinds := make(map[string]secretbroker.Kind, len(secrets))
-	for _, s := range secrets {
-		kinds[s.ID] = s.Kind
-	}
-	grants, err := store.ListGrants()
-	if err != nil {
-		return 0, 0
-	}
-	now := time.Now()
+	grants, _ := activeGitHubGrants(dir)
 	for _, g := range grants {
-		if !g.Active(now) || !g.Constraints.RestrictsBranches() {
+		if !g.restricted {
 			continue
 		}
-		switch kinds[g.SecretID] {
+		switch g.kind {
 		case secretbroker.KindGitHubApp:
 			apps++
 		case secretbroker.KindGitHubPAT:
@@ -119,22 +94,90 @@ func branchRestrictedGrants(dir string) (apps, pats int) {
 	return apps, pats
 }
 
+// activeGrant is one active grant of a secret.
+type activeGrant struct {
+	kind       secretbroker.Kind
+	restricted bool // carries a branch allowlist
+}
+
+// activeGitHubGrants lists the control plane's active grants of GitHub
+// credentials; see activeGrants for known.
+func activeGitHubGrants(dir string) ([]activeGrant, bool) {
+	return activeGrants(dir, secretbroker.KindGitHubApp, secretbroker.KindGitHubPAT)
+}
+
+// activeGrants lists the control plane's active grants of secrets of the given
+// kinds, read from the store's own listing in the database the hub's broker
+// uses. Grants and secret kinds are not sealed, so this needs neither the
+// sealing key nor a broker. None, and known, when there is no database yet;
+// known is false when there is one and it could not be read, which a caller
+// must not take for "no grant" (checkStorage reports why).
+func activeGrants(dir string, kinds ...secretbroker.Kind) ([]activeGrant, bool) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, true
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return nil, false
+	}
+	secrets, err := store.ListSecrets()
+	if err != nil {
+		return nil, false
+	}
+	want := make(map[secretbroker.Kind]bool, len(kinds))
+	for _, k := range kinds {
+		want[k] = true
+	}
+	kindOf := make(map[string]secretbroker.Kind, len(secrets))
+	for _, s := range secrets {
+		kindOf[s.ID] = s.Kind
+	}
+	grants, err := store.ListGrants()
+	if err != nil {
+		return nil, false
+	}
+	now := time.Now()
+	var out []activeGrant
+	for _, g := range grants {
+		kind := kindOf[g.SecretID]
+		if !g.Active(now) || !want[kind] {
+			continue
+		}
+		out = append(out, activeGrant{kind: kind, restricted: g.Constraints.RestrictsBranches()})
+	}
+	return out, true
+}
+
 // checkGitProxy reports whether git pushes from sandboxes are brokered.
-func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
+func checkGitProxy(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn) {
 	g := cfg.Executors.GitProxy
+	likely := gitWorkspacesLikely(dir, cfg)
 
 	if !g.Enabled {
+		if f, ok := switchedOffFinding(cfg, "executors.git_proxy", "gitproxy.enabled", "Git interception proxy",
+			"the hub runs without the proxy and provisions workspaces as it did before it existed, "+
+				"handing the forge credential into the sandbox"); ok {
+			add(f)
+			return
+		}
 		// A warning rather than a pass only when there is something to protect.
 		// A single-machine install whose executors share the host filesystem
 		// never provisions a git workspace at all, so telling its operator to
 		// stand up a TLS proxy would be advice for a problem they do not have.
-		if !gitWorkspacesLikely(cfg) {
+		if !likely {
 			add(Finding{
 				Check:    "gitproxy.enabled",
 				Title:    "Git interception proxy",
 				Severity: SeverityPass,
-				Message: "disabled, and no configured executor provisions a git workspace, " +
-					"so no forge credential is delivered into a sandbox",
+				Message: "disabled, and no configured executor or enrolled device provisions a git " +
+					"workspace and no GitHub credential is granted, so no forge credential is " +
+					"delivered into a sandbox",
 			})
 			return
 		}
@@ -142,9 +185,9 @@ func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add ad
 			Check:    "gitproxy.enabled",
 			Title:    "Git interception proxy",
 			Severity: SeverityWarn,
-			Message: "disabled while executors that clone the project source are configured, " +
-				"so a sandbox is handed the GitHub PAT and the cloop/ branch rule is enforced " +
-				"only by code the sandbox itself runs",
+			Message: "disabled while executors that clone the project source, or GitHub grants, " +
+				"are configured, so a sandbox is handed the forge credential and the cloop/ branch " +
+				"rule is enforced only by code the sandbox itself runs",
 			Remediation: "Set executors.git_proxy.enabled: true with cert_file, key_file and " +
 				"advertise_url, so the credential stays on the hub and the branch allowlist " +
 				"is enforced on the push. See docs/git-interception-proxy.md",
@@ -152,81 +195,34 @@ func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add ad
 		return
 	}
 
-	// --- enabled: is it usable? ---------------------------------------------
+	// --- enabled: does it start, and where does it point sandboxes? ---------
 
-	for label, path := range map[string]string{"cert_file": g.CertFile, "key_file": g.KeyFile} {
-		p := strings.TrimSpace(path)
-		if p == "" {
-			add(Finding{
-				Check:    "gitproxy.tls",
-				Title:    "Git proxy TLS material",
-				Severity: SeverityFail,
-				Message: fmt.Sprintf("executors.git_proxy is enabled but %s is not set, so the "+
-					"proxy will not start and git workspaces will be refused", label),
-				Remediation: "Set executors.git_proxy." + label + ", or set enabled: false",
-			})
-			continue
-		}
-		if _, err := os.Stat(p); err != nil {
-			add(Finding{
-				Check:    "gitproxy.tls",
-				Title:    "Git proxy TLS material",
-				Severity: SeverityFail,
-				Message:  fmt.Sprintf("executors.git_proxy.%s is %s, which cannot be read: %v", label, p, err),
-				Remediation: "Point executors.git_proxy." + label + " at a readable file, or " +
-					"generate one with `cloop hub bootstrap`",
-			})
-		}
-	}
+	starts := proxyTLS("gitproxy.tls", "Git proxy TLS material", "executors.git_proxy",
+		g.CertFile, g.KeyFile, g.MinTLSVersion,
+		"every dispatch that needs a git workspace is refused rather than handed the forge credential", add)
 
-	// The advertise URL is the single most common way this is misconfigured,
-	// because the wrong value works perfectly on the machine it was written on.
-	adv := strings.TrimSpace(g.AdvertiseURL)
-	switch {
-	case adv == "":
+	// The advertised base is the single most common way this is
+	// misconfigured, because the wrong value works perfectly on the machine
+	// it was written on.
+	ep, err := resolveProxyEndpoint(g.AdvertiseURL, g.ListenAddr, gitproxy.DefaultListenAddr, opts.Offline,
+		gitproxy.AdvertisedBaseURL, gitproxy.NormalizeBaseURL)
+	if err != nil && !ep.fromBind && strings.TrimSpace(g.AdvertiseURL) != "" {
+		starts = false
 		add(Finding{
-			Check:    "gitproxy.advertise_url",
-			Title:    "Git proxy advertised URL",
-			Severity: SeverityWarn,
-			Message: "not set, so sandboxes are pointed at the hub's own bound address — " +
-				"correct only when the sandbox shares the host's network namespace",
-			Remediation: "Set executors.git_proxy.advertise_url to a URL the sandbox can reach " +
-				"(a Service name for Kubernetes, a hub address the edge device routes to)",
+			Check: "gitproxy.advertise_url", Title: "Git proxy advertised URL", Severity: SeverityFail,
+			Message: fmt.Sprintf("the proxy will not start: %v — executors.git_proxy is enabled, so every "+
+				"dispatch that needs a git workspace is refused", err),
+			Remediation: "Set executors.git_proxy.advertise_url to an https:// base with a host and no path, " +
+				"such as https://cloop-gitproxy.cloop.svc:8443",
 		})
-	case isLoopbackURL(adv) && gitWorkspacesLikely(cfg):
-		add(Finding{
-			Check:    "gitproxy.advertise_url",
-			Title:    "Git proxy advertised URL",
-			Severity: SeverityWarn,
-			Message: fmt.Sprintf("advertises %s, which a Pod or an edge device cannot reach — "+
-				"their clone and write-back push will fail to connect", adv),
-			Remediation: "Set executors.git_proxy.advertise_url to an address reachable from " +
-				"the sandbox's network, not from the hub's",
-		})
-	}
-
-	// Dialling it is separate from reading it, and reported separately, because
-	// the two answer different questions: the checks above ask whether the
-	// value is the kind of address a sandbox could use, this one asks whether
-	// anything is actually there. A loopback URL fails the first and passes the
-	// second, which is exactly the combination worth seeing spelled out.
-	if adv != "" {
-		target, err := dialTarget(adv)
-		if err != nil {
-			add(Finding{
-				Check:    "gitproxy.advertise_reachable",
-				Title:    "Git proxy reachability",
-				Severity: SeverityWarn,
-				Message: fmt.Sprintf("executors.git_proxy.advertise_url %q could not be turned into an "+
-					"address to dial: %v", adv, err),
-				Remediation: "Set executors.git_proxy.advertise_url to an absolute URL such as " +
-					"https://cloop-gitproxy.cloop.svc:8443",
-			})
-		} else {
-			add(reachFinding("gitproxy.advertise_reachable", "Git proxy reachability",
-				"the git proxy", "executors.git_proxy.advertise_url",
-				probeReach(ctx, opts, target), opts))
-		}
+	} else {
+		reportProxyEndpoint(ctx, opts, ep, err, likely, proxyLabels{
+			advertiseCheck: "gitproxy.advertise_url", advertiseTitle: "Git proxy advertised URL",
+			reachCheck: "gitproxy.advertise_reachable", reachTitle: "Git proxy reachability",
+			what: "the git proxy", key: "executors.git_proxy.advertise_url",
+			consequence: "their clone and write-back push will fail to connect",
+			example:     "https://cloop-gitproxy.cloop.svc:8443",
+		}, add)
 	}
 
 	// A widened allowlist is legitimate and deliberate, and worth saying out
@@ -257,6 +253,11 @@ func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add ad
 		})
 	}
 
+	if !starts {
+		// The failure above is the verdict; a pass here would be a second,
+		// contradicting one.
+		return
+	}
 	add(Finding{
 		Check:    "gitproxy.enabled",
 		Title:    "Git interception proxy",
@@ -265,35 +266,29 @@ func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add ad
 			"limited to %s for %d minutes per session",
 			strings.Join(pol.AllowedRefs, ", "), g.SessionTTLMinutes()),
 		Details: map[string]any{
-			"advertise_url":   adv,
+			"advertise_url":   ep.base,
 			"allowed_refs":    pol.AllowedRefs,
 			"session_minutes": g.SessionTTLMinutes(),
 		},
 	})
 }
 
-// gitWorkspacesLikely reports whether any configured executor would clone the
-// project rather than find it already on disk.
+// gitWorkspacesLikely reports whether a forge credential would reach a
+// sandbox on this hub with the proxy off.
 //
-// Only the Kubernetes driver and enrolled edge devices provision a git
-// workspace; the container driver bind-mounts and the host driver is the host.
-// Edge devices arrive at runtime over an outbound connection and so cannot be
-// seen in a config file — strict mode is the closest available signal that a
-// hub expects them, and it is the mode under which they are the only way work
-// runs at all.
-func gitWorkspacesLikely(cfg *config.Config) bool {
-	return cfg.Executors.Kubernetes.Enabled || !cfg.Executors.HostProcessAllowed()
-}
-
-// isLoopbackURL reports whether a URL names this machine and nowhere else.
-func isLoopbackURL(raw string) bool {
-	s := strings.ToLower(raw)
-	for _, host := range []string{"//127.0.0.1", "//localhost", "//[::1]", "//0.0.0.0"} {
-		if strings.Contains(s, host) {
-			return true
-		}
+// The Kubernetes driver and enrolled edge devices provision a git workspace
+// (the container driver bind-mounts, and the host driver is the host); strict
+// mode is the closest available signal that a hub expects devices it has not
+// enrolled yet, and it is the mode under which they are the only way work runs
+// at all. And a GitHub grant puts the credential into a sandbox of any kind.
+func gitWorkspacesLikely(dir string, cfg *config.Config) bool {
+	if cfg.Executors.Kubernetes.Enabled || !cfg.Executors.HostProcessAllowed() {
+		return true
 	}
-	return false
+	agents, agentsKnown := enrolledAgentsKnown(dir)
+	grants, grantsKnown := activeGitHubGrants(dir)
+	// A store that could not be read is not evidence of nothing in it.
+	return len(agents) > 0 || len(grants) > 0 || !agentsKnown || !grantsKnown
 }
 
 // widenedRefs returns the patterns that reach outside the write-back namespace.
@@ -301,9 +296,10 @@ func isLoopbackURL(raw string) bool {
 // The comparison is a prefix test against the default rather than an attempt to
 // decide what a glob can match, because the honest question is "did somebody
 // add something", not "is this pattern dangerous" — and a check that tried to
-// prove the latter would either miss cases or cry wolf.
+// prove the latter would either miss cases or cry wolf. The namespace is the
+// proxy's own default, not a copy of it.
 func widenedRefs(patterns []string) []string {
-	const namespace = "refs/heads/cloop/"
+	namespace := strings.TrimSuffix(gitproxy.DefaultAllowedRef, "**")
 	var out []string
 	for _, p := range patterns {
 		if !strings.HasPrefix(p, namespace) {

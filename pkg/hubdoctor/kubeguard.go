@@ -22,28 +22,35 @@ package hubdoctor
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/kubeguard"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
 // checkKubeGuard reports whether kubeconfig grants are brokered through the
 // monitor.
-func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
+func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn) {
 	k := cfg.Executors.KubeGuard
 
 	if !k.Enabled {
+		if f, ok := switchedOffFinding(cfg, "executors.kube_guard", "kubeguard.enabled", "Kubernetes access monitor",
+			"the hub runs without the monitor, and a kubeconfig grant delivers the cluster credential "+
+				"into the sandbox"); ok {
+			add(f)
+			return
+		}
 		// A warning rather than a pass only when there is a kubeconfig grant
 		// to protect. Telling an operator with no cluster credential in the
 		// store to stand up a TLS proxy would be advice for a problem they do
 		// not have.
-		if !kubeconfigGrantsLikely(cfg) {
+		if !kubeconfigGrantsLikely(dir, cfg) {
 			add(Finding{
 				Check:    "kubeguard.enabled",
 				Title:    "Kubernetes access monitor",
 				Severity: SeverityPass,
-				Message: "disabled, and no Kubernetes executor or kubeconfig secret is " +
+				Message: "disabled, and no Kubernetes executor or kubeconfig grant is " +
 					"configured, so no cluster credential is delivered into a sandbox",
 			})
 			return
@@ -63,42 +70,21 @@ func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add a
 		return
 	}
 
-	// --- enabled: is it usable? ---------------------------------------------
+	// --- enabled: does it start, and where does it point sandboxes? ---------
 
-	for label, path := range map[string]string{"cert_file": k.CertFile, "key_file": k.KeyFile} {
-		p := strings.TrimSpace(path)
-		if p == "" {
+	refusal := "every kubeconfig lease is refused rather than handed the cluster credential"
+	starts := proxyTLS("kubeguard.tls", "Kubernetes monitor TLS material", "executors.kube_guard",
+		k.CertFile, k.KeyFile, k.MinTLSVersion, refusal, add)
+	// The trust anchor a sandbox's kubectl is given, read by the method the
+	// hub reads it with: ca_file when set — a path that was typed and cannot
+	// be read is a mistake, not a choice — else the serving certificate.
+	if starts {
+		if _, err := k.CABundle(); err != nil {
+			starts = false
 			add(Finding{
-				Check:    "kubeguard.tls",
-				Title:    "Kubernetes monitor TLS material",
-				Severity: SeverityFail,
-				Message: fmt.Sprintf("executors.kube_guard is enabled but %s is not set, so the "+
-					"monitor will not start and every kubeconfig lease will be refused", label),
-				Remediation: "Set executors.kube_guard." + label + ", or set enabled: false",
-			})
-			continue
-		}
-		if _, err := os.Stat(p); err != nil {
-			add(Finding{
-				Check:    "kubeguard.tls",
-				Title:    "Kubernetes monitor TLS material",
-				Severity: SeverityFail,
-				Message:  fmt.Sprintf("executors.kube_guard.%s is %s, which cannot be read: %v", label, p, err),
-				Remediation: "Point executors.kube_guard." + label + " at a readable file, or " +
-					"generate one with `cloop hub bootstrap`",
-			})
-		}
-	}
-	// ca_file is optional — the serving certificate is used when it is unset —
-	// but a path that was typed and cannot be read is a mistake, not a choice.
-	if p := strings.TrimSpace(k.CAFile); p != "" {
-		if _, err := os.Stat(p); err != nil {
-			add(Finding{
-				Check:    "kubeguard.tls",
-				Title:    "Kubernetes monitor TLS material",
-				Severity: SeverityFail,
-				Message: fmt.Sprintf("executors.kube_guard.ca_file is %s, which cannot be read: %v; "+
-					"the monitor will not start", p, err),
+				Check: "kubeguard.tls", Title: "Kubernetes monitor TLS material", Severity: SeverityFail,
+				Message: fmt.Sprintf("the monitor will not start: %v — executors.kube_guard is enabled, "+
+					"so %s", err, refusal),
 				Remediation: "Point executors.kube_guard.ca_file at a readable PEM bundle, or " +
 					"remove it to embed the serving certificate instead",
 			})
@@ -109,47 +95,27 @@ func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add a
 	// value works perfectly on the machine it was written on. It is worse here
 	// than for git: it becomes the `server:` field of a kubeconfig, so a wrong
 	// one produces "connection refused" from kubectl inside someone's task.
-	adv := strings.TrimSpace(k.AdvertiseURL)
-	switch {
-	case adv == "":
+	ep, err := resolveProxyEndpoint(k.AdvertiseURL, k.ListenAddr, kubeguard.DefaultListenAddr, opts.Offline,
+		kubeguard.AdvertisedBaseURL, kubeguard.NormalizeBaseURL)
+	if err != nil && strings.TrimSpace(k.AdvertiseURL) != "" {
+		starts = false
 		add(Finding{
-			Check:    "kubeguard.advertise_url",
-			Title:    "Kubernetes monitor advertised URL",
-			Severity: SeverityWarn,
-			Message: "not set, so sandboxes are pointed at the hub's own bound address — " +
-				"correct only when the sandbox shares the host's network namespace",
-			Remediation: "Set executors.kube_guard.advertise_url to a URL the sandbox can reach " +
-				"(a Service name for Kubernetes, a hub address the edge device routes to)",
+			Check: "kubeguard.advertise_url", Title: "Kubernetes monitor advertised URL", Severity: SeverityFail,
+			Message: fmt.Sprintf("the monitor will not start: %v — executors.kube_guard is enabled, so %s",
+				err, refusal),
+			Remediation: "Set executors.kube_guard.advertise_url to an https:// base with a host and no path, " +
+				"such as https://cloop-kubeguard.cloop.svc:8444",
 		})
-	case isLoopbackURL(adv):
-		add(Finding{
-			Check:    "kubeguard.advertise_url",
-			Title:    "Kubernetes monitor advertised URL",
-			Severity: SeverityWarn,
-			Message: fmt.Sprintf("advertises %s, which a Pod or an edge device cannot reach — "+
-				"kubectl inside the sandbox will fail to connect", adv),
-			Remediation: "Set executors.kube_guard.advertise_url to an address reachable from " +
-				"the sandbox's network, not from the hub's",
-		})
-	}
-
-	if adv != "" {
-		target, err := dialTarget(adv)
-		if err != nil {
-			add(Finding{
-				Check:    "kubeguard.advertise_reachable",
-				Title:    "Kubernetes monitor reachability",
-				Severity: SeverityWarn,
-				Message: fmt.Sprintf("executors.kube_guard.advertise_url %q could not be turned into "+
-					"an address to dial: %v", adv, err),
-				Remediation: "Set executors.kube_guard.advertise_url to an absolute URL such as " +
-					"https://cloop-kubeguard.cloop.svc:8444",
-			})
-		} else {
-			add(reachFinding("kubeguard.advertise_reachable", "Kubernetes monitor reachability",
-				"the Kubernetes access monitor", "executors.kube_guard.advertise_url",
-				probeReach(ctx, opts, target), opts))
-		}
+	} else {
+		// Reported whatever this hub's executors are: a monitor that is on is
+		// there to be reached from a sandbox.
+		reportProxyEndpoint(ctx, opts, ep, err, true, proxyLabels{
+			advertiseCheck: "kubeguard.advertise_url", advertiseTitle: "Kubernetes monitor advertised URL",
+			reachCheck: "kubeguard.advertise_reachable", reachTitle: "Kubernetes monitor reachability",
+			what: "the Kubernetes access monitor", key: "executors.kube_guard.advertise_url",
+			consequence: "kubectl inside the sandbox will fail to connect",
+			example:     "https://cloop-kubeguard.cloop.svc:8444",
+		}, add)
 	}
 
 	// The verb ceiling is worth reporting either way, because both states are
@@ -178,14 +144,17 @@ func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add a
 		})
 	}
 
+	if !starts {
+		return // the failure above is the verdict
+	}
 	add(Finding{
 		Check:    "kubeguard.enabled",
 		Title:    "Kubernetes access monitor",
 		Severity: SeverityPass,
 		Message: fmt.Sprintf("enabled; the cluster credential stays on the hub and sessions are "+
-			"held to %s for %d minutes", pol.Summary(), k.SessionTTLMinutes()),
+			"held to at most %s for %d minutes (a grant may narrow it further)", pol.Summary(), k.SessionTTLMinutes()),
 		Details: map[string]any{
-			"advertise_url":   adv,
+			"advertise_url":   ep.base,
 			"verbs":           pol.Verbs,
 			"namespaces":      pol.Namespaces,
 			"session_minutes": k.SessionTTLMinutes(),
@@ -194,15 +163,17 @@ func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add a
 }
 
 // kubeconfigGrantsLikely reports whether this hub plausibly delivers a
-// kubeconfig into a sandbox.
-//
-// Config is the only thing available here — the secret store is a separate
-// database this check does not open — so this is a heuristic, and it is
-// deliberately the inclusive one. A Kubernetes executor means cluster
-// credentials are in play; strict mode means every workload is isolated and so
-// anything it needs arrives by lease. Over-reporting costs an operator a
-// warning they can dismiss; under-reporting costs them the finding this check
-// exists for.
-func kubeconfigGrantsLikely(cfg *config.Config) bool {
-	return cfg.Executors.Kubernetes.Enabled || !cfg.Executors.HostProcessAllowed()
+// kubeconfig into a sandbox: a Kubernetes executor means cluster credentials
+// are in play, strict mode means every workload is isolated and anything it
+// needs arrives by lease, and an active kubeconfig grant is one being
+// delivered. Deliberately the inclusive reading: over-reporting costs an
+// operator a warning they can dismiss; under-reporting costs them the finding
+// this check exists for. The grants are read from the store, so the pass that
+// says "no kubeconfig grant" has looked.
+func kubeconfigGrantsLikely(dir string, cfg *config.Config) bool {
+	if cfg.Executors.Kubernetes.Enabled || !cfg.Executors.HostProcessAllowed() {
+		return true
+	}
+	grants, known := activeGrants(dir, secretbroker.KindKubeconfig)
+	return len(grants) > 0 || !known
 }

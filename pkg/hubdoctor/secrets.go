@@ -25,6 +25,7 @@ package hubdoctor
 // a handful of distinct characters, or literally the string in the docs.
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -33,6 +34,9 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const (
@@ -62,9 +66,12 @@ var placeholderKeys = []string{
 
 func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 	key := os.Getenv(secretbroker.EnvPassphraseKey)
-	sealed := hasSealedMaterial(dir)
+	sealed := hasSealedMaterial(dir) || brokerSecretsStored(dir)
 
-	if strings.TrimSpace(key) == "" {
+	// Unset exactly when the keyring says so (secretbroker.OpenKeyring tests
+	// for ""): a value of spaces is a passphrase to it, and is judged below
+	// as one — a very short one.
+	if key == "" {
 		// Severity turns on whether anything is already sealed. With sealed
 		// material and no key the hub cannot open its own secrets, which is
 		// an outage; without, it is a hub that will fail the first time
@@ -121,24 +128,98 @@ func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 		})
 	}
 
+	checkKeyOpensKeyring(dir, add)
 	_ = cfg
 }
 
+// checkKeyOpensKeyring asks the hub's own keyring whether the key opens this
+// control plane's sealing keys: secretbroker.OpenKeyring, which the broker
+// runs before every lease, opened read-only (WithoutKeyCreation) so that a
+// diagnostic never mints or promotes a key. Strength says nothing about this:
+// a perfectly random key that is not the one the secrets were sealed under
+// passed here, on a hub whose broker refused every lease (Task 20387).
+func checkKeyOpensKeyring(dir string, add addFn) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return // checkStorage reports a database that will not open
+	}
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return
+	}
+	kr, err := secretbroker.OpenKeyring(store, secretbroker.WithoutKeyCreation())
+	switch {
+	case errors.Is(err, secretbroker.ErrKeyUnavailable):
+		add(Finding{
+			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityFail,
+			Message: "the key does not open this hub's sealing keys, so the broker refuses every lease " +
+				"and no sealed secret can be read: " + err.Error(),
+			Remediation: "Set " + secretbroker.EnvPassphraseKey + " to the key these secrets were sealed " +
+				"under (the hub's own environment file has it); `cloop hub key list` names the keys it cannot open",
+		})
+	case err != nil:
+		add(Finding{
+			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityWarn,
+			Message:     "the hub's sealing keys could not be checked against the key: " + err.Error(),
+			Remediation: "Run `cloop hub key list` in this directory for the keyring's own report",
+		})
+	case kr.PrimaryID() == "":
+		add(Finding{
+			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityPass,
+			Message: "no sealing key is recorded yet; the hub creates its first from this key when it " +
+				"first needs one",
+		})
+	default:
+		add(Finding{
+			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityPass,
+			Message: "the key derives this hub's primary sealing key, " + kr.PrimaryID(),
+		})
+	}
+}
+
 // hasSealedMaterial reports whether this control plane has a project secret
-// file sealed under the key.
+// file sealed under the key. The broker's own sealed rows are judged by
+// brokerSecretsStored.
 //
 // It reads the filesystem rather than the database deliberately, and it is
 // deliberately conservative: a state.db exists on every hub, so treating its
 // presence as evidence of sealed material would turn "no key configured yet"
-// into a failure on every fresh deployment. The broker's own sealed rows live
-// inside that database and are reported by checkStorage; what this answers is
-// the narrower question that can be answered without opening it.
+// into a failure on every fresh deployment.
 func hasSealedMaterial(dir string) bool {
 	if dir == "" {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(dir, ".cloop", "secrets.enc"))
 	return err == nil
+}
+
+// brokerSecretsStored reports whether the broker holds any secret in the hub's
+// database: a PAT, a kubeconfig, an App key — each sealed under the key, and
+// unreadable without it. Not the key registry: the hub records a sealing key
+// whenever it starts with one set, sealed secret or not, so a recorded key
+// says only that the hub once had one. Read from the store's own listing;
+// false when there is no database to read.
+func brokerSecretsStored(dir string) bool {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return false
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return false
+	}
+	secrets, err := store.ListSecrets()
+	return err == nil && len(secrets) > 0
 }
 
 // shannonBits estimates total entropy as (per-character Shannon entropy of the

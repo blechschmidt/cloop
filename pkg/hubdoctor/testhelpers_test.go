@@ -10,9 +10,11 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 
 	_ "modernc.org/sqlite"
 )
@@ -64,5 +66,43 @@ func recordFutureMigration(t *testing.T, dir string) {
 		 VALUES (?, ?, datetime('now'), ?)`,
 		latest+1, "9999_from_the_future.sql", futureBuild); err != nil {
 		t.Fatalf("stamp future migration: %v", err)
+	}
+}
+
+// tlsPair writes a real self-signed certificate and key under a fresh
+// directory and returns their paths. Real material, because the proxy checks
+// load the pair the way the hub's listeners do (tlsconf.LoadServerConfig);
+// they used to stat the files, and a fixture of placeholder bytes passed.
+func tlsPair(t *testing.T, name string) (cert, key string) {
+	t.Helper()
+	dir := t.TempDir()
+	cert = filepath.Join(dir, name+".crt")
+	key = filepath.Join(dir, name+".key")
+	if _, err := tlsconf.GenerateSelfSigned(cert, key, tlsconf.SelfSignedOptions{
+		Hosts: []string{"hub.internal"}, ValidFor: time.Hour,
+	}); err != nil {
+		t.Fatalf("generate %s pair: %v", name, err)
+	}
+	return cert, key
+}
+
+// recordFutureAdditiveMigration stamps a version past this binary's, recorded
+// as additive — the shape of database an older hub's guard opens anyway.
+func recordFutureAdditiveMigration(t *testing.T, dir string) {
+	t.Helper()
+	latest, err := statedb.LatestSchemaVersion()
+	if err != nil {
+		t.Fatalf("LatestSchemaVersion: %v", err)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(dir, ".cloop", "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite directly: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(
+		`INSERT INTO schema_migrations (version, name, applied_at, applied_by, compat)
+		 VALUES (?, ?, datetime('now'), ?, ?)`,
+		latest+1, "9999_a_new_table.sql", futureBuild, string(statedb.CompatAdditive)); err != nil {
+		t.Fatalf("stamp future additive migration: %v", err)
 	}
 }

@@ -8,16 +8,21 @@ package hubdoctor
 // to somebody else. They are also the checks with the least informative native
 // failure: a redirect_uri the IdP does not recognise produces an error page
 // rendered by the IdP, in the IdP's words, about a value the IdP was never
-// shown. So this file re-derives, from the hub's side, everything the login
+// shown. So this file checks, from the hub's side, everything the login
 // depends on and says which value is wrong.
 //
-// The network probes do not mirror pkg/oidcauth — they *are* pkg/oidcauth.
-// oidcauth.Preflight is the same function the hub runs at startup and the same
-// two round trips a sign-in performs before it can begin, so this report cannot
-// be green about a login that will fail. That mattered enough to be worth a
-// shared entry point: a doctor which merely re-implemented the same checks
-// would drift the first time one side was fixed and the other was not, and the
-// failure mode of that drift is a confident green line.
+// The checks do not mirror pkg/oidcauth — they *are* pkg/oidcauth. Whether the
+// hub would start is oidcauth.New's answer, asked of the builder `cloop ui`
+// builds its authenticator from; the redirect path is oidcauth.ValidateRedirectURL,
+// the rule New applies and CallbackPath serves; and the network probes are
+// oidcauth.Preflight, the same function the hub runs at startup and the same
+// two round trips a sign-in performs before it can begin. A doctor which
+// merely re-implemented those rules drifts the first time one side is fixed
+// and the other is not, and the failure mode of that drift is a confident
+// verdict in either direction. This one had it: it required the callback to be
+// /auth/callback when the hub serves any path under /auth/, and failed a
+// working hub registered at /auth/oidc — telling its operator to change an IdP
+// registration that was correct (Task 20387).
 
 import (
 	"context"
@@ -29,12 +34,8 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
-
-// callbackPath is where pkg/ui mounts the OIDC callback. Repeated rather than
-// imported: pkg/ui pulls in the whole dashboard, and this is a constant that
-// has never changed and would be a breaking change if it did.
-const callbackPath = "/auth/callback"
 
 func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
 	oc := cfg.UI.OIDC
@@ -64,7 +65,8 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 		Message: fmt.Sprintf("enabled for issuer %s", strings.TrimSpace(oc.Issuer)),
 	})
 
-	checkOIDCClientCredentials(oc, add)
+	checkOIDCStartup(oc, add)
+	checkOIDCClientSecret(oc, add)
 	checkRedirectURI(cfg, add)
 
 	if opts.Offline {
@@ -179,22 +181,100 @@ func preflightDetails(pe *oidcauth.PreflightError) map[string]any {
 	return d
 }
 
-// checkOIDCClientCredentials verifies the hub can authenticate itself to the
-// IdP, and objects to the secret living in a file.
+// checkOIDCStartup reports whether `cloop ui` would start with this ui.oidc
+// block, by asking the constructor startup runs — oidcauth.New, on the builder
+// startup uses — rather than re-deriving its rules. Startup treats a refusal
+// as fatal, so this is the verdict most expensive to get wrong either way: a
+// pass here over a block New refuses is a hub that does not come back from its
+// next restart.
+//
+// New stops at its first refusal, which once let a bad issuer hide an empty
+// client id. Each refusal names its setting (oidcauth.ConfigError), so it is
+// set aside with a value New accepts and New is asked again, until it has
+// nothing more to refuse. The redirect URL is set aside up front: it is
+// checkRedirectURI's to report, with the remediation it has always had. The
+// client id is reported under oidc.client_id, the id it always had.
+func checkOIDCStartup(oc config.OIDCConfig, add addFn) {
+	probe := oc.AuthConfig()
+	var setAside []string
+	if _, err := oidcauth.ValidateRedirectURL(probe.RedirectURL); err != nil {
+		standIn(&probe, "redirect_url")
+		setAside = append(setAside, "the redirect URL")
+	}
+	var refused []string
+	for attempt := 0; attempt < 8; attempt++ {
+		_, err := oidcauth.New(probe)
+		if err == nil {
+			break
+		}
+		var ce *oidcauth.ConfigError
+		if !errors.As(err, &ce) || !standIn(&probe, ce.Field) {
+			refused = append(refused, err.Error())
+			break
+		}
+		if ce.Field == "client_id" {
+			add(Finding{
+				Check: "oidc.client_id", Title: "OIDC client id", Severity: SeverityFail,
+				Message:     "the hub will not start: " + ce.Error(),
+				Remediation: "Set ui.oidc.client_id to the client you registered at the identity provider",
+			})
+			setAside = append(setAside, "the client id")
+			continue
+		}
+		refused = append(refused, ce.Error())
+	}
+	if len(refused) > 0 {
+		add(Finding{
+			Check: "oidc.startup", Title: "Single sign-on settings", Severity: SeverityFail,
+			Message: "the hub will not start: " + strings.Join(refused, "; "),
+			Remediation: "Correct the ui.oidc settings named, in .cloop/config.yaml or this hub's " +
+				"per-port overlay; `cloop ui` exits at startup until they are fixed",
+		})
+		return
+	}
+	subject := "ui.oidc"
+	if len(setAside) > 0 {
+		subject = "the rest of ui.oidc (" + strings.Join(setAside, " and ") + " reported on its own)"
+	}
+	add(Finding{
+		Check: "oidc.startup", Title: "Single sign-on settings", Severity: SeverityPass,
+		Message: "oidcauth.New, which `cloop ui` runs at startup, accepts " + subject,
+	})
+}
+
+// standIn replaces the setting a refusal names with a value oidcauth.New
+// accepts, so the refusal behind it can surface. False for a setting it has
+// no stand-in for, which ends the search.
+func standIn(c *oidcauth.Config, field string) bool {
+	switch field {
+	case "issuer":
+		c.Issuer = "https://issuer.invalid"
+	case "client_id":
+		c.ClientID = "cloop-hub-doctor"
+	case "redirect_url":
+		c.RedirectURL = "https://cloop.invalid" + oidcauth.DefaultCallbackPath
+	case "cookie_secure":
+		c.CookieSecure = ""
+	case "max_claim_age":
+		c.MaxClaimAge = 0 // the default
+	case "clock_skew":
+		c.ClockSkew = 0 // the default
+	default:
+		return false
+	}
+	return true
+}
+
+// checkOIDCClientSecret objects to the client secret living in a file.
 //
 // The env-var preference is not stylistic. .cloop/config.yaml is committed in
 // every deployment topology cloop documents — it is a ConfigMap in the Helm
 // chart and a read-only bind mount in the compose stack — and a client secret
 // in it is a client secret in git.
-func checkOIDCClientCredentials(oc config.OIDCConfig, add addFn) {
-	if strings.TrimSpace(oc.ClientID) == "" {
-		add(Finding{
-			Check: "oidc.client_id", Title: "OIDC client id", Severity: SeverityFail,
-			Message:     "ui.oidc.client_id is empty, so the hub cannot identify itself to the issuer",
-			Remediation: "Set ui.oidc.client_id to the client you registered at the identity provider",
-		})
-	}
-
+//
+// The client id has no check of its own here: an empty one is a startup
+// refusal, and checkOIDCStartup reports it in oidcauth.New's words.
+func checkOIDCClientSecret(oc config.OIDCConfig, add addFn) {
 	// The environment is checked first because Load has already copied an
 	// env-supplied secret into oc.ClientSecret: by the time this runs, the two
 	// sources are indistinguishable from the struct alone, and the env is the
@@ -238,53 +318,85 @@ func checkOIDCClientCredentials(oc config.OIDCConfig, add addFn) {
 // The redirect URI has to be identical in three places — the hub's config, the
 // client registration at the IdP, and the URL the browser is actually on — and
 // the hub only knows two of them. What it can prove is the half that is its own
-// fault: that the redirect it will send matches the external URL it claims to
-// be served at, and that it points at the path the router actually mounts.
+// fault: that it will serve the path the issuer sends the browser back to, and
+// that the redirect it sends matches the external URL it claims to be served
+// at.
+//
+// The first half is oidcauth.ValidateRedirectURL, not a restatement of it.
+// The IdP decides the path — /auth/callback is only the hub's default, and an
+// Entra SPA registration is commonly /auth/oidc — and the hub serves whatever
+// path that rule admits. So the only path finding is the hub's own refusal,
+// which means it will not start. The value is checked untrimmed, as New
+// receives it.
 func checkRedirectURI(cfg *config.Config, add addFn) {
-	raw := strings.TrimSpace(cfg.UI.OIDC.RedirectURL)
-	if raw == "" {
-		add(Finding{
-			Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityFail,
-			Message:     "ui.oidc.redirect_url is empty; the hub refuses to start with OIDC enabled and no redirect",
-			Remediation: "Set ui.oidc.redirect_url to " + joinURL(cfg.UI.ExternalURL, callbackPath),
-		})
-		return
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !u.IsAbs() {
-		add(Finding{
-			Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityFail,
-			Message:     fmt.Sprintf("ui.oidc.redirect_url %q is not an absolute URL", raw),
-			Remediation: "Set it to the full URL a browser lands on, e.g. " + joinURL(cfg.UI.ExternalURL, callbackPath),
-		})
-		return
-	}
-
-	if u.Path != callbackPath {
-		add(Finding{
-			Check: "oidc.redirect_uri", Title: "Redirect URI path", Severity: SeverityFail,
-			Message: fmt.Sprintf("ui.oidc.redirect_url points at %q, but the hub only serves the callback at %s",
-				u.Path, callbackPath),
-			Remediation: "Change the path to " + callbackPath + " here and in the client registration at the issuer",
-		})
-	}
-
+	raw := cfg.UI.OIDC.RedirectURL
 	ext := strings.TrimSpace(cfg.UI.ExternalURL)
-	if ext == "" {
+
+	u, err := oidcauth.ValidateRedirectURL(raw)
+	if err != nil {
+		add(Finding{
+			Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityFail,
+			Message: "the hub will not start: " + err.Error(),
+			Remediation: "Set ui.oidc.redirect_url to " + redirectFor(ext, raw, oidcauth.DefaultCallbackPath) +
+				" (any path under /auth/ the hub can route will do), and register the same URI " +
+				"for the client at the issuer",
+		})
+		return
+	}
+
+	// Past here the hub starts and serves u.Path. Everything below is about
+	// whether a browser can complete a sign-in through it, and each fix keeps
+	// the path the operator registered: the issuer already holds it, so
+	// changing it would trade one mismatch for another.
+	if !u.IsAbs() || u.Host == "" {
+		add(Finding{
+			Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityFail,
+			Message: fmt.Sprintf("ui.oidc.redirect_url %q is not an absolute URL; the hub starts, but "+
+				"OAuth 2.0 requires an absolute redirect_uri and no client registration matches this one, "+
+				"so every sign-in stops at the issuer", raw),
+			Remediation: "Set it to the full URL a browser lands on, " + redirectFor(ext, "", u.Path) +
+				", and register the same URI at the issuer",
+		})
+		return
+	}
+
+	if !strings.EqualFold(u.Scheme, "https") && !tlsconf.IsLoopbackHost(u.Hostname()) {
+		add(Finding{
+			Check: "oidc.redirect_uri", Title: "Redirect URI scheme", Severity: SeverityFail,
+			Message: "the redirect URI is http:// to a non-loopback host, so the authorization " +
+				"code crosses the network in the clear",
+			Remediation: "Terminate TLS (a proxy or ui.tls) and change both URLs to https://",
+		})
+		return
+	}
+
+	// The cross-check against ui.external_url. Without a usable external URL
+	// the path is still verified — it is the hub's own rule — so the redirect
+	// passes on what was checked and says what was not.
+	var e *url.URL
+	if ext != "" {
+		e, err = url.Parse(ext)
+		if err != nil || e.Host == "" {
+			add(Finding{
+				Check: "oidc.external_url", Title: "External URL", Severity: SeverityFail,
+				Message:     fmt.Sprintf("ui.external_url %q is not a URL", ext),
+				Remediation: "Set it to the scheme and host a browser types, e.g. " + originOf(u),
+			})
+			e = nil
+		}
+	} else {
 		add(Finding{
 			Check: "oidc.external_url", Title: "External URL", Severity: SeverityWarn,
 			Message: "ui.external_url is unset, so the redirect URI could not be cross-checked " +
 				"and enrollment bundles will carry no server address",
 			Remediation: "Set ui.external_url to " + originOf(u),
 		})
-		return
 	}
-	e, err := url.Parse(ext)
-	if err != nil || e.Host == "" {
+	if e == nil {
 		add(Finding{
-			Check: "oidc.external_url", Title: "External URL", Severity: SeverityFail,
-			Message:     fmt.Sprintf("ui.external_url %q is not a URL", ext),
-			Remediation: "Set it to the scheme and host a browser types, e.g. https://cloop.example.com",
+			Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityPass,
+			Message: fmt.Sprintf("the hub serves its callback at %s; with no usable ui.external_url, "+
+				"the origin %s was not cross-checked", u.Path, originOf(u)),
 		})
 		return
 	}
@@ -295,41 +407,33 @@ func checkRedirectURI(cfg *config.Config, add addFn) {
 			Message: fmt.Sprintf("redirect origin %s does not match ui.external_url %s; "+
 				"the issuer will redirect the browser away from this hub",
 				originOf(u), originOf(e)),
-			Remediation: "Set ui.oidc.redirect_url to " + joinURL(ext, callbackPath),
-		})
-		return
-	}
-
-	if !strings.EqualFold(u.Scheme, "https") && !isLoopbackHost(u.Hostname()) {
-		add(Finding{
-			Check: "oidc.redirect_uri", Title: "Redirect URI scheme", Severity: SeverityFail,
-			Message: "the redirect URI is http:// to a non-loopback host, so the authorization " +
-				"code crosses the network in the clear",
-			Remediation: "Terminate TLS (a proxy or ui.tls) and change both URLs to https://",
+			Remediation: "Set ui.oidc.redirect_url to " + redirectFor(ext, "", u.Path) +
+				", and register the same URI for the client at the issuer",
 		})
 		return
 	}
 
 	add(Finding{
 		Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityPass,
-		Message: raw + " matches ui.external_url and the served callback path",
+		Message: fmt.Sprintf("%s matches ui.external_url, and the hub serves its callback at %s", raw, u.Path),
 	})
 }
 
 func originOf(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
-func joinURL(base, path string) string {
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return "https://<your-host>" + path
+// redirectFor proposes a redirect URL ending in path: the origin of
+// ui.external_url when that parses, else the origin of the configured
+// redirect, else a placeholder.
+//
+// The origin and not the whole external URL, because the hub serves its
+// callback at the root of its own path space: a prefix carried over from
+// external_url would put the suggestion outside /auth/, which is advice the
+// hub would then refuse to start on.
+func redirectFor(external, redirect, path string) string {
+	for _, raw := range []string{external, redirect} {
+		if u, err := url.Parse(strings.TrimSpace(raw)); err == nil && u.Scheme != "" && u.Host != "" {
+			return originOf(u) + path
+		}
 	}
-	return strings.TrimRight(base, "/") + path
-}
-
-func isLoopbackHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	}
-	return false
+	return "https://<your-host>" + path
 }

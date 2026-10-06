@@ -38,23 +38,29 @@ var hubDoctorCmd = &cobra.Command{
 things that only exist once cloop is hosted, and that fail silently or at the
 worst possible moment when they are wrong:
 
-  identity     the issuer resolves, its discovery document agrees on its own
-               name, its signing keys are fetchable, and the redirect URI
+  identity     the hub would start with ui.oidc, the issuer resolves, its
+               discovery document agrees on its own name, its signing keys are
+               fetchable, and the redirect URI is one the hub serves and
                matches the external URL a browser will actually be on
   transport    the certificate and key are a matching pair, the chain is
                ordered, it has not expired and it covers the external hostname
-  secrets      CLOOP_SECRET_KEY is present, and is generated key material
-               rather than a passphrase or a placeholder from the docs
+  secrets      CLOOP_SECRET_KEY is present, is generated key material rather
+               than a passphrase or a placeholder from the docs, and opens
+               this hub's sealing keys
   authorization the role mappings parse, and — the one that has no runtime
                symptom — somebody maps to admin
-  image trust  the policy is deny-by-default, the hub's own executor images
-               satisfy it, and the allowed registries are reachable
+  image trust  the policy constrains where images come from, signatures can be
+               verified where it requires them, and the registries it names
+               are reachable
   executors    strict mode has something isolating to dispatch to, and every
                registered executor answers a liveness probe
   storage      state.db passes quick_check and its schema matches this binary
   admission    quotas and budget bound what one tenant can consume
 
-Every finding that is not a pass carries a one-line remediation.
+Every verdict is asked of the code the hub runs — its constructors, its
+router's rules, its loaders — rather than restated here, so the doctor fails
+what the hub refuses and passes what it serves. Every finding that is not a
+pass carries a one-line remediation.
 
 ` + "`--smoke`" + ` adds the check the others cannot make: it dispatches a trivial
 workload — no network, no repository, no model call — through the same
@@ -79,9 +85,10 @@ Every finding that is not a pass carries a one-line remediation.
 
 Where two dashboards share a directory, each reads its own
 .cloop/config.ui-<port>.yaml over config.yaml. --port names the hub to
-diagnose, so its overlay is merged as ` + "`cloop ui --port`" + ` merges it.
-Without --port only config.yaml is read, and the report names any overlay it
-did not merge.
+diagnose, so its overlay is merged as ` + "`cloop ui --port`" + ` merges it. It
+defaults to 8080, the port ` + "`cloop ui`" + ` serves on without --port, so a bare
+run diagnoses the hub a bare ` + "`cloop ui`" + ` starts; --port 0 reads config.yaml
+alone. The report names any overlay it did not merge.
 
 Exit codes. Warnings never fail the command — several are legitimate
 deployment choices, and a CI gate that goes red on choices gets disabled,
@@ -191,30 +198,33 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 // reportOverlays says which configuration files the diagnosis read. It writes
 // to stderr so --json output stays clean.
 //
-// It names the overlay that was merged. Without --port it lists the overlays
-// that were not, because a doctor that silently diagnosed config.yaml alone,
-// on a host where the hub in question takes its policy from an overlay, would
-// report on a hub nobody runs.
+// It names the overlay that was merged, and lists the overlays that were not,
+// because a doctor that silently diagnosed one hub's view, on a host where the
+// hub in question takes its policy from another overlay, would report on a hub
+// nobody runs.
 func reportOverlays(cmd *cobra.Command, dir string, port int, merged string) {
 	out := cmd.ErrOrStderr()
+	diagnosed := config.ConfigPath(dir) + " alone"
 	if merged != "" {
 		fmt.Fprintf(out, "Instance config: %s merged over %s\n", merged, config.ConfigPath(dir))
-		return
-	}
-	if port > 0 {
-		return
+		diagnosed = "the hub on :" + fmt.Sprint(port)
 	}
 	ports, err := config.UIInstancePorts(dir)
-	if err != nil || len(ports) == 0 {
+	if err != nil {
 		return
 	}
 	names := make([]string, 0, len(ports))
 	for _, p := range ports {
-		names = append(names, fmt.Sprint(p))
+		if p != port {
+			names = append(names, fmt.Sprint(p))
+		}
 	}
-	fmt.Fprintf(out, "Note: diagnosed %s alone; this directory also has instance overlays "+
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "Note: diagnosed %s; this directory also has instance overlays "+
 		"for port(s) %s. Pass --port <n> to diagnose that hub with its overlay merged.\n",
-		config.ConfigPath(dir), strings.Join(names, ", "))
+		diagnosed, strings.Join(names, ", "))
 }
 
 // renderHubDoctor prints the report with colour, falling back to the plain
@@ -431,9 +441,10 @@ func init() {
 			"each stage (default: every non-cordoned executor)")
 	hubDoctorCmd.Flags().Duration("smoke-timeout", hubdoctor.DefaultSmokeTimeout,
 		"time budget for one executor's --smoke run")
-	hubDoctorCmd.Flags().Int("port", 0,
+	hubDoctorCmd.Flags().Int("port", defaultUIPort,
 		"diagnose the hub listening on this port, merging its .cloop/config.ui-<port>.yaml "+
-			"overlay as `cloop ui --port` does (default: config.yaml alone)")
+			"overlay as `cloop ui --port` does; the default is the port `cloop ui` defaults to, "+
+			"and 0 reads config.yaml alone")
 
 	hubCmd.AddCommand(hubDoctorCmd)
 }

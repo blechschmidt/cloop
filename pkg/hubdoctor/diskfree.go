@@ -48,8 +48,8 @@ func checkFreeSpace(dir string, cfg *config.Config, opts Options, add addFn) {
 	free := diskusage.HumanBytes(v.FreeBytes)
 	freeUp := "Free space on " + v.Mount + " — `cloop compact`, `cloop db maintain` and the Go build cache " +
 		"(`go clean -cache`) are the usual places — or move .cloop to a larger volume"
-	switch {
-	case floor == 0:
+	switch v.AgainstFloor(floor) {
+	case diskusage.FloorOff:
 		add(Finding{
 			Check: "storage.free_space", Title: "Free disk space", Severity: SeverityWarn,
 			Message: fmt.Sprintf("volume %s has %s free, and orchestrator.min_free_disk_mb is 0: runs start "+
@@ -58,7 +58,7 @@ func checkFreeSpace(dir string, cfg *config.Config, opts Options, add addFn) {
 				"in Settings → Disk & Retention", config.MinFreeDiskMBDefault),
 			Details: details,
 		})
-	case v.FreeBytes < floor:
+	case diskusage.FloorBelow:
 		add(Finding{
 			Check: "storage.free_space", Title: "Free disk space", Severity: SeverityFail,
 			Message: fmt.Sprintf("volume %s has %s free, below the %s floor: runs writing there pause before "+
@@ -66,7 +66,7 @@ func checkFreeSpace(dir string, cfg *config.Config, opts Options, add addFn) {
 			Remediation: freeUp,
 			Details:     details,
 		})
-	case v.FreeBytes < 2*floor:
+	case diskusage.FloorNear:
 		add(Finding{
 			Check: "storage.free_space", Title: "Free disk space", Severity: SeverityWarn,
 			Message: fmt.Sprintf("volume %s has %s free, less than twice the %s floor runs pause at",

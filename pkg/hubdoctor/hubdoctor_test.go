@@ -13,18 +13,23 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
@@ -36,6 +41,12 @@ func findingsFor(t *testing.T, dir string, cfg *config.Config, opts Options) map
 	t.Helper()
 	if opts.Timeout == 0 {
 		opts.Timeout = 2 * time.Second
+	}
+	if opts.GlobalBudget == nil {
+		// The machine running the suite may have host-wide caps of its own.
+		opts.GlobalBudget = func() (globalbudget.GlobalBudgetConfig, error) {
+			return globalbudget.GlobalBudgetConfig{}, nil
+		}
 	}
 	rep := Run(context.Background(), dir, cfg, opts)
 	out := map[string][]Finding{}
@@ -321,6 +332,16 @@ func TestRedirectURIChecks(t *testing.T) {
 			"oidc.redirect_uri", SeverityFail},
 		{"wrong path", "https://cloop.example.com", "https://cloop.example.com/callback",
 			"oidc.redirect_uri", SeverityFail},
+		// The IdP decides the path, and the hub serves any it can route under
+		// /auth/ — Entra SPA registrations are commonly /auth/oidc (Task 20387).
+		{"registered elsewhere under /auth/", "https://cloop.example.com", "https://cloop.example.com/auth/oidc",
+			"oidc.redirect_uri", SeverityPass},
+		{"nested under /auth/", "https://cloop.example.com", "https://cloop.example.com/auth/sso/return",
+			"oidc.redirect_uri", SeverityPass},
+		{"a path the router cannot register", "https://cloop.example.com", "https://cloop.example.com/auth//cb",
+			"oidc.redirect_uri", SeverityFail},
+		{"the hub's own login route", "https://cloop.example.com", "https://cloop.example.com/auth/login",
+			"oidc.redirect_uri", SeverityFail},
 		{"empty", "https://cloop.example.com", "",
 			"oidc.redirect_uri", SeverityFail},
 		{"not a URL", "https://cloop.example.com", "callback",
@@ -354,6 +375,131 @@ func TestRedirectURIChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRedirectPathOutsideAuthSaysTheHubWillNotStart: the one path finding
+// left is the hub's own refusal, and it is reported as what it is — a hub that
+// does not start — with a remediation that keeps the operator's origin.
+func TestRedirectPathOutsideAuthSaysTheHubWillNotStart(t *testing.T) {
+	cfg := hubCfg()
+	cfg.UI.OIDC.RedirectURL = "https://cloop.example.com/oidc/callback"
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "oidc.redirect_uri")
+	wantSeverity(t, f, SeverityFail)
+	if !strings.Contains(f.Message, "will not start") || !strings.Contains(f.Message, "/auth/") {
+		t.Errorf("the refusal should say the hub will not start and name the /auth/ rule: %q", f.Message)
+	}
+	if !strings.Contains(f.Remediation, "https://cloop.example.com/auth/callback") {
+		t.Errorf("remediation should propose a servable URL at the hub's origin: %q", f.Remediation)
+	}
+	// Reported once: the startup check asks about the rest of the block.
+	start := only(t, got, "oidc.startup")
+	wantSeverity(t, start, SeverityPass)
+	if strings.Contains(start.Message, "redirect_url path") {
+		t.Errorf("the redirect refusal is reported twice: %q", start.Message)
+	}
+}
+
+// TestRedirectAtAuthOIDCWithoutExternalURLPasses is :8888's own configuration
+// (Task 20387): an Entra SPA registration at /auth/oidc and no ui.external_url.
+// The doctor used to FAIL it and advise moving the registration to
+// /auth/callback, which would have broken a working sign-in.
+func TestRedirectAtAuthOIDCWithoutExternalURLPasses(t *testing.T) {
+	cfg := hubCfg()
+	cfg.UI.ExternalURL = ""
+	cfg.UI.OIDC.RedirectURL = "https://aiden.blechschmidt.io:8888/auth/oidc"
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "oidc.redirect_uri")
+	wantSeverity(t, f, SeverityPass)
+	if !strings.Contains(f.Message, "/auth/oidc") || !strings.Contains(f.Message, "not cross-checked") {
+		t.Errorf("the pass should name the served path and what was not checked: %q", f.Message)
+	}
+	ext := only(t, got, "oidc.external_url")
+	wantSeverity(t, ext, SeverityWarn)
+	if !strings.Contains(ext.Remediation, "https://aiden.blechschmidt.io:8888") {
+		t.Errorf("remediation should propose the redirect's own origin: %q", ext.Remediation)
+	}
+}
+
+// TestRedirectOriginRemediationKeepsTheRegisteredPath: when the origin is
+// wrong the fix is the origin, not the path the issuer already holds.
+func TestRedirectOriginRemediationKeepsTheRegisteredPath(t *testing.T) {
+	cfg := hubCfg()
+	cfg.UI.ExternalURL = "https://cloop.example.com/"
+	cfg.UI.OIDC.RedirectURL = "https://old-name.example.com/auth/oidc"
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "oidc.redirect_uri")
+	wantSeverity(t, f, SeverityFail)
+	if !strings.Contains(f.Remediation, "https://cloop.example.com/auth/oidc") {
+		t.Errorf("remediation should be ui.external_url plus the configured path: %q", f.Remediation)
+	}
+}
+
+// TestOIDCStartupIsTheConstructorsVerdict: whether the hub starts is asked of
+// oidcauth.New on the builder `cloop ui` uses, so every rule New enforces is
+// reported — including the ones the doctor never restated, which used to pass
+// offline and then stop the hub at its next restart.
+func TestOIDCStartupIsTheConstructorsVerdict(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*config.OIDCConfig)
+		want   string // substring of the refusal; "" means accepted
+	}{
+		{"valid", func(*config.OIDCConfig) {}, ""},
+		{"plaintext issuer", func(o *config.OIDCConfig) { o.Issuer = "http://idp.example.com" }, "https"},
+		{"loopback plaintext issuer is development", func(o *config.OIDCConfig) { o.Issuer = "http://127.0.0.1:5556" }, ""},
+		{"unknown cookie mode", func(o *config.OIDCConfig) { o.CookieSecure = "sometimes" }, "cookie_secure"},
+		{"clock skew past the ceiling", func(o *config.OIDCConfig) { o.ClockSkewSeconds = 3600 }, "clock_skew"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := hubCfg()
+			tc.mutate(&cfg.UI.OIDC)
+			f := only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "oidc.startup")
+			if tc.want == "" {
+				wantSeverity(t, f, SeverityPass)
+				return
+			}
+			wantSeverity(t, f, SeverityFail)
+			if !strings.Contains(f.Message, "will not start") || !strings.Contains(f.Message, tc.want) {
+				t.Errorf("want a refusal naming %q, got %q", tc.want, f.Message)
+			}
+		})
+	}
+}
+
+// TestOIDCStartupReportsEveryRefusal: New stops at its first refusal, so each
+// is set aside and New asked again — a bad issuer no longer hides an empty
+// client id, which keeps its own check id, oidc.client_id (Task 20387).
+func TestOIDCStartupReportsEveryRefusal(t *testing.T) {
+	cfg := hubCfg()
+	cfg.UI.OIDC.Issuer = "http://idp.example.com"
+	cfg.UI.OIDC.ClientID = ""
+	cfg.UI.OIDC.CookieSecure = "sometimes"
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+
+	id := only(t, got, "oidc.client_id")
+	wantSeverity(t, id, SeverityFail)
+	if !strings.Contains(id.Message, "client_id is required") {
+		t.Errorf("oidc.client_id: %q", id.Message)
+	}
+	start := only(t, got, "oidc.startup")
+	wantSeverity(t, start, SeverityFail)
+	for _, want := range []string{"https", "cookie_secure"} {
+		if !strings.Contains(start.Message, want) {
+			t.Errorf("oidc.startup should name the %s refusal too: %q", want, start.Message)
+		}
+	}
+	if strings.Contains(start.Message, "client_id") {
+		t.Errorf("the client id is reported twice: %q", start.Message)
+	}
+
+	// The client id alone: its own finding, and the rest of the block passes.
+	cfg = hubCfg()
+	cfg.UI.OIDC.ClientID = ""
+	got = findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	wantSeverity(t, only(t, got, "oidc.client_id"), SeverityFail)
+	wantSeverity(t, only(t, got, "oidc.startup"), SeverityPass)
 }
 
 // TestClientSecretFromConfigIsAWarning: config.yaml is committed in every
@@ -455,6 +601,83 @@ func TestTLSCertificateChecks(t *testing.T) {
 		got := findingsFor(t, dir, &cfg, Options{Offline: true})
 		wantSeverity(t, only(t, got, "tls.material"), SeverityFail)
 	})
+
+	// The material is judged by tlsconf.LoadServerConfig, the listener's own
+	// loader, so a config with two faults is reported at the one startup stops
+	// on — the floor, which it parses before it loads the pair (Task 20387).
+	t.Run("an unsupported floor stops startup before the pair is read", func(t *testing.T) {
+		otherKey := filepath.Join(t.TempDir(), "key.pem")
+		if _, err := tlsconf.GenerateSelfSigned(filepath.Join(filepath.Dir(otherKey), "cert.pem"), otherKey,
+			tlsconf.SelfSignedOptions{Hosts: []string{"cloop.example.com"}, ValidFor: time.Hour}); err != nil {
+			t.Fatalf("generate second certificate: %v", err)
+		}
+		cfg := *base
+		cfg.UI.TLS = config.TLSConfig{CertFile: certPath, KeyFile: otherKey, MinVersion: "1.0"}
+		got := findingsFor(t, dir, &cfg, Options{Offline: true})
+		f := only(t, got, "tls.min_version")
+		wantSeverity(t, f, SeverityFail)
+		if !strings.Contains(f.Message, "will not start") {
+			t.Errorf("a floor startup refuses should say so: %q", f.Message)
+		}
+		if len(got["tls.material"]) != 0 {
+			t.Errorf("reported the pair, which startup never reaches: %+v", got["tls.material"])
+		}
+	})
+
+	// The server presents every CERTIFICATE block it loaded and parses only
+	// the leaf. Re-reading the file and skipping what did not parse used to
+	// pass a chain whose intermediate breaks every client that needs it.
+	t.Run("an intermediate that does not parse is presented anyway", func(t *testing.T) {
+		leafPEM, err := os.ReadFile(certPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := append(append([]byte{}, leafPEM...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not DER")})...)
+		badChain := filepath.Join(t.TempDir(), "chain.pem")
+		if err := os.WriteFile(badChain, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := *base
+		cfg.UI.TLS = config.TLSConfig{CertFile: badChain, KeyFile: keyPath}
+		got := findingsFor(t, dir, &cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "tls.material"), SeverityPass)
+		wantSeverity(t, only(t, got, "tls.chain"), SeverityFail)
+	})
+}
+
+// TestTLSTerminationFollowsTheAgentsEndpointRule: with no certificate of its
+// own, the hub's transport is classified by tlsconf.ParseEndpoint — the rule an
+// edge agent applies to the same URL when it dials in — rather than by a list
+// of three loopback names the doctor once kept, which failed hubs that every
+// agent connects to without --insecure-transport (Task 20387).
+func TestTLSTerminationFollowsTheAgentsEndpointRule(t *testing.T) {
+	cases := []struct {
+		external string
+		want     Severity
+	}{
+		{"https://cloop.example.com", SeverityPass},
+		{"wss://cloop.example.com", SeverityPass},
+		{"http://localhost:8080", SeverityPass},
+		{"http://127.0.1.1:8080", SeverityPass},
+		{"http://[::1]:8080", SeverityPass},
+		{"http://hub.localhost:8080", SeverityPass},
+		{"http://cloop.example.com", SeverityFail},
+		{"http://localhost.example.com", SeverityFail},
+		{"ftp://cloop.example.com", SeverityFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.external, func(t *testing.T) {
+			if _, _, err := tlsconf.CheckEndpoint(tc.external, false); (err == nil) != (tc.want == SeverityPass) {
+				t.Fatalf("premise: an agent's verdict on %s is err=%v", tc.external, err)
+			}
+			cfg := hubCfg()
+			cfg.UI.ExternalURL = tc.external
+			cfg.UI.OIDC.Enabled = false
+			got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+			wantSeverity(t, only(t, got, "tls.termination"), tc.want)
+		})
+	}
 }
 
 // TestTLSTerminationAtProxy: no certificate is correct behind a proxy and
@@ -553,6 +776,22 @@ func TestProjectScopedAdminIsNotHubAdmin(t *testing.T) {
 	wantSeverity(t, only(t, got, "rbac.admin"), SeverityFail)
 }
 
+// TestAdminRoutesAreCountedOnce: an address in admin_emails that an email
+// mapping also makes admin is one way in. On :8888's own configuration the
+// finding said "2 route(s)" and named the one address twice (Task 20387).
+func TestAdminRoutesAreCountedOnce(t *testing.T) {
+	cfg := hubCfg()
+	cfg.UI.OIDC.AdminEmails = []string{"ops@example.com"}
+	cfg.UI.OIDC.RoleMappings = []config.RoleMapping{{Claim: "email", Value: "ops@example.com", Role: "admin"}}
+
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "rbac.admin")
+	wantSeverity(t, f, SeverityPass)
+	if !strings.HasPrefix(f.Message, "1 route(s)") || f.Details["granted_by"] != "email=ops@example.com" {
+		t.Errorf("one address made admin twice is one route: %q, granted_by %v", f.Message, f.Details["granted_by"])
+	}
+}
+
 func TestRBACChecks(t *testing.T) {
 	t.Run("default_role admin", func(t *testing.T) {
 		cfg := hubCfg()
@@ -593,6 +832,56 @@ func TestRBACChecks(t *testing.T) {
 	})
 }
 
+// TestRBACJudgesThePolicyTheResolverHolds: authz.New normalizes a binding —
+// claim and role lowercased, values trimmed, a group path's leading "/"
+// dropped, sub kept exact — and the hub decides with that. The doctor judged
+// the YAML, and failed a hub whose admin mapping said "role: Admin" (Task 20387).
+func TestRBACJudgesThePolicyTheResolverHolds(t *testing.T) {
+	t.Run("a capitalized admin role is admin", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.OIDC.AdminEmails = nil
+		cfg.UI.OIDC.RoleMappings = []config.RoleMapping{{Claim: "group", Value: "platform", Role: " Admin "}}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "rbac.admin"), SeverityPass)
+	})
+	t.Run("a capitalized group claim still needs the groups scope", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.OIDC.Scopes = []string{"openid", "email"}
+		cfg.UI.OIDC.RoleMappings = []config.RoleMapping{{Claim: "Group", Value: "platform", Role: "admin"}}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "rbac.scopes"), SeverityFail)
+	})
+	t.Run("a group path and its bare name are one value", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.OIDC.RoleMappings = []config.RoleMapping{
+			{Claim: "group", Value: "/ops", Role: "admin"},
+			{Claim: "group", Value: "ops", Role: "viewer"},
+		}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "rbac.duplicates"), SeverityWarn)
+	})
+	t.Run("subjects differing in case are two subjects", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.OIDC.RoleMappings = append(cfg.UI.OIDC.RoleMappings,
+			config.RoleMapping{Claim: "sub", Value: "ABC", Role: "viewer"},
+			config.RoleMapping{Claim: "sub", Value: "abc", Role: "operator"})
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		if fs := got["rbac.duplicates"]; len(fs) != 0 {
+			t.Errorf("sub is compared exactly, so these are not duplicates: %+v", fs)
+		}
+	})
+	t.Run("an admin email repeated as a mapping is not dead policy", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.OIDC.AdminEmails = []string{"ops@example.com"}
+		cfg.UI.OIDC.RoleMappings = append(cfg.UI.OIDC.RoleMappings,
+			config.RoleMapping{Claim: "email", Value: "ops@example.com", Role: "admin"})
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		if fs := got["rbac.duplicates"]; len(fs) != 0 {
+			t.Errorf("flagged the :8888 shape, an admin email and the same mapping: %+v", fs)
+		}
+	})
+}
+
 // ── Image trust ─────────────────────────────────────────────────────────────
 
 func TestImagePolicyChecks(t *testing.T) {
@@ -605,6 +894,7 @@ func TestImagePolicyChecks(t *testing.T) {
 
 	t.Run("require_signature with no cosign", func(t *testing.T) {
 		cfg := hubCfg()
+		cfg.Executors.Container.Enabled = true // a driver that verifies
 		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
 			AllowedRegistries: []string{"ghcr.io"},
 			RequireSignature:  true,
@@ -634,7 +924,11 @@ func TestImagePolicyChecks(t *testing.T) {
 		}
 	})
 
-	t.Run("the hub's own image would be refused", func(t *testing.T) {
+	// The drivers never apply the policy to the operator's own image
+	// (container.Options.ImagePolicy), so it is not "refused by this hub's
+	// own policy" — the doctor used to say it was (Task 20387). What is true
+	// is that a project naming the same image would be.
+	t.Run("the hub's own image runs whatever the policy says", func(t *testing.T) {
 		cfg := hubCfg()
 		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
 			AllowedRegistries: []string{"ghcr.io"},
@@ -643,8 +937,164 @@ func TestImagePolicyChecks(t *testing.T) {
 		cfg.Executors.Container.Enabled = true
 		cfg.Executors.Container.Image = "docker.io/library/alpine:3"
 		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
-		wantSeverity(t, only(t, got, "images.configured"), SeverityWarn)
+		f := only(t, got, "images.configured")
+		wantSeverity(t, f, SeverityPass)
+		if !strings.Contains(f.Message, "runs as configured") || f.Details["refused_for_projects"] == nil {
+			t.Errorf("want the exemption and what it would mean for a project: %q %v", f.Message, f.Details)
+		}
 	})
+
+	t.Run("a policy that admits any registry says so", func(t *testing.T) {
+		for _, pol := range []config.ImagePolicyConfig{
+			{RequireDigest: true},
+			{AllowedRegistries: []string{"*"}, RequireDigest: true},
+			// A bare repo beside "*" is that path on any registry.
+			{AllowedRegistries: []string{"*"}, AllowedRepos: []string{"acme/tools"}},
+		} {
+			cfg := hubCfg()
+			cfg.Sandbox.ImagePolicy = pol
+			got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+			f := only(t, got, "images.policy")
+			wantSeverity(t, f, SeverityWarn)
+			if strings.Contains(f.Message, "deny-by-default") {
+				t.Errorf("%+v was called deny-by-default: %q", pol, f.Message)
+			}
+		}
+		cfg := hubCfg()
+		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{AllowedRegistries: []string{"ghcr.io"}}
+		wantSeverity(t, only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "images.policy"),
+			SeverityPass)
+	})
+
+	t.Run("a cosign key nobody can read verifies nothing", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.Executors.Container.Enabled = true
+		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
+			AllowedRegistries: []string{"ghcr.io"},
+			RequireSignature:  true,
+			CosignPublicKeys:  []string{filepath.Join(t.TempDir(), "absent.pub")},
+		}
+		got := findingsFor(t, t.TempDir(), cfg, Options{
+			Offline:  true,
+			LookPath: func(string) (string, error) { return "/usr/bin/cosign", nil },
+		})
+		f := only(t, got, "images.signature")
+		wantSeverity(t, f, SeverityFail)
+		if !strings.Contains(f.Message, "every project image is refused") {
+			t.Errorf("want the consequence, got %q", f.Message)
+		}
+	})
+
+	t.Run("a KMS key is cosign's to resolve", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.Executors.Container.Enabled = true
+		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
+			AllowedRegistries: []string{"ghcr.io"},
+			RequireSignature:  true,
+			CosignPublicKeys:  []string{"awskms:///arn:aws:kms:eu-west-1:000000000000:key/x", "k8s://cloop/cosign"},
+		}
+		got := findingsFor(t, t.TempDir(), cfg, Options{
+			Offline:  true,
+			LookPath: func(string) (string, error) { return "/usr/bin/cosign", nil },
+		})
+		wantSeverity(t, only(t, got, "images.signature"), SeverityPass)
+	})
+
+	// A device in container mode runs the images projects name; the hub
+	// checks them against the allowlists before dispatch, and no device
+	// verifies a signature.
+	t.Run("devices whose sandbox runs a container run project images", func(t *testing.T) {
+		// Host mode runs no image, so the policy decides nothing a device
+		// in it runs.
+		dir := t.TempDir()
+		seedEnrolledAgent(t, dir, "edge-01")
+		cfg := hubCfg()
+		got := findingsFor(t, dir, cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "images.policy"), SeverityPass)
+
+		setDeviceSandbox(t, dir, "edge-01", executor.SandboxSettings{Mode: executor.SandboxModeContainer, Image: "alpine:3"})
+		got = findingsFor(t, dir, cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "images.policy"), SeverityWarn)
+
+		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
+			AllowedRegistries: []string{"ghcr.io"},
+			RequireSignature:  true,
+			CosignPublicKeys:  []string{"/etc/cloop/cosign.pub"},
+		}
+		got = findingsFor(t, dir, cfg, Options{Offline: true})
+		f := only(t, got, "images.signature")
+		wantSeverity(t, f, SeverityWarn)
+		if !strings.Contains(f.Message, "no device verifies a signature") {
+			t.Errorf("want the device gap named, got %q", f.Message)
+		}
+	})
+}
+
+// TestRegistryProbesAreThePolicysRegistries: the registries probed are the
+// ones imagepolicy reads out of the policy. "acme/tools" names a repository on
+// an allowed registry, not a registry called acme — the doctor used to probe
+// https://acme/v2/ and fail the hub (Task 20387).
+func TestRegistryProbesAreThePolicysRegistries(t *testing.T) {
+	var probed []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		probed = append(probed, r.URL.Host)
+		return &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody, Request: r}, nil
+	})}
+	cfg := hubCfg()
+	cfg.UI.OIDC.Enabled = false
+	cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
+		AllowedRegistries: []string{"ghcr.io", "docker.io"},
+		AllowedRepos:      []string{"acme/tools", "quay.io/org/img"},
+	}
+	got := findingsFor(t, t.TempDir(), cfg, Options{HTTPClient: client})
+	sort.Strings(probed)
+	want := []string{"ghcr.io", "quay.io", "registry-1.docker.io"}
+	if strings.Join(probed, ",") != strings.Join(want, ",") {
+		t.Errorf("probed %v, want %v", probed, want)
+	}
+	for _, f := range got["images.registry"] {
+		wantSeverity(t, f, SeverityPass)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// setDeviceSandbox records a device's sandbox settings the way the Executors
+// panel does, with the device's executor row beside it.
+func setDeviceSandbox(t *testing.T, dir, id string, s executor.SandboxSettings) {
+	t.Helper()
+	db, err := statedb.Open(filepath.Join(dir, ".cloop", "state.db"))
+	if err != nil {
+		t.Fatalf("statedb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.UpsertExecutor(statedb.ExecutorRow{ID: id, Name: id, Kind: executor.KindRemoteAgent,
+		Status: statedb.ExecutorStatusOnline, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("UpsertExecutor: %v", err)
+	}
+	if err := db.SetExecutorSandbox(id, s, "test"); err != nil {
+		t.Fatalf("SetExecutorSandbox: %v", err)
+	}
+}
+
+// seedEnrolledAgent stores an enrolled, unrevoked agent the way enrollment does.
+func seedEnrolledAgent(t *testing.T, dir, name string) {
+	t.Helper()
+	db, err := statedb.Open(mustInitStateDB(t, dir))
+	if err != nil {
+		t.Fatalf("statedb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := executorstore.New(db)
+	if err != nil {
+		t.Fatalf("executorstore.New: %v", err)
+	}
+	if err := store.PutAgent(remote.AgentRecord{AgentID: name, Name: name, SecretHash: "00",
+		CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("PutAgent: %v", err)
+	}
 }
 
 // TestRegistryReachability: an authenticated registry challenging an anonymous
@@ -798,6 +1248,25 @@ func TestSchemaGuardOptOutIsItselfReported(t *testing.T) {
 		wantSeverity(t, only(t, got, "storage.schema_guard"), SeverityWarn)
 	})
 
+	// The hub's guard opens a database ahead only by migrations recorded as
+	// additive; the doctor failed it anyway, and told the operator to roll
+	// forward or restore a backup (Task 20387).
+	t.Run("ahead only by an additive migration", func(t *testing.T) {
+		t.Setenv(statedb.EnvAllowSchemaDowngrade, "")
+		dir := t.TempDir()
+		mustInitStateDB(t, dir)
+		recordFutureAdditiveMigration(t, dir)
+		if err := statedb.CheckSchemaAhead(filepath.Join(dir, ".cloop", "state.db")); err != nil {
+			t.Fatalf("premise: the guard opens this database: %v", err)
+		}
+		got := findingsFor(t, dir, hubCfg(), Options{Offline: true})
+		f := only(t, got, "storage.schema")
+		wantSeverity(t, f, SeverityPass)
+		if !strings.Contains(f.Message, "additive") {
+			t.Errorf("the pass should say why the guard opens it: %q", f.Message)
+		}
+	})
+
 	t.Run("set while the database is ahead", func(t *testing.T) {
 		t.Setenv(statedb.EnvAllowSchemaDowngrade, "1")
 		dir := t.TempDir()
@@ -837,6 +1306,81 @@ func TestAdmissionChecks(t *testing.T) {
 		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
 		wantSeverity(t, only(t, got, "quotas.policy"), SeverityPass)
 		wantSeverity(t, only(t, got, "budget.limits"), SeverityPass)
+	})
+
+	// Judged as quota.New holds the policy: a negative ceiling is unlimited
+	// and dropped, so this block is no policy at all — it used to pass as
+	// "1 default limit(s)" (Task 20387).
+	t.Run("a policy of unlimited ceilings is no policy", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.Quotas = config.QuotasConfig{Defaults: map[string]float64{"max_concurrent_tasks": -1}}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "quotas.policy"), SeverityWarn)
+	})
+
+	t.Run("a policy of max_sessions: 0 alone bounds nothing", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.Quotas = config.QuotasConfig{Defaults: map[string]float64{"max_sessions": 0}}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		wantSeverity(t, only(t, got, "quotas.policy"), SeverityWarn)
+	})
+
+	// The hub reads max_sessions: 0 as no cap (quota.SessionCap), so there is
+	// no refusal to warn about.
+	t.Run("zero sessions is no cap, not a refusal", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.UI.Quotas = config.QuotasConfig{Defaults: map[string]float64{"max_sessions": 0, "max_projects": 3}}
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		if fs := got["quotas.zero_limits"]; len(fs) != 0 {
+			t.Errorf("warned about a zero the hub reads as unlimited: %+v", fs)
+		}
+	})
+
+	// budget.EffectiveLimits is what a run is held to: monthly_usd is not in
+	// it, and the host-wide caps are.
+	t.Run("monthly_usd alone bounds nothing", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.Budget.MonthlyUSD = 500
+		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+		f := only(t, got, "budget.limits")
+		wantSeverity(t, f, SeverityWarn)
+		if !strings.Contains(f.Message, "enforced nowhere") {
+			t.Errorf("the message should say monthly_usd is not enforced: %q", f.Message)
+		}
+	})
+	// budget.Enforce runs inside `cloop run`, which on an isolating executor
+	// is the sandboxed workload: the host-wide caps in ~/.config/cloop do not
+	// reach it, so they bound only host runs, and say so.
+	t.Run("a host-wide cap holds back host runs only", func(t *testing.T) {
+		got := findingsFor(t, t.TempDir(), hubCfg(), Options{Offline: true,
+			GlobalBudget: func() (globalbudget.GlobalBudgetConfig, error) {
+				return globalbudget.GlobalBudgetConfig{DailyUSDLimit: 20}, nil
+			}})
+		f := only(t, got, "budget.limits")
+		wantSeverity(t, f, SeverityWarn)
+		if !strings.Contains(f.Message, "an isolated run is not given them") {
+			t.Errorf("the message should say where the host-wide cap applies: %q", f.Message)
+		}
+	})
+	t.Run("a project cap holds every run back", func(t *testing.T) {
+		cfg := hubCfg()
+		cfg.Budget.DailyUSDLimit = 25
+		wantSeverity(t, only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "budget.limits"),
+			SeverityPass)
+	})
+	// Runs read config.yaml, never an overlay, so a budget the merged view
+	// carries and config.yaml does not holds nothing back.
+	t.Run("a budget runs never read is no budget", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.ConfigPath(dir), []byte("provider: claudecode\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := hubCfg()
+		cfg.Budget.DailyUSDLimit = 25 // as if from config.ui-<port>.yaml
+		wantSeverity(t, only(t, findingsFor(t, dir, cfg, Options{Offline: true}), "budget.limits"), SeverityWarn)
 	})
 
 	t.Run("zero means none allowed, not unlimited", func(t *testing.T) {
@@ -897,5 +1441,20 @@ func TestNilConfigIsDiagnosedNotFatal(t *testing.T) {
 	wantSeverity(t, rep.Findings[0], SeverityFail)
 	if rep.ExitCode() != 1 {
 		t.Error("a hub with no readable config must fail the command")
+	}
+}
+
+// TestForwardedProtoIsRequiredOnlyWhereTheCookieFollowsTheRequest: the session
+// cookie's Secure flag comes from X-Forwarded-Proto only when cookie_secure is
+// auto or unset (oidcauth.CookieSecureFollowsRequest); with always or never the
+// header changes nothing, and the doctor used to say it was required anyway.
+func TestForwardedProtoIsRequiredOnlyWhereTheCookieFollowsTheRequest(t *testing.T) {
+	for mode, want := range map[string]bool{"": true, "auto": true, "always": false, "never": false} {
+		cfg := hubCfg()
+		cfg.UI.OIDC.CookieSecure = mode
+		f := only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "tls.termination")
+		if _, got := f.Details["requires"]; got != want {
+			t.Errorf("cookie_secure %q: requires-detail present=%v, want %v", mode, got, want)
+		}
 	}
 }

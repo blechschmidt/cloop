@@ -11,25 +11,30 @@ package hubdoctor
 //
 // So the checks here are less about validity (quota.New already rejects what is
 // malformed, loudly, at boot) and more about the gap between what the
-// deployment implies and what was actually written down.
+// deployment implies and what was actually written down — judged as the hub
+// holds it, not as the YAML reads (Task 20387). A quota policy is whatever
+// quota.New built from the builder `cloop ui` uses: "-1" is unlimited there,
+// so a block of nothing but -1s is no policy, though it reads like one. A
+// spend ceiling is whatever budget.EffectiveLimits says a run is held to, from
+// the config.yaml runs read: monthly_usd bounds nothing, and an overlay's
+// budget is never read.
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
-	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/budget"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/quota"
 )
 
-func checkAdmission(cfg *config.Config, add addFn) {
+func checkAdmission(dir string, cfg *config.Config, opts Options, add addFn) {
 	q := cfg.UI.Quotas
 
-	resolver, err := quota.New(quota.Config{
-		Defaults: limitsFrom(q.Defaults),
-		Bindings: quotaBindings(q.Bindings),
-	})
+	resolver, err := quota.New(q.QuotaConfig())
 	if err != nil {
 		add(Finding{
 			Check: "quotas.policy", Title: "Quota policy", Severity: SeverityFail,
@@ -38,19 +43,19 @@ func checkAdmission(cfg *config.Config, add addFn) {
 		})
 		return
 	}
-	_ = resolver
 
 	multiTenant := cfg.UI.OIDC.Enabled
 	switch {
-	case !q.Configured() && multiTenant:
+	case !resolver.Constrains() && multiTenant:
 		add(Finding{
 			Check: "quotas.policy", Title: "Quota policy", Severity: SeverityWarn,
-			Message: "single sign-on is on but ui.quotas is empty, so every authenticated identity " +
-				"may create unlimited projects and run unlimited concurrent tasks",
+			Message: "single sign-on is on but no quota bounds anything (ui.quotas sets nothing, or only " +
+				"ceilings that mean unlimited — a negative one, or max_sessions: 0), so every " +
+				"authenticated identity may create unlimited projects and run unlimited concurrent tasks",
 			Remediation: "Set ui.quotas.defaults (max_projects, max_concurrent_tasks, daily_token_budget " +
 				"are the ones that bound a shared hub)",
 		})
-	case !q.Configured():
+	case !resolver.Constrains():
 		add(Finding{
 			Check: "quotas.policy", Title: "Quota policy", Severity: SeverityPass,
 			Message: "no quotas configured; correct for a single-tenant hub",
@@ -60,31 +65,35 @@ func checkAdmission(cfg *config.Config, add addFn) {
 			Check: "quotas.policy", Title: "Quota policy", Severity: SeverityPass,
 			Message: fmt.Sprintf("%d default limit(s), %d binding(s)", len(q.Defaults), len(q.Bindings)),
 		})
-		checkQuotaSemantics(q, add)
+		checkQuotaSemantics(q.QuotaConfig(), add)
 	}
 
-	checkBudget(cfg, add)
+	checkBudget(dir, cfg, opts, add)
 }
 
-// checkQuotaSemantics catches the two quota mistakes that parse cleanly.
-//
-// A limit of 0 is the sharpest: it is valid, it means "none allowed", and it is
-// what somebody writes when they meant "unlimited" (which is the key being
-// absent). A tenant with max_projects: 0 is refused at every admission with a
-// quota error, and the config reads like a generous default.
-func checkQuotaSemantics(q config.QuotasConfig, add addFn) {
+// checkQuotaSemantics catches the quota mistake that parses cleanly: a limit
+// of 0. It is valid, it means "none allowed" for every resource whose
+// quota.Resource.ZeroAdmitsNone says so, and it is what somebody writes when
+// they meant "unlimited" (which is the key being absent). A tenant with
+// max_projects: 0 is refused at every admission with a quota error, and the
+// config reads like a generous default. max_sessions: 0 is not that — the hub
+// reads it as no cap — and is not reported.
+func checkQuotaSemantics(qc quota.Config, add addFn) {
 	var zeros []string
-	for name, v := range q.Defaults {
-		if v == 0 {
-			zeros = append(zeros, "defaults."+name)
+	collect := func(prefix string, l quota.Limits) {
+		norm, err := l.Normalize()
+		if err != nil {
+			return // quota.New refused the policy, reported by quotas.policy
 		}
-	}
-	for _, b := range q.Bindings {
-		for name, v := range b.Limits {
-			if v == 0 {
-				zeros = append(zeros, fmt.Sprintf("%s=%s.%s", b.Claim, b.Value, name))
+		for r, v := range norm {
+			if v == 0 && r.ZeroAdmitsNone() {
+				zeros = append(zeros, prefix+string(r))
 			}
 		}
+	}
+	collect("defaults.", qc.Defaults)
+	for _, b := range qc.Bindings {
+		collect(fmt.Sprintf("%s=%s.", b.Claim, b.Value), b.Limits)
 	}
 	if len(zeros) > 0 {
 		sort.Strings(zeros)
@@ -105,57 +114,61 @@ func checkQuotaSemantics(q config.QuotasConfig, add addFn) {
 // checkBudget reports the spend ceiling. On a hosted hub the provider bill is
 // the one resource a tenant can consume without limit through entirely
 // legitimate use, and it is charged to the operator.
-func checkBudget(cfg *config.Config, add addFn) {
-	daily := cfg.Budget.DailyUSDLimit
-	monthly := cfg.Budget.MonthlyUSD
-	tokens := cfg.Budget.DailyTokenLimit
+//
+// The ceiling is budget.EffectiveLimits — what budget.Enforce holds a run to —
+// over the budget runs read: config.yaml's, because a budget belongs to the
+// project and `cloop run` reads no overlay (a config built without a file, in
+// a test, is taken as it is). Enforce runs inside `cloop run`, which on an
+// isolating executor is the sandboxed workload, given only its leased
+// environment: the host-wide caps in ~/.config/cloop reach it there no more
+// than the hub's HOME does. So the caps that hold every run back are the
+// project's own, and the host-wide ones are reported for what they are.
+func checkBudget(dir string, cfg *config.Config, opts Options, add addFn) {
+	project := cfg.Budget
+	if _, err := os.Stat(config.ConfigPath(dir)); err == nil {
+		if pc, err := config.Load(dir); err == nil {
+			project = pc.Budget
+		}
+	}
+	everyRun := budget.EffectiveLimits(project, globalbudget.GlobalBudgetConfig{})
+	global, _ := opts.globalBudget()
+	hostRun := budget.EffectiveLimits(project, global)
 
+	var notes []string
+	if hostRun != everyRun {
+		notes = append(notes, fmt.Sprintf("runs on this host's own driver are also held to $%.2f and %d "+
+			"token(s) a day across the host, from this user's ~/.config/cloop — when the hub runs as this "+
+			"user; an isolated run is not given them", hostRun.GlobalDailyUSD, hostRun.GlobalDailyTokens))
+	}
+	if project.MonthlyUSD > 0 {
+		notes = append(notes, fmt.Sprintf("budget.monthly_usd ($%.2f) is reported by `cloop cost report` "+
+			"and enforced nowhere", project.MonthlyUSD))
+	}
+	note := ""
+	if len(notes) > 0 {
+		note = "; " + strings.Join(notes, "; ")
+	}
 	switch {
-	case daily <= 0 && monthly <= 0 && tokens <= 0 && cfg.UI.OIDC.Enabled:
+	case !everyRun.Bounded() && cfg.UI.OIDC.Enabled:
 		add(Finding{
 			Check: "budget.limits", Title: "Spend budget", Severity: SeverityWarn,
-			Message: "no budget.daily_usd_limit, budget.monthly_usd or budget.daily_token_limit on a " +
-				"multi-tenant hub: provider spend is unbounded and billed to the operator",
-			Remediation: "Set budget.daily_usd_limit (and ui.quotas.defaults.daily_cost_usd for a per-identity cap)",
+			Message: "no budget.daily_usd_limit or budget.daily_token_limit holds a run back on a " +
+				"multi-tenant hub, so provider spend is unbounded and billed to the operator" + note,
+			Remediation: "Set budget.daily_usd_limit in config.yaml (and ui.quotas.defaults.daily_cost_usd " +
+				"for a per-identity cap)",
 		})
-	case daily <= 0 && monthly <= 0 && tokens <= 0:
+	case !everyRun.Bounded():
 		add(Finding{
 			Check: "budget.limits", Title: "Spend budget", Severity: SeverityPass,
-			Message: "no spend ceiling configured; acceptable for a single-tenant hub",
+			Message: "no spend ceiling configured; acceptable for a single-tenant hub" + note,
 		})
 	default:
 		add(Finding{
 			Check: "budget.limits", Title: "Spend budget", Severity: SeverityPass,
-			Message: fmt.Sprintf("daily $%.2f, monthly $%.2f, %d token(s)/day (0 = unset)",
-				daily, monthly, tokens),
+			Message: fmt.Sprintf("every run is held to $%.2f and %d token(s) a day per project (0 = no cap)%s",
+				everyRun.DailyUSD, everyRun.DailyTokens, note),
 		})
 	}
-}
-
-func limitsFrom(m map[string]float64) quota.Limits {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make(quota.Limits, len(m))
-	for k, v := range m {
-		out[quota.Resource(k)] = v
-	}
-	return out
-}
-
-func quotaBindings(in []config.QuotaBinding) []quota.Binding {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]quota.Binding, 0, len(in))
-	for _, b := range in {
-		out = append(out, quota.Binding{
-			Claim:  authz.ClaimKind(b.Claim),
-			Value:  b.Value,
-			Limits: limitsFrom(b.Limits),
-		})
-	}
-	return out
 }
 
 func resourcesList() string {

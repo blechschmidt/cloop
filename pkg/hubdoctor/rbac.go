@@ -14,6 +14,11 @@ package hubdoctor
 // looser than it reads*: a default_role of admin (everyone in the directory is
 // an administrator the moment SSO is switched on), a binding on a claim the IdP
 // does not emit, a mapping that duplicates another with a weaker role.
+//
+// Every one of them judges the policy as the resolver holds it — built by the
+// builder `cloop ui` uses (config.OIDCConfig.AuthzConfig) and normalized by
+// authz.New — not the YAML. Judging the YAML is how this check came to fail a
+// hub whose mapping said "role: Admin", which authz grants as admin (Task 20387).
 
 import (
 	"fmt"
@@ -43,12 +48,7 @@ func checkRBAC(cfg *config.Config, add addFn) {
 		return
 	}
 
-	bindings := bindingsFrom(oc.RoleMappings)
-	resolver, err := authz.New(authz.Config{
-		DefaultRole: authz.Role(oc.DefaultRole),
-		Bindings:    bindings,
-		AdminEmails: oc.AdminEmails,
-	})
+	resolver, err := authz.New(oc.AuthzConfig(nil))
 	if err != nil {
 		// The hub refuses to start on this, so it is a hard failure and the
 		// error text already names the offending value.
@@ -61,13 +61,12 @@ func checkRBAC(cfg *config.Config, add addFn) {
 	}
 	add(Finding{
 		Check: "rbac.policy", Title: "Role mappings", Severity: SeverityPass,
-		Message: fmt.Sprintf("%d mapping(s) parse, default role %q", len(bindings), effectiveDefault(oc.DefaultRole)),
+		Message: fmt.Sprintf("%d mapping(s) parse, default role %q", len(oc.RoleMappings), resolver.DefaultRole()),
 	})
 
-	checkDefaultRole(oc, add)
-	checkAdminReachable(oc, bindings, add)
-	checkMappingHygiene(oc, bindings, add)
-	_ = resolver
+	checkDefaultRole(resolver, add)
+	checkAdminReachable(resolver, add)
+	checkMappingHygiene(oc, add)
 }
 
 // checkDefaultRole reports the blast radius of authenticating at all.
@@ -76,9 +75,9 @@ func checkRBAC(cfg *config.Config, add addFn) {
 // binding is consulted. Set to anything above "none" it means "everyone my IdP
 // knows about", which for a corporate IdP is the whole company; set to admin it
 // means the whole company can revoke secrets and read the audit trail.
-func checkDefaultRole(oc config.OIDCConfig, add addFn) {
-	role := effectiveDefault(oc.DefaultRole)
-	switch authz.Role(role) {
+func checkDefaultRole(resolver *authz.Resolver, add addFn) {
+	role := resolver.DefaultRole()
+	switch role {
 	case authz.RoleNone:
 		add(Finding{
 			Check: "rbac.default_role", Title: "Default role", Severity: SeverityPass,
@@ -101,26 +100,24 @@ func checkDefaultRole(oc config.OIDCConfig, add addFn) {
 	}
 }
 
-// checkAdminReachable is the "no group maps to admin" check.
-func checkAdminReachable(oc config.OIDCConfig, bindings []authz.Binding, add addFn) {
+// checkAdminReachable is the "no group maps to admin" check, answered by
+// authz.GlobalAdminBindings — the same answer the Settings panel refuses to
+// save a policy without. A project- or executor-scoped admin binding is admin
+// *of that thing*, not of the hub: it does not grant user management, token
+// administration or the audit trail, and counting it would produce a green
+// line on a hub nobody can administer.
+//
+// Routes are counted once each: an address in admin_emails that an email
+// mapping also makes admin is one way in, not two.
+func checkAdminReachable(resolver *authz.Resolver, add addFn) {
 	var routes []string
-	for _, e := range oc.AdminEmails {
-		if strings.TrimSpace(e) != "" {
-			routes = append(routes, "admin_emails: "+e)
+	seen := map[string]bool{}
+	for _, b := range resolver.GlobalAdminBindings() {
+		route := fmt.Sprintf("%s=%s", b.Claim, b.Value)
+		if !seen[route] {
+			seen[route] = true
+			routes = append(routes, route)
 		}
-	}
-	for _, b := range bindings {
-		if b.Role != authz.RoleAdmin {
-			continue
-		}
-		// A project- or executor-scoped admin binding is admin *of that
-		// thing*, not of the hub: it does not grant user management, token
-		// administration or the audit trail. Counting it as an admin route
-		// would produce a green line on a hub nobody can administer.
-		if strings.TrimSpace(b.Project) != "" || strings.TrimSpace(b.Executor) != "" {
-			continue
-		}
-		routes = append(routes, fmt.Sprintf("%s=%s", b.Claim, b.Value))
 	}
 
 	if len(routes) == 0 {
@@ -144,7 +141,15 @@ func checkAdminReachable(oc config.OIDCConfig, bindings []authz.Binding, add add
 
 // checkMappingHygiene catches mappings that parse but cannot do what they look
 // like they do.
-func checkMappingHygiene(oc config.OIDCConfig, bindings []authz.Binding, add addFn) {
+func checkMappingHygiene(oc config.OIDCConfig, add addFn) {
+	// The role mappings as authz.New normalizes them — and only them: an
+	// admin_emails entry that repeats an email mapping is redundant, not dead
+	// policy that reads as a constraint, which is what this looks for.
+	mappings, err := authz.New(authz.Config{Bindings: oc.AuthzBindings()})
+	if err != nil {
+		return // checkRBAC reported the policy invalid
+	}
+	bindings := mappings.ConfiguredBindings()
 	// A group binding needs the groups claim in the request, and cloop only
 	// asks for what ui.oidc.scopes lists. A group mapping with no groups
 	// scope matches nothing, forever, silently.
@@ -165,10 +170,12 @@ func checkMappingHygiene(oc config.OIDCConfig, bindings []authz.Binding, add add
 	}
 
 	// Two bindings on the same claim+value: the stronger wins, so the weaker
-	// is dead policy that reads as if it constrains something.
+	// is dead policy that reads as if it constrains something. The values are
+	// the resolver's — folded where matching is case-insensitive, exact for
+	// sub — so "/ops" and "ops" are one value and "ABC" and "abc" two subs.
 	seen := map[string][]authz.Role{}
 	for _, b := range bindings {
-		k := fmt.Sprintf("%s=%s|%s|%s", b.Claim, strings.ToLower(b.Value), b.Project, b.Executor)
+		k := fmt.Sprintf("%s=%s|%s|%s", b.Claim, b.Value, b.Project, b.Executor)
 		seen[k] = append(seen[k], b.Role)
 	}
 	var dupes []string
@@ -196,34 +203,6 @@ func hasScope(scopes []string, want string) bool {
 		}
 	}
 	return false
-}
-
-// bindingsFrom mirrors cmd's roleMappingsToBindings. It is duplicated rather
-// than exported from cmd because pkg may not import cmd, and the conversion is
-// four field copies whose validation lives in authz.New either way.
-func bindingsFrom(mappings []config.RoleMapping) []authz.Binding {
-	if len(mappings) == 0 {
-		return nil
-	}
-	out := make([]authz.Binding, 0, len(mappings))
-	for _, m := range mappings {
-		out = append(out, authz.Binding{
-			Claim:    authz.ClaimKind(m.Claim),
-			Value:    m.Value,
-			Role:     authz.Role(m.Role),
-			Project:  m.Project,
-			Executor: m.Executor,
-		})
-	}
-	return out
-}
-
-// effectiveDefault applies the same empty→none rule authz.New does.
-func effectiveDefault(role string) string {
-	if strings.TrimSpace(role) == "" {
-		return string(authz.RoleNone)
-	}
-	return role
 }
 
 func rolesList() string {

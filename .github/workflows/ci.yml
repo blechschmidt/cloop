@@ -564,7 +564,7 @@ jobs:
     # existing job would have pushed a serial chain closer to the timeout cliff
     # Task 20227 pulled it back from.
     #
-    # 20s per target, ~3.5 minutes of fuzzing in total. Short on purpose: this
+    # 20s per target, about three minutes of fuzzing in total. Short on purpose: this
     # gate is for the shallow panic a refactor introduces, which the corpus
     # finds in seconds. A deep campaign is `make fuzz FUZZTIME=5m` on a machine
     # with time to spare, not something to make every push wait for.

@@ -25,11 +25,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
@@ -116,7 +117,7 @@ func checkEdgeLag(dir string, add addFn) {
 // edgeDevices lists the enrolled, unrevoked devices whose last advertisement
 // put them on the edge channel, ordered by name.
 func edgeDevices(dir string) ([]edgeDevice, error) {
-	dbPath := filepath.Join(dir, ".cloop", "state.db")
+	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, nil // no database, no enrolled devices; storage says the rest
 	}
@@ -130,7 +131,7 @@ func edgeDevices(dir string) ([]edgeDevice, error) {
 	if store, err := executorstore.New(db); err == nil {
 		if agents, err := store.ListAgents(); err == nil {
 			for _, a := range agents {
-				if !a.RevokedAt.IsZero() {
+				if a.Revoked() {
 					revoked[a.AgentID] = true
 				}
 			}
@@ -147,7 +148,6 @@ func edgeDevices(dir string) ([]edgeDevice, error) {
 		}
 		var caps struct {
 			UpdateChannel string `json:"update_channel"`
-			BuildSequence int    `json:"build_sequence"`
 		}
 		if len(row.Capabilities) == 0 || json.Unmarshal(row.Capabilities, &caps) != nil ||
 			caps.UpdateChannel != executor.ChannelEdge {
@@ -157,11 +157,10 @@ func edgeDevices(dir string) ([]edgeDevice, error) {
 		if name == "" {
 			name = row.ID
 		}
-		seq := caps.BuildSequence
-		if seq < 0 || seq > version.MaxSequence {
-			seq = 0
-		}
-		out = append(out, edgeDevice{ID: row.ID, Name: name, Version: row.Inventory.AgentVersion, Sequence: seq})
+		// The sequence as the hub reads a disconnected device's, out-of-range
+		// values included — not a second reading of the same JSON.
+		out = append(out, edgeDevice{ID: row.ID, Name: name, Version: row.Inventory.AgentVersion,
+			Sequence: remote.StoredBuildSequence(row.Capabilities)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

@@ -13,8 +13,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
 // netpolCheckID is the stable id a CI pipeline greps for.
@@ -107,5 +109,32 @@ func TestProbeFindingIDIsStable(t *testing.T) {
 	got := runNetpolCheck(t, &config.Config{}, Options{ProbeNetworkPolicy: true})
 	if len(got) == 0 || got[0].Check != netpolCheckID {
 		t.Fatalf("check id changed: %+v", got)
+	}
+}
+
+// TestAProbeTheConfigOverrulesIsNotAPass: a probe can prove the cluster
+// enforces NetworkPolicy on an executor whose explicit
+// network_policy_enforced: false still makes placement refuse egress-scoped
+// projects — the executor's own resolution says so, and the finding follows it
+// rather than the measurement alone (Task 20387).
+func TestAProbeTheConfigOverrulesIsNotAPass(t *testing.T) {
+	now := time.Now()
+	off := false
+	verdict := kubernetes.ProbeVerdict{Enforced: true, ObservedAt: now, ExecutorID: "k8s",
+		Detail: "the policed connection was refused", ProbeVersion: kubernetes.CurrentProbeVersion}
+
+	status, reason := kubernetes.NetworkPolicyEnforcement{Assertion: &off, Verdict: verdict}.Resolve("k8s", now)
+	f, overruled := overruledVerdict("k8s", verdict, status, reason, map[string]any{})
+	if !overruled {
+		t.Fatalf("status %s with a proving probe was not reported as overruled", status)
+	}
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Message, "still refuses") || !strings.Contains(f.Message, "network_policy_enforced") {
+		t.Errorf("want the overruling setting named: %q", f.Message)
+	}
+
+	status, reason = kubernetes.NetworkPolicyEnforcement{Verdict: verdict}.Resolve("k8s", now)
+	if _, overruled := overruledVerdict("k8s", verdict, status, reason, nil); overruled {
+		t.Errorf("status %s follows the probe, and was reported as overruled", status)
 	}
 }

@@ -28,8 +28,10 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -43,6 +45,12 @@ func checkEgressBroker(ctx context.Context, dir string, cfg *config.Config, opts
 		// here when this run read a configuration without that overlay: what
 		// the running hubs did outranks what this file says they would do.
 		checkEgressHosting(dir, add, false)
+		if f, ok := switchedOffFinding(cfg, "executors.egress", "egress.enabled", "Egress broker",
+			"the hub hosts no egress proxy: runs whose .cloop/sandbox.yaml names an egress grant are "+
+				"refused, and the rest get no proxy session"); ok {
+			add(f)
+			return
+		}
 		// Not a defect on its own — most deployments do not lease the hub's
 		// connection — but it is one when a sandbox has been confined to an
 		// internal network, because then the broker was its only way out and
@@ -74,72 +82,194 @@ func checkEgressBroker(ctx context.Context, dir string, cfg *config.Config, opts
 	// cannot say. A proxy that would not bind leaves the configuration valid
 	// and every run that needs it refused.
 	checkEgressHosting(dir, add, true)
+	checkEgressRoutes(ctx, dir, cfg, opts, add)
+}
 
-	adv := strings.TrimSpace(e.AdvertiseAddr)
-	switch {
-	case adv == "":
+// checkEgressRoutes reports how each kind of workload this hub runs reaches
+// the proxy, or why it cannot, by the rules the hub dispatches with:
+// executor.ContainerEgressRoute for a container on its own engine, and
+// executor.AdvertisedEgressRoute for Pods and devices, which are handed
+// advertise_addr. A kind that is refused a route has every run that names an
+// egress grant refused, so that is a failure for an executor the hub has, and
+// a warning for devices it merely expects.
+//
+// This used to be a guess: advertise_addr unset was always a warning, and a
+// loopback one was flagged only in strict mode — so a Kubernetes hub that
+// allowed host execution passed with 127.0.0.1, which the hub refuses for every
+// Pod, and the remediation recommended a Service name, which it refuses too
+// (Task 20387).
+func checkEgressRoutes(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn) {
+	e := cfg.Executors.Egress
+	listen := strings.TrimSpace(e.ListenAddr)
+	if listen == "" {
+		listen = egressbroker.DefaultListenAddr
+	}
+	bound, err := boundAddr(listen, opts.Offline)
+	if err != nil {
 		add(Finding{
-			Check:    "egress.advertise_addr",
-			Title:    "Egress broker advertised address",
-			Severity: SeverityWarn,
-			Message: "not set, so sandboxes are pointed at the broker's own bound address — " +
-				"correct only when the sandbox shares the host's network namespace",
-			Remediation: "Set executors.egress.advertise_addr to a host:port the sandbox can reach " +
-				"(the bridge address for a container executor, a Service name for Kubernetes)",
+			Check: "egress.listen_addr", Title: "Egress broker listen address", Severity: SeverityWarn,
+			Message: fmt.Sprintf("the address the proxy binds could not be determined (%v), so no "+
+				"sandbox's route to it was checked", err),
+			Remediation: "Write executors.egress.listen_addr as an address and port, e.g. 0.0.0.0:8899",
 		})
-	case isLoopbackHostPort(adv) && !cfg.Executors.HostProcessAllowed():
-		add(Finding{
-			Check:    "egress.advertise_addr",
-			Title:    "Egress broker advertised address",
-			Severity: SeverityWarn,
-			Message: fmt.Sprintf("advertises %s, which resolves to the hub itself inside every sandbox "+
-				"that has its own network namespace — their proxy requests will never leave the sandbox", adv),
-			Remediation: "Set executors.egress.advertise_addr to an address reachable from the " +
-				"sandbox's network, not from the hub's",
-		})
+		return
+	}
+	// The port, when the hub picks it at startup, is not knowable here. The
+	// rules judge the host; a port taken from the listener is valid by
+	// construction, so any valid one stands in for it where a route needs one.
+	ephemeral := bound.Port == 0
+	routePort := bound.Port
+	if ephemeral {
+		routePort = 65535
 	}
 
+	// The hub resolves advertise_addr before it serves anything, and a value
+	// it cannot resolve means no proxy at all — for every kind of sandbox,
+	// not only the ones that read it.
+	advertised, advErr := executor.EgressAdvertised(e.AdvertiseAddr, routePort)
+	if advErr != nil {
+		add(Finding{
+			Check: "egress.advertise_addr", Title: "Egress broker advertised address", Severity: SeverityFail,
+			Message: fmt.Sprintf("the proxy will not start: %v, so every run that names an egress grant "+
+				"is refused", advErr),
+			Remediation: "Write executors.egress.advertise_addr as host:port, or remove it",
+		})
+		return
+	}
+
+	// A refused route costs a run only when it names an egress grant, so it
+	// is a failure while one is in force and a warning until then. A grant
+	// store that cannot be read counts as holding one.
+	grants, known := activeEgressGrants(dir)
+	costs := func(certain bool) (Severity, string) {
+		switch {
+		case !certain:
+			return SeverityWarn, " — when one enrolls"
+		case grants > 0 || !known:
+			return SeverityFail, ""
+		}
+		return SeverityWarn, " — none does yet, as no egress grant is active"
+	}
+
+	if cfg.Executors.Container.Enabled {
+		if route, why, remedy := executor.ContainerEgressRoute(bound); why != "" {
+			sev, when := costs(true)
+			add(Finding{
+				Check: "egress.listen_addr", Title: "Egress broker listen address", Severity: sev,
+				Message: "container sandboxes are refused the proxy: " + why +
+					", so every container run that names an egress grant is refused" + when,
+				Remediation: remedy,
+			})
+		} else {
+			add(Finding{
+				Check: "egress.listen_addr", Title: "Egress broker listen address", Severity: SeverityPass,
+				Message: "container sandboxes reach the proxy at " + routeShown(route, ephemeral),
+			})
+		}
+	}
+
+	// who is the hub's own word for the workloads, in its reason; label is
+	// the doctor's, in a sentence about all of them.
+	routeFor := func(who, label, remedy string, certain bool) {
+		route, why := executor.AdvertisedEgressRoute(advertised, bound.String(), who)
+		if why != "" {
+			sev, when := costs(certain)
+			add(Finding{
+				Check: "egress.advertise_addr", Title: "Egress broker advertised address", Severity: sev,
+				Message: fmt.Sprintf("%s are refused the proxy: %s, so their runs that name an egress "+
+					"grant are refused%s", label, why, when),
+				Remediation: remedy,
+			})
+			return
+		}
+		add(Finding{
+			Check: "egress.advertise_addr", Title: "Egress broker advertised address", Severity: SeverityPass,
+			Message: fmt.Sprintf("%s are pointed at %s", label, routeShown(route, ephemeral)),
+		})
+	}
+	if cfg.Executors.Kubernetes.Enabled {
+		routeFor("Pods", "Pods", executor.EgressRemedyPods, true)
+	}
+	// Devices reach the proxy the way Pods do. They are certain once one is
+	// enrolled, and expected when strict mode leaves nothing else to run work.
+	devicesOnly := !cfg.Executors.HostProcessAllowed() && !cfg.Executors.Container.Enabled &&
+		!cfg.Executors.Kubernetes.Enabled
+	agents, agentsKnown := enrolledAgentsKnown(dir)
+	switch {
+	case len(agents) > 0 || !agentsKnown:
+		routeFor("a device", "Devices", executor.EgressRemedyDevices, true)
+	case devicesOnly:
+		routeFor("a device", "Devices", executor.EgressRemedyDevices, false)
+	}
+
+	// The probe, separately: whether anything answers at the advertised
+	// address, which no rule above can say.
+	adv := strings.TrimSpace(e.AdvertiseAddr)
 	if adv == "" {
 		return
 	}
-	target, err := addrTarget(adv)
-	if err != nil {
+	if ephemeral && !hasExplicitPort(adv) {
 		add(Finding{
-			Check:    "egress.advertise_reachable",
-			Title:    "Egress broker reachability",
-			Severity: SeverityWarn,
-			Message: fmt.Sprintf("executors.egress.advertise_addr %q %v, so whether a sandbox can "+
-				"reach the broker is unknown", adv, err),
-			Remediation: "Write executors.egress.advertise_addr as host:port to have " +
+			Check: "egress.advertise_reachable", Title: "Egress broker reachability", Severity: SeverityWarn,
+			Message: fmt.Sprintf("executors.egress.advertise_addr %q takes its port from the listener, which "+
+				"picks one at startup, so there was nothing to dial and whether a sandbox can reach the "+
+				"broker is unknown", adv),
+			Remediation: "Give executors.egress.listen_addr or advertise_addr an explicit port to have " +
 				"`cloop hub doctor` probe it",
 		})
 		return
 	}
 	add(reachFinding("egress.advertise_reachable", "Egress broker reachability",
 		"the egress broker", "executors.egress.advertise_addr",
-		probeReach(ctx, opts, target), opts))
+		probeReach(ctx, opts, advertised), opts))
 }
 
-// isLoopbackHostPort reports whether a host:port names this machine only.
-//
-// Separate from isLoopbackURL because the two inputs differ in shape, and
-// parsing a bare host:port as a URL succeeds while producing nonsense — the
-// host lands in the scheme or the path depending on what it looks like.
-func isLoopbackHostPort(addr string) bool {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+// activeEgressGrants counts the egress grants in force, from the grant store
+// the hub's proxy decides with. known is false when the database exists and
+// could not be read.
+func activeEgressGrants(dir string) (n int, known bool) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return 0, true
+	}
+	db, err := statedb.Open(dbPath)
 	if err != nil {
-		host = strings.TrimSpace(addr)
+		return 0, false
 	}
-	host = strings.Trim(host, "[]")
-	if strings.EqualFold(host, "localhost") {
-		return true
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.NewEgressStore(db)
+	if err != nil {
+		return 0, false
 	}
-	// The unspecified address is included: a broker bound to 0.0.0.0 is
-	// reachable, but a sandbox told to *dial* 0.0.0.0 dials itself.
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
+	grants, err := store.ListGrants()
+	if err != nil {
+		return 0, false
 	}
-	return false
+	now := time.Now()
+	for _, g := range grants {
+		if g.Active(now) {
+			n++
+		}
+	}
+	return n, true
+}
+
+// routeShown renders a route for a message, without a port the doctor made up.
+func routeShown(r executor.EgressProxyRoute, ephemeral bool) string {
+	host := r.Host
+	if r.Gateway {
+		host += " (pinned to the sandbox's bridge gateway)"
+	}
+	if ephemeral {
+		return host + " on the port the proxy picks at startup"
+	}
+	return fmt.Sprintf("%s, port %d", host, r.Port)
+}
+
+// hasExplicitPort reports whether advertise_addr names its own, non-zero port.
+func hasExplicitPort(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	return err == nil && port != "" && port != "0"
 }
 
 // checkEgressHosting reports where each running hub's egress proxy listens,

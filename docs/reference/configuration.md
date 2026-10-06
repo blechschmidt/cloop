@@ -1835,8 +1835,9 @@ the egress proxy, the three executor ratchets) take effect at the next restart,
 whichever file they are in. The rest are read on each use.
 
 `cloop hub doctor --port N` diagnoses the hub on port `N` with its overlay
-merged. Without `--port` it reads `config.yaml` alone and names any overlay it
-did not merge.
+merged. Without `--port` it diagnoses the hub a bare `cloop ui` starts — port
+8080, with `config.ui-8080.yaml` if there is one — and `--port 0` reads
+`config.yaml` alone. It names any overlay it did not merge.
 
 It is a separate file rather than a port-keyed section of `config.yaml` because
 of what an older binary sharing the directory does with a key it does not know:

@@ -19,9 +19,9 @@ package hubdoctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -30,6 +30,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -38,15 +39,10 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 	// doctor run reproduces the registry the hub would build rather than the
 	// permissive default a CLI starts with. The ratchet only tightens, so
 	// this cannot loosen a process that was already strict.
-	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
-	// Same ratchet, so `hub doctor` reports the placement a run would
-	// actually get rather than one with the build floor missing.
-	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
-	// And the resource ceiling, so the report describes the sandbox a run
-	// would actually be given rather than the one it asked for.
-	if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
-		executor.ApplyResourceCeiling(ceiling)
-	}
+	// The build floor and the resource ceiling too, by the method the hub
+	// uses, so the report describes the placement and the sandbox a run would
+	// actually get.
+	cfg.Executors.ApplyRatchets()
 
 	// Reconcile without publishing: `cloop hub doctor` may be run alongside a
 	// hub in the same directory, and overwriting the live report with a CLI
@@ -72,9 +68,15 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 	// a device that dialled in.
 	enrolled := enrolledAgents(dir)
 
-	// The strict-mode gate, stated as the readiness probe states it.
+	// The strict-mode gate, asked of the readiness probe itself
+	// (reconcile.ReadyIn, which /readyz serves) against the registry just
+	// reconciled, rather than restated from the config: the process's host
+	// policy is the ratchet the hub applies, which the config alone does not
+	// show (Task 20387).
+	readyErr := reconcile.ReadyIn(executor.DefaultRegistry)
+	var notReady *reconcile.NotReadyError
 	switch {
-	case !cfg.Executors.HostProcessAllowed() && len(isolated) == 0 && len(enrolled) > 0:
+	case readyErr != nil && len(enrolled) > 0:
 		add(Finding{
 			Check: "executors.available", Title: "Dispatch targets", Severity: SeverityWarn,
 			Message: fmt.Sprintf("no executor is configured in this file, but %d remote agent(s) are "+
@@ -83,13 +85,18 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 				"executor so the hub does not depend on a device being awake",
 			Details: map[string]any{"enrolled": strings.Join(enrolled, ", ")},
 		})
-	case !cfg.Executors.HostProcessAllowed() && len(isolated) == 0:
+	case errors.As(readyErr, &notReady):
 		add(Finding{
 			Check: "executors.available", Title: "Dispatch targets", Severity: SeverityFail,
-			Message: "strict mode is on, no isolating executor is configured and no remote agent is " +
-				"enrolled: every run will be refused with 409 and /readyz will report this hub as not ready",
-			Remediation: "Enable executors.container or executors.kubernetes, or enroll a remote agent " +
-				"with `cloop executor enroll --name <device>`",
+			Message: notReady.Reason + ", and no remote agent is enrolled: every run will be refused " +
+				"with 409 and /readyz will report this hub as not ready",
+			Remediation: notReady.Remediation,
+		})
+	case readyErr != nil:
+		add(Finding{
+			Check: "executors.available", Title: "Dispatch targets", Severity: SeverityFail,
+			Message:     "the readiness check refuses this hub: " + readyErr.Error(),
+			Remediation: "Enable an isolating executor, or enroll a remote agent with `cloop executor enroll`",
 		})
 	case len(registered) == 0:
 		add(Finding{
@@ -212,27 +219,35 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 // finding to report, and an executor verdict that could not read it should say
 // "no agents" rather than double-report a storage failure as an executor one.
 func enrolledAgents(dir string) []string {
-	dbPath := filepath.Join(dir, ".cloop", "state.db")
+	names, _ := enrolledAgentsKnown(dir)
+	return names
+}
+
+// enrolledAgentsKnown is enrolledAgents, and whether the answer was read:
+// false when the database exists and could not be, which a caller deciding
+// whether something is likely must not take for "none".
+func enrolledAgentsKnown(dir string) ([]string, bool) {
+	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil
+		return nil, true
 	}
 	db, err := statedb.Open(dbPath)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer func() { _ = db.Close() }()
 
 	store, err := executorstore.New(db)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	agents, err := store.ListAgents()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	var names []string
 	for _, a := range agents {
-		if !a.RevokedAt.IsZero() {
+		if a.Revoked() { // the predicate Hub.Restore skips them by
 			continue
 		}
 		name := a.Name
@@ -242,7 +257,7 @@ func enrolledAgents(dir string) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	return names, true
 }
 
 // remediationFor names the action that fits the kind of executor that failed,

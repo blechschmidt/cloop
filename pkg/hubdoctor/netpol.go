@@ -131,6 +131,16 @@ func probeOne(ctx context.Context, dir string, ex *kubernetes.Executor, opts Opt
 		"persisted": saved,
 	}
 
+	// What placement now decides is the executor's own resolution of the
+	// verdict against its configuration — not the verdict alone. An explicit
+	// network_policy_enforced: false outranks any probe, and the doctor used
+	// to report egress scopes as honoured on such an executor (Task 20387).
+	status, reason, _ := ex.EnforcementState()
+	details["status"] = string(status)
+	if f, overruled := overruledVerdict(id, verdict, status, reason, details); overruled {
+		add(f)
+		return
+	}
 	switch {
 	case verdict.Enforced:
 		f := Finding{
@@ -162,6 +172,26 @@ func probeOne(ctx context.Context, dir string, ex *kubernetes.Executor, opts Opt
 			Details: details,
 		})
 	}
+}
+
+// overruledVerdict is the finding for a probe that proved enforcement on an
+// executor whose configuration still refuses egress-scoped projects — status
+// and reason being the executor's own resolution (EnforcementState) — or
+// false when the probe's verdict is the one placement follows.
+func overruledVerdict(id string, verdict kubernetes.ProbeVerdict, status kubernetes.EnforcementStatus,
+	reason string, details map[string]any) (Finding, bool) {
+	if !verdict.Enforced || status == kubernetes.EnforcementProven {
+		return Finding{}, false
+	}
+	return Finding{
+		Check: "executors.network_policy_probe", Title: "NetworkPolicy enforcement",
+		Severity: SeverityWarn,
+		Message: fmt.Sprintf("executor %s: %s — but placement still refuses projects with "+
+			"capabilities.egress here: %s", id, verdict.Detail, reason),
+		Remediation: "Remove executors.kubernetes.network_policy_enforced: false, which outranks any " +
+			"probe, if this cluster's enforcement is meant to be relied on",
+		Details: details,
+	}, true
 }
 
 // saveVerdict persists the result, reporting whether it landed.

@@ -9,6 +9,7 @@ package hubdoctor
 // control plane actually found.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,4 +167,41 @@ func TestCheckRetention_IncludesTheTables(t *testing.T) {
 	if !found {
 		t.Errorf("checkRetention emitted %v, with no retention.tables", checks)
 	}
+}
+
+// TestRetentionArchiveIsTheDirectoryTheJanitorPrunes: with audit.export_dir
+// set, the janitor prunes seals there, and the doctor measured .cloop's
+// audit-archive instead — reporting nothing about an archive growing without
+// bound. And limits bound nothing while the janitor is off (Task 20387).
+func TestRetentionArchiveIsTheDirectoryTheJanitorPrunes(t *testing.T) {
+	export := t.TempDir()
+	// Sparse: the measure reads sizes, and a test must not write a gigabyte
+	// to whatever disk runs it.
+	seal, err := os.Create(filepath.Join(export, "audit-1-100-20261001T000000Z.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seal.Truncate(archiveAdvisoryBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := seal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := hubCfg()
+	cfg.Audit.ExportDir = export
+	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
+	f := only(t, got, "retention.archive")
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Message, export) {
+		t.Errorf("the finding should name the directory measured: %q", f.Message)
+	}
+
+	cfg.Retention.ArchiveMaxMB = 1
+	wantSeverity(t, only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "retention.archive"),
+		SeverityPass)
+
+	off := false
+	cfg.Retention.Enabled = &off
+	f = only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "retention.archive")
+	wantSeverity(t, f, SeverityWarn)
 }

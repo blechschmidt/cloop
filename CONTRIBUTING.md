@@ -94,7 +94,10 @@ unevenly, so the result measures the instrumentation.
 cloop ships native Go fuzz targets (`testing.F`) for every parser that ingests
 untrusted input — config files, plan import files, the legacy state.json
 migration path, the relative-time deadline parser, and the JSON-schema config
-validator. None of them should panic on any input.
+validator. None of them should panic on any input. Two more fuzz a property
+rather than a parser: that `cloop hub doctor` and the hub agree on a
+redirect URL, and that every redirect URL the hub accepts is one its router
+can serve.
 
 Run all fuzz targets at the default 30-second budget per target:
 
@@ -115,7 +118,7 @@ make fuzz FUZZTIME=2m
 ```
 
 CI runs this same `make fuzz` target on every push (the **Parser fuzzing** job)
-at `FUZZTIME=20s`, which is ~3.5 minutes of fuzzing in total. That budget is
+at `FUZZTIME=20s`, which is about three minutes of fuzzing in total. That budget is
 sized for the shallow panic a refactor introduces — the accumulated corpus
 finds those in seconds — not for discovering something new. A deep campaign is
 `make fuzz FUZZTIME=5m` on a machine with time to spare.
@@ -148,6 +151,8 @@ started crashing again — fails.
 | `pkg/state`          | `FuzzMigrateLegacyJSON` | Legacy `state.json` → SQLite `state.db` migration path.   |
 | `pkg/pm`             | `FuzzParseDeadline`     | Relative (`2h`, `3d`, `1w`) / RFC3339 / date-only parser. |
 | `pkg/configvalidate` | `FuzzValidate`          | JSON-schema-style config validator (`Run`).                |
+| `pkg/hubdoctor`      | `FuzzRedirectVerdictMatchesStartup` | `ui.oidc.redirect_url`: `cloop hub doctor` says the hub will not start exactly when `oidcauth.New` refuses it. |
+| `pkg/ui`             | `FuzzOIDCCallbackRoutes` | Every redirect URL `oidcauth.New` accepts registers in the real route table and routes the browser's return to the callback. |
 
 ### Adding a new fuzz target
 

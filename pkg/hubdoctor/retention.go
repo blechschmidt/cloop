@@ -179,18 +179,34 @@ func checkRetentionDisk(dir string, pol janitor.Policy, add addFn) {
 		})
 	case usage.FreeRatio >= vacuumAdvisoryRatio:
 		sev := SeverityWarn
-		remedy := "Run `cloop db maintain` to reclaim it now"
+		// `cloop db maintain` refuses to VACUUM while a hub holds the
+		// database, which on the hub this is run against is now.
+		remedy := "Stop the hub and run `cloop db maintain` (it refuses while a hub holds the database)"
+		msg := fmt.Sprintf("%s of state.db's %s is free pages (%.0f%%), reclaimable by VACUUM",
+			diskusage.HumanBytes(usage.ReclaimableBytes), diskusage.HumanBytes(usage.DBBytes), usage.FreeRatio*100)
 		// A janitor that will act on its own turns this from a problem into
-		// a scheduled one. Say which, rather than telling an operator to run
-		// a command that is about to run itself.
-		if pol.Enabled && usage.FreeRatio >= pol.VacuumFreeRatio && usage.ReclaimableBytes >= pol.VacuumMinFreeBytes {
-			sev = SeverityPass
-			remedy = ""
+		// a scheduled one. Whether it will is janitor.VacuumBlocker's answer
+		// for a pass inside the hub — which also skips a database with more
+		// live data than it may rewrite in-process, or no room for the
+		// rebuild, where repeating its thresholds promised a VACUUM that never
+		// came (Task 20387).
+		if pol.Enabled {
+			free, err := diskusage.FreeBytes(filepath.Join(dir, ".cloop"))
+			if err != nil {
+				free = -1
+			}
+			if blocker := janitor.VacuumBlocker(pol, usage, true, free); blocker == "" {
+				sev, remedy = SeverityPass, ""
+				msg += "; the hub's janitor reclaims it on a pass that finds no other hub member " +
+					"serving and no run busy"
+			} else {
+				msg += "; the hub's janitor will not: " + blocker
+				remedy = "Stop the hub and run `cloop hub retention --apply`"
+			}
 		}
 		add(Finding{
 			Check: "retention.freelist", Title: "Reclaimable pages", Severity: sev,
-			Message: fmt.Sprintf("%s of state.db's %s is free pages (%.0f%%), reclaimable by VACUUM",
-				diskusage.HumanBytes(usage.ReclaimableBytes), diskusage.HumanBytes(usage.DBBytes), usage.FreeRatio*100),
+			Message:     msg,
 			Remediation: remedy,
 			Details: map[string]any{
 				"reclaimable": diskusage.HumanBytes(usage.ReclaimableBytes),
@@ -205,32 +221,48 @@ func checkRetentionDisk(dir string, pol janitor.Policy, add addFn) {
 		})
 	}
 
-	checkRetentionArchive(usage, pol, add)
+	checkRetentionArchive(dir, pol, add)
 	checkRetentionHistory(dir, usage, pol, add)
 }
 
 // checkRetentionArchive reports the sealed audit exports, whose retention is
 // off by default and therefore the one directory that can still grow without
-// bound on a fully-configured hub.
-func checkRetentionArchive(usage *diskusage.Usage, pol janitor.Policy, add addFn) {
-	e, ok := usage.Entry("audit-archive")
-	if !ok || e.Bytes == 0 {
+// bound on a fully-configured hub. Measured with janitor.ArchiveSeals, in the
+// directory the janitor prunes — audit.export_dir when set — and bounded only
+// while the janitor runs at all.
+func checkRetentionArchive(dir string, pol janitor.Policy, add addFn) {
+	archive, bytes, seals, err := janitor.ArchiveSeals(dir, pol)
+	if err != nil {
+		add(Finding{
+			Check: "retention.archive", Title: "Audit archive", Severity: SeverityWarn,
+			Message:     fmt.Sprintf("could not read the audit archive at %s: %v", archive, err),
+			Remediation: "Check that " + archive + " is readable by the hub's user",
+		})
 		return
 	}
-	bounded := pol.ArchiveMaxBytes > 0 || pol.ArchiveMaxAgeDays > 0
-	if bounded || e.Bytes < archiveAdvisoryBytes {
+	if seals == 0 {
+		return
+	}
+	bounded := pol.Enabled && (pol.ArchiveMaxBytes > 0 || pol.ArchiveMaxAgeDays > 0)
+	if bounded || bytes < archiveAdvisoryBytes {
+		note := ""
+		if bounded {
+			note = archiveBoundNote(pol)
+		}
 		add(Finding{
 			Check: "retention.archive", Title: "Audit archive", Severity: SeverityPass,
-			Message: fmt.Sprintf("%s in %d seal(s)%s", diskusage.HumanBytes(e.Bytes), e.Files, archiveBoundNote(pol)),
+			Message: fmt.Sprintf("%s in %d seal(s) at %s%s", diskusage.HumanBytes(bytes), seals, archive, note),
 		})
 		return
 	}
 	add(Finding{
 		Check: "retention.archive", Title: "Audit archive", Severity: SeverityWarn,
-		Message: fmt.Sprintf("%s in %d seal(s) with no retention limit set", diskusage.HumanBytes(e.Bytes), e.Files),
+		Message: fmt.Sprintf("%s in %d seal(s) at %s with no retention limit in force",
+			diskusage.HumanBytes(bytes), seals, archive),
 		Remediation: "Copy the seals to durable storage, then set retention.archive_max_mb " +
-			"or retention.archive_max_age_days — each seal is the only remaining copy of the audit rows it holds",
-		Details: map[string]any{"bytes": e.Bytes, "seals": e.Files},
+			"or retention.archive_max_age_days (with the retention janitor enabled) — each seal is the " +
+			"only remaining copy of the audit rows it holds",
+		Details: map[string]any{"bytes": bytes, "seals": seals, "dir": archive},
 	})
 }
 
