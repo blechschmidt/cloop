@@ -1149,6 +1149,41 @@ bundles its own work, and the hub applies it again when that work arrives. A
 refusal says which bundle was too large and names this setting. Values outside
 `0..128` are refused when the configuration is loaded; `0` means the default.
 
+### Pushing a run's work back
+
+A run on an executor that does not share the hub's filesystem — a remote
+device, a Pod — works in a clone of the project's repository there. By default
+what it changes stays there, unless the run's own git pushes it. This makes the
+executor push it back:
+
+```yaml
+executors:
+  write_back: push   # the default is unset: no work is pushed back
+```
+
+Once a run's workload exits successfully, the executor commits everything the
+run changed in the checkout — as git sees it, so `.gitignore` applies — to a
+fresh branch `cloop/run-<UTC time>-<random>` and pushes it to the project's
+`origin` with the workspace's credential: through the
+[git proxy](../git-interception-proxy.md)'s pinned session for the workspace
+when the proxy runs, so its ref policy decides the push, and a write-back after
+a hub restart is served by the [restored session](../architecture/git-proxy.md#a-hub-restarted-mid-run)
+(Task 20390). The project's journal records the branch and commit, or why the
+push failed, as a `write_back` row.
+
+It applies to a project whose checkout on the hub has an https `origin` and a
+GitHub grant admitting it, on an executor that can return work (a device whose
+agent has git). The workspace is fetched at the commit the hub's checkout
+records for `origin/<branch>` — the base the push is measured from — so fetch
+the origin on the hub before a run; a project with no such ref, or no branch
+checked out, is dispatched as before, without a write-back, and its journal says
+why. The push presents the workspace's git proxy session, which ends after
+`executors.git_proxy.session_minutes`: a run that outlives it cannot push its
+work back. A value other than `push` is refused by `cloop config validate` and
+`cloop config set`; one written into the file by hand is treated as unset and
+shown as a warning on the Executors tab. Read from the hub's own configuration,
+its instance overlay included, on every dispatch.
+
 It is a hub-scope key: read once at startup, from `config.yaml` with the hub's
 overlay merged in.
 
@@ -1858,6 +1893,7 @@ ui:
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
+| `executors.write_back` | Whether a run on an executor that does not share this hub's filesystem pushes its work back to the project's origin. Read on each dispatch. |
 | `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
 | `ui.*` | Sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |

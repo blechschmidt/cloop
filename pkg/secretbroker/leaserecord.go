@@ -248,6 +248,39 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 	}, nil
 }
 
+// HeldLease describes a lease this broker holds — its ids, its current
+// deadline and the grants it carries, by name — without opening any of its
+// materials. It is for a caller that keeps a lease alive past the call that
+// issued it and must not keep the material that call returned: the workspace
+// lease a git proxy session stands on (Task 20390). False for a lease this
+// broker does not hold.
+func (b *Broker) HeldLease(leaseID string) (*Lease, bool) {
+	b.mu.Lock()
+	st, ok := b.leases[leaseID]
+	var (
+		req     Requester
+		expires time.Time
+		grants  []string
+	)
+	if ok {
+		req, expires = st.requester, st.expiresAt
+		grants = append(grants, st.grantIDs...)
+	}
+	b.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	return &Lease{
+		ID:         leaseID,
+		ExecutorID: req.ExecutorID,
+		ProjectID:  req.ProjectID,
+		RunID:      req.RunID,
+		IssuedAt:   b.now(),
+		ExpiresAt:  expires,
+		Materials:  b.heldMaterials(grants),
+	}, true
+}
+
 // heldMaterials describes the materials a taken-over lease carries without
 // opening any of them.
 func (b *Broker) heldMaterials(grantIDs []string) []Material {

@@ -103,7 +103,9 @@ What *is* written down, since Task 20383, is everything about a lease-path
 session except a credential — its id, the SHA-256 of its token, its scope and
 deadline, and which hub process serves it — so the process that adopts a run
 after this one stops can bring the session back and re-derive its credential
-from the run's lease. See [a hub restarted mid-run](#a-hub-restarted-mid-run).
+from the run's lease. Since Task 20390 the same is written for a workspace's
+pinned session, which stands on a workspace lease of its own. See
+[a hub restarted mid-run](#a-hub-restarted-mid-run).
 
 The [Kubernetes access monitor](kubernetes-access.md) keeps its own registry in
 the same process for the same reason, and the two are deliberately shaped alike.
@@ -157,7 +159,7 @@ No driver imports `pkg/gitproxy`, and neither does `pkg/secretbroker`:
 | **Policy** | the hub's, with the grant's branch list as `RestrictRefs` | the hub's, narrowed by `guardPolicy` — see [below](#the-policy-a-session-carries) |
 | **Reaches git as** | a credential in the environment of **one git child**, as an origin-scoped `http.<origin>.extraHeader` — never on disk | three files in the lease directory and a few environment variables |
 | **How git finds the proxy** | the workspace's `Repo` is replaced by `Minted.RepoURL`, so the fetch and any push aim at it | the lease's gitconfig rewrites `https://github.com/`, `git@github.com:` and `ssh://git@github.com/` to it |
-| **Ended by** | its TTL (`session_minutes`), the hub shutting down, or — when the sandbox never presented it — the driver handing it back; the lease behind it is released when it ends | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
+| **Ended by** | its TTL (`session_minutes`), its lease revoked, or — when the sandbox never presented it — the driver handing it back; the lease behind it is kept alive until then and released when it ends. A hub stopping suspends it; after a restart it ends with the workload | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
 | **Session actor** | `ui` | the credential's owner for a personal secret, else the lease's actor |
 
 ### The workspace path
@@ -215,11 +217,21 @@ audited copy of the Spec keeps naming the real repository — an operator readin
 a run row wants `github.com/acme/tool`, not a proxy URL whose session died with
 the run.
 
-**What production drives through it today is the fetch.** The write-back push
-(`WriteBackPush`) is implemented end to end, but nothing in the hub asks for it:
-`cloop task reproduce` and `cloop hub doctor --smoke` ask for a bundle, which is
+**What production drives through it is the fetch — and, where the hub asks
+for it, the write-back push.** Since Task 20390 `executors.write_back: push`
+asks an executor that does not share the hub's filesystem to return a run's
+work by pushing it: once the workload has exited successfully, the device
+commits what the run changed to a fresh branch `cloop/run-<time>-<id>` and pushes
+it to the project's origin through the workspace's pinned session, so the
+proxy's ref policy decides the push. The workspace is then fetched at the
+commit the hub's checkout records for `origin/<branch>`, the base the push is
+measured from; a project without one is dispatched as before, without a
+write-back, and its journal says why. The outcome — the branch and commit, or
+the error — is a `write_back` row on the project's journal. `cloop task
+reproduce` and `cloop hub doctor --smoke` ask for a bundle instead, which is
 returned over the executor's own channel and needs no forge credential at all.
-The pushes a running hub actually sees come from workloads, on the lease path.
+Without the setting, the pushes a running hub sees come from workloads, on the
+lease path.
 
 ### The lease path
 
@@ -597,13 +609,17 @@ operational, not cosmetic.
 720 at most, counted from dispatch. Nothing closes it when the run ends, because
 the fetch happens at the start of a run and a push write-back, where one is asked
 for, at the end; a session closed at delivery would refuse the push it exists to
-authorise. The reaper drops it within five minutes of lapsing, and a hub shutdown
-closes it with the reason *"the hub is shutting down"*. What bounds it in practice
-is the fetch: the device or the init container uses it once, early. The one
-early close is a session nothing ever authenticated with — the dispatch failed
-before the fetch — which the driver's release closes with the reason *"workspace
-credential released unused"*. Whichever way it ends, the lease behind it is
-released then, and a `github_app` token with it.
+authorise. The reaper drops it within five minutes of lapsing. A hub shutdown
+suspends a recorded one — its record stays open for the process that adopts its
+run — and closes one with no record with the reason *"the hub is shutting
+down"*. What bounds it in practice is the fetch: the device or the init
+container uses it once, early, and the push write-back, where asked for, once,
+late. The one early close is a session nothing ever authenticated with — the
+dispatch failed before the fetch — which the driver's release closes with the
+reason *"workspace credential released unused"*. The lease behind it is kept
+alive while it lives (Task 20390) — listed among the hub's leases, where
+revoking it closes the session — and released when it ends, a `github_app`
+token with it. A session restored with an adopted run ends with the workload.
 
 **A lease session ends with the lease that minted it**, whichever of these comes
 first:
@@ -779,11 +795,37 @@ The leader's janitor retires the records of sessions that closed; of open ones
 whose holder is gone, once they lapse or their lease does; and of any open one
 well past its TTL, whoever holds it.
 
-A workspace session — the pinned one cloop's own provisioning fetch and a
-write-back push use — is not recorded: its credential stands on a workspace
-lease of its own, which no process takes over. It is closed when a hub stops
-gracefully and lost when one is killed, and a write-back through it after a
-restart gets a 401; see [limits that remain](#limits-that-remain).
+**A workspace's pinned session** — the one cloop's own provisioning fetch and a
+write-back push use — is restored the same way since Task 20390, though it
+stands on a lease of its own rather than on the run's:
+
+- The **workspace lease** is recorded in `secret_leases` like any lease, and
+  the dispatching process keeps it alive — listed among the hub's leases and
+  revocable there — for as long as the session standing on it lives, releasing
+  it when the session ends. The **session** is minted `Durable` when its lease
+  is recorded, so it has a `proxy_sessions` row (token hash only); its GitHub
+  App token's slot is recorded as held by the proxy, which renews it.
+- A driver that keeps the credential past dispatch — a device whose run pushes
+  its work back (`executors.write_back: push`) — names both in the run's owner
+  row, as `workspace: {lease, session}` beside the run's own `leases`.
+- The process that adopts the run takes the workspace lease over
+  (`takeOverWorkspaceLease`, `pkg/ui/workspace_lease.go`) and restores the
+  session exactly as above: a conditional write on the holder; the repository
+  re-checked against the grant's allowlist and the policy against what the
+  hub's proxy policy and the grant's branches allow now, never wider; the
+  upstream taken from the **project's own git origin** as `applyWorkspace`
+  derives it now — a record naming another repository or host is refused, and
+  nothing in it decides where the credential goes; the deadline clamped; a
+  GitHub App token minted at once at the slot's recorded scope. The adopter
+  ends both with the workload, as it does the run's lease.
+
+A write-back push that arrives after the restart but before the device's agent
+has reconnected waits for the adoption, as any recorded session's request
+does (below). A device run that pushes no work back releases its workspace
+credential when it has been delivered; its session, used once by the
+provisioning fetch, lives out its TTL on the process that minted it and is not
+named for adoption, since nothing presents it again. See
+[limits that remain](#limits-that-remain) for Kubernetes.
 
 ---
 
@@ -1007,11 +1049,15 @@ What remains is either deliberate or beyond what the hub can reach today:
    that enforces NetworkPolicy. CI's kind cluster does not — the hub's own probe
    refutes it on every run, the test says so, and it asserts egress blocking only
    on a cluster where the probe *proves* enforcement.
-4. **A workspace session does not survive a restart.** The pinned session of the
-   workspace path stands on a workspace lease of its own, which nothing takes
-   over, so it is not recorded: a hub stopped or killed mid-run takes it with
-   it, and a write-back push through it afterwards gets a 401. Lease-path
-   sessions — everything the workload's own git uses — [are restored](#a-hub-restarted-mid-run).
+4. **A Pod's workspace session does not survive a restart.** Since Task 20390 a
+   device's pinned session [is restored with its run](#a-hub-restarted-mid-run)
+   — its workspace lease recorded, kept alive and taken over — and a write-back
+   push through it after a restart lands. The Kubernetes driver's workspace
+   credential source is built during reconciliation over a broker that keeps
+   no lease records, so a Pod's session is minted unrecorded, as before: an
+   init container that fetches after its hub restarted gets a 401, and the Pod
+   fails its provisioning. Lease-path sessions — everything the workload's own
+   git uses — are restored on every executor.
 5. **A device checkout provisioned through the proxy before Task 20349 has no
    recorded upstream.** Turning the proxy *on*, or moving it, works for every
    checkout, because the forge URL is the new route's upstream; turning it

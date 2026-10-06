@@ -533,13 +533,15 @@ closing audit row carries the session's counters. It is what makes revocation a
 local decision: the next request is refused with no forge round-trip and no
 coordination.
 
-No command exposes it, and for a *workspace* session the hub closes only on
-shutdown — so an operator ending one early either restarts the hub, which closes
-every workspace session (a guarded one is suspended and restored with its run), or
-waits for the TTL, which is enforced at authentication whether or
-not the reaper has swept it. Revoking the underlying grant with
-`cloop secret revoke` stops the *next* dispatch from minting anything; it does
-not reach a session already minted.
+No command exposes it. A *workspace* session's lease, though, is listed with the
+hub's other leases since Task 20390 — kept alive for as long as the session
+lives — and revoking it in the Secrets panel (or `POST /api/leases/{id}/revoke`)
+closes the session at once. A hub restart suspends a recorded session rather
+than closing it, and the process that adopts its run restores it; short of that
+a session lives out its TTL, which is enforced at authentication whether or not
+the reaper has swept it. Revoking the underlying grant with `cloop secret
+revoke` stops the *next* dispatch from minting anything; it does not reach a
+session already minted.
 
 **A guarded GitHub session is the exception** — the scoped session a
 `github_pat` or `github_app` lease mints: it is closed when the lease that

@@ -592,6 +592,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// carries are how a process adopting the run takes the lease over
 	// (Task 20382).
 	lease.bindHandle(ex.ID(), handle.ID)
+	// And the workspace lease a driver kept for the run's push write-back,
+	// which the owner row names as the run's workspace (Task 20390).
+	bindWorkspaceLease(ex, handle.ID)
 	// Whom the run was started for, which its automatic resume acts for.
 	clear.started()
 	go wipeLeaseOnExit(ex, handle.ID, lease, egress)

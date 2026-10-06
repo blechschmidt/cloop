@@ -502,6 +502,32 @@ type GitCredential struct {
 	// keeps the credential longer than that renews it through the source that
 	// leased it (Task 20375). Not secret.
 	TokenExpiresAt time.Time
+	// SessionID names the git proxy session this credential is, when a proxy
+	// minted one in the forge credential's place (pkg/executor/gitproxycreds):
+	// the session's id, which is also its Username. Not secret. Empty for a
+	// forge credential handed over as is.
+	SessionID string
+}
+
+// HeldWorkspaceCredential names, without its secret, a workspace credential a
+// driver keeps on a handle past dispatch — for a push write-back, which
+// presents it when the workload finishes (Task 20390).
+type HeldWorkspaceCredential struct {
+	// LeaseID is the secret lease the credential stands on.
+	LeaseID string
+	// GrantID is the grant that authorised it.
+	GrantID string
+	// SessionID is the git proxy session it is, when one was minted.
+	SessionID string
+}
+
+// WorkspaceCredentialHolder is implemented by a driver that keeps a workload's
+// workspace credential on its handle past dispatch. The hub names what it
+// holds in the run's owner row, so the hub process that adopts the run after
+// this one stops takes the lease over and restores the session, and the
+// workload's write-back push is served rather than refused (Task 20390).
+type WorkspaceCredentialHolder interface {
+	HeldWorkspaceCredential(handleID string) (HeldWorkspaceCredential, bool)
 }
 
 // Empty reports whether there is no credential to deliver.

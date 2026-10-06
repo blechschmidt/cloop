@@ -222,6 +222,11 @@ func (v *Virtual) WriteBackBundle(handleID string) ([]byte, error) {
 	return v.parent.WriteBackBundle(handleID)
 }
 
+// HeldWorkspaceCredential implements executor.WorkspaceCredentialHolder.
+func (v *Virtual) HeldWorkspaceCredential(handleID string) (executor.HeldWorkspaceCredential, bool) {
+	return v.parent.HeldWorkspaceCredential(handleID)
+}
+
 // ProjectResult implements executor.ProjectResultFetcher.
 func (v *Virtual) ProjectResult(handleID string) (executor.ProjectResult, error) {
 	return v.parent.ProjectResult(handleID)
@@ -370,12 +375,13 @@ func (e *Executor) handleStatusesFor(ctx context.Context, virtualID string) ([]e
 // feature: no stop button for attach, no work product for write-back, a build
 // floor that never applies.
 var (
-	_ executor.Executor             = (*Virtual)(nil)
-	_ executor.Lister               = (*Virtual)(nil)
-	_ executor.Attacher             = (*Virtual)(nil)
-	_ executor.WriteBackFetcher     = (*Virtual)(nil)
-	_ executor.ProjectResultFetcher = (*Virtual)(nil)
-	_ executor.BuildReporter        = (*Virtual)(nil)
-	_ executor.Revoker              = (*Virtual)(nil)
-	_ executor.EgressScopeExplainer = (*Virtual)(nil)
+	_ executor.Executor                  = (*Virtual)(nil)
+	_ executor.Lister                    = (*Virtual)(nil)
+	_ executor.Attacher                  = (*Virtual)(nil)
+	_ executor.WriteBackFetcher          = (*Virtual)(nil)
+	_ executor.WorkspaceCredentialHolder = (*Virtual)(nil)
+	_ executor.ProjectResultFetcher      = (*Virtual)(nil)
+	_ executor.BuildReporter             = (*Virtual)(nil)
+	_ executor.Revoker                   = (*Virtual)(nil)
+	_ executor.EgressScopeExplainer      = (*Virtual)(nil)
 )

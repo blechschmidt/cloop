@@ -102,6 +102,9 @@ type restartScene struct {
 	// hubEnv is added to the hub process's environment alone: the routes
 	// and trust a variant gives the hub to reach its fake upstreams.
 	hubEnv []string
+	// agentEnv is added to the agent's: the trust a variant gives the device
+	// to reach the hub's git proxy.
+	agentEnv []string
 
 	mu       sync.Mutex
 	hub      *exec.Cmd
@@ -124,6 +127,8 @@ type restartOptions struct {
 	vars map[string]string
 	// hubEnv is the hub's own extra environment.
 	hubEnv []string
+	// agentEnv is the agent's own extra environment.
+	agentEnv []string
 }
 
 func newRestartScene(t *testing.T, gitRepo bool) *restartScene {
@@ -148,7 +153,7 @@ func newRestartSceneWith(t *testing.T, opt restartOptions) *restartScene {
 		root = resolved
 	}
 	s := &restartScene{
-		t: t, bin: binaryPath(t), root: root, hubEnv: opt.hubEnv,
+		t: t, bin: binaryPath(t), root: root, hubEnv: opt.hubEnv, agentEnv: opt.agentEnv,
 		hubDir: filepath.Join(root, "hub"),
 		proj:   filepath.Join(root, "proj"),
 		home:   filepath.Join(root, "home"),
@@ -285,7 +290,8 @@ func (s *restartScene) startAgent() {
 		"--token-file", bundle,
 		"--credential", filepath.Join(s.root, "agent.json"),
 		"--workdir-root", filepath.Join(s.root, "device"))
-	cmd.Env = append(withPath(s.env, filepath.Join(s.root, "device-bin")), "HOME="+filepath.Join(s.root, "device-home"))
+	cmd.Env = append(append(withPath(s.env, filepath.Join(s.root, "device-bin")),
+		"HOME="+filepath.Join(s.root, "device-home")), s.agentEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	s.agentLog = &strings.Builder{}
 	w := &syncWriter{w: s.agentLog}

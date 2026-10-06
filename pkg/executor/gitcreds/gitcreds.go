@@ -212,6 +212,12 @@ func (s *BrokerSource) RefreshWorkspaceCredential(ctx context.Context, cred exec
 	return out, got.Retire, nil
 }
 
+// LeasesRecorded implements gitproxycreds.RecordedSource: the broker records
+// the leases it issues, so another hub process can take one over (Task 20390).
+func (s *BrokerSource) LeasesRecorded() bool {
+	return s != nil && s.Broker != nil && s.Broker.LeaseHolder() != ""
+}
+
 // matchesGrantRef reports whether a material is the one the spec named. Both
 // the secret name and the grant ID are accepted, because the UI shows names
 // while the API returns IDs and an operator will reasonably paste either.

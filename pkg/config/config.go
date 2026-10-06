@@ -646,6 +646,19 @@ type ExecutorsConfig struct {
 	// it may have.
 	FeatureBundleMB int `yaml:"feature_bundle_mb,omitempty"`
 
+	// WriteBack is how a run returns its work from an executor that does not
+	// share this hub's filesystem, when its project is a git checkout with an
+	// https origin (Task 20390). Empty — the default — returns none: what
+	// the run changed stays on the device unless the run's own git pushes it.
+	// "push": once the run's workload exits successfully, the executor
+	// commits what it changed to a fresh branch cloop/run-<id> and pushes it
+	// to the project's origin with the workspace's credential — through the
+	// git proxy's pinned session for the workspace, when the proxy runs, so
+	// the proxy's ref policy decides the push. The workspace is then fetched
+	// at the commit the hub's origin/<branch> names, which must be on the
+	// origin. Read from the hub's own configuration only, like MinAgentBuild.
+	WriteBack string `yaml:"write_back,omitempty"`
+
 	// HarnessCredentialExempt names executors that supply their harness's
 	// Claude credential themselves, so the hub does not refuse to dispatch to
 	// them for want of one (Task 20379): a device whose agent user is signed in
@@ -964,6 +977,17 @@ func (e ExecutorsConfig) FeatureBundleBytes() int64 {
 	}
 	return int64(mb) << 20
 }
+
+// RunWriteBackPush reports whether runs on an executor that does not share
+// this hub's filesystem push their work back to the project's origin
+// (executors.write_back: push).
+func (e ExecutorsConfig) RunWriteBackPush() bool {
+	return strings.EqualFold(strings.TrimSpace(e.WriteBack), WriteBackPush)
+}
+
+// WriteBackPush is the executors.write_back value that makes a run push its
+// work back.
+const WriteBackPush = "push"
 
 // AutoInstallHarnessAllowed reports the effective policy, applying the
 // permissive-by-default rule for an absent setting.

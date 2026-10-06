@@ -269,18 +269,35 @@ func (sl *secretLease) restoreGitSession(ctx context.Context, row statedb.ProxyS
 	if err != nil {
 		return refusedf("%v", err)
 	}
-	// Where the credential goes is this hub's to say, never the record's: a
+	// Where the credential goes is this hub's to say, never the record's. A
 	// lease-path session is scoped to its grant's allowlist on the forge this
-	// hub's proxy fronts, which is what Mint was given (gitguard.go), and a
-	// record that names anything else was not written for this hub.
-	if why := gitUpstreamMismatch(rec, svc.githubUpstream); why != "" {
+	// hub's proxy fronts, which is what Mint was given (gitguard.go); a
+	// workspace's pinned session to the one repository the project's origin
+	// names (Task 20390, workspace_lease.go). A record that names anything
+	// else was not written for this hub.
+	pinned := len(rec.RepoPatterns) == 0
+	if pinned {
+		if !sl.isWorkspace() {
+			return refusedf("it is pinned to one repository, and only a workspace lease feeds a pinned session")
+		}
+		up, why := pinnedUpstream(rec, sl.workDir)
+		if why != "" {
+			return refusedf("%s", why)
+		}
+		rec.Upstream = up
+	} else if why := gitUpstreamMismatch(rec, svc.githubUpstream); why != "" {
 		return refusedf("%s", why)
 	}
 	g, err := sl.broker.HeldGrant(sl.lease.ID, row.GrantID)
 	if err != nil {
 		return err
 	}
-	if why := gitScopeWider(rec, g.Constraints, svc.policy); why != "" {
+	// What a session minted for this grant on this hub would be allowed now.
+	want, _ := guardPolicy(svc.policy, g.Constraints.Permissions, g.Constraints.Branches)
+	if pinned {
+		want = workspaceSessionPolicy(svc.policy, g.Constraints)
+	}
+	if why := gitScopeWider(rec, g.Constraints, want); why != "" {
 		return refusedf("its recorded scope is wider than its grant and this hub's git proxy policy allow now: %s", why)
 	}
 	// Nor longer than this hub mints a session for.
@@ -426,10 +443,11 @@ func clampRestoredExpiry(issued, expires time.Time, ttl, fallback time.Duration)
 }
 
 // gitScopeWider reports how a git session's recorded scope exceeds what its
-// grant and this hub's proxy policy allow now, or "". The comparison is
-// conservative — membership, not glob arithmetic — so a scope it cannot prove
-// within bounds is refused rather than restored.
-func gitScopeWider(rec gitproxy.SessionRecord, c secretbroker.Constraints, hub gitproxy.Policy) string {
+// grant allows now, and want — the policy a session minted for it on this hub
+// would get now — or "". The comparison is conservative — membership, not glob
+// arithmetic — so a scope it cannot prove within bounds is refused rather than
+// restored.
+func gitScopeWider(rec gitproxy.SessionRecord, c secretbroker.Constraints, want gitproxy.Policy) string {
 	if len(rec.RepoPatterns) > 0 {
 		allowed := map[string]bool{}
 		for _, p := range c.Repos {
@@ -452,7 +470,8 @@ func gitScopeWider(rec gitproxy.SessionRecord, c secretbroker.Constraints, hub g
 		return fmt.Sprintf("repository %q is not one the grant admits", rec.RepoPath)
 	}
 
-	want, _ := guardPolicy(hub, c.Permissions, c.Branches)
+	want.AllowedRefs = append([]string(nil), want.AllowedRefs...)
+	want.RestrictRefs = append([]string(nil), want.RestrictRefs...)
 	want.Normalize()
 	got := rec.Policy
 	got.AllowedRefs = append([]string(nil), got.AllowedRefs...)

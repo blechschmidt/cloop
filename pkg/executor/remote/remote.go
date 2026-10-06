@@ -71,6 +71,9 @@ type handleState struct {
 	// here when a push write-back will present that credential again once
 	// the workload finishes; run once, when the handle closes.
 	releaseWorkspace func()
+	// heldWorkspace names the parked credential, for the run's owner row
+	// (Task 20390). Set and cleared with releaseWorkspace.
+	heldWorkspace executor.HeldWorkspaceCredential
 }
 
 // takeWorkspaceRelease returns the parked workspace release, at most once.
@@ -79,7 +82,23 @@ func (h *handleState) takeWorkspaceRelease() func() {
 	defer h.mu.Unlock()
 	r := h.releaseWorkspace
 	h.releaseWorkspace = nil
+	h.heldWorkspace = executor.HeldWorkspaceCredential{}
 	return r
+}
+
+// HeldWorkspaceCredential implements executor.WorkspaceCredentialHolder: the
+// workspace credential parked on handleID for its push write-back, if any.
+func (e *Executor) HeldWorkspaceCredential(handleID string) (executor.HeldWorkspaceCredential, bool) {
+	hs, err := e.lookup(handleID)
+	if err != nil {
+		return executor.HeldWorkspaceCredential{}, false
+	}
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.releaseWorkspace == nil || hs.heldWorkspace.LeaseID == "" {
+		return executor.HeldWorkspaceCredential{}, false
+	}
+	return hs.heldWorkspace, true
 }
 
 // finishWorkspaceRelease runs the parked workspace release, if any.
@@ -917,6 +936,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		hs.status.StartedAt = startedAt
 		if spec.WriteBack.Mode == executor.WriteBackPush && !cred.Empty() {
 			hs.releaseWorkspace = releaseCred
+			hs.heldWorkspace = executor.HeldWorkspaceCredential{
+				LeaseID: cred.LeaseID, GrantID: cred.GrantID, SessionID: cred.SessionID,
+			}
 			keepCred = true
 		}
 	}

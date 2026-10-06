@@ -103,12 +103,25 @@ func (lr *leaseRegistry) forHandle(executorID, handleID string) []string {
 	defer lr.mu.Unlock()
 	var out []string
 	for id, sl := range lr.active {
+		if sl.isWorkspace() {
+			continue // named as the run's workspace: workspaceForHandle
+		}
 		if ex, h := sl.boundHandle(); ex == executorID && h == handleID {
 			out = append(out, id)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// isWorkspace reports whether sl is a workspace lease (Task 20390).
+func (sl *secretLease) isWorkspace() bool {
+	if sl == nil {
+		return false
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	return sl.workspace
 }
 
 // get returns the open lease with that id, or nil.
@@ -263,6 +276,13 @@ type secretLease struct {
 	// closing: Close has begun, so nothing more is restored for the lease.
 	// Guarded by mu.
 	closing bool
+	// workspace marks the lease a workspace's pinned git proxy session
+	// stands on (Task 20390, workspace_lease.go): kept alive for as long as
+	// that session lives, and named in a run's owner row as its workspace
+	// rather than among the run's own leases. workspaceSession names the
+	// session once a driver says which it kept. Guarded by mu.
+	workspace        bool
+	workspaceSession string
 
 	once sync.Once
 }

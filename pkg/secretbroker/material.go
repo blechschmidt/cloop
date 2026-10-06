@@ -396,6 +396,20 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 		return Material{}, err
 	}
+	if b != nil && mat.heldByProxy {
+		// The caller hands the token to cloop's git proxy itself — a
+		// workspace's pinned session presents it, and renews it on that
+		// session's request path — so no file of the lease carries it, and
+		// the lease keepalive must not try to renew one. Recorded as guarded,
+		// a process that takes the lease over re-mints it for the session it
+		// restores, as it does for the lease path's (Task 20390).
+		b.mu.Lock()
+		slot.guarded = true
+		b.mu.Unlock()
+		mat.Summary = fmt.Sprintf("github app installation %d token for %s (held by the git proxy), expires %s",
+			cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339))
+		return mat, nil
+	}
 	if b != nil && allowsAllRepos(mat.Constraints.Repos) {
 		// deliverGitHubToken exported the token as GITHUB_TOKEN and GH_TOKEN
 		// too, which a refresh cannot reach in a running process; see

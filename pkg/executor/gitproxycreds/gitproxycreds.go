@@ -191,6 +191,11 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 	}
 
 	m, err := s.Registry.Mint(gitproxy.MintRequest{
+		// Recorded, when the lease it stands on is (Task 20390): the hub
+		// process that adopts the run after this one stops takes that lease
+		// over and restores the session, so a write-back push that presents
+		// it after a restart is served rather than refused.
+		Durable:  s.leasesRecorded() && strings.TrimSpace(access.Credential.LeaseID) != "",
 		Upstream: w.Repo,
 		Credential: gitproxy.Credential{
 			Username: access.Credential.Username,
@@ -245,9 +250,30 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			// Passed on for anything downstream that reports it. The session
 			// above is what enforces it.
 			Branches: access.Credential.Branches,
+			// Named so a driver that keeps the credential for a write-back
+			// can say which session it holds (Task 20390). Not secret: it is
+			// the session's username and in every proxy audit row.
+			SessionID: m.Session.ID,
 		},
 		Repo: m.RepoURL,
 	}, s.relinquish(m.Session), nil
+}
+
+// RecordedSource is implemented by an inner source whose leases are recorded
+// durably, so a hub process other than the one that issued one can take it
+// over (Task 20390). Only a session standing on such a lease is minted
+// Durable: a record of one standing on a lease nobody can take over would be
+// a record nothing could restore.
+//
+// Discovered by type assertion for the reason HeldSource is.
+type RecordedSource interface {
+	LeasesRecorded() bool
+}
+
+// leasesRecorded reports whether the inner source's leases are recorded.
+func (s *Source) leasesRecorded() bool {
+	rs, ok := s.Inner.(RecordedSource)
+	return ok && rs.LeasesRecorded()
 }
 
 // relinquish returns the release a driver calls when it is done with what it

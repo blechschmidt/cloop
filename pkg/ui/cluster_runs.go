@@ -68,8 +68,12 @@ type runOwnerMeta struct {
 	Leases []string `json:"leases,omitempty"`
 	// Egress are the egress proxy sessions the run holds, which the member
 	// adopting it restores with their counters (Task 20383).
-	Egress  []string  `json:"egress,omitempty"`
-	Started time.Time `json:"started,omitzero"`
+	Egress []string `json:"egress,omitempty"`
+	// Workspace is the workspace lease and the pinned git proxy session a
+	// driver keeps for the run's push write-back, which the member adopting
+	// it takes over and restores (Task 20390).
+	Workspace *runWorkspaceMeta `json:"workspace,omitempty"`
+	Started   time.Time         `json:"started,omitzero"`
 	// RunClaimMeta carries Dispatching, which every observer of the claim
 	// judges by — members and, since Task 20374, processes that are not
 	// members at all. It is embedded rather than restated so the field is
@@ -141,6 +145,7 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 	}
 	meta.Leases = liveLeases.forHandle(ex.ID(), handleID)
 	meta.Egress = liveEgress.idsForHandle(handleID)
+	meta.Workspace = liveLeases.workspaceForHandle(ex.ID(), handleID)
 	if _, found, _ := n.Lookup(ownerRun, workDir); !found {
 		// Standalone-era callers and adoption paths reach here without a
 		// prior claim; take one now so the run is visible cluster-wide.
@@ -351,7 +356,11 @@ func (s *Server) detachRun(workDir string) bool {
 	// until it is. The run's egress session stays: no proxy forwards egress,
 	// and the workload's proxy address may well be this process's, so the
 	// adopter restores it only from a process that is gone.
-	for _, id := range liveLeases.forHandle(run.ex.ID(), run.handleID) {
+	ids := liveLeases.forHandle(run.ex.ID(), run.handleID)
+	if ws := liveLeases.workspaceForHandle(run.ex.ID(), run.handleID); ws != nil {
+		ids = append(ids, ws.Lease) // and its workspace lease (Task 20390)
+	}
+	for _, id := range ids {
 		sl := liveLeases.get(id)
 		if sl == nil || sl.broker == nil {
 			continue
@@ -546,8 +555,14 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		// leases, released, and its executor session, closed with how the
 		// workload ended rather than left running for failover to find.
 		s.retireRunLeases(meta.Leases, "its run ended while no hub process held the lease")
+		if meta.Workspace != nil {
+			s.retireRunLeases([]string{meta.Workspace.Lease}, "its run ended while no hub process held the lease")
+		}
 		retireRunEgressRecords(meta.Egress, "its run ended while no hub process held the session")
 		closeAdoptedSessions(ex, meta.Handle, st, stErr)
+		if stErr == nil {
+			journalPushWriteBack(workDir, ex, st)
+		}
 		s.reconcileDeadRun(workDir, verdict)
 		// Settled here, so counted here: the member that dispatched it, and
 		// counted its start, is gone, and the cluster's sum needs the end.
@@ -561,6 +576,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	// Before resumeRun, which rewrites the owner row from what this member
 	// holds: the leases have to be held here by then to stay on it.
 	s.takeOverRunLeases(workDir, ex, meta.Handle, meta.Leases)
+	s.takeOverWorkspaceLease(workDir, ex, meta.Handle, meta.Workspace)
 	s.restoreRunEgress(workDir, ex, meta.Handle, meta.Egress)
 	go watchAdoptedSessions(ex, meta.Handle)
 	s.resumeRun(workDir, ex, meta.Handle)

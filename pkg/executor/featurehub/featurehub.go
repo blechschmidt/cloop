@@ -103,6 +103,30 @@ func HubEnv(ctx context.Context, dir string) (func(extra ...[2]string) []string,
 	return g.env, nil
 }
 
+// TrackingCommit returns the commit the repository at dir records for
+// origin/<branch> — the origin's tip as the hub last fetched it — for a run
+// whose work is pushed back and measured from it (Task 20390). The hub's own
+// git, hardened as every invocation here is: the repository's configuration
+// runs nothing.
+func TrackingCommit(ctx context.Context, dir, branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, " \t\n:^~?*[\\") {
+		return "", fmt.Errorf("featurehub: %q is not a branch name", branch)
+	}
+	g, err := newGitRunner(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	sha, err := g.run(ctx, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("featurehub: no refs/remotes/origin/%s in %s", branch, dir)
+	}
+	if err := executor.ValidateCommitSHA(sha); err != nil {
+		return "", fmt.Errorf("featurehub: refs/remotes/origin/%s does not name a commit: %w", branch, err)
+	}
+	return sha, nil
+}
+
 // run executes one git command and returns its stdout, trimmed of the trailing
 // newline. A failure carries git's own words.
 func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {

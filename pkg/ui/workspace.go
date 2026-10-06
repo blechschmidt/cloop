@@ -197,6 +197,12 @@ func applyWorkspaceFor(spec executor.Spec, ex executor.Executor, workDir string,
 		return spec, err
 	}
 	ws.CredentialGrant = grant
+	if returnWork {
+		// A run's work comes back by push when the hub asks for it
+		// (executors.write_back: push, Task 20390); the workspace is then
+		// pinned to the commit the push is measured against.
+		spec, ws = applyPushWriteBack(spec, ws, ex, workDir, origin)
+	}
 
 	// Validate here rather than leaving it to the driver. Everything in ws was
 	// derived from files on disk, so a repository whose branch name git accepts
@@ -974,8 +980,11 @@ func workspaceCredentialFactory(db *statedb.DB) func(string) executor.WorkspaceC
 		// Route through the git interception proxy when one is configured, so
 		// the edge device gets a session token scoped to one repository and
 		// the branch allowlist instead of the forge PAT. Nil-safe: with no
-		// proxy the source is returned unchanged.
-		return activeGitProxy().Wrap(executorID, src)
+		// proxy the source is returned unchanged. The lease a proxied
+		// session stands on is kept alive for as long as the session lives,
+		// so the hub process that adopts the run after this one stops can
+		// take it over and restore the session (Task 20390).
+		return activeGitProxy().Wrap(executorID, keptWorkspaceSource{inner: src, db: db})
 	}
 }
 

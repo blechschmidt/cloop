@@ -281,6 +281,11 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	if ex != nil && handleID != "" {
 		st, stErr = workloadStatus(ex, handleID)
 		verdict = verdictFor(st, stErr)
+		if stErr == nil {
+			// What came of its push write-back, when it asked for one
+			// (Task 20390).
+			journalPushWriteBack(workDir, ex, st)
+		}
 	}
 	// Read before untrackRun forgets it: whether the hub asked this run to
 	// stop, and since when this member has been following it.

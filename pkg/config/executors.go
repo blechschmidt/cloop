@@ -211,6 +211,10 @@ func ValidateExecutors(e ExecutorsConfig) error {
 				"any agent", v)
 		}
 	}
+	if v := strings.TrimSpace(e.WriteBack); v != "" && !strings.EqualFold(v, WriteBackPush) {
+		return fmt.Errorf("executors.write_back: %q is not a write-back mode; use %q, or leave it unset "+
+			"so runs return no work", v, WriteBackPush)
+	}
 	if e.FeatureBundleMB < 0 || e.FeatureBundleMB > MaxFeatureBundleMB {
 		return fmt.Errorf("executors.feature_bundle_mb: %d is outside 0..%d (0 uses the default of 32)",
 			e.FeatureBundleMB, MaxFeatureBundleMB)
@@ -257,6 +261,13 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 				"eligible. Use a released vMAJOR.MINOR.PATCH build such as v0.1.0, or remove "+
 				"the key.", v))
 		}
+	}
+
+	// A write-back mode this hub does not know returns nothing, which is the
+	// default — but the operator who typed it expects work to come back.
+	if v := strings.TrimSpace(e.WriteBack); v != "" && !strings.EqualFold(v, WriteBackPush) {
+		out = append(out, fmt.Sprintf("executors.write_back is %q, which is not a write-back mode, so "+
+			"runs return no work; use %q or remove the key.", v, WriteBackPush))
 	}
 
 	// An unparseable ceiling is silently no ceiling — the same failure shape as
