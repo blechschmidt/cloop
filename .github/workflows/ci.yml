@@ -1568,39 +1568,40 @@ jobs:
         # nothing can reach), the certificate (a name a sandbox's git
         # refuses), and the workload namespace's CA (a clone that cannot
         # verify the proxy).
+        # Shell only: the runner's python3 is not promised a YAML parser.
         run: |
           set -euo pipefail
-          helm template cloop deploy/helm/cloop-hub --namespace cloop \
-            --set secrets.existingSecret=external --set executor.kubernetes.enabled=true \
-            --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
-            --set executor.monitorTLS.selfSigned=true > /tmp/monitors.yaml
-          python3 - <<'PY'
-          import base64, subprocess, sys, yaml
-          docs = [d for d in yaml.safe_load_all(open("/tmp/monitors.yaml")) if d]
-          by = {(d["kind"], d["metadata"]["name"], d["metadata"].get("namespace")): d for d in docs}
-          def need(cond, why):
-              if not cond:
-                  sys.exit("chart: " + why)
-          cfg = yaml.safe_load(by[("ConfigMap", "cloop-cloop-hub-config", "cloop")]["data"]["config.yaml"])["executors"]
-          url = "https://cloop-cloop-hub.cloop.svc:8443"
-          need(cfg["git_proxy"]["enabled"] and cfg["git_proxy"]["advertise_url"] == url,
-               "git_proxy is not advertised at the in-cluster Service name")
-          need(cfg["kube_guard"]["advertise_url"] == "https://cloop-cloop-hub.cloop.svc:8444",
-               "kube_guard is not advertised at the in-cluster Service name")
-          need(cfg["kube_guard"].get("ca_file") == "/etc/cloop/monitor-ca/ca.crt",
-               "the kube guard does not embed the chart's CA in the kubeconfigs it issues")
-          need(cfg["kubernetes"]["git_ca_bundle"] == {"config_map": "cloop-cloop-hub-monitor-ca",
-               "key": "ca.crt", "urls": [url]}, "the workload Pods are not given the proxy's CA for its URL")
-          ports = {p["name"]: p["port"] for p in by[("Service", "cloop-cloop-hub", "cloop")]["spec"]["ports"]}
-          need(ports.get("git-proxy") == 8443 and ports.get("kube-guard") == 8444, "the Service lacks a monitor port")
-          need(("ConfigMap", "cloop-cloop-hub-monitor-ca", "cloop-workloads") in by,
-               "no CA ConfigMap in the workload namespace")
-          crt = base64.b64decode(by[("Secret", "cloop-cloop-hub-monitor-tls", "cloop")]["data"]["tls.crt"])
-          sans = subprocess.run(["openssl", "x509", "-noout", "-ext", "subjectAltName"], input=crt,
-                                capture_output=True, check=True).stdout.decode()
-          need("DNS:cloop-cloop-hub.cloop.svc" in sans, "the generated certificate does not name the Service: " + sans)
-          print("monitors render the config, the ports, the certificate and the CA they need")
-          PY
+          render() {
+            helm template cloop deploy/helm/cloop-hub --namespace cloop \
+              --set secrets.existingSecret=external --set executor.kubernetes.enabled=true \
+              --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
+              --set executor.monitorTLS.selfSigned=true "$@"
+          }
+          need() {
+            grep -qF -- "$2" <<<"$1" || { echo "::error::chart: $3"; exit 1; }
+          }
+          cfg=$(render --show-only templates/configmap.yaml)
+          need "$cfg" 'advertise_url: "https://cloop-cloop-hub.cloop.svc:8443"' \
+            "git_proxy is not advertised at the in-cluster Service name"
+          need "$cfg" 'advertise_url: "https://cloop-cloop-hub.cloop.svc:8444"' \
+            "kube_guard is not advertised at the in-cluster Service name"
+          need "$cfg" 'ca_file: /etc/cloop/monitor-ca/ca.crt' \
+            "the kube guard does not embed the chart's CA in the kubeconfigs it issues"
+          need "$cfg" 'config_map: "cloop-cloop-hub-monitor-ca"' \
+            "the workload Pods are not given the proxy's CA"
+          need "$cfg" 'urls: ["https://cloop-cloop-hub.cloop.svc:8443"]' \
+            "the proxy's CA is not scoped to the proxy's URL"
+          svc=$(render --show-only templates/service.yaml)
+          for want in 'name: git-proxy' 'port: 8443' 'name: kube-guard' 'port: 8444'; do
+            need "$svc" "$want" "the Service lacks '$want'"
+          done
+          tls=$(render --show-only templates/monitor-tls.yaml)
+          need "$tls" 'namespace: cloop-workloads' "no CA ConfigMap in the workload namespace"
+          sed -n 's/^  tls.crt: "\(.*\)"$/\1/p' <<<"$tls" | head -n 1 | base64 -d > /tmp/monitor.crt
+          openssl x509 -noout -ext subjectAltName -in /tmp/monitor.crt | grep -q 'DNS:cloop-cloop-hub.cloop.svc' || {
+            echo "::error::chart: the generated certificate does not name the Service"; exit 1
+          }
+          echo "the monitors render the config, the ports, the certificate and the CA they need"
 
       - name: Chart guard rails refuse what they should
         # These fail() calls are load-bearing — one of them is the only thing
