@@ -384,6 +384,112 @@ executor:
     rbac:
       create: true
 
+  # ── Credential monitors ───────────────────────────────────────────────────
+  # Two listeners in the hub process that hold a credential so the sandbox
+  # does not (docs/architecture/git-proxy.md, kubernetes-access.md). Each is a
+  # second port on the hub Pod and on its Service, served over TLS — the
+  # session token a sandbox presents rides every request.
+  #
+  # Both are off by default: turning one on changes the URL a sandbox's git or
+  # kubectl talks to, which is an operator's decision rather than something an
+  # upgrade should do. Both need monitorTLS below.
+
+  # The git interception proxy. With it on, a GitHub token granted to a
+  # project stays in the hub: the workload's git gets a session token worth
+  # nothing anywhere else, and the branch allowlist is enforced on the push
+  # itself by a process the sandbox does not control.
+  gitProxy:
+    enabled: false
+    # The port the proxy listens on in the hub Pod, and the Service port that
+    # exposes it. Not the dashboard's 8080.
+    port: 8443
+    # What a workload's git is pointed at. Empty derives the in-cluster
+    # Service name, https://<fullname>.<namespace>.svc:<port>, which is right
+    # for the Kubernetes executor. Set it for edge devices outside the
+    # cluster — to a name they resolve, routed to this port — and make sure
+    # the certificate covers it. Must be https://, with no path: the chart
+    # refuses anything else.
+    advertiseURL: ""
+    # How long one session lives: the window covering a run's clone and its
+    # last push. 0 means 60; at most 720.
+    sessionMinutes: 0
+    # Ref globs a sandbox may push. Empty means refs/heads/cloop/** — the
+    # write-back namespace. Widening this is how a hub stops protecting the
+    # branches a human owns; a grant can only narrow it.
+    allowedRefs: []
+    # Let a sandbox delete refs it may otherwise write. A write-back never
+    # deletes.
+    allowDelete: false
+
+  # The Kubernetes access monitor ("kube guard"). With it on, a kubeconfig
+  # granted to a project stays in the hub: the workload's kubectl gets a
+  # kubeconfig naming this monitor and a session token, and the grant's verbs
+  # and namespaces are enforced outside the sandbox. A grant with no verbs is
+  # read-only.
+  kubeGuard:
+    enabled: false
+    port: 8444
+    # As gitProxy.advertiseURL: empty derives
+    # https://<fullname>.<namespace>.svc:<port>.
+    advertiseURL: ""
+    sessionMinutes: 0
+    # A hub-wide ceiling on what any grant may allow. Empty means each grant
+    # decides; listing the read verbs here means no project on this hub can
+    # ever write to a cluster, whatever a grant asks for.
+    verbs: []
+    namespaces: []
+    resources: []
+    # Record every forwarded request in the audit trail, not only the
+    # refused ones. Off by default: one `kubectl get pods` is a burst of
+    # discovery requests and a watch never ends, so the rows bury denials.
+    auditAllowed: false
+
+  # TLS for both monitors: one certificate, whose names cover both advertise
+  # URLs (they differ only in port). Exactly one source when a monitor is on.
+  monitorTLS:
+    # A kubernetes.io/tls Secret in the release namespace — tls.crt and
+    # tls.key for <fullname>.<namespace>.svc (and any advertiseURL host).
+    # cert-manager writes exactly this shape. The production path.
+    existingSecret: ""
+    # Or let the chart generate a CA and a certificate for the Service's
+    # names. Kept across `helm upgrade` by reading the Secret back, so it is
+    # for installs Helm manages directly: a tool that renders without cluster
+    # access (Argo CD, `helm template`) gets a new CA on every render.
+    selfSigned: false
+
+    # How workload Pods come to trust the certificate. The CA has to reach the
+    # *sandbox's* git, not the hub's. With selfSigned the chart delivers its
+    # own CA and none of these is needed; with existingSecret pick one:
+    #
+    #   caBundle             the CA as PEM; the chart writes it into a
+    #                        ConfigMap in the workload namespace (and the hub
+    #                        embeds it in the kubeconfigs the monitor issues)
+    #   workloadCAConfigMap  a ConfigMap you maintain in the workload
+    #                        namespace — what trust-manager produces
+    #   publiclyTrusted      the certificate chains to a CA the workload image
+    #                        already trusts; deliver nothing
+    #
+    # Whichever it is, git trusts it for the proxy's URL only: every other
+    # host keeps the image's own store (executors.kubernetes.git_ca_bundle).
+    caBundle: ""
+    workloadCAConfigMap: ""
+    workloadCAKey: ca.crt
+    publiclyTrusted: false
+
+# CAs the hub itself trusts for outbound TLS, added to the image's own bundle
+# rather than replacing it (SSL_CERT_DIR): a forge behind a private CA that the
+# git proxy forwards to, an identity provider likewise. A ConfigMap in the
+# release namespace; every key in it is read as PEM.
+extraCACerts:
+  configMap: ""
+
+# Standard Pod hostAliases for the hub — /etc/hosts entries. For a forge or an
+# identity provider reachable by an address its DNS name does not resolve to
+# from inside the cluster.
+hostAliases: []
+#  - ip: 10.96.0.20
+#    hostnames: [git.internal.example]
+
 serviceAccount:
   create: true
   name: ""

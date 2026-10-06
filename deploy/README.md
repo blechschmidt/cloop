@@ -439,6 +439,65 @@ That runs the full preflight — credentials, TLS, API reachability, RBAC,
 confinement, limits — and then actually creates a Pod, runs `cloop version` in
 it, and deletes it.
 
+### The git proxy and the Kubernetes access monitor
+
+Two monitors run inside the hub process and keep a credential there so the
+sandbox does not hold it: the [git interception proxy](../docs/architecture/git-proxy.md)
+for GitHub tokens, and the [Kubernetes access monitor](../docs/architecture/kubernetes-access.md)
+("kube guard") for kubeconfigs. Each is a TLS listener on its own port, on the
+hub Pod and on its Service. Both are off by default — turning one on changes
+the URL a sandbox's git or kubectl talks to — and both need a certificate.
+
+```bash
+helm upgrade cloop deploy/helm/cloop-hub --reuse-values \
+  --set executor.gitProxy.enabled=true \
+  --set executor.kubeGuard.enabled=true \
+  --set executor.monitorTLS.selfSigned=true
+```
+
+That is the whole evaluation setup, and it is what CI runs end to end on kind
+([`tests/kube`](../tests/kube/README.md)): a workload Pod clones and pushes
+through the proxy, the grant's branch list and repository allowlist are
+enforced on its pushes, and its `kubectl` reaches the cluster only through the
+monitor, read-only.
+
+| Value | Default | Notes |
+| --- | --- | --- |
+| `executor.gitProxy.enabled`, `executor.kubeGuard.enabled` | `false` | Each adds a port to the Pod and the Service, and a section to `config.yaml`. |
+| `executor.gitProxy.port`, `executor.kubeGuard.port` | `8443`, `8444` | Container port and Service port alike. Not 8080, which the dashboard owns. |
+| `executor.gitProxy.advertiseURL`, `executor.kubeGuard.advertiseURL` | `""` | What a sandbox dials. Empty derives `https://<fullname>.<namespace>.svc:<port>`, which is right for the Kubernetes executor. Set it for edge devices outside the cluster, to a name they resolve and a route to this port; the generated certificate adds its host. |
+| `executor.gitProxy.allowedRefs` | `[]` | Empty means `refs/heads/cloop/**`. A grant can narrow it, never widen it. |
+| `executor.gitProxy.sessionMinutes`, `executor.kubeGuard.sessionMinutes` | `0` (60) | At most 720. The deadline that bounds a sandbox's access. |
+| `executor.kubeGuard.verbs`, `.namespaces`, `.resources` | `[]` | A hub-wide ceiling on every grant. Empty lets each grant decide; a grant with no verbs is read-only. |
+| `executor.kubeGuard.auditAllowed` | `false` | Record every forwarded request in the audit trail, not only refusals. |
+| `executor.monitorTLS.existingSecret` | `""` | A `kubernetes.io/tls` Secret for the Service's names — what cert-manager writes. The production path. |
+| `executor.monitorTLS.selfSigned` | `false` | The chart generates a CA and a certificate, and keeps them across `helm upgrade` by reading its Secret back. A renderer without cluster access (Argo CD, `helm template`) gets a new CA every render, so use `existingSecret` there. |
+| `executor.monitorTLS.caBundle` | `""` | With `existingSecret`: the CA as PEM. The chart delivers it to the Pods, and the kube guard embeds it in the kubeconfigs it issues. |
+| `executor.monitorTLS.workloadCAConfigMap`, `.workloadCAKey` | `""`, `ca.crt` | With `existingSecret`: a ConfigMap you maintain in the workload namespace — what trust-manager produces — instead of `caBundle`. |
+| `executor.monitorTLS.publiclyTrusted` | `false` | With `existingSecret`: the certificate chains to a CA the workload image already trusts; deliver nothing. |
+| `extraCACerts.configMap` | `""` | CAs the **hub** trusts for its own outbound TLS, added to the image's bundle: a forge behind a private CA the proxy forwards to, an identity provider likewise. |
+| `hostAliases` | `[]` | `/etc/hosts` entries for the hub Pod. |
+
+**How the Pods trust the proxy.** A sandbox's git verifies the proxy's
+certificate, and an in-cluster name like `cloop-hub.cloop.svc` is one no
+public CA will certify. So the chart writes the CA into a ConfigMap in the
+workload namespace (`<fullname>-monitor-ca`), and
+`executors.kubernetes.git_ca_bundle` has the driver mount it into every
+workload Pod at `/etc/cloop/git-ca/ca.crt` and point git at it for the proxy's
+URL only (`http.<url>.sslCAInfo`). Every other host keeps the image's own trust
+store, so a workload that also clones from another forge directly is
+unaffected. The kube guard needs none of this in the image: a kubeconfig carries
+its own CA, and the monitor embeds the chart's.
+
+**With the egress filter on**, a workload must still reach the monitors. List
+the hub Pods' range (the pod CIDR) in `executor.kubernetes.egressFilter.cidrs`
+and the monitors' ports in `.ports`; the chart refuses a filter whose ports
+leave the proxy or the monitor out.
+
+**Rotation.** The monitors read their certificate at start. After cert-manager
+renews an `existingSecret`, restart the hub (or let a reloader do it); a
+changed `caBundle` rolls the Pods by itself.
+
 ### Notable values
 
 | Value | Default | Notes |
@@ -470,6 +529,15 @@ disappears exactly when someone turns that file off.
 | More than one replica (or `strategy.type=RollingUpdate`) without persistence | Each Pod would run on its own emptyDir — separate hubs with separate databases behind one Service. |
 | More than one replica with `persistence.accessMode=ReadWriteOncePod` | Only one Pod could mount the volume; the others would never start. |
 | `ingress.host` ≠ the host in `config.externalURL` | Produces a login that silently loops back to the sign-in page. |
+| A monitor with no certificate, or two certificate sources | The session token rides every request; the hub will not start a monitor without TLS, and exactly one source decides which certificate it serves. |
+| A monitor's `advertiseURL` that is not a bare `https://` URL | http would publish the session token; a path would be read as part of every repository's. |
+| Both monitors on one port, or either on 8080 | One listener per port; 8080 is the dashboard's. |
+| `sessionMinutes` outside 0–720 | A session longer than a working day is the credential itself, handed over. |
+| `executor.gitProxy` for the Kubernetes executor with an `existingSecret` and no way for Pods to trust it | Every Pod's git would refuse the proxy at its first clone. Set `caBundle`, `workloadCAConfigMap` or `publiclyTrusted`. |
+| `selfSigned` with `caBundle`, `workloadCAConfigMap` or `publiclyTrusted` | Each would describe a certificate that is not the one in use. |
+| A `caBundle` that is not PEM | — |
+| `executor.kubernetes.egressFilter` whose `ports` leave out a monitor's port | Workloads could not reach the monitor their credential was routed through. |
+| A monitor with `config.fromConfigMap=false` | Its section would never reach the hub. |
 
 ### TLS
 
@@ -513,14 +581,19 @@ So it boots the things:
    `cloop hub healthcheck` works.
 3. Runs `cloop hub bootstrap` and asserts the generated config still contains
    `allow_host_process: false`, `default_role: none`, and a 0600 `hub.env`.
-4. `helm lint` across three value sets, and asserts the chart's guard rails
-   still refuse every configuration in the table above.
+4. `helm lint` across the interesting value sets, and asserts the chart's guard
+   rails still refuse every configuration in the table above.
 5. Spins up kind, runs `helm template | kubectl apply --dry-run` both
    client- and server-side, installs the chart, and waits for readiness.
 6. Asserts the executor Role grants the five `pods` verbs plus `pods/log: get`,
    and that it denies `update`/`patch` on Pods and `get`/`list` on Secrets, in
    the workload namespace only.
 7. Runs a real workload through the in-cluster executor.
+8. Renders the credential monitors and asserts the hub's config, the Service
+   ports, the certificate's names and the workload namespace's CA; then runs
+   [`tests/kube`](../tests/kube/README.md): a Pod clones and pushes through the
+   git proxy and runs `kubectl` through the Kubernetes access monitor, and the
+   forge, the audit trail and the cluster are checked afterwards.
 
 ---
 

@@ -37,7 +37,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.config.fromConfigMap .Values.podAnnotations }}
+      {{- if or .Values.config.fromConfigMap .Values.podAnnotations .Values.executor.monitorTLS.caBundle (include "cloop-hub.monitorsEnabled" .) }}
       annotations:
         {{- if .Values.config.fromConfigMap }}
         # Roll the Pod when the config changes. Without this a `helm upgrade`
@@ -45,6 +45,15 @@ spec:
         # the old policy running, which is the worst possible outcome for a
         # security setting.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.executor.monitorTLS.caBundle }}
+        # The monitors read their CA at start; a new one needs a new Pod.
+        checksum/monitor-ca: {{ . | sha256sum }}
+        {{- end }}
+        {{- if and (include "cloop-hub.monitorsEnabled" .) .Values.executor.monitorTLS.selfSigned }}
+        # A generated certificate is reissued when the names it must cover
+        # change, and the monitors load theirs at start.
+        checksum/monitor-names: {{ include "cloop-hub.monitorDNSNames" . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -63,6 +72,10 @@ spec:
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
@@ -77,6 +90,16 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.executor.gitProxy.enabled }}
+            - name: git-proxy
+              containerPort: {{ .Values.executor.gitProxy.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.executor.kubeGuard.enabled }}
+            - name: kube-guard
+              containerPort: {{ .Values.executor.kubeGuard.port }}
+              protocol: TCP
+            {{- end }}
           env:
             # `cloop ui` resolves .cloop against the process working
             # directory and the project registry against $HOME. Both point at
@@ -93,6 +116,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            {{- if .Values.extraCACerts.configMap }}
+            # Added to the image's own bundle, not substituted for it: Go reads
+            # its default certificate file and then every file in these
+            # directories.
+            - name: SSL_CERT_DIR
+              value: /etc/cloop/extra-ca
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -121,6 +151,22 @@ spec:
             # os.CreateTemp and anything shelling out needs one.
             - name: tmp
               mountPath: /tmp
+            {{- if include "cloop-hub.monitorsEnabled" . }}
+            # The credential monitors' certificate and key.
+            - name: monitor-tls
+              mountPath: /etc/cloop/monitor-tls
+              readOnly: true
+            {{- if include "cloop-hub.monitorCAKnown" . }}
+            - name: monitor-ca
+              mountPath: /etc/cloop/monitor-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.extraCACerts.configMap }}
+            - name: extra-ca
+              mountPath: /etc/cloop/extra-ca
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- with .Values.livenessProbe }}
@@ -155,6 +201,29 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+        {{- if include "cloop-hub.monitorsEnabled" . }}
+        - name: monitor-tls
+          secret:
+            secretName: {{ include "cloop-hub.monitorTLSSecretName" . }}
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+            # Group-readable: the hub runs as the Pod's fsGroup, never as the
+            # file's owner.
+            defaultMode: 0440
+        {{- if include "cloop-hub.monitorCAKnown" . }}
+        - name: monitor-ca
+          configMap:
+            name: {{ include "cloop-hub.monitorCAName" . }}
+            defaultMode: 0444
+        {{- end }}
+        {{- end }}
+        {{- if .Values.extraCACerts.configMap }}
+        - name: extra-ca
+          configMap:
+            name: {{ .Values.extraCACerts.configMap }}
+            defaultMode: 0444
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -98,6 +98,63 @@ data:
           resolvers: {{ toJson . }}
           {{- end }}
       {{- end }}
+      {{- with include "cloop-hub.workloadGitCA" . }}
+        # The git proxy's CA, mounted into every workload Pod from this
+        # ConfigMap in the workload namespace and trusted by its git for the
+        # proxy's URL only (http.<url>.sslCAInfo). Every other host keeps the
+        # image's own trust store, so this can only make a connection work.
+        git_ca_bundle:
+          config_map: {{ (splitList "/" .) | first | quote }}
+          key: {{ (splitList "/" .) | last | quote }}
+          urls: [{{ include "cloop-hub.gitProxyURL" $ | quote }}]
+      {{- end }}
+    {{- end }}
+    {{- if .Values.executor.gitProxy.enabled }}
+      # The git interception proxy: a GitHub token granted to a project stays
+      # in this process, the sandbox's git gets a session token, and the
+      # branch allowlist is enforced on the push. TLS because the session
+      # token rides every request.
+      git_proxy:
+        enabled: true
+        listen_addr: {{ printf ":%d" (int .Values.executor.gitProxy.port) | quote }}
+        advertise_url: {{ include "cloop-hub.gitProxyURL" . | quote }}
+        cert_file: /etc/cloop/monitor-tls/tls.crt
+        key_file: /etc/cloop/monitor-tls/tls.key
+        {{- with .Values.executor.gitProxy.sessionMinutes }}
+        session_minutes: {{ . }}
+        {{- end }}
+        {{- with .Values.executor.gitProxy.allowedRefs }}
+        allowed_refs: {{ toJson . }}
+        {{- end }}
+        allow_delete: {{ .Values.executor.gitProxy.allowDelete }}
+    {{- end }}
+    {{- if .Values.executor.kubeGuard.enabled }}
+      # The Kubernetes access monitor: a kubeconfig granted to a project stays
+      # in this process, and the sandbox's kubectl is handed one naming this
+      # monitor, whose verbs and namespaces it enforces.
+      kube_guard:
+        enabled: true
+        listen_addr: {{ printf ":%d" (int .Values.executor.kubeGuard.port) | quote }}
+        advertise_url: {{ include "cloop-hub.kubeGuardURL" . | quote }}
+        cert_file: /etc/cloop/monitor-tls/tls.crt
+        key_file: /etc/cloop/monitor-tls/tls.key
+        {{- if include "cloop-hub.monitorCAKnown" . }}
+        # Embedded in every kubeconfig the monitor issues.
+        ca_file: /etc/cloop/monitor-ca/ca.crt
+        {{- end }}
+        {{- with .Values.executor.kubeGuard.sessionMinutes }}
+        session_minutes: {{ . }}
+        {{- end }}
+        {{- with .Values.executor.kubeGuard.verbs }}
+        verbs: {{ toJson . }}
+        {{- end }}
+        {{- with .Values.executor.kubeGuard.namespaces }}
+        namespaces: {{ toJson . }}
+        {{- end }}
+        {{- with .Values.executor.kubeGuard.resources }}
+        resources: {{ toJson . }}
+        {{- end }}
+        audit_allowed: {{ .Values.executor.kubeGuard.auditAllowed }}
     {{- end }}
 
     # Which images a project's own .cloop/sandbox.yaml may name. Deny by

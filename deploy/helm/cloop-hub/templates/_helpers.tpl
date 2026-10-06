@@ -110,3 +110,101 @@ workloads with the hub's own Secrets, so NOTES.txt says so out loud.
 {{- define "cloop-hub.workloadNamespace" -}}
 {{- default .Release.Namespace .Values.executor.kubernetes.namespace -}}
 {{- end -}}
+
+{{/*
+The credential monitors (Task 20385): the git interception proxy and the
+Kubernetes access monitor, two TLS listeners in the hub process. Everything
+about them — the ports, the URLs sandboxes are pointed at, where their
+certificate and its CA come from — is derived here once, because the
+ConfigMap, the Deployment, the Service and the CA ConfigMaps all have to agree.
+*/}}
+
+{{/* "true" when either monitor is on. */}}
+{{- define "cloop-hub.monitorsEnabled" -}}
+{{- if or .Values.executor.gitProxy.enabled .Values.executor.kubeGuard.enabled -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+The in-cluster name both monitors are advertised under by default. Fully
+qualified to the Service, not to cluster.local: the cluster domain is a kubelet
+setting the chart cannot read, and every Pod's resolver completes <svc>.<ns>.svc.
+*/}}
+{{- define "cloop-hub.serviceHost" -}}
+{{- printf "%s.%s.svc" (include "cloop-hub.fullname" .) .Release.Namespace -}}
+{{- end -}}
+
+{{- define "cloop-hub.gitProxyURL" -}}
+{{- $u := trimSuffix "/" (default "" .Values.executor.gitProxy.advertiseURL) -}}
+{{- if $u -}}
+{{- $u -}}
+{{- else -}}
+{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int .Values.executor.gitProxy.port) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cloop-hub.kubeGuardURL" -}}
+{{- $u := trimSuffix "/" (default "" .Values.executor.kubeGuard.advertiseURL) -}}
+{{- if $u -}}
+{{- $u -}}
+{{- else -}}
+{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int .Values.executor.kubeGuard.port) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The Secret holding the monitors' certificate and key. */}}
+{{- define "cloop-hub.monitorTLSSecretName" -}}
+{{- default (printf "%s-monitor-tls" (include "cloop-hub.fullname" .)) .Values.executor.monitorTLS.existingSecret -}}
+{{- end -}}
+
+{{/*
+The ConfigMap the chart writes the monitors' CA into: in the release namespace
+for the hub (the kube guard embeds it in every kubeconfig it issues) and in the
+workload namespace for the Pods' git. Same name in both.
+*/}}
+{{- define "cloop-hub.monitorCAName" -}}
+{{- printf "%s-monitor-ca" (include "cloop-hub.fullname" .) -}}
+{{- end -}}
+
+{{/* "true" when the chart itself knows the CA's PEM: it generated it, or was given it. */}}
+{{- define "cloop-hub.monitorCAKnown" -}}
+{{- if or .Values.executor.monitorTLS.selfSigned .Values.executor.monitorTLS.caBundle -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+The ConfigMap in the workload namespace a Pod's git reads the proxy's CA from,
+as "name/key"; empty when nothing is delivered (a publicly trusted certificate,
+or no git proxy).
+*/}}
+{{- define "cloop-hub.workloadGitCA" -}}
+{{- $t := .Values.executor.monitorTLS -}}
+{{- if and .Values.executor.gitProxy.enabled (not $t.publiclyTrusted) -}}
+{{- if include "cloop-hub.monitorCAKnown" . -}}
+{{- printf "%s/ca.crt" (include "cloop-hub.monitorCAName" .) -}}
+{{- else if $t.workloadCAConfigMap -}}
+{{- printf "%s/%s" $t.workloadCAConfigMap (default "ca.crt" $t.workloadCAKey) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The DNS names the monitors' certificate must carry: the Service in every form a
+resolver completes, plus the host of any advertise URL set by hand.
+*/}}
+{{- define "cloop-hub.monitorDNSNames" -}}
+{{- $svc := include "cloop-hub.fullname" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $names := list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
+{{- range $u := list .Values.executor.gitProxy.advertiseURL .Values.executor.kubeGuard.advertiseURL -}}
+{{- if $u -}}
+{{- $host := regexReplaceAll "^https://([^/:]+).*$" $u "${1}" -}}
+{{- if and $host (not (has $host $names)) -}}
+{{- $names = append $names $host -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $names -}}
+{{- end -}}

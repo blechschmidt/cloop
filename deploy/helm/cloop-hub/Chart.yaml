@@ -6,7 +6,7 @@ type: application
 # Chart version tracks the chart's own shape. appVersion follows the cloop
 # release the default image tag points at; overriding image.tag without
 # overriding this is fine and expected.
-version: 0.2.0
+version: 0.3.0
 appVersion: "dev"
 
 home: https://github.com/blechschmidt/cloop
