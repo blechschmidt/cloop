@@ -336,7 +336,32 @@ import (
 // The ceiling comes down to 213,000 B rather than staying at 215,720: the
 // stripping is a saving, and keeping all of it as slack would let the next
 // several additions through without anyone having to look. 1,556 B of slack.
-const eagerWireBudgetBytes = 213_000
+//
+// Lowered to 144_000 B by Task 20386, which did the refactor the notes above
+// kept naming as next: the Settings and admin panels load on demand. At HEAD
+// the set measured 211,971 B with 1,029 B of slack, and Tasks 20379 and 20360
+// had each had to defer or strip something to fit their own few hundred bytes.
+//
+// What moved. The Settings, Budget, Secrets, Audit, Quotas and Telemetry tabs,
+// markup and code, and the executor dialogs — history, sandbox, virtual
+// executors, firewall, limits, access, enrollment, upgrades — are seven
+// deferred scripts (static.go, deferredScripts), fetched the first time their
+// tab or dialog opens. Their markup travels inside them, and mountPanel
+// (01-overview.js) routes its data-act attributes, because a deferred script
+// may not put a handler on window for an inline onclick to reach. What first
+// paint renders stayed in the bundle: the Overview's executor, repository,
+// firewall and caps cards, the Executors tab's list, the Tasks run bar, the
+// header's own-quota badge and sign-out, and session renewal (32-renew.js).
+//
+// Measured after: 141,553 B — app.js 150,777 → 99,537 B and index.html
+// 41,679 → 22,448 B wire; 932,832 → 608,308 B decoded. The deferred scripts
+// add up to ~80 KB wire, paid once by the sessions that open those panels.
+//
+// The ceiling follows the measurement down, with 2,447 B (~1.7%) of slack:
+// enough for gzip jitter and a label or two, not for a panel. The way to add
+// one now exists and costs a <meta> and a mount call — a new Settings section
+// or admin dialog belongs in a deferred script, and this gate is what says so.
+const eagerWireBudgetBytes = 144_000
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {
