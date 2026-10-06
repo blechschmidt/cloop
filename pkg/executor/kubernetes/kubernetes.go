@@ -302,6 +302,12 @@ type Options struct {
 	// require_digest is the only way to make a Kubernetes run reproducible.
 	ImagePolicy imagepolicy.Policy
 
+	// GitCABundle is a CA bundle in the workload namespace that every Pod's
+	// git verifies particular https URLs against — the hub's git proxy, on a
+	// certificate no public CA issued (Task 20385). The zero value mounts
+	// nothing. See cabundle.go.
+	GitCABundle GitCABundle
+
 	// HandleStore persists handle identity so a control plane that restarts
 	// can find the Pods it already dispatched (Task 20191). Optional.
 	//
@@ -414,6 +420,12 @@ func (o Options) Normalize() (Options, error) {
 		return o, fmt.Errorf("kubernetes: egress_filter: %w", err)
 	}
 	o.EgressFilter = egress
+
+	bundle, err := o.GitCABundle.Normalize()
+	if err != nil {
+		return o, fmt.Errorf("kubernetes: %w", err)
+	}
+	o.GitCABundle = bundle
 
 	if o.TerminationGracePeriod == 0 {
 		o.TerminationGracePeriod = DefaultTerminationGracePeriod
@@ -1365,6 +1377,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		WriteBack:             spec.WriteBack,
 		WorkspaceSecretName:   workspaceSecret,
 		SecretFiles:           spec.SecretFiles,
+		GitCABundle:           e.opts.GitCABundle,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),

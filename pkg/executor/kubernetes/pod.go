@@ -404,6 +404,21 @@ type volume struct {
 	// files reach the workload — see secretfiles.go — and the kubelet backs
 	// such a volume with tmpfs, so the material never touches a node's disk.
 	Secret *secretSource `json:"secret,omitempty"`
+	// ConfigMap projects a ConfigMap's keys as files. Its one use is the CA
+	// bundle a workload's git verifies the hub's git proxy against — public
+	// material, which is why it is not a Secret. See cabundle.go.
+	ConfigMap *configMapSource `json:"configMap,omitempty"`
+}
+
+// configMapSource projects a ConfigMap as a directory of files.
+type configMapSource struct {
+	Name        string      `json:"name"`
+	Items       []keyToPath `json:"items,omitempty"`
+	DefaultMode *int32      `json:"defaultMode,omitempty"`
+	// Optional is always false, for the reason secretSource's is: a missing
+	// bundle must hold the Pod at ContainerCreating, not start a workload
+	// whose first fetch fails on a certificate.
+	Optional *bool `json:"optional,omitempty"`
 }
 
 // secretSource projects a Secret as a directory of files.
@@ -648,6 +663,10 @@ type podRequest struct {
 	// SecretFilesSecretName is the per-run Secret holding those files' bytes.
 	// Empty when there are none.
 	SecretFilesSecretName string
+
+	// GitCABundle is the CA bundle both containers' git verifies particular
+	// URLs against — the hub's git proxy, typically. See cabundle.go.
+	GitCABundle GitCABundle
 }
 
 // egressLabelValue renders DisableNetwork for LabelEgress.
@@ -671,7 +690,11 @@ func buildPod(req podRequest) (*pod, error) {
 		return nil, fmt.Errorf("%w: kubernetes executor requires a namespace", executor.ErrInvalidSpec)
 	}
 
-	env, err := buildEnv(req.Env)
+	harnessEnv, err := withGitConfig(req.Env, req.GitCABundle.gitConfigPairs())
+	if err != nil {
+		return nil, err
+	}
+	env, err := buildEnv(harnessEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -873,6 +896,15 @@ func buildPod(req podRequest) (*pod, error) {
 	spec.Volumes = append(spec.Volumes, secretVolumes...)
 	mounts = append(mounts, secretMounts...)
 
+	// The CA bundle, in both containers: the provisioner fetches through the
+	// proxy and the harness pushes through it. Scoped per URL in the
+	// environment, so every other host keeps the image's trust store.
+	gitCAPairs := req.GitCABundle.gitConfigPairs()
+	if len(gitCAPairs) > 0 {
+		spec.Volumes = append(spec.Volumes, req.GitCABundle.volume())
+		mounts = append(mounts, req.GitCABundle.mount())
+	}
+
 	// The harness argv, possibly wrapped so the work it produces survives the
 	// Pod. See buildWriteBackArgv for why a wrapper is the only place a
 	// Kubernetes Pod can run anything after its main container.
@@ -1010,6 +1042,27 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 	if err != nil {
 		return nil, err
 	}
+	mounts := []volumeMount{
+		{Name: workspaceVolume, MountPath: PodWorkspace},
+		// git needs somewhere to write its temporaries, and the root
+		// filesystem is read-only for this container exactly as it is for
+		// the harness.
+		{Name: tmpVolume, MountPath: "/tmp"},
+	}
+	// The fetch is the first thing to reach the git proxy, so it needs the
+	// bundle as much as the harness does. Plain values: a CA path and the URLs
+	// it is for are not credentials.
+	if pairs := req.GitCABundle.gitConfigPairs(); len(pairs) > 0 {
+		caEnv, err := withGitConfig(nil, pairs)
+		if err != nil {
+			return nil, err
+		}
+		for _, kv := range caEnv {
+			k, v, _ := strings.Cut(kv, "=")
+			env = append(env, envVar{Name: k, Value: v})
+		}
+		mounts = append(mounts, req.GitCABundle.mount())
+	}
 
 	return &container{
 		Name:            InitContainerName,
@@ -1020,16 +1073,10 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		// The volume root, not workDir: `cloop workspace provision` creates
 		// the target directory, and a workingDir that does not exist yet is a
 		// container the kubelet refuses to start.
-		WorkingDir: PodWorkspace,
-		Env:        env,
-		Resources:  res,
-		VolumeMounts: []volumeMount{
-			{Name: workspaceVolume, MountPath: PodWorkspace},
-			// git needs somewhere to write its temporaries, and the root
-			// filesystem is read-only for this container exactly as it is for
-			// the harness.
-			{Name: tmpVolume, MountPath: "/tmp"},
-		},
+		WorkingDir:      PodWorkspace,
+		Env:             env,
+		Resources:       res,
+		VolumeMounts:    mounts,
 		SecurityContext: confinedSecurityContext(runAsUser, runAsGroup),
 	}, nil
 }

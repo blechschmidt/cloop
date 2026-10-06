@@ -54,6 +54,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -302,6 +303,69 @@ func transportEnv() []string {
 	return out
 }
 
+// maxTransportConfigEntries bounds how far into the machine's GIT_CONFIG_COUNT
+// block TransportConfig reads. The block is the operator's or the driver's,
+// not the workload's, but a count is a number in an environment variable and
+// is not trusted to be small.
+const maxTransportConfigEntries = 64
+
+// TransportConfig returns the URL-scoped certificate settings in the machine's
+// own GIT_CONFIG_COUNT block: http.<https-url>.sslCAInfo and .sslCAPath, and
+// nothing else (Task 20385).
+//
+// They are the per-URL form of GIT_SSL_CAINFO and GIT_SSL_CAPATH, which
+// transportVars already forwards, and they exist for the case those cannot
+// serve: trusting one private CA for one host — the hub's git proxy, served
+// under an in-cluster name — without replacing the trust store every other
+// host is verified against. The Kubernetes executor sets them in a Pod's
+// environment from executors.kubernetes.git_ca_bundle.
+//
+// Only these two keys, and only scoped to an https URL. Everything else in the
+// block — a credential helper, an insteadOf, an extraHeader — would let the
+// machine's configuration redirect or authenticate a fetch the control plane
+// asked for, which is what the closed environment exists to prevent. A
+// certificate path can only make a connection to the host already named in
+// the URL verify, or fail to.
+//
+// Callers fold the pairs into their one configuration block (see
+// executor.GitEnv) rather than appending them as a second.
+func TransportConfig() [][2]string {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("GIT_CONFIG_COUNT")))
+	if err != nil || n <= 0 {
+		return nil
+	}
+	if n > maxTransportConfigEntries {
+		n = maxTransportConfigEntries
+	}
+	var out [][2]string
+	for i := 0; i < n; i++ {
+		idx := strconv.Itoa(i)
+		key, value := os.Getenv("GIT_CONFIG_KEY_"+idx), os.Getenv("GIT_CONFIG_VALUE_"+idx)
+		if transportConfigKey(key) && strings.HasPrefix(value, "/") && !strings.ContainsAny(value, "\r\n") {
+			out = append(out, [2]string{key, value})
+		}
+	}
+	return out
+}
+
+// transportConfigKey reports whether key is http.<https-url>.sslcainfo or
+// .sslcapath. git compares section and variable names case-insensitively.
+func transportConfigKey(key string) bool {
+	if strings.ContainsAny(key, " \t\r\n") {
+		return false
+	}
+	lower := strings.ToLower(key)
+	if !strings.HasPrefix(lower, "http.https://") {
+		return false
+	}
+	for _, v := range []string{".sslcainfo", ".sslcapath"} {
+		if url, ok := strings.CutSuffix(lower, v); ok {
+			return len(url) > len("http.https://")
+		}
+	}
+	return false
+}
+
 // childWaitDelay bounds how long Wait may block after the child has exited or
 // its context has been cancelled, before the pipes are closed by force.
 //
@@ -364,14 +428,18 @@ func runStep(ctx context.Context, dir string, w executor.Workspace, cred executo
 	// the narrow transport allowlist this machine is permitted to contribute.
 	// The credential is appended for exactly the step that talks to the remote,
 	// so the other three children never hold it at all.
-	env := append(executor.GitBaseEnv(), transportEnv()...)
+	//
+	// One configuration block (see executor.GitEnv): the machine's URL-scoped
+	// certificate settings, then the credential.
+	pairs := TransportConfig()
 	if step.Authenticated {
-		extra, err := executor.GitCredentialEnv(w, cred)
+		extra, err := executor.GitCredentialConfig(w, cred)
 		if err != nil {
 			return err
 		}
-		env = append(env, extra...)
+		pairs = append(pairs, extra...)
 	}
+	env := append(executor.GitEnv(pairs...), transportEnv()...)
 
 	cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...)
 	cmd.Env = env

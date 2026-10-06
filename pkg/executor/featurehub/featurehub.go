@@ -74,6 +74,7 @@ func newGitRunner(ctx context.Context, dir string) (*gitRunner, error) {
 	hardened := append(executor.HardenedGitConfig(drivers), hubOwnershipConfig)
 	return &gitRunner{dir: dir, env: func(extra ...[2]string) []string {
 		pairs := append(append([][2]string(nil), hardened...), extra...)
+		pairs = append(pairs, gitprovision.TransportConfig()...)
 		return append(append(executor.GitEnv(pairs...), gitprovision.TransportEnv()...), "LC_ALL=C")
 	}}, nil
 }

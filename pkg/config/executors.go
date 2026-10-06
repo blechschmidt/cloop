@@ -688,6 +688,7 @@ func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
 		KeepCompletedPods:     k.KeepCompletedPods,
 		MaxConcurrent:         k.MaxConcurrent,
 		EgressFilter:          k.EgressFilter.driverFilter(),
+		GitCABundle:           k.GitCABundle,
 		// Only the operator's half. The recorded probe verdict is the hub's to
 		// supply — it lives in the control-plane database, which a config
 		// validator must not need to open to answer "is this section

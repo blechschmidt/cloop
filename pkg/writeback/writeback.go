@@ -657,6 +657,7 @@ func newGitRunner(ctx context.Context, dir string, timeout time.Duration) (*gitR
 		return nil, err
 	}
 	pairs := append(executor.HardenedGitConfig(drivers), ownership)
+	pairs = append(pairs, gitprovision.TransportConfig()...)
 	env := append(executor.GitEnv(pairs...), gitprovision.TransportEnv()...)
 	return &gitRunner{dir: dir, timeout: timeout, env: append(env, "LC_ALL=C")}, nil
 }

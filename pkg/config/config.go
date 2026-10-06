@@ -778,6 +778,7 @@ type KubeGuardConfig struct {
 	Verbs      []string `yaml:"verbs,omitempty"`
 	Namespaces []string `yaml:"namespaces,omitempty"`
 	Resources  []string `yaml:"resources,omitempty"`
+
 }
 
 // GitProxyConfig configures the git interception proxy.
@@ -1276,6 +1277,13 @@ type KubernetesExecutorConfig struct {
 	// Absent means no policy is created and Pods keep the cluster's default
 	// egress, which is what an upgrade must not change under an operator.
 	EgressFilter KubernetesEgressFilterConfig `yaml:"egress_filter,omitempty"`
+
+	// GitCABundle names a ConfigMap in the workload namespace whose PEM bundle
+	// every Pod's git verifies the listed https URLs against (Task 20385) —
+	// the git proxy's advertise_url, when its certificate is private, which
+	// it is whenever it is served under an in-cluster Service name. Scoped to
+	// those URLs, so every other host keeps the image's own trust store.
+	GitCABundle kubernetes.GitCABundle `yaml:"git_ca_bundle,omitempty"`
 
 	// NetworkPolicyEnforced asserts that this cluster's CNI actually enforces
 	// the NetworkPolicy objects cloop creates.

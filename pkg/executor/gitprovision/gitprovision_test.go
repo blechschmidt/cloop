@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1090,5 +1091,88 @@ func TestRequestHostFallsBackToALabel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "this machine") {
 		t.Errorf("an unnamed host did not fall back to a label: %v", err)
+	}
+}
+
+// --- a CA scoped to one URL (Task 20385) ----------------------------------------
+
+// TestProvisionTrustsACertificateScopedToTheRemote: the Kubernetes executor
+// hands a Pod the git proxy's CA as http.<proxy-url>.sslCAInfo in the
+// environment's GIT_CONFIG_COUNT block, and the provisioning fetch — which runs
+// with a closed environment — must still see it. Scoped to another URL, the
+// same CA must not help: that is what keeps every other host on the image's
+// own trust store.
+func TestProvisionTrustsACertificateScopedToTheRemote(t *testing.T) {
+	cases := map[string]struct {
+		scope   func(f *fixture) string
+		succeed bool
+	}{
+		"scoped to the forge":   {scope: func(f *fixture) string { return f.forge.URL() + "/" }, succeed: true},
+		"scoped to another URL": {scope: func(*fixture) string { return "https://git-proxy.invalid:8443/" }},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, gitforge.Options{})
+			// Untrust the forge the way newFixture trusted it: an empty value
+			// is not forwarded at all.
+			t.Setenv("GIT_SSL_CAINFO", "")
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "http."+tc.scope(f)+".sslCAInfo")
+			t.Setenv("GIT_CONFIG_VALUE_0", f.forge.CAFile())
+
+			err := f.provision()
+			switch {
+			case tc.succeed && err != nil:
+				t.Fatalf("Provision with the forge's CA scoped to it: %v\nlog:\n%s", err, f.log())
+			case !tc.succeed && err == nil:
+				t.Fatal("Provision succeeded with the forge's CA scoped to another URL; something " +
+					"other than the scoped setting is trusting the forge, so this test proves nothing")
+			case !tc.succeed && !strings.Contains(strings.ToLower(err.Error()), "certificate"):
+				t.Fatalf("Provision failed, but not on the certificate: %v", err)
+			}
+			f.assertNoLeak(err)
+		})
+	}
+}
+
+// TestTransportConfigImportsOnlyURLScopedCertificateKeys: of the machine's
+// GIT_CONFIG_COUNT block, a closed-environment git may take the certificate
+// settings for an https URL and nothing else. Every refused key below would let
+// the machine redirect, authenticate or weaken a fetch the control plane asked
+// for.
+func TestTransportConfigImportsOnlyURLScopedCertificateKeys(t *testing.T) {
+	entries := [][2]string{
+		{"http.https://hub.cloop.svc:8443/.sslCAInfo", "/etc/cloop/git-ca/ca.crt"},    // kept
+		{"HTTP.https://hub.cloop.svc:8443/.SSLCAPATH", "/etc/cloop/git-ca"},           // kept: names are case-insensitive
+		{"http.sslCAInfo", "/etc/cloop/git-ca/ca.crt"},                                // unscoped: GIT_SSL_CAINFO's job
+		{"http.http://hub.cloop.svc:8080/.sslCAInfo", "/etc/cloop/git-ca/ca.crt"},     // not https
+		{"http.https://hub.cloop.svc:8443/.sslVerify", "false"},                       // switches verification off
+		{"http.https://hub.cloop.svc:8443/.extraHeader", "Authorization: Basic eA=="}, // a credential
+		{"credential.helper", "!/tmp/steal.sh"},
+		{"url.https://evil.example/.insteadOf", "https://github.com/"},
+		{"http.https://hub.cloop.svc:8443/.sslCAInfo", "relative/ca.crt"}, // not an absolute path
+		{"http.https://.sslCAInfo", "/etc/ca.crt"},                        // no URL at all
+	}
+	t.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(len(entries)))
+	for i, kv := range entries {
+		t.Setenv("GIT_CONFIG_KEY_"+strconv.Itoa(i), kv[0])
+		t.Setenv("GIT_CONFIG_VALUE_"+strconv.Itoa(i), kv[1])
+	}
+	got := gitprovision.TransportConfig()
+	want := entries[:2]
+	if len(got) != len(want) {
+		t.Fatalf("TransportConfig = %q, want exactly %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("TransportConfig[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	for _, count := range []string{"", "0", "-1", "lots"} {
+		t.Setenv("GIT_CONFIG_COUNT", count)
+		if got := gitprovision.TransportConfig(); len(got) != 0 {
+			t.Errorf("GIT_CONFIG_COUNT=%q: TransportConfig = %q, want nothing", count, got)
+		}
 	}
 }

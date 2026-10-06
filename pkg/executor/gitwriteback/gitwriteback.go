@@ -475,6 +475,9 @@ func (g *gitRunner) run(ctx context.Context, name string, authenticated bool, r 
 		if err != nil {
 			return "", err
 		}
+		// And the machine's URL-scoped certificate settings: the push goes to
+		// the same git proxy the provisioning fetch did (Task 20385).
+		pairs = append(pairs, gitprovision.TransportConfig()...)
 		authEnv, err := gitprovision.SandboxedRepoEnv(ctx, g.dir, pairs...)
 		if err != nil {
 			return "", err
