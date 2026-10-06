@@ -69,11 +69,11 @@ const CMD_REGISTRY = [
   { label:'Brainstorm ideas',icon:'💡', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('suggestPanel'); if(el && el.style.display==='none'){ toggleSuggestPanel(); } },100); } },
   { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
-  { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },
-  { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>submitStop() },
+  { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>apiRun() },
+  { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>apiStop() },
   { label:'Add task',        icon:'✏️', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
-  { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>submitRun() },
-  { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>submitReset() },
+  { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>apiRun() },
+  { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>panelAct('settings','confirmReset') },
 ];
 
 // ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────────────

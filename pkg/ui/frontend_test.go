@@ -1545,3 +1545,37 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 		t.Error("switchTab does not refresh the Overview executor card")
 	}
 }
+
+// TestCommandPaletteActionsResolve checks that every entry in the command
+// palette calls something that exists. Its Start run, Stop run, Run plan and
+// Reset session entries called submitRun, submitStop and submitReset, which
+// nothing defines, so choosing them threw a ReferenceError (found in Task
+// 20386, whose palette entries had to keep working from a cold page).
+func TestCommandPaletteActionsResolve(t *testing.T) {
+	set := loadAssets()
+	start := strings.Index(set.bundle, "const CMD_REGISTRY = [")
+	if start < 0 {
+		t.Fatal("18-shortcuts.js no longer declares CMD_REGISTRY; this gate reads it")
+	}
+	end := strings.Index(set.bundle[start:], "\n];")
+	if end < 0 {
+		t.Fatal("CMD_REGISTRY is not closed")
+	}
+	registry := set.bundle[start : start+end]
+	actions := regexp.MustCompile(`action:\s*\(\)\s*=>\s*([A-Za-z_$][\w$]*)\(`).FindAllStringSubmatch(registry, -1)
+	if len(actions) < 10 {
+		t.Fatalf("found %d palette actions; the registry has ~20, so this gate has gone vacuous", len(actions))
+	}
+	exposed := extractWindowExposures(set.bundle)
+	for _, a := range actions {
+		name := a[1]
+		if _, ok := exposed[name]; ok {
+			continue
+		}
+		if regexp.MustCompile(`\bfunction ` + regexp.QuoteMeta(name) + `\(`).MatchString(set.bundle) {
+			continue
+		}
+		t.Errorf("the command palette calls %s(), which the bundle does not define — choosing that "+
+			"entry throws", name)
+	}
+}
