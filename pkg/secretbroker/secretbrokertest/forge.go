@@ -30,9 +30,10 @@ import (
 // a test pass whether or not a token was ever refreshed; this one refuses the
 // first token the moment the fake clock passes its hour.
 type Forge struct {
-	// URL is the server's https base, e.g. https://127.0.0.1:40123.
+	// URL is the server's https base, e.g. https://127.0.0.1:40123. Empty for
+	// a forge from NewForgeHandler, which its caller serves.
 	URL string
-	// Addr is the listener's host:port.
+	// Addr is the listener's host:port, likewise.
 	Addr string
 	// Root holds the bare repositories, <owner>/<name>.git.
 	Root string
@@ -51,9 +52,19 @@ type Forge struct {
 // GitTools finds git and git-http-backend, or skips the test.
 func GitTools(t testing.TB) (gitBin, backend string) {
 	t.Helper()
-	gitBin, err := exec.LookPath("git")
+	gitBin, backend, err := FindGitTools()
 	if err != nil {
-		t.Skip("no git binary on PATH; this test drives a real git client")
+		t.Skip(err.Error())
+	}
+	return gitBin, backend
+}
+
+// FindGitTools is GitTools for a caller that is not a test: the forge served
+// from a container in a cluster (Task 20385), which has no test to skip.
+func FindGitTools() (gitBin, backend string, err error) {
+	gitBin, err = exec.LookPath("git")
+	if err != nil {
+		return "", "", fmt.Errorf("no git binary on PATH; the forge drives a real git")
 	}
 	var candidates []string
 	if out, err := exec.Command(gitBin, "--exec-path").Output(); err == nil {
@@ -62,12 +73,58 @@ func GitTools(t testing.TB) (gitBin, backend string) {
 	candidates = append(candidates, "/usr/lib/git-core/git-http-backend", "/usr/libexec/git-core/git-http-backend")
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() && st.Mode().Perm()&0o111 != 0 {
-			return gitBin, c
+			return gitBin, c, nil
 		}
 	}
-	t.Skipf("git-http-backend not found (looked in %s)", strings.Join(candidates, ", "))
-	return "", ""
+	return "", "", fmt.Errorf("git-http-backend not found (looked in %s)", strings.Join(candidates, ", "))
 }
+
+// ForgeConfig describes a forge served by something other than a test: the
+// stand-alone server tests/kube runs inside a cluster, answering as
+// github.com (Task 20385).
+type ForgeConfig struct {
+	// GitHub decides which tokens the forge honours, for which repositories.
+	GitHub *GitHub
+	// Root holds the bare repositories, <owner>/<name>.git. Created if missing.
+	Root string
+	// Home is HOME for the forge's own git commands. Created if missing.
+	Home string
+	// Repos ("owner/name") are each seeded with one commit on main, unless
+	// they already exist under Root.
+	Repos []string
+}
+
+// NewForgeHandler prepares a forge without starting a server: its tools found
+// and its repositories seeded. The Forge is an http.Handler; the caller serves
+// it over TLS on a listener of its own, and URL and Addr stay empty.
+func NewForgeHandler(cfg ForgeConfig) (*Forge, error) {
+	if cfg.GitHub == nil {
+		return nil, fmt.Errorf("forge: no GitHub to authorise requests against")
+	}
+	if strings.TrimSpace(cfg.Root) == "" || strings.TrimSpace(cfg.Home) == "" {
+		return nil, fmt.Errorf("forge: Root and Home are required")
+	}
+	gitBin, backend, err := FindGitTools()
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range []string{cfg.Root, cfg.Home} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("forge: %w", err)
+		}
+	}
+	f := &Forge{gh: cfg.GitHub, git: gitBin, backend: backend, Root: cfg.Root, home: cfg.Home}
+	for _, repo := range cfg.Repos {
+		if err := f.initRepo(repo); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// ServeHTTP authenticates a request against the fake GitHub and answers it
+// with git-http-backend.
+func (f *Forge) ServeHTTP(w http.ResponseWriter, r *http.Request) { f.serve(w, r) }
 
 // NewForge starts a forge serving repos ("owner/name"), each seeded with one
 // commit on main.
@@ -93,16 +150,16 @@ func NewForgeWithCert(t testing.TB, addr string, gh *GitHub, cert tls.Certificat
 
 func newForge(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, repos ...string) *Forge {
 	t.Helper()
-	gitBin, backend := GitTools(t)
-	f := &Forge{gh: gh, git: gitBin, backend: backend, Root: t.TempDir(), home: t.TempDir()}
-	for _, repo := range repos {
-		f.initRepo(t, repo)
+	GitTools(t) // a machine without git skips, rather than fails
+	f, err := NewForgeHandler(ForgeConfig{GitHub: gh, Root: t.TempDir(), Home: t.TempDir(), Repos: repos})
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("forge listen on %s: %v", addr, err)
 	}
-	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	f.srv = httptest.NewUnstartedServer(f)
 	_ = f.srv.Listener.Close()
 	f.srv.Listener = ln
 	if cert != nil {
@@ -140,29 +197,52 @@ func (f *Forge) Ref(t testing.TB, repo, ref string) string {
 
 func (f *Forge) bare(repo string) string { return filepath.Join(f.Root, repo+".git") }
 
-func (f *Forge) initRepo(t testing.TB, repo string) {
-	t.Helper()
+func (f *Forge) initRepo(repo string) error {
 	bare := f.bare(repo)
-	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
-		t.Fatalf("forge: %v", err)
+	if _, err := os.Stat(filepath.Join(bare, "HEAD")); err == nil {
+		return nil // already there: a forge restarted over its own volume
 	}
-	must := func(dir string, args ...string) {
+	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+		return fmt.Errorf("forge: %w", err)
+	}
+	seed, err := os.MkdirTemp(f.home, "seed-")
+	if err != nil {
+		return fmt.Errorf("forge: %w", err)
+	}
+	defer os.RemoveAll(seed)
+	must := func(dir string, args ...string) error {
 		if out, err := f.gitCmd(dir, args...); err != nil {
-			t.Fatalf("forge: git %s: %v\n%s", strings.Join(args, " "), err, out)
+			return fmt.Errorf("forge: git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return nil
+	}
+	for _, step := range []struct {
+		dir  string
+		args []string
+	}{
+		{"", []string{"init", "--bare", bare}},
+		{"", []string{"--git-dir=" + bare, "symbolic-ref", "HEAD", "refs/heads/main"}},
+		{"", []string{"--git-dir=" + bare, "config", "http.receivepack", "true"}},
+		{"", []string{"init", seed}},
+		{seed, []string{"symbolic-ref", "HEAD", "refs/heads/main"}},
+	} {
+		if err := must(step.dir, step.args...); err != nil {
+			return err
 		}
 	}
-	must("", "init", "--bare", bare)
-	must("", "--git-dir="+bare, "symbolic-ref", "HEAD", "refs/heads/main")
-	must("", "--git-dir="+bare, "config", "http.receivepack", "true")
-	seed := t.TempDir()
-	must("", "init", seed)
-	must(seed, "symbolic-ref", "HEAD", "refs/heads/main")
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatalf("forge: %v", err)
+		return fmt.Errorf("forge: %w", err)
 	}
-	must(seed, "add", "README.md")
-	must(seed, "-c", "user.email=forge@example.invalid", "-c", "user.name=forge", "commit", "--no-gpg-sign", "-m", "seed")
-	must(seed, "push", bare, "HEAD:refs/heads/main")
+	for _, args := range [][]string{
+		{"add", "README.md"},
+		{"-c", "user.email=forge@example.invalid", "-c", "user.name=forge", "commit", "--no-gpg-sign", "-m", "seed"},
+		{"push", bare, "HEAD:refs/heads/main"},
+	} {
+		if err := must(seed, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *Forge) gitCmd(dir string, args ...string) (string, error) {

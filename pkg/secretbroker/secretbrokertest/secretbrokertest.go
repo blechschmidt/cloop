@@ -11,7 +11,8 @@
 // fake that never refused an expired token would let every one of those tests
 // pass without a refresh ever happening.
 //
-// Nothing outside _test.go files may import this package.
+// Nothing outside _test.go files may import this package, except a harness
+// under tests/: tests/kube serves the forge from a container in a cluster.
 package secretbrokertest
 
 import (
@@ -120,6 +121,26 @@ type GitHub struct {
 	refuse  error
 	failing error
 	creates []secretbroker.InstallationTokenRequest
+	// pats are personal access tokens the fake honours (Task 20385): each
+	// covers the repositories listed, or every repository when none are. They
+	// never expire, as a PAT does not on any clock the hub knows.
+	pats map[string][]string
+}
+
+// AcceptPAT makes the fake — and so a forge built on it — honour token as a
+// personal access token covering repos ("owner/name"), or every repository
+// when repos is empty.
+//
+// A broad PAT is the interesting case for a git proxy: the forge would let it
+// reach a repository the grant does not name, so a refusal can only have come
+// from the proxy.
+func (g *GitHub) AcceptPAT(token string, repos ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pats == nil {
+		g.pats = map[string][]string{}
+	}
+	g.pats[token] = append([]string(nil), repos...)
 }
 
 // NewGitHub returns a fake whose installation covers repos.
@@ -326,8 +347,22 @@ func (g *GitHub) LiveTokens() []string {
 }
 
 // CoversRepo reports whether token is scoped to repo — "owner/name" — under
-// the installation's current inventory.
+// the installation's current inventory, or is a PAT (AcceptPAT) covering it.
 func (g *GitHub) CoversRepo(token, repo string) bool {
+	g.mu.Lock()
+	scope, isPAT := g.pats[token]
+	g.mu.Unlock()
+	if isPAT {
+		if len(scope) == 0 {
+			return true
+		}
+		for _, r := range scope {
+			if strings.EqualFold(r, repo) {
+				return true
+			}
+		}
+		return false
+	}
 	m, ok := g.Authorize(token)
 	if !ok {
 		return false

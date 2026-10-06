@@ -1784,6 +1784,44 @@ jobs:
           kubectl -n cloop exec deploy/cloop-cloop-hub -- \
             /usr/local/bin/cloop executor test kubernetes
 
+      - name: Set up Go for the Kubernetes end-to-end test
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Git proxy and kube guard end to end on kind
+        id: kube-e2e
+        # Task 20385: the only check that runs a workload Pod through the git
+        # interception proxy and the Kubernetes access monitor, on the hub
+        # this chart installed. tests/kube builds a test forge and a harness
+        # image, loads them into this cluster, upgrades the release with both
+        # monitors on, and dispatches a task whose probe clones and pushes
+        # through the proxy and runs kubectl through the monitor — then checks
+        # the forge's refs, the audit trail, and that the run's Pod, Secrets
+        # and NetworkPolicy are gone. See tests/kube/README.md.
+        #
+        # Advisory until it has passed twice on main; then this line goes.
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
+        run: |
+          set -euo pipefail
+          kind get kubeconfig --name cloop-ci > "$RUNNER_TEMP/kubeconfig"
+          # The workload runs the cloop the hub image carries: the build under
+          # test, and statically linked, so it runs on the harness's alpine.
+          id=$(docker create cloop-hub:ci)
+          docker cp "$id:/usr/local/bin/cloop" "$RUNNER_TEMP/cloop"
+          docker rm "$id" >/dev/null
+          CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
+            go test ./tests/kube/ -run TestGitProxyAndKubeGuardOnKubernetes -count=1 -v -timeout 28m 2>&1 |
+            tee "$RUNNER_TEMP/kube-e2e.log"
+          # A skip is a pass to go test; here it would mean nothing was proven.
+          grep -q -- '--- PASS: TestGitProxyAndKubeGuardOnKubernetes' "$RUNNER_TEMP/kube-e2e.log" || {
+            echo "::error::the Kubernetes end-to-end test did not pass (see the log above)"
+            exit 1
+          }
+
       - name: Scale to three replicas and assert one hub cluster
         # Horizontal scaling (Task 20354). The replicas must land on the node
         # holding the ReadWriteOnce volume (the chart's podAffinity term), open
@@ -1824,9 +1862,12 @@ jobs:
           expect_one_cluster "after a rolling restart"
 
       - name: Hub diagnostics on failure
-        if: failure()
+        # Also after the advisory end-to-end step fails, which does not fail
+        # the job while it is continue-on-error.
+        if: failure() || steps.kube-e2e.outcome == 'failure'
         run: |
           kubectl -n cloop get pods -o wide || true
           kubectl -n cloop describe pods || true
-          kubectl -n cloop logs deploy/cloop-cloop-hub --tail=200 || true
-          kubectl -n cloop-workloads get pods -o wide || true
+          kubectl -n cloop logs deploy/cloop-cloop-hub --tail=300 || true
+          kubectl -n cloop-workloads get pods,secrets,networkpolicies -o wide || true
+          kubectl -n cloop-e2e-forge logs deploy/forge --tail=100 || true
