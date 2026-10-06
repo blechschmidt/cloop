@@ -50,6 +50,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -804,3 +805,55 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // very identity that test just admitted. Serialising scrapes costs nothing
 // real — Prometheus polls on the order of tens of seconds.
 var metricsMu sync.Mutex
+
+// autorunAdmission applies handleRun's admission gates — the executor's access
+// list, the daily budget, a concurrency slot — to the run a new project may
+// start the moment it is created (Task 20391), without writing a response:
+// the project was created either way, and a refused run is reported beside it.
+//
+// It returns the refusal, or nil and the function that gives the slot back,
+// which the caller must call exactly once when the run ends or fails to start.
+func (s *Server) autorunAdmission(r *http.Request, workDir string) (refusal map[string]any, release func()) {
+	registerBuiltinExecutors()
+	if ex, err := executor.ResolveBinding(workDir); err == nil && ex != nil {
+		allowed, err := s.callerMayUseExecutor(r, ex.ID())
+		switch {
+		case err != nil:
+			return map[string]any{
+				"code":        "executor_audience_unavailable",
+				"error":       fmt.Sprintf("cannot determine who may use executor %q right now", ex.ID()),
+				"executor_id": ex.ID(),
+			}, nil
+		case !allowed:
+			return map[string]any{
+				"code": "executor_audience_denied",
+				"error": fmt.Sprintf("executor %q is restricted and your account is not on its access list — "+
+					"ask an administrator to admit you, or bind this project to another executor", ex.ID()),
+				"executor_id": ex.ID(),
+			}, nil
+		}
+	}
+	noop := func() {}
+	e := s.quotas()
+	subject := s.quotaSubject(r)
+	if e == nil || subject == nil {
+		return nil, noop
+	}
+	denied := func(err error) map[string]any {
+		out := map[string]any{"code": string(apierror.CodeQuotaExceeded), "error": err.Error()}
+		if d, ok := err.(*quota.Denial); ok {
+			out["error"] = quotaDenialMessage(d)
+			out["resource"] = string(d.Resource)
+		}
+		return out
+	}
+	if err := e.CheckSpend(subject); err != nil {
+		return denied(err), nil
+	}
+	if _, err := e.Admit(subject, quota.ResConcurrentTasks, 1); err != nil {
+		return denied(err), nil
+	}
+	var once sync.Once
+	identity := subject.Label()
+	return nil, func() { once.Do(func() { e.Release(identity, quota.ResConcurrentTasks, 1) }) }
+}

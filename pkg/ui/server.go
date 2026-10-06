@@ -6651,11 +6651,35 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 
+	// The admission gates handleRun applies, in its order (Task 20391). The
+	// grid's Run button starts the same run on the same executor, and before
+	// these it was the way round them: an identity left off a restricted
+	// executor's access list was refused by the Overview's Run and admitted by
+	// this one, and a tenant at its concurrency or daily-budget cap could
+	// start one more run here every time.
+	if !s.admitExecutorAudienceForProject(w, r, entry.Path) {
+		return
+	}
+
 	// The grid's Run button meets the same Claude-credential check as the
 	// Overview's (Task 20379), before the run is claimed.
 	harnessClear := s.harnessClearanceFor(r, entry.Path)
 	if s.refuseWithoutHarnessCredential(w, harnessClear) {
 		return
+	}
+
+	quotaID := s.quotaIdentity(r)
+	if !s.admitSpend(w, r) {
+		return
+	}
+	if !s.admitQuota(w, r, quota.ResConcurrentTasks, 1) {
+		return
+	}
+	// Every path from here gives the slot back exactly once: the error paths
+	// below, or the run's own watcher when it ends.
+	var slotOnce sync.Once
+	releaseSlot := func() {
+		slotOnce.Do(func() { s.releaseQuota(quotaID, quota.ResConcurrentTasks, 1) })
 	}
 
 	exe := s.selfExe()
@@ -6667,6 +6691,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	// (Task 20156).
 	payer := s.runIdentity(r, entry.Path)
 	if owner, err := s.claimRun(entry.Path, "project-run"); err != nil {
+		releaseSlot()
 		writeRunOwnedElsewhere(w, owner)
 		return
 	}
@@ -6675,6 +6700,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
+		releaseSlot()
 		s.releaseRunClaim(entry.Path)
 		jsonWorkloadErr(w, err)
 		return
@@ -6686,6 +6712,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		s.trackRunWithCancel(entry.Path, ex, handle.ID, cancelStream)
 		s.recordRunDispatch(entry.Path, "project-run", ex, handle.ID)
 		go func() {
+			defer releaseSlot()
 			stopDrain := s.startSpendDrain(entry.Path)
 			defer stopDrain()
 			defer func() { _, _ = s.drainSpend(entry.Path) }() // run over; next start is the gate
@@ -6697,6 +6724,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 			s.runEnded(entry.Path, ex, handle.ID)
 		}()
 	} else {
+		// Live but unobservable: nothing will say when it ends, so the slot
+		// comes back now rather than never (handleRun does the same).
+		releaseSlot()
 		cancelStream()
 		s.releaseRunClaim(entry.Path)
 	}
@@ -6945,7 +6975,15 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			runArgs = append(runArgs, "--pm")
 		}
 		autoPayer := s.runIdentity(r, abs)
-		if _, claimErr := s.claimRun(abs, "project-new-autorun"); claimErr != nil {
+		// The run meets handleRun's admission gates (Task 20391) — the
+		// executor's access list, the daily budget, a concurrency slot. A
+		// refusal is returned beside the project, which was created anyway.
+		refusal, releaseSlot := s.autorunAdmission(r, abs)
+		if refusal != nil {
+			autorunRefused = refusal
+			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s refused: %v\n", abs, refusal["error"])
+		} else if _, claimErr := s.claimRun(abs, "project-new-autorun"); claimErr != nil {
+			releaseSlot()
 			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s skipped: %v\n", abs, claimErr)
 		} else {
 			s.openSpendCursor(abs, autoPayer)
@@ -6968,6 +7006,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 				// Non-fatal: the project was created successfully, only the
 				// optional immediate run failed. Surfacing it in the server log
 				// beats silently swallowing it as the pre-executor code did.
+				releaseSlot()
 				cancelStream()
 				s.releaseRunClaim(abs)
 				fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
@@ -6976,6 +7015,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 				s.recordRunDispatch(abs, "project-new-autorun", runEx, runHandle.ID)
 				s.publishRunState(abs, true)
 				go func() {
+					defer releaseSlot()
 					stopDrain := s.startSpendDrain(abs)
 					defer stopDrain()
 					defer func() { _, _ = s.drainSpend(abs) }() // run over; next start is the gate
@@ -6987,6 +7027,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 					s.runEnded(abs, runEx, runHandle.ID)
 				}()
 			} else {
+				releaseSlot()
 				cancelStream()
 				s.releaseRunClaim(abs)
 			}
