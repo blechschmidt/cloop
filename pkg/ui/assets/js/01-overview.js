@@ -1,25 +1,117 @@
 // ── Render overview ─────────────────────────────────────────────────────────
 
-// ── Deferred Overview panels (Tasks 20366, 20379) ──────────────────────────
-// Fetched the first time an Overview needs them rather than bundled: first
-// paint has no room for panels most sessions never open (static.go,
-// deferredScripts). Each runs outside this IIFE, so it is handed the few
-// helpers it calls; the one global it defines is its factory. A failed fetch
-// is retried by the next Overview, not replayed forever.
+// ── Deferred panels (Tasks 20366, 20379, 20386) ─────────────────────────────
+// Fetched the first time the page needs them rather than bundled: first paint
+// has no room for panels most sessions never open (static.go,
+// deferredScripts). Each runs outside this IIFE, so it is handed the helpers
+// it calls — panelHelpers() unless the caller passes its own — and the one
+// global it defines is its factory, window.cloop<Name>Panel. A fetch or a
+// factory that fails is retried by the next call, not replayed forever.
 const _deferred = {};
-function deferredPanel(name, factory, helpers) {
+function deferredPanel(name, helpers) {
   if (!_deferred[name]) {
-    _deferred[name] = new Promise((ok, no) => {
+    const p = _deferred[name] = new Promise((ok, no) => {
       const m = document.querySelector('meta[name="cloop-' + name + '-src"]');
       const el = document.createElement('script');
       el.src = m ? m.getAttribute('content') : '';
-      el.onload = () => window[factory] ? ok(window[factory](helpers)) : no();
-      el.onerror = no;
+      el.onload = () => {
+        const f = window['cloop' + name[0].toUpperCase() + name.slice(1) + 'Panel'];
+        try { f ? ok(f(helpers || panelHelpers())) : no(new Error(name + ' defined no panel')); } catch (e) { no(e); }
+      };
+      el.onerror = () => no(new Error(name + ' could not be fetched'));
       document.head.appendChild(el);
     });
-    _deferred[name].catch(() => { delete _deferred[name]; });
+    p.catch(() => { if (_deferred[name] === p) delete _deferred[name]; });
   }
   return _deferred[name];
+}
+
+// What the Settings and admin panels are handed (Task 20386): their whole view
+// of this IIFE, built on first use. fleet reads the executor list's cached
+// auto-update policy, or stores and draws a new one; oidc says whether the hub
+// has sign-on.
+let _ph;
+function panelHelpers() {
+  return _ph || (_ph = {
+    api, apiMethod, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating,
+    mount: mountPanel, panel: deferredPanel, fmtBytes: _duFmtBytes,
+    execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
+    fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
+    fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal},
+    quota: {label: _quotaLabel, labels: _quotaLabels, fmt: _quotaFmt, saturation: _quotaSaturation},
+  });
+}
+
+// mountPanel puts a deferred panel's markup on the page — its tab's contents,
+// and its dialogs appended to the document body — and routes its data-act,
+// data-change, data-input, data-enter and data-dismiss (a backdrop click) to
+// the panel's own functions in fns, which its script may not put on window
+// for an inline handler to reach. Delegated from each root, so markup the
+// panel redraws later is routed too. Returns fns.
+function mountPanel(fns, tab, html, dialogs) {
+  const roots = [];
+  if (tab) {
+    const box = document.getElementById('tab-' + tab);
+    box.innerHTML = html;
+    roots.push(box);
+  }
+  if (dialogs) {
+    const t = document.createElement('div');
+    t.innerHTML = dialogs;
+    Array.from(t.children).forEach(el => roots.push(document.body.appendChild(el)));
+  }
+  roots.forEach(root => ['click', 'change', 'input', 'keydown'].forEach(type => root.addEventListener(type, e => {
+    if (type === 'click' && e.target === root && root.dataset.dismiss) return fns[root.dataset.dismiss]();
+    const key = type === 'click' ? 'act' : type === 'keydown' ? 'enter' : type;
+    const el = e.target.closest && e.target.closest('[data-' + key + ']');
+    if (!el || (type === 'keydown' && e.key !== 'Enter')) return;
+    if (type === 'keydown') e.preventDefault();
+    fns[el.dataset[key]].call(el, el.dataset.arg);
+  })));
+  applyPermissionGating();
+  return fns;
+}
+
+// The tabs whose markup and code arrive on their first open (Task 20386). The
+// panel's open() runs on every visit, as their bundled loaders used to.
+const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry'];
+function openDeferredTab(name) {
+  const box = document.getElementById('tab-' + name);
+  if (!_deferred[name]) box.innerHTML = '<p class="deferred-note">Loading…</p>';
+  return deferredPanel(name).then(p => { if (activeTab === name) p.open(); },
+    () => deferredFailed(() => openDeferredTab(name), box));
+}
+
+// deferredFailed says a deferred panel did not arrive and offers to fetch it
+// again — in box, the tab that would otherwise stay empty, or for a dialog in
+// a banner of its own.
+function deferredFailed(retry, box) {
+  const banner = !box;
+  if (banner) {
+    box = document.getElementById('deferredFail') || document.body.appendChild(document.createElement('div'));
+    box.id = 'deferredFail';
+  }
+  box.innerHTML = '<p class="deferred-note" role="alert">This part of the dashboard did not load. ' +
+    '<button class="btn">Retry</button>' + (banner ? ' <button class="btn" aria-label="Dismiss">&times;</button>' : '') + '</p>';
+  const [again, dismiss] = box.querySelectorAll('button');
+  if (again) again.onclick = () => { if (banner) box.remove(); retry(); };
+  if (dismiss) dismiss.onclick = () => box.remove();
+}
+
+// panelAct runs fn of a deferred panel, fetching the panel first: the shim
+// through which bundled markup — an executor card's buttons — reaches a
+// deferred dialog. With no fn it resolves to the panel itself.
+function panelAct(name, fn, ...a) {
+  return deferredPanel(name).then(p => fn ? p[fn](...a) : p,
+    () => deferredFailed(() => panelAct(name, fn, ...a)));
+}
+window.panelAct = panelAct;
+
+// panelIf calls fn of a panel that has been loaded, and does nothing for one
+// that has not: a broadcast refreshes what is on screen, it never fetches code.
+function panelIf(name, fn) {
+  const p = _deferred[name];
+  if (p) p.then(x => x[fn] && x[fn](), () => {});
 }
 // No project on screen: none selected, or in single-project mode none loaded.
 const _noProject = () => isMultiProject ? selectedProjectIdx === null : !appState;
@@ -29,7 +121,7 @@ const _membersOff = () => !myOIDC || _noProject();
 function loadProjectMembers() {
   loadHarnessCred();
   if (_membersOff()) return;
-  return deferredPanel('members', 'cloopMembersPanel', {
+  return deferredPanel('members', {
     api, apiMethod, esc, toast, left: clearProjectSelection, idx: _overviewIdx, hidden: _membersOff,
   }).then(p => p.load()).catch(() => {});
 }
@@ -38,7 +130,7 @@ function loadProjectMembers() {
 // that sent the user there.
 function loadHarnessCred(opts) {
   if (!opts && _noProject()) return;
-  return deferredPanel('harness', 'cloopHarnessPanel', {
+  return deferredPanel('harness', {
     api, esc, toast, openOverlay, closeOverlay, idx: _overviewIdx,
   }).then(p => p.load(opts)).catch(() => opts && opts.refusal && toast(opts.refusal.error, 'err'));
 }

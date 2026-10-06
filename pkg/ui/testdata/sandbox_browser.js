@@ -216,30 +216,22 @@ async function boot(cdp) {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Page.navigate', {url: BASE + '/'});
-  // Wait for the bundle to have defined the entry point this panel is reached
-  // through. Polling a function's existence rather than a load event is what
-  // makes this robust to the deferred script tags Task 20289 introduced.
-  for (let i = 0; i < 200; i++) {
-    await sleep(50);
-    const ready = await cdp.eval(`typeof window.openExecutorSandbox === 'function'`);
-    if (ready) return;
+  // Wait for the bundle to have defined the shim this deferred dialog is
+  // reached through (Task 20386). Polling a function's existence rather than a
+  // load event is what makes this robust to deferred script tags.
+  if (!await waitFor(cdp, `typeof window.panelAct === 'function'`)) {
+    throw new Error('window.panelAct never appeared — the panel is unreachable');
   }
-  throw new Error('window.openExecutorSandbox never appeared — the panel is unreachable');
 }
 
 // openPanel opens the dialog for our executor.
 //
-// It calls openExecutorSandbox with an index rather than clicking the card's
-// button, because the Executors tab renders from a fetch this driver would have
-// to race. The button's wiring is checked separately, by asserting the handler
-// it names exists on window — which is the half a shim cannot do.
+// It makes the card button's call — panelAct, which fetches the deferred
+// dialog first (Task 20386) — with an index rather than clicking the button,
+// because the Executors tab renders from a fetch this driver would have to
+// race. The dialog's own controls are pressed as a user would, so their
+// data-act wiring is what the scenarios exercise.
 async function openPanel(cdp) {
-  const wired = await cdp.eval(`typeof window.openExecutorSandbox === 'function'
-    && typeof window.saveExecutorSandbox === 'function'
-    && typeof window.onExecSandboxModeChange === 'function'
-    && typeof window.clearExecutorSandbox === 'function'`);
-  if (!wired) throw new Error('the panel\'s handlers are not all exported on window');
-
   // Seed the module-level cache the card indices resolve against, then open
   // index 0. Assigning through a setter the bundle exposes is not possible —
   // execData is IIFE-local — so the panel is opened by the same call the button
@@ -264,7 +256,7 @@ async function openPanel(cdp) {
   // page holds: until then openExecutorSandbox finds no executor at that index
   // and returns without opening anything.
   const opened = await waitFor(cdp,
-    `(() => { try { window.openExecutorSandbox(${idx}); } catch (e) { return false; }
+    `(async () => { try { await window.panelAct('execadmin', 'openExecutorSandbox', ${idx}); } catch (e) { return false; }
        const o = document.getElementById('executor-sandbox-overlay');
        return !!o && o.style.display !== 'none'; })()`);
   if (!opened) throw new Error('the sandbox overlay never opened');
@@ -290,7 +282,17 @@ async function openPanel(cdp) {
 }
 
 async function closePanel(cdp) {
-  await cdp.eval(`window.closeExecutorSandbox && window.closeExecutorSandbox()`);
+  await cdp.eval(`window.panelAct('execadmin', 'closeExecutorSandbox')`);
+}
+
+// pressSave clicks the dialog's own Save button.
+async function pressSave(cdp) {
+  const r = await cdp.eval(`(() => {
+    const b = document.querySelector('#executor-sandbox-overlay [data-act="saveExecutorSandbox"]');
+    if (!b) return false;
+    b.click();
+    return true; })()`);
+  if (!r) throw new Error('the sandbox dialog has no Save button');
 }
 
 async function fetchJSON(cdp, url) {
@@ -340,7 +342,7 @@ async function scenarioSaveContainerMode(cdp) {
   const runtimeSet = await cdp.eval(setInputExpr('execSandboxRuntime', 'kata'));
   const imageSet = await cdp.eval(setInputExpr('execSandboxImage', 'ghcr.io/acme/sandbox:v3'));
 
-  await cdp.eval(`window.saveExecutorSandbox()`);
+  await pressSave(cdp);
   // The save closes the dialog once the PUT has answered, and reloads the
   // fleet; both are async.
   const closed = await waitFor(cdp,
@@ -391,7 +393,7 @@ async function scenarioRejectedRuntimeKeepsTheStoredValue(cdp) {
   // so the one waited for is this save's, not a leftover from an earlier one.
   await cdp.eval(`(() => { const t = document.getElementById('toast');
     if (t) { t.className = ''; t.textContent = ''; } })()`);
-  await cdp.eval(`window.saveExecutorSandbox()`);
+  await pressSave(cdp);
   await waitFor(cdp, `(() => { const t = document.getElementById('toast');
     return !!t && t.classList.contains('err') && t.textContent !== ''; })()`);
 

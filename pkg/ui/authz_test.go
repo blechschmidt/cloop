@@ -881,7 +881,8 @@ func TestFrontendGatesTheHighRiskControls(t *testing.T) {
 		{`id="instructionsEditBtn"`, "project.write", "changing instructions reshapes the project"},
 		{`onclick="submitAddTask()"`, "task.mutate", "adding a task"},
 		{`id="suggestBtn"`, "task.mutate", "brainstorming spends provider budget"},
-		{`onclick="openEnrollModal()"`, "executor.manage", "enrolling a device lets it run workloads"},
+		// Through panelAct since the dialog is deferred (Task 20386).
+		{`onclick="panelAct('execadmin','openEnrollModal')"`, "executor.manage", "enrolling a device lets it run workloads"},
 	}
 	for _, r := range required {
 		t.Run(r.perm+" on "+r.marker, func(t *testing.T) {

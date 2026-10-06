@@ -65,11 +65,12 @@ func overlayLikeID(id, class string) bool {
 	return false
 }
 
-// dashboardOverlays returns every overlay root declared in index.html, keyed by
-// id, with its declared mechanic.
+// dashboardOverlays returns every overlay root declared in index.html or in a
+// deferred script's markup (Task 20386), keyed by id, with its declared
+// mechanic.
 func dashboardOverlays(t *testing.T) map[string]string {
 	t.Helper()
-	html := loadAssets().page.contents
+	html := loadAssets().page.contents + deferredSource()
 	out := map[string]string{}
 	for _, tag := range overlayRootRe.FindAllString(html, -1) {
 		id, class := "", ""
@@ -163,7 +164,13 @@ func TestDashboard_OverlaysUseTheSharedHelper(t *testing.T) {
 		chained[id] = regexp.MustCompile(`getElementById\(\s*['"]` + regexp.QuoteMeta(id) + `['"]\s*\)` + overlayShowHideChained)
 	}
 
-	for _, file := range bundleFiles {
+	// The deferred scripts too: a dialog moved out of the bundle (Task 20386)
+	// still has to go through the helper.
+	files := append([]string(nil), bundleFiles...)
+	for _, d := range deferredScripts {
+		files = append(files, d.path)
+	}
+	for _, file := range files {
 		if file == helper {
 			continue
 		}

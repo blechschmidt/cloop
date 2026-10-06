@@ -193,7 +193,7 @@ const scenarios = {
     const seen = {alert: null, prompted: false};
     globalThis.alert = m => { seen.alert = String(m); };
     globalThis.prompt = () => { seen.prompted = true; return null; };
-    window.upgradeExecutor(0);
+    await window.panelAct('execadmin', 'upgradeExecutor', 0);
     await globalThis.__settle(3);
     seen.posts = h.requests.filter(r => r.method === 'POST' && r.url.includes('/upgrade')).length;
     return {html: JSON.stringify(seen)};
@@ -210,7 +210,7 @@ const scenarios = {
     h.routes['/api/executors'] = list;
     const seen = {};
     globalThis.prompt = (text, dflt) => { seen.text = String(text); seen.dflt = dflt; return dflt; };
-    window.upgradeExecutor(0);
+    await window.panelAct('execadmin', 'upgradeExecutor', 0);
     await globalThis.__settle(3);
     const post = h.requests.filter(r => r.method === 'POST' && r.url.includes('/upgrade')).pop();
     seen.body = post ? post.body : '';

@@ -329,7 +329,9 @@ async function main() {
       const mark = requests.length;
       await ctl('POST', '/silent?error=login_required');
       await ctl('POST', '/advance?seconds=600');
-      await cdp.eval(`window.loadAudit().then(() => true)`);
+      // The Audit tab is deferred (Task 20386); its loader is reached the way
+      // the page reaches it.
+      await cdp.eval(`window.panelAct('audit', 'loadAudit').then(() => true)`);
       await waitFor(cdp, `document.getElementById('sessionRenewBanner').style.display === 'flex'`);
       out.banner = Object.assign(await cdp.eval(STATE), {
         login_requests: since(requests, mark, isPath('/auth/login')).length,
@@ -377,7 +379,7 @@ async function main() {
     {
       const mark = requests.length;
       await ctl('POST', '/revoke');
-      await navigated(cdp, () => cdp.eval(`window.loadAudit(), true`));
+      await navigated(cdp, () => cdp.eval(`window.panelAct('audit', 'loadAudit'), true`));
       await waitFor(cdp, `document.getElementById('tab-audit').classList.contains('active')`);
       const logins = since(requests, mark, isPath('/auth/login'));
       out.lapsed = Object.assign(await cdp.eval(STATE), {

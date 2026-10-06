@@ -79,8 +79,9 @@ async function openSettingsOnBeta(h) {
   await globalThis.__settle(2);
   const ws = h.sockets[h.sockets.length - 1];
   if (ws) ws.open();
+  // The tab is fetched on its first open (Task 20386), a tick before its loader runs.
   window.switchTab('settings');
-  await globalThis.__settle(3);
+  await globalThis.__settle(5);
 }
 
 // reopenSettingsWith swaps the canned answer and walks away and back, which is
@@ -123,7 +124,7 @@ const scenarios = {
     h.routes['/api/dictate'] = {available: true, can_add_tasks: true, backend: 'groq'};
 
     const dictateBefore = h.requests.filter(r => r.url.startsWith('/api/dictate')).length;
-    window.saveSTTCfg();
+    await window.panelAct('settings', 'saveSTTCfg');
     await globalThis.__settle(4);
 
     const puts = sttRequests(h).filter(r => r.method === 'PUT');
@@ -163,7 +164,7 @@ const scenarios = {
 
     document.getElementById('cfgGroqKey').value = '   ';
     const before = sttRequests(h).filter(r => r.method === 'PUT').length;
-    window.saveSTTCfg();
+    await window.panelAct('settings', 'saveSTTCfg');
     await globalThis.__settle(3);
 
     return {putsBefore: before, putsAfter: sttRequests(h).filter(r => r.method === 'PUT').length};
@@ -183,7 +184,7 @@ const scenarios = {
     await globalThis.__settle(2);
     h.routes['/api/config/stt'] = clone(NO_KEY);
     h.routes['/api/dictate'] = {available: false, can_add_tasks: true};
-    window.clearSTTCfg();
+    await window.panelAct('settings', 'clearSTTCfg');
     await globalThis.__settle(4);
 
     return {visibleBefore: before, visibleAfter: vis('dictateTaskBtn')};

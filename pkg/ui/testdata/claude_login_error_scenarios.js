@@ -79,11 +79,12 @@ async function boot(loginResponse, loginStatus) {
 const panelHTML = () => (document.getElementById('ccAuthPanel').innerHTML || '');
 const toastText = () => (document.getElementById('toast').textContent || '');
 
-// clickSignIn renders the panel, then presses "Sign in with Claude.ai".
+// clickSignIn renders the panel, then presses "Sign in with Claude.ai". The
+// panel is the Budget tab's, fetched on its first open (Task 20386).
 async function clickSignIn() {
-  await window.loadClaudeAuthStatus();
+  await window.panelAct('budget', 'loadClaudeAuthStatus');
   await globalThis.__settle(5);
-  await window.startClaudeAuthLogin({});
+  await window.panelAct('budget', 'startClaudeAuthLogin', {});
   await globalThis.__settle(5);
 }
 
@@ -153,15 +154,19 @@ async function main() {
   //    tracks no activeElement. Asserting on focus would make this test pass or
   //    fail on the shim's capabilities rather than on the contract it is about.
   {
-    const src = require('fs').readFileSync(bundlePath, 'utf8');
-    const grab = name => {
-      const m = src.match(new RegExp('function ' + name + '\\([\\s\\S]*?\\n\\}'));
+    const fs = require('fs'), path = require('path');
+    const src = fs.readFileSync(bundlePath, 'utf8');
+    // oidcErrField is the Settings tab's, inside its deferred panel's factory
+    // (Task 20386), so its top-level functions close at a four-space indent.
+    const settings = fs.readFileSync(path.join(path.dirname(shimPath), '..', 'assets', 'js', 'deferred', 'settings.js'), 'utf8');
+    const grab = (name, from, indent) => {
+      const m = (from || src).match(new RegExp('function ' + name + '\\([\\s\\S]*?\\n' + (indent || '') + '\\}'));
       if (!m) throw new Error('not found in bundle: ' + name);
       return m[0];
     };
     const sandbox = {};
     // eslint-disable-next-line no-new-func
-    new Function('out', grab('errText') + grab('normalizeAPIError') + grab('oidcErrField') +
+    new Function('out', grab('errText') + grab('normalizeAPIError') + grab('oidcErrField', settings, '    ') +
       'out.f = {errText, normalizeAPIError, oidcErrField};')(sandbox);
     const {normalizeAPIError, oidcErrField} = sandbox.f;
 

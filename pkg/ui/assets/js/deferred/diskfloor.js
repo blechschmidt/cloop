@@ -10,12 +10,12 @@
 // Fetched the first time an admin opens the section (static.go,
 // deferredScripts): first paint has no room for a form most sessions never
 // see. It runs outside the dashboard's IIFE, so loadDiskUsage in
-// 28-retention.js hands over the helpers it calls, and the only name it puts on
-// window is the factory.
+// deferred/budget.js hands over the helpers it calls, and the only name it
+// puts on window is the factory.
 (function () {
   'use strict';
 
-  window.cloopDiskFloorPanel = function (h) {
+  window.cloopDiskfloorPanel = function (h) {
     const box = () => document.getElementById('diskFloorBody');
 
     function render(d) {

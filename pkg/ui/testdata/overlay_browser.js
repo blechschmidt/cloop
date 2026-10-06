@@ -37,6 +37,8 @@ const CHROME = process.argv[2];
 const BASE = process.argv[3];
 
 const OVERLAY = 'enroll-overlay';
+// The dialog is deferred since Task 20386: its script and markup arrive the
+// first time panelAct opens it, as the "+ Enroll device" button does.
 const OPEN_FN = 'openEnrollModal';
 // A header tab button: always rendered, never gated, and a plausible place for
 // focus to be sitting when a dialog is opened. The in-panel "+ Enroll device"
@@ -210,19 +212,37 @@ const FOCUSABLE_IDS = id => `(() => {
   return window.overlayFocusables(ov).map(e => e.id || e.textContent.trim().slice(0, 20));
 })()`;
 
+// See sandbox_browser.js: how long to keep looking, not a pause a healthy run
+// sits out.
+const WAIT_MS = 30000;
+
+async function waitFor(cdp, expr, what) {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    if (await cdp.eval(expr)) return;
+    if (Date.now() >= deadline) throw new Error('timed out waiting for ' + what);
+    await sleep(25);
+  }
+}
+
+const isOpen = id => `!!window.isOverlayOpen(${JSON.stringify(id)})`;
+
+// openFixture opens the dialog through panelAct, which resolves once the
+// deferred script has run and the dialog is up, then waits until focus is
+// inside it.
 async function openFixture(cdp, invokerId) {
   await cdp.eval(`(() => {
     const b = document.getElementById(${JSON.stringify(invokerId)});
     if (b) b.focus();
-    window.${OPEN_FN}();
-    return true;
+    return window.panelAct('execadmin', '${OPEN_FN}');
   })()`);
-  await sleep(60);
+  await waitFor(cdp, `${isOpen(OVERLAY)} && document.getElementById('${OVERLAY}').contains(document.activeElement)`,
+    'the dialog to open with focus inside');
 }
 
 async function closeFixture(cdp) {
-  await cdp.eval(`window.closeEnrollModal && window.closeEnrollModal()`);
-  await sleep(40);
+  await cdp.eval(`window.panelAct('execadmin', 'closeEnrollModal')`);
+  await waitFor(cdp, `!${isOpen(OVERLAY)}`, 'the dialog to close');
 }
 
 // ── scenarios ───────────────────────────────────────────────────────────────
@@ -235,7 +255,7 @@ async function run(cdp) {
     // The real in-panel button, if the Executors tab will show it.
     if (typeof switchTab === 'function') { try { switchTab('executors'); } catch (e) {} }
     const real = Array.from(document.querySelectorAll('button'))
-      .find(b => (b.getAttribute('onclick') || '').indexOf('${OPEN_FN}') === 0
+      .find(b => (b.getAttribute('onclick') || '').indexOf("'${OPEN_FN}'") !== -1
                  && !b.disabled && b.getClientRects().length);
     if (real) { if (!real.id) real.id = '_test_enroll_invoker'; return real.id; }
     return ${JSON.stringify(FALLBACK_INVOKER)};
@@ -313,7 +333,6 @@ async function run(cdp) {
 
   // 6. Closing with the dialog's own button hands focus back to the invoker.
   await closeFixture(cdp);
-  await sleep(40);
   out.close_restores_focus = {
     active: await cdp.eval(`(() => { const a=document.activeElement; return {id:a?a.id:'', isBody:a===document.body}; })()`),
     expect: invoker,
@@ -323,7 +342,7 @@ async function run(cdp) {
   // 7. Escape is the second close path, and must restore focus like the first.
   await openFixture(cdp, invoker);
   await cdp.escape();
-  await sleep(40);
+  await waitFor(cdp, `!${isOpen(OVERLAY)}`, 'Escape to close the dialog');
   out.escape_restores_focus = {
     open: await cdp.eval(`window.isOverlayOpen('${OVERLAY}')`),
     active: await cdp.eval(`(() => { const a=document.activeElement; return {id:a?a.id:'', isBody:a===document.body}; })()`),
@@ -334,7 +353,7 @@ async function run(cdp) {
   //    card is centred — so this is the real `event.target===this` path.
   await openFixture(cdp, invoker);
   await cdp.clickAt(5, 5);
-  await sleep(40);
+  await waitFor(cdp, `!${isOpen(OVERLAY)}`, 'a backdrop click to close the dialog');
   out.backdrop_click_restores_focus = {
     open: await cdp.eval(`window.isOverlayOpen('${OVERLAY}')`),
     active: await cdp.eval(`(() => { const a=document.activeElement; return {id:a?a.id:'', isBody:a===document.body}; })()`),
@@ -345,11 +364,11 @@ async function run(cdp) {
   //    the one behind, which stays open.
   await openFixture(cdp, invoker);
   await cdp.ctrlK();
-  await sleep(60);
+  await waitFor(cdp, isOpen('cmd-backdrop'), 'the command palette to open');
   const paletteOpen = await cdp.eval(`window.isOverlayOpen('cmd-backdrop')`);
   const paletteFocus = await cdp.eval(ACTIVE('cmd-backdrop'));
   await cdp.escape();
-  await sleep(60);
+  await waitFor(cdp, `!${isOpen('cmd-backdrop')}`, 'Escape to close the palette');
   out.stacked_escape_closes_front_only = {
     palette_open_before: paletteOpen,
     palette_focus_before: paletteFocus,
@@ -358,7 +377,7 @@ async function run(cdp) {
     active_after: await cdp.eval(ACTIVE(OVERLAY)),
   };
   await cdp.escape();
-  await sleep(40);
+  await waitFor(cdp, `!${isOpen(OVERLAY)}`, 'Escape to close the dialog behind the palette');
 
   // 10. The regression the old Escape chain carried: its last branch ran
   //     document.querySelector('.voice-modal-backdrop').remove() on a *static*
@@ -366,7 +385,6 @@ async function run(cdp) {
   //     for the life of the document and the next open threw on a null.
   await cdp.escape();
   await cdp.escape();
-  await sleep(40);
   out.voice_modal_survives_escape = await cdp.eval(`(() => {
     const present = !!document.getElementById('voiceModalBackdrop');
     let threw = '';
@@ -386,19 +404,27 @@ async function run(cdp) {
     const cdp = await connect(chrome.port);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `try { sessionStorage.setItem('cloop_resume', '{"at":0}'); } catch (e) {}`,
+    });
     await cdp.send('Page.navigate', {url: BASE});
 
-    // Wait for the bundle to have run, not merely for the document to exist.
-    let ready = false;
-    for (let i = 0; i < 200 && !ready; i++) {
-      await sleep(50);
+    // Wait for the bundle to have run and boot to be done with the tabs: boot
+    // picks a view once /api/projects answers, which under load is after the
+    // driver's own switch to Executors. Its last step, resumeView, removes the
+    // stale cloop_resume marker seeded below, so the marker's absence is the
+    // signal (telemetry_panel_browser.js).
+    const deadline = Date.now() + WAIT_MS;
+    for (;;) {
+      let ready = false;
       try {
-        ready = await cdp.eval(
-          `typeof window.openOverlay === 'function' && !!document.getElementById('${OVERLAY}')`);
+        ready = await cdp.eval(`typeof window.openOverlay === 'function' && typeof window.panelAct === 'function'
+          && sessionStorage.getItem('cloop_resume') === null`);
       } catch (e) { /* navigating */ }
+      if (ready) break;
+      if (Date.now() >= deadline) throw new Error('dashboard bundle never became ready');
+      await sleep(50);
     }
-    if (!ready) throw new Error('dashboard bundle never became ready');
-    await sleep(150); // let the first render settle
 
     const out = await run(cdp);
     process.stdout.write(JSON.stringify(out, null, 2));

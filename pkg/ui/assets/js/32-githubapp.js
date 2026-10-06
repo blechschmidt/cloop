@@ -4,7 +4,8 @@
 // once on the Settings tab — that stores a signing key and is hub-wide. A
 // project's maintainer then assigns repositories to their project from the
 // Overview tab, choosing from the installation's own inventory rather than
-// typing names.
+// typing names. The Overview's is here; the Settings one is fetched with that
+// tab (deferred/settings.js, Task 20386).
 //
 // The inventory is the whole point of asking GitHub rather than the operator.
 // An installation ID lives in a settings URL; a repository list lives nowhere
@@ -17,154 +18,12 @@
 // becomes markup — see the recurring bug class in this dashboard's history.
 
 const ghAppState = {
-  installations: [],   // discovered, awaiting a choice
-  connectKey: '',      // the pasted PEM, held only until the secret is minted
-  connectAppID: '',
-  connectBaseURL: '',
-  apps: [],            // stored github_app secrets
+  apps: [],            // the Apps this project may be assigned repositories from
   assignments: [],     // this project's live grants
   repos: [],           // inventory of the app selected in the assign form
   reposFor: '',        // which app id `repos` belongs to
   gitProxy: null,      // can this hub enforce a branch restriction (Task 20340)
   editing: '',         // grant id whose access row is open for editing
-};
-
-// ---------------------------------------------------------------------------
-// Settings: connect an App
-// ---------------------------------------------------------------------------
-
-// ghAppDiscover asks the hub where the pasted App is installed.
-//
-// Nothing is stored by this call. The key stays in ghAppState until the
-// operator picks an installation and the secret is minted, and is dropped
-// immediately afterwards.
-window.ghAppDiscover = function() {
-  const appID = (document.getElementById('ghAppId') || {}).value || '';
-  const key = (document.getElementById('ghAppKey') || {}).value || '';
-  const baseURL = (document.getElementById('ghAppBaseUrl') || {}).value || '';
-  if (!appID.trim() || !key.trim()) {
-    toast('App ID and private key are both required', 'error');
-    return;
-  }
-  const out = document.getElementById('ghAppInstallations');
-  if (out) out.innerHTML = '<div class="empty-state"><p>Asking GitHub…</p></div>';
-
-  api('/api/github-app/installations', {
-    app_id: appID.trim(),
-    private_key: key,
-    base_url: baseURL.trim(),
-  }).then(d => {
-    if (!d || d.error) {
-      if (out) out.innerHTML = '<div style="color:var(--danger);font-size:12px">' +
-        esc((d && d.error) || 'discovery failed') + '</div>';
-      return;
-    }
-    ghAppState.installations = d.installations || [];
-    ghAppState.connectKey = key;
-    ghAppState.connectAppID = appID.trim();
-    ghAppState.connectBaseURL = baseURL.trim();
-    ghAppRenderInstallations();
-  }).catch(e => {
-    if (out) out.innerHTML = '<div style="color:var(--danger);font-size:12px">' +
-      esc(String(e && e.message ? e.message : e)) + '</div>';
-  });
-};
-
-function ghAppRenderInstallations() {
-  const out = document.getElementById('ghAppInstallations');
-  if (!out) return;
-  const list = ghAppState.installations;
-  if (!list.length) {
-    out.innerHTML = '<div class="empty-state"><p>This App is not installed anywhere yet.</p></div>';
-    return;
-  }
-  // "all" vs "selected" is worth showing: an operator who cannot reach a
-  // repository needs to know whether to widen the installation or tick a box.
-  out.innerHTML =
-    '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">' +
-    'Choose the account whose repositories cloop should reach:</div>' +
-    list.map(i =>
-      '<div class="gh-install-row" style="display:flex;align-items:center;gap:10px;padding:6px 0">' +
-        '<button class="btn btn-sm" data-gh-install="' + esc(String(i.id)) + '">Use</button>' +
-        '<div><strong>' + esc(i.account) + '</strong> ' +
-          '<span class="badge unknown" style="font-size:10px">' + esc(i.account_type) + '</span> ' +
-          '<span style="font-size:11px;color:var(--muted)">installation ' + esc(String(i.id)) +
-          ', covers ' + esc(i.repository_selection) + ' repositories</span>' +
-        '</div>' +
-      '</div>').join('');
-}
-
-// ghAppSaveInstallation mints the github_app secret for a chosen installation.
-function ghAppSaveInstallation(installationID) {
-  const chosen = ghAppState.installations.find(i => String(i.id) === String(installationID));
-  if (!chosen) return;
-  const nameField = document.getElementById('ghAppName');
-  const name = (nameField && nameField.value.trim()) ||
-    ('github-' + String(chosen.account || 'app').toLowerCase().replace(/[^a-z0-9-]+/g, '-'));
-
-  const payload = {
-    app_id: Number(ghAppState.connectAppID),
-    installation_id: chosen.id,
-    private_key: ghAppState.connectKey,
-  };
-  if (ghAppState.connectBaseURL) payload.base_url = ghAppState.connectBaseURL;
-
-  api('/api/secrets', {
-    name: name,
-    kind: 'github_app',
-    payload: JSON.stringify(payload),
-    metadata: {
-      account: chosen.account,
-      account_type: chosen.account_type,
-      installation_id: String(chosen.id),
-    },
-    // Shared, not personal: an App connected by an admin is infrastructure the
-    // whole hub grants from. A personal one would be invisible to every other
-    // maintainer and could not be assigned to a shared project.
-    personal: false,
-  }).then(d => {
-    if (!d || d.error) { toast((d && d.error) || 'could not store the App', 'error'); return; }
-    toast('Connected ' + chosen.account, 'success');
-    // The key is no longer needed anywhere in this page.
-    ghAppState.connectKey = '';
-    ghAppState.installations = [];
-    ['ghAppKey', 'ghAppId', 'ghAppName', 'ghAppBaseUrl'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.value = '';
-    });
-    const out = document.getElementById('ghAppInstallations');
-    if (out) out.innerHTML = '';
-    loadGitHubApps();
-  }).catch(e => toast(String(e && e.message ? e.message : e), 'error'));
-}
-
-// loadGitHubApps lists the github_app secrets this hub holds.
-window.loadGitHubApps = function() {
-  if (typeof canGlobal === 'function' && !canGlobal('secret.grant')) return Promise.resolve();
-  return api('/api/secrets').then(d => {
-    const secrets = (d && d.secrets) || [];
-    ghAppState.apps = secrets.filter(s => s.kind === 'github_app');
-    const el = document.getElementById('ghAppList');
-    if (!el) return;
-    if (!ghAppState.apps.length) {
-      el.innerHTML = '<div class="empty-state"><p>No GitHub App connected yet.</p></div>';
-      return;
-    }
-    el.innerHTML = ghAppState.apps.map(a => {
-      const md = a.metadata || {};
-      const where = md.account
-        ? esc(md.account) + (md.account_type ? ' (' + esc(md.account_type) + ')' : '')
-        : 'installation ' + esc(md.installation_id || '?');
-      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;' +
-        'border-bottom:1px solid var(--border)">' +
-        '<strong>' + esc(a.name) + '</strong>' +
-        '<span style="font-size:11px;color:var(--muted)">' + where + '</span>' +
-        '<span style="flex:1"></span>' +
-        '<span style="font-size:11px;color:var(--muted)">' +
-          esc(String(a.active_grants || 0)) + ' active grant(s)</span>' +
-        '</div>';
-    }).join('');
-  }).catch(() => {});
 };
 
 // ---------------------------------------------------------------------------
@@ -457,9 +316,6 @@ function ghAppRevoke(grantID) {
 document.addEventListener('click', function(ev) {
   const t = ev.target;
   if (!t || !t.closest) return;
-
-  const install = t.closest('[data-gh-install]');
-  if (install) { ghAppSaveInstallation(install.getAttribute('data-gh-install')); return; }
 
   const revoke = t.closest('[data-gh-revoke]');
   if (revoke) { ghAppRevoke(revoke.getAttribute('data-gh-revoke')); return; }

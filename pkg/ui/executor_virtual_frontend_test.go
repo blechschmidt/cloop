@@ -57,8 +57,9 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 
 	cards := res["cards"].HTML
-	for _, want := range []string{"openExecutorVirtual(0)", "Virtual (1)", "devices: 1",
-		"Virtual executor on sgx", "openExecutorVirtual(1)",
+	// Through panelAct: the dialog is deferred (Task 20386).
+	for _, want := range []string{"panelAct('execadmin','openExecutorVirtual',0)", "Virtual (1)", "devices: 1",
+		"Virtual executor on sgx", "panelAct('execadmin','openExecutorVirtual',1)",
 		// The network chip speaks the dialog's three words, and only an
 		// unfiltered network is the negative one: no network at all is the
 		// tightest access there is, not a missing firewall.
@@ -88,8 +89,8 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 	// A new virtual executor starts with no network, the rules and the network
 	// name out of sight under the choices that apply them.
-	for _, want := range []string{`name="evxNet" id="evxNetNone" checked`, `id="evxNetFw" onchange="evxSync()"`,
-		`id="evxNetOpen" onchange="evxSync()"`, `id="evxFwRules" style="display:none"`,
+	for _, want := range []string{`name="evxNet" id="evxNetNone" checked`, `id="evxNetFw" data-change="evxSync"`,
+		`id="evxNetOpen" data-change="evxSync"`, `id="evxFwRules" style="display:none"`,
 		`id="evxOpenNet" style="display:none"`, "Nothing is reachable unless a rule below allows it"} {
 		if !strings.Contains(dialog, want) {
 			t.Errorf("dialog lacks %q", want)
@@ -145,7 +146,8 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 
 	settings := res["settings"].HTML
-	for _, want := range []string{"Yubico YubiHSM", "1050:0030", "serial 0031650425", "exposeUSBDevice(0)"} {
+	for _, want := range []string{"Yubico YubiHSM", "1050:0030", "serial 0031650425",
+		`data-act="exposeUSBDevice" data-arg="0"`} {
 		if !strings.Contains(settings, want) {
 			t.Errorf("the Settings USB list lacks %q: %s", want, settings)
 		}

@@ -285,9 +285,15 @@ const HEIGHTS = `(() => {
 
 // ── scenarios ───────────────────────────────────────────────────────────────
 
+// The panels whose markup arrives with their script on first open (Task 20386).
+// Mounted up front so their selects are measured like the page's own.
+const DEFERRED_PANELS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'execadmin'];
+
 async function run(cdp) {
   const out = {};
 
+  await cdp.eval(`Promise.all(${JSON.stringify(DEFERRED_PANELS)}.map(n => window.panelAct(n)))
+    .then(ps => ps.every(Boolean))`);
   await cdp.eval(FIXTURE);
   out.styles = [];
   // getComputedStyle recalculates on the spot, so a theme switch needs no wait.

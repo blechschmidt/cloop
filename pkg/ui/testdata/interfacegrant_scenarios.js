@@ -39,6 +39,9 @@ async function boot() {
   ]};
   require(bundlePath);
   await globalThis.__settle(5);
+  // The grant dialog is the Secrets tab's (Task 20386): fetched through the
+  // loader the tab uses, then driven directly.
+  globalThis.SEC = await window.panelAct('secrets');
   return h;
 }
 
@@ -68,7 +71,7 @@ const scenarios = {
   async selecting_host_interface_reveals_its_fieldset() {
     await boot();
     setVal('grantKind', 'host_interface');
-    window.onGrantKindChange();
+    SEC.onGrantKindChange();
     await globalThis.__settle(2);
     return {visible: visibleKindSets()};
   },
@@ -81,7 +84,7 @@ const scenarios = {
     const out = {};
     for (const kind of ['host_device', 'local_repo', 'host_interface', 'kubeconfig']) {
       setVal('grantKind', kind);
-      window.onGrantKindChange();
+      SEC.onGrantKindChange();
       await globalThis.__settle(2);
       out[kind] = visibleKindSets().includes('grantSet-writable');
     }
@@ -94,13 +97,13 @@ const scenarios = {
   async submit_sends_the_interface_allowlist() {
     const h = await boot();
     setVal('grantKind', 'host_interface');
-    window.onGrantKindChange();
+    SEC.onGrantKindChange();
     await globalThis.__settle(2);
     setVal('grantSubject', 'project:/srv/firmware');
     setVal('grantSecret', 'sec_if');
     setVal('grantInterfaces', 'dut, can0');
     setVal('grantTTL', '480');
-    window.submitGrant();
+    SEC.submitGrant();
     await globalThis.__settle(5);
 
     const post = h.requests.filter(r => r.method === 'POST' && r.url.startsWith('/api/grants')).pop();
@@ -116,7 +119,7 @@ const scenarios = {
   async submit_sends_the_device_allowlist_and_writable() {
     const h = await boot();
     setVal('grantKind', 'host_device');
-    window.onGrantKindChange();
+    SEC.onGrantKindChange();
     await globalThis.__settle(2);
     setVal('grantSubject', 'project:/srv/firmware');
     setVal('grantSecret', 'sec_dev');
@@ -124,7 +127,7 @@ const scenarios = {
     setVal('grantTTL', '480');
     const wr = document.getElementById('grantWritable');
     if (wr) wr.checked = true;
-    window.submitGrant();
+    SEC.submitGrant();
     await globalThis.__settle(5);
 
     const post = h.requests.filter(r => r.method === 'POST' && r.url.startsWith('/api/grants')).pop();
@@ -136,14 +139,14 @@ const scenarios = {
   async submit_omits_writable_for_other_kinds() {
     const h = await boot();
     setVal('grantKind', 'host_interface');
-    window.onGrantKindChange();
+    SEC.onGrantKindChange();
     await globalThis.__settle(2);
     setVal('grantSubject', 'project:/srv/firmware');
     setVal('grantSecret', 'sec_if');
     setVal('grantInterfaces', 'dut');
     const wr = document.getElementById('grantWritable');
     if (wr) wr.checked = true;   // stale from a previous kind
-    window.submitGrant();
+    SEC.submitGrant();
     await globalThis.__settle(5);
 
     const post = h.requests.filter(r => r.method === 'POST' && r.url.startsWith('/api/grants')).pop();

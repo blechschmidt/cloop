@@ -14,9 +14,9 @@
 //
 // Fetched on demand since Task 20379 (static.go, deferredScripts): an
 // admin-only form most sessions never open has no claim on first paint. It
-// runs outside the dashboard's IIFE, so offboardPreview in 31-offboard.js hands
-// over the helpers it calls, and the only name it puts on window is the
-// factory.
+// runs outside the dashboard's IIFE, so offboardPreview in the Secrets panel
+// (deferred/secrets.js since Task 20386) hands over the helpers it calls, and
+// the only name it puts on window is the factory.
 (function () {
   'use strict';
 

@@ -58,14 +58,15 @@ func TestDashboard_FirewallPanels(t *testing.T) {
 	}
 
 	cards, dialog, _ := strings.Cut(res["device_dialog"].HTML, "\n----\n")
-	need("device_dialog", "the cards", cards, "openExecutorFirewall(0)")
-	if strings.Contains(cards, "openExecutorFirewall(1)") || strings.Contains(cards, "openExecutorFirewall(2)") {
+	// Through panelAct: the dialog is deferred (Task 20386).
+	need("device_dialog", "the cards", cards, "panelAct('execadmin','openExecutorFirewall',0)")
+	if strings.Contains(cards, "'openExecutorFirewall',1)") || strings.Contains(cards, "'openExecutorFirewall',2)") {
 		t.Error("device_dialog: the host-process and virtual executors must not offer a device firewall")
 	}
 	need("device_dialog", "the dialog", dialog,
 		"Set by admin@example.com",
 		"runs payloads on its host", "Lab", "/srv/app", "(exceeds it)", "port 22 is not allowed",
-		`onclick="clearExecutorFirewall()"`, `onclick="saveExecutorFirewall()"`)
+		`data-act="clearExecutorFirewall"`, `data-act="saveExecutorFirewall"`)
 
 	need("summary", "the sentence", res["summary"].HTML,
 		"In effect: TCP to the public Internet on port 443; DNS via 1.1.1.1:53; never 203.0.113.0/24. "+

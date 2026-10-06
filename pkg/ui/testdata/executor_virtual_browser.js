@@ -172,26 +172,22 @@ async function boot(cdp) {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Page.navigate', {url: BASE + '/'});
-  for (let i = 0; i < 200; i++) {
-    await sleep(50);
-    if (await cdp.eval(`typeof window.openExecutorVirtual === 'function'`)) return;
+  if (!await waitFor(cdp, `typeof window.panelAct === 'function' && typeof window.loadExecutors === 'function'`)) {
+    throw new Error('the dashboard bundle never ran');
   }
-  throw new Error('window.openExecutorVirtual never appeared — the dialog is unreachable');
 }
 
-// openDialog opens the device's dialog the way its card's button does, and
-// waits for the form its GET fills.
+// openDialog opens the device's dialog the way its card's button does — a
+// click, which fetches the deferred dialog through panelAct (Task 20386) —
+// and waits for the form its GET fills.
 async function openDialog(cdp) {
-  const wired = await cdp.eval(`typeof window.evxSync === 'function'
-    && typeof window.saveExecutorVirtual === 'function'`);
-  if (!wired) throw new Error('the dialog\'s handlers are not exported on window');
   await cdp.eval(`window.loadExecutors && window.loadExecutors()`);
   // The card index is whatever the page's own list says, once it has one.
   const idx = await (async () => {
     const deadline = Date.now() + WAIT_MS;
     for (;;) {
       const i = await cdp.eval(`(() => {
-        const m = /openExecutorVirtual\\((\\d+)\\)/.exec((document.getElementById('execList') || {}).innerHTML || '');
+        const m = /'openExecutorVirtual',(\\d+)\\)/.exec((document.getElementById('execList') || {}).innerHTML || '');
         return m ? Number(m[1]) : -1; })()`);
       if (i >= 0) return i;
       if (Date.now() >= deadline) return -1;
@@ -199,7 +195,7 @@ async function openDialog(cdp) {
     }
   })();
   if (idx < 0) throw new Error('the device card never offered its Virtual button');
-  await cdp.eval(`window.openExecutorVirtual(${idx})`);
+  await cdp.eval(`document.querySelector('#execList button[onclick*="\\'openExecutorVirtual\\',${idx})"]').click()`);
   if (!await waitFor(cdp, `!!document.getElementById('evxNetNone')`)) {
     throw new Error('the dialog never rendered its network choice: ' + await cdp.eval(textExpr('evxBody')));
   }
@@ -330,7 +326,7 @@ async function main() {
   try {
     await boot(cdp);
     await scenarioSettingsFollowTheChoice(cdp);
-    await cdp.eval(`window.closeExecutorVirtual && window.closeExecutorVirtual()`);
+    await cdp.eval(`window.panelAct('execadmin', 'closeExecutorVirtual')`);
     await scenarioSavedAsChosen(cdp);
     process.stdout.write(JSON.stringify(results, null, 2));
   } finally {

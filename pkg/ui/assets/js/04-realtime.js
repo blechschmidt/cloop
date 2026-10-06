@@ -334,7 +334,7 @@ function handleRealtimeMsg(type, data, scope) {
       try {
         if (activeTab === 'executors' || activeTab === 'overview') { loadExecutors(); }
         // A fleet change is an audited event, so the trail grew too.
-        if (activeTab === 'audit') { loadAudit(); }
+        if (activeTab === 'audit') panelIf('audit', 'refresh');
       } catch(_) {}
       break;
     case 'audit_append':
@@ -347,7 +347,7 @@ function handleRealtimeMsg(type, data, scope) {
       // page one; paging back to the top under someone reading page 4
       // would be worse than a slightly stale view.
       try {
-        if (activeTab === 'audit' && auditState.offset === 0) { loadAudit(); }
+        if (activeTab === 'audit') panelIf('audit', 'onAppend');
       } catch(_) {}
       break;
     case 'secrets_update':
@@ -356,7 +356,7 @@ function handleRealtimeMsg(type, data, scope) {
       // a viewer who receives it learns nothing and the refetch it would
       // trigger is refused by the route gate. Only the open panel re-reads.
       try {
-        if (activeTab === 'secrets') { loadSecretsPanel(); }
+        if (activeTab === 'secrets') panelIf('secrets', 'open');
         // The Overview's Claude credential card shows a grant (Task 20379).
         if (activeTab === 'overview') loadHarnessCred();
       } catch(_) {}

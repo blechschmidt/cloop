@@ -159,9 +159,10 @@ type selectStyleResults struct {
 	EscapeFromClosedSelect *selectKeyState `json:"escape_from_closed_select"`
 }
 
-// selectStyleMinSelects is a floor, not a count: index.html holds 39 selects
-// and the driver adds 5. Far fewer means the page did not assemble and every
-// per-select assertion below would pass on an empty list.
+// selectStyleMinSelects is a floor, not a count: index.html and the deferred
+// panels the driver mounts (Task 20386) hold 39 selects, and the driver adds 5.
+// Far fewer means the page did not assemble and every per-select assertion
+// below would pass on an empty list.
 const selectStyleMinSelects = 30
 
 // TestSelects_FitThePageDesign is the whole gate; the subtests read from one

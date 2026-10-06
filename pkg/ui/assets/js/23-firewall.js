@@ -15,7 +15,10 @@
 //
 // _fwForm, _fwRead and fwSync are shared by both: one form, one reading of it,
 // one sentence for what it lets through. The IDs are a fixed prefix plus a
-// field name, so nothing user-typed reaches an attribute.
+// field name, so nothing user-typed reaches an attribute. The project's card
+// is here, because the Overview renders it on first paint; the device's
+// dialog is deferred/execadmin.js since Task 20386, handed these through
+// panelHelpers().fw.
 
 // _fwSum renders a rule set as the clause after "In effect:". null is no
 // firewall at all.
@@ -70,84 +73,6 @@ function _fwRefusal(d) {
   const why = (d && d.reasons && d.reasons.length) ? d.reasons : [(d && d.error) || 'Save failed'];
   return '<div class="form-hint" style="color:var(--red)">' + why.map(esc).join('<br>') + '</div>';
 }
-
-// ── A device's rule set ─────────────────────────────────────────────────────
-
-// efwTarget is the executor the dialog edits, held by ID for the reason
-// execLimitsTarget is: the list may reorder while the dialog is open.
-let efwTarget = null;
-
-window.openExecutorFirewall = function(idx) {
-  const ex = _execAt(idx);
-  if (!ex) return;
-  efwTarget = {id: ex.id, name: ex.name || ex.id};
-  document.getElementById('efwBody').innerHTML = '<div class="form-hint">Loading…</div>';
-  openOverlay('executor-firewall-overlay', {dismiss: closeExecutorFirewall});
-  api('/api/executors/' + encodeURIComponent(ex.id) + '/firewall')
-    .then(d => _efwRender(d, ''))
-    .catch(e => _efwRender({error: _execDetailErrText(e)}, ''));
-};
-
-window.closeExecutorFirewall = function() {
-  closeOverlay('executor-firewall-overlay');
-  efwTarget = null;
-};
-
-function _efwRender(d, note) {
-  const body = document.getElementById('efwBody');
-  if (!body || !efwTarget) return;
-  if (!d || d.error) { body.innerHTML = _fwRefusal(d); return; }
-  efwTarget.configured = d.configured;
-  let h = '<div class="form-hint">The most any sandbox on ' + esc(efwTarget.name) + ' may reach. Its virtual '
-    + 'executors’ firewalls and its projects’ rules can only narrow this. '
-    + (d.configured ? 'Set by ' + esc(d.set_by || 'an admin') + '.' : '<b>No rule set: nothing here bounds it.</b>') + '</div>';
-  if (d.config) h += '<div class="form-hint">Its configuration file allows at most: ' + esc(_fwSum(d.config)) + '.</div>';
-  if (d.warning) h += '<div class="form-hint" style="color:var(--yellow)">&#9888; ' + esc(d.warning) + '</div>';
-  h += note + '<div id="efwWarn"></div>';
-  h += _fwForm('efw', d.configured ? d.rules : {allow_public_internet: true, allow_ports: [443], resolvers: ['1.1.1.1']});
-  const kids = d.children || [];
-  if (kids.length) {
-    h += '<div class="form-hint">Bounded by it: ' + kids.map(c => esc(c.kind === 'virtual' ? (c.name || c.id) : c.id)
-      + (c.fits ? '' : ' <b style="color:var(--red)" title="' + esc((c.reasons || []).join('; ')) + '">(exceeds it)</b>'))
-      .join(', ') + '</div>';
-  }
-  h += '<div class="modal-footer">'
-    + (d.configured ? '<button class="btn danger" onclick="clearExecutorFirewall()">Remove rules</button>' : '')
-    + '<button class="btn" onclick="closeExecutorFirewall()">Close</button>'
-    + '<button class="btn primary" onclick="saveExecutorFirewall()">Save</button></div>';
-  body.innerHTML = h;
-  fwSync('efw');
-}
-
-function _efwSave(payload) {
-  const t = efwTarget;
-  if (!t) return;
-  apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/firewall', payload)
-    .then(d => {
-      if (!d || d.error) {
-        const w = document.getElementById('efwWarn');
-        if (w) w.innerHTML = _fwRefusal(d);
-        return;
-      }
-      const n = d.constrained || [];
-      _efwRender(d, n.length ? '<div class="form-hint" style="color:var(--yellow)">Narrowed to fit: '
-        + n.map(c => '<b>' + esc(c.name || c.subject) + '</b> — ' + esc((c.notes || []).join('; '))).join('<br>')
-        + '</div>' : '');
-      toast(payload.clear ? 'Firewall removed from ' + t.name
-        : 'Firewall saved for ' + t.name + (n.length ? ' · ' + n.length + ' rule set(s) narrowed' : ''), 'ok');
-      loadExecutors();
-    })
-    .catch(e => toast(_execDetailErrText(e) || 'Save failed', 'err'));
-}
-
-window.saveExecutorFirewall = function() { _efwSave(_fwRead('efw')); };
-
-window.clearExecutorFirewall = function() {
-  if (efwTarget && confirm('Remove the firewall rule set on ' + efwTarget.name + '?\n\nIts sandboxes will be '
-      + 'bounded only by their own firewalls and its configuration.')) {
-    _efwSave({clear: true});
-  }
-};
 
 // ── A project's rule set ────────────────────────────────────────────────────
 

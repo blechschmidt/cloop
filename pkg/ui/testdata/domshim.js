@@ -169,6 +169,39 @@ globalThis.document = {
 // and code that compares against activeElement must not see undefined.
 globalThis.document.activeElement = globalThis.document.body;
 
+// ── deferred panels ─────────────────────────────────────────────────────────
+//
+// The bundle fetches a deferred panel (static.go, deferredScripts) by appending
+// a <script> whose src the page names in a <meta name="cloop-<name>-src">. A
+// browser fetches and runs it; this shim runs the file from assets/js/deferred/
+// and fires onload a tick later, so a scenario reaches a deferred panel the way
+// the page does — through panelAct — and never by a back door (Task 20386).
+// __harness.deferredFail[name] makes that fetch fail instead.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const vm = require('vm');
+  const dir = path.join(__dirname, '..', 'assets', 'js', 'deferred');
+  const file = name => path.join(dir, name + '.js');
+  globalThis.document.querySelector = sel => {
+    const m = /^meta\[name="cloop-([\w-]+)-src"\]$/.exec(String(sel));
+    return m && fs.existsSync(file(m[1])) ? {getAttribute: () => 'deferred:' + m[1]} : null;
+  };
+  const head = globalThis.document.head;
+  head.appendChild = c => {
+    head.children.push(c);
+    const m = /^deferred:([\w-]+)$/.exec(String(c.src || ''));
+    if (m) {
+      setTimeout(() => {
+        if (globalThis.__harness.deferredFail[m[1]]) { if (c.onerror) c.onerror(new Error('fetch failed')); return; }
+        vm.runInThisContext(fs.readFileSync(file(m[1]), 'utf8'), {filename: file(m[1])});
+        if (c.onload) c.onload();
+      }, 0);
+    }
+    return c;
+  };
+}
+
 // ── storage ─────────────────────────────────────────────────────────────────
 
 function mkStorage() {
@@ -278,6 +311,8 @@ const harness = {
   // stopped. A live one after a completed dictation is the browser's recording
   // indicator left lit with nothing able to turn it off.
   micTracks: [{live: true, stop() { this.live = false; }}],
+  // Deferred panels whose fetch fails, by name (see "deferred panels" above).
+  deferredFail: {},
 };
 globalThis.__harness = harness;
 

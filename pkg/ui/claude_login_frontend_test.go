@@ -45,7 +45,6 @@ var knownRawJSONFetches = map[string]int{
 	"assets/js/12-task-crud.js": 5,
 	"assets/js/15-voice.js":     2, // multipart audio upload
 	"assets/js/18-shortcuts.js": 2,
-	"assets/js/23-executors.js": 2,
 	"assets/js/25-replay.js":    1,
 	"assets/js/26-sessions.js":  1,
 }
@@ -73,7 +72,13 @@ func TestDashboard_APIResponsesGoThroughParseAPIResponse(t *testing.T) {
 		"assets/js/17-assistant.js": true,
 	}
 	counts := map[string][]string{}
-	for _, name := range bundleFiles {
+	// The deferred scripts too (Task 20386): moving a fragment out of the
+	// bundle must not move it out of reach of this gate.
+	files := append([]string(nil), bundleFiles...)
+	for _, d := range deferredScripts {
+		files = append(files, d.path)
+	}
+	for _, name := range files {
 		if exempt[name] {
 			continue
 		}

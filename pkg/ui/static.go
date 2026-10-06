@@ -80,59 +80,39 @@ var bundleFiles = []string{
 	"assets/js/11-timeline.js",
 	"assets/js/12-task-crud.js",
 	"assets/js/13-suggest.js",
-	"assets/js/14-settings.js",
 	"assets/js/15-voice.js",
 	"assets/js/16-chat.js",
 	"assets/js/17-assistant.js",
 	"assets/js/18-shortcuts.js",
 	"assets/js/19-analytics.js",
-	"assets/js/20-budget.js",
-	"assets/js/21-audit.js",
-	"assets/js/22-secrets.js",
+	// The executor list and cards, the Overview's executor and caps cards; the
+	// executor dialogs are deferred/execadmin.js (Task 20386).
 	"assets/js/23-executors.js",
-	// The firewall rule sets of devices and projects (Task 20363), after the
-	// executors fragment whose helpers it uses.
+	// A project's firewall card on the Overview (Task 20363), after the
+	// executors fragment whose helpers it uses. A device's firewall dialog is
+	// deferred/execadmin.js.
 	"assets/js/23-firewall.js",
 	"assets/js/24-mobile-nav.js",
 	"assets/js/25-replay.js",
-	// Loads after 22-secrets.js: the sessions panel reuses that file's
-	// formatting helpers (_secFmtDuration, _secTTLClass, _secApplyGating) and
-	// renders into the same Secrets tab.
+	// The header's sign-out buttons (Task 20176). The sessions table they used
+	// to sit beside moved with the Secrets tab to deferred/secrets.js.
 	"assets/js/26-sessions.js",
+	// The header's own-quota badge and the formatting the deferred Quotas tab
+	// shares with it (Task 20182).
 	"assets/js/27-quotas.js",
-	// Renders into the Settings tab, which is where the config that governs
-	// it is already edited (Task 20229).
-	"assets/js/28-retention.js",
 	// The running hub's own build (Task 20249): the Settings panel, the footer
 	// chip, and the reconnect check that notices the page is now older than
 	// the server. One fragment rather than three edits, because those three
 	// surfaces share the fetch and the formatting.
 	"assets/js/29-build.js",
-	// The read side of the front-end diagnostic trail (Task 20251). Renders
-	// into its own global tab, gated on audit.read like the Audit panel it
-	// sits beside.
-	"assets/js/30-telemetry.js",
-	// Offboarding (Task 20261). Renders into the Secrets tab beside the
-	// sessions table, and reuses that file's gating helper, so it must load
-	// after 26-sessions.js.
-	"assets/js/31-offboard.js",
-	// CI/CD pipeline federation (Task 20278): the Settings panel that edits
-	// the pipeline allowlist and watches the sessions it mints.
-	"assets/js/32-cicd.js",
 	// Parallel features (Task 20341): the Features panel on a project's
 	// Overview, the banner on a feature's, and their three dialogs. Uses
 	// nothing but 00-core.js/00-overlay.js helpers and openProject from
 	// 05-projects.js, all in scope by the time it runs.
 	"assets/js/32-features.js",
-	// GitHub App connection and per-project repository assignment
-	// (Task 20306). Two panels — one on Settings, one on the project
-	// overview — in one fragment, because they share the state that carries
-	// a discovered installation from the first to the second.
+	// Per-project repository assignment on the Overview (Task 20306). The
+	// Settings panel that connects an App is deferred/settings.js.
 	"assets/js/32-githubapp.js",
-	// Single sign-on (Task 20308): the Settings panel that edits ui.oidc.
-	// Depends on nothing but 00-core.js's helpers, so its position is fixed
-	// only by the filename-order rule.
-	"assets/js/32-oidc.js",
 	// Silent sign-in renewal and the way back from a lapsed SSO session
 	// (Task 20359). Called from 00-core.js's response handling and
 	// 18-shortcuts.js's boot, both of which run after every fragment has been
@@ -140,11 +120,10 @@ var bundleFiles = []string{
 	"assets/js/32-renew.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
-	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is
-	// why it keeps being renumbered as panels are added: the list must stay in
-	// filename order, so a new fragment before the closer has to take a number
-	// below it.
-	"assets/js/33-glasses.js",
+	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. Numbered
+	// 99 so that the list, which must stay in filename order, never needs it
+	// renumbered when a panel is added.
+	"assets/js/99-end.js",
 }
 
 // deferredScripts are served as assets of their own and loaded only when a
@@ -166,6 +145,20 @@ var deferredScripts = []struct{ token, path string }{
 	// The free-space floor editor in Settings → Disk & Retention (Task
 	// 20381): admin-only, so only an admin's Settings ever fetches it.
 	{"diskfloor.js", "assets/js/deferred/diskfloor.js"},
+	// The Settings and admin tabs, markup and code, each fetched on its first
+	// open (Task 20386): 01-overview.js's openDeferredTab loads them. Their
+	// handlers are data-act attributes that mountPanel routes, since a
+	// deferred script cannot put functions on window for an inline onclick.
+	{"settings.js", "assets/js/deferred/settings.js"},
+	{"budget.js", "assets/js/deferred/budget.js"},
+	{"secrets.js", "assets/js/deferred/secrets.js"},
+	{"audit.js", "assets/js/deferred/audit.js"},
+	{"quotas.js", "assets/js/deferred/quotas.js"},
+	{"telemetry.js", "assets/js/deferred/telemetry.js"},
+	// The executor dialogs — history, sandbox, virtual executors, firewall,
+	// limits, access, enrollment and upgrades — fetched on the first open of
+	// any of them through panelAct (Task 20386).
+	{"execadmin.js", "assets/js/deferred/execadmin.js"},
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

@@ -81,6 +81,9 @@ async function boot(opts) {
   await globalThis.__settle(5);
   await window.loadExecutors();
   await globalThis.__settle(3);
+  // The dialog is deferred (Task 20386): fetched through the loader the
+  // card's buttons use, then driven directly.
+  globalThis.XA = await window.panelAct('execadmin');
   return h;
 }
 
@@ -102,7 +105,7 @@ function fillRules() {
 }
 
 async function postedAfterSave(h) {
-  window.saveExecutorVirtual();
+  XA.saveExecutorVirtual();
   await globalThis.__settle(4);
   const post = h.requests.filter(r => r.method === 'POST' && r.url.includes('/virtuals')).pop();
   return post ? post.body : '';
@@ -114,7 +117,7 @@ function summary(mode, fill) {
   choose(mode);
   fillRules();
   fill();
-  window.evxSync();
+  XA.evxSync();
   return {sum: el('evxFwSum').innerHTML, warn: el('evxFwSum').classList.contains('warn'),
     rules: el('evxFwRules').style.display, open: el('evxOpenNet').style.display};
 }
@@ -129,7 +132,7 @@ const scenarios = {
   // The dialog lists the USB hardware, hubs excluded.
   async dialog() {
     await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
@@ -137,7 +140,7 @@ const scenarios = {
   // way into that device's dialog.
   async settings() {
     await boot();
-    window.loadUSBSettings();
+    await window.panelAct('settings', 'loadUSBSettings');
     await globalThis.__settle(4);
     return {html: el('usbList').innerHTML};
   },
@@ -145,7 +148,7 @@ const scenarios = {
   // expects.
   async create() {
     const h = await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     el('evxName').value = 'HSM sandbox';
     el('evxEngine').value = 'docker';
@@ -158,7 +161,7 @@ const scenarios = {
     el('evxDeny').value = '203.0.113.0/24\n198.51.100.7';
     el('evxPorts').value = '';
     el('evxDns').value = '1.1.1.1, 9.9.9.9';
-    window.saveExecutorVirtual();
+    XA.saveExecutorVirtual();
     await globalThis.__settle(4);
     const post = h.requests.filter(r => r.method === 'POST' && r.url.includes('/virtuals')).pop();
     return {body: post ? post.body : ''};
@@ -167,7 +170,7 @@ const scenarios = {
   // no firewall, and the network is none.
   async createNoNetwork() {
     const h = await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     el('evxName').value = 'Quiet';
     fillRules();
@@ -177,7 +180,7 @@ const scenarios = {
   // Unfiltered sends the network named, and no firewall either.
   async createUnfiltered() {
     const h = await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     el('evxName').value = 'Lab';
     fillRules();
@@ -190,13 +193,13 @@ const scenarios = {
   // could not show and so reset to none on save.
   async editFirewalled() {
     await boot({stored: true});
-    window.openExecutorVirtual(1);
+    XA.openExecutorVirtual(1);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
   async editNamed() {
     await boot({stored: true});
-    window.openExecutorVirtual(2);
+    XA.openExecutorVirtual(2);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
@@ -207,21 +210,21 @@ const scenarios = {
     await boot({parent: {protocol_version: 13, supported: false,
       unsupported_note: "This device's agent speaks protocol v13, and the hub needs v14 to apply a virtual " +
         "executor's firewall or devices. NOTE FROM THE HUB."}});
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
   // A device that cannot install a firewall says so under Firewalled.
   async noPacketFilter() {
     await boot({parent: {packet_filter: false, packet_filter_issue: 'nft(8) needs CAP_NET_ADMIN'}});
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },
   // The sentence under the rules, for each shape of rule set.
   async summaries() {
     await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     const out = {};
     out.full = summary('evxNetFw', () => {});

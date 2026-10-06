@@ -108,7 +108,8 @@ async function boot(detailBody, status) {
 
   await window.loadExecutors();
   await globalThis.__settle(3);
-  window.openExecutorDetail(0);
+  // A deferred dialog (Task 20386): reached the way the card's button reaches it.
+  await window.panelAct('execadmin', 'openExecutorDetail', 0);
   await globalThis.__settle(5);
   return h;
 }
@@ -194,7 +195,7 @@ const scenarios = {
       completed: [ref({id: 77, title: 'in a project you cannot see',
                        project_name: 'gamma', project_path: '/srv/gamma'})],
     }));
-    window.openExecutorTaskRef(0);
+    await window.panelAct('execadmin', 'openExecutorTaskRef', 0);
     await globalThis.__settle(3);
     const r = out();
     r.toast = (document.getElementById('toast') || {}).textContent || '';
@@ -213,7 +214,7 @@ const scenarios = {
                        project_name: 'beta', project_path: '/srv/beta'})],
     }));
     h.requests.length = 0;
-    window.openExecutorTaskRef(0);
+    await window.panelAct('execadmin', 'openExecutorTaskRef', 0);
     await globalThis.__settle(5);
     const r = out();
     r.requests = h.requests.map(x => x.url);

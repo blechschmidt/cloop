@@ -1245,6 +1245,11 @@
   #toast.err { border-color:rgba(248,81,73,.5);  color:var(--red); }
   #toast.info{ border-color:rgba(88,166,255,.5); color:var(--accent); }
 
+  /* A deferred panel loading, or not arriving (Task 20386): in its tab, or for
+     a dialog in a banner that stays until retried or dismissed. */
+  .deferred-note { padding:16px; font-size:13px; color:var(--muted); }
+  #deferredFail { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); z-index:110; max-width:92vw; background:var(--surface); border:1px solid rgba(248,81,73,.5); border-radius:var(--radius); }
+
   /* ── Danger zone ── */
   .danger-zone { border-color:rgba(248,81,73,.3); }
   .danger-zone h3 { color:var(--red); }

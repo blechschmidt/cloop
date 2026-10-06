@@ -270,8 +270,9 @@ func allUISources() string {
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
-// shell, app.css, the error boundary, and every panel JS fragment — joined in
-// the order the browser sees them.
+// shell, app.css, the error boundary, every panel JS fragment, and the deferred
+// scripts with the markup they mount (Task 20386) — joined in the order the
+// browser sees them.
 //
 // Before Task 20174 this was a single `dashboardHTML` string constant in
 // server.go, and these tests grepped it directly. The front end now lives in
@@ -285,8 +286,22 @@ var dashboardSource = func() string {
 	// below: these tests read the front end as written (the served page has
 	// its comments stripped since Task 20363, and several tests here use one
 	// as a landmark).
-	return a.renderedPage + "\n" + a.css + "\n" + a.boundary + "\n" + a.bundle
+	return a.renderedPage + "\n" + a.css + "\n" + a.boundary + "\n" + a.bundle + "\n" + deferredSource()
 }()
+
+// deferredSource is every deferred script as written, in deferredScripts
+// order. Since Task 20386 the Settings and admin tabs and the executor dialogs
+// carry their markup in these, so an invariant about the page's markup has to
+// read them too — a grep of index.html alone would pass on a dialog that moved.
+func deferredSource() string {
+	a := loadAssets()
+	var b strings.Builder
+	for _, d := range deferredScripts {
+		b.WriteString(a.deferred[d.token].raw)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
 
 // Frontend behaviour is impossible to assert
 // end-to-end from Go without a real browser, but the *structural* invariants

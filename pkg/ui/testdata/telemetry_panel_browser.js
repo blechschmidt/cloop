@@ -206,7 +206,7 @@ async function openPanel(cdp) {
   // resumeView, removes the cloop_resume marker seeded below (stale, so it
   // restores nothing), which makes the marker's absence the signal that boot
   // is done with the tabs.
-  await waitFor(cdp, `typeof window.switchTab === 'function' && typeof window.saveTelemetryPolicy === 'function'
+  await waitFor(cdp, `typeof window.switchTab === 'function' && typeof window.panelAct === 'function'
     && sessionStorage.getItem('cloop_resume') === null`, 'the dashboard to finish booting');
   await cdp.eval(`window.switchTab('settings')`);
   // The badge is written only once GET /api/config/telemetry has answered and

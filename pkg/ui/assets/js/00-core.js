@@ -230,6 +230,10 @@ window.switchTab = function(name) {
   const fab = document.getElementById('fab-add-task');
   if (fab) fab.style.display = (name === 'tasks') ? 'flex' : 'none';
 
+  // The Settings and admin tabs fetch their markup and code on first open
+  // (Task 20386); every open runs the panel's own loader, as below.
+  if (DEFERRED_TABS.includes(name)) openDeferredTab(name);
+
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
   const projectScopedTabs = ['overview','tasks','queue','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','replay','provider-calls'];
@@ -252,11 +256,6 @@ window.switchTab = function(name) {
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
-    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
-    if (name === 'executors') loadExecutors();
-    if (name === 'audit') { loadAudit(); verifyAuditChain(); }
-    if (name === 'secrets') loadSecretsPanel();
-    if (name === 'quotas') loadQuotas();
     // The Overview's Executor card needs the same payload; it is the only
     // per-project field on that page the state diff does not carry, because
     // bindings live in the control plane's database rather than in project
@@ -268,7 +267,6 @@ window.switchTab = function(name) {
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
-    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadTelemetryPolicy(); loadCIPanel(); loadGitHubApps(); loadUSBSettings(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
     if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
     if (name === 'tasks'  && appState) renderTasks(appState);
@@ -282,15 +280,9 @@ window.switchTab = function(name) {
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
-    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
     if (name === 'executors') loadExecutors();
-    if (name === 'audit') { loadAudit(); verifyAuditChain(); }
-    if (name === 'secrets') loadSecretsPanel();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
-    // The Telemetry tab had no loader: it populated only when the reader
-    // pressed Refresh, which every other panel does on open (Task 20311).
-    if (name === 'telemetry') loadTelemetry();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -822,6 +814,18 @@ function refreshPermissions() {
       return me;
     })
     .catch(() => null);
+}
+
+// _duFmtBytes renders a byte count for a reader: the hub-disk banner below, and
+// the Budget tab's Disk & Retention panel (deferred/budget.js) through
+// panelHelpers().fmtBytes.
+function _duFmtBytes(n) {
+  if (n === null || n === undefined) return '—';
+  const KB = 1024, MB = KB * 1024, GB = MB * 1024;
+  if (n < KB) return n + ' B';
+  if (n < MB) return (n / KB).toFixed(1) + ' KB';
+  if (n < GB) return (n / MB).toFixed(1) + ' MB';
+  return (n / GB).toFixed(2) + ' GB';
 }
 
 // renderHubDisk shows the admin banner while the hub's state volume is below

@@ -84,15 +84,16 @@ func runGrantDialogScenarios(t *testing.T) map[string]grantDialogResult {
 // TestDashboard_GrantDialogCoversTheInventoryKinds is the regression that
 // matters: every kind an operator can mint must also be grantable here.
 //
-// Read from the served page rather than through the shim, because the kind
-// list is static markup and the shim deliberately does not parse HTML — it
+// Read from the markup rather than through the shim, because the kind list is
+// static markup and the shim deliberately does not parse HTML — it
 // auto-vivifies elements, so every id resolves and every innerHTML is empty.
-// Asserting through it would pass on a page with no <select> at all.
+// Asserting through it would pass on a page with no <select> at all. The
+// dialog's markup is the Secrets panel's deferred script since Task 20386.
 func TestDashboard_GrantDialogCoversTheInventoryKinds(t *testing.T) {
-	page := loadAssets().page.contents
+	page := loadAssets().deferred["secrets.js"].raw
 	start := strings.Index(page, `id="grantKind"`)
 	if start < 0 {
-		t.Fatal("the served page has no grant-kind picker")
+		t.Fatal("the Secrets panel has no grant-kind picker")
 	}
 	end := strings.Index(page[start:], "</select>")
 	if end < 0 {

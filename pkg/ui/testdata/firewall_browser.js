@@ -99,17 +99,24 @@ async function shot(cdp, name) {
   fs.writeFileSync(path.join(SHOTS, name + '.png'), Buffer.from(r.data, 'base64'));
 }
 
-// cardIndex finds the index the page's own list gives the device's card.
+// cardIndex finds the index the page's own list gives the device's card. The
+// card's buttons reach their deferred dialogs through panelAct (Task 20386):
+// onclick="panelAct('execadmin','<fn>',<index>)".
 async function cardIndex(cdp, fn) {
   await cdp.eval(`window.loadExecutors()`);
   const deadline = Date.now() + WAIT_MS;
   for (;;) {
-    const i = await cdp.eval(`(() => { const re = new RegExp(${JSON.stringify(fn)} + '\\\\((\\\\d+)\\\\)');
+    const i = await cdp.eval(`(() => { const re = new RegExp("'" + ${JSON.stringify(fn)} + "',(\\\\d+)\\\\)");
       const m = re.exec((document.getElementById('execList') || {}).innerHTML || ''); return m ? Number(m[1]) : -1; })()`);
     if (i >= 0) return i;
     if (Date.now() >= deadline) throw new Error('no card offers ' + fn);
     await sleep(50);
   }
+}
+
+// openFromCard clicks the card's button, which fetches the dialog first.
+async function openFromCard(cdp, fn, idx) {
+  await act(cdp, click('#execList button[onclick*="\'' + fn + '\',' + idx + ')"]'));
 }
 
 async function main(cdp) {
@@ -122,7 +129,7 @@ async function main(cdp) {
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
     source: `try { sessionStorage.setItem('cloop_resume', '{"at":0}'); } catch (e) {}`});
   await cdp.send('Page.navigate', {url: BASE + '/'});
-  await waitFor(cdp, `typeof window.openExecutorFirewall === 'function'
+  await waitFor(cdp, `typeof window.panelAct === 'function'
     && sessionStorage.getItem('cloop_resume') === null`, 'the dashboard to finish booting');
 
   // ── the device's rule set ──
@@ -131,8 +138,8 @@ async function main(cdp) {
   // One card offers the button: the device's, not the hub's host-process
   // executor's nor the virtual executor's.
   out.firewall_buttons = await cdp.eval(
-    `(document.getElementById('execList').innerHTML.match(/openExecutorFirewall\\(/g) || []).length`);
-  await cdp.eval(`window.openExecutorFirewall(${idx})`);
+    `(document.getElementById('execList').innerHTML.match(/'openExecutorFirewall',/g) || []).length`);
+  await openFromCard(cdp, 'openExecutorFirewall', idx);
   await waitFor(cdp, `!!document.getElementById('efwAllow')`, 'the device dialog');
   out.device_fields_visible = true;
   for (const id of ['efwPub', 'efwAllow', 'efwDeny', 'efwPorts', 'efwDns', 'efwSum']) {
@@ -149,7 +156,7 @@ async function main(cdp) {
   out.device_after = await cdp.eval(text('efwBody'));
   out.device_stored = await cdp.eval(getJSON('/api/executors/' + encodeURIComponent(DEVICE) + '/firewall'));
   await shot(cdp, 'device-dialog-saved');
-  await cdp.eval(`window.closeExecutorFirewall()`);
+  await cdp.eval(`window.panelAct('execadmin', 'closeExecutorFirewall')`);
 
   // ── the project's card ──
   await cdp.eval(`window.switchTab('overview')`);
@@ -187,7 +194,7 @@ async function main(cdp) {
   // ── the virtual-executor dialog ──
   await cdp.eval(`window.switchTab('executors')`);
   const vidx = await cardIndex(cdp, 'openExecutorVirtual');
-  await cdp.eval(`window.openExecutorVirtual(${vidx})`);
+  await openFromCard(cdp, 'openExecutorVirtual', vidx);
   await waitFor(cdp, `${text('evxBody')}.includes('Device firewall')`, 'the device rules in the dialog');
   out.virtual_dialog = await cdp.eval(text('evxBody'));
   out.unfiltered_disabled = await cdp.eval(`document.getElementById('evxNetOpen').disabled`);

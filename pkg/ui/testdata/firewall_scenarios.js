@@ -61,6 +61,9 @@ async function boot(opts) {
   await globalThis.__settle(5);
   await window.loadExecutors();
   await globalThis.__settle(3);
+  // A device's dialog is deferred (Task 20386): fetched through the loader its
+  // card's button uses, then driven directly. The project card is bundled.
+  globalThis.XA = await window.panelAct('execadmin');
   return h;
 }
 
@@ -73,7 +76,7 @@ const scenarios = {
   async device_dialog() {
     const h = await boot();
     const cards = el('execList').innerHTML;
-    window.openExecutorFirewall(0);
+    XA.openExecutorFirewall(0);
     await globalThis.__settle(4);
     return {html: cards + '\n----\n' + el('efwBody').innerHTML};
   },
@@ -83,7 +86,7 @@ const scenarios = {
   // would have filled them from it.
   async summary() {
     await boot();
-    window.openExecutorFirewall(0);
+    XA.openExecutorFirewall(0);
     await globalThis.__settle(4);
     el('efwPub').checked = true;
     el('efwAllow').value = '';
@@ -101,7 +104,7 @@ const scenarios = {
   // Saving sends the form as lists, the ports as numbers.
   async device_save() {
     const h = await boot();
-    window.openExecutorFirewall(0);
+    XA.openExecutorFirewall(0);
     await globalThis.__settle(4);
     el('efwPub').checked = false;
     el('efwAllow').value = '10.8.0.0/24\n 140.82.112.0/20';
@@ -110,7 +113,7 @@ const scenarios = {
     el('efwDns').value = '1.1.1.1';
     h.routes['/api/executors/sgx-dev/firewall'] = Object.assign({}, DEVICE_VIEW, {constrained: [
       {kind: 'project', subject: '/srv/app', from: 'a', to: 'b', notes: ['its ports were narrowed from 22, 443 to 443']}]});
-    window.saveExecutorFirewall();
+    XA.saveExecutorFirewall();
     await globalThis.__settle(4);
     const put = lastPut(h, '/api/executors/sgx-dev/firewall');
     return {body: put ? put.body : '', html: el('efwBody').innerHTML};
@@ -119,12 +122,12 @@ const scenarios = {
   // A refused save shows the hub's reasons on the form.
   async device_refused() {
     const h = await boot();
-    window.openExecutorFirewall(0);
+    XA.openExecutorFirewall(0);
     await globalThis.__settle(4);
     h.routes['/api/executors/sgx-dev/firewall'] = {error: 'refused', code: 'firewall_exceeds_bound',
       reasons: ['10.0.0.0/8 is outside the governing rule set']};
     h.routeStatus['/api/executors/sgx-dev/firewall'] = 409;
-    window.saveExecutorFirewall();
+    XA.saveExecutorFirewall();
     await globalThis.__settle(4);
     return {html: el('efwWarn').innerHTML};
   },
@@ -133,7 +136,7 @@ const scenarios = {
   // unfiltered network under them, and marks a virtual executor outside them.
   async virtual_dialog() {
     await boot();
-    window.openExecutorVirtual(0);
+    XA.openExecutorVirtual(0);
     await globalThis.__settle(4);
     return {html: el('evxBody').innerHTML};
   },

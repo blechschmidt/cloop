@@ -17,10 +17,11 @@ package ui
 //     visibility without a layout engine reports a clean number on exactly the
 //     broken page.
 //   - whether a real `change` on a real <select> reaches the handler. The
-//     selector is wired with an inline onchange and the bundle lives in an IIFE,
-//     so a handler that was not exported onto window is a silent no-op — the bug
-//     class of Tasks 20033 and 20065, and one a shim that calls the function
-//     directly cannot reproduce.
+//     dialog is deferred since Task 20386 and its selector carries a
+//     data-change that mountPanel routes to the panel's own function, so a name
+//     the panel does not hand over is a silent no-op — the descendant of the
+//     bug class of Tasks 20033 and 20065, and one a shim that calls the
+//     function directly cannot reproduce.
 //
 // It skips when Chrome or node is missing, which is the normal case in CI: the
 // assertions gate a developer box and any runner that has a browser, never a
