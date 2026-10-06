@@ -119,9 +119,36 @@ certificate and its CA come from — is derived here once, because the
 ConfigMap, the Deployment, the Service and the CA ConfigMaps all have to agree.
 */}}
 
+{{/*
+The monitors' values, each merged over its defaults and returned as JSON (read
+with `include … | fromJson`). Templates read these, never
+.Values.executor.gitProxy and friends directly: `helm upgrade --reuse-values`
+renders with the *previous* release's chart defaults, and a release installed
+from a chart before 0.3.0 has no executor.gitProxy, executor.kubeGuard or
+executor.monitorTLS at all — a direct read is a nil-pointer error, and an
+absent port would render as 0. The defaults are values.yaml's; CI renders the
+chart with those sections deleted to keep the two in step.
+*/}}
+{{- define "cloop-hub.gitProxy" -}}
+{{- $d := dict "enabled" false "port" 8443 "advertiseURL" "" "sessionMinutes" 0 "allowedRefs" (list) "allowDelete" false -}}
+{{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.executor.gitProxy))) -}}
+{{- end -}}
+
+{{- define "cloop-hub.kubeGuard" -}}
+{{- $d := dict "enabled" false "port" 8444 "advertiseURL" "" "sessionMinutes" 0 "verbs" (list) "namespaces" (list) "resources" (list) "auditAllowed" false -}}
+{{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.executor.kubeGuard))) -}}
+{{- end -}}
+
+{{- define "cloop-hub.monitorTLS" -}}
+{{- $d := dict "existingSecret" "" "selfSigned" false "caBundle" "" "workloadCAConfigMap" "" "workloadCAKey" "ca.crt" "publiclyTrusted" false -}}
+{{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.executor.monitorTLS))) -}}
+{{- end -}}
+
 {{/* "true" when either monitor is on. */}}
 {{- define "cloop-hub.monitorsEnabled" -}}
-{{- if or .Values.executor.gitProxy.enabled .Values.executor.kubeGuard.enabled -}}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson -}}
+{{- if or $gp.enabled $kg.enabled -}}
 true
 {{- end -}}
 {{- end -}}
@@ -136,26 +163,29 @@ setting the chart cannot read, and every Pod's resolver completes <svc>.<ns>.svc
 {{- end -}}
 
 {{- define "cloop-hub.gitProxyURL" -}}
-{{- $u := trimSuffix "/" (default "" .Values.executor.gitProxy.advertiseURL) -}}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}
+{{- $u := trimSuffix "/" (toString (default "" $gp.advertiseURL)) -}}
 {{- if $u -}}
 {{- $u -}}
 {{- else -}}
-{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int .Values.executor.gitProxy.port) -}}
+{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int $gp.port) -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "cloop-hub.kubeGuardURL" -}}
-{{- $u := trimSuffix "/" (default "" .Values.executor.kubeGuard.advertiseURL) -}}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson -}}
+{{- $u := trimSuffix "/" (toString (default "" $kg.advertiseURL)) -}}
 {{- if $u -}}
 {{- $u -}}
 {{- else -}}
-{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int .Values.executor.kubeGuard.port) -}}
+{{- printf "https://%s:%d" (include "cloop-hub.serviceHost" .) (int $kg.port) -}}
 {{- end -}}
 {{- end -}}
 
 {{/* The Secret holding the monitors' certificate and key. */}}
 {{- define "cloop-hub.monitorTLSSecretName" -}}
-{{- default (printf "%s-monitor-tls" (include "cloop-hub.fullname" .)) .Values.executor.monitorTLS.existingSecret -}}
+{{- $t := include "cloop-hub.monitorTLS" . | fromJson -}}
+{{- default (printf "%s-monitor-tls" (include "cloop-hub.fullname" .)) $t.existingSecret -}}
 {{- end -}}
 
 {{/*
@@ -169,7 +199,8 @@ workload namespace for the Pods' git. Same name in both.
 
 {{/* "true" when the chart itself knows the CA's PEM: it generated it, or was given it. */}}
 {{- define "cloop-hub.monitorCAKnown" -}}
-{{- if or .Values.executor.monitorTLS.selfSigned .Values.executor.monitorTLS.caBundle -}}
+{{- $t := include "cloop-hub.monitorTLS" . | fromJson -}}
+{{- if or $t.selfSigned $t.caBundle -}}
 true
 {{- end -}}
 {{- end -}}
@@ -180,8 +211,9 @@ as "name/key"; empty when nothing is delivered (a publicly trusted certificate,
 or no git proxy).
 */}}
 {{- define "cloop-hub.workloadGitCA" -}}
-{{- $t := .Values.executor.monitorTLS -}}
-{{- if and .Values.executor.gitProxy.enabled (not $t.publiclyTrusted) -}}
+{{- $t := include "cloop-hub.monitorTLS" . | fromJson -}}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}
+{{- if and $gp.enabled (not $t.publiclyTrusted) -}}
 {{- if include "cloop-hub.monitorCAKnown" . -}}
 {{- printf "%s/ca.crt" (include "cloop-hub.monitorCAName" .) -}}
 {{- else if $t.workloadCAConfigMap -}}
@@ -198,7 +230,9 @@ resolver completes, plus the host of any advertise URL set by hand.
 {{- $svc := include "cloop-hub.fullname" . -}}
 {{- $ns := .Release.Namespace -}}
 {{- $names := list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
-{{- range $u := list .Values.executor.gitProxy.advertiseURL .Values.executor.kubeGuard.advertiseURL -}}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson -}}
+{{- range $u := list $gp.advertiseURL $kg.advertiseURL -}}
 {{- if $u -}}
 {{- $host := regexReplaceAll "^https://([^/:]+).*$" $u "${1}" -}}
 {{- if and $host (not (has $host $names)) -}}

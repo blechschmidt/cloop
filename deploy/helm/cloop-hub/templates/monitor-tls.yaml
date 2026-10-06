@@ -17,7 +17,8 @@ ConfigMap — which the kubelet fetches on a Pod's behalf, with no new rule in
 the executor's Role — is the right object for it.
 */ -}}
 {{- if include "cloop-hub.monitorsEnabled" . }}
-{{- $t := .Values.executor.monitorTLS }}
+{{- $t := include "cloop-hub.monitorTLS" . | fromJson }}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
 {{- $caPEM := "" }}
 {{- if $t.selfSigned }}
 {{- $secretName := include "cloop-hub.monitorTLSSecretName" . }}
@@ -83,7 +84,7 @@ data:
   ca.crt: |
     {{- $caPEM | trim | nindent 4 }}
 {{- $wns := include "cloop-hub.workloadNamespace" . }}
-{{- if and .Values.executor.kubernetes.enabled .Values.executor.gitProxy.enabled (ne $wns .Release.Namespace) }}
+{{- if and .Values.executor.kubernetes.enabled $gp.enabled (ne $wns .Release.Namespace) }}
 ---
 apiVersion: v1
 kind: ConfigMap

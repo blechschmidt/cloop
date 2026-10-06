@@ -1,3 +1,5 @@
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -16,16 +18,16 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
-    {{- if .Values.executor.gitProxy.enabled }}
+    {{- if $gp.enabled }}
     # The git interception proxy, which sandboxes' git dials directly: it is
     # not behind the Ingress, and it terminates its own TLS.
-    - port: {{ .Values.executor.gitProxy.port }}
+    - port: {{ $gp.port }}
       targetPort: git-proxy
       protocol: TCP
       name: git-proxy
     {{- end }}
-    {{- if .Values.executor.kubeGuard.enabled }}
-    - port: {{ .Values.executor.kubeGuard.port }}
+    {{- if $kg.enabled }}
+    - port: {{ $kg.port }}
       targetPort: kube-guard
       protocol: TCP
       name: kube-guard

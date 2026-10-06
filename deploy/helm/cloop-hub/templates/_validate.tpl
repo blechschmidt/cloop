@@ -91,26 +91,29 @@ Everything here fails the render rather than warning. A warning during
   the values file that caused it.
 */}}
 {{- $mon := .Values.executor }}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson }}
+{{- $mt := include "cloop-hub.monitorTLS" . | fromJson }}
 {{- if include "cloop-hub.monitorsEnabled" . }}
 {{- if not .Values.config.fromConfigMap }}
 {{- fail "executor.gitProxy or executor.kubeGuard is enabled but config.fromConfigMap is false, so neither section reaches the hub: it would start with no monitor and this chart would report one.\nSet config.fromConfigMap=true." }}
 {{- end }}
-{{- if and $mon.monitorTLS.existingSecret $mon.monitorTLS.selfSigned }}
+{{- if and $mt.existingSecret $mt.selfSigned }}
 {{- fail "executor.monitorTLS.existingSecret and executor.monitorTLS.selfSigned are mutually exclusive: one names your certificate, the other has the chart generate one. Pick one." }}
 {{- end }}
-{{- if not (or $mon.monitorTLS.existingSecret $mon.monitorTLS.selfSigned) }}
+{{- if not (or $mt.existingSecret $mt.selfSigned) }}
 {{- fail "executor.gitProxy or executor.kubeGuard is enabled but has no certificate. The session token a sandbox presents rides every request, and cleartext would publish it rather than deliver it — the hub refuses to start a monitor without TLS.\nSet executor.monitorTLS.existingSecret to a kubernetes.io/tls Secret for the Service's names (cert-manager), or executor.monitorTLS.selfSigned=true." }}
 {{- end }}
-{{- if and $mon.monitorTLS.selfSigned (or $mon.monitorTLS.caBundle $mon.monitorTLS.workloadCAConfigMap $mon.monitorTLS.publiclyTrusted) }}
+{{- if and $mt.selfSigned (or $mt.caBundle $mt.workloadCAConfigMap $mt.publiclyTrusted) }}
 {{- fail "executor.monitorTLS.selfSigned has the chart generate and deliver its own CA, so caBundle, workloadCAConfigMap and publiclyTrusted would each describe a certificate that is not the one in use. Unset them, or use existingSecret." }}
 {{- end }}
-{{- with $mon.monitorTLS.caBundle }}
+{{- with $mt.caBundle }}
 {{- if not (contains "-----BEGIN CERTIFICATE-----" .) }}
 {{- fail "executor.monitorTLS.caBundle is not a PEM certificate (no BEGIN CERTIFICATE line). It is the CA that signed the monitors' certificate, as PEM." }}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- range $name, $m := dict "gitProxy" $mon.gitProxy "kubeGuard" $mon.kubeGuard }}
+{{- range $name, $m := dict "gitProxy" $gp "kubeGuard" $kg }}
 {{- if $m.enabled }}
 {{- with $m.advertiseURL }}
 {{- if not (regexMatch "^https://[^/@?#[:space:]]+/?$" .) }}
@@ -127,10 +130,10 @@ Everything here fails the render rather than warning. A warning during
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and $mon.gitProxy.enabled $mon.kubeGuard.enabled (eq (int $mon.gitProxy.port) (int $mon.kubeGuard.port)) }}
-{{- fail (printf "executor.gitProxy.port and executor.kubeGuard.port are both %d; each monitor needs its own port." (int $mon.gitProxy.port)) }}
+{{- if and $gp.enabled $kg.enabled (eq (int $gp.port) (int $kg.port)) }}
+{{- fail (printf "executor.gitProxy.port and executor.kubeGuard.port are both %d; each monitor needs its own port." (int $gp.port)) }}
 {{- end }}
-{{- if and $mon.gitProxy.enabled $mon.kubernetes.enabled (not (include "cloop-hub.workloadGitCA" .)) (not $mon.monitorTLS.publiclyTrusted) }}
+{{- if and $gp.enabled $mon.kubernetes.enabled (not (include "cloop-hub.workloadGitCA" .)) (not $mt.publiclyTrusted) }}
 {{- fail "executor.gitProxy is enabled for the Kubernetes executor, but nothing delivers the proxy's CA to the workload Pods, so every Pod's git would refuse its certificate at the first clone.\nWith executor.monitorTLS.existingSecret, set one of:\n  executor.monitorTLS.caBundle             the CA as PEM; the chart delivers it\n  executor.monitorTLS.workloadCAConfigMap  a ConfigMap you maintain in the workload namespace (trust-manager)\n  executor.monitorTLS.publiclyTrusted=true the certificate chains to a CA the workload image already trusts" }}
 {{- end }}
 {{- if and $mon.kubernetes.enabled $mon.kubernetes.egressFilter.enabled }}
@@ -139,7 +142,7 @@ Everything here fails the render rather than warning. A warning during
 {{- range $mon.kubernetes.egressFilter.ports }}
 {{- $open = append $open (int .) }}
 {{- end }}
-{{- range $name, $m := dict "gitProxy" $mon.gitProxy "kubeGuard" $mon.kubeGuard }}
+{{- range $name, $m := dict "gitProxy" $gp "kubeGuard" $kg }}
 {{- if and $m.enabled (not (has (int $m.port) $open)) }}
 {{- fail (printf "executor.kubernetes.egressFilter is enabled but its ports do not include executor.%s.port (%d), so a workload Pod could not reach the monitor its credential was routed through.\nAdd %d to executor.kubernetes.egressFilter.ports, and the hub Pods' range (the pod CIDR) to executor.kubernetes.egressFilter.cidrs." $name (int $m.port) (int $m.port)) }}
 {{- end }}

@@ -1,4 +1,8 @@
 {{- include "cloop-hub.validate" . -}}
+{{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
+{{- $kg := include "cloop-hub.kubeGuard" . | fromJson }}
+{{- $mt := include "cloop-hub.monitorTLS" . | fromJson }}
+{{- $extraCA := dig "configMap" "" (default dict .Values.extraCACerts) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -37,7 +41,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.config.fromConfigMap .Values.podAnnotations .Values.executor.monitorTLS.caBundle (include "cloop-hub.monitorsEnabled" .) }}
+      {{- if or .Values.config.fromConfigMap .Values.podAnnotations $mt.caBundle (include "cloop-hub.monitorsEnabled" .) }}
       annotations:
         {{- if .Values.config.fromConfigMap }}
         # Roll the Pod when the config changes. Without this a `helm upgrade`
@@ -46,11 +50,11 @@ spec:
         # security setting.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- end }}
-        {{- with .Values.executor.monitorTLS.caBundle }}
+        {{- with $mt.caBundle }}
         # The monitors read their CA at start; a new one needs a new Pod.
         checksum/monitor-ca: {{ . | sha256sum }}
         {{- end }}
-        {{- if and (include "cloop-hub.monitorsEnabled" .) .Values.executor.monitorTLS.selfSigned }}
+        {{- if and (include "cloop-hub.monitorsEnabled" .) $mt.selfSigned }}
         # A generated certificate is reissued when the names it must cover
         # change, and the monitors load theirs at start.
         checksum/monitor-names: {{ include "cloop-hub.monitorDNSNames" . | sha256sum }}
@@ -90,14 +94,14 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
-            {{- if .Values.executor.gitProxy.enabled }}
+            {{- if $gp.enabled }}
             - name: git-proxy
-              containerPort: {{ .Values.executor.gitProxy.port }}
+              containerPort: {{ $gp.port }}
               protocol: TCP
             {{- end }}
-            {{- if .Values.executor.kubeGuard.enabled }}
+            {{- if $kg.enabled }}
             - name: kube-guard
-              containerPort: {{ .Values.executor.kubeGuard.port }}
+              containerPort: {{ $kg.port }}
               protocol: TCP
             {{- end }}
           env:
@@ -116,7 +120,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            {{- if .Values.extraCACerts.configMap }}
+            {{- if $extraCA }}
             # Added to the image's own bundle, not substituted for it: Go reads
             # its default certificate file and then every file in these
             # directories.
@@ -162,7 +166,7 @@ spec:
               readOnly: true
             {{- end }}
             {{- end }}
-            {{- if .Values.extraCACerts.configMap }}
+            {{- if $extraCA }}
             - name: extra-ca
               mountPath: /etc/cloop/extra-ca
               readOnly: true
@@ -218,10 +222,10 @@ spec:
             defaultMode: 0444
         {{- end }}
         {{- end }}
-        {{- if .Values.extraCACerts.configMap }}
+        {{- if $extraCA }}
         - name: extra-ca
           configMap:
-            name: {{ .Values.extraCACerts.configMap }}
+            name: {{ $extraCA }}
             defaultMode: 0444
         {{- end }}
       {{- with .Values.nodeSelector }}

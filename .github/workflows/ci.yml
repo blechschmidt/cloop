@@ -1603,6 +1603,29 @@ jobs:
           }
           echo "the monitors render the config, the ports, the certificate and the CA they need"
 
+      - name: The chart renders with the defaults an upgrade from 0.2.0 sees
+        # `helm upgrade --reuse-values` — which deploy/README.md itself uses —
+        # renders with the previous release's chart defaults, so every key this
+        # chart added since is absent. A template that read one directly failed
+        # every such upgrade with a nil-pointer error, monitors on or off, until
+        # the monitors' values went through defaulting helpers (Task 20385).
+        # This renders a copy whose values.yaml lacks the 0.3.0 sections, the
+        # way such an upgrade sees it.
+        run: |
+          set -euo pipefail
+          old=$(mktemp -d)
+          cp -r deploy/helm/cloop-hub "$old/"
+          sed -i '/# ── Credential monitors/,/^serviceAccount:/{/^serviceAccount:/!d}' "$old/cloop-hub/values.yaml"
+          if grep -qE '^ *(gitProxy|kubeGuard|monitorTLS|extraCACerts|hostAliases):' "$old/cloop-hub/values.yaml"; then
+            echo "::error::the 0.3.0 sections were not removed — the markers in values.yaml moved"; exit 1
+          fi
+          base=(--namespace cloop --set secrets.existingSecret=x --set executor.kubernetes.enabled=true)
+          helm template cloop "$old/cloop-hub" "${base[@]}" >/dev/null
+          helm template cloop "$old/cloop-hub" "${base[@]}" \
+            --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
+            --set executor.monitorTLS.selfSigned=true | grep -q 'listen_addr: ":8443"'
+          echo "the chart renders with the defaults an upgrade from 0.2.0 sees, monitors off and on"
+
       - name: Chart guard rails refuse what they should
         # These fail() calls are load-bearing — one of them is the only thing
         # stopping a hub from installing with no CLOOP_SECRET_KEY at all. A
