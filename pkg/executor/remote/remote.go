@@ -336,7 +336,7 @@ func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr 
 	if sandboxErr == nil {
 		caps.Virtualized = sandbox.IsVirtualized()
 		caps.KernelIsolated = sandbox.IsKernelIsolated()
-		if sandbox.Mode == executor.SandboxModeContainer {
+		if sandbox.RunsProjectImages() {
 			// Only now are these true. The image and the setup: block are the
 			// container driver's abilities, and until the device was told to run
 			// one there was nothing on the far side that could honour them — a

@@ -514,6 +514,73 @@ func matchRepo(ref Reference, allowed []string) bool {
 	return false
 }
 
+// RegistryHosts lists the concrete registries the policy names, sorted: each
+// allowed_registries entry that is not a wildcard, and the registry of each
+// allowed_repos entry that names one — read by the parser the policy evaluates
+// with, so "acme/tools" names a repository and no registry, exactly as it does
+// when an image is checked against it. Docker Hub is named by its canonical
+// host, DockerHub.
+//
+// `cloop hub doctor` probes these. It used to split repo entries on their
+// first "/" itself, and failed a hub over a registry called "acme" that the
+// policy had never named (Task 20387).
+func (p Policy) RegistryHosts() []string {
+	n := p.Normalize()
+	seen := map[string]bool{}
+	for _, r := range n.AllowedRegistries {
+		if r == "" || strings.Contains(r, "*") {
+			continue
+		}
+		if canonical, err := normalizeRegistry(r); err == nil {
+			seen[canonical] = true
+		}
+	}
+	for _, repo := range n.AllowedRepos {
+		if registry, _, err := parseRepoPattern(repo); err == nil && registry != "" {
+			seen[registry] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for h := range seen {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AdmitsAnyRegistry reports whether the policy admits images from a registry
+// it never names, and an image it admits that shows it. "Configured" is not
+// that: require_digest alone, an allowed_registries entry of "*", or a repo
+// entry that names no registry beside "*", all let any registry through.
+//
+// Judged by Evaluate itself, against digest-pinned references on a reserved
+// registry (.invalid, RFC 2606): one at a path no policy names, and one under
+// each allowed_repos path that names no registry — the paths a policy admits
+// from whichever registries it allows. `cloop hub doctor` asks this rather
+// than reading the lists; its single probe once called a policy
+// "deny-by-default" that admitted evil.example/acme/tools (Task 20387).
+func (p Policy) AdmitsAnyRegistry() (string, bool) {
+	const digest = "@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	probes := []string{"cloop-hub-doctor/probe"}
+	for _, repo := range p.Normalize().AllowedRepos {
+		registry, path, err := parseRepoPattern(repo)
+		if err != nil || registry != "" {
+			continue
+		}
+		if strings.HasSuffix(path, "/*") {
+			path = strings.TrimSuffix(path, "/*") + "/probe"
+		}
+		probes = append(probes, path)
+	}
+	for _, path := range probes {
+		ref := "registry.invalid/" + path + digest
+		if d, err := p.Evaluate(ref); err == nil && d.Allowed {
+			return ref, true
+		}
+	}
+	return "", false
+}
+
 // parseRepoPattern splits an allowed_repos entry into an optional registry and
 // a repository path, using the same domain heuristic references use so an
 // entry means the same thing as the reference it is meant to match.

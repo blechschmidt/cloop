@@ -534,3 +534,35 @@ func TestFingerprintTracksEveryRule(t *testing.T) {
 		t.Error("whitespace and case changed the fingerprint")
 	}
 }
+
+// TestAdmitsAnyRegistryAsksEvaluate: whether a policy constrains where images
+// come from is Evaluate's answer for images on a registry the policy never
+// names — including under a repo entry that names no registry, which "*"
+// lets in from anywhere (Task 20387).
+func TestAdmitsAnyRegistryAsksEvaluate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    Policy
+		want bool
+	}{
+		{"registries named", Policy{AllowedRegistries: []string{"ghcr.io"}}, false},
+		{"digest rule alone", Policy{RequireDigest: true}, true},
+		{"every registry", Policy{AllowedRegistries: []string{"*"}}, true},
+		{"every registry, one bare repo", Policy{AllowedRegistries: []string{"*"}, AllowedRepos: []string{"acme/tools"}}, true},
+		{"every registry, a bare repo subtree", Policy{AllowedRegistries: []string{"*"}, AllowedRepos: []string{"acme/*"}}, true},
+		{"named registry, bare repo", Policy{AllowedRegistries: []string{"ghcr.io"}, AllowedRepos: []string{"acme/tools"}}, false},
+		{"qualified repos only", Policy{AllowedRepos: []string{"ghcr.io/acme/tools"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref, got := tc.p.AdmitsAnyRegistry()
+			if got != tc.want {
+				t.Fatalf("AdmitsAnyRegistry() = %q, %v; want %v", ref, got, tc.want)
+			}
+			if got {
+				if d, err := tc.p.Evaluate(ref); err != nil || !d.Allowed {
+					t.Errorf("the example %q is not one Evaluate admits: %v", ref, err)
+				}
+			}
+		})
+	}
+}

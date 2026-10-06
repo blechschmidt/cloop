@@ -1598,7 +1598,8 @@
             The default role applies to a signed-in user matching no mapping below.
             <strong>none</strong> denies everything, which is the safe default — but a hub with no
             administrator cannot be administered, so at least one admin email or a mapping granting
-            <code>admin</code> is required before SSO can be turned on.
+            <code>admin</code> to the whole hub (no project or executor) is required before SSO can be
+            turned on.
           </p>
           <div class="form-row">
             <div class="form-group">

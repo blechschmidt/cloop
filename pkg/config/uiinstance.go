@@ -159,6 +159,7 @@ func LoadUIInstance(workdir string, port int) (*Config, string, error) {
 		return nil, "", fmt.Errorf("could not read %s: %w", path, err)
 	}
 	warnIfConfigTooOpen(path)
+	baseRepairs := len(cfg.loadRepairs)
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, "", fmt.Errorf("could not parse %s: %w", path, err)
 	}
@@ -167,7 +168,57 @@ func LoadUIInstance(workdir string, port int) (*Config, string, error) {
 	// config.yaml cannot escape be escaped by writing it one file over.
 	cfg.validateAndClamp(path)
 	cfg.applyEnvVars()
+	var stated map[string]any
+	_ = yaml.Unmarshal(data, &stated) // parsed once already, into cfg
+	cfg.loadRepairs = mergedRepairs(cfg.loadRepairs[:baseRepairs], cfg.loadRepairs[baseRepairs:],
+		func(key string) bool { return statesKey(stated, key) })
 	return cfg, path, nil
+}
+
+// mergedRepairs keeps the load repairs that describe the merged configuration
+// a hub runs, each attributed to the file that holds the value (Task 20387).
+//
+// From config.yaml's pass, a repaired value the overlay replaces is gone from
+// what the hub runs, and a switch-off is superseded where the overlay sets the
+// section's enabled itself — on, to be judged again below, or off, which is a
+// choice and not a repair. From the overlay's pass, which re-judges the merged
+// result, only the overlay's own values are its to report: anything else it
+// finds is config.yaml's, recorded already — and a switch-off there can only
+// have been caused by what the overlay states.
+func mergedRepairs(base, overlay []LoadRepair, states func(key string) bool) []LoadRepair {
+	out := make([]LoadRepair, 0, len(base)+len(overlay))
+	for _, r := range base {
+		switch {
+		case r.SwitchedOff != "" && states(r.SwitchedOff+".enabled"):
+			continue
+		case r.SwitchedOff == "" && states(r.Field):
+			continue
+		}
+		out = append(out, r)
+	}
+	for _, r := range overlay {
+		if r.SwitchedOff != "" || states(r.Field) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// statesKey reports whether a parsed YAML document states the dotted key —
+// "executors.git_proxy.advertise_url", or a section such as
+// "executors.kube_guard".
+func statesKey(doc map[string]any, key string) bool {
+	var cur any = doc
+	for _, part := range strings.Split(key, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return false
+		}
+		if cur, ok = m[part]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // SaveUIInstanceOIDC writes the ui.oidc block into an overlay file, leaving

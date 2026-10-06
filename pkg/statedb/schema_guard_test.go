@@ -451,3 +451,38 @@ func TestParseStampTime(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckSchemaAheadIsOpensVerdict: the read-only check reaches the decision
+// Open's guard reaches — refuse an unclassified or breaking migration ahead,
+// open past an additive one — and writes nothing either way, so a diagnostic
+// can ask it of a live hub's database (Task 20387).
+func TestCheckSchemaAheadIsOpensVerdict(t *testing.T) {
+	path, conn := migratedDB(t)
+	if err := CheckSchemaAhead(path); err != nil {
+		t.Fatalf("a database at this binary's version: %v", err)
+	}
+
+	latest, err := LatestSchemaVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(`INSERT INTO schema_migrations(version, applied_at, name, compat)
+		VALUES (?, ?, ?, ?)`, latest+1, time.Now().UTC().Format(time.RFC3339Nano),
+		"a_new_table.sql", string(CompatAdditive)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSchemaAhead(path); err != nil {
+		t.Errorf("ahead by an additive migration, which Open accepts: %v", err)
+	}
+	stampFutureVersion(t, conn, 2, "v9.0.0") // unclassified, so breaking
+	conn.Close()
+
+	err = CheckSchemaAhead(path)
+	var tooNew *SchemaTooNewError
+	if !errors.As(err, &tooNew) || !strings.Contains(tooNew.Blockers(), "from_the_future") {
+		t.Fatalf("want the refusal naming the blocking migration, got %v", err)
+	}
+	if _, openErr := Open(path); !errors.Is(openErr, ErrSchemaTooNew) {
+		t.Errorf("Open disagrees with CheckSchemaAhead: %v", openErr)
+	}
+}

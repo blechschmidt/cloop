@@ -29,7 +29,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -239,20 +238,12 @@ type Registry struct {
 // construction something that may share a host with whatever else is
 // listening on loopback.
 func NewRegistry(baseURL string) (*Registry, error) {
-	u, err := url.Parse(strings.TrimSpace(baseURL))
+	base, err := NormalizeBaseURL(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("kubeguard: base url %q: %w", baseURL, err)
-	}
-	switch {
-	case u.Scheme != "https":
-		return nil, fmt.Errorf("kubeguard: base url must be https (got %q)", baseURL)
-	case u.Host == "":
-		return nil, fmt.Errorf("kubeguard: base url has no host (got %q)", baseURL)
-	case u.User != nil:
-		return nil, errors.New("kubeguard: base url must not embed credentials")
+		return nil, err
 	}
 	return &Registry{
-		BaseURL:  strings.TrimSuffix(u.String(), "/"),
+		BaseURL:  base,
 		Now:      time.Now,
 		sessions: make(map[string]*Session),
 	}, nil

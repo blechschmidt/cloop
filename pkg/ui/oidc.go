@@ -179,7 +179,7 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		// mid-task — or a bookmark into a project — does not land them back on
 		// the project list (Task 20359). oidcauth vets the value before it
 		// becomes a redirect.
-		http.Redirect(w, r, "/auth/login?return="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+		http.Redirect(w, r, oidcauth.LoginPath+"?return="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 		return
 	}
 	setSignInHint(w)
@@ -201,7 +201,7 @@ const signInHintHeader = "X-Cloop-Sign-In"
 
 // setSignInHint marks a 401 as one a browser answers by signing in again.
 func setSignInHint(w http.ResponseWriter) {
-	w.Header().Set(signInHintHeader, "/auth/login")
+	w.Header().Set(signInHintHeader, oidcauth.LoginPath)
 }
 
 // wantsHTMLNavigation distinguishes a browser page navigation (redirect to

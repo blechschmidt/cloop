@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
 
 // scopeKind selects how a route's authz.Scope is derived from the request.
@@ -548,23 +549,24 @@ func (s *Server) routeTable() []routeSpec {
 
 		// OIDC login machinery. Gating these on a permission would make
 		// signing in require being signed in.
-		{Pattern: "GET /auth/login", Handler: s.handleOIDCLogin, Perm: public},
+		{Pattern: "GET " + oidcauth.LoginPath, Handler: s.handleOIDCLogin, Perm: public},
 		// Not a fixed path: the IdP decides where the browser comes back,
 		// and the app registration is often created by somebody else with a
 		// path of their choosing. Serving a hardcoded /auth/callback against
 		// a redirect_url of /auth/oidc authenticates the user and then drops
 		// them into the SPA shell with no session — an endless login loop
-		// and nothing logged. oidcauth.New constrains this to /auth/ so the
-		// route cannot shadow "/" or an /api path, and oidcGate lets the
-		// whole /auth/ subtree through unauthenticated.
+		// and nothing logged. oidcauth.New constrains this to a clean path
+		// under /auth/ that is none of the routes beside it, so the route
+		// cannot shadow "/" or an /api path, cannot panic this table, and
+		// oidcGate lets the whole /auth/ subtree through unauthenticated.
 		{Pattern: "GET " + s.oidcCallbackPath(), Handler: s.handleOIDCCallback, Perm: public},
-		{Pattern: "POST /auth/logout", Handler: s.handleOIDCLogout, Perm: public},
+		{Pattern: "POST " + oidcauth.LogoutPath, Handler: s.handleOIDCLogout, Perm: public},
 		// Silent claim renewal (Task 20359). Public like the rest of /auth/,
 		// and it has to be: it runs in a hidden frame whose callback leg
 		// carries no cookie. It authenticates itself — BeginRenew refuses
 		// without a valid session — and answers with a document rather than a
 		// status, because a frame cannot surface one.
-		{Pattern: "GET /auth/renew", Handler: s.handleOIDCRenew, Perm: public},
+		{Pattern: "GET " + oidcauth.RenewPath, Handler: s.handleOIDCRenew, Perm: public},
 
 		// Self-service "sign out everywhere" (Task 20176). Ungated on
 		// purpose: the handler scopes the deletion to the caller's own

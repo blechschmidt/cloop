@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -158,14 +157,14 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	// an ephemeral port is not knowable until the listener exists.
 	addr := strings.TrimSpace(g.ListenAddr)
 	if addr == "" {
-		addr = "127.0.0.1:0"
+		addr = gitproxy.DefaultListenAddr
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("git proxy listen on %s: %w", addr, err)
 	}
 
-	baseURL, err := gitProxyBaseURL(g.AdvertiseURL, ln.Addr())
+	baseURL, err := gitproxy.AdvertisedBaseURL(g.AdvertiseURL, ln.Addr())
 	if err != nil {
 		_ = ln.Close()
 		return nil, err
@@ -229,37 +228,6 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		"ui: git interception proxy on %s, advertised as %s; pushes limited to %s\n",
 		ln.Addr(), baseURL, strings.Join(svc.policy.AllowedRefs, ", "))
 	return svc, nil
-}
-
-// gitProxyBaseURL resolves what sandboxes are pointed at.
-//
-// The bound address is only correct when the sandbox shares the hub's network
-// namespace, which is why an operator running containers, Pods or edge devices
-// sets advertise_url. Falling back to it anyway — rather than refusing — keeps
-// the single-host case working with no configuration, and a wrong choice here
-// surfaces immediately as a fetch that cannot connect rather than as a
-// credential going somewhere it should not.
-func gitProxyBaseURL(advertise string, bound net.Addr) (string, error) {
-	if s := strings.TrimSpace(advertise); s != "" {
-		u, err := url.Parse(s)
-		if err != nil {
-			return "", fmt.Errorf("git proxy advertise_url %q: %w", s, err)
-		}
-		return strings.TrimSuffix(u.String(), "/"), nil
-	}
-	tcp, ok := bound.(*net.TCPAddr)
-	if !ok {
-		return "", fmt.Errorf("git proxy listener is not TCP (%T), so no URL can be advertised; "+
-			"set executors.git_proxy.advertise_url", bound)
-	}
-	host := tcp.IP.String()
-	if tcp.IP == nil || tcp.IP.IsUnspecified() {
-		// 0.0.0.0 is a bind address, never a destination. Naming loopback is
-		// the honest reading of "wherever this hub is", and an operator whose
-		// sandboxes are elsewhere has to say where.
-		host = "127.0.0.1"
-	}
-	return "https://" + net.JoinHostPort(host, fmt.Sprint(tcp.Port)), nil
 }
 
 // reap sweeps lapsed sessions until ctx ends.

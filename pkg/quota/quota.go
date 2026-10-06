@@ -137,6 +137,27 @@ func (r Resource) Valid() bool {
 	return false
 }
 
+// ZeroAdmitsNone reports whether a ceiling of 0 for r refuses every admission,
+// which is what 0 means for every resource but sessions. A session cap is
+// enforced by evicting the oldest session rather than refusing the newest, so
+// a cap of 0 would sign out the session being created; the hub reads any
+// ceiling below one session as no cap at all (SessionCap).
+//
+// `cloop hub doctor` warns about zero ceilings by asking this. It used to warn
+// about max_sessions: 0 too, and advise removing a key whose removal changes
+// nothing (Task 20387).
+func (r Resource) ZeroAdmitsNone() bool { return r != ResSessions }
+
+// SessionCap converts a max_sessions ceiling into the number of concurrent
+// sessions the authenticator allows, or 0 for no cap — when the ceiling is
+// unset, and when it is below one.
+func SessionCap(limit float64, set bool) int {
+	if !set || limit <= 0 {
+		return 0
+	}
+	return int(limit)
+}
+
 // Integral reports whether r counts whole things. Used only for rendering:
 // "3 projects" should not print as "3.0".
 func (r Resource) Integral() bool { return r != ResDailyCostUSD }
@@ -367,6 +388,35 @@ func claimNames() string {
 // Configured reports whether any policy was set. A hub with no quota config
 // enforces nothing, which keeps single-tenant local use exactly as it was.
 func (r *Resolver) Configured() bool { return r != nil && r.configured }
+
+// Constrains reports whether the policy bounds any admission at all: some
+// default or binding sets a ceiling that refuses or caps something. A policy
+// of nothing but max_sessions: 0 is configured and constrains nothing, since
+// a sessions ceiling below one is no cap (SessionCap).
+func (r *Resolver) Constrains() bool {
+	if r == nil {
+		return false
+	}
+	if r.defaults.constrains() {
+		return true
+	}
+	for _, b := range r.bindings {
+		if b.Limits.constrains() {
+			return true
+		}
+	}
+	return false
+}
+
+// constrains reports whether any ceiling in l bounds an admission.
+func (l Limits) constrains() bool {
+	for res, v := range l {
+		if res.ZeroAdmitsNone() || SessionCap(v, true) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // HasClaimBindings reports whether any binding resolves off a group or role
 // claim, so a caller holding only an identity string can tell whether a

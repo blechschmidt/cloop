@@ -11,7 +11,7 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -84,30 +84,17 @@ func validateKubeGuardListenAddr(addr string) error {
 	return nil
 }
 
-// validateKubeGuardAdvertiseURL checks the URL sandboxes are pointed at.
-//
-// It becomes the `server:` field of a kubeconfig, so it must be a bare https
-// base: kubectl appends "/api/v1/..." to it, and a path, query or fragment
-// here would produce requests nothing serves.
+// validateKubeGuardAdvertiseURL checks the URL a sandbox's kubeconfig names
+// as its server, by the rule the monitor's registry applies when it starts
+// (kubeguard.NormalizeBaseURL). The copy that lived here until Task 20387
+// refused a path the registry let through, and both accepted "https://:8444".
 func validateKubeGuardAdvertiseURL(raw string) error {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return nil
 	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return fmt.Errorf("executors.kube_guard.advertise_url is not a URL (got %q): %w", s, err)
-	}
-	switch {
-	case u.Scheme != "https":
-		return fmt.Errorf("executors.kube_guard.advertise_url must be an https:// URL (got %q)", s)
-	case u.Host == "":
-		return fmt.Errorf("executors.kube_guard.advertise_url has no host (got %q)", s)
-	case u.User != nil:
-		return fmt.Errorf("executors.kube_guard.advertise_url must not embed credentials")
-	case strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "":
-		return fmt.Errorf("executors.kube_guard.advertise_url must be a bare base URL with no "+
-			"path, query or fragment (got %q)", s)
+	if _, err := kubeguard.NormalizeBaseURL(s); err != nil {
+		return fmt.Errorf("executors.kube_guard.advertise_url %q: %w", s, err)
 	}
 	return nil
 }
@@ -167,6 +154,33 @@ func clampKubeGuardConfig(k *KubeGuardConfig) []string {
 		k.Enabled = false
 	}
 	return changed
+}
+
+// CABundle returns the PEM a sandbox's kubectl is told to trust for the
+// monitor: ca_file when set, otherwise the serving certificate itself — the
+// right answer for a self-signed certificate and harmless for one signed by a
+// public CA, since a kubeconfig's certificate-authority-data replaces the
+// trust store rather than adding to it, and the serving certificate's own
+// chain is exactly what will be presented. Nil when neither is set.
+//
+// The hub reads it here when it starts the monitor, and refuses to start it on
+// an error; `cloop hub doctor` calls the same method, so a directory or an
+// unreadable file is reported the way the hub meets it (Task 20387).
+func (k KubeGuardConfig) CABundle() ([]byte, error) {
+	path := strings.TrimSpace(k.CAFile)
+	label := "executors.kube_guard.ca_file"
+	if path == "" {
+		path = strings.TrimSpace(k.CertFile)
+		label = "executors.kube_guard.cert_file"
+	}
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	return pem, nil
 }
 
 // SessionTTLMinutes returns the effective session length, applying the

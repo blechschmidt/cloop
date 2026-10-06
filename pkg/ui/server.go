@@ -1667,7 +1667,7 @@ func (s *Server) framedBySelf(path string) bool {
 	if !s.oidcEnabled() {
 		return false
 	}
-	return path == "/auth/renew" || path == s.oidcCallbackPath()
+	return path == oidcauth.RenewPath || path == s.oidcCallbackPath()
 }
 
 // frameSrcDirective is the CSP frame-src for this hub: 'self', plus the

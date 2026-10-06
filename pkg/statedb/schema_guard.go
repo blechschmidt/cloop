@@ -157,6 +157,10 @@ func (e *SchemaTooNewError) Error() string {
 	return b.String()
 }
 
+// Blockers names the migrations ahead of this binary that it cannot tolerate,
+// for a caller that reports the refusal in its own words.
+func (e *SchemaTooNewError) Blockers() string { return e.blockers() }
+
 // blockers names the migrations that actually caused the refusal, so an
 // operator looking at a 12-version gap is not left to diff all twelve.
 func (e *SchemaTooNewError) blockers() string {
@@ -197,6 +201,36 @@ func (e *SchemaTooNewError) provenance() string {
 // is included.
 func (e *SchemaTooNewError) Is(target error) bool {
 	return target == ErrSchemaTooNew || target == ErrSchemaMismatch
+}
+
+// CheckSchemaAhead reports, without writing, whether this build would refuse
+// to open the database at path because it was migrated past this binary: the
+// decision Open's guard makes (checkNotFromFuture), asked of a read-only
+// connection. Nil means it would open it — not ahead, or ahead only by
+// migrations recorded as additive — and a *SchemaTooNewError names what
+// blocks it. Any other error means the question could not be asked: the file
+// would not open read-only, or its schema_migrations would not read.
+// CLOOP_ALLOW_SCHEMA_DOWNGRADE is not consulted; the caller weighs the
+// opt-out.
+//
+// `cloop hub doctor` asks this rather than comparing version numbers itself.
+// It used to fail every database that was ahead, including the ones this guard
+// opens without complaint (Task 20387).
+func CheckSchemaAhead(path string) error {
+	conn, err := OpenConn(path, ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	latest, err := LatestSchemaVersion()
+	if err != nil {
+		return err
+	}
+	current, err := currentVersion(conn)
+	if err != nil {
+		return fmt.Errorf("statedb: read schema version of %s: %w", path, err)
+	}
+	return checkNotFromFuture(conn, current, latest, false)
 }
 
 // checkNotFromFuture refuses a database migrated past this binary's highest

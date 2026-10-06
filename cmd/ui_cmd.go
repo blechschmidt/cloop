@@ -20,6 +20,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// defaultUIPort is the port `cloop ui` serves on without --port, and so the hub
+// `cloop hub doctor` diagnoses without one: the two have to agree on which hub
+// that is, or the doctor reads a different overlay from the hub it reports on.
+const defaultUIPort = 8080
+
 var (
 	uiPort       int
 	uiNoBrowser  bool
@@ -186,14 +191,16 @@ but not for anything reachable from a network.`,
 					fmt.Printf("warning: sessions are process-local (%v) — a restart will sign every user out\n", storeWarn)
 				}
 				refreshMinutes := cfg.UI.OIDC.EffectiveRefreshIntervalMinutes()
-				// The static fields come from ui.OIDCAuthConfig rather than
-				// being spelled out here, because the Settings panel validates
-				// a prospective block by handing the same builder's output to
-				// the same constructor (Task 20308). Two construction sites
-				// would let the panel accept a configuration this line then
-				// refuses — and refusing here is fatal, so the symptom would be
-				// a hub that will not start.
-				authCfg := ui.OIDCAuthConfig(cfg.UI.OIDC)
+				// The static fields come from config.OIDCConfig.AuthConfig
+				// rather than being spelled out here, because the Settings
+				// panel validates a prospective block by handing the same
+				// builder's output to the same constructor (Task 20308), and
+				// `cloop hub doctor` does the same to say whether this start
+				// will succeed (Task 20387). Two construction sites would let
+				// the panel accept a configuration this line then refuses —
+				// and refusing here is fatal, so the symptom would be a hub
+				// that will not start.
+				authCfg := cfg.UI.OIDC.AuthConfig()
 				authCfg.Store = store
 				authCfg.Audit = srv.SessionAuditSink()
 				// Per-identity session cap (Task 20182). Resolved live rather
@@ -242,7 +249,7 @@ but not for anything reachable from a network.`,
 				if _, memberErr := srv.OpenMemberStore(); memberErr != nil {
 					return fmt.Errorf("could not open project memberships: %w", memberErr)
 				}
-				resolver, authzErr := authz.New(ui.OIDCAuthzConfig(cfg.UI.OIDC, roleSource))
+				resolver, authzErr := authz.New(cfg.UI.OIDC.AuthzConfig(roleSource))
 				if authzErr != nil {
 					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)
 				}
@@ -277,10 +284,7 @@ but not for anything reachable from a network.`,
 			// can still cap one identity from the panel and that override
 			// needs somewhere to live. With neither, every admission
 			// succeeds and a single-tenant hub is unchanged.
-			quotaResolver, quotaErr := quota.New(quota.Config{
-				Defaults: quotaLimitsFrom(cfg.UI.Quotas.Defaults),
-				Bindings: quotaBindingsFrom(cfg.UI.Quotas.Bindings),
-			})
+			quotaResolver, quotaErr := quota.New(cfg.UI.Quotas.QuotaConfig())
 			if quotaErr != nil {
 				return fmt.Errorf("ui.quotas is invalid: %w", quotaErr)
 			}
@@ -338,37 +342,6 @@ func describeRuntimeBindings(bindings []authz.Binding) string {
 	}
 	return fmt.Sprintf(", plus %d runtime binding(s) (%d deny) — see `cloop hub role list`",
 		len(bindings), denies)
-}
-
-// quotaLimitsFrom converts the YAML limit map into the quota model.
-// Validation (unknown resources, negative ceilings) happens in quota.New so
-// there is exactly one place that decides what is well-formed — the same
-// split ui.OIDCBindings has with authz.New.
-func quotaLimitsFrom(m map[string]float64) quota.Limits {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make(quota.Limits, len(m))
-	for k, v := range m {
-		out[quota.Resource(k)] = v
-	}
-	return out
-}
-
-// quotaBindingsFrom converts ui.quotas.bindings into the quota model.
-func quotaBindingsFrom(bindings []config.QuotaBinding) []quota.Binding {
-	if len(bindings) == 0 {
-		return nil
-	}
-	out := make([]quota.Binding, 0, len(bindings))
-	for _, b := range bindings {
-		out = append(out, quota.Binding{
-			Claim:  authz.ClaimKind(b.Claim),
-			Value:  b.Value,
-			Limits: quotaLimitsFrom(b.Limits),
-		})
-	}
-	return out
 }
 
 // effectiveDefaultRole renders the configured default for the startup
@@ -442,7 +415,7 @@ func warnStaticTokenDeprecated() {
 }
 
 func init() {
-	uiCmd.Flags().IntVar(&uiPort, "port", 8080, "Port to listen on")
+	uiCmd.Flags().IntVar(&uiPort, "port", defaultUIPort, "Port to listen on")
 	uiCmd.Flags().BoolVar(&uiNoBrowser, "no-browser", false, "Do not open the browser automatically")
 	uiCmd.Flags().StringVar(&uiToken, "token", "",
 		"DEPRECATED: unscoped static auth token (also reads CLOOP_UI_TOKEN). "+

@@ -300,42 +300,11 @@ type Registry struct {
 
 // NewRegistry returns a registry serving sessions beneath baseURL.
 func NewRegistry(baseURL string) (*Registry, error) {
-	base, err := normalizeBaseURL(baseURL)
+	base, err := NormalizeBaseURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
 	return &Registry{BaseURL: base, sessions: make(map[string]*Session)}, nil
-}
-
-// normalizeBaseURL checks the public base the sandbox will clone from.
-//
-// https is required for the same reason pkg/executor requires it of a
-// workspace repo: the sandbox presents its session token as an Authorization
-// header on every request, and over cleartext that token is published rather
-// than delivered. A loopback proxy is not an exception — a sandbox is, by
-// construction, something that might be sharing the host.
-func normalizeBaseURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", errors.New("gitproxy: base URL is empty")
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", fmt.Errorf("gitproxy: base URL %q is not a URL: %w", s, err)
-	}
-	switch {
-	case u.Scheme != "https":
-		return "", fmt.Errorf("gitproxy: base URL must be https, got scheme %q", u.Scheme)
-	case u.Host == "":
-		return "", errors.New("gitproxy: base URL has no host")
-	case u.User != nil:
-		return "", errors.New("gitproxy: base URL must not embed credentials")
-	case strings.Trim(u.Path, "/") != "":
-		return "", fmt.Errorf("gitproxy: base URL must have no path, got %q", u.Path)
-	case u.RawQuery != "" || u.Fragment != "":
-		return "", errors.New("gitproxy: base URL must not carry a query or fragment")
-	}
-	return u.Scheme + "://" + u.Host, nil
 }
 
 func (r *Registry) now() time.Time {

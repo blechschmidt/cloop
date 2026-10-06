@@ -25,6 +25,38 @@ type Volume struct {
 	FreeBytes int64 `json:"free_bytes"`
 }
 
+// FloorStanding is where a volume's free space stands against a free-space
+// floor (orchestrator.min_free_disk_mb).
+type FloorStanding int
+
+const (
+	// FloorOff: the floor is 0, which turns the check off.
+	FloorOff FloorStanding = iota
+	// FloorClear: at least twice the floor is free.
+	FloorClear
+	// FloorNear: above the floor but under twice it — the band an operator
+	// is warned in before anything pauses.
+	FloorNear
+	// FloorBelow: under the floor, where a run pauses before its next task.
+	FloorBelow
+)
+
+// AgainstFloor places v's free space against a floor of floor bytes. The hub's
+// admin banner and `cloop hub doctor` both read it, so the band one warns in is
+// the band the other reports (Task 20387); a run pauses in FloorBelow, by the
+// same strict comparison.
+func (v Volume) AgainstFloor(floor int64) FloorStanding {
+	switch {
+	case floor <= 0:
+		return FloorOff
+	case v.FreeBytes < floor:
+		return FloorBelow
+	case v.FreeBytes < 2*floor:
+		return FloorNear
+	}
+	return FloorClear
+}
+
 // Volumes resolves each path to the filesystem holding it and returns one
 // Volume per distinct device, in the order the paths first name them.
 //

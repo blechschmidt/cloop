@@ -103,6 +103,93 @@ func TestRedirectURLPathIsConstrained(t *testing.T) {
 	}
 }
 
+// TestRedirectURLPathIsRoutable covers the half of the rule that is about the
+// router rather than the gate: every path New accepts is registered as a route
+// at startup, and net/http panics on a pattern it cannot register. The paths
+// refused here passed the old "under /auth/" rule and then took the route
+// table down, collided with one of the hub's own routes, or registered a route
+// the browser's request never reaches. The accepted ones are paths the router
+// decodes and serves, which a stricter rule would have stopped from starting
+// (Task 20387); FuzzOIDCCallbackRoutes in pkg/ui checks the same property
+// against the real route table.
+func TestRedirectURLPathIsRoutable(t *testing.T) {
+	t.Parallel()
+
+	refused := []string{
+		"https://cloop.example.com/auth//cb",    // empty segment: unclean
+		"https://cloop.example.com/auth/./cb",   // dot segment: unclean
+		"https://cloop.example.com/auth/../api", // escapes /auth/ once cleaned
+		"https://cloop.example.com/auth/cb//",   // trailing empty segment
+		"https://cloop.example.com/auth/cb{",    // malformed wildcard
+		"https://cloop.example.com/auth/{x}",    // a wildcard, capturing the other /auth/ routes
+		"https://cloop.example.com/auth/{$}",    // an anchor
+		"https://cloop.example.com/auth/cb%7B",  // decodes to a brace
+		"https://cloop.example.com/auth/a%2Fb",  // routed as /auth/a/b, requested as one segment
+		"https://cloop.example.com/auth/login",  // the hub's own GET sign-in route
+		"https://cloop.example.com/auth/renew",  // likewise
+	}
+	for _, redirect := range refused {
+		t.Run("refused "+redirect, func(t *testing.T) {
+			t.Parallel()
+			if _, err := New(entraCfg("https://idp.example.com", redirect)); err == nil {
+				t.Fatalf("New accepted %q, which the hub cannot register or reach as a route", redirect)
+			}
+			if _, err := ValidateRedirectURL(redirect); err == nil {
+				t.Fatalf("ValidateRedirectURL accepted %q, which New refuses", redirect)
+			}
+		})
+	}
+
+	accepted := map[string]string{
+		"https://cloop.example.com/auth/callback":          "/auth/callback",
+		"https://cloop.example.com/auth/oidc":              "/auth/oidc",
+		"https://cloop.example.com/auth/sso/return":        "/auth/sso/return",
+		"https://cloop.example.com/auth/signin-oidc":       "/auth/signin-oidc",
+		"https://cloop.example.com/auth/callback/":         "/auth/callback/", // a subtree the router serves
+		"https://cloop.example.com/auth/login/":            "/auth/login/",    // not the login route itself
+		"https://cloop.example.com/auth/logout":            "/auth/logout",    // a POST route; a GET does not collide
+		"https://cloop.example.com/auth/%61b":              "/auth/ab",        // the router decodes the request
+		"https://cloop.example.com/auth/c%20b":             "/auth/c b",
+		"https://cloop.example.com/auth/r%C3%BCckruf":      "/auth/rückruf",
+		"https://cloop.example.com/auth/cb+x":              "/auth/cb+x",
+		"https://cloop.example.com/auth/callback?next=1":   "/auth/callback",
+		"https://cloop.example.com:8443/auth/oidc#ignored": "/auth/oidc",
+	}
+	for redirect, want := range accepted {
+		t.Run("accepted "+redirect, func(t *testing.T) {
+			t.Parallel()
+			u, err := ValidateRedirectURL(redirect)
+			if err != nil {
+				t.Fatalf("ValidateRedirectURL(%q): %v", redirect, err)
+			}
+			if u.Path != want {
+				t.Errorf("path = %q, want %q", u.Path, want)
+			}
+			a, err := New(entraCfg("https://idp.example.com", redirect))
+			if err != nil {
+				t.Fatalf("New refused %q, which ValidateRedirectURL accepts: %v", redirect, err)
+			}
+			if got := a.CallbackPath(); got != want {
+				t.Errorf("CallbackPath() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestValidateRedirectURLDoesNotTrim pins that the exported rule judges the
+// string New is given, byte for byte. A leading space makes net/url refuse the
+// whole URL, so startup fails; a validator that trimmed first would pass it.
+func TestValidateRedirectURLDoesNotTrim(t *testing.T) {
+	t.Parallel()
+	const padded = " https://cloop.example.com/auth/callback"
+	if _, err := New(entraCfg("https://idp.example.com", padded)); err == nil {
+		t.Fatal("New accepted a redirect_url with a leading space; this test's premise is gone")
+	}
+	if _, err := ValidateRedirectURL(padded); err == nil {
+		t.Fatal("ValidateRedirectURL accepted a value New refuses")
+	}
+}
+
 // TestDiscoveryAcceptsSameOriginIssuerAlias is the Entra tenant-addressing
 // case, verified against the real provider before it was written: fetching
 // .../{domain}.onmicrosoft.com/v2.0/.well-known/openid-configuration returns
@@ -436,4 +523,26 @@ func asPreflight(err error, target **PreflightError) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// TestSessionCookieReadsTheClientFacingHop: behind a proxy chain that sends
+// "https, http", the session cookie is Secure — it reads X-Forwarded-Proto's
+// first entry, as the dashboard's HSTS decision does, instead of comparing the
+// whole header and leaving the flag off (Task 20387).
+func TestSessionCookieReadsTheClientFacingHop(t *testing.T) {
+	t.Parallel()
+	a, err := New(entraCfg("https://idp.example.com", "https://cloop.example.com/auth/callback"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for proto, want := range map[string]bool{"https": true, "https, http": true, "HTTPS ,http": true,
+		"http, https": false, "": false} {
+		r := httptest.NewRequest(http.MethodGet, "http://cloop.example.com/", nil)
+		if proto != "" {
+			r.Header.Set("X-Forwarded-Proto", proto)
+		}
+		if got := a.cookieSecure(r); got != want {
+			t.Errorf("X-Forwarded-Proto %q: Secure=%v, want %v", proto, got, want)
+		}
+	}
 }

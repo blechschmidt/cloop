@@ -30,8 +30,10 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -307,17 +309,17 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 	}
 	if e.Egress.Enabled {
 		// A loopback bind is the default and is right for host-process and
-		// host-network executors; it is silently wrong for a bridged
-		// container, which cannot route to the host's 127.0.0.1 and will
-		// simply time out on every request. Saying so at config time is much
-		// cheaper than discovering it as "the sandbox has no network".
-		addr := strings.TrimSpace(e.Egress.ListenAddr)
-		if (addr == "" || strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "localhost")) &&
-			strings.TrimSpace(e.Egress.AdvertiseAddr) == "" && e.Container.Enabled {
-			out = append(out, "executors.egress binds loopback but the container executor is "+
-				"enabled — a bridged sandbox cannot reach the host's 127.0.0.1. Set "+
-				"executors.egress.advertise_addr (host.containers.internal / "+
-				"host.docker.internal) or bind an address the sandbox can route to.")
+		// host-network executors; a container on the hub's engine is refused
+		// the proxy by it. Whether it is refused is the hub's own routing rule,
+		// asked rather than restated: the copy that stood here was silenced by
+		// an advertise_addr the container route never reads, and recommended
+		// advertising host.containers.internal, which the hub refuses for Pods
+		// and devices (Task 20387).
+		if e.Container.Enabled {
+			if why, remedy := containerEgressRefusal(e.Egress.ListenAddr); why != "" {
+				out = append(out, "executors.egress: "+why+", so container runs that need the proxy "+
+					"are refused. "+remedy)
+			}
 		}
 		if e.Egress.DefaultMaxBytesUp == "" && e.Egress.DefaultMaxBytesDown == "" {
 			out = append(out, "executors.egress sets no default transfer quota, so a grant "+
@@ -330,6 +332,30 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 			"Enable executors.egress and grant hosts with `cloop egress grant` if they need one.")
 	}
 	return out
+}
+
+// containerEgressRefusal is executor.ContainerEgressRoute's verdict on the
+// address the hub would bind for listen, or "" when a container can reach it —
+// or when listen names a host only resolution could judge.
+func containerEgressRefusal(listen string) (why, remedy string) {
+	addr := strings.TrimSpace(listen)
+	if addr == "" {
+		addr = egressbroker.DefaultListenAddr
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", "" // reported by ValidateEgressConfig
+	}
+	port, _ := strconv.Atoi(portStr)
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil && host != "" {
+		if !tlsconf.IsLoopbackHost(host) {
+			return "", ""
+		}
+		ip = net.IPv4(127, 0, 0, 1)
+	}
+	_, why, remedy = executor.ContainerEgressRoute(&net.TCPAddr{IP: ip, Port: port})
+	return why, remedy
 }
 
 // ValidateEgressConfig returns a non-nil error describing the first problem
@@ -350,7 +376,7 @@ func ValidateEgressConfig(e EgressConfig) error {
 	if err := validateEgressAddr("listen_addr", e.ListenAddr, true); err != nil {
 		return err
 	}
-	if err := validateEgressAddr("advertise_addr", e.AdvertiseAddr, false); err != nil {
+	if err := validateEgressAdvertiseAddr(e.AdvertiseAddr); err != nil {
 		return err
 	}
 	for field, v := range map[string]string{
@@ -390,6 +416,21 @@ func validateEgressAddr(field, addr string, requirePort bool) error {
 	return nil
 }
 
+// validateEgressAdvertiseAddr checks advertise_addr: the shape every egress
+// address must have, and then the rule the hub resolves it by when it starts
+// the proxy (executor.EgressAdvertised), which refuses one that names no host.
+// Without the second, ":8899" loaded cleanly and the proxy then did not start
+// (Task 20387). Any port stands in for the listener's, which the hub supplies.
+func validateEgressAdvertiseAddr(addr string) error {
+	if err := validateEgressAddr("advertise_addr", addr, false); err != nil {
+		return err
+	}
+	if _, err := executor.EgressAdvertised(addr, 1); err != nil {
+		return err
+	}
+	return nil
+}
+
 // clampEgressConfig repairs out-of-range values in place and reports what it
 // changed, so Load can warn once per field.
 //
@@ -421,7 +462,7 @@ func clampEgressConfig(e *EgressConfig) []string {
 			*v = ""
 		}
 	}
-	if err := validateEgressAddr("advertise_addr", e.AdvertiseAddr, false); err != nil {
+	if err := validateEgressAdvertiseAddr(e.AdvertiseAddr); err != nil {
 		changed = append(changed, fmt.Sprintf("executors.egress.advertise_addr: %v", err))
 		e.AdvertiseAddr = ""
 	}

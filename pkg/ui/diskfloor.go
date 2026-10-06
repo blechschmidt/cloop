@@ -104,9 +104,11 @@ func (s *Server) hubDisk() hubDiskView {
 		return v
 	}
 	v.Volume, v.FreeBytes = vols[0].Mount, vols[0].FreeBytes
-	if v.FloorBytes > 0 {
-		v.Low = v.FreeBytes < v.FloorBytes
-		v.Warn = v.FreeBytes < 2*v.FloorBytes
+	switch vols[0].AgainstFloor(v.FloorBytes) {
+	case diskusage.FloorBelow:
+		v.Low, v.Warn = true, true
+	case diskusage.FloorNear:
+		v.Warn = true
 	}
 	return v
 }

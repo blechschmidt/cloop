@@ -508,7 +508,7 @@ func TestEgressRouteForEachExecutorKind(t *testing.T) {
 			ex: stub(executor.KindLocalProcess), want: executor.EgressProxyRoute{Host: "127.0.0.1", Port: 41000}},
 		{name: "container on an any-address bind is pinned to its gateway", svc: svcAt("0.0.0.0:41000", "hub.example:9"),
 			ex:   stub(executor.KindContainer),
-			want: executor.EgressProxyRoute{Host: egressGatewayHost, Port: 41000, Gateway: true}},
+			want: executor.EgressProxyRoute{Host: executor.EgressGatewayHost, Port: 41000, Gateway: true}},
 		{name: "container cannot reach a loopback bind", svc: svcAt("127.0.0.1:41000", ""),
 			ex: stub(executor.KindContainer), whyHas: "loopback", fixHas: "0.0.0.0:41000"},
 		{name: "container on one host address dials it", svc: svcAt("172.17.0.1:41000", ""),

@@ -134,7 +134,7 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 	if reg == nil {
 		return nil, errors.New("gitproxy: nil registry")
 	}
-	if _, err := normalizeBaseURL(reg.BaseURL); err != nil {
+	if _, err := NormalizeBaseURL(reg.BaseURL); err != nil {
 		return nil, err
 	}
 	rt := opts.Transport

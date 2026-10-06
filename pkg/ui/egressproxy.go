@@ -45,6 +45,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -172,7 +173,7 @@ func startEgressProxy(cfg *config.Config, dir string, port int) (*egressProxySer
 		_ = ln.Close()
 		return nil, fmt.Errorf("executors.egress.listen_addr %s is not a TCP listener (%T)", addr, ln.Addr())
 	}
-	advertised, err := egressAdvertised(e.AdvertiseAddr, bound)
+	advertised, err := executor.EgressAdvertised(e.AdvertiseAddr, bound.Port)
 	if err != nil {
 		_ = ln.Close()
 		return nil, err
@@ -263,27 +264,6 @@ func egressBrokerOptions(auditor secretbroker.Auditor, cfg *config.Config, endpo
 	up, _ := egressbroker.ParseBytes(e.DefaultMaxBytesUp)
 	down, _ := egressbroker.ParseBytes(e.DefaultMaxBytesDown)
 	return append(opts, egressbroker.WithDefaultQuotas(up, down))
-}
-
-// egressAdvertised resolves executors.egress.advertise_addr against the bound
-// listener: a bare host, or a port of 0, takes the bound port, which is what
-// lets an operator bind an ephemeral port and still advertise a name.
-func egressAdvertised(advertise string, bound *net.TCPAddr) (string, error) {
-	a := strings.TrimSpace(advertise)
-	if a == "" {
-		return "", nil
-	}
-	host, port, err := net.SplitHostPort(a)
-	if err != nil {
-		host, port = strings.Trim(a, "[]"), ""
-	}
-	if host == "" {
-		return "", fmt.Errorf("executors.egress.advertise_addr %q names no host", a)
-	}
-	if port == "" || port == "0" {
-		port = strconv.Itoa(bound.Port)
-	}
-	return net.JoinHostPort(host, port), nil
 }
 
 // defaultEndpoint is the address a sandbox with no route of its own is

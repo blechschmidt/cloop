@@ -48,6 +48,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -496,6 +497,22 @@ func (a *Authenticator) RefreshClaimStats() (asserted, unverified uint64) {
 	return a.claimsAsserted, a.claimsUnverified
 }
 
+// ConfigError is New's refusal of one setting: Field names it as a ui.oidc
+// block does — "issuer", "client_id", "redirect_url", "cookie_secure",
+// "max_claim_age", "clock_skew" — and the message is New's own. It exists so
+// a caller can say which setting to fix without matching on the message, and
+// so `cloop hub doctor` can set one refusal aside to find the next: New stops
+// at the first, and a bad issuer used to hide an empty client id (Task 20387).
+type ConfigError struct {
+	Field string
+	Err   error
+}
+
+func (e *ConfigError) Error() string { return e.Err.Error() }
+func (e *ConfigError) Unwrap() error { return e.Err }
+
+func configErr(field string, err error) error { return &ConfigError{Field: field, Err: err} }
+
 // New validates cfg and returns a ready Authenticator. It is an error to
 // call New with Enabled=false — callers should simply not construct one.
 // Validation is strict (fail closed): a dashboard that claims to require
@@ -505,17 +522,17 @@ func New(cfg Config) (*Authenticator, error) {
 		return nil, errors.New("oidcauth: config has enabled=false")
 	}
 	if cfg.Issuer == "" {
-		return nil, errors.New("oidcauth: issuer is required")
+		return nil, configErr("issuer", errors.New("oidcauth: issuer is required"))
 	}
 	iss, err := url.Parse(cfg.Issuer)
 	if err != nil {
-		return nil, fmt.Errorf("oidcauth: invalid issuer URL: %w", err)
+		return nil, configErr("issuer", fmt.Errorf("oidcauth: invalid issuer URL: %w", err))
 	}
 	if iss.Scheme != "https" && !isLoopbackHost(iss.Hostname()) {
-		return nil, fmt.Errorf("oidcauth: issuer %q must use https (plain http is only allowed for localhost development IdPs)", cfg.Issuer)
+		return nil, configErr("issuer", fmt.Errorf("oidcauth: issuer %q must use https (plain http is only allowed for localhost development IdPs)", cfg.Issuer))
 	}
 	if cfg.ClientID == "" {
-		return nil, errors.New("oidcauth: client_id is required")
+		return nil, configErr("client_id", errors.New("oidcauth: client_id is required"))
 	}
 	// No client_secret check. An empty secret is a supported configuration,
 	// not a missing one: cloop then acts as an RFC 6749 §2.1 *public* client
@@ -534,30 +551,13 @@ func New(cfg Config) (*Authenticator, error) {
 	// that list (it also omits code_challenge_methods_supported while fully
 	// supporting S256), so believing the metadata would refuse the very
 	// deployment this is for. See deploy/terraform/azure-entra-id.
-	if cfg.RedirectURL == "" {
-		return nil, errors.New("oidcauth: redirect_url is required (e.g. https://cloop.example.com/auth/callback)")
-	}
-	red, err := url.Parse(cfg.RedirectURL)
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: invalid redirect_url: %w", err)
-	}
-	// The path is not decoration: it is the route the hub has to answer on
-	// when the browser comes back from the IdP. Registering the callback
-	// somewhere the redirect never lands produces the worst failure this
-	// package has — the IdP authenticates the user, redirects to a path that
-	// falls through to the SPA shell, the shell finds no session and bounces
-	// to /auth/login, and the operator watches an endless login loop with
-	// nothing in the log. Constrain it to /auth/ so the one gate that lets
-	// unauthenticated requests through (oidcGate) covers it by construction,
-	// and so a stray redirect_url cannot shadow "/" or an /api route.
-	if !isCallbackPath(red.Path) {
-		return nil, fmt.Errorf("oidcauth: redirect_url path must be under /auth/ (got %q in %q) — "+
-			"cloop serves the callback there and nowhere else", red.Path, cfg.RedirectURL)
+	if _, err := ValidateRedirectURL(cfg.RedirectURL); err != nil {
+		return nil, err
 	}
 	switch cfg.CookieSecure {
 	case "", "auto", "always", "never":
 	default:
-		return nil, fmt.Errorf("oidcauth: cookie_secure must be auto, always, or never (got %q)", cfg.CookieSecure)
+		return nil, configErr("cookie_secure", fmt.Errorf("oidcauth: cookie_secure must be auto, always, or never (got %q)", cfg.CookieSecure))
 	}
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "profile", "email"}
@@ -589,9 +589,9 @@ func New(cfg Config) (*Authenticator, error) {
 		// The explicit opt-out, normalised so ClaimsStale has one comparison.
 		cfg.MaxClaimAge = -1
 	case cfg.MaxClaimAge > MaxMaxClaimAge:
-		return nil, fmt.Errorf("oidcauth: max_claim_age %s exceeds the maximum of %s — "+
+		return nil, configErr("max_claim_age", fmt.Errorf("oidcauth: max_claim_age %s exceeds the maximum of %s — "+
 			"past that it is a second session lifetime rather than a freshness bound; "+
-			"set it negative to disable the check outright", cfg.MaxClaimAge, MaxMaxClaimAge)
+			"set it negative to disable the check outright", cfg.MaxClaimAge, MaxMaxClaimAge))
 	}
 	switch {
 	case cfg.ClockSkew == 0:
@@ -601,9 +601,9 @@ func New(cfg Config) (*Authenticator, error) {
 		// validation path has one shape to check and jwt.go one value to add.
 		cfg.ClockSkew = 0
 	case cfg.ClockSkew > MaxClockSkew:
-		return nil, fmt.Errorf("oidcauth: clock_skew %s exceeds the maximum of %s — "+
+		return nil, configErr("clock_skew", fmt.Errorf("oidcauth: clock_skew %s exceeds the maximum of %s — "+
 			"past that the setting extends the life of every expired token rather than "+
-			"compensating for drift", cfg.ClockSkew, MaxClockSkew)
+			"compensating for drift", cfg.ClockSkew, MaxClockSkew))
 	}
 	store := cfg.Store
 	if store == nil {
@@ -684,23 +684,123 @@ const DefaultCallbackPath = "/auth/callback"
 // Safe on nil and on a disabled authenticator, both of which report the
 // default so the route table has a stable shape either way.
 func (a *Authenticator) CallbackPath() string {
-	if a == nil || a.cfg.RedirectURL == "" {
+	if a == nil {
 		return DefaultCallbackPath
 	}
-	u, err := url.Parse(a.cfg.RedirectURL)
-	if err != nil || !isCallbackPath(u.Path) {
-		// Unreachable via New, which rejects both. Falling back rather than
-		// panicking keeps a hand-built Authenticator in a test from taking
-		// the whole route table down.
+	u, err := ValidateRedirectURL(a.cfg.RedirectURL)
+	if err != nil {
+		// Unreachable via New, which refuses the same URL for the same
+		// reason. Falling back rather than panicking keeps a hand-built
+		// Authenticator in a test from taking the whole route table down.
 		return DefaultCallbackPath
 	}
 	return u.Path
 }
 
-// isCallbackPath reports whether p may serve as the OIDC redirect path. The
-// rule is deliberately narrow: under /auth/, and with something after it.
-func isCallbackPath(p string) bool {
-	return strings.HasPrefix(p, "/auth/") && len(p) > len("/auth/")
+// ValidateRedirectURL is New's rule for redirect_url, and the parsed URL when
+// it holds: present, parseable, and with a path under /auth/ that the hub can
+// serve. CallbackPath serves exactly that path, so any path that passes here
+// is a working callback — /auth/callback is only the default, and an Entra
+// SPA registration is commonly /auth/oidc.
+//
+// Exported so that a diagnostic asks this rule rather than restating it.
+// `cloop hub doctor` once compared the path against /auth/callback and
+// failed a working hub registered at /auth/oidc (Task 20387); a copy of a
+// rule drifts the first time one side changes, and the doctor's failure mode
+// is a confident verdict the hub does not share.
+//
+// The value is checked as given, without trimming whitespace, because New
+// receives it untrimmed: a check that cleaned it first would approve a
+// string the hub then refuses.
+func ValidateRedirectURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, configErr("redirect_url",
+			errors.New("oidcauth: redirect_url is required (e.g. https://cloop.example.com/auth/callback)"))
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, configErr("redirect_url", fmt.Errorf("oidcauth: invalid redirect_url: %w", err))
+	}
+	// The path is not decoration: it is the route the hub has to answer on
+	// when the browser comes back from the IdP. Registering the callback
+	// somewhere the redirect never lands produces the worst failure this
+	// package has — the IdP authenticates the user, redirects to a path that
+	// falls through to the SPA shell, the shell finds no session and bounces
+	// to /auth/login, and the operator watches an endless login loop with
+	// nothing in the log. Constrain it to /auth/ so the one gate that lets
+	// unauthenticated requests through (oidcGate) covers it by construction,
+	// and so a stray redirect_url cannot shadow "/" or an /api route.
+	if problem := callbackPathProblem(u); problem != "" {
+		return nil, configErr("redirect_url",
+			fmt.Errorf("oidcauth: redirect_url path %s (got %q in %q)", problem, u.EscapedPath(), raw))
+	}
+	return u, nil
+}
+
+// LoginPath, LogoutPath and RenewPath are the hub's other routes under
+// /auth/. They are named here, beside the callback rule, because the callback
+// shares their subtree: the hub registers GET LoginPath and GET RenewPath as
+// routes, and the router panics at startup on a second registration of either
+// rather than serving them. (LogoutPath is a POST, which a GET callback does
+// not collide with.)
+const (
+	LoginPath  = "/auth/login"
+	LogoutPath = "/auth/logout"
+	RenewPath  = "/auth/renew"
+)
+
+// callbackPathProblem says why u's path cannot serve as the OIDC redirect
+// path, or returns "" when it can.
+//
+// The hub registers the path as a route at startup ("GET " + u.Path), and a
+// pattern net/http refuses is a panic, not an error. So beyond "under /auth/,
+// with something after it" — which keeps the callback inside the subtree the
+// sign-in gate lets through and away from "/" and /api — the rule refuses
+// exactly what the router cannot register or reach:
+//
+//   - an unclean path, with an empty, "." or ".." segment ("/auth//cb",
+//     "/auth/../api"): net/http panics on the pattern, and a browser cleans
+//     the URL before it would ever request it;
+//   - "{" or "}": wildcard syntax, which either panics ("/auth/cb{") or
+//     registers a pattern that captures the hub's other /auth/ routes
+//     ("/auth/{x}");
+//   - an escaped "/" ("%2F"): the route is registered from the decoded path,
+//     where it is a second segment, and the request for the escaped form is
+//     matched as one segment and never reaches it;
+//   - the hub's own GET routes, LoginPath and RenewPath.
+//
+// Each of those once passed this check and then took the route table down or
+// left the callback unreachable (Task 20387). Anything else — another escape,
+// a non-ASCII name, punctuation — the router decodes and matches, and
+// FuzzOIDCCallbackRoutes in pkg/ui holds this rule and the real route table
+// to agreement. One trailing slash is allowed: the router serves it as the
+// subtree it names.
+func callbackPathProblem(u *url.URL) string {
+	p := u.Path
+	rest, ok := strings.CutPrefix(p, "/auth/")
+	if !ok || rest == "" {
+		return "must be under /auth/, with a name after it — cloop serves the callback there and nowhere else"
+	}
+	switch p {
+	case LoginPath, RenewPath:
+		return "is one of the hub's own sign-in routes; the callback needs a path of its own, such as " +
+			DefaultCallbackPath
+	}
+	clean := path.Clean(p)
+	if strings.HasSuffix(p, "/") {
+		clean += "/"
+	}
+	switch {
+	case clean != p:
+		return "must be a clean path, with no empty, '.' or '..' segment — the hub registers it as a " +
+			"route, and the router refuses an unclean one"
+	case strings.ContainsAny(p, "{}"):
+		return "may not contain '{' or '}' — the router reads them as wildcard syntax"
+	case strings.Contains(strings.ToLower(u.EscapedPath()), "%2f"):
+		return "may not contain an escaped '/' (%2F) — the request for it never reaches the route " +
+			"registered from the decoded path"
+	}
+	return ""
 }
 
 // IsAdmin reports whether id's email is on the configured admin list.
@@ -1114,15 +1214,35 @@ func (a *Authenticator) sessionCookie(r *http.Request, value string, maxAge int)
 
 // cookieSecure resolves the Secure flag from config and the request.
 func (a *Authenticator) cookieSecure(r *http.Request) bool {
-	switch a.cfg.CookieSecure {
-	case "always":
+	switch {
+	case a.cfg.CookieSecure == "always":
 		return true
-	case "never":
+	case !CookieSecureFollowsRequest(a.cfg.CookieSecure):
 		return false
-	default: // "auto" / ""
-		return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	default:
+		return r.TLS != nil || ForwardedProtoHTTPS(r.Header)
 	}
 }
+
+// ForwardedProtoHTTPS reads the client-facing hop from X-Forwarded-Proto: a
+// proxy chain may append ("https, http"), and the first entry is the one that
+// decided the browser's view. The dashboard's HSTS decision reads it with this
+// too; the cookie used to compare the whole header, so a chain that sends
+// "https, http" got HSTS and a session cookie without Secure.
+func ForwardedProtoHTTPS(h http.Header) bool {
+	proto := h.Get("X-Forwarded-Proto")
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// CookieSecureFollowsRequest reports whether a cookie_secure mode takes the
+// session cookie's Secure flag from the request — its own TLS, or a proxy's
+// X-Forwarded-Proto: https — rather than fixing it: "auto", and unset. Behind
+// a TLS-terminating proxy that header is then what keeps the flag on, which
+// `cloop hub doctor` states only where it is true (Task 20387).
+func CookieSecureFollowsRequest(mode string) bool { return mode == "" || mode == "auto" }
 
 // errorPage renders a small self-contained HTML error page with a retry
 // link. err detail is included (escaped) because the dashboard's audience

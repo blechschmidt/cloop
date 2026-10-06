@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -131,14 +130,14 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 	// an ephemeral port is not knowable until the listener exists.
 	addr := strings.TrimSpace(k.ListenAddr)
 	if addr == "" {
-		addr = "127.0.0.1:0"
+		addr = kubeguard.DefaultListenAddr
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes monitor listen on %s: %w", addr, err)
 	}
 
-	baseURL, err := kubeGuardBaseURL(k.AdvertiseURL, ln.Addr())
+	baseURL, err := kubeguard.AdvertisedBaseURL(k.AdvertiseURL, ln.Addr())
 	if err != nil {
 		_ = ln.Close()
 		return nil, err
@@ -153,7 +152,7 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 	// kubeconfig can carry its own, so a self-signed hub certificate needs no
 	// change to the sandbox image — which is why this is read here rather
 	// than left to the operator.
-	bundle, err := kubeGuardCABundle(k)
+	bundle, err := k.CABundle()
 	if err != nil {
 		_ = ln.Close()
 		return nil, err
@@ -211,58 +210,6 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		"ui: kubernetes access monitor on %s, advertised as %s; policy floor %s\n",
 		ln.Addr(), baseURL, svc.policy.Summary())
 	return svc, nil
-}
-
-// kubeGuardCABundle returns the PEM a sandbox should trust for the monitor.
-//
-// ca_file when set, otherwise the serving certificate itself — which is the
-// right answer for a self-signed certificate and harmless for one signed by a
-// public CA, since a kubeconfig's certificate-authority-data replaces the
-// trust store rather than adding to it, and the serving certificate's own
-// chain is exactly what will be presented.
-func kubeGuardCABundle(k config.KubeGuardConfig) ([]byte, error) {
-	path := strings.TrimSpace(k.CAFile)
-	label := "executors.kube_guard.ca_file"
-	if path == "" {
-		path = strings.TrimSpace(k.CertFile)
-		label = "executors.kube_guard.cert_file"
-	}
-	if path == "" {
-		return nil, nil
-	}
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", label, err)
-	}
-	return pem, nil
-}
-
-// kubeGuardBaseURL resolves what sandboxes are pointed at.
-//
-// The bound address is only correct when the sandbox shares the hub's network
-// namespace. Falling back to it rather than refusing keeps the single-host
-// case working with no configuration, and a wrong choice surfaces immediately
-// as a kubectl that cannot connect rather than as a credential going
-// somewhere it should not.
-func kubeGuardBaseURL(advertise string, bound net.Addr) (string, error) {
-	if s := strings.TrimSpace(advertise); s != "" {
-		u, err := url.Parse(s)
-		if err != nil {
-			return "", fmt.Errorf("kubernetes monitor advertise_url %q: %w", s, err)
-		}
-		return strings.TrimSuffix(u.String(), "/"), nil
-	}
-	tcp, ok := bound.(*net.TCPAddr)
-	if !ok {
-		return "", fmt.Errorf("kubernetes monitor listener is not TCP (%T), so no URL can be "+
-			"advertised; set executors.kube_guard.advertise_url", bound)
-	}
-	host := tcp.IP.String()
-	if tcp.IP == nil || tcp.IP.IsUnspecified() {
-		// 0.0.0.0 is a bind address, never a destination.
-		host = "127.0.0.1"
-	}
-	return "https://" + net.JoinHostPort(host, fmt.Sprint(tcp.Port)), nil
 }
 
 // reap sweeps lapsed sessions until ctx ends.

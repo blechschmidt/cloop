@@ -116,3 +116,25 @@ func TestMeasureFilesSkipsTheReserve(t *testing.T) {
 		t.Error("the reserve is listed as a .cloop entry")
 	}
 }
+
+// TestAgainstFloorIsTheOneSetOfBands: the hub's admin banner and `cloop hub
+// doctor` both place a volume with this, so they cannot disagree about which
+// side of the floor it is on (Task 20387).
+func TestAgainstFloorIsTheOneSetOfBands(t *testing.T) {
+	const floor = 1 << 30
+	for _, tc := range []struct {
+		free  int64
+		floor int64
+		want  FloorStanding
+	}{
+		{0, 0, FloorOff},
+		{floor - 1, floor, FloorBelow},
+		{floor, floor, FloorNear},
+		{2*floor - 1, floor, FloorNear},
+		{2 * floor, floor, FloorClear},
+	} {
+		if got := (Volume{FreeBytes: tc.free}).AgainstFloor(tc.floor); got != tc.want {
+			t.Errorf("free %d against %d = %v, want %v", tc.free, tc.floor, got, tc.want)
+		}
+	}
+}

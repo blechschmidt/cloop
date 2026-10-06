@@ -1278,6 +1278,42 @@ func (r *Resolver) RuntimeBindings() []Binding {
 	return out
 }
 
+// ConfiguredBindings returns a copy of the configured bindings as the
+// resolver decides with them: normalized by New — claim and role lowercased,
+// values trimmed, a leading "/" off a group path — and with admin_emails as
+// the global admin bindings New turns them into.
+//
+// A diagnostic that judged the raw role_mappings instead would disagree with
+// the hub it describes: "role: Admin" grants admin here, and `cloop hub
+// doctor` once reported such a hub as having no administrator (Task 20387).
+func (r *Resolver) ConfiguredBindings() []Binding {
+	if r == nil || len(r.bindings) == 0 {
+		return nil
+	}
+	out := make([]Binding, len(r.bindings))
+	copy(out, r.bindings)
+	return out
+}
+
+// GlobalAdminBindings returns the configured bindings that make an identity
+// an administrator of the whole hub: the admin role, narrowed to no project
+// and no executor. A project- or executor-scoped admin is admin of that one
+// thing; it does not reach user management, settings or the audit trail, so a
+// hub whose only admin bindings are scoped has nobody who can fix its policy.
+//
+// It is the one answer to "does this policy have an administrator" — the
+// Settings panel refuses to save a block without one, and `cloop hub doctor`
+// fails a hub without one — so the two cannot disagree about what counts.
+func (r *Resolver) GlobalAdminBindings() []Binding {
+	var out []Binding
+	for _, b := range r.ConfiguredBindings() {
+		if b.Role == RoleAdmin && !b.Deny && b.Project == "" && b.Executor == "" {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // HasRuntimeBindings reports whether any runtime binding is in force.
 //
 // Separate from RuntimeBindings because callers on the request path ask only

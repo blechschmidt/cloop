@@ -15,7 +15,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -198,65 +197,6 @@ func TestGitProxyWrapIsNilSafe(t *testing.T) {
 }
 
 func activeGitProxyNil() *gitProxyService { return nil }
-
-func TestGitProxyBaseURL(t *testing.T) {
-	tests := []struct {
-		name      string
-		advertise string
-		addr      net.Addr
-		want      string
-		wantErr   bool
-	}{
-		{
-			name: "advertised url wins",
-			// The bound address is right only when the sandbox shares the
-			// hub's network namespace; everything else must be told.
-			advertise: "https://hub.internal:8443",
-			addr:      &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9000},
-			want:      "https://hub.internal:8443",
-		},
-		{
-			name:      "trailing slash is trimmed",
-			advertise: "https://hub.internal:8443/",
-			addr:      &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9000},
-			want:      "https://hub.internal:8443",
-		},
-		{
-			name: "bound loopback",
-			addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9000},
-			want: "https://127.0.0.1:9000",
-		},
-		{
-			// 0.0.0.0 is a bind address and never a destination, so it must
-			// not be advertised as one.
-			name: "unspecified bind becomes loopback",
-			addr: &net.TCPAddr{IP: net.IPv4zero, Port: 9000},
-			want: "https://127.0.0.1:9000",
-		},
-		{
-			name:    "a non-TCP listener cannot be advertised",
-			addr:    &net.UnixAddr{Name: "/tmp/x", Net: "unix"},
-			wantErr: true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := gitProxyBaseURL(tc.advertise, tc.addr)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("want an error, got %q", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("gitProxyBaseURL: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("gitProxyBaseURL = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
 
 // TestGitProxyCloseEndsSessions checks that shutdown leaves no session behind
 // and that the audit trail records why each ended.

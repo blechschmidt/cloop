@@ -925,3 +925,33 @@ func TestPresentClaims(t *testing.T) {
 		t.Errorf("a blank claim is not a released claim: %v", got)
 	}
 }
+
+// TestGlobalAdminBindingsIsThePolicyAsResolved: the bindings a diagnostic or
+// the Settings panel judges are the ones New normalized, and only a hub-wide
+// admin binding counts as an administrator (Task 20387).
+func TestGlobalAdminBindingsIsThePolicyAsResolved(t *testing.T) {
+	r, err := New(Config{
+		Bindings: []Binding{
+			{Claim: "Group", Value: " /platform ", Role: " Admin "},
+			{Claim: ClaimGroup, Value: "eng", Role: RoleAdmin, Project: "/srv/one"},
+			{Claim: ClaimGroup, Value: "ops", Role: RoleOperator},
+		},
+		AdminEmails: []string{"Ops@Example.com"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	all := r.ConfiguredBindings()
+	if len(all) != 4 || all[0].Claim != ClaimGroup || all[0].Value != "platform" || all[0].Role != RoleAdmin {
+		t.Fatalf("ConfiguredBindings = %+v, want the normalized bindings plus the admin email", all)
+	}
+	all[0].Role = RoleViewer // a copy: the resolver must not see this
+	admins := r.GlobalAdminBindings()
+	if len(admins) != 2 || admins[0].Value != "platform" || admins[1].Value != "ops@example.com" {
+		t.Fatalf("GlobalAdminBindings = %+v, want the group mapping and the admin email, not the project admin", admins)
+	}
+	var nilResolver *Resolver
+	if nilResolver.ConfiguredBindings() != nil || nilResolver.GlobalAdminBindings() != nil {
+		t.Error("a nil resolver has no bindings")
+	}
+}

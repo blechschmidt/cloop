@@ -196,19 +196,13 @@ func applyHostExecutionPolicy(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+	// Host execution, the agent build floor and the resource ceiling, each
+	// through its ratchet — the same three every command and `cloop hub
+	// doctor` apply.
+	cfg.Executors.ApplyRatchets()
 	// How large a feature's branch, or the work its run returns, may be when
 	// it travels to and from an isolating executor (Task 20367).
 	installFeatureBundleCap(cfg)
-	// Same ratchet, same reason: a tenant's config.yaml must not be able to
-	// lower the fleet's minimum agent build.
-	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
-	// And the same again for the resource ceiling, where the stakes are the
-	// machine's RAM rather than a build number. A malformed section installs
-	// nothing; config.ExecutorLimitWarnings is what tells the operator so.
-	if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
-		executor.ApplyResourceCeiling(ceiling)
-	}
 }
 
 // reconcileConfiguredExecutors brings up the container and Kubernetes drivers

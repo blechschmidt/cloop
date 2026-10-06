@@ -122,6 +122,52 @@ func Check(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyConfi
 	return result, nil
 }
 
+// Limits are the spend ceilings Enforce holds a run to. Zero means none.
+//
+// budget.monthly_usd is not among them: it is reported by `cloop cost report`
+// and enforced nowhere, which is worth knowing before relying on it.
+type Limits struct {
+	// DailyUSD and DailyTokens are the project's daily caps, each the lower of
+	// its own setting and its percentage of the global limit.
+	DailyUSD    float64
+	DailyTokens int
+	// GlobalDailyUSD and GlobalDailyTokens are the host-wide caps, across
+	// every project.
+	GlobalDailyUSD    float64
+	GlobalDailyTokens int
+}
+
+// Bounded reports whether any of these ceilings is set. (The Claude Code
+// subscription caps and block_extra_usage are enforced elsewhere, and are not
+// among them.)
+func (l Limits) Bounded() bool {
+	return l.DailyUSD > 0 || l.DailyTokens > 0 || l.GlobalDailyUSD > 0 || l.GlobalDailyTokens > 0
+}
+
+// EffectiveLimits computes the ceilings Enforce applies for a project with cfg
+// on a host with global. Exported so `cloop hub doctor` reports the limits a
+// run is held to, rather than reading the budget block and counting every
+// field in it as one (Task 20387).
+func EffectiveLimits(cfg config.BudgetConfig, global globalbudget.GlobalBudgetConfig) Limits {
+	lim := Limits{
+		DailyUSD:          cfg.DailyUSDLimit,
+		DailyTokens:       cfg.DailyTokenLimit,
+		GlobalDailyUSD:    global.DailyUSDLimit,
+		GlobalDailyTokens: global.DailyTokenLimit,
+	}
+	if pct := globalbudget.EffectiveProjectUSDLimit(global, cfg.GlobalUSDPct); pct > 0 {
+		if lim.DailyUSD == 0 || pct < lim.DailyUSD {
+			lim.DailyUSD = pct
+		}
+	}
+	if pct := globalbudget.EffectiveProjectTokenLimit(global, cfg.GlobalTokenPct); pct > 0 {
+		if lim.DailyTokens == 0 || pct < lim.DailyTokens {
+			lim.DailyTokens = pct
+		}
+	}
+	return lim
+}
+
 // Enforce checks the daily budget and returns a non-nil error if any limit is
 // exceeded, with a clear human-readable message. Use this before starting task
 // execution to abort early rather than spending tokens on a blocked run.
@@ -132,20 +178,9 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 	// Load global budget config (best-effort — errors mean no global limit).
 	globalCfg, _ := globalbudget.Load()
 
-	// Compute effective per-project limits from global percentages.
-	effectiveUSDLimit := cfg.DailyUSDLimit
-	effectiveTokenLimit := cfg.DailyTokenLimit
-
-	if pctLimit := globalbudget.EffectiveProjectUSDLimit(globalCfg, cfg.GlobalUSDPct); pctLimit > 0 {
-		if effectiveUSDLimit == 0 || pctLimit < effectiveUSDLimit {
-			effectiveUSDLimit = pctLimit
-		}
-	}
-	if pctLimit := globalbudget.EffectiveProjectTokenLimit(globalCfg, cfg.GlobalTokenPct); pctLimit > 0 {
-		if effectiveTokenLimit == 0 || pctLimit < effectiveTokenLimit {
-			effectiveTokenLimit = pctLimit
-		}
-	}
+	lim := EffectiveLimits(cfg, globalCfg)
+	effectiveUSDLimit := lim.DailyUSD
+	effectiveTokenLimit := lim.DailyTokens
 
 	// Check per-project limits (with effective limits applied).
 	if effectiveUSDLimit > 0 || effectiveTokenLimit > 0 {

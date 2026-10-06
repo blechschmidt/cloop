@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -95,4 +96,126 @@ func validRouteHostname(h string) bool {
 		}
 	}
 	return true
+}
+
+// The routing rules below decide how a workload of each kind reaches the
+// hub's egress proxy. They were methods of the hub's proxy service until Task
+// 20387 moved them here, so that `cloop hub doctor` reports the route the hub
+// will choose — by calling these — rather than its own guess at one. The
+// doctor's guess had already drifted: it accepted a loopback advertise_addr on
+// a Kubernetes hub that was not in strict mode, and recommended a Service name
+// the hub refuses.
+
+// EgressGatewayHost is the name a container sandbox's proxy URL uses for the
+// hub. The container driver pins it to the gateway of whichever bridge the
+// sandbox joins; podman already resolves it to the host in every container.
+const EgressGatewayHost = "host.containers.internal"
+
+// EgressAdvertised resolves executors.egress.advertise_addr against the port
+// the proxy is bound to: a bare host, or a port of 0, takes the bound port,
+// which is what lets an operator bind an ephemeral port and still advertise a
+// name. "" when advertise is unset.
+func EgressAdvertised(advertise string, boundPort int) (string, error) {
+	a := strings.TrimSpace(advertise)
+	if a == "" {
+		return "", nil
+	}
+	host, port, err := net.SplitHostPort(a)
+	if err != nil {
+		host, port = strings.Trim(a, "[]"), ""
+	}
+	if host == "" {
+		return "", fmt.Errorf("executors.egress.advertise_addr %q names no host", a)
+	}
+	if port == "" || port == "0" {
+		port = fmt.Sprint(boundPort)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// ContainerEgressRoute is how a container sandbox on the hub's own engine
+// reaches a proxy bound to bound — or why it cannot, the reason first, then
+// the remedy.
+func ContainerEgressRoute(bound *net.TCPAddr) (route EgressProxyRoute, why, remedy string) {
+	ip := bound.IP
+	switch {
+	case ip != nil && ip.IsLoopback():
+		return EgressProxyRoute{}, fmt.Sprintf("executors.egress.listen_addr binds %s, a loopback "+
+				"address no container sandbox can reach", bound),
+			fmt.Sprintf("Bind executors.egress.listen_addr to 0.0.0.0:%d — the per-session credential is what "+
+				"protects the proxy, on every interface — so sandboxes reach it at their bridge's gateway.", bound.Port)
+	case ip == nil || ip.IsUnspecified():
+		// Every host interface, so the gateway of whichever bridge the
+		// sandbox joins — an --internal one included — answers.
+		return EgressProxyRoute{Host: EgressGatewayHost, Port: bound.Port, Gateway: true}, "", ""
+	default:
+		// One host address: reachable from a bridge with a route off it,
+		// and from an --internal bridge only if it is that bridge's own
+		// gateway. The driver opens it in a ruleset either way.
+		return EgressProxyRoute{Host: ip.String(), Port: bound.Port}, "", ""
+	}
+}
+
+// The remedies for an AdvertisedEgressRoute refusal, by who it refuses.
+const (
+	EgressRemedyPods = "Set executors.egress.advertise_addr to the address Pods reach the hub's proxy at — its " +
+		"Service's cluster IP and port; a name is refused, since a Pod's NetworkPolicy opens addresses."
+	EgressRemedyDevices = "Set executors.egress.advertise_addr to an address the device reaches the hub at, " +
+		"with the proxy's port."
+)
+
+// AdvertisedEgressRoute is advertised — EgressAdvertised's result — as the
+// route a workload on another machine is given, or why it cannot be one. who
+// names those workloads in the reason ("Pods", "a device"), and bound is the
+// proxy's bound address, named when nothing is advertised.
+func AdvertisedEgressRoute(advertised, bound, who string) (EgressProxyRoute, string) {
+	if advertised == "" {
+		return EgressProxyRoute{}, fmt.Sprintf("executors.egress.advertise_addr is not set, and the "+
+			"proxy's bound address %s is not one %s can reach", bound, who)
+	}
+	host, portStr, err := net.SplitHostPort(advertised)
+	if err != nil {
+		return EgressProxyRoute{}, fmt.Sprintf("executors.egress.advertise_addr %q is not host:port", advertised)
+	}
+	port, _ := strconv.Atoi(portStr)
+	if local := HubLocalHost(host); local != "" {
+		return EgressProxyRoute{}, fmt.Sprintf("executors.egress.advertise_addr names %s, %s, which %s "+
+			"cannot reach", host, local, who)
+	}
+	route := EgressProxyRoute{Host: host, Port: port}
+	if err := route.Validate(); err != nil {
+		return EgressProxyRoute{}, err.Error()
+	}
+	return route, ""
+}
+
+// HubLocalHost says why a host only means something on the hub's own machine
+// or network, or "" when it may be reachable from elsewhere.
+//
+// A device cannot be asked whether it can reach an address before the run
+// starts, so this is a judgement — and it errs on the side of saying so: an
+// address it lets through that the device cannot reach fails the run's first
+// request, which the journal row at dispatch names.
+func HubLocalHost(host string) string {
+	h := strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	switch {
+	case h == "localhost" || strings.HasSuffix(h, ".localhost"):
+		return "the loopback name"
+	case h == EgressGatewayHost || h == "host.docker.internal":
+		return "a container runtime's name for its own host"
+	case strings.HasSuffix(h, ".svc") || strings.HasSuffix(h, ".cluster.local"):
+		return "a Kubernetes cluster-internal name"
+	}
+	if a, err := netip.ParseAddr(h); err == nil {
+		a = a.Unmap()
+		switch {
+		case a.IsLoopback():
+			return "a loopback address"
+		case a.IsUnspecified():
+			return "the unspecified address"
+		case a.IsLinkLocalUnicast():
+			return "a link-local address"
+		}
+	}
+	return ""
 }

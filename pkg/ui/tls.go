@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -105,15 +106,10 @@ func (s *Server) externalURLIsHTTPS() bool {
 	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
-// forwardedProtoIsHTTPS reads the client-facing hop from X-Forwarded-Proto.
-// A proxy chain may append: "https, http" — the first entry is the one that
-// decided the browser's view.
+// forwardedProtoIsHTTPS reads the client-facing hop from X-Forwarded-Proto,
+// by the parser the session cookie's Secure flag uses.
 func forwardedProtoIsHTTPS(r *http.Request) bool {
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if i := strings.IndexByte(proto, ','); i >= 0 {
-		proto = proto[:i]
-	}
-	return strings.EqualFold(strings.TrimSpace(proto), "https")
+	return oidcauth.ForwardedProtoHTTPS(r.Header)
 }
 
 // peerIsLoopback reports whether the direct TCP peer is on this host.

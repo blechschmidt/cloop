@@ -21,11 +21,12 @@ package ui
 //
 // The defence is that the panel validates through the identical code the next
 // startup will run, rather than through a second implementation of the same
-// rules that can drift from it. That is what these builders are for: there is
+// rules that can drift from it. That is what the builders are for: there is
 // one place that turns a config.OIDCConfig into the arguments of oidcauth.New
-// and authz.New, and both the startup path and the save path go through it.
-// A rule added to either constructor is enforced on save for free, and a rule
-// that exists only in the panel cannot exist at all.
+// (config.OIDCConfig.AuthConfig) and one for authz.New (AuthzConfig), and the
+// startup path, the save path and `cloop hub doctor` all go through them. A rule added to either
+// constructor is enforced on save for free, and a rule that exists only in
+// the panel cannot exist at all.
 //
 // # The three refusals
 //
@@ -46,82 +47,11 @@ package ui
 import (
 	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
-
-// OIDCAuthConfig builds the oidcauth.Config a hub runs from its ui.oidc block.
-//
-// Static fields only: the runtime hooks a live hub supplies — the session
-// store, the audit sink, the session-limit and effective-role resolvers — are
-// assigned by the caller that has them. Validation does not need them, which
-// is what lets the save path call oidcauth.New on the same struct startup will.
-//
-// Exported because cmd/ui_cmd.go is the other caller, and the entire point is
-// that there is only one of these.
-func OIDCAuthConfig(o config.OIDCConfig) oidcauth.Config {
-	return oidcauth.Config{
-		Enabled:      true,
-		Issuer:       o.Issuer,
-		ClientID:     o.ClientID,
-		ClientSecret: o.ClientSecret,
-		RedirectURL:  o.RedirectURL,
-		Scopes:       o.Scopes,
-		AdminEmails:  o.AdminEmails,
-		SessionTTL:   time.Duration(o.EffectiveSessionTTLHours()) * time.Hour,
-		IdleTimeout:  time.Duration(o.EffectiveIdleTimeoutHours()) * time.Hour,
-		// Bounded authorization staleness for privileged actions
-		// (Task 20273). Independent of RefreshInterval on purpose: a hub that
-		// disabled the background pass still may not grant a credential on
-		// claims of unknown age.
-		RefreshInterval: time.Duration(o.EffectiveRefreshIntervalMinutes()) * time.Minute,
-		MaxClaimAge:     time.Duration(o.EffectiveMaxClaimAgeMinutes()) * time.Minute,
-		ClockSkew:       o.EffectiveClockSkew(),
-		CookieSecure:    o.CookieSecure,
-	}
-}
-
-// OIDCBindings converts the YAML role-mapping shape into the authz model.
-//
-// Lives here rather than in pkg/config because pkg/config stays free of
-// authorization logic and pkg/authz stays free of YAML — the split
-// RoleMapping's own doc comment describes. The values are not checked here;
-// authz.New rejects an unknown claim kind or role name, and it is the
-// authority at startup, so a second check would only be a second opinion.
-func OIDCBindings(mappings []config.RoleMapping) []authz.Binding {
-	if len(mappings) == 0 {
-		return nil
-	}
-	bindings := make([]authz.Binding, 0, len(mappings))
-	for _, m := range mappings {
-		bindings = append(bindings, authz.Binding{
-			Claim:    authz.ClaimKind(m.Claim),
-			Value:    m.Value,
-			Role:     authz.Role(m.Role),
-			Project:  m.Project,
-			Executor: m.Executor,
-		})
-	}
-	return bindings
-}
-
-// OIDCAuthzConfig builds the authz.Config a hub runs from its ui.oidc block.
-//
-// runtime may be nil, which evaluates the configured policy alone. Whether that
-// is the right thing to pass depends on the question being asked —
-// validateOIDCConfig needs it both ways and explains why.
-func OIDCAuthzConfig(o config.OIDCConfig, runtime authz.RuntimeSource) authz.Config {
-	return authz.Config{
-		DefaultRole: authz.Role(o.DefaultRole),
-		Bindings:    OIDCBindings(o.RoleMappings),
-		AdminEmails: o.AdminEmails,
-		Runtime:     runtime,
-	}
-}
 
 // oidcConfigProblem is a refusal to save, carrying the field to blame.
 //
@@ -177,17 +107,17 @@ func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject, runtime auth
 	// authority comes from such a binding then this config change does not take
 	// it away, they are not locked out, and refusing them would block the
 	// incident-response path at exactly the moment it is being used.
-	configured, err := authz.New(OIDCAuthzConfig(o, nil))
+	configured, err := authz.New(o.AuthzConfig(nil))
 	if err != nil {
 		// Reachable: authz.New rejects an unknown claim kind, an unknown role
 		// name, and a default_role that is neither. Startup treats each as
 		// fatal, so each must be refused here.
 		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
 	}
-	if err := wouldStrandTheHub(o, configured); err != nil {
+	if err := wouldStrandTheHub(configured); err != nil {
 		return err
 	}
-	withRuntime, err := authz.New(OIDCAuthzConfig(o, runtime))
+	withRuntime, err := authz.New(o.AuthzConfig(runtime))
 	if err != nil {
 		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
 	}
@@ -198,45 +128,37 @@ func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject, runtime auth
 // accept this block.
 //
 // Deliberately thin. Every rule it enforces — issuer present, parseable, and
-// https or loopback; client id, client secret and redirect URL present;
-// cookie_secure one of three words; the claim-age and clock-skew ceilings —
+// https or loopback; client id present; a redirect URL whose path the hub's
+// router can serve under /auth/; cookie_secure one of three words; the
+// claim-age and clock-skew ceilings —
 // belongs to oidcauth.New, and re-stating any of them here would create a
 // second copy that can disagree with the one that decides whether the hub
 // boots.
 func oidcStartupParity(o config.OIDCConfig) error {
-	if _, err := oidcauth.New(OIDCAuthConfig(o)); err != nil {
+	if _, err := oidcauth.New(o.AuthConfig()); err != nil {
 		return oidcConfigProblem{Field: oidcBlameField(err), Message: err.Error()}
 	}
 	return nil
 }
 
-// oidcBlameField maps a constructor error onto the input that caused it.
-//
-// Matching on the message is unattractive and the alternative is worse:
-// oidcauth.New returns bare errors, and the only other way to attribute them
-// is to re-derive the rules here, which is the duplication this file exists to
-// avoid. A miss costs a message that appears at the top of the form instead of
-// beside a box — so the failure mode of guessing wrong is cosmetic, which is
-// what makes it an acceptable place to guess.
+// oidcBlameField maps a constructor error onto the input that caused it, by
+// the field oidcauth.New names in its refusal (oidcauth.ConfigError) — the
+// same tag `cloop hub doctor` reports a refusal under. It used to be guessed
+// from the message, which was the only way before New said. Two fields carry
+// a unit in the panel that the constructor's name for them does not; an error
+// that names no field leaves the message at the top of the form.
 func oidcBlameField(err error) string {
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "issuer"):
-		return "issuer"
-	case strings.Contains(msg, "client_secret"), strings.Contains(msg, "client secret"):
-		return "client_secret"
-	case strings.Contains(msg, "client_id"), strings.Contains(msg, "client id"):
-		return "client_id"
-	case strings.Contains(msg, "redirect"):
-		return "redirect_url"
-	case strings.Contains(msg, "cookie_secure"):
-		return "cookie_secure"
-	case strings.Contains(msg, "claim age"), strings.Contains(msg, "max_claim_age"):
+	var ce *oidcauth.ConfigError
+	if !errors.As(err, &ce) {
+		return ""
+	}
+	switch ce.Field {
+	case "max_claim_age":
 		return "max_claim_age_minutes"
-	case strings.Contains(msg, "skew"):
+	case "clock_skew":
 		return "clock_skew_seconds"
 	}
-	return ""
+	return ce.Field
 }
 
 // wouldStrandTheHub refuses a config that turns SSO on with no administrator.
@@ -249,25 +171,21 @@ func oidcBlameField(err error) string {
 // anyway because it is never what anybody meant, and because the person it
 // strands is the person who clicked Save.
 //
-// Three things count as having an administrator, and they are asked of the
-// resolver rather than of the config, so a mapping that grants admin through a
-// group claim counts exactly as much as an entry in admin_emails.
-func wouldStrandTheHub(o config.OIDCConfig, resolver *authz.Resolver) error {
-	if len(o.AdminEmails) > 0 {
+// Two things count as having an administrator, and both are asked of the
+// resolver rather than of the YAML: a default role of admin, or a binding the
+// resolver holds as hub-wide admin (authz.GlobalAdminBindings) — which covers
+// admin_emails, a group mapping and an email mapping alike, and is the same
+// answer `cloop hub doctor` gives. Asking the YAML went wrong twice (Task
+// 20387): "role: Admin" grants admin but was not counted, and an admin binding
+// narrowed to one project was counted though it cannot reach this panel.
+func wouldStrandTheHub(resolver *authz.Resolver) error {
+	if resolver.DefaultRole() == authz.RoleAdmin || len(resolver.GlobalAdminBindings()) > 0 {
 		return nil
-	}
-	if resolver.DefaultRole() == authz.RoleAdmin {
-		return nil
-	}
-	for _, b := range OIDCBindings(o.RoleMappings) {
-		if b.Role == authz.RoleAdmin {
-			return nil
-		}
 	}
 	return oidcConfigProblem{
 		Field: "admin_emails",
 		Message: "enabling SSO with no administrator would lock every user out: " +
-			"add an admin email, or a role mapping granting the admin role",
+			"add an admin email, or a role mapping granting the admin role with no project or executor",
 	}
 }
 

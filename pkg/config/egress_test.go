@@ -176,12 +176,15 @@ func TestExecutorWarnings_Egress(t *testing.T) {
 		e.Egress.ListenAddr = "127.0.0.1:8899"
 
 		warnings := ExecutorWarnings(e)
-		if !containsSubstring(warnings, "advertise_addr") {
+		if !containsSubstring(warnings, "a loopback address no container sandbox can reach") {
 			t.Errorf("expected a loopback-unreachable warning, got %v", warnings)
 		}
 	})
 
-	t.Run("advertise_addr silences it", func(t *testing.T) {
+	// The hub routes a container to the proxy by its bound address alone
+	// (executor.ContainerEgressRoute), so an advertise_addr changes nothing
+	// for it. This subtest used to assert the opposite (Task 20387).
+	t.Run("advertise_addr does not reach a loopback bind", func(t *testing.T) {
 		e := ExecutorsConfig{}
 		e.Container.Enabled = true
 		e.Container.Network = "bridge"
@@ -191,8 +194,8 @@ func TestExecutorWarnings_Egress(t *testing.T) {
 		e.Egress.DefaultMaxBytesDown = "1g"
 		e.Egress.DefaultMaxBytesUp = "100m"
 
-		if containsSubstring(ExecutorWarnings(e), "advertise_addr") {
-			t.Errorf("a configured advertise_addr should silence the warning: %v", ExecutorWarnings(e))
+		if !containsSubstring(ExecutorWarnings(e), "a loopback address no container sandbox can reach") {
+			t.Errorf("an advertise_addr silenced a refusal the hub still makes: %v", ExecutorWarnings(e))
 		}
 	})
 
@@ -224,4 +227,63 @@ func containsSubstring(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestExecutorWarningsAskTheHubsContainerRoute: a container on the hub's engine
+// reaches the egress proxy by executor.ContainerEgressRoute, which reads the
+// bound address and nothing else. The warning used to be its own copy — silent
+// once advertise_addr was set, which the route never reads, and advising
+// host.containers.internal, which the hub refuses for Pods and devices.
+func TestExecutorWarningsAskTheHubsContainerRoute(t *testing.T) {
+	warned := func(listen, advertise string) string {
+		e := ExecutorsConfig{}
+		e.Container.Enabled = true
+		e.Egress.Enabled = true
+		e.Egress.ListenAddr, e.Egress.AdvertiseAddr = listen, advertise
+		for _, w := range ExecutorWarnings(e) {
+			if strings.Contains(w, "container runs that need the proxy are refused") {
+				return w
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		listen, advertise string
+		want              bool
+	}{
+		{"", "", true},
+		{"127.0.0.1:8899", "host.containers.internal:8899", true},
+		{"localhost:8899", "", true},
+		{"0.0.0.0:8899", "", false},
+		{"10.0.0.5:8899", "", false},
+	} {
+		w := warned(tc.listen, tc.advertise)
+		if (w != "") != tc.want {
+			t.Errorf("listen %q advertise %q: warning=%q, want warned=%v", tc.listen, tc.advertise, w, tc.want)
+		}
+		if strings.Contains(w, "host.containers.internal") {
+			t.Errorf("the warning recommends a name the hub refuses: %q", w)
+		}
+	}
+}
+
+// TestEgressAdvertiseAddrIsResolvedByTheHubsRule: an advertise_addr that
+// names no host is refused by executor.EgressAdvertised when the hub starts
+// the proxy, so the proxy did not start while the config loaded cleanly. It is
+// refused here now, and repaired at load like any other unusable advertise
+// address (Task 20387).
+func TestEgressAdvertiseAddrIsResolvedByTheHubsRule(t *testing.T) {
+	e := EgressConfig{Enabled: true, ListenAddr: "0.0.0.0:8899", AdvertiseAddr: ":8899"}
+	if err := ValidateEgressConfig(e); err == nil || !strings.Contains(err.Error(), "names no host") {
+		t.Errorf("ValidateEgressConfig(%q) = %v, want the hub's refusal", e.AdvertiseAddr, err)
+	}
+	changed := clampEgressConfig(&e)
+	if e.AdvertiseAddr != "" || !e.Enabled || len(changed) == 0 {
+		t.Errorf("clamp left %+v (changed %v); want advertise_addr reset and the proxy still on", e, changed)
+	}
+	for _, ok := range []string{"egress.example.com", "egress.example.com:0", "10.0.0.7:8899"} {
+		if err := ValidateEgressConfig(EgressConfig{AdvertiseAddr: ok}); err != nil {
+			t.Errorf("ValidateEgressConfig(%q) = %v, want accepted", ok, err)
+		}
+	}
 }

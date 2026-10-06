@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -278,6 +279,10 @@ var (
 type Config struct {
 	// Default provider: anthropic, openai, ollama, claudecode, mock
 	Provider string `yaml:"provider"`
+
+	// loadRepairs records what validateAndClamp changed; see LoadRepairs.
+	// Unexported, so neither YAML nor JSON ever carries it.
+	loadRepairs []LoadRepair
 
 	Anthropic  AnthropicConfig  `yaml:"anthropic"`
 	OpenAI     OpenAIConfig     `yaml:"openai"`
@@ -923,6 +928,25 @@ func (e ExecutorsConfig) HostProcessAllowed() bool {
 // distinguish "permissive because nobody has decided yet" from "permissive on
 // purpose".
 func (e ExecutorsConfig) HostProcessExplicit() bool { return e.AllowHostProcess != nil }
+
+// ApplyRatchets installs the fleet-wide policies this section states — host
+// execution, the agent build floor and the resource ceiling — into the
+// process, each through its ratchet, so they only ever tighten what is in
+// force. A malformed ceiling installs nothing; ExecutorLimitWarnings is what
+// tells the operator so.
+//
+// `cloop ui`, every command's startup and `cloop hub doctor` apply the same
+// three, and each used to spell them out: a doctor reproducing a hub's registry
+// with a ratchet missing reports placements the hub does not make.
+func (e ExecutorsConfig) ApplyRatchets() {
+	executor.ApplyHostExecutionPolicy(e.HostProcessAllowed())
+	// A tenant's config.yaml must not be able to lower the fleet's minimum
+	// agent build, nor raise the machine's resource ceiling.
+	executor.ApplyMinAgentBuild(e.MinAgentBuild)
+	if ceiling, err := e.Limits.Ceiling(); err == nil {
+		executor.ApplyResourceCeiling(ceiling)
+	}
+}
 
 // MaxFeatureBundleMB is the most executors.feature_bundle_mb may be: the hard
 // ceiling on a branch or write-back bundle (executor.MaxBranchBundleBytes).
@@ -2173,8 +2197,8 @@ type OIDCConfig struct {
 }
 
 // RoleMapping is one claim→role binding in oidc.role_mappings. It mirrors
-// authz.Binding; pkg/ui converts between the two so pkg/config stays free of
-// authorization logic and pkg/authz stays free of YAML.
+// authz.Binding; OIDCConfig.AuthzBindings converts between the two by copying
+// fields, so the rules stay in authz.New and pkg/authz stays free of YAML.
 type RoleMapping struct {
 	// Claim selects what Value is compared against: group, role, email,
 	// or sub.
@@ -2841,7 +2865,10 @@ func Load(workdir string) (*Config, error) {
 		// silently revert API keys and budget caps to defaults.
 		if blob := loadFromSQLite(workdir); blob != "" {
 			if err := yaml.Unmarshal([]byte(blob), cfg); err == nil {
-				cfg.validateAndClamp(path)
+				// Named as the source of what loading repairs: attributed
+				// to the bare path, a repair sends the operator to correct
+				// a file that is not there.
+				cfg.validateAndClamp(path + " (missing, so read from the copy mirrored in state.db)")
 				cfg.applyEnvVars()
 				return cfg, nil
 			}
@@ -2886,6 +2913,10 @@ func statesOwnOutcome(msg string) bool {
 // negative budgets, or emit nonsensical alert thresholds.
 func (c *Config) validateAndClamp(path string) {
 	warn := func(field, msg string) {
+		// Recorded on every load, unlike the stderr line below: the record
+		// belongs to this Config, and a reader of it — `cloop hub doctor` —
+		// must see the repair even in a process that already printed it.
+		c.loadRepairs = append(c.loadRepairs, LoadRepair{File: path, Field: field, Detail: msg})
 		key := path + "::" + field
 		clampWarnedMu.Lock()
 		_, already := clampWarnedPairs[key]
@@ -3065,60 +3096,123 @@ func (c *Config) validateAndClamp(path string) {
 			*v, MinFreeDiskMBLower, MinFreeDiskMBUpper, MinFreeDiskMBDefault))
 		c.Orchestrator.MinFreeDiskMB = nil
 	}
+	// The executor sections below are clamped by their own functions, which
+	// report a repair as "field: detail". Some repairs switch a section off
+	// rather than reset a field; that is recorded as a repair of its own,
+	// because "enabled in the file, off in the running hub" is the outcome an
+	// operator reading only the file can never see.
+	section := func(key string, enabled *bool, clamp func() []string) {
+		wasOn := *enabled
+		var details []string
+		for _, msg := range clamp() {
+			field, detail, found := strings.Cut(msg, ": ")
+			if !found {
+				field, detail = key, msg
+			}
+			warn(field, detail)
+			details = append(details, field+": "+detail)
+		}
+		if wasOn && !*enabled {
+			c.loadRepairs = append(c.loadRepairs, LoadRepair{
+				File: path, Field: key + ".enabled", SwitchedOff: key,
+				Detail: "switched off at load, with these problems in the section: " + strings.Join(details, "; "),
+			})
+		}
+	}
 	// Container executor: every repair resets to the driver's default, which
 	// is always the more confined choice, so a bad value can never widen the
 	// sandbox. The field name is included in the warning key so each distinct
 	// problem is reported once rather than the section as a whole.
-	for _, msg := range clampContainerExecutor(&c.Executors.Container) {
-		field, detail, found := strings.Cut(msg, ": ")
-		if !found {
-			field, detail = "executors.container", msg
-		}
-		warn(field, detail)
-	}
+	section("executors.container", &c.Executors.Container.Enabled, func() []string {
+		return clampContainerExecutor(&c.Executors.Container)
+	})
 	// Kubernetes executor: same rule, same reason — a repaired field falls
 	// back to the driver's confining default rather than being honoured.
-	for _, msg := range clampKubernetesExecutor(&c.Executors.Kubernetes) {
-		field, detail, found := strings.Cut(msg, ": ")
-		if !found {
-			field, detail = "executors.kubernetes", msg
-		}
-		warn(field, detail)
-	}
+	section("executors.kubernetes", &c.Executors.Kubernetes.Enabled, func() []string {
+		return clampKubernetesExecutor(&c.Executors.Kubernetes)
+	})
 	// Egress broker: same rule again. Every repair resets to the broker's
 	// default, and every broker default is the tighter one — a shorter
 	// session, a shorter dial, an unusable listen address disabling the proxy
 	// rather than binding somewhere nobody chose.
-	for _, msg := range clampEgressConfig(&c.Executors.Egress) {
-		field, detail, found := strings.Cut(msg, ": ")
-		if !found {
-			field, detail = "executors.egress", msg
-		}
-		warn(field, detail)
-	}
+	section("executors.egress", &c.Executors.Egress.Enabled, func() []string {
+		return clampEgressConfig(&c.Executors.Egress)
+	})
 	// Git interception proxy: the same rule once more, with one difference
 	// worth stating. A repair that would leave the proxy unusable or unsafe
 	// disables it rather than binding somewhere nobody chose — and disabling
 	// is safe here because the proxy is not a fallback path: with it off a
 	// workspace is provisioned exactly as it was before interception existed.
-	for _, msg := range clampGitProxyConfig(&c.Executors.GitProxy) {
-		field, detail, found := strings.Cut(msg, ": ")
-		if !found {
-			field, detail = "executors.git_proxy", msg
-		}
-		warn(field, detail)
-	}
+	section("executors.git_proxy", &c.Executors.GitProxy.Enabled, func() []string {
+		return clampGitProxyConfig(&c.Executors.GitProxy)
+	})
 
 	// The Kubernetes access monitor, on the same terms: a repair that would
 	// leave it unusable disables it, and with it off a kubeconfig grant is
 	// delivered exactly as it was before the monitor existed.
-	for _, msg := range clampKubeGuardConfig(&c.Executors.KubeGuard) {
-		field, detail, found := strings.Cut(msg, ": ")
-		if !found {
-			field, detail = "executors.kube_guard", msg
-		}
-		warn(field, detail)
+	section("executors.kube_guard", &c.Executors.KubeGuard.Enabled, func() []string {
+		return clampKubeGuardConfig(&c.Executors.KubeGuard)
+	})
+}
+
+// LoadRepair is one value Load could not honour as written, and what it did
+// instead. Load has always made these repairs — reset an out-of-range value to
+// its default, switch off a section that could only start unusable or unsafe —
+// and said so once on stderr, which is where a service's warnings go to be
+// missed. Recording them on the Config is what lets `cloop hub doctor` report
+// what the hub is actually running rather than what the file says (Task
+// 20387): a section the loader switched off reads as "disabled" to anything
+// looking only at the result, indistinguishable from an operator's choice.
+type LoadRepair struct {
+	// File is the file the value was read from: config.yaml, or the per-port
+	// overlay merged over it.
+	File string
+	// Field is the key, e.g. executors.git_proxy.advertise_url.
+	Field string
+	// Detail says what was wrong, in the loader's words.
+	Detail string
+	// SwitchedOff names the section this repair turned off although the file
+	// enables it, e.g. "executors.git_proxy". Empty for a repair that reset a
+	// value and left its section running.
+	SwitchedOff string
+}
+
+// LoadRepairs returns every repair the loads that produced c applied, in the
+// order they were made. Empty for a Config that was not loaded from a file.
+//
+// A switch-off is dropped once a later file switched the section back on with
+// values that load — an overlay over config.yaml — so every SwitchedOff here
+// names a section that is off in c.
+func (c *Config) LoadRepairs() []LoadRepair {
+	if c == nil {
+		return nil
 	}
+	out := make([]LoadRepair, 0, len(c.loadRepairs))
+	for _, r := range c.loadRepairs {
+		if r.SwitchedOff != "" && c.sectionEnabled(r.SwitchedOff) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// sectionEnabled reports the Enabled switch of a section validateAndClamp can
+// turn off.
+func (c *Config) sectionEnabled(key string) bool {
+	switch key {
+	case "executors.container":
+		return c.Executors.Container.Enabled
+	case "executors.kubernetes":
+		return c.Executors.Kubernetes.Enabled
+	case "executors.egress":
+		return c.Executors.Egress.Enabled
+	case "executors.git_proxy":
+		return c.Executors.GitProxy.Enabled
+	case "executors.kube_guard":
+		return c.Executors.KubeGuard.Enabled
+	}
+	return false
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range

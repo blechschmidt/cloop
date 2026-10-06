@@ -659,6 +659,37 @@ func archiveDir(workDir string) string {
 	return filepath.Join(workDir, ".cloop", "audit-archive")
 }
 
+// ArchiveSeals measures the sealed audit exports a pass prunes: the seals in
+// the directory it prunes them from — audit.export_dir when set, not the
+// default under .cloop — counted the way pruneArchive counts them. Zeros when
+// the directory does not exist.
+//
+// `cloop hub doctor` reports the archive from this. It measured .cloop's
+// audit-archive whatever export_dir said, and so said nothing about an archive
+// growing without bound one directory over (Task 20387).
+func ArchiveSeals(workDir string, pol Policy) (dir string, bytes int64, seals int, err error) {
+	dir = resolveArchiveDir(workDir, pol)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dir, 0, 0, nil
+		}
+		return dir, 0, 0, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !isSealName(e.Name()) {
+			continue
+		}
+		fi, ierr := e.Info()
+		if ierr != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		bytes += fi.Size()
+		seals++
+	}
+	return dir, bytes, seals, nil
+}
+
 // resolveArchiveDir picks the directory holding sealed audit exports: the
 // operator's audit.export_dir when set, otherwise auditretention's default
 // beneath .cloop. Mirrors cmd/hub_audit_cmd.go's resolveAuditExportDir so the
@@ -854,6 +885,61 @@ func isSealName(name string) bool {
 	return strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".jsonl.gz")
 }
 
+// VacuumBlocker says why a pass would not rewrite the database usage
+// describes, or "" when it would: too little to reclaim, or too small a share
+// of the file; more live data than a pass inside a running hub may rewrite
+// (inHub), since a long VACUUM there outlasts the hub's own lease; or too
+// little room beside it for the rebuild. free is the space on the database's
+// volume, or negative when it could not be measured — which, as in a pass, is
+// not evidence of a full disk.
+//
+// It is the decision maybeVacuum makes, exported so `cloop hub doctor` can
+// say whether the hub's own janitor will reclaim the pages it reports, rather
+// than repeat the first two rules and promise a VACUUM the size ceiling skips
+// every pass (Task 20387). Whether another hub member holds the lease, and
+// whether a run is busy, are a running hub's to know.
+func VacuumBlocker(pol Policy, usage *diskusage.Usage, inHub bool, free int64) string {
+	if pol.VacuumFreeRatio >= 1 {
+		return "disabled (vacuum_free_ratio >= 1)"
+	}
+	if usage == nil || usage.DBBytes == 0 {
+		return "database statistics unavailable"
+	}
+	reclaimable, ratio := usage.ReclaimableBytes, usage.FreeRatio
+	switch {
+	case reclaimable < pol.VacuumMinFreeBytes:
+		return fmt.Sprintf("%s reclaimable is below the %s floor",
+			diskusage.HumanBytes(reclaimable), diskusage.HumanBytes(pol.VacuumMinFreeBytes))
+	case ratio < pol.VacuumFreeRatio:
+		return fmt.Sprintf("freelist is %.0f%% of the file, below the %.0f%% threshold",
+			ratio*100, pol.VacuumFreeRatio*100)
+	}
+
+	// An in-process VACUUM competes with the hub's own lease heartbeat for the
+	// same write lock. Past a certain size the rewrite outlasts the lease TTL,
+	// the hub concludes a peer took the fence, and it stands down — so the
+	// ceiling is what keeps the janitor from being an outage. It applies only
+	// when there is a lease at stake: inside the hub that holds it.
+	// Same fallback as VacuumHeadroom: page arithmetic sampled while a writer
+	// extends the file can put the freelist above the recorded size, and the
+	// conservative reading of "I cannot tell how much live data there is" is
+	// the whole file — not a negative number that would slip under any
+	// ceiling.
+	live := usage.DBBytes - usage.ReclaimableBytes
+	if live < 0 {
+		live = usage.DBBytes
+	}
+	if inHub && pol.VacuumMaxInlineBytes > 0 && live > pol.VacuumMaxInlineBytes {
+		return fmt.Sprintf("%s of live data exceeds the %s in-process limit; run `cloop hub retention --apply` "+
+			"with the hub stopped", diskusage.HumanBytes(live), diskusage.HumanBytes(pol.VacuumMaxInlineBytes))
+	}
+	if need := usage.VacuumHeadroom(); free >= 0 && free < need {
+		return fmt.Sprintf("only %s free, and a rebuild of this database needs about %s",
+			diskusage.HumanBytes(free), diskusage.HumanBytes(need))
+	}
+	return ""
+}
+
 // maybeVacuum decides whether the database is wasteful enough to rewrite, and
 // rewrites it if so.
 func maybeVacuum(opts Options, pol Policy, before *diskusage.Usage) StepResult {
@@ -886,64 +972,22 @@ func maybeVacuum(opts Options, pol Policy, before *diskusage.Usage) StepResult {
 
 	reclaimable, ratio := before.ReclaimableBytes, before.FreeRatio
 	pct := ratio * 100
-	switch {
-	case reclaimable < pol.VacuumMinFreeBytes:
-		return StepResult{
-			Skipped: true,
-			Reason: fmt.Sprintf("%s reclaimable is below the %s floor",
-				diskusage.HumanBytes(reclaimable), diskusage.HumanBytes(pol.VacuumMinFreeBytes)),
-		}
-	case ratio < pol.VacuumFreeRatio:
-		return StepResult{
-			Skipped: true,
-			Reason:  fmt.Sprintf("freelist is %.0f%% of the file, below the %.0f%% threshold", pct, pol.VacuumFreeRatio*100),
-		}
+
+	// Free space is measured here, after the file-level steps above have run,
+	// and deliberately: it sees the space they just reclaimed rather than the
+	// space the pass started with. On the hub that motivated this package,
+	// that is the difference between a VACUUM that cannot run and one that can
+	// — plan-history pruning released 1.95 GB on a disk that was at 100%.
+	free, err := freeBytes(filepath.Dir(dbPath))
+	if err != nil {
+		free = -1
+	}
+	if reason := VacuumBlocker(pol, before, opts.InstanceID != "", free); reason != "" {
+		return StepResult{Skipped: true, Reason: reason}
 	}
 
 	if err := checkLeaseOwnership(dbPath, opts.InstanceID); err != nil {
 		return StepResult{Skipped: true, Reason: err.Error()}
-	}
-
-	// An in-process VACUUM competes with the hub's own lease heartbeat for the
-	// same write lock. Past a certain size the rewrite outlasts the lease TTL,
-	// the hub concludes a peer took the fence, and it stands down — so the
-	// ceiling is what keeps the janitor from being an outage. It applies only
-	// when there is a lease at stake: InstanceID is set exactly when this pass
-	// runs inside the hub that holds it.
-	// Same fallback as VacuumHeadroom: page arithmetic sampled while a writer
-	// extends the file can put the freelist above the recorded size, and the
-	// conservative reading of "I cannot tell how much live data there is" is
-	// the whole file — not a negative number that would slip under any
-	// ceiling.
-	live := before.DBBytes - before.ReclaimableBytes
-	if live < 0 {
-		live = before.DBBytes
-	}
-	if opts.InstanceID != "" && pol.VacuumMaxInlineBytes > 0 && live > pol.VacuumMaxInlineBytes {
-		return StepResult{
-			Skipped: true,
-			Reason: fmt.Sprintf("%s of live data exceeds the %s in-process limit; run `cloop hub retention --apply` with the hub stopped",
-				diskusage.HumanBytes(live), diskusage.HumanBytes(pol.VacuumMaxInlineBytes)),
-		}
-	}
-
-	// Free space is checked here, last, and deliberately: the file-level steps
-	// above have already run, so this sees the space they just reclaimed
-	// rather than the space the pass started with. On the hub that motivated
-	// this package, that is the difference between a VACUUM that cannot run
-	// and one that can — plan-history pruning released 1.95 GB on a disk that
-	// was at 100%.
-	//
-	// A statfs that fails is not evidence of a full disk; proceed and let
-	// SQLite report the real error, as with the lease probe above.
-	if free, err := freeBytes(filepath.Dir(dbPath)); err == nil {
-		if need := before.VacuumHeadroom(); free < need {
-			return StepResult{
-				Skipped: true,
-				Reason: fmt.Sprintf("only %s free, and a rebuild of this database needs about %s",
-					diskusage.HumanBytes(free), diskusage.HumanBytes(need)),
-			}
-		}
 	}
 
 	if opts.DryRun {

@@ -138,25 +138,35 @@ func CipherSuites() []uint16 {
 // of YAML was missing is exactly the silent downgrade this whole task exists
 // to remove.
 func ServerConfig(certFile, keyFile, minVersion string) (*tls.Config, error) {
-	certFile, keyFile = strings.TrimSpace(certFile), strings.TrimSpace(keyFile)
-	if certFile == "" || keyFile == "" {
-		return nil, fmt.Errorf("tlsconf: both a certificate and a key are required (got cert=%q key=%q)",
-			certFile, keyFile)
-	}
-	min, err := ParseMinVersion(minVersion)
-	if err != nil {
-		return nil, err
-	}
-	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("tlsconf: load key pair (cert=%s key=%s): %w", certFile, keyFile, err)
-	}
-	if warn := CheckKeyPermissions(keyFile); warn != "" {
+	cfg, permWarning, err := LoadServerConfig(certFile, keyFile, minVersion)
+	if permWarning != "" {
 		// Not fatal: refusing to start because of a permission bit would take
 		// a working deployment down for a problem the operator can fix
 		// without downtime. Loud, though — a world-readable server key is a
 		// full impersonation of the control plane.
-		fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", permWarning)
+	}
+	return cfg, err
+}
+
+// LoadServerConfig is ServerConfig without the stderr line: the key-permission
+// problem is returned instead, for a caller that reports it itself. It is the
+// whole of ServerConfig's decision, so a diagnostic that calls it reaches the
+// verdict every listener in the hub reaches — the dashboard's, the git
+// proxy's, the Kubernetes monitor's — rather than a re-derivation of it.
+func LoadServerConfig(certFile, keyFile, minVersion string) (cfg *tls.Config, permWarning string, err error) {
+	certFile, keyFile = strings.TrimSpace(certFile), strings.TrimSpace(keyFile)
+	if certFile == "" || keyFile == "" {
+		return nil, "", fmt.Errorf("tlsconf: both a certificate and a key are required (got cert=%q key=%q)",
+			certFile, keyFile)
+	}
+	min, err := ParseMinVersion(minVersion)
+	if err != nil {
+		return nil, "", err
+	}
+	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("tlsconf: load key pair (cert=%s key=%s): %w", certFile, keyFile, err)
 	}
 	return &tls.Config{
 		Certificates:             []tls.Certificate{pair},
@@ -164,7 +174,7 @@ func ServerConfig(certFile, keyFile, minVersion string) (*tls.Config, error) {
 		CipherSuites:             CipherSuites(),
 		PreferServerCipherSuites: true,
 		NextProtos:               []string{"h2", "http/1.1"},
-	}, nil
+	}, CheckKeyPermissions(keyFile), nil
 }
 
 // CheckKeyPermissions reports a warning string when a private key is readable

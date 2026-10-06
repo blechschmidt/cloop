@@ -405,6 +405,13 @@ func validateImageRef(ref string) error {
 	return nil
 }
 
+// RunsProjectImages reports whether these settings run payloads in a container
+// — the one mode in which a device honours the image a project names in its
+// .cloop/sandbox.yaml (and its setup: block), and so the one in which the
+// hub's image policy decides what a device runs. The device driver advertises
+// SupportsImageOverride from this, and `cloop hub doctor` counts devices by it.
+func (s SandboxSettings) RunsProjectImages() bool { return s.Mode == SandboxModeContainer }
+
 // IsVirtualized reports whether these settings put payloads behind a
 // hypervisor. It is false unless the mode is container: a runtime name is not
 // a boundary on its own, and host execution with `runtime: kata` recorded

@@ -505,11 +505,7 @@ func (s *Server) SessionLimitFor(identity string, groups, roles []string) int {
 	}
 	subj := quota.SubjectForIdentity(identity)
 	subj.Groups, subj.Roles = groups, roles
-	limit, ok := e.Effective(subj).Limits.Get(quota.ResSessions)
-	if !ok || limit <= 0 {
-		return 0
-	}
-	return int(limit)
+	return quota.SessionCap(e.Effective(subj).Limits.Get(quota.ResSessions))
 }
 
 // EffectiveRoleFor resolves a set of claims to a role name and its rank on the

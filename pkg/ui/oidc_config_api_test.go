@@ -230,7 +230,7 @@ func TestOIDCSave_RefusesDemotingTheCaller(t *testing.T) {
 	// Valid, and grants admin to somebody else.
 	o := validOIDC()
 	o.AdminEmails = []string{"bob@example.com"}
-	resolver, err := authz.New(OIDCAuthzConfig(o, nil))
+	resolver, err := authz.New(o.AuthzConfig(nil))
 	if err != nil {
 		t.Fatalf("build resolver: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestOIDCSave_RefusesDemotingTheCaller(t *testing.T) {
 
 	// Keeping herself in the list is accepted.
 	o.AdminEmails = []string{"bob@example.com", "alice@example.com"}
-	resolver, err = authz.New(OIDCAuthzConfig(o, nil))
+	resolver, err = authz.New(o.AuthzConfig(nil))
 	if err != nil {
 		t.Fatalf("build resolver: %v", err)
 	}
@@ -699,5 +699,28 @@ func TestOIDCSave_WritesConfigYAMLWithoutAnOverlay(t *testing.T) {
 	}
 	if _, err := os.Stat(config.UIInstanceConfigPath(srv.WorkDir, 8080)); err == nil {
 		t.Error("an overlay was created for a hub that did not have one")
+	}
+}
+
+// TestOIDCSave_CountsAdministratorsAsTheResolverDoes: whether a block has an
+// administrator is authz.GlobalAdminBindings' answer — the one `cloop hub
+// doctor` gives too. The panel asked the YAML, which went wrong both ways
+// (Task 20387): "role: Admin" grants admin and was refused as "no
+// administrator", and an admin mapping narrowed to one project was accepted
+// though nobody it grants can reach this panel.
+func TestOIDCSave_CountsAdministratorsAsTheResolverDoes(t *testing.T) {
+	capitalized := validOIDC()
+	capitalized.AdminEmails = nil
+	capitalized.RoleMappings = []config.RoleMapping{{Claim: "group", Value: "platform", Role: "Admin"}}
+	if err := validateOIDCConfig(capitalized, nil, nil); err != nil {
+		t.Errorf("a mapping authz grants admin was refused: %v", err)
+	}
+
+	scoped := validOIDC()
+	scoped.AdminEmails = nil
+	scoped.RoleMappings = []config.RoleMapping{{Claim: "group", Value: "eng", Role: "admin", Project: "/srv/one"}}
+	err := validateOIDCConfig(scoped, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no administrator") {
+		t.Errorf("a project-scoped admin was counted as the hub's administrator: %v", err)
 	}
 }

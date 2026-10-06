@@ -314,7 +314,10 @@ executors:
   # none, per host and with byte quotas, instead of giving them a network.
   # egress:
   #   enabled: true
-  #   listen_addr: 127.0.0.1:8899
+  #   # Every interface: a container sandbox reaches the proxy at its bridge's
+  #   # gateway, and is refused it on a loopback bind. The per-session
+  #   # credential is what protects the proxy.
+  #   listen_addr: 0.0.0.0:8899
   #   max_session_minutes: 15
 
 # ── HTTP surface ────────────────────────────────────────────────────────────

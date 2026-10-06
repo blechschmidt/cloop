@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/blechschmidt/cloop/pkg/config"
-	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/janitor"
 	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
@@ -134,15 +133,10 @@ func init() {
 				// not three. Registering isolated drivers afterwards is
 				// safe: strict mode refuses only non-isolating ones. The
 				// policy is a ratchet — see executor.ApplyHostExecutionPolicy.
-				executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
-				// Same ratchet, same reason: a tenant's config.yaml must not be
-				// able to lower the fleet's minimum agent build.
-				executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
-				// And the fleet resource ceiling, where a tenant raising the
-				// cap would be helping itself to the machine's RAM.
-				if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
-					executor.ApplyResourceCeiling(ceiling)
-				}
+				// With it, the agent build floor and the resource ceiling: a
+				// tenant's config.yaml must not be able to lower the fleet's
+				// minimum agent build, nor help itself to the machine's RAM.
+				cfg.Executors.ApplyRatchets()
 
 				// Commands that construct a control plane reconcile from
 				// their OWN workdir a moment later, and skipping the pass

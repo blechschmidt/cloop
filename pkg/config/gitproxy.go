@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -90,32 +89,18 @@ func validateGitProxyListenAddr(addr string) error {
 	return nil
 }
 
-// validateGitProxyAdvertiseURL checks the URL sandboxes are pointed at.
-//
-// It is a URL rather than a host:port because it becomes a git remote, and it
-// must be https for the same reason gitproxy.NewRegistry insists: the session
-// token is presented on every request, and a loopback listener is no
-// exception — a sandbox is by construction something that may share a host
-// with whatever else is listening on loopback.
+// validateGitProxyAdvertiseURL checks the URL sandboxes are pointed at, by
+// the rule the proxy's registry applies when it starts (gitproxy.NormalizeBaseURL):
+// an https base with a host and nothing after it. It is a URL rather than a
+// host:port because it becomes a git remote. A copy of that rule lived here
+// until Task 20387, and it accepted "https://:8443", which names no host.
 func validateGitProxyAdvertiseURL(raw string) error {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return nil
 	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return fmt.Errorf("executors.git_proxy.advertise_url is not a URL (got %q): %w", s, err)
-	}
-	switch {
-	case u.Scheme != "https":
-		return fmt.Errorf("executors.git_proxy.advertise_url must be an https:// URL (got %q)", s)
-	case u.Host == "":
-		return fmt.Errorf("executors.git_proxy.advertise_url has no host (got %q)", s)
-	case u.User != nil:
-		return fmt.Errorf("executors.git_proxy.advertise_url must not embed credentials")
-	case strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "":
-		return fmt.Errorf("executors.git_proxy.advertise_url must be a bare base URL with no "+
-			"path, query or fragment (got %q)", s)
+	if _, err := gitproxy.NormalizeBaseURL(s); err != nil {
+		return fmt.Errorf("executors.git_proxy.advertise_url %q: %w", s, err)
 	}
 	return nil
 }
