@@ -431,7 +431,7 @@ func runStep(ctx context.Context, dir string, w executor.Workspace, cred executo
 	//
 	// One configuration block (see executor.GitEnv): the machine's URL-scoped
 	// certificate settings, then the credential.
-	pairs := TransportConfig()
+	pairs := append(TransportConfig(), RootOwnedTrust(dir)...)
 	if step.Authenticated {
 		extra, err := executor.GitCredentialConfig(w, cred)
 		if err != nil {
@@ -581,7 +581,7 @@ func inspectDir(ctx context.Context, dir string, w executor.Workspace, hostName 
 // set. Bounded like remoteURL, for the same reasons.
 func configValue(ctx context.Context, dir, key string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--local", "--get", key)
-	cmd.Env = executor.GitBaseEnv()
+	cmd.Env = localGitEnv(dir)
 	cmd.Dir = dir
 	BoundChild(cmd)
 	var stdout, stderr bytes.Buffer
@@ -600,7 +600,7 @@ func configValue(ctx context.Context, dir, key string) (string, error) {
 // checkout's own files, never the network — and reports its failure.
 func gitLocal(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = executor.GitBaseEnv()
+	cmd.Env = localGitEnv(dir)
 	cmd.Dir = dir
 	BoundChild(cmd)
 	var stderr bytes.Buffer
@@ -619,7 +619,7 @@ func gitLocal(ctx context.Context, dir string, args ...string) error {
 // — os/exec refuses a Cancel without one.
 func remoteURL(ctx context.Context, dir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", "remote.origin.url")
-	cmd.Env = executor.GitBaseEnv()
+	cmd.Env = localGitEnv(dir)
 	cmd.Dir = dir
 	BoundChild(cmd)
 	var stdout, stderr bytes.Buffer

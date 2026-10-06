@@ -436,7 +436,15 @@ func TestBuildPod_WorkspaceInitDoesNotInheritEnv(t *testing.T) {
 		}
 	}
 	// The harness still gets it: this is about scope, not about dropping it.
-	if len(p.Spec.Containers[0].Env) != 2 {
+	// (Beside its own git's trust in the workspace — see
+	// TestBuildPod_HarnessGitTrustsTheWorkspace.)
+	got := map[string]string{}
+	for _, ev := range p.Spec.Containers[0].Env {
+		if !strings.HasPrefix(ev.Name, "GIT_CONFIG_") {
+			got[ev.Name] = ev.Value
+		}
+	}
+	if len(got) != 2 || got["ANTHROPIC_API_KEY"] != "sk-secret-value" || got["PATH"] != "/usr/bin" {
 		t.Errorf("harness env = %+v, want the Spec's two variables", p.Spec.Containers[0].Env)
 	}
 }

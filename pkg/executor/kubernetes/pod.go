@@ -690,7 +690,13 @@ func buildPod(req podRequest) (*pod, error) {
 		return nil, fmt.Errorf("%w: kubernetes executor requires a namespace", executor.ErrInvalidSpec)
 	}
 
-	harnessEnv, err := withGitConfig(req.Env, req.GitCABundle.gitConfigPairs())
+	// The workspace volume's root is owned by root — an emptyDir is, whatever
+	// runAsUser says — and git refuses a work tree another user owns, so the
+	// harness's own git trusts exactly that path. Root is the one owner that
+	// check protects nothing against (gitprovision.RootOwnedTrust, which cloop's
+	// own git applies by itself). Then the CA bundle, scoped per URL.
+	harnessGit := append([][2]string{{"safe.directory", PodWorkspace}}, req.GitCABundle.gitConfigPairs()...)
+	harnessEnv, err := withGitConfig(req.Env, harnessGit)
 	if err != nil {
 		return nil, err
 	}

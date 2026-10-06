@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,6 +88,11 @@ func TestBuildPod_GitCABundleReachesBothContainers(t *testing.T) {
 
 	wantKey := "http.https://cloop-cloop-hub.cloop.svc:8443/.sslCAInfo"
 	for _, c := range append(append([]container(nil), p.Spec.InitContainers...), p.Spec.Containers...) {
+		// The harness's block opens with the workspace trust; the bundle follows.
+		first := 0
+		if c.Name == ContainerName {
+			first = 1
+		}
 		mounted := false
 		for _, m := range c.VolumeMounts {
 			if m.Name == gitCAVolume {
@@ -102,9 +108,12 @@ func TestBuildPod_GitCABundleReachesBothContainers(t *testing.T) {
 				env[e.Name] = e.Value
 			}
 		}
-		if env["GIT_CONFIG_COUNT"] != "1" || env["GIT_CONFIG_KEY_0"] != wantKey || env["GIT_CONFIG_VALUE_0"] != PodGitCAFile {
-			t.Errorf("container %s git config = COUNT %q, KEY_0 %q, VALUE_0 %q; want 1, %q, %q",
-				c.Name, env["GIT_CONFIG_COUNT"], env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"], wantKey, PodGitCAFile)
+		idx := strconv.Itoa(first)
+		if env["GIT_CONFIG_COUNT"] != strconv.Itoa(first+1) || env["GIT_CONFIG_KEY_"+idx] != wantKey ||
+			env["GIT_CONFIG_VALUE_"+idx] != PodGitCAFile {
+			t.Errorf("container %s git config = COUNT %q, KEY_%s %q, VALUE_%s %q; want %d, %q, %q",
+				c.Name, env["GIT_CONFIG_COUNT"], idx, env["GIT_CONFIG_KEY_"+idx], idx, env["GIT_CONFIG_VALUE_"+idx],
+				first+1, wantKey, PodGitCAFile)
 		}
 		// Never the global form: that would replace the image's trust store
 		// for every host the workload reaches directly.
@@ -137,9 +146,10 @@ func TestBuildPod_GitCABundleJoinsAnExistingConfigBlock(t *testing.T) {
 	for _, e := range p.Spec.Containers[0].Env {
 		env[e.Name] = e.Value
 	}
-	if env["GIT_CONFIG_COUNT"] != "2" || env["GIT_CONFIG_KEY_0"] != "url.cloop-review::https://.pushInsteadOf" ||
-		env["GIT_CONFIG_KEY_1"] != "http.https://cloop-cloop-hub.cloop.svc:8443/.sslCAInfo" {
-		t.Errorf("merged block = %v; want the existing entry kept at 0 and the bundle at 1", env)
+	if env["GIT_CONFIG_COUNT"] != "3" || env["GIT_CONFIG_KEY_0"] != "url.cloop-review::https://.pushInsteadOf" ||
+		env["GIT_CONFIG_KEY_1"] != "safe.directory" ||
+		env["GIT_CONFIG_KEY_2"] != "http.https://cloop-cloop-hub.cloop.svc:8443/.sslCAInfo" {
+		t.Errorf("merged block = %v; want the existing entry kept at 0, the workspace trust at 1, the bundle at 2", env)
 	}
 
 	req.Env = []string{"GIT_CONFIG_COUNT=many"}
@@ -160,9 +170,36 @@ func TestBuildPod_NoGitCABundleNoVolume(t *testing.T) {
 	}
 	for _, c := range append(p.Spec.InitContainers, p.Spec.Containers...) {
 		for _, e := range c.Env {
-			if strings.HasPrefix(e.Name, "GIT_CONFIG_") {
-				t.Errorf("container %s carries %s with no bundle configured", c.Name, e.Name)
+			if strings.Contains(e.Value, "sslCAInfo") {
+				t.Errorf("container %s trusts a CA with no bundle configured: %s=%s", c.Name, e.Name, e.Value)
 			}
+		}
+	}
+}
+
+// TestBuildPod_HarnessGitTrustsTheWorkspace: /workspace is an emptyDir, which
+// root owns whatever runAsUser says, and git refuses a work tree another user
+// owns — so without this every git command the harness runs in its own
+// workspace fails with "detected dubious ownership". The first live run on a
+// cluster found exactly that (Task 20385). The trust is the one path, nothing
+// wider, and the init container gets none: cloop's provisioner applies it
+// itself, only to a root-owned target.
+func TestBuildPod_HarnessGitTrustsTheWorkspace(t *testing.T) {
+	p, err := buildPod(workspaceRequest())
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range p.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["GIT_CONFIG_COUNT"] != "1" || env["GIT_CONFIG_KEY_0"] != "safe.directory" ||
+		env["GIT_CONFIG_VALUE_0"] != PodWorkspace {
+		t.Errorf("harness git config = %v; want exactly safe.directory=%s", env, PodWorkspace)
+	}
+	for _, e := range p.Spec.InitContainers[0].Env {
+		if strings.HasPrefix(e.Name, "GIT_CONFIG_") {
+			t.Errorf("the init container carries %s=%s; the provisioner trusts its target itself", e.Name, e.Value)
 		}
 	}
 }

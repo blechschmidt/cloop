@@ -75,11 +75,15 @@ func SandboxedRepoEnv(ctx context.Context, dir string, extra ...[2]string) ([]st
 		}
 	}
 	pinned := []string{"GIT_DIR=" + gitDir, "GIT_WORK_TREE=" + dir}
-	drivers, err := FilterDrivers(ctx, dir, pinned)
+	// A work tree root owns — a Pod's /workspace — would otherwise be refused
+	// as dubious; see RootOwnedTrust.
+	trust := RootOwnedTrust(dir)
+	drivers, err := FilterDrivers(ctx, dir, pinned, trust...)
 	if err != nil {
 		return nil, err
 	}
-	env := executor.GitEnv(append(executor.HardenedGitConfig(drivers), extra...)...)
+	pairs := append(append(executor.HardenedGitConfig(drivers), trust...), extra...)
+	env := executor.GitEnv(pairs...)
 	return append(env, pinned...), nil
 }
 

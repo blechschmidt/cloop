@@ -415,8 +415,14 @@ func TestBuildPod_NilEnvForwardsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPod: %v", err)
 	}
-	if len(p.Spec.Containers[0].Env) != 0 {
-		t.Errorf("nil Spec.Env produced %d env vars; it must produce none", len(p.Spec.Containers[0].Env))
+	// Nothing forwarded: the only entries are the driver's own — its git's
+	// trust in the workspace volume, which no environment supplied.
+	own := map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory",
+		"GIT_CONFIG_VALUE_0": PodWorkspace}
+	for _, e := range p.Spec.Containers[0].Env {
+		if want, ok := own[e.Name]; !ok || e.Value != want {
+			t.Errorf("nil Spec.Env produced %s=%q; it must forward nothing", e.Name, e.Value)
+		}
 	}
 }
 

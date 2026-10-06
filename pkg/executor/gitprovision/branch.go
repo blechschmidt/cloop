@@ -301,7 +301,7 @@ func writeShallow(dir string, shas []string) error {
 // gitOutput runs a local git command in dir and returns its trimmed stdout.
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = executor.GitBaseEnv()
+	cmd.Env = localGitEnv(dir)
 	cmd.Dir = dir
 	BoundChild(cmd)
 	var stdout, stderr strings.Builder
