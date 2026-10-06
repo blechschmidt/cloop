@@ -494,6 +494,11 @@ the hub Pods' range (the pod CIDR) in `executor.kubernetes.egressFilter.cidrs`
 and the monitors' ports in `.ports`; the chart refuses a filter whose ports
 leave the proxy or the monitor out.
 
+**Upgrading from chart 0.2.0** with `--reuse-values` works: the release's old
+values have no `executor.gitProxy`, `executor.kubeGuard` or
+`executor.monitorTLS` at all, and the templates fill in the defaults rather
+than failing on the missing keys.
+
 **Rotation.** The monitors read their certificate at start. After cert-manager
 renews an `existingSecret`, restart the hub (or let a reloader do it); a
 changed `caBundle` rolls the Pods by itself.
@@ -582,7 +587,9 @@ So it boots the things:
 3. Runs `cloop hub bootstrap` and asserts the generated config still contains
    `allow_host_process: false`, `default_role: none`, and a 0600 `hub.env`.
 4. `helm lint` across the interesting value sets, and asserts the chart's guard
-   rails still refuse every configuration in the table above.
+   rails still refuse every configuration in the table above — and that the
+   chart renders with the defaults `helm upgrade --reuse-values` sees on a
+   release from an older chart, which lacks every key added since.
 5. Spins up kind, runs `helm template | kubectl apply --dry-run` both
    client- and server-side, installs the chart, and waits for readiness.
 6. Asserts the executor Role grants the five `pods` verbs plus `pods/log: get`,
