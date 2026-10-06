@@ -252,6 +252,24 @@ const ciExchangeColumns = `id, at, accepted, issuer, subject, repository, ref,
 	workflow, actor, event_name, run_id, rule_id, rule_name, session_id,
 	reason, detail, remote_addr, claims_json`
 
+// ciExchangeUpsert writes one exchange in ciExchangeColumns order. An id
+// already stored is updated in place, in those columns only, so a column a
+// newer build added keeps its value. It was INSERT OR REPLACE, which deletes
+// the stored row and inserts a new one, resetting every column this binary
+// does not name (Task 20388).
+var ciExchangeUpsert = func() string {
+	cols := strings.Split(ciExchangeColumns, ",")
+	sets := make([]string, 0, len(cols)-1)
+	for _, c := range cols {
+		if c = strings.TrimSpace(c); c != "id" {
+			sets = append(sets, c+" = excluded."+c)
+		}
+	}
+	return `INSERT INTO ci_exchanges (` + ciExchangeColumns + `)
+		VALUES (` + strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",") + `)
+		ON CONFLICT(id) DO UPDATE SET ` + strings.Join(sets, ", ")
+}()
+
 // PutCIExchange records a federation attempt.
 func (d *DB) PutCIExchange(row CIExchangeRow) error {
 	if strings.TrimSpace(row.ID) == "" {
@@ -271,8 +289,7 @@ func (d *DB) PutCIExchange(row CIExchangeRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.conn.Exec(`INSERT OR REPLACE INTO ci_exchanges (`+ciExchangeColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := d.conn.Exec(ciExchangeUpsert,
 		row.ID, formatTimeRFC(row.At), boolToInt(row.Accepted), row.Issuer, row.Subject,
 		row.Repository, row.Ref, row.Workflow, row.Actor, row.EventName, row.RunID,
 		row.RuleID, row.RuleName, row.SessionID, row.Reason, row.Detail,

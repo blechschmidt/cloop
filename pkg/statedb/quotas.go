@@ -232,11 +232,15 @@ func (d *DB) ListQuotaCounters() ([]QuotaCounterRow, error) {
 // ReplaceQuotaGauges swaps every gauge row (bucket = ”) for rows in one
 // transaction.
 //
-// A transaction rather than delete-then-insert because the intermediate state
-// — no gauge counters at all — is a state in which every tenant has unlimited
-// headroom. On a hub reconciling at startup that window is short, but it is
-// exactly the window an attacker watching for a restart would aim at, and
-// making it atomic costs nothing.
+// A transaction because the intermediate state — no gauge counters at all — is
+// a state in which every tenant has unlimited headroom. On a hub reconciling
+// at startup that window is short, but it is exactly the window an attacker
+// watching for a restart would aim at, and making it atomic costs nothing.
+//
+// The swap updates the gauges that stay in place and deletes only the ones
+// that go. It used to delete every gauge row and insert the set again, which
+// reset any column this binary does not know on every reconciliation — the
+// row replacement Task 20388 removed from every writer.
 func (d *DB) ReplaceQuotaGauges(rows []QuotaCounterRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -247,21 +251,56 @@ func (d *DB) ReplaceQuotaGauges(rows []QuotaCounterRow) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec(`DELETE FROM quota_counters WHERE bucket = ''`); err != nil {
-		return fmt.Errorf("statedb: clear quota gauges: %w", classifyDriverErr(err))
-	}
+	type gaugeKey struct{ identity, resource string }
+	keep := make(map[gaugeKey]bool, len(rows))
 	for _, r := range rows {
 		if strings.TrimSpace(r.Identity) == "" || strings.TrimSpace(r.Resource) == "" || r.Value <= 0 {
 			continue
 		}
+		keep[gaugeKey{r.Identity, r.Resource}] = true
 		if _, err := tx.Exec(
 			`INSERT INTO quota_counters (identity, resource, bucket, value, updated_at)
-			 VALUES (?, ?, '', ?, ?)`,
+			 VALUES (?, ?, '', ?, ?)
+			 ON CONFLICT(identity, resource, bucket) DO UPDATE SET
+			     value      = excluded.value,
+			     updated_at = excluded.updated_at`,
 			r.Identity, r.Resource, r.Value, formatOptionalTime(r.UpdatedAt),
 		); err != nil {
-			return fmt.Errorf("statedb: insert quota gauge: %w", classifyDriverErr(err))
+			return fmt.Errorf("statedb: write quota gauge: %w", classifyDriverErr(err))
 		}
 	}
+
+	// Every gauge the new set does not hold. Read in full before deleting: a
+	// statement on this transaction's connection must not run while its rows
+	// are still open.
+	stored, err := tx.Query(`SELECT identity, resource FROM quota_counters WHERE bucket = ''`)
+	if err != nil {
+		return fmt.Errorf("statedb: read quota gauges: %w", classifyDriverErr(err))
+	}
+	var gone []gaugeKey
+	for stored.Next() {
+		var k gaugeKey
+		if err := stored.Scan(&k.identity, &k.resource); err != nil {
+			stored.Close()
+			return fmt.Errorf("statedb: scan quota gauge: %w", classifyDriverErr(err))
+		}
+		if !keep[k] {
+			gone = append(gone, k)
+		}
+	}
+	if err := stored.Err(); err != nil {
+		stored.Close()
+		return fmt.Errorf("statedb: read quota gauges: %w", classifyDriverErr(err))
+	}
+	stored.Close()
+	for _, k := range gone {
+		if _, err := tx.Exec(
+			`DELETE FROM quota_counters WHERE identity = ? AND resource = ? AND bucket = ''`,
+			k.identity, k.resource); err != nil {
+			return fmt.Errorf("statedb: clear quota gauge: %w", classifyDriverErr(err))
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("statedb: commit quota gauges: %w", classifyDriverErr(err))
 	}

@@ -98,7 +98,7 @@ func benchState(n int) *State {
 // are the point: a linear path roughly doubles between them, and a quadratic
 // one quadruples, which is visible in the CI log without any threshold.
 func BenchmarkSaveState(b *testing.B) {
-	for _, n := range []int{200, 400, 800} {
+	for _, n := range []int{200, 400, 550, 800} {
 		b.Run(fmt.Sprintf("tasks=%d", n), func(b *testing.B) {
 			db := openBenchDB(b)
 			st := benchState(n)

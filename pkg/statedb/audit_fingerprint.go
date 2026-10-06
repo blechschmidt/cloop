@@ -1,16 +1,17 @@
 // Task-audit change detection (Task 20218).
 //
-// SaveState rewrites plan_tasks wholesale — DELETE all, INSERT all — because
-// the caller hands it a whole plan and the cheapest correct write is a
-// replacement. The audit emitter mirrored that shape and emitted one
-// `task.upsert` per task per save, which is how a 417-task plan turned a
-// per-step save into 417 audit rows and 417 transactions. On the hub that
-// reached 1.09M rows, 99.7% of the table.
+// SaveState writes every task of the plan the caller hands it, whether or not
+// the task changed: it upserts each one and deletes the ones the plan dropped
+// (until Task 20388 it emptied plan_tasks and inserted the plan again). The
+// audit emitter mirrored that shape and emitted one `task.upsert` per task per
+// save, which is how a 417-task plan turned a per-step save into 417 audit
+// rows and 417 transactions. On the hub that reached 1.09M rows, 99.7% of the
+// table.
 //
-// Wholesale replacement is fine for plan_tasks and wrong for an audit trail:
+// Rewriting every task is cheap for plan_tasks and wrong for an audit trail:
 // the trail is supposed to record mutations, and rewriting a row with its own
 // contents is not one. So the write path has to know what actually changed,
-// and it has to know it *before* the DELETE, since afterwards the previous
+// and it has to know it *before* the write, since afterwards the previous
 // values are gone.
 //
 // audit_task_fingerprints holds SHA-256 of the exact payload last emitted for

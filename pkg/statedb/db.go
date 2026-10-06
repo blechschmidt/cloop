@@ -307,8 +307,8 @@ func (d *DB) SaveState(s *State) error {
 	//
 	// Only genuinely changed tasks are emitted: saveStateLocked diffed them
 	// against their stored fingerprints inside its own transaction, before the
-	// wholesale rewrite destroyed the previous values. See audit_fingerprint.go
-	// for why that diff cannot be done here.
+	// write replaced the previous values. See audit_fingerprint.go for why that
+	// diff cannot be done here.
 	auditStateSave(d, s)
 	auditPlanTasks(d, changed, deleted)
 	auditTaskLifecycle(d, edges, s.WorkDir)
@@ -361,7 +361,7 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	// before decomposition), NOT "plan intentionally emptied" — leave the
 	// stored plan metadata untouched so externally-added tasks and their
 	// goal survive. An intentionally emptied plan is a non-nil Plan with
-	// zero tasks, which still replaces the stored rows below.
+	// zero tasks, which still deletes every stored task below.
 	if s.Plan != nil {
 		meta["plan_goal"] = s.Plan.Goal
 		meta["plan_version"] = strconv.Itoa(s.Plan.Version)
@@ -423,15 +423,23 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	}
 
 	// ── plan tasks ──
-	// Only replace the stored task rows when the incoming state actually
+	// Only write the stored task rows when the incoming state actually
 	// carries a plan. When s.Plan is nil the caller never loaded (or never
 	// had) a plan, and deleting here would destroy tasks added externally
 	// (e.g. via the UI) before decomposition ran.
+	//
+	// The plan is written row by row, never by emptying the table and
+	// inserting it again (Task 20388). A task already stored is updated in
+	// place, in the columns this binary knows; only the rows of tasks the plan
+	// no longer carries are deleted. Emptying the table reset every column
+	// this binary does not know to its default, on every save — so a binary
+	// one migration behind erased whatever that migration added, and an
+	// ADD COLUMN on plan_tasks was only "additive" until the first save.
 	if s.Plan != nil {
-		// Diff before the rewrite: after the DELETE the previous payloads are
-		// gone, and "what changed" is unanswerable. The fingerprint table is
-		// updated in this same transaction, so a rollback below leaves the
-		// audit bookkeeping exactly as consistent as the tasks.
+		// Diff before the write: afterwards the previous payloads are gone, and
+		// "what changed" is unanswerable. The fingerprint table is updated in
+		// this same transaction, so a rollback below leaves the audit
+		// bookkeeping exactly as consistent as the tasks.
 		changed, deleted, err = diffPlanTaskFingerprints(tx, s.Plan.Tasks)
 		if err != nil {
 			return nil, nil, nil, err
@@ -443,10 +451,10 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
-			return nil, nil, nil, classifyDriverErr(err)
+		if err := upsertTasks(tx, s.Plan.Tasks); err != nil {
+			return nil, nil, nil, err
 		}
-		if err := insertTasks(tx, s.Plan.Tasks); err != nil {
+		if err := deleteTasksNotIn(tx, s.Plan.Tasks); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -845,21 +853,69 @@ func (d *DB) AppendStep(row StepRow) error {
 // Internal helpers
 // ────────────────────────────────────────────────────────────
 
-// insertTasks writes every task of a plan through one prepared statement.
+// upsertTasks writes every task of a plan through one prepared statement:
+// upsertTaskSQL, which updates a stored task in place, in the columns this
+// binary knows, and inserts one that is not stored yet.
 //
 // Preparing it once rather than per row is most of the cost of a save: the
 // statement names every column, and an unprepared Exec has SQLite compile it
 // afresh for each task — 70% of SaveState's time for a 400-task plan, measured
 // when 0054 made the statement a third longer (Task 20361).
-func insertTasks(tx *sql.Tx, tasks []*pm.Task) error {
+func upsertTasks(tx *sql.Tx, tasks []*pm.Task) error {
 	stmt, err := tx.Prepare(upsertTaskSQL)
 	if err != nil {
-		return fmt.Errorf("prepare task insert: %w", classifyDriverErr(err))
+		return fmt.Errorf("prepare task upsert: %w", classifyDriverErr(err))
 	}
 	defer stmt.Close()
 	for _, t := range tasks {
 		if _, err := stmt.Exec(taskValues(t)...); err != nil {
-			return fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
+			return fmt.Errorf("write task %d: %w", t.ID, classifyDriverErr(err))
+		}
+	}
+	return nil
+}
+
+// deleteTasksNotIn deletes the stored tasks whose ids tasks does not carry:
+// the ones the plan being saved has dropped.
+//
+// SaveState calls it after upsertTasks, so every stored id is either one the
+// plan carries, which stays, or one it dropped. Deleting by id rather than
+// emptying the table is what keeps a carried task's row — and with it every
+// column this binary does not know — intact across the save (Task 20388).
+func deleteTasksNotIn(tx *sql.Tx, tasks []*pm.Task) error {
+	keep := make(map[int]struct{}, len(tasks))
+	for _, t := range tasks {
+		if t != nil {
+			keep[t.ID] = struct{}{}
+		}
+	}
+
+	// Read every id first and delete afterwards: a statement on this
+	// transaction's connection must not run while its rows are still open.
+	rows, err := tx.Query(`SELECT id FROM plan_tasks`)
+	if err != nil {
+		return fmt.Errorf("read stored task ids: %w", classifyDriverErr(err))
+	}
+	var dropped []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan stored task id: %w", classifyDriverErr(err))
+		}
+		if _, ok := keep[id]; !ok {
+			dropped = append(dropped, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read stored task ids: %w", classifyDriverErr(err))
+	}
+	rows.Close()
+
+	for _, id := range dropped {
+		if _, err := tx.Exec(`DELETE FROM plan_tasks WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("delete task %d: %w", id, classifyDriverErr(err))
 		}
 	}
 	return nil
@@ -897,8 +953,10 @@ var taskSelect = `SELECT ` + strings.Join(taskColumns, ", ") + `,
 		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 	FROM plan_tasks`
 
-// upsertTaskSQL writes every column of taskColumns, replacing all but the id
-// on conflict.
+// upsertTaskSQL writes every column of taskColumns, updating all but the id
+// on conflict. It names only those columns, so a stored row keeps whatever it
+// holds in a column a newer build added: the conflict updates the row rather
+// than replacing it, which INSERT OR REPLACE would do.
 var upsertTaskSQL = func() string {
 	updates := make([]string, 0, len(taskColumns)-1)
 	for _, c := range taskColumns[1:] {
