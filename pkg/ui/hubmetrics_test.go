@@ -595,6 +595,7 @@ func TestMetricsSharedGaugesComeFromTheLeaderOnly(t *testing.T) {
 		"cloop_quota_enforcement_enabled",
 		"cloop_quota_identities",
 		"cloop_projects_registered",
+		"cloop_statedb_wal_bytes",
 	}
 	perMember := series("cloop_secret_leases_live", "kind", string(secretbroker.KindGitHubPAT))
 

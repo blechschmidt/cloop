@@ -1568,6 +1568,15 @@ Deleting a row frees a page *inside* `state.db`; only a VACUUM hands pages back
 to the filesystem. The row steps therefore run first in a pass, so the same pass
 can reclaim what they released.
 
+Every pass ends by truncating the database's write-ahead log, `state.db-wal`,
+which all of the steps above wrote through and which SQLite never shrinks on its
+own. That step needs no key: it runs whenever the pass does, beside a live run
+or other hub processes too, because its checkpoint waits at most a quarter of a
+second for another connection and reports "busy" rather than hold writers up.
+The hub's leader also truncates its own database's log within a minute of
+finding it over 64 MiB. See
+[The write-ahead log](../operations/runbook.md#the-write-ahead-log).
+
 Preview or force a pass with `cloop hub retention` (a dry run unless you pass
 `--apply`). `cloop doctor` and `cloop hub doctor` both report the per-directory
 breakdown and the reclaimable-page estimate; `cloop hub doctor` additionally

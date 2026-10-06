@@ -151,6 +151,7 @@ cloop_executor_heartbeat_age_seconds_max  cloop_quota_enforcement_enabled
 cloop_secret_kek_rotation_records         cloop_quota_limit
 cloop_secret_kek_rotation_active          cloop_quota_usage
 cloop_sessions_live                       cloop_quota_identities
+cloop_statedb_wal_bytes
 ```
 
 `sum()` and `max()` over the cluster therefore both give the right answer. A
@@ -711,6 +712,35 @@ min by (volume) (cloop_hub_disk_free_bytes) < 2 * 1073741824
 Every member exports it for its own disk, so members sharing a volume report
 the same reading; `min()` by volume is the answer, `sum()` is not. The series
 set resets at every scrape and is capped at 32 volumes.
+
+## Control-plane database
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_statedb_wal_bytes` | gauge | — |
+
+The size of the hub database's write-ahead log, `.cloop/state.db-wal`, read at
+scrape time (Task 20392). Every write passes through the log before a
+checkpoint copies it into `state.db`, and SQLite never shrinks the file on its
+own: a burst — a bulk delete by row retention or an audit prune, a VACUUM,
+which writes the whole database through it — used to leave it at that size for
+as long as the hub ran. Now every read-write connection trims it to 64 MiB when
+it starts the log over, and the leader's janitor truncates it after each
+retention pass and within a minute of finding it larger.
+
+So the steady state is a few megabytes, with spikes during large writes that
+come back down within minutes. A log that stays over 64 MiB is one something is
+holding: a connection still reading from it (the leader's checkpoint reports
+"busy" and retries every minute), or writers that all predate the limit. The
+[runbook](runbook.md#the-write-ahead-log) says how to tell which.
+
+```promql
+cloop_statedb_wal_bytes > 64 * 1048576
+```
+
+with a `for:` of half an hour, which no single burst outlasts. It is a gauge of
+the shared database's directory, so the cluster leader alone exports it; a hub
+with no database yet exports nothing.
 
 ## Registry self-monitoring
 

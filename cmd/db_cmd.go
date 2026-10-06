@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -125,6 +126,12 @@ Flags:
               removes actually give their pages back. Implied by
               audit.prune_on_maintain. See 'cloop hub audit prune'.
 
+VACUUM writes every page of the database through the write-ahead log
+(.cloop/state.db-wal), and SQLite never shrinks that file on its own, so a run
+ends with a TRUNCATE checkpoint and reports the log's size before and after.
+The checkpoint waits at most a quarter of a second for another connection: one
+that is still reading from the log leaves it as it was, and the run says so.
+
 VACUUM rewrites the whole database file, which is unsafe underneath a running
 hub — and this control plane can have two, since several hubs may be started
 from one directory. The command refuses while another instance holds the
@@ -199,6 +206,7 @@ Exit codes:
 
 		fmt.Printf("  size before:    %s (%d pages, %d bytes/page, %d freelist)\n",
 			humanBytes(rep.Before.Bytes), rep.Before.PageCount, rep.Before.PageSize, rep.Before.FreelistPages)
+		fmt.Printf("  wal before:     %s\n", humanBytes(rep.WALBefore))
 
 		if rep.LastEntry != nil {
 			elapsed := time.Since(rep.LastEntry.CompletedAt).Round(time.Second)
@@ -233,10 +241,14 @@ Exit codes:
 		if rep.DryRun {
 			dim.Println("Dry run — no changes written.")
 			fmt.Printf("  estimated reclaim: %s (freelist_count × page_size)\n", humanBytes(rep.EstimatedReclaim))
+			if rep.WALBefore > 0 {
+				fmt.Printf("  write-ahead log:   %s (a real run truncates it)\n", humanBytes(rep.WALBefore))
+			}
 			return nil
 		}
 
 		fmt.Printf("  size after:     %s (%d pages)\n", humanBytes(rep.After.Bytes), rep.After.PageCount)
+		fmt.Printf("  wal after:      %s%s\n", humanBytes(rep.WALAfter), walCheckpointNote(rep.WALCheckpoint))
 		fmt.Printf("  operations:     %v\n", rep.Operations)
 		fmt.Println()
 
@@ -250,6 +262,23 @@ Exit codes:
 		}
 		return nil
 	},
+}
+
+// walCheckpointNote says how the run's closing checkpoint went, for the "wal
+// after" line: a busy one left the log as it was, and the operator should
+// know why it did not shrink.
+func walCheckpointNote(cp *statedb.WALCheckpoint) string {
+	switch {
+	case cp == nil:
+		return ""
+	case cp.Busy:
+		return fmt.Sprintf(" (not truncated: another connection was still using the log after %s; "+
+			"a hub's janitor retries every minute while it is over %s)",
+			statedb.WALCheckpointBusyTimeout, humanBytes(statedb.JournalSizeLimitBytes))
+	case cp.Truncated():
+		return " (truncated)"
+	}
+	return ""
 }
 
 // humanBytes formats a byte count using SI-style units. Sub-KB values are

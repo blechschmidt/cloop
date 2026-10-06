@@ -176,7 +176,31 @@ func registerHubCollectors() {
 			Families: []*hubmetrics.Metric{hubmetrics.DiskFreeBytes},
 			Collect:  withScrape(collectDiskFree),
 		},
+		hubmetrics.CollectorSpec{
+			Name:     "statedb_wal",
+			Families: []*hubmetrics.Metric{hubmetrics.StateDBWALBytes},
+			Collect:  withScrape(collectStateDBWAL),
+		},
 	)
+}
+
+// collectStateDBWAL publishes the size of the control plane's write-ahead log
+// (Task 20392). Leader only, as every gauge of the shared database is: each
+// member would report the same file, and sum() would multiply it. A hub with
+// no database yet has no log to report, which is not a zero.
+func collectStateDBWAL(sc *metricsScrape) {
+	if !sc.leader {
+		return
+	}
+	dbPath := state.DBPath(sc.srv.WorkDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	n, err := statedb.WALSize(dbPath)
+	if err != nil {
+		return
+	}
+	hubmetrics.StateDBWALBytes.Set(float64(n))
 }
 
 // collectDiskFree publishes the free space on each volume this process writes

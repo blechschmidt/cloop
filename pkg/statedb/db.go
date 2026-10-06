@@ -215,11 +215,13 @@ func connString(dbPath string) string {
 //   - synchronous=NORMAL: safe under WAL — a sudden power loss may lose
 //     the very last commit but cannot corrupt the database — and is
 //     several times faster than the FULL default for our write pattern.
+//   - journal_size_limit: the size this connection trims the WAL back to
+//     when it restarts it (JournalSizeLimitBytes, Task 20392).
 //
-// connString already applies busy_timeout, synchronous and foreign_keys when
-// the driver opens the connection, busy_timeout before anything else; they are
-// repeated here, busy_timeout first, so a connection string built elsewhere
-// cannot quietly lose them.
+// connString already applies busy_timeout, synchronous, foreign_keys and
+// journal_size_limit when the driver opens the connection, busy_timeout before
+// anything else; they are repeated here, busy_timeout first, so a connection
+// string built elsewhere cannot quietly lose them.
 func applyPragmas(conn *sql.DB) error {
 	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
 		return fmt.Errorf("statedb: set busy_timeout: %w", err)
@@ -233,6 +235,9 @@ func applyPragmas(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
 		return fmt.Errorf("statedb: set synchronous=NORMAL: %w", err)
+	}
+	if _, err := conn.Exec(`PRAGMA journal_size_limit=` + strconv.FormatInt(JournalSizeLimitBytes, 10)); err != nil {
+		return fmt.Errorf("statedb: set journal_size_limit: %w", err)
 	}
 	// Connection-scoped: must be re-issued on every open. Migration files
 	// can no longer rely on PRAGMA foreign_keys being part of their script

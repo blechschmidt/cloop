@@ -144,7 +144,7 @@ What it checks, and what each one catches that nothing else does:
 | `gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
 | `kubeguard` | whether kubeconfig grants are brokered at all; whether the monitor would start — its TLS material and CA bundle read as the hub reads them, its base judged by `kubeguard.NormalizeBaseURL` — where sandboxes are pointed and whether only this machine can reach it, plus a bounded dial; and the verb ceiling |
 | `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); how each kind of sandbox this hub runs reaches the proxy, by the hub's own routing rules — containers by the bind address (`egress.listen_addr`), Pods and devices by `advertise_addr` (`egress.advertise_addr`) — and a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
-| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema, and failing only where the hub's guard refuses the database (one ahead by additive migrations opens) — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)) |
+| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema, and failing only where the hub's guard refuses the database (one ahead by additive migrations opens) — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)); and the write-ahead log beside `state.db`, a warning once it is larger than 64 MiB and a quarter of the database both (`statedb.wal`, measured before any other check opens the database; see [The write-ahead log](#the-write-ahead-log)) |
 | `config` | every value loading had to repair (`config.repaired`): a value reset to its default is a warning, and a section switched off because it could not start as written is a failure — reported under the section's own check for the git proxy, the Kubernetes monitor and the egress proxy, which would otherwise read as "disabled"; and drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited — except `max_sessions`, where it is no cap), all judged as `quota.New` holds them (a negative ceiling is unlimited); and unbounded spend on a multi-tenant hub, by the daily caps `budget.Enforce` holds a run to — the project's own, read from `config.yaml`, which is where runs read a budget; the host-wide caps in the doctor's `~/.config/cloop` are reported beside them, since they hold back only runs on the host's own driver (an isolated run is not given them); and never counting `monthly_usd`, which nothing enforces |
 
@@ -425,22 +425,90 @@ $ cloop db maintain --dry-run
 cloop db maintain — dry-run (size report only)
   database: /srv/cloop/.cloop/state.db
 
-  size before:    320.0 KB (80 pages, 4096 bytes/page, 0 freelist)
-  last maintenance: never
+  size before:    541.9 MB (138739 pages, 4096 bytes/page, 38740 freelist)
+  wal before:     152.2 MB
+  last maintenance: 504h12m40s ago (vacuum+analyze, freed 1.96 GB)
 
 Dry run — no changes written.
-  estimated reclaim: 0 B (freelist_count × page_size)
+  estimated reclaim: 151.3 MB (freelist_count × page_size)
+  write-ahead log:   152.2 MB (a real run truncates it)
+$ cloop db maintain                         # with the hub stopped
+cloop db maintain — VACUUM + ANALYZE
+  …
+  size after:     390.6 MB (99999 pages)
+  wal after:      0 B (truncated)
+  operations:     [VACUUM ANALYZE]
+
+Reclaimed 151.3 MB.
 ```
 
-`cloop db maintain` runs `VACUUM` + `ANALYZE` and records the run in
-`maintenance_log`. `--auto` skips unless the database has grown more than 20 %
-since the last vacuum, which is what you want in a cron entry:
+`cloop db maintain` runs `VACUUM` + `ANALYZE`, records the run in
+`maintenance_log`, and ends by truncating the write-ahead log, which the
+`VACUUM` has just put every page of the database through. `--auto` skips
+unless the database has grown more than 20 % since the last vacuum, which is
+what you want in a cron entry:
 
 ```bash
 0 4 * * *  cloop db maintain --auto
 ```
 
-`VACUUM` rewrites the database and needs free space roughly equal to its size.
+`VACUUM` rewrites the database and needs free space roughly equal to its size —
+twice that while it runs, since the rewritten pages pass through the log
+before the closing checkpoint gives them back.
+
+### The write-ahead log
+
+`state.db-wal` is where every write to the database goes first; a checkpoint
+copies it into `state.db`. In steady state it is a few megabytes. SQLite reuses
+the file from its start after each checkpoint but never shrinks it, so a burst
+of writes — a `VACUUM`, which writes the whole database through it, or a bulk
+delete by row retention or `cloop hub audit prune` — used to leave the log at
+that size for as long as anything had the database open: on 2026-10-06 this
+project's hub had a 340 MB log beside a 409 MB database, on a disk 98% full.
+Three things keep it bounded now (Task 20392):
+
+- **Every read-write connection trims it.** cloop opens its databases with
+  `journal_size_limit` at 64 MiB, so whichever connection starts the log over
+  after a checkpoint cuts the file back to 64 MiB, or to the size of its own
+  write if that is larger. On a busy hub that is within seconds of the burst
+  ending — but only connections from this version on do it. Older builds
+  sharing the database (a long-lived `cloop run`, a second dashboard started
+  from an older binary) write without the limit.
+- **The leader truncates it.** The hub that leads runs
+  `PRAGMA wal_checkpoint(TRUNCATE)` at the end of every retention pass — on
+  every project's database, not only its own — and every minute while its own
+  database's log is over 64 MiB. The checkpoint waits at most 250 ms for other
+  connections: a TRUNCATE checkpoint holds the write lock while it waits, so
+  the policy's usual 5 s would hold every writer up for as long and fail
+  writers whose own 5 s ran out. It copies the log back with a PASSIVE
+  checkpoint first, which takes no lock a writer waits on, so the TRUNCATE has
+  little left to copy while it holds one. If a connection is still reading from
+  the log, it reports busy, nothing changes, and the next minute tries again;
+  the hub logs the first busy attempt and one an hour after that:
+
+  ```
+  retention [/srv/cloop] write-ahead log is 324.2 MB, over the 64.0 MB limit, and another connection was still using it after 250ms (1 attempt(s) so far); retrying every 60 s
+  retention [/srv/cloop] truncated the write-ahead log, 324.2 MB → 0 B, after 3 busy attempt(s)
+  ```
+
+- **`cloop hub retention --apply` truncates it** with the same short wait,
+  beside a running hub or not, and **`cloop db maintain`** ends every run that
+  goes ahead — which needs the hub stopped — the same way.
+
+How to see it: `ls -l .cloop/state.db-wal`, the `cloop_statedb_wal_bytes` gauge
+([metrics](metrics.md#control-plane-database)), and `cloop hub doctor`'s
+`statedb.wal`, which warns once the log is larger than both 64 MiB and a
+quarter of the database. `cloop db maintain` prints `wal before:` and
+`wal after:`.
+
+**A log that stays large** is held by something. Either a connection keeps a
+read transaction open the whole time — the leader's minute-by-minute attempts
+then all report busy, and its log says so hourly — or every connection writing
+the database predates the limit. `fuser -v .cloop/state.db-wal` lists the
+processes with the log open; the version of each is in `/proc/<pid>/exe`
+(`go version -m`). Until the older ones are replaced, the leader's checks are
+what keep the file down. If no hub is running, `cloop hub retention --apply`
+truncates it.
 
 ### A task row that will not load
 
@@ -504,8 +572,9 @@ within a minute. The usual places, largest first on a busy hub:
 
 ```console
 $ df -h /                                   # what the run measured
+$ ls -l .cloop/state.db-wal                 # the write-ahead log; see "The write-ahead log"
 $ cloop hub retention                       # dry run: what the janitor would reclaim
-$ cloop hub retention --apply               # ...and reclaim it, including VACUUM
+$ cloop hub retention --apply               # ...and reclaim it, including VACUUM and the log
 $ cloop compact --dry-run                   # per project: old artifacts, snapshots, checkpoints
 $ go clean -cache                           # on a build host: often gigabytes
 $ du -sh /tmp/* 2>/dev/null | sort -h | tail # test runs leave scratch here

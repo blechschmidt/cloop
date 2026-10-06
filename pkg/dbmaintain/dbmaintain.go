@@ -18,6 +18,10 @@
 //   - ANALYZE: refreshes per-index statistics so the query planner picks
 //     good plans as table sizes change. Cheap; we always run it after a
 //     successful VACUUM.
+//   - A TRUNCATE checkpoint of the write-ahead log (Task 20392). VACUUM
+//     writes the whole database through the log, and SQLite never shrinks the
+//     log file on its own, so without it a run that handed back the freelist
+//     would leave a log the size of the database behind it.
 //
 // Auto-mode logic: if the current page_count exceeds AutoGrowthThreshold
 // times the page_count recorded after the last vacuum, run; otherwise skip.
@@ -133,6 +137,16 @@ type Report struct {
 	// reclaim, derived from freelist_count × page_size. Only populated when
 	// DryRun is true.
 	EstimatedReclaim int64
+
+	// WALBefore and WALAfter are the write-ahead log's size when the run
+	// began and when it ended (Task 20392). A run that changed nothing — a
+	// dry run, an --auto skip, a refusal — reports the same size twice.
+	WALBefore int64
+	WALAfter  int64
+	// WALCheckpoint is the TRUNCATE checkpoint a real run ends with, nil when
+	// none ran. Busy means another connection was still using the log; the
+	// log keeps its size and nothing failed.
+	WALCheckpoint *statedb.WALCheckpoint
 }
 
 // Run opens the database at dbPath, performs the requested maintenance, and
@@ -160,8 +174,25 @@ func Run(dbPath string, opts Options) (*Report, error) {
 
 // runOnDB is the work loop, separated from Run so tests can drive an existing
 // *statedb.DB without re-opening the file.
-func runOnDB(db *statedb.DB, dbPath string, opts Options) (*Report, error) {
-	rep := &Report{DBPath: dbPath, DryRun: opts.DryRun}
+func runOnDB(db *statedb.DB, dbPath string, opts Options) (rep *Report, err error) {
+	rep = &Report{DBPath: dbPath, DryRun: opts.DryRun}
+
+	walBefore, err := statedb.WALSize(dbPath)
+	if err != nil {
+		return rep, fmt.Errorf("dbmaintain: %w", err)
+	}
+	rep.WALBefore = walBefore
+	// Whichever way the run ends, report the log as it left it. A run that
+	// truncated it reports what its checkpoint measured instead.
+	defer func() {
+		if rep.WALCheckpoint != nil {
+			return
+		}
+		rep.WALAfter = rep.WALBefore
+		if n, serr := statedb.WALSize(dbPath); serr == nil {
+			rep.WALAfter = n
+		}
+	}()
 
 	before, err := db.SizeStats()
 	if err != nil {
@@ -238,6 +269,24 @@ func runOnDB(db *statedb.DB, dbPath string, opts Options) (*Report, error) {
 			return rep, err
 		}
 	}
+
+	// From here on the run rewrites the database, and every page of it goes
+	// through the write-ahead log, so it ends by truncating the log — whether
+	// or not the rewrite completes: a VACUUM that failed halfway wrote
+	// through the log as well. Last, so the log it empties holds everything
+	// the run wrote. With statedb's short checkpoint timeout, a reader still
+	// using the log makes it report busy rather than hold anybody's writes up.
+	defer func() {
+		cp, cerr := statedb.CheckpointWAL(dbPath, statedb.WALCheckpointBusyTimeout)
+		if cerr != nil {
+			if err == nil {
+				err = fmt.Errorf("dbmaintain: truncate the write-ahead log: %w", cerr)
+			}
+			return
+		}
+		rep.WALCheckpoint = &cp
+		rep.WALAfter = cp.BytesAfter
+	}()
 
 	started := time.Now().UTC()
 

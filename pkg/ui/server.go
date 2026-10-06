@@ -790,6 +790,10 @@ type Server struct {
 	// lastSessionSweep is when the leader last retired the records of proxy
 	// sessions that ended or lapsed (Task 20383). Guarded by clusterMu.
 	lastSessionSweep time.Time
+
+	// walCheck is the leader's record of its attempts to truncate the
+	// control plane's write-ahead log (Task 20392). See statedb_wal.go.
+	walCheck walCheckState
 }
 
 // log returns s.Log, falling back to a default text logger if the field

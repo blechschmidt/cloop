@@ -16,6 +16,7 @@
 package statedb
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -102,18 +103,28 @@ func (d *DB) Analyze() error {
 // not an error per se — under heavy concurrent load the checkpoint can
 // only flush as many frames as it could acquire — but it is reported so an
 // operator can decide whether to retry.
+//
+// It waits WALCheckpointBusyTimeout rather than the handle's 5 s (Task
+// 20392): a TRUNCATE checkpoint holds the write lock while it waits, so a
+// backup taken beside a live hub would otherwise hold every one of that hub's
+// writers up for as long as a reader kept it waiting. See wal.go.
 func (d *DB) WALCheckpointTruncate() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	var busy, logSize, checkpointed int
-	row := d.conn.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	if err := row.Scan(&busy, &logSize, &checkpointed); err != nil {
+	ctx := context.Background()
+	c, err := d.conn.Conn(ctx)
+	if err != nil {
 		return "", fmt.Errorf("statedb: wal_checkpoint(TRUNCATE): %w", classifyDriverErr(err))
 	}
-	if busy != 0 {
-		return fmt.Sprintf("PARTIAL (busy=%d log_frames=%d checkpointed=%d)", busy, logSize, checkpointed), nil
+	defer c.Close() //nolint:errcheck // returns the connection to the handle's pool
+	res, err := checkpointTruncate(ctx, c, WALCheckpointBusyTimeout)
+	if err != nil {
+		return "", fmt.Errorf("statedb: %w", err)
 	}
-	return fmt.Sprintf("TRUNCATE log_frames=%d checkpointed=%d", logSize, checkpointed), nil
+	if res.Busy {
+		return fmt.Sprintf("PARTIAL (busy=1 log_frames=%d checkpointed=%d)", res.LogFrames, res.CheckpointedFrames), nil
+	}
+	return fmt.Sprintf("TRUNCATE log_frames=%d checkpointed=%d", res.LogFrames, res.CheckpointedFrames), nil
 }
 
 // VacuumInto produces a transactionally-consistent copy of the database at

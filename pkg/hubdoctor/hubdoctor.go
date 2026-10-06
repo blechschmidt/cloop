@@ -387,6 +387,8 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 		Offline:   opts.Offline,
 	}
 	add := func(f Finding) { rep.Findings = append(rep.Findings, f) }
+	// Before anything opens the database: see walSample.
+	wal := sampleWAL(dir)
 
 	if cfg == nil {
 		add(Finding{
@@ -419,7 +421,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkBranchRestrictedGrants(dir, cfg, add)
 	checkKubeGuard(ctx, dir, cfg, opts, add)
 	checkEgressBroker(ctx, dir, cfg, opts, add)
-	checkStorage(dir, add)
+	checkStorage(dir, wal, add)
 	checkFreeSpace(dir, cfg, opts, add)
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)

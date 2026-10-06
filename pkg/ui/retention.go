@@ -58,15 +58,24 @@ func (s *Server) watchRetention(ctx context.Context) {
 	}
 
 	s.runRetentionSweep()
+	s.checkControlPlaneWAL()
 
 	ticker := time.NewTicker(retentionCheckInterval)
 	defer ticker.Stop()
+	// The control plane's write-ahead log is looked at far more often than
+	// projects are cleaned: it is one stat, and a log a burst left past the
+	// limit should not wait a day (Task 20392). Same goroutine as the sweep,
+	// so a check never checkpoints beside a pass doing the same.
+	walTicker := time.NewTicker(walCheckInterval)
+	defer walTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.runRetentionSweep()
+		case <-walTicker.C:
+			s.checkControlPlaneWAL()
 		}
 	}
 }
@@ -227,6 +236,12 @@ func (s *Server) maybeRunRetention(workDir string, running multiui.RunningDirs) 
 	}
 	for _, e := range rep.Errs() {
 		s.logRetention(workDir, e.Error())
+	}
+	// A log the pass could not truncate is not an error, but it is worth a
+	// line: nothing else retries a project's log before its next pass. The
+	// control plane's is retried by the WAL check within the minute.
+	if rep.WAL.Skipped {
+		s.logRetention(workDir, "write-ahead log not truncated: "+rep.WAL.Reason)
 	}
 
 	if rep.BytesFreed() > 0 || rep.Vacuum.Ran {

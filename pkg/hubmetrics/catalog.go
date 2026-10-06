@@ -516,6 +516,20 @@ var (
 // past what a per-volume series is good for.
 const DiskVolumesMax = 32
 
+// The control-plane database (Task 20392). Its write-ahead log takes every
+// write before a checkpoint copies it into the database, and SQLite never
+// shrinks the file on its own: read-write connections trim it to 64 MiB when
+// they start it over, and the leader's janitor truncates it after each
+// retention pass and every minute while it is larger. One file in the shared
+// database's directory, so exported by the cluster leader only.
+var (
+	StateDBWALBytes = Default.MustRegister(Definition{
+		Name: "cloop_statedb_wal_bytes",
+		Help: "Size of the control-plane database's write-ahead log (.cloop/state.db-wal) in bytes. Read-write connections trim it to 64 MiB when they restart it and the leader truncates it while it is larger, so one that stays above that is held open by a reader or written only by builds that predate the limit. Exported by the cluster leader only.",
+		Type: TypeGauge,
+	})
+)
+
 // Bounded reason vocabularies used by call sites whose own packages have no
 // enumeration to borrow. Declaring them here rather than as string literals at
 // the call site is what keeps the label a closed set: a typo becomes a compile

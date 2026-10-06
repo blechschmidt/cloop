@@ -21,6 +21,9 @@
 //  2. Apply size-and-age retention to .cloop/audit-archive.
 //  3. VACUUM the database, but only when the freelist is large enough in
 //     proportion to the file to be worth it.
+//  4. Truncate the database's write-ahead log, which every step above wrote
+//     through and which SQLite never shrinks on its own (Task 20392; see
+//     wal.go).
 //
 // Every step is individually skippable and none of them aborts the others: a
 // pass that cannot read the archive directory still vacuums.
@@ -507,6 +510,8 @@ type Report struct {
 	Costs         StepResult `json:"costs"`
 	Telemetry     StepResult `json:"telemetry"`
 	Vacuum        StepResult `json:"vacuum"`
+	// WAL is the TRUNCATE checkpoint that ends the pass (Task 20392).
+	WAL StepResult `json:"wal"`
 	// Before and After are the .cloop breakdowns either side of the pass.
 	// After is nil for a dry run, which changes nothing.
 	Before *diskusage.Usage `json:"before,omitempty"`
@@ -530,7 +535,8 @@ func (r *Report) BytesFreed() int64 {
 	if r == nil {
 		return 0
 	}
-	return r.PlanHistory.BytesFreed + r.Archive.BytesFreed + r.Verdicts.BytesFreed + r.Vacuum.BytesFreed
+	return r.PlanHistory.BytesFreed + r.Archive.BytesFreed + r.Verdicts.BytesFreed + r.Vacuum.BytesFreed +
+		r.WAL.BytesFreed
 }
 
 // BytesReleased totals what row pruning returned to the database freelist,
@@ -559,7 +565,7 @@ func (r *Report) Errs() []error {
 	}
 	var out []error
 	steps := append([]StepResult{r.PlanHistory, r.Archive, r.Verdicts}, r.rowSteps()...)
-	for _, s := range append(steps, r.Vacuum) {
+	for _, s := range append(steps, r.Vacuum, r.WAL) {
 		if s.Err != nil {
 			out = append(out, s.Err)
 		}
@@ -600,6 +606,12 @@ func (r *Report) Summary() string {
 		parts = append(parts, "vacuumed")
 	case r.Vacuum.Skipped:
 		parts = append(parts, "vacuum skipped ("+r.Vacuum.Reason+")")
+	}
+	switch {
+	case r.WAL.Ran && r.WAL.BytesFreed > 0:
+		parts = append(parts, "write-ahead log truncated ("+diskusage.HumanBytes(r.WAL.BytesFreed)+")")
+	case r.WAL.Skipped && !r.DryRun:
+		parts = append(parts, "write-ahead log not truncated ("+r.WAL.Reason+")")
 	}
 	return strings.Join(parts, ", ")
 }
@@ -644,6 +656,9 @@ func RunOnce(opts Options) (*Report, error) {
 		}
 	}
 	rep.Vacuum = maybeVacuum(opts, pol, before)
+	// Last, so the log it truncates already holds everything the pass wrote:
+	// the row prunes and the VACUUM above are the largest writes a hub makes.
+	rep.WAL = truncateWAL(opts)
 
 	if !opts.DryRun {
 		if after, err := diskusage.Measure(opts.WorkDir); err == nil {

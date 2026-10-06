@@ -38,8 +38,9 @@ var hubRetentionCmd = &cobra.Command{
 Runs the same retention pass the hub performs on its own schedule: bound
 plan-history to the configured keep-count, apply size and age limits to the
 sealed audit archive, bound the row tables that grow with every unit of work
-(provider calls, steps, events, costs, telemetry), and VACUUM the database when
-its freelist has grown large enough to be worth rewriting the file for.
+(provider calls, steps, events, costs, telemetry), VACUUM the database when
+its freelist has grown large enough to be worth rewriting the file for, and
+truncate its write-ahead log, which every one of those writes went through.
 
 With no flags this is a DRY RUN — nothing is deleted and nothing is vacuumed.
 Pass --apply to actually reclaim.
@@ -53,7 +54,9 @@ The VACUUM step is refused while another hub holds the control-plane lease,
 because it rewrites the database file underneath that process's open
 connections. The step-history prune is skipped while a run is executing here,
 because a live run rewrites its own step history from memory. Everything else is
-safe alongside a running hub and still applies.`,
+safe alongside a running hub and still applies: the write-ahead log's checkpoint
+gives up after a quarter of a second rather than hold the hub's writers up, and
+reports "busy" if a reader was still using the log.`,
 	Example: `  cloop hub retention                # what would be reclaimed
   cloop hub retention --json         # the same, machine-readable
   cloop hub retention --apply        # reclaim it`,
@@ -167,6 +170,7 @@ func renderRetention(rep *janitor.Report, pol janitor.Policy) {
 		{"costs", rep.Costs, "row"},
 		{"telemetry", rep.Telemetry, "row"},
 		{"vacuum", rep.Vacuum, "file"},
+		{"wal", rep.WAL, "file"},
 	}
 	for _, s := range steps {
 		switch {

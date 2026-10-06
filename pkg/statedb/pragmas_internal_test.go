@@ -54,6 +54,14 @@ func TestApplyPragmas_OnLiveConnection(t *testing.T) {
 	if fk != 1 {
 		t.Errorf("foreign_keys on live conn: got %d, want 1", fk)
 	}
+
+	var limit int64
+	if err := db.conn.QueryRow(`PRAGMA journal_size_limit`).Scan(&limit); err != nil {
+		t.Fatalf("PRAGMA journal_size_limit: %v", err)
+	}
+	if limit != JournalSizeLimitBytes {
+		t.Errorf("journal_size_limit on live conn: got %d, want %d", limit, JournalSizeLimitBytes)
+	}
 }
 
 // TestApplyPragmas_RejectsNonWALFilesystem documents that Open() refuses to

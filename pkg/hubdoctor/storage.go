@@ -31,7 +31,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
-func checkStorage(dir string, add addFn) {
+func checkStorage(dir string, wal walSample, add addFn) {
 	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		add(Finding{
@@ -80,6 +80,7 @@ func checkStorage(dir string, add addFn) {
 	}
 
 	checkSchemaVersion(dbPath, add)
+	checkWAL(wal, add)
 }
 
 // checkSchemaVersion compares what is applied against what this binary carries.

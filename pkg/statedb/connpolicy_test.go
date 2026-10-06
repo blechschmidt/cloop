@@ -39,15 +39,19 @@ func TestConnPolicyReachesEveryPooledConnection(t *testing.T) {
 	}
 	for i, c := range held {
 		var busy, fk int
+		var limit int64
 		if err := c.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busy); err != nil {
 			t.Fatalf("connection %d busy_timeout: %v", i, err)
 		}
 		if err := c.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
 			t.Fatalf("connection %d foreign_keys: %v", i, err)
 		}
-		if busy != statedb.BusyTimeoutMillis || fk != 1 {
-			t.Errorf("connection %d: busy_timeout=%d foreign_keys=%d, want %d and 1",
-				i, busy, fk, statedb.BusyTimeoutMillis)
+		if err := c.QueryRowContext(ctx, `PRAGMA journal_size_limit`).Scan(&limit); err != nil {
+			t.Fatalf("connection %d journal_size_limit: %v", i, err)
+		}
+		if busy != statedb.BusyTimeoutMillis || fk != 1 || limit != statedb.JournalSizeLimitBytes {
+			t.Errorf("connection %d: busy_timeout=%d foreign_keys=%d journal_size_limit=%d, want %d, 1 and %d",
+				i, busy, fk, limit, statedb.BusyTimeoutMillis, statedb.JournalSizeLimitBytes)
 		}
 		_ = c.Close()
 	}

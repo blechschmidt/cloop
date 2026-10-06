@@ -65,6 +65,26 @@ func (a Access) String() string {
 // another connection's lock before returning SQLITE_BUSY.
 const BusyTimeoutMillis = 5000
 
+// JournalSizeLimitBytes is the size a read-write connection under the policy
+// trims the write-ahead log back to when it restarts it (Task 20392).
+//
+// SQLite rewrites a WAL from its start once a checkpoint has copied every
+// frame back into the database, but it never shrinks the file: the log stays
+// at the high-water mark of the largest burst written between two checkpoints
+// — a bulk delete, a VACUUM, which writes the whole database through it — for
+// as long as the database is open. On 2026-10-06 the hub's own log was 340 MB
+// beside a 409 MB database on a disk 98% full, in use, and never coming back.
+// With journal_size_limit set, the connection whose write restarts the log
+// truncates the file to this size when that write commits, or to the size
+// of the write if that is larger. Nothing else changes: the limit is not a
+// cap on how large the log may grow, and checkpoints run as before.
+//
+// 64 MiB is several times the log a busy hub needs between two automatic
+// checkpoints (1000 pages, 4 MiB), so the trim costs a steady-state hub
+// nothing, and small enough that a burst no longer leaves a meaningful share
+// of a small disk behind.
+const JournalSizeLimitBytes int64 = 64 << 20
+
 // DSN returns the data source name a handle with the given access opens path
 // with.
 //
@@ -86,6 +106,11 @@ func policyDSN(path string, access Access, extraPragmas ...string) string {
 		// know that.
 		"busy_timeout(" + strconv.Itoa(BusyTimeoutMillis) + ")",
 		"foreign_keys(1)",
+	}
+	if access != ReadOnly {
+		// Whichever connection restarts the log trims it (Task 20392). A
+		// read-only handle never writes the log, so it never restarts it.
+		pragmas = append(pragmas, "journal_size_limit("+strconv.FormatInt(JournalSizeLimitBytes, 10)+")")
 	}
 	pragmas = append(pragmas, extraPragmas...)
 	q := url.Values{"_pragma": pragmas}
