@@ -33,6 +33,12 @@ const (
 	// ActionRunCapResumed records the hub restarting such a run once the
 	// window rolled over, with no human involved.
 	ActionRunCapResumed Action = "run.cap_resumed"
+	// ActionRunAdoptRequested records somebody asking a running project's run
+	// to adopt the hub's build at its next task boundary (Task 20389).
+	ActionRunAdoptRequested Action = "run.adopt_requested"
+	// ActionRunReexecuted records a run replacing its own image with a newer
+	// build at a task boundary, keeping its process (Task 20389).
+	ActionRunReexecuted Action = "run.reexecuted"
 
 	// ── feature ────────────────────────────────────────────────────────────
 

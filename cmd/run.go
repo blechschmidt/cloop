@@ -102,6 +102,7 @@ var (
 	autoPromoteThresholdDays int
 	coachMode                bool
 	requireCommitted         string
+	followBuilds             bool
 )
 
 var runCmd = &cobra.Command{
@@ -119,6 +120,18 @@ Press Ctrl+C to pause gracefully.`,
 		// progress line would otherwise kill this process partway through a
 		// task, committing the work but never recording that it finished.
 		outlive.ControlPlane()
+
+		// An image continuing a run that adopted a newer build at a task
+		// boundary (Task 20389). Its command line was applied when the run
+		// first started; applied again it would undo what the dashboard has
+		// changed since, or with --replan throw the plan away.
+		resume := takeRunHandoff()
+		if resume.active {
+			replan, retryFailed, optimizePlan = false, false, false
+			autoEvolve, innovateMode = false, false
+			parallelMode, maxParallel, worktreeParallel = false, 0, false
+			continueSteps = 0
+		}
 
 		workdir, _ := os.Getwd()
 
@@ -161,7 +174,7 @@ Press Ctrl+C to pause gracefully.`,
 		// Done means committed (Task 20370): the flag sets the project's own
 		// setting, which this run — and every later one, and the dashboard —
 		// then reads from the project.
-		if cmd.Flags().Changed("require-committed") {
+		if cmd.Flags().Changed("require-committed") && !resume.active {
 			policy, err := pm.ParseCommitRequirement(requireCommitted)
 			if err != nil {
 				return fmt.Errorf("invalid --require-committed: %w", err)
@@ -173,6 +186,18 @@ Press Ctrl+C to pause gracefully.`,
 				return fmt.Errorf("--require-committed: %w", err)
 			}
 			projectState.CommitPolicy = policy
+		}
+
+		// Follow new builds (Task 20389) is the project's own setting too: a
+		// run on this host adopts a newly deployed cloop at a task boundary.
+		if cmd.Flags().Changed("follow-builds") && !resume.active {
+			if projectState == nil {
+				return fmt.Errorf("--follow-builds: no cloop project in %s (run 'cloop init' first)", workdir)
+			}
+			if err := state.SetFollowBuilds(workdir, followBuilds); err != nil {
+				return fmt.Errorf("--follow-builds: %w", err)
+			}
+			projectState.FollowBuilds = followBuilds
 		}
 
 		// Apply CLOOP_* environment variable overrides to config (env > config file).
@@ -517,6 +542,9 @@ Press Ctrl+C to pause gracefully.`,
 				"ollama":     cfg.Ollama.Model,
 				"claudecode": cfg.ClaudeCode.Model,
 			},
+			Resumed:      resume.active,
+			Handoff:      resume.handoff,
+			HandoffError: resume.err,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -558,7 +586,10 @@ Press Ctrl+C to pause gracefully.`,
 		// Build context: support total session timeout via --timeout flag.
 		var ctx context.Context
 		var cancel context.CancelFunc
-		if runTimeout != "" {
+		if h := resume.handoff; h != nil && !h.Deadline.IsZero() {
+			// The session's deadline is the one the run started with.
+			ctx, cancel = context.WithDeadline(context.Background(), h.Deadline)
+		} else if runTimeout != "" {
 			totalTimeout, err := time.ParseDuration(runTimeout)
 			if err != nil {
 				return fmt.Errorf("invalid --timeout: %w", err)
@@ -580,6 +611,11 @@ Press Ctrl+C to pause gracefully.`,
 			fmt.Println("\n⏸ Stopping — the task in progress goes back to pending and the next run picks it up...")
 			cancel()
 		}()
+		if stopArrivedEarly() {
+			// A stop sent while this image was starting (Task 20389).
+			fmt.Println("\n⏸ Stopping — a stop arrived while this run was moving to a new build...")
+			cancel()
+		}
 
 		runErr := orc.Run(ctx)
 
@@ -817,6 +853,7 @@ func init() {
 	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
 	runCmd.Flags().StringVar(&requireCommitted, "require-committed", "", "PM mode: a task is done only once the changes it made are committed: --require-committed, --require-committed=pushed (and on the branch's upstream), --require-committed=off. Stored with the project")
 	runCmd.Flags().Lookup("require-committed").NoOptDefVal = pm.CommitRequireCommitted
+	runCmd.Flags().BoolVar(&followBuilds, "follow-builds", false, "Adopt a newly deployed cloop build at the next task boundary instead of running the build this run started with until it ends (host-process runs on Linux; --follow-builds=false turns it off). Stored with the project")
 	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
 	rootCmd.AddCommand(runCmd)
 }

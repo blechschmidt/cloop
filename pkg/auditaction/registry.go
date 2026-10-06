@@ -116,6 +116,29 @@ var registry = []Entry{
 		Note: "The only action recording work that a machine started on its own initiative, " +
 			"so \"who restarted this project\" stays answerable from the trail alone.",
 	},
+	{
+		Action:    ActionRunAdoptRequested,
+		Home:      HomeProject,
+		Entity:    "plan",
+		Trigger:   "Somebody asks a project's running host-process run to adopt the hub's build at its next task boundary.",
+		Payload:   []string{"project", "request_id", "pid", "run_build", "hub_build", "behind"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Gated like starting a run. The request names the run's process, so it is acted on by " +
+			"that run or by none; what the run then did is its run.reexecuted row, or a refusal in " +
+			"the project's journal.",
+	},
+	{
+		Action:    ActionRunReexecuted,
+		Home:      HomeProject,
+		Entity:    "plan",
+		Trigger:   "A run replaces its own image with a newer build at a task boundary, keeping its process.",
+		Payload:   []string{"project", "run_id", "pid", "from", "to", "reason", "reexecs"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Written by the new image. Together with task.dispatch it answers \"which build ran this " +
+			"task\": a run's tasks before this row ran on `from`, after it on `to`.",
+	},
 
 	// ── feature ────────────────────────────────────────────────────────────
 	{

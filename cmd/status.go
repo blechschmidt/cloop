@@ -11,9 +11,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/profile"
+	"github.com/blechschmidt/cloop/pkg/runbuild"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/trace"
 	"github.com/fatih/color"
@@ -71,6 +73,8 @@ var statusCmd = &cobra.Command{
 		if s.Model != "" {
 			fmt.Printf("Model:    %s\n", s.Model)
 		}
+
+		printRunBuild(s, workdir)
 
 		if s.PMMode {
 			fmt.Printf("Mode:     product manager\n")
@@ -231,4 +235,40 @@ func printPauseReason(s *state.ProjectState) {
 func init() {
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output status as JSON")
 	rootCmd.AddCommand(statusCmd)
+}
+
+// printRunBuild says which build the project's run executes and how far it is
+// behind this cloop (Task 20389), and whether the project follows new builds.
+// Nothing for a project whose run never recorded a build, or one that is not
+// running.
+func printRunBuild(s *state.ProjectState, workdir string) {
+	if st := s.RunBuild; st == nil || !st.Live {
+		// A run that predates the run-owner record says nothing about its
+		// build; say that, rather than nothing, when one is executing here.
+		if pids := multiui.CloopRunPIDsInDir(workdir); len(pids) > 0 && (st == nil || st.LiveKnown) {
+			fmt.Printf("Build:    not reported by the run (pid %d): it started on a cloop from before runs recorded "+
+				"their build; restart it once to see its build here and let it adopt newer ones\n", pids[0])
+		}
+	}
+	if st := s.RunBuild; st != nil && st.Live {
+		line := fmt.Sprintf("running %s (pid %d), %s", st.Build.Label(), st.PID,
+			runbuild.BehindPhrase(st.Build, st.Reference, "this cloop"))
+		if st.Reexecs > 0 && st.Previous != nil {
+			line += fmt.Sprintf("; adopted %s, from %s", st.Since.Local().Format("2006-01-02 15:04"), st.Previous.Short())
+		}
+		fmt.Printf("Build:    %s\n", line)
+		if !st.Adoptable {
+			fmt.Printf("          its executor (%s) keeps its own upgrade path\n", st.Executor)
+		}
+	}
+	if s.FollowBuilds {
+		fmt.Printf("Follow:   a newly deployed build is adopted at the next task boundary (cloop run --follow-builds=false)\n")
+	}
+	if r := s.AdoptRequest; r != nil && s.RunBuild != nil && s.RunBuild.Live && r.Run.PID == s.RunBuild.PID {
+		who := ""
+		if r.RequestedBy != "" {
+			who = " by " + r.RequestedBy
+		}
+		fmt.Printf("Adopt:    requested%s at %s — waiting for the next task boundary\n", who, r.RequestedAt.Local().Format("15:04:05"))
+	}
 }

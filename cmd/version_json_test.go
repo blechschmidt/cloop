@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // runVersion drives the command body and returns what it printed.
@@ -60,6 +61,7 @@ func TestVersionJSONCarriesWhatTheInstallerReads(t *testing.T) {
 		Arch        string `json:"arch"`
 		Protocol    int    `json:"protocol"`
 		MinProtocol int    `json:"min_protocol"`
+		Schema      int    `json:"schema"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("the report is not valid JSON (%v): %s", err, out)
@@ -83,6 +85,11 @@ func TestVersionJSONCarriesWhatTheInstallerReads(t *testing.T) {
 	}
 	if got.Go == "" {
 		t.Error("go toolchain is unreported")
+	}
+	// A run adopting this build at a task boundary refuses one that does not
+	// say which schema it embeds (Task 20389).
+	if want, err := statedb.LatestSchemaVersion(); err != nil || got.Schema != want {
+		t.Errorf("schema = %d, want the newest embedded migration %d (%v)", got.Schema, want, err)
 	}
 }
 

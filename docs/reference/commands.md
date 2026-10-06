@@ -91,6 +91,7 @@ cloop run --plan-only         # decompose goal into tasks, then stop
 cloop run --retry-failed      # retry previously failed tasks
 cloop run --replan            # discard plan and re-decompose
 cloop run --require-committed=pushed   # done means committed and pushed (stored with the project)
+cloop run --follow-builds     # adopt newly deployed builds at task boundaries (stored with the project)
 ```
 
 | Flag | Default | Description |
@@ -115,9 +116,18 @@ cloop run --require-committed=pushed   # done means committed and pushed (stored
 | `--token-budget` | `0` | Stop when cumulative tokens reach this limit (0 = unlimited) |
 | `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
 | `--require-committed[=VALUE]` | | Set [done means committed](../guides/done-means-committed.md) for the project, then run: `committed` (the bare flag), `pushed`, or `off`. Stored with the project, like `cloop require-committed` |
+| `--follow-builds[=false]` | off | Follow new builds: when a newer cloop build is deployed at the path this run was started from, adopt it at the next task boundary — same process, same live log — instead of running the old build until the run ends. Host-process runs on Linux. Stored with the project, like the Overview's *Follow New Builds* badge; see [Following new builds](configuration.md#following-new-builds) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
+
+**A new build while it runs:** a run keeps the build it started with until it
+ends — or, with `--follow-builds` or the Overview's *Adopt at next task
+boundary*, until its next task boundary, where it validates the deployed binary
+(`version --json`: a strictly higher `sequence`, a `schema` at least the
+database's) and re-executes itself on it. Refusals are journalled
+(`run_adoption`) and the run carries on. See the runbook's *Long-lived runs
+after an upgrade*.
 
 ### `cloop require-committed`
 
@@ -144,7 +154,12 @@ with the *Done = Committed* and *…and Pushed* badges on a project's Overview.
 
 Show current project status including provider, progress, and token usage —
 and, once it has been set, what "done" requires (`Done:     only once committed
-and pushed`; see `cloop require-committed`).
+and pushed`; see `cloop require-committed`). While a run is executing, it also
+says which build that run is on, against the build of the `cloop` you ran
+(`Build:    running dev+g4e35bf6 (sequence 831 on main) (pid 4242), 132 builds
+behind this cloop`), whether the project follows new builds (`Follow:`), and a
+pending adoption request (`Adopt:`). `--json` carries the same as `run_build`,
+`run_owner`, `follow_builds` and `adopt_request`.
 
 ```
 Goal:     Build a REST API with auth
@@ -155,6 +170,22 @@ Tokens:   12450 in / 3820 out
 Created:  2026-05-01 14:00
 Updated:  2026-05-01 14:15
 ```
+
+### `cloop version`
+
+Print the build: version, Go toolchain, platform, the executor protocol, and —
+for a stamped build — the commit and its place on main.
+
+```bash
+cloop version
+cloop version --json   # {"version","go","os","arch","protocol","min_protocol","commit","sequence","schema"}
+```
+
+`--json` is what the device installer and a run adopting a new build execute to
+validate a binary before trusting it, so it has no side effects: it loads no
+configuration and opens no database. `schema` is the newest state-database
+migration the build embeds; a run refuses to adopt a build whose `schema` is
+behind its project's database.
 
 ### `cloop log`
 

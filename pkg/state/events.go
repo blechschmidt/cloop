@@ -63,6 +63,8 @@ const (
 	EventFirewall          = statedb.EventFirewall
 	EventCredentialRefresh = statedb.EventCredentialRefresh
 	EventEgress            = statedb.EventEgress
+	EventRunReexecuted     = statedb.EventRunReexecuted
+	EventRunAdoption       = statedb.EventRunAdoption
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

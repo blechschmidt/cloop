@@ -110,6 +110,42 @@ the work was meant to be waited for.
 
 ---
 
+## Following new builds
+
+A deploy replaces the cloop binary but not the runs started from it, and a run
+in auto-evolve does not end on its own — so without help it executes the build
+it started with indefinitely. Two settings let a run on this host move to a
+newly deployed build at a task boundary instead, keeping its process, its pid
+and the hub's live log (Task 20389). The runbook's *Long-lived runs after an
+upgrade* describes what happens and what each refusal means.
+
+| Setting | Where | Default | What it does |
+| --- | --- | --- | --- |
+| **Follow New Builds** | Per project: the Overview's Active Options badge, `cloop run --follow-builds` (`=false` to turn off), `POST /api/options/toggle` `{"flag":"follow_builds"}`. Stored in the project's `state.db` (metadata key `follow_builds`), not in `config.yaml` | off | At every task boundary the run checks the binary at the path it was started from; once that is a different file that has been in place for three minutes (a deploy that fails its health check is rolled back well within that), answers `version --json` with a higher `sequence` and a `schema` at least the database's, and accepts the run's command line, the run adopts it. A file it refused is not asked again until it changes; a probe that failed is tried three times. |
+| **Adopt at next task boundary** | One-shot, per run: the Overview button, or `POST /api/run/adopt-build` (`run.start`) | — | The same check and move, once, for the run that is running now — without the three-minute wait, but never to a build newer than the hub that asked. The request names that run's process and is cleared once the run has acted on it, or refused it. |
+
+Both apply only to host-process runs (the local executor) on Linux. A run in a
+container or on a remote device executes the binary its image or its agent
+provides and moves with them: rebuild the image, or upgrade the device from the
+Executors panel. The dashboard says so instead of offering the button.
+
+What the run keeps about itself, and where:
+
+- The **run-owner record** (metadata key `run_owner`): pid, start time and boot
+  id, host, the path it was started from, executor kind, run id, and its build —
+  `version`, `commit`, `sequence`, `schema` — with `reexecs` and the `previous`
+  build once it has moved. Written only by the run; read by the dashboard
+  (`run_build` in `/api/state`), `cloop status` and `cloop hub doctor`
+  (`runs.build_lag`).
+- A pending request (metadata key `run_adopt_request`), written only by the hub.
+- `CLOOP_RUN_HANDOFF`, set by a run in its own environment as it re-executes
+  itself, names `.cloop/run-handoff-<pid>.json`. The new image reads it, removes
+  it and unsets the variable. Never set it yourself: an image started with it
+  skips everything a fresh run does at its start.
+
+A candidate must report `schema` in `cloop version --json`; builds from before
+Task 20389 do not, and are refused.
+
 ## Execution Backends (Executors)
 
 An **executor** decides *where* a cloop workload actually runs. By default it is

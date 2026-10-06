@@ -137,6 +137,17 @@ const (
 	EventFeatureCreated EventType = "feature_created"
 	EventFeatureRemoved EventType = "feature_removed"
 
+	// EventRunReexecuted records a run replacing its own image with a newer
+	// build at a task boundary (Task 20389), written by the new image: which
+	// build it left, which it runs now, and why. The process, its pid and
+	// its live log carry on, so without this row nothing would show where
+	// one build's tasks end and the next one's begin.
+	EventRunReexecuted EventType = "run_reexecuted"
+	// EventRunAdoption records an adoption that did not happen, or not yet:
+	// a refused build and the reason, a failed exec, a request waiting for
+	// the task in flight. The run carries on on the build it has.
+	EventRunAdoption EventType = "run_adoption"
+
 	// EventFeaturePR records a feature's pull request being opened or updated,
 	// on the feature's journal and its parent's.
 	EventFeaturePR EventType = "feature_pr"

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -106,6 +107,10 @@ type Client struct {
 	events  map[EventType]bool // nil = all events
 	headers map[string]string
 	isSlack bool
+	// inflight counts the sends still going, so a run about to replace its
+	// own image (Task 20389) can let them finish first: an exec ends every
+	// goroutine, and with them the last task's notification.
+	inflight sync.WaitGroup
 }
 
 // New creates a Client. If events is empty all events are sent.
@@ -148,7 +153,9 @@ func (c *Client) Send(event EventType, payload Payload) {
 	}
 	payload.Event = event
 	payload.Timestamp = time.Now()
+	c.inflight.Add(1)
 	go func() {
+		defer c.inflight.Done()
 		// A panic inside c.send (nil-pointer deref in a future formatter,
 		// JSON encoder bug on an unusual payload, etc.) would otherwise
 		// kill the entire orchestrator process — webhooks are fired from
@@ -160,6 +167,25 @@ func (c *Client) Send(event EventType, payload Payload) {
 		}()
 		c.send(payload)
 	}()
+}
+
+// Wait blocks until every send in flight has finished, or timeout has passed,
+// and reports whether they all finished. Safe on a nil client.
+func (c *Client) Wait(timeout time.Duration) bool {
+	if c == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		c.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (c *Client) send(payload Payload) {

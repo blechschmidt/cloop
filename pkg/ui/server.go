@@ -8362,7 +8362,7 @@ func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run"|"require_committed"|"require_pushed","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run"|"require_committed"|"require_pushed"|"follow_builds","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -8404,6 +8404,20 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 			s.broadcastStateDiff(workDir, fresh)
 		}
 		jsonOK(w, map[string]interface{}{"ok": true, "commit_policy": p})
+		return
+	}
+	// Follow new builds (Task 20389) is stored on its own for the same reason:
+	// a run reads it at every task boundary and must see the change, not a
+	// stale copy a full save from here would write back.
+	if req.Flag == "follow_builds" {
+		if err := state.SetFollowBuilds(workDir, req.Value); err != nil {
+			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if fresh, err := state.LoadLite(workDir); err == nil {
+			s.broadcastStateDiff(workDir, fresh)
+		}
+		jsonOK(w, map[string]interface{}{"ok": true, "follow_builds": req.Value})
 		return
 	}
 	// PM mode is always on (Task 20067 removed non-PM mode); force-true on every save.

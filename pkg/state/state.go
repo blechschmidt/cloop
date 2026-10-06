@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/runbuild"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -171,6 +172,27 @@ type ProjectState struct {
 	// require-committed`; a running orchestrator picks up changes at its next
 	// sync.
 	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
+
+	// FollowBuilds is the "follow new builds" option (Task 20389): a run of
+	// this project on this host adopts a newly deployed cloop build at its
+	// next task boundary instead of running the build it started with until
+	// it ends. Set from the dashboard or `cloop run --follow-builds`, stored
+	// only by SetFollowBuilds; a running orchestrator picks it up at its next
+	// sync. Off by default.
+	FollowBuilds bool `json:"follow_builds,omitempty"`
+
+	// RunOwner is the record the project's run keeps of its own process and
+	// build (Task 20389), written only by the run; AdoptRequest a pending
+	// "adopt the hub's build at the next task boundary", filed by
+	// RequestAdoption and cleared by the run that acts on it.
+	RunOwner     *runbuild.Owner   `json:"run_owner,omitempty"`
+	AdoptRequest *runbuild.Request `json:"adopt_request,omitempty"`
+
+	// RunBuild is RunOwner as the process reading it sees it — compared with
+	// its own build and checked for liveness — so the dashboard and `cloop
+	// status` can say "running build X, N builds behind". Computed when the
+	// state is read, never stored.
+	RunBuild *runbuild.Status `json:"run_build,omitempty"`
 
 	// StepCount is the total number of step rows in the database. Always
 	// populated: Load mirrors len(Steps); LoadLite fills it from a cheap
@@ -651,7 +673,61 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 	s.ReviewGate = disk.ReviewGate
 	// Task 20370: so is "done means committed"; the next task's check uses it.
 	s.CommitPolicy = disk.CommitPolicy
+	// Task 20389: and "follow new builds", a pending request to adopt one, and
+	// the run's own record, which only the run writes.
+	s.FollowBuilds = disk.FollowBuilds
+	s.AdoptRequest = disk.AdoptRequest
+	s.RunOwner = disk.RunOwner
+	s.RunBuild = disk.RunBuild
 	return nil
+}
+
+// SelfBuild is this binary's build, with the newest schema it embeds.
+func SelfBuild() runbuild.Build {
+	selfBuildOnce.Do(func() {
+		schema, _ := statedb.LatestSchemaVersion()
+		selfBuildValue = runbuild.Self(schema)
+	})
+	return selfBuildValue
+}
+
+var (
+	selfBuildOnce  sync.Once
+	selfBuildValue runbuild.Build
+)
+
+// SetFollowBuilds stores a project's "follow new builds" option (Task 20389)
+// without rewriting anything else in its state. A run in progress picks the
+// change up at its next sync, which is its next task boundary.
+func SetFollowBuilds(workDir string, on bool) error {
+	db, err := openExisting(workDir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveFollowBuilds(on)
+}
+
+// RequestAdoption files a one-shot request for the project's run to adopt a
+// newer build at its next task boundary (Task 20389). The request names the
+// run's process, so it is acted on by that run or by none.
+func RequestAdoption(workDir string, r *runbuild.Request) error {
+	db, err := openExisting(workDir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveAdoptRequest(r)
+}
+
+// openExisting opens a project's database without creating one: a setting
+// stored for a directory that is not a project would only create one there.
+func openExisting(workDir string) (*statedb.DB, error) {
+	dbPath := effectiveDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("no cloop project in %s: %w", workDir, err)
+	}
+	return statedb.Open(dbPath)
 }
 
 // SetReviewGate stores a project's review gate settings (Task 20357) without
@@ -874,6 +950,10 @@ func fromRaw(r *statedb.State) *ProjectState {
 		DryRun:            r.DryRun,
 		ReviewGate:        r.ReviewGate,
 		CommitPolicy:      r.CommitPolicy,
+		FollowBuilds:      r.FollowBuilds,
+		RunOwner:          r.RunOwner,
+		AdoptRequest:      r.AdoptRequest,
+		RunBuild:          runbuild.Assess(r.RunOwner, SelfBuild()),
 		StepCount:         r.StepCount,
 		LastStepTime:      r.LastStepTime,
 	}

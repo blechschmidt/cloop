@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/runbuild"
 )
 
 // This file records the two run-level events a subscription cap produces
@@ -101,5 +102,76 @@ func AuditCapResume(d *DB, in CapResumeInput) {
 		EntityType: "plan",
 		EntityID:   in.ProjectPath,
 		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
+// RunReexecInput is one run that replaced its image with a newer build at a
+// task boundary (Task 20389).
+type RunReexecInput struct {
+	ProjectPath string
+	RunID       string
+	PID         int
+	From, To    runbuild.Build
+	Reason      string
+	Reexecs     int
+}
+
+// AuditRunReexecuted records a run moving to a newer build. Written by the new
+// image, on the project's chain: which build ran which of its tasks is a
+// question about the project.
+func AuditRunReexecuted(d *DB, in RunReexecInput) {
+	payload := map[string]any{
+		"project": in.ProjectPath,
+		"pid":     in.PID,
+		"from":    in.From,
+		"to":      in.To,
+		"reexecs": in.Reexecs,
+	}
+	if in.RunID != "" {
+		payload["run_id"] = in.RunID
+	}
+	if in.Reason != "" {
+		payload["reason"] = in.Reason
+	}
+	emit(d, &AuditEvent{
+		Actor:      "orchestrator",
+		EventType:  string(auditaction.ActionRunReexecuted),
+		EntityType: "plan",
+		EntityID:   in.ProjectPath,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
+// AdoptRequestInput is one request for a run to adopt the hub's build.
+type AdoptRequestInput struct {
+	ProjectPath string
+	RequestID   string
+	PID         int
+	RunBuild    runbuild.Build
+	HubBuild    runbuild.Build
+	Behind      int
+	Actor       string
+}
+
+// AuditAdoptRequested records somebody asking a run to adopt the hub's build
+// at its next task boundary (Task 20389).
+func AuditAdoptRequested(d *DB, in AdoptRequestInput) {
+	actor := in.Actor
+	if actor == "" {
+		actor = "hub"
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionRunAdoptRequested),
+		EntityType: "plan",
+		EntityID:   in.ProjectPath,
+		Payload: MarshalAuditPayload(map[string]any{
+			"project":    in.ProjectPath,
+			"request_id": in.RequestID,
+			"pid":        in.PID,
+			"run_build":  in.RunBuild,
+			"hub_build":  in.HubBuild,
+			"behind":     in.Behind,
+		}),
 	})
 }

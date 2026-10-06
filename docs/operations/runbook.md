@@ -1135,6 +1135,96 @@ upgrading in lockstep, but check `cloop executor ls` afterwards. Confirm
 re-enables host execution is the regression worth looking for after every
 upgrade.
 
+### Long-lived runs after an upgrade
+
+An upgrade replaces the hub's binary; it does not replace the runs the hub
+started. A hub restart deliberately keeps them alive (the unit uses
+`KillMode=process`, and a restarted hub adopts the runs it finds), so a run in
+auto-evolve, which never ends on its own, keeps executing the build it started
+with for as long as it lives. On 2026-10-06 the run driving cloop's own
+repository was 132 builds behind the hub serving it: "done means committed",
+switched on for the project three days earlier, had never been enforced, and the
+disk floor was inactive on a 98%-full disk.
+
+**Seeing it.** Every run records its process and its build (version, commit,
+sequence on main, the schema it embeds) in its project when it starts — the
+run-owner record — and journals it in the run's `session_started` row. Whatever
+reads the project compares that record with its own build:
+
+- the Overview's status line and the Tasks tab's run bar say
+  *Running build dev+g4e35bf6, 132 builds behind this hub* while the run lags;
+- `GET /api/state` carries `run_build` (`build`, `reference`, `behind`,
+  `comparable`, `live`, `adoptable`, `pid`, `executor`), the `run_owner` record
+  itself, `follow_builds`, and a pending `adopt_request`;
+- `cloop status` prints `Build:    running dev+g4e35bf6 (sequence 831 on main)
+  (pid 4242), 132 builds behind this cloop`;
+- `cloop hub doctor` warns `runs.build_lag` for every `cloop run` on the host
+  that is behind the doctor's build, or that never recorded one.
+
+A run started by a cloop from before this record existed shows no build at all;
+doctor says so ("has not reported its build"). Restart it once — Stop, then
+Start — and from then on it can move by itself.
+
+**Moving a run without stopping it** (host-process runs only):
+
+```bash
+# once, from the dashboard: the run's Overview → "Adopt at next task boundary"
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "https://hub.example.com/api/run/adopt-build?project_idx=0"
+
+# or for good: Overview → Active Options → Follow New Builds, or
+cloop run --follow-builds          # stores the option with the project, then runs
+```
+
+The request is gated like Start (`run.start`, and the executor's audience) and
+audited as `run.adopt_requested`; it names the run's process (pid, start time,
+boot id), so a run started later never acts on it. The run acts at its next
+safe point — after the task in flight has been settled and stored, and before
+the next task or evolve round starts; a parallel run first lets its round drain
+and dispatches nothing new meanwhile. There it insists that no child process is
+alive, persists its state, and validates the binary at the path it was started
+from (`/usr/local/bin/cloop-latest` on :8888): `<path> version --json` must
+answer within ten seconds with a `sequence` strictly greater than the run's own
+and a `schema` at least the project database's, and the new build must accept
+the run's own command line (`<path> run … --help`). A request never moves a run
+past the build of the hub that filed it, and Follow New Builds waits until the
+deployed file has been in place for three minutes: the deploy health-checks the
+new hub for half a minute and puts the old binary back if that fails, and a run
+that had moved in that window would have migrated its database past what the
+rolled-back hub can open. It then writes
+`.cloop/run-handoff-<pid>.json` (run id, evolve iteration, the consecutive
+failure and empty-evolve counters, its status and pause reason, the reason it
+moved) and calls `execve` with the same argv and environment plus
+`CLOOP_RUN_HANDOFF`.
+
+To the hub nothing happened: the pid, the `(starttime, boot_id)` identity the
+local driver checks, the hub's run claim and the live log's stdout pipe all
+carry over. The new image journals `run_reexecuted` (old and new build, and
+why), writes `run.reexecuted` to the project's audit trail, updates the
+run-owner record (`reexecs`, `previous`), and continues the run — no new
+`session_started`, no `--replan`, no `--retry-failed` reset, no `pre_plan` hook,
+no re-applied command-line toggles.
+
+**When it does not move.** Every refusal is a `run_adoption` row in the event
+history, with the reason, and the run carries on on the build it has:
+
+| Journal says | Meaning | What to do |
+| --- | --- | --- |
+| `… is at the same sequence as this run's build` / `still holds the build this run is executing` | Nothing newer was deployed at the path | Wait for the deploy; check `/var/lib/cloop-latest/commit` |
+| `… builds older than this run's build` | The path holds a rollback | Adoption never moves a run backwards; restart the run if you mean to |
+| `… carries no sequence` | An unstamped build (`go build`) | Deploy a build stamped by the deploy script or `scripts/build-release.sh` |
+| `… embeds schema N, behind the project database at M` | The deployed build is older than the database | Deploy a build at least as new as the schema |
+| `` `version --json` failed `` / `did not answer within 10s` (`attempt N of 3`) | A broken binary, or a host too loaded to answer | Tried again at the next boundaries, three times per deployed file |
+| `not an ELF executable` / `not a regular file` / `writable by its group` / `belongs to uid` | Not an installed binary | Fix the deploy; the next file at the path is looked at afresh |
+| `does not accept this run's command line` | The new build dropped or renamed a flag the run was started with | Restart the run without it |
+| `newer than the hub that asked` | The path holds a build the hub is not running yet — a deploy in progress | Ask again once the hub runs it |
+| `child processes are still running` | Something the run started has not exited | It retries at the next boundary (Follow New Builds) or refuses the request |
+| `… executor, which keeps its own upgrade path` | A container or device run | Upgrade the device (Executors → Upgrade) or rebuild the image |
+
+Check a move on the host itself: the pid in `cloop status` stays the same,
+`/proc/<pid>/stat` field 22 (the start time) is unchanged, and
+`readlink /proc/<pid>/exe` names the deployed file instead of `… (deleted)`.
+
 ---
 
 ## Rollback

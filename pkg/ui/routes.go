@@ -656,6 +656,10 @@ func (s *Server) routeTable() []routeSpec {
 		// operator who cannot start can still halt a runaway plan.
 		{Pattern: "/api/run", Handler: s.handleRun, Methods: []string{"POST"}, Perm: start, Scope: scopeProject},
 		{Pattern: "/api/stop", Handler: s.handleStop, Methods: []string{"POST"}, Perm: stop, Scope: scopeProject},
+		// Ask the running run to adopt this hub's build at its next task
+		// boundary (Task 20389). `start`, like starting a run: it decides
+		// which code the run executes from then on. See adopt_api.go.
+		{Pattern: "POST /api/run/adopt-build", Handler: s.handleAdoptBuild, Perm: start, Scope: scopeProject},
 
 		// ── Task management (legacy endpoints) ───────────────────────
 		{Pattern: "/api/task/add", Handler: s.handleTaskAdd, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},

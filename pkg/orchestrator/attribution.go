@@ -103,6 +103,10 @@ var (
 // its tasks under an execution that ended yesterday, and inherit that run's
 // leases in any query that joins on the id.
 func resolveRunID(workDir string) string {
+	// An image that took over the run from another keeps its id (Task 20389).
+	if id := pinnedRunID.Load(); id != nil {
+		return *id
+	}
 	runIDOnce.Do(func() {
 		if rec, ok := artifact.LoadSandboxRun(workDir); ok && !staleRecord(rec) {
 			if id := strings.TrimSpace(rec.RunID); id != "" {
@@ -217,7 +221,7 @@ func staleRecord(rec artifact.SandboxRecord) bool {
 	if rec.StartedAt.IsZero() {
 		return false
 	}
-	return rec.StartedAt.Before(processStart.Add(-attributionGrace))
+	return rec.StartedAt.Before(processStartTime().Add(-attributionGrace))
 }
 
 // isolationOf returns the isolation a record describes, inferring it from the

@@ -19,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/runbuild"
 )
 
 // State mirrors pkg/state.ProjectState but is owned by this package to avoid
@@ -73,6 +74,16 @@ type State struct {
 	// 20370), stored as JSON under the commit_policy meta key. Nil when never
 	// set.
 	CommitPolicy *pm.CommitPolicy
+	// FollowBuilds, RunOwner and AdoptRequest are the project's side of a
+	// run adopting newer builds (Task 20389): the "follow new builds" option
+	// (follow_builds), the record the run keeps of its own process and build
+	// (run_owner) and a pending one-shot request to adopt (run_adopt_request).
+	// Each is written only through its own setter — SaveFollowBuilds,
+	// SaveRunOwner, SaveAdoptRequest — and never by SaveState, so neither a
+	// run's save nor a dashboard's can put back a stale copy.
+	FollowBuilds bool
+	RunOwner     *runbuild.Owner
+	AdoptRequest *runbuild.Request
 }
 
 // StepRow represents one recorded step result.
@@ -625,6 +636,20 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 		var p pm.CommitPolicy
 		if err := json.Unmarshal([]byte(v), &p); err == nil {
 			s.CommitPolicy = &p
+		}
+	}
+
+	s.FollowBuilds = metaMap[metaFollowBuilds] == "1"
+	if v := metaMap[metaRunOwner]; v != "" {
+		var o runbuild.Owner
+		if err := json.Unmarshal([]byte(v), &o); err == nil {
+			s.RunOwner = &o
+		}
+	}
+	if v := metaMap[metaAdoptRequest]; v != "" {
+		var r runbuild.Request
+		if err := json.Unmarshal([]byte(v), &r); err == nil {
+			s.AdoptRequest = &r
 		}
 	}
 

@@ -437,6 +437,7 @@ function renderActiveOptions(s) {
     [!!s.dry_run,       '🧪', 'Dry Run',       '--dry-run',      'Click to toggle. Show prompts without invoking the provider (no API calls, no side effects)', 'dry_run'],
     [!!cp.enabled, '📌', 'Done = Committed', '--require-committed', 'Click to toggle. A task is done only once the changes it made are committed; otherwise its turn is handed back', 'require_committed'],
     [!!(cp.enabled && cp.pushed), '🚀', '…and Pushed', '--require-committed=pushed', 'Click to toggle. Also require its commits on the branch upstream', 'require_pushed'],
+    [!!s.follow_builds, '🔄', 'Follow New Builds', '--follow-builds', 'Click to toggle. A run on this host adopts a newly deployed cloop build at its next task boundary. Device and container runs keep their own upgrade paths', 'follow_builds'],
   ];
   const mp = parseInt(s.max_parallel, 10);
   const mpVal = (Number.isFinite(mp) && mp >= 1 && mp <= 64) ? mp : 1;
@@ -614,7 +615,7 @@ window.toggleOption = function(flag, value) {
   }
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run', require_committed: 'Done = Committed', require_pushed: 'Done = Pushed'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run', require_committed: 'Done = Committed', require_pushed: 'Done = Pushed', follow_builds: 'Follow New Builds'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
       if (d.commit_policy && appState) { appState.commit_policy = d.commit_policy; renderActiveOptions(appState); }
       // No explicit /api/state refetch — the backend's task_update WebSocket

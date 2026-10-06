@@ -52,6 +52,9 @@ func Version() string { return version.String() }
 //   - Commit: is this the build its signed manifest describes? An edge build's
 //     manifest names its commit and sequence, and the installer requires the
 //     binary to report both.
+//   - Schema: can it run against this database? A run adopting a newly
+//     deployed build at a task boundary (Task 20389) refuses one that embeds
+//     less than the schema its project's database is already at.
 type versionReport struct {
 	Version string `json:"version"`
 	Go      string `json:"go"`
@@ -66,6 +69,8 @@ type versionReport struct {
 	// position on main, absent for a build that was not stamped with one.
 	Commit   string `json:"commit,omitempty"`
 	Sequence int    `json:"sequence,omitempty"`
+	// Schema is the newest state-database migration the build embeds.
+	Schema int `json:"schema"`
 }
 
 var versionCmd = &cobra.Command{
@@ -96,6 +101,12 @@ staged binary before it replaces a running agent.`,
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
 			seq, _ := version.BuildSequence()
+			// The embedded migrations are parsed, never applied: no database
+			// is opened here (see PersistentPreRunE above).
+			schema, err := statedb.LatestSchemaVersion()
+			if err != nil {
+				return fmt.Errorf("reading the embedded schema: %w", err)
+			}
 			return enc.Encode(versionReport{
 				Version:     Version(),
 				Go:          runtime.Version(),
@@ -105,6 +116,7 @@ staged binary before it replaces a running agent.`,
 				MinProtocol: remote.MinProtocolVersion,
 				Commit:      version.BuildCommit(),
 				Sequence:    seq,
+				Schema:      schema,
 			})
 		}
 		// The first line is "cloop <version>" and stays so: older installers

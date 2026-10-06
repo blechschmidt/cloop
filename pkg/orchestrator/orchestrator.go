@@ -55,6 +55,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/review"
 	"github.com/blechschmidt/cloop/pkg/risk"
 	"github.com/blechschmidt/cloop/pkg/router"
+	"github.com/blechschmidt/cloop/pkg/runbuild"
 	"github.com/blechschmidt/cloop/pkg/secret"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -426,6 +427,17 @@ type Config struct {
 	// agent's pushes (default: this executable's review-gate-remote-helper).
 	ReviewProvider   provider.Provider
 	ReviewGateHelper []string
+
+	// Handoff is what the image this process replaced handed over when it
+	// adopted a newer build at a task boundary (Task 20389); cmd/run.go reads
+	// it from CLOOP_RUN_HANDOFF. Resumed is set whenever that variable was
+	// present, even when the file could not be read (HandoffError says why):
+	// the process is continuing a run either way, so it must not do what a
+	// fresh run does at its start — re-plan, reset failed tasks, optimise, run
+	// the pre_plan hook, announce itself again.
+	Handoff      *runbuild.Handoff
+	Resumed      bool
+	HandoffError string
 }
 
 type Orchestrator struct {
@@ -513,6 +525,22 @@ type Orchestrator struct {
 	// concurrently.
 	reviewersMu sync.Mutex
 	reviewers   map[string]provider.Provider
+
+	// Adopting newer builds at task boundaries (Task 20389); see adopt.go.
+	// selfBuild is this image's build, owner the run-owner record it wrote,
+	// carry the run's bookkeeping across loop entries and images,
+	// refusedFiles the binaries already refused (so following new builds asks
+	// each deployed file once), adoptNotes the conditions already journalled,
+	// and handingOver tells the loops' deferred end-of-run work that the run
+	// is not ending but moving.
+	adopt         adoptHooks
+	selfBuild     runbuild.Build
+	owner         *runbuild.Owner
+	carry         *runCarry
+	refusedFiles  map[runbuild.FileID]bool
+	adoptFailures map[runbuild.FileID]int
+	adoptNotes    map[string]bool
+	handingOver   bool
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -520,31 +548,37 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Model != "" {
-		s.Model = cfg.Model
-	}
-	if cfg.Effort != "" {
-		s.Effort = cfg.Effort
-	}
 	// All work is tracked through the PM task pipeline; non-PM mode was removed
 	// in Task 20067 so every change is visible in the task list and auditable.
 	s.PMMode = true
-	s.InnovateMode = cfg.InnovateMode
-	if cfg.Parallel {
-		s.Parallel = true
-	}
-	if cfg.MaxParallel > 0 {
-		s.MaxParallel = cfg.MaxParallel
-	}
-	// A configured cap > 1 is itself an "I want parallel" signal (Task 20111),
-	// so promote s.Parallel even if the caller forgot to set cfg.Parallel.
-	// Without this the dispatcher in runPM falls through to runPMSequential
-	// and the cap is silently ignored.
-	if s.MaxParallel > 1 {
-		s.Parallel = true
-	}
-	if cfg.WorktreeParallel {
-		s.WorktreeParallel = true
+	// The command line's overrides are the run's first image's to apply. An
+	// image that took the run over (Task 20389) continues on the settings as
+	// stored, which the dashboard may have changed since — reapplying the
+	// same flags or config defaults would quietly undo that.
+	if !cfg.Resumed {
+		if cfg.Model != "" {
+			s.Model = cfg.Model
+		}
+		if cfg.Effort != "" {
+			s.Effort = cfg.Effort
+		}
+		s.InnovateMode = cfg.InnovateMode
+		if cfg.Parallel {
+			s.Parallel = true
+		}
+		if cfg.MaxParallel > 0 {
+			s.MaxParallel = cfg.MaxParallel
+		}
+		// A configured cap > 1 is itself an "I want parallel" signal (Task 20111),
+		// so promote s.Parallel even if the caller forgot to set cfg.Parallel.
+		// Without this the dispatcher in runPM falls through to runPMSequential
+		// and the cap is silently ignored.
+		if s.MaxParallel > 1 {
+			s.Parallel = true
+		}
+		if cfg.WorktreeParallel {
+			s.WorktreeParallel = true
+		}
 	}
 	mem, _ := memory.Load(cfg.WorkDir)
 	if mem == nil {
@@ -613,16 +647,34 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// poller fires the registered cancel when an operator aborts a running
 	// task from the UI (Task 20140).
 	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry()}
+	o.adopt = defaultAdoptHooks()
+	o.selfBuild = state.SelfBuild()
+	o.refusedFiles = map[runbuild.FileID]bool{}
+	o.adoptFailures = map[runbuild.FileID]int{}
+	o.adoptNotes = map[string]bool{}
+	// An image that took over from another continues its process: the same
+	// start time for attribution, the same execution id for its tasks — from
+	// the handoff, or, if that was lost, from the record the previous image
+	// left about this very process.
+	if cfg.Handoff != nil {
+		inheritFromHandoff(cfg.Handoff)
+	} else if cfg.Resumed && s.RunOwner != nil {
+		if id, err := o.adopt.self(); err == nil && s.RunOwner.Ident.Same(id) {
+			inheritFromHandoff(&runbuild.Handoff{RunID: s.RunOwner.RunID, ProcessStart: s.RunOwner.StartedAt})
+		}
+	}
 
 	// Persist the command line's overrides so the loop's SyncFromDisk reads
 	// them back rather than overwriting them from the stored state:
 	// mergeExternalTasks copies these toggles disk → memory, so a merging
 	// write — or none — would quietly put the run back on the stored settings.
 	// A run that cannot store them would not run as asked, so it does not
-	// start.
-	if err := o.persist(s, "this run's command-line settings (parallel, worktrees, innovate)", replacePlan); err != nil {
-		o.closeStores()
-		return nil, err
+	// start. An image that took the run over applied none (see above).
+	if !cfg.Resumed {
+		if err := o.persist(s, "this run's command-line settings (parallel, worktrees, innovate)", replacePlan); err != nil {
+			o.closeStores()
+			return nil, err
+		}
 	}
 	return o, nil
 }
@@ -1179,34 +1231,46 @@ func (o *Orchestrator) warnCapsUnenforced(cause error) {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
-	// Background pollers run under a child context that we cancel before
-	// Close() so their goroutines exit even when the caller passed an
-	// unbounded ctx (e.g. context.Background() in tests).
-	pollCtx, pollCancel := context.WithCancel(ctx)
-	// Manual-abort poller (Task 20140): polls kill_requests rows the UI
-	// inserts when an operator changes a running task's status, and fires
-	// the watchdog-registered cancel for that task.
-	o.startKillPoller(pollCtx)
-	// Live-deadline poller (Task 20143): re-reads per-task / per-project
-	// task-timeout values from disk every few seconds and adjusts the
-	// timer on any in-flight task whose budget changed.
-	o.startDeadlinePoller(pollCtx)
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
 	// is a one-shot value — callers Build → Run → discard. Re-using the
 	// orchestrator after Run would already misbehave (state/plan are baked
 	// in at New time), so closing here is safe.
 	defer o.Close()
-	defer pollCancel()
 	o.settleReserve()
-	err := o.runPM(ctx)
-	if errors.Is(err, ErrStateNotPersisted) {
-		// The pollers write state too, so they stop before the last word.
+	// Which process and build this run is (Task 20389), for the dashboard,
+	// `cloop status` and hub doctor to compare with theirs.
+	o.recordRunOwner()
+	for {
+		// Background pollers run under a child context that is cancelled
+		// before Close() so their goroutines exit even when the caller passed
+		// an unbounded ctx (e.g. context.Background() in tests).
+		pollCtx, pollCancel := context.WithCancel(ctx)
+		// Manual-abort poller (Task 20140): polls kill_requests rows the UI
+		// inserts when an operator changes a running task's status, and fires
+		// the watchdog-registered cancel for that task.
+		o.startKillPoller(pollCtx)
+		// Live-deadline poller (Task 20143): re-reads per-task / per-project
+		// task-timeout values from disk every few seconds and adjusts the
+		// timer on any in-flight task whose budget changed.
+		o.startDeadlinePoller(pollCtx)
+		err := o.runPM(ctx)
+		// The pollers write state too, so they stop before the last word —
+		// and before an exec, which would cut a write of theirs in half.
 		pollCancel()
 		o.killWG.Wait()
-		o.recordAbort(err)
+		var ad *adoptBuild
+		if errors.As(err, &ad) {
+			// Returns only if the exec failed or the run was stopped; the
+			// loop then goes on here — or pauses, for a stop.
+			o.handOver(ctx, ad)
+			continue
+		}
+		if errors.Is(err, ErrStateNotPersisted) {
+			o.recordAbort(err)
+		}
+		return err
 	}
-	return err
 }
 
 // errSwitchMode is returned by the runPMSequential / runPMParallel loops when
@@ -1280,9 +1344,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		return err
 	}
 
-	sessionStart := time.Now()
-	startStep := s.CurrentStep
+	// fresh is false when this loop is entered by a mode switch or by an
+	// image that took the run over from another (Task 20389): the session,
+	// its counters and its start-of-run work belong to the run, not the loop.
+	fresh, carry := o.enterLoop(s)
+	sessionStart := carry.sessionStart
+	startStep := carry.sessionStartStep
 	defer func() {
+		// A run handing itself to a newer build is not ending: its next image
+		// learns from the session and summarises it when the run does end.
+		if o.handingOver {
+			return
+		}
 		newSteps := s.Steps
 		if startStep < len(newSteps) {
 			newSteps = newSteps[startStep:]
@@ -1300,35 +1373,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	dimColor := color.New(color.Faint)
 	pmColor := color.New(color.FgMagenta, color.Bold)
 
-	if !o.log.IsJSON() {
+	if !o.log.IsJSON() && fresh {
 		header.Printf("\n🧠 cloop PM — AI Product Manager Mode\n")
 		fmt.Printf("   Provider: %s\n", o.provider.Name())
 		fmt.Printf("   Goal: %s\n", s.Goal)
 		fmt.Println()
 	}
-	o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
-		"goal":     s.Goal,
-		"mode":     "pm",
-		"trace_id": clooptracing.TraceIDFromContext(ctx),
-	})
-
-	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
-	state.LogEventDetails(o.config.WorkDir, state.EventRow{
-		Type:    state.EventSessionStarted,
-		Step:    state.NoStep,
-		Message: "Run started",
-	}, map[string]any{
-		"goal":         s.Goal,
-		"provider":     o.provider.Name(),
-		"model":        s.Model,
-		"auto_evolve":  s.AutoEvolve,
-		"innovate":     s.InnovateMode,
-		"parallel":     s.Parallel,
-		"max_parallel": s.MaxParallel,
-	})
+	if fresh {
+		o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
+			"goal":     s.Goal,
+			"mode":     "pm",
+			"trace_id": clooptracing.TraceIDFromContext(ctx),
+		})
+		o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
+		o.logRunStarted(s)
+	}
 
 	// If --replan requested, clear existing plan and force re-decomposition.
-	if o.config.Replan && s.Plan != nil {
+	if fresh && o.config.Replan && s.Plan != nil {
 		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
 		s.Plan = nil
 		if err := o.persist(s, "the plan cleared for --replan"); err != nil {
@@ -1390,7 +1452,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		fmt.Println()
 	} else {
 		// If retry-failed is set, reset failed tasks to pending
-		if o.config.RetryFailed {
+		if fresh && o.config.RetryFailed {
 			retried := 0
 			for _, t := range s.Plan.Tasks {
 				if t.Status == pm.TaskFailed {
@@ -1409,14 +1471,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	}
 
 	// Optimization pass: AI reviews the plan before execution.
-	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+	if fresh && o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
 		if err := o.runOptimizer(ctx, s, pmColor, dimColor); err != nil {
 			return err
 		}
 	}
 
 	// Plan-only mode: just show the plan, don't execute
-	if o.config.PlanOnly {
+	if fresh && o.config.PlanOnly {
 		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
 			"plan-only mode: the plan was generated but not executed"))
 		return o.persist(s, "the pause (plan-only mode)")
@@ -1438,7 +1500,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	// An operator at a terminal may prefer to skip a task that was re-queued
 	// rather than watch it fail again. Adopted tasks are not offered — there is
 	// nothing left to decide about work that is already finished.
-	if clarify.IsTTY() {
+	if fresh && clarify.IsTTY() {
 		for _, t := range s.Plan.Tasks {
 			if t == nil || t.Status != pm.TaskPending || !o.wasRequeued(t.ID) {
 				continue
@@ -1460,17 +1522,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 	}
 
-	// Pre-plan hook: run once before execution starts.
-	if err := hooks.RunPrePlan(o.config.Hooks, hooks.PlanContext{
-		Goal:  s.Goal,
-		Total: len(s.Plan.Tasks),
-	}, o.allEnvLines()...); err != nil {
-		failColor.Printf("✗ pre_plan hook failed: %v — aborting plan execution.\n", err)
-		return o.failRun(s, err)
+	// Pre-plan hook: run once before execution starts — once per run, not
+	// again when a mode switch or an adopted build re-enters the loop.
+	if fresh {
+		if err := hooks.RunPrePlan(o.config.Hooks, hooks.PlanContext{
+			Goal:  s.Goal,
+			Total: len(s.Plan.Tasks),
+		}, o.allEnvLines()...); err != nil {
+			failColor.Printf("✗ pre_plan hook failed: %v — aborting plan execution.\n", err)
+			return o.failRun(s, err)
+		}
 	}
 
-	// Post-plan hook: runs when plan finishes (done or paused).
+	// Post-plan hook: runs when plan finishes (done or paused) — not when the
+	// run hands itself to a newer build, which is neither (Task 20389).
 	defer func() {
+		if o.handingOver {
+			return
+		}
 		done, failed := s.Plan.CountByStatus()
 		skipped := 0
 		for _, t := range s.Plan.Tasks {
@@ -1531,7 +1600,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 	}
 
-	consecutiveErrors := 0
+	consecutiveErrors := carry.errors
 	maxConsecutiveErrors := o.config.MaxFailures
 	if maxConsecutiveErrors <= 0 {
 		maxConsecutiveErrors = 3
@@ -1543,7 +1612,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	// the budget itself is the abort condition and we keep evolving until it
 	// trips, regardless of how many empty evolves occur — that is the intended
 	// behaviour for long-running auto-evolve sessions.
-	consecutiveEmptyEvolves := 0
+	consecutiveEmptyEvolves := carry.emptyEvolves
 	const maxEmptyEvolves = 3
 
 	// Per-task context bookkeeping. The cancel for each iteration is invoked
@@ -1643,8 +1712,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// so runPM can re-dispatch into runPMParallel without a process restart
 		// (Task 20111). We're at the top of the loop with no task in flight, so
 		// switching is safe — the next iteration starts fresh in the new mode.
+		carry.errors, carry.emptyEvolves = consecutiveErrors, consecutiveEmptyEvolves
 		if o.wantParallel() {
 			return errSwitchMode
+		}
+		// A newer build of cloop, when the project follows new builds or the
+		// run was asked to adopt one: the run hands itself over here, between
+		// tasks and before any evolve round, with nothing in flight (Task 20389).
+		if err := o.atTaskBoundary(ctx, s, carry, false); err != nil {
+			return err
 		}
 		// A plan may not finish — or evolve — on the strength of an error
 		// message. Any task recorded as done whose summary is a provider or
@@ -3776,9 +3852,16 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		return err
 	}
 
-	sessionStart := time.Now()
-	startStep := s.CurrentStep
-	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+	// See runPMSequential: a mode switch or an adopted build re-enters the
+	// loop without starting a new run (Task 20389).
+	fresh, carry := o.enterLoop(s)
+	sessionStart := carry.sessionStart
+	startStep := carry.sessionStartStep
+	defer func() {
+		if !o.handingOver {
+			printSessionSummary(sessionStart, startStep, s)
+		}
+	}()
 
 	header := color.New(color.FgCyan, color.Bold)
 	successColor := color.New(color.FgGreen, color.Bold)
@@ -3787,10 +3870,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	pmColor := color.New(color.FgMagenta, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
 
-	header.Printf("\n🧠 cloop PM — AI Product Manager Mode (parallel)\n")
-	fmt.Printf("   Provider: %s\n", o.provider.Name())
-	fmt.Printf("   Goal: %s\n", s.Goal)
-	fmt.Println()
+	if fresh {
+		header.Printf("\n🧠 cloop PM — AI Product Manager Mode (parallel)\n")
+		fmt.Printf("   Provider: %s\n", o.provider.Name())
+		fmt.Printf("   Goal: %s\n", s.Goal)
+		fmt.Println()
+		o.logRunStarted(s)
+	}
 
 	// roundGates are the review gate's holds for the round in flight (Task
 	// 20357), one per ready task; released after the round and on any exit.
@@ -3859,7 +3945,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	}
 
 	// Replan / decompose phase (same as sequential).
-	if o.config.Replan && s.Plan != nil {
+	if fresh && o.config.Replan && s.Plan != nil {
 		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
 		s.Plan = nil
 		if err := o.persist(s, "the plan cleared for --replan"); err != nil {
@@ -3907,7 +3993,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 		fmt.Println()
 	} else {
-		if o.config.RetryFailed {
+		if fresh && o.config.RetryFailed {
 			retried := 0
 			for _, t := range s.Plan.Tasks {
 				if t.Status == pm.TaskFailed {
@@ -3926,13 +4012,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	}
 
 	// Optimization pass (parallel mode).
-	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+	if fresh && o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
 		if err := o.runOptimizer(ctx, s, pmColor, dimColor); err != nil {
 			return err
 		}
 	}
 
-	if o.config.PlanOnly {
+	if fresh && o.config.PlanOnly {
 		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
 			"plan-only mode: the plan was generated but not executed"))
 		return o.persist(s, "the pause (plan-only mode)")
@@ -3944,7 +4030,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		return err
 	}
 
-	consecutiveErrors := 0
+	consecutiveErrors := carry.errors
 	maxConsecutiveErrors := o.config.MaxFailures
 	if maxConsecutiveErrors <= 0 {
 		maxConsecutiveErrors = 3
@@ -3956,7 +4042,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	// the budget itself is the abort condition and we keep evolving until it
 	// trips, regardless of how many empty evolves occur — that is the intended
 	// behaviour for long-running auto-evolve sessions.
-	consecutiveEmptyEvolves := 0
+	consecutiveEmptyEvolves := carry.emptyEvolves
 	const maxEmptyEvolves = 3
 
 	var mu sync.Mutex
@@ -4029,8 +4115,16 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// re-dispatch into runPMSequential without a process restart
 		// (Task 20111). Safe at the top of the loop with no batch in flight.
 		// CLI flag wins — if --parallel was passed, stay parallel.
+		carry.errors, carry.emptyEvolves = consecutiveErrors, consecutiveEmptyEvolves
 		if !o.config.Parallel && !o.wantParallel() {
 			return errSwitchMode
+		}
+		// A newer build of cloop (Task 20389): handed over here, at the top of
+		// the loop, where the last round has drained — rounds launch together
+		// and wait for each other, so no new task is dispatched while an
+		// adoption is pending and the tasks in flight have all finished.
+		if err := o.atTaskBoundary(ctx, s, carry, true); err != nil {
+			return err
 		}
 		// Same gate as the sequential loop: no completion and no evolve round
 		// on top of tasks whose recorded "work" is a refusal (Task 20224).

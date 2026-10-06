@@ -279,6 +279,7 @@ function render(s) {
   // Status badge — carries the pause reason, so "paused" says which wall the
   // run hit and, for a usage cap, when it lifts (Task 20285).
   document.getElementById('statusBadge').innerHTML = statusBadge(s.status, s.pause_reason);
+  renderRunBuild(s);
 
   renderAbortedLedgerBanner(s);
 
@@ -590,6 +591,30 @@ function loadMoreSteps() {
   if (b && stepsState.hasMore) _historyFetch('before=' + b + '&limit=' + STEP_PAGE_SIZE, 'older');
 }
 
+// renderRunBuild says, while the project's run lags this hub, which build it
+// executes (Task 20389) — on the Overview, with the one-shot adoption, and on
+// the Tasks run bar. A device or container run keeps its own upgrade path.
+function renderRunBuild(s) {
+  const b = s.run_build, r = s.adopt_request;
+  let txt = '', note = '', btn = '';
+  if (b && b.live && (b.behind > 0 || !b.comparable)) {
+    txt = 'Running build ' + b.build.version + (b.comparable ? ', ' + b.behind + ' build' + (b.behind === 1 ? '' : 's') +
+      ' behind this hub' : ', not comparable with this hub (' + b.reference.version + ')');
+    if (!b.adoptable) note = ' — its ' + (b.executor || 'executor') + ' executor keeps its own upgrade path';
+    else if (r && r.run && r.run.pid === b.pid) note = ' — adoption requested, waiting for the next task boundary';
+    else if (can('run.start')) btn = ' <button class="btn" onclick="adoptBuild()" title="The run validates this hub\'s binary and moves to it between tasks, keeping its process and live log">Adopt at next task boundary</button>';
+  }
+  ['runBuildNote', 'tasksRunBuild'].forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = txt ? '' : 'none';
+    el.innerHTML = esc(txt + note) + (i ? '' : btn);
+  });
+}
+window.adoptBuild = function() {
+  api(pUrl('/api/run/adopt-build'), {}).then(d => toast(d.ok ? d.message : (d.error || 'Request failed'), d.ok ? 'ok' : 'err'));
+};
+
 // _eventVisuals maps an event kind to icon glyph + CSS class + short label.
 // Unknown kinds fall back to a neutral bullet so the row still renders.
 function _eventVisuals(kind) {
@@ -632,6 +657,9 @@ function _eventVisuals(kind) {
     case 'session_started':     return { glyph:'▷', cls:'ev-session',     label:'session'   };
     case 'session_paused':      return { glyph:'⏸', cls:'ev-session',     label:'paused'    };
     case 'session_failed':      return { glyph:'✗', cls:'ev-session',     label:'failed'    };
+    // A run moving to a newer build at a task boundary, or why it did not.
+    case 'run_reexecuted':      return { glyph:'↻', cls:'ev-session',     label:'new build' };
+    case 'run_adoption':        return { glyph:'↻', cls:'ev-other',       label:'build'     };
     default:                    return { glyph:'•', cls:'ev-other',       label:kind || ''  };
   }
 }

@@ -236,6 +236,12 @@ var membersSource string
 //go:embed diskfloor.go
 var diskFloorSource string
 
+// adoptAPISource is pkg/ui/adopt_api.go (Task 20389): the request a running
+// run adopts this hub's build on.
+//
+//go:embed adopt_api.go
+var adoptAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -266,7 +272,8 @@ func allUISources() string {
 		"\n" + historySource +
 		"\n" + suggestAPISource +
 		"\n" + membersSource +
-		"\n" + diskFloorSource
+		"\n" + diskFloorSource +
+		"\n" + adoptAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
