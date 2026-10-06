@@ -539,7 +539,14 @@ executors:
     verbs: [get, list, watch]
     namespaces: ["team-*"]
     resources: ["pods", "services", "configmaps", "apps/deployments"]
+    audit_allowed: false                         # true: audit forwarded requests too
 ```
+
+With the Helm chart this is `executor.kubeGuard.enabled=true` beside a
+certificate from `executor.monitorTLS`: the chart advertises the monitor at the
+hub's Service name, adds the port to the Pod and the Service, and points
+`ca_file` at the CA it generated or was given — see
+[deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
 
 Resource patterns name the resource, never a subresource: `pods` already admits
 `pods/log`, and a pattern written as `pods/log` matches nothing at all, because
@@ -631,6 +638,36 @@ kubeconfig grant is unaffected.
 A milder line, `ui: kubernetes monitor decisions will go to stderr, not the audit
 trail: …`, means the boundary still holds and the evidence just is not in the
 database.
+
+### Proven on a cluster
+
+Until Task 20385 nothing put the monitor in front of a real API server: its
+tests used a fake one on loopback, and the device kit's stub read the kubeconfig
+with `sed` and spoke `curl`. [`tests/kube`](../../tests/kube/README.md) now does,
+on every CI run, against the hub the Helm chart installs on kind with
+`executor.kubeGuard` on and `auditAllowed` set — on one replica, and again on a
+hub cluster of three, where the Pod's requests reach members that did not mint
+its session and are forwarded:
+
+- a kubeconfig for a ServiceAccount that may **edit** a test namespace is stored
+  as a secret and granted to a project for that namespace with no verbs — so a
+  refused write can only have been refused by the monitor;
+- the task's Pod receives a kubeconfig whose `server:` is the monitor's Service
+  URL and whose CA is the chart's, and the real `kubectl` in it runs
+  `kubectl get pods` — discovery and the list, forwarded with the cluster
+  credential — and `kubectl create configmap`, refused as read-only before the
+  API server sees it (`K0`–`K2`);
+- the trail holds a `kubeguard.request_allowed` row for the list and a
+  `kubeguard.request_denied` row for the create, both naming the run's project;
+- no configmap was created, and the cluster credential reached no part of the
+  Pod.
+
+What it does not cover: watches and the subresource refusals (`exec`, `attach`,
+`portforward`, `proxy`), which unit tests pin against the fake API server; a
+delivered kubeconfig's namespace default, which the run names explicitly with
+`-n`; and a Pod's direct route to the API server, which only a CNI that enforces
+NetworkPolicy closes — CI's kind cluster does not, as the hub's probe reports on
+every run.
 
 ### Where it runs, and why there is no `cloop kube-guard`
 
@@ -753,7 +790,7 @@ export to a SIEM.
 | Kind | Emitted when | Notes |
 | --- | --- | --- |
 | `request_denied` | policy refused a request | **The row that matters.** The only place a sandbox's attempt to write to, or read outside, its granted scope is written down. Nothing else in cloop would record it. Alert on it. |
-| `request_allowed` | a request was forwarded | Sampled, and **off** in the shipped hub: a `kubectl get pods` is several requests and a watch is one that never ends, so a row per allowed request would bury the denials in discovery traffic. |
+| `request_allowed` | a request was forwarded | **Off** by default: a `kubectl get pods` is several requests and a watch is one that never ends, so a row per allowed request would bury the denials in discovery traffic. `executors.kube_guard.audit_allowed: true` turns it on (Task 20385), for a hub whose trail has to say what a sandbox *read*. |
 | `session_minted` | a session was created | `Detail` carries the policy summary and the expiry. |
 | `session_closed` | a session was revoked, released or reaped | `Detail` carries the reason and the allowed/denied counters. Also written for a session that ended while no hub process served it — not restored with its run, or retired once it lapsed. |
 | `session_restored` | the hub process that adopted a run restored its session (Task 20383) | `Detail` names the process that held it until then. |

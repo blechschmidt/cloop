@@ -788,6 +788,19 @@ of installing one. `GIT_SSL_NO_VERIFY` is deliberately not on that list:
 disabling verification for a fetch carrying a brokered token is not a transport
 preference, it is handing the token to whoever answers.
 
+A Pod gives the operator neither option — its spec is the Kubernetes driver's —
+and a proxy served under an in-cluster Service name has a certificate no public
+CA issued. So the driver does it (Task 20385):
+[`executors.kubernetes.git_ca_bundle`](reference/configuration.md#on-kubernetes-the-git-proxys-ca-for-its-url-only)
+names a ConfigMap in the workload namespace and the proxy's URL, and every Pod
+mounts the CA at `/etc/cloop/git-ca/ca.crt` and trusts it as
+`http.<url>.sslCAInfo` — for that URL only, so every other host keeps the
+image's own store. The provisioning fetch and the write-back push, which run
+with a closed environment, import those keys and nothing else from it
+(`gitprovision.TransportConfig`). The Helm chart renders both the section and
+the ConfigMap; see
+[deploy/README.md](../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
+
 ### `advertise_url`: what the sandbox can reach
 
 `listen_addr` is where the proxy binds. `advertise_url` is what becomes the

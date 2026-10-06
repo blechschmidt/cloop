@@ -907,6 +907,17 @@ one of those would be recorded as *enforcement*, which is the exact false
 confidence the mechanism exists to prevent. A control that does not succeed
 yields `ErrProbeInconclusive` and **no verdict in either direction**.
 
+The probe's Pods take the executor's `image_pull_policy`. Where that is `Never` —
+a kind cluster with images loaded by hand, as CI's is — the default
+`busybox:1.36` is not on the node, the target never starts, and the probe reports
+*inconclusive* only when its timeout runs out. Pass `--probe-image` an image the
+nodes already hold that provides `sh`, `httpd` and `wget`;
+[`tests/kube`](../../tests/kube/README.md) uses its harness image, alpine with
+`busybox-extras` (Task 20385). On CI's kind cluster the probe **refutes**
+enforcement on every run: its CNI accepts the policy and the policed Pod still
+connects. So CI creates and removes a per-Pod policy there, and does not assert
+that one bites.
+
 The connection attempt is the Pod's command and the result is its exit code read
 from Pod status, so the probe needs no `pods/exec` RBAC — exactly the `pods` and
 `networkpolicies` verbs the egress filter already requires. Every object is
@@ -1329,7 +1340,12 @@ The engine also owns the parts a pure plan cannot express:
   siblings), because an edge device behind a corporate proxy with a private CA
   is precisely the machine that cannot otherwise clone, and none of those
   variables can name a repository or supply a credential. `GIT_SSL_NO_VERIFY` is
-  pointedly absent.
+  pointedly absent. So is the rest of the machine's `GIT_CONFIG_COUNT` block,
+  except the certificate settings scoped to an https URL —
+  `http.<url>.sslCAInfo` and `.sslCAPath` — which is how a Pod's provisioner
+  trusts the git proxy's private CA without replacing its trust store for every
+  other host ([`git_ca_bundle`](../reference/configuration.md#on-kubernetes-the-git-proxys-ca-for-its-url-only),
+  Task 20385).
 
 Provisioning writes two audit rows of its own — `start` before the first byte
 moves, `end` once, with the duration and the outcome — because it is the moment

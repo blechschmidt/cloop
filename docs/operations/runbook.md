@@ -12,6 +12,8 @@ would otherwise walk into it.
 - [Backup and restore](#backup-and-restore)
 - [Database maintenance](#database-maintenance)
 - [Audit chain verification](#audit-chain-verification)
+- [The git interception proxy](#the-git-interception-proxy)
+- [The Kubernetes access monitor](#the-kubernetes-access-monitor)
 - [Key rotation](#key-rotation)
 - [Upgrade](#upgrade)
 - [Rollback](#rollback)
@@ -676,7 +678,10 @@ operational part.
    missed: the certificate is validated by *the sandbox's* git, not by the hub.
    A public-CA certificate needs nothing further; a self-signed or private-CA one
    needs its CA in the sandbox image's trust store, or in a bundle named by
-   `SSL_CERT_FILE` / `GIT_SSL_CAINFO` on the machine git runs on.
+   `SSL_CERT_FILE` / `GIT_SSL_CAINFO` on the machine git runs on. A Pod gives you
+   neither, so on Kubernetes the driver mounts the CA from a ConfigMap and trusts
+   it for the proxy's URL only:
+   [`executors.kubernetes.git_ca_bundle`](../reference/configuration.md#on-kubernetes-the-git-proxys-ca-for-its-url-only).
 2. **Decide what the sandbox can reach.** `listen_addr` is the bind address;
    `advertise_url` is what becomes the sandbox's remote, and it has to route
    from where git actually runs — a Service for the Kubernetes backend, the
@@ -705,6 +710,16 @@ operational part.
 
 5. **Run one task on the executor** and check the audit trail for the session and
    the fetch: `cloop audit-log list --entity gitproxy --since 1h`.
+
+**With the Helm chart** the steps above are values: `executor.gitProxy.enabled`
+and a certificate from `executor.monitorTLS` (`selfSigned`, or an
+`existingSecret` from cert-manager plus a way for the Pods to trust its CA). The
+chart advertises the proxy at the hub's Service name, adds the port to the Pod
+and the Service, and renders `git_ca_bundle` with the CA in a ConfigMap in the
+workload namespace; see
+[deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
+That configuration is what CI's kind cluster runs a Pod through on every push
+([`tests/kube`](../../tests/kube/README.md)).
 
 Two failure lines matter, and both mean GitHub access has stopped rather than
 been opened up. After `ui: git interception proxy NOT started: …` every git
@@ -813,6 +828,64 @@ do or a policy narrower than the task it was minted for, and both want a human.
 Its sibling `gitproxy.push_allowed` is emitted *before* forwarding, so a
 `push_allowed` with no matching change on the forge means the forge refused it —
 branch protection, a non-fast-forward — not that the proxy did.
+
+---
+
+## The Kubernetes access monitor
+
+Off by default. With it on, a kubeconfig granted to a project stays in the hub:
+the sandbox's `kubectl` gets a kubeconfig naming the monitor and a session token,
+and every request is decided against the grant's verbs and namespaces before the
+cluster credential is attached. A grant with no verbs is read-only. The design is
+in [Kubernetes access monitor](../architecture/kubernetes-access.md); this is the
+operational part.
+
+### Turning it on
+
+1. **Certificate.** Unlike the git proxy, nothing has to change in the sandbox
+   image: the monitor embeds its CA (`ca_file`, else `cert_file`) in every
+   kubeconfig it issues.
+2. **Reachability.** `advertise_url` becomes the kubeconfig's `server:`, so it
+   has to route from where `kubectl` runs — the hub's Service for Pods.
+3. **Write the section** (`executors.kube_guard`; the
+   [reference](../reference/configuration.md#kubernetes-access-monitor) has every
+   key) and restart the hub, or with the Helm chart set
+   `executor.kubeGuard.enabled=true` beside `executor.monitorTLS`.
+4. **Confirm it came up:**
+
+   ```
+   ui: kubernetes access monitor on 0.0.0.0:8444, advertised as https://cloop-hub.cloop.svc:8444; policy floor no verb ceiling
+   ```
+
+5. **Check it from a sandbox.** Grant a project a kubeconfig with
+   `--namespaces team-a` and no verbs, run a task, and look for
+   `kubeguard.session_minted` and — when the task writes — a
+   `kubeguard.request_denied`: `cloop audit-log list --entity kubeguard --since 1h`.
+
+Its failure lines mirror the proxy's: `ui: kubernetes access monitor NOT started:
+…` means kubeconfig leases are refused, not delivered unguarded.
+
+What is proven, and where: on every push CI installs the Helm chart on kind with
+the monitor on, grants a project a kubeconfig that may edit a namespace with no
+verbs, and runs a task whose Pod's `kubectl get pods` is forwarded and whose
+`kubectl create configmap` is refused by the monitor — both audited, nothing
+created, no cluster token readable in the Pod — on one replica and on a hub
+cluster of three ([`tests/kube`](../../tests/kube/README.md)). The git proxy is
+proven in the same run.
+
+### Alert on `kubeguard.request_denied`
+
+```console
+$ cloop audit-log list --type kubeguard.request_denied --since 7d
+```
+
+A task doing what it was asked never produces one, so each is a workload writing
+to, or reading outside, what it was granted — or a grant narrower than its task.
+Allowed requests are not recorded unless `executors.kube_guard.audit_allowed` (in
+the chart, `executor.kubeGuard.auditAllowed`) is on; then each forwarded request
+is a `kubeguard.request_allowed` row naming verb, resource and namespace. Turn it
+on where the trail has to say what a sandbox *read*; expect a burst of rows per
+`kubectl` invocation and one per watch.
 
 ---
 

@@ -903,6 +903,8 @@ all of it is reconnaissance.
 | The lease delivery with real git | the rewrite, the helper's host check, no token on disk | `pkg/secretbroker` `guardedintegration_test.go` |
 | Conformance | a guarded PAT never reaches either delivery shape; a broken guard never delivers the token | `tests/security/gitguard_test.go` |
 | Workspace credentials in a Pod | the session id reaches the init container through the run's Secret, the helper is projected executable, and the lease behind the token lives as long as that Secret | `pkg/executor/kubernetes` `workspace_test.go`, `secretfiles_test.go` |
+| The proxy's CA in a Pod | the bundle is mounted in both containers and trusted for the proxy's URL only, joining any `GIT_CONFIG_COUNT` block already there; a real git fetch through a closed environment trusts a CA scoped to its remote and not one scoped elsewhere | `pkg/executor/kubernetes` `cabundle_test.go`; `pkg/executor/gitprovision` `TestProvisionTrustsACertificateScopedToTheRemote` |
+| A Pod on a real cluster | the Helm chart's hub on kind: a workload Pod provisioned through a pinned session, the lease's helper run at 0550, a clone and pushes through the proxy with the grant's repository and branch limits enforced and audited, no token in the Pod, and the run's objects gone afterwards — on every CI run | [`tests/kube`](../../tests/kube/README.md) |
 | Session and lease lifetimes | a pinned session releases its lease exactly once when it ends, an unused one is closed on release, a lease is extended only while its grants hold and its run is live | `pkg/gitproxy` `session_test.go`, `pkg/executor/gitproxycreds`, `pkg/secretbroker` `extend_test.go`, `pkg/ui` `secrets_keepalive_test.go` |
 | Live GitHub, opt-in | a grant assigned through the panel's endpoint pushes through the proxy to a real repository — outside its branches refused, inside them landed, no token in the sandbox | `TestLiveBranchRestrictionThroughTheGitProxy` in `pkg/ui` |
 | An App token past its hour | the clocks of a fake GitHub App API and of the broker are driven past the first token's expiry, against a forge that refuses expired tokens: a real git fetches and pushes through the proxy after it, at the first token's scope; a session that cannot renew is refused by the same forge; a revoked grant closes the session and mints nothing | `pkg/gitproxy` `refresh_e2e_test.go`, `refresh_test.go`; the hub's own adapter and lease files in `pkg/ui` `secrets_refresh_test.go`; the broker's rules in `pkg/secretbroker` `apprefresh_test.go` |
@@ -927,9 +929,22 @@ made it, and every push re-reads the remote ref afterwards. Its first run, in
 Task 20346, passed all 132 checks across runc, gVisor, a firewall admitting only
 the proxy, a provisioned workspace and host mode.
 
-What it does not cover is the Kubernetes backend, where nothing yet exercises
-the proxy end to end — which is why two of the seven gaps in
-[limits that remain](#limits-that-remain) were found only by reading.
+### On a cluster
+
+[`tests/kube`](../../tests/kube/README.md) is the same idea for the Kubernetes
+backend (Task 20385), and it runs on every CI run against the hub the Helm chart
+installs on kind — once as installed, one replica, and once after the job scales
+it to a hub cluster of three, where a workload's git reaches members that did not
+mint its session and is forwarded: the chart's `executor.gitProxy` with a
+certificate it generated, a forge in the cluster standing in for github.com, a
+`github_pat` grant for one repository and one branch pattern, and a task whose
+workload is the same stand-in harness. Its checks are the device kit's that apply to a Pod —
+`H1` (the helper runs, at 0550), `T1`, `C1` (the proxy's CA, for its URL only),
+`WS1`–`WS2`, `P1`, `B1`–`B2`, `R1` — plus the forge's refs, the
+`gitproxy.push_denied` row, and that the run's Pod and Secrets are gone. Two of
+Task 20347's seven gaps were Kubernetes-only and found by reading; its first live
+run found an eighth that reading had not: [git refused the Pod's own
+workspace](#limits-that-remain).
 
 ---
 
@@ -956,6 +971,14 @@ dispatch lost it. A session now [renews its upstream token](#the-upstream-creden
 and without the proxy the keepalive rewrites the sandbox's token file through the
 executor holding it.
 
+Task 20385's first live run on a cluster found one more, which no unit test could
+see because git's check runs in the container rather than in the objects the
+driver sends:
+
+| It was | Now |
+| --- | --- |
+| A Pod's `/workspace` is an emptyDir, which root owns whatever `runAsUser` says, and git refuses a work tree another user owns — so the init container's fetch failed with *detected dubious ownership*, on every cluster, and the harness's own git and the write-back would have failed there after it | cloop's own git trusts a target directory root owns, by its exact path (`gitprovision.RootOwnedTrust`: root is the one owner git's check protects nothing against), and the harness container gets `safe.directory=/workspace` for its git |
+
 What remains is either deliberate or beyond what the hub can reach today:
 
 1. **Not every holder can take a new token file.** A device whose agent speaks a
@@ -969,10 +992,21 @@ What remains is either deliberate or beyond what the hub can reach today:
 2. **A lease session is bounded by `session_minutes`**, counted from dispatch,
    whatever the lease does. That is the operator's ceiling by design; set it
    against the longest run the hub is expected to complete.
-3. **Nothing exercises the proxy end to end on Kubernetes.** The fixes above are
-   pinned by unit tests against the objects the driver sends the API server; no
-   test yet runs a Pod through the proxy, the way
-   [the live kit](#on-a-real-device) runs a device.
+3. **Kubernetes is proven on one cluster, not on every one.** Since Task 20385
+   [CI runs a Pod through the proxy](#on-a-cluster) on the hub the Helm chart
+   installs on kind, so the two Kubernetes fixes above — the session username in
+   the `cloop-ws-<handle>` Secret, the helper's 0550 — are pinned by a live run
+   and not only by the objects the driver sends: the init container provisions
+   the workspace through a pinned session, the workload's own git clones and
+   pushes through a scoped one, a push outside the grant's branches and one to a
+   repository the PAT reaches but the grant does not name are refused, and
+   nothing of the token reaches the Pod — on one replica and on a hub cluster of
+   three, through [cluster forwarding](hub-cluster.md). What that run does not
+   cover: a `github_app` grant and its token refresh through a running Pod's
+   Secret; a push write-back, which ordinary runs do not ask a Pod for; and a CNI
+   that enforces NetworkPolicy. CI's kind cluster does not — the hub's own probe
+   refutes it on every run, the test says so, and it asserts egress blocking only
+   on a cluster where the probe *proves* enforcement.
 4. **A workspace session does not survive a restart.** The pinned session of the
    workspace path stands on a workspace lease of its own, which nothing takes
    over, so it is not recorded: a hub stopped or killed mid-run takes it with

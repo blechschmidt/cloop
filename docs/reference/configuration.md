@@ -413,6 +413,41 @@ command, and [the executor architecture](../architecture/executors.md#sandbox-ne
 for how the two mechanisms are chosen and why the ruleset is installed on the
 host side.
 
+#### On Kubernetes: the git proxy's CA, for its URL only
+
+A Pod's git verifies the [git interception proxy](#git-interception-proxy)'s
+certificate, and a proxy served under an in-cluster Service name has one no
+public CA issued. On a device the operator fixes that in the image or with
+`GIT_SSL_CAINFO`; a Pod's spec is the driver's, so the driver does it
+(Task 20385):
+
+```yaml
+executors:
+  kubernetes:
+    git_ca_bundle:
+      config_map: cloop-hub-monitor-ca          # in the workload namespace
+      key: ca.crt                                # the default
+      urls: ["https://cloop-hub.cloop.svc:8443"] # executors.git_proxy.advertise_url
+```
+
+Every Pod mounts the entry read-only at `/etc/cloop/git-ca/ca.crt`, in the
+harness and in the workspace provisioner, and git trusts it for the listed URLs
+**only** — `http.<url>.sslCAInfo`, set through the `GIT_CONFIG_COUNT` protocol
+and joining any block the workload's environment already numbers. Not
+`GIT_SSL_CAINFO`, which replaces git's whole trust store: a bundle holding only
+the proxy's CA would break every forge the workload reaches directly. cloop's
+own provisioning and write-back git, which run with a closed environment,
+import exactly these keys (`http.<https-url>.sslCAInfo` and `.sslCAPath`) and
+nothing else from it.
+
+The kubelet fetches the ConfigMap on the Pod's behalf, so the executor's Role
+needs no rule for it; a missing one holds the Pod at `ContainerCreating` with an
+event naming it. `config_map` without `urls` is refused, as are URLs that are not
+bare `https://` bases, and an unusable section disables the executor with the
+reason — the same treatment as a malformed `egress_filter`. The Helm chart
+renders this section, and the ConfigMap, from `executor.monitorTLS`; see
+[deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
+
 ### VM-isolated sandboxes: Kata Containers
 
 Everything above confines a workload with namespaces, cgroups and seccomp, on
@@ -869,8 +904,9 @@ executors:
   it is an operator's decision rather than something a config file acquires on
   upgrade. With it off, workspaces are provisioned exactly as before.
 - **TLS is required**, and the certificate is validated by *the sandbox's* git,
-  not by the hub — a self-signed one needs its CA in the sandbox image. An
-  enabled section without both `cert_file` and `key_file` is switched off at
+  not by the hub — a self-signed one needs its CA in the sandbox image, or on
+  Kubernetes in [`executors.kubernetes.git_ca_bundle`](#on-kubernetes-the-git-proxys-ca-for-its-url-only).
+  An enabled section without both `cert_file` and `key_file` is switched off at
   load rather than serving session tokens in cleartext.
 - **`advertise_url` must be reachable from where git runs** — a Kubernetes
   Service for the Pod backend, the hub's address on the link for an edge device,
@@ -927,6 +963,7 @@ executors:
     verbs: [get, list, watch]                    # a hub-wide ceiling; omit to let grants decide
     namespaces: ["team-*"]
     resources: ["pods", "configmaps", "apps/deployments"]
+    audit_allowed: false                         # true: a row per forwarded request too
 ```
 
 - **Off by default.** Interposing a monitor changes the server a sandbox's
@@ -964,6 +1001,11 @@ executors:
   `kubeguard.session_closed` and `kubeguard.rejected`, and is counted by
   `cloop_kubeguard_requests_total` and `cloop_kubeguard_denials_total`. Alert on
   the first.
+- **`audit_allowed` adds a `kubeguard.request_allowed` row for every forwarded
+  request** (Task 20385). Off by default: one `kubectl get pods` is a burst of
+  discovery requests and a watch never ends, so those rows bury the denials.
+  Turn it on where "what did this sandbox read from the cluster" has to be
+  answerable from the trail.
 
 Like the git proxy, it runs inside the hub process and has no standalone command.
 Full design and operations:
