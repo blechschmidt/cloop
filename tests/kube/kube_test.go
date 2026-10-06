@@ -50,6 +50,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -81,6 +82,10 @@ const (
 	// kindEnv names the kind cluster to load the test images into. Unset, the
 	// images must already be on the nodes.
 	kindEnv = "CLOOP_KUBE_E2E_KIND_CLUSTER"
+	// importEnv is a shell command that reads an image tarball (docker save) on
+	// stdin and loads it onto the cluster's nodes — for a cluster that is not
+	// kind, e.g. "docker exec -i k3s ctr images import -".
+	importEnv = "CLOOP_KUBE_E2E_IMAGE_IMPORT"
 	// binEnv supplies a static cloop for the harness image; unset, one is built.
 	binEnv = "CLOOP_KUBE_E2E_CLOOP_BIN"
 	// releaseEnv and namespaceEnv locate the release: "cloop" in "cloop" by
@@ -277,7 +282,10 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	}
 
 	// ── 10. What the forge holds ───────────────────────────────────────────
-	pushed := infoValue(lines, "pushed_commit")
+	pushed := ""
+	if m := regexp.MustCompile(`accepted at ([0-9a-f]{40})`).FindStringSubmatch(results["B1"].detail); m != nil {
+		pushed = m[1]
+	}
 	refs := forgeRefs(ctx, t, x, forgePod, grantedRepo)
 	if got := refs["refs/heads/"+allowed]; got == "" || got != pushed {
 		t.Errorf("the forge's %s is %q, want the probe's commit %q", allowed, got, pushed)
@@ -292,7 +300,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	}
 
 	// ── 11. What the audit trail recorded ──────────────────────────────────
-	assertAudit(t, hub, since, denied, allowed)
+	assertAudit(t, hub, since, projectDir, denied, allowed)
 
 	// ── 12. Nothing of the run is left in the cluster ──────────────────────
 	// The long-lived ones were seen while the run lived — so their absence now
@@ -354,12 +362,22 @@ func buildImages(ctx context.Context, t *testing.T, x tool) {
 	copyFile(t, filepath.Join(root, "tests/kube/harness.Dockerfile"), filepath.Join(harnessCtx, "Dockerfile"))
 	dockerBuild(ctx, t, x, harnessCtx, harnessImage)
 
-	if cluster := os.Getenv(kindEnv); cluster != "" {
-		for _, img := range []string{forgeImage, harnessImage} {
+	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
+	for _, img := range []string{forgeImage, harnessImage} {
+		switch {
+		case cluster != "":
 			x.run(ctx, nil, false, "kind", "load", "docker-image", img, "--name", cluster)
-			// The node has its own copy now; the daemon's is disk nobody needs.
-			x.run(ctx, nil, true, "docker", "rmi", img)
+		case importCmd != "":
+			tarball, err := exec.CommandContext(ctx, "docker", "save", img).Output()
+			if err != nil {
+				t.Fatalf("docker save %s: %v", img, err)
+			}
+			x.run(ctx, tarball, false, "sh", "-c", importCmd)
+		default:
+			continue // already on the nodes, the caller says
 		}
+		// The node has its own copy now; the daemon's is disk nobody needs.
+		x.run(ctx, nil, true, "docker", "rmi", img)
 	}
 }
 
@@ -386,9 +404,12 @@ func probeNetworkPolicy(ctx context.Context, t *testing.T, x tool, ns, fullname 
 	// stdout alone: the probe's progress goes to stderr, and the report is the
 	// one JSON document on stdout. The exit status is ignored because any
 	// failing check — not only this one — makes it 1.
+	//
+	// The harness image is the probe's image: its Pods take the executor's pull
+	// policy, which CI sets to Never, so the default busybox would never start.
 	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", ns, "deploy/"+fullname, "--",
 		"/usr/local/bin/cloop", "hub", "doctor", "--probe-network-policy", "--executor", "kubernetes",
-		"--probe-timeout", "4m", "--json")
+		"--probe-image", harnessImage, "--probe-timeout", "4m", "--json")
 	cmd.Env = append(toolEnv(), "KUBECONFIG="+x.kubeconfig)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -646,7 +667,7 @@ func seedForgeProject(ctx context.Context, t *testing.T, x tool, forgePod string
 
 	cli("init", "Task 20385: prove the git proxy and the kube guard from a Pod")
 	cli("task", "add", "Kubernetes git proxy and kube guard probe", "--no-ai", "--auto", "--desc",
-		"Run the Kubernetes probe in this sandbox and report every RESULT line.\nE2E-SCRIPT-B64: "+b64)
+		"Run the Kubernetes probe in this sandbox and report what it prints.\nE2E-SCRIPT-B64: "+b64)
 	checkpoint(t, filepath.Join(work, ".cloop", "state.db"))
 
 	tarball, err := exec.CommandContext(ctx, "tar", "-C", work, "-cf", "-", ".cloop").Output()
@@ -716,7 +737,7 @@ func projectIndex(t *testing.T, hub hubClient, dir string) int {
 func awaitRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int, workloadNS string) ([]string, string, []string) {
 	t.Helper()
 	var lines []string
-	podJSON, handle := "", ""
+	podJSON, handle, initLog := "", "", ""
 	objects := map[string]bool{}
 	started := false
 	begun := time.Now()
@@ -736,6 +757,12 @@ func awaitRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int,
 			}
 		}
 		if handle != "" {
+			// The provisioner's output never reaches the hub's live log, and the
+			// Pod is deleted with the run: keep the last of it seen.
+			if out, err := x.kubectlMay(ctx, "logs", "-n", workloadNS, "-l", "cloop.dev/handle-id="+handle,
+				"-c", "workspace", "--tail=80"); err == nil && strings.TrimSpace(out) != "" {
+				initLog = out
+			}
 			out, _ := x.kubectlMay(ctx, "get", "pods,secrets,networkpolicies", "-n", workloadNS,
 				"-l", "cloop.dev/handle-id="+handle, "-o", "name")
 			for _, n := range strings.Fields(out) {
@@ -749,7 +776,11 @@ func awaitRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int,
 			Lines   []string `json:"lines"`
 		}
 		hub.must("GET", fmt.Sprintf("/api/livelog?project_idx=%d", idx), nil, &live)
-		lines = live.Lines
+		// An entry is a chunk of the Pod's output, not a line: split them.
+		lines = lines[:0]
+		for _, chunk := range live.Lines {
+			lines = append(lines, strings.Split(strings.TrimRight(chunk, "\n"), "\n")...)
+		}
 		if live.Running {
 			started = true
 		}
@@ -764,6 +795,11 @@ func awaitRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int,
 	})
 	for _, l := range lines {
 		t.Logf("run | %s", l)
+	}
+	for _, l := range strings.Split(strings.TrimRight(initLog, "\n"), "\n") {
+		if l != "" {
+			t.Logf("workspace init | %s", l)
+		}
 	}
 	if !strings.Contains(strings.Join(lines, "\n"), "SUMMARY kube") {
 		t.Fatalf("the run finished without the probe's SUMMARY line")
@@ -797,36 +833,20 @@ type result struct {
 	detail string
 }
 
-// parseResults reads "RESULT <id> PASS|FAIL <detail>" lines, wherever the log
-// prefixed them.
+// resultLine is one check's report, wherever the log prefixed it: an id of
+// capitals and digits, then PASS or FAIL. Strict, because the task description
+// is echoed into the same log.
+var resultLine = regexp.MustCompile(`RESULT ([A-Z][A-Z0-9]*) (PASS|FAIL)(?: (.*))?$`)
+
+// parseResults reads the probe's "RESULT <id> PASS|FAIL <detail>" lines.
 func parseResults(lines []string) map[string]result {
 	out := map[string]result{}
 	for _, l := range lines {
-		i := strings.Index(l, "RESULT ")
-		if i < 0 {
-			continue
+		if m := resultLine.FindStringSubmatch(strings.TrimRight(l, " \r")); m != nil {
+			out[m[1]] = result{pass: m[2] == "PASS", detail: m[3]}
 		}
-		f := strings.SplitN(strings.TrimSpace(l[i+len("RESULT "):]), " ", 3)
-		if len(f) < 2 {
-			continue
-		}
-		r := result{pass: f[1] == "PASS"}
-		if len(f) == 3 {
-			r.detail = f[2]
-		}
-		out[f[0]] = r
 	}
 	return out
-}
-
-// infoValue returns the value of an "INFO key=value" line.
-func infoValue(lines []string, key string) string {
-	for _, l := range lines {
-		if i := strings.Index(l, "INFO "+key+"="); i >= 0 {
-			return strings.TrimSpace(l[i+len("INFO "+key+"="):])
-		}
-	}
-	return ""
 }
 
 // forgeRefs lists a repository's refs on the forge, read from its bare
@@ -844,8 +864,10 @@ func forgeRefs(ctx context.Context, t *testing.T, x tool, forgePod, repo string)
 	return refs
 }
 
-// assertAudit checks the trail holds the proxy's and the monitor's decisions.
-func assertAudit(t *testing.T, hub hubClient, since time.Time, denied, allowed string) {
+// assertAudit checks the trail holds the proxy's and the monitor's decisions
+// for this run — every row is matched on the run's own project path, so a row
+// an earlier run left within the window cannot stand in for one.
+func assertAudit(t *testing.T, hub hubClient, since time.Time, projectDir, denied, allowed string) {
 	t.Helper()
 	type event struct {
 		EventType string `json:"event_type"`
@@ -859,9 +881,10 @@ func assertAudit(t *testing.T, hub hubClient, since time.Time, denied, allowed s
 			since.UTC().Format(time.RFC3339)), nil, &resp)
 		return resp.Events
 	}
+	project := fmt.Sprintf(`"project_id":%q`, projectDir)
 	has := func(events []event, typ string, needles ...string) bool {
 		for _, e := range events {
-			if e.EventType != typ {
+			if e.EventType != typ || !strings.Contains(e.Payload, project) {
 				continue
 			}
 			match := true
@@ -906,10 +929,10 @@ func assertAudit(t *testing.T, hub hubClient, since time.Time, denied, allowed s
 
 	kube := read("kubeguard")
 	t.Logf("kubeguard audit rows since the run began: %s", summary(kube))
-	if !has(kube, "kubeguard.request_denied", "configmaps") {
+	if !has(kube, "kubeguard.request_denied", "configmaps", `"namespace":"`+targetNS+`"`) {
 		t.Error("no kubeguard.request_denied row for kubectl create configmap")
 	}
-	if !has(kube, "kubeguard.request_allowed", "pods") {
+	if !has(kube, "kubeguard.request_allowed", `"resource":"pods"`, `"verb":"list"`) {
 		t.Error("no kubeguard.request_allowed row for kubectl get pods (executor.kubeGuard.auditAllowed is on)")
 	}
 }

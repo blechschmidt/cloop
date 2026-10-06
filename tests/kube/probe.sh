@@ -18,6 +18,11 @@
 # Every check prints "RESULT <id> PASS|FAIL <detail>"; the run ends with
 # SUMMARY. Nothing here prints a credential: a token check reports where a
 # token was found, never its value.
+#
+# Nothing else may reach stdout. `cloop run` shows at most 20 lines of what a
+# harness printed — the first ten and the last ten — and captures its stderr
+# instead of passing it through, so the stand-in's two lines plus one per check
+# and the summary is the whole budget. A diagnostic belongs in a check's detail.
 set -u
 : "${REPO:?}" "${OTHER_REPO:?}" "${STAMP:?}" "${ALLOWED:?}" "${DENIED:?}" "${BRANCH_RULE:?}" "${K8S_NS:?}"
 
@@ -27,7 +32,6 @@ res() {
 	printf 'RESULT %s %s %s\n' "$1" "$2" "$3"
 	if [ "$2" = PASS ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
 }
-info() { printf 'INFO %s\n' "$*"; }
 # brief renders the lines of a transcript that say what happened, as one line.
 brief() {
 	grep -E 'remote:|error:|fatal:|rejected|\[new|->|denied|refused|not found|returned error|Forbidden|Error' "$1" |
@@ -44,16 +48,13 @@ export GIT_TERMINAL_PROMPT=0
 GITC="git -c user.name=cloop-e2e -c user.email=cloop-e2e@example.invalid -c commit.gpgsign=false"
 TOKRE='(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_.]{20,}|github_pat_[A-Za-z0-9_]{20,}'
 
-info "repo=$REPO other=$OTHER_REPO stamp=$STAMP allowed=$ALLOWED denied=$DENIED ns=$K8S_NS"
-info "id=$(id) host=$(hostname) cwd=$BASE git=$(git --version)"
-info "lease_dir=${CLOOP_LEASE_DIR:-unset} proxy_url=${CLOOP_GIT_PROXY_URL:-unset} mode=${CLOOP_GIT_PROXY_MODE:-unset} push_refs=${CLOOP_GIT_PUSH_REFS:-unset}"
-info "git_config_count=${GIT_CONFIG_COUNT:-unset} key0=${GIT_CONFIG_KEY_0:-unset} ssl_cainfo=${GIT_SSL_CAINFO:-unset}"
-
 # ── The credential helper and the token ───────────────────────────────────
 HELPER=${CLOOP_LEASE_DIR:-/nonexistent}/git-credential-cloop
-mode=$(stat -c %a "$HELPER" 2>/dev/null || echo missing)
+# -L: a projected Secret's file is a symlink into the volume's ..data
+# directory, and the link's own mode is always 777.
+mode=$(stat -L -c %a "$HELPER" 2>/dev/null || echo missing)
 if [ "$mode" = 550 ]; then
-	res H1 PASS "the lease's credential helper is mode 0550 ($HELPER), so git can run it as the Pod's group"
+	res H1 PASS "the lease's credential helper is mode 0550 ($HELPER, run as $(id -u):$(id -g)), so git can run it as the Pod's group"
 else
 	res H1 FAIL "the lease's credential helper is mode $mode, not 0550 ($HELPER)"
 fi
@@ -71,7 +72,7 @@ fi
 # ── The CA the chart delivered ────────────────────────────────────────────
 if [ -s /etc/cloop/git-ca/ca.crt ] && [ -z "${GIT_SSL_CAINFO:-}" ] &&
 	env | grep -q '^GIT_CONFIG_KEY_[0-9]*=http\.https://.*\.sslCAInfo$'; then
-	res C1 PASS "the proxy's CA is mounted at /etc/cloop/git-ca/ca.crt and trusted for the proxy URL only (no GIT_SSL_CAINFO)"
+	res C1 PASS "the proxy's CA is mounted at /etc/cloop/git-ca/ca.crt and trusted for $(env | sed -n 's/^GIT_CONFIG_KEY_[0-9]*=http\.\(https:.*\)\.sslCAInfo$/\1/p' | head -n 1) only (no GIT_SSL_CAINFO)"
 else
 	res C1 FAIL "the CA bundle is not delivered as a URL-scoped sslCAInfo (ca=$(ls -l /etc/cloop/git-ca/ca.crt 2>&1 | cut -c1-60), GIT_SSL_CAINFO=${GIT_SSL_CAINFO:-unset})"
 fi
@@ -104,11 +105,11 @@ fi
 cd repo || exit 0
 printf 'Task 20385 kube e2e %s\n' "$STAMP" >"t20385-$STAMP.txt"
 git add "t20385-$STAMP.txt" && $GITC commit -qm "Task 20385 kube e2e $STAMP" >/dev/null
-info "pushed_commit=$(git rev-parse HEAD)"
 remote_sha() { git ls-remote origin "$1" 2>/dev/null | cut -f1; }
 
+# kube_test.go reads the commit from this detail: "at <sha>".
 if git push origin "HEAD:refs/heads/$ALLOWED" >"$O" 2>&1 && [ "$(remote_sha "refs/heads/$ALLOWED")" = "$(git rev-parse HEAD)" ]; then
-	res B1 PASS "push to $ALLOWED (inside the grant's $BRANCH_RULE) accepted"
+	res B1 PASS "push to $ALLOWED (inside the grant's $BRANCH_RULE) accepted at $(git rev-parse HEAD)"
 else
 	res B1 FAIL "push to $ALLOWED: $(brief "$O")"
 fi
@@ -137,12 +138,11 @@ fi
 # ── The cluster, through the kube guard ───────────────────────────────────
 cd "$W" || exit 0
 SERVER=$(sed -n 's/^ *server: *//p' "${KUBECONFIG:-/nonexistent}" | head -n 1)
-info "kubeconfig_server=${SERVER:-none}"
 case $SERVER in
+*kubernetes.default* | "") res K0 FAIL "the delivered kubeconfig's server is '${SERVER:-none}', not the monitor" ;;
 https://*:*) res K0 PASS "the delivered kubeconfig names the monitor ($SERVER), not the API server" ;;
-*) res K0 FAIL "the delivered kubeconfig's server is '${SERVER:-none}'" ;;
+*) res K0 FAIL "the delivered kubeconfig's server is '$SERVER'" ;;
 esac
-case $SERVER in *kubernetes.default*) res K0b FAIL "the kubeconfig points at the API server directly" ;; esac
 if kubectl get pods -n "$K8S_NS" >"$O" 2>&1; then
 	res K1 PASS "kubectl get pods -n $K8S_NS succeeded through the monitor"
 else
@@ -168,9 +168,9 @@ if [ -n "${FORGE_URL:-}" ]; then
 			res E1 FAIL "the forge was reached directly (it refused only for want of a credential): $(brief "$O")"
 		fi
 	else
-		info "egress: the hub did not prove this CNI enforces NetworkPolicy, so blocking is not asserted"
+		egress=" (egress blocking not asserted: the hub did not prove this CNI enforces NetworkPolicy)"
 	fi
 fi
 
 cd / && rm -rf "$W"
-printf 'SUMMARY kube pass=%d fail=%d\n' "$pass" "$fail"
+printf 'SUMMARY kube pass=%d fail=%d%s\n' "$pass" "$fail" "${egress:-}"

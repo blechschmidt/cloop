@@ -78,7 +78,8 @@ CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
 | variable | meaning |
 | --- | --- |
 | `CLOOP_KUBE_E2E_KUBECONFIG` | required; without it the test skips |
-| `CLOOP_KUBE_E2E_KIND_CLUSTER` | the kind cluster to load the images into; unset, they must already be on the nodes |
+| `CLOOP_KUBE_E2E_KIND_CLUSTER` | the kind cluster to load the images into |
+| `CLOOP_KUBE_E2E_IMAGE_IMPORT` | for any other cluster: a shell command that reads a `docker save` tarball on stdin and loads it onto the nodes, e.g. `docker exec -i k3s ctr images import -`. With neither, the images must already be there |
 | `CLOOP_KUBE_E2E_CLOOP_BIN` | a static cloop for the harness image; unset, one is built (CI copies the hub image's) |
 | `CLOOP_KUBE_E2E_RELEASE`, `CLOOP_KUBE_E2E_NAMESPACE` | the release, `cloop` in `cloop` by default |
 | `CLOOP_KUBE_E2E_KEEP` | leave the forge, the target namespace and the helper Pod behind |

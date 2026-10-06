@@ -5,7 +5,10 @@
 # cloop and kubectl binaries and the stand-in — and loads the image into kind.
 ARG BASE=alpine:3.20
 FROM ${BASE}
-RUN apk add --no-cache git ca-certificates
+# busybox-extras for httpd: the image doubles as the hub's NetworkPolicy probe
+# image (cloop hub doctor --probe-image), which needs sh, httpd and wget — so
+# the probe pulls nothing from a registry.
+RUN apk add --no-cache git ca-certificates busybox-extras
 COPY cloop kubectl claude /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/cloop /usr/local/bin/kubectl /usr/local/bin/claude
 # The Pod's root filesystem is read-only; /tmp is the emptyDir the driver mounts.
