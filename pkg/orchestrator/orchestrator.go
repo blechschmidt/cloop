@@ -1451,11 +1451,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 		fmt.Println()
 	} else {
-		// If retry-failed is set, reset failed tasks to pending
+		// If retry-failed is set, reset failed tasks to pending — except a
+		// suspected node killer, which only an explicit reset releases
+		// (Task 20391).
 		if fresh && o.config.RetryFailed {
 			retried := 0
 			for _, t := range s.Plan.Tasks {
-				if t.Status == pm.TaskFailed {
+				if t.Status == pm.TaskFailed && !t.Quarantined() {
 					t.Status = pm.TaskPending
 					retried++
 				}
@@ -3996,7 +3998,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		if fresh && o.config.RetryFailed {
 			retried := 0
 			for _, t := range s.Plan.Tasks {
-				if t.Status == pm.TaskFailed {
+				// Never a suspected node killer (Task 20391); see above.
+				if t.Status == pm.TaskFailed && !t.Quarantined() {
 					t.Status = pm.TaskPending
 					retried++
 				}

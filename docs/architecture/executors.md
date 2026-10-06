@@ -1940,23 +1940,88 @@ supervisor racing its own retry, must not dispatch the same task twice.
 transition → unreachable
   └─ SessionStore.RunningSessions(deadExecutorID)
        └─ for each session:
-            ClaimRequeue(sessionID, claimToken, now)     ← atomic UPDATE … WHERE claim_token = ?
+            ClaimRequeue(sessionID, claimToken, maxAttempts, now)   ← one atomic UPDATE … WHERE claim_token = ?
               │  token mismatch → ErrSessionClaimLost → return quietly (the guard worked)
-              └─ placeReplacement: Select(pool minus dead node, requirementsFor(session))
-                   │  no candidate → FailoverEvent.Err; task marked failed-with-retry
-                   └─ FailoverHandler re-dispatches the persisted Spec verbatim
-                        └─ EventSink.ExecutorFailover(ev)
+              │  attempt > maxAttempts → state failover_exhausted: no placement, no re-dispatch
+              └─ otherwise state requeued → placeReplacement: Select(pool minus dead node, …)
+                   │  no candidate → FailoverEvent.Err
+                   └─ FailoverHandler settles the session's tasks (every claim),
+                      then re-dispatches the persisted Spec (a placed one only)
+                        └─ EventSink.ExecutorFailover(ev)  → executor.failover or
+                                                             executor.failover_exhausted
 ```
 
 The exactly-once latch is the **claim token**, rotated on every requeue. A
 `Session` persists `ID`, `ExecutorID`, `HandleID`, `ProjectPath`, `TaskID`,
-`ClaimToken`, `Attempt`, and the full `Spec`, which is why a replacement can be
-dispatched verbatim to a different node. `ErrSessionClaimLost` is deliberately
-not logged: it is the normal outcome of a race, and logging it would train
-operators to ignore the log.
+`ClaimToken`, `Attempt`, the tasks its run last announced (`RunningTasks`), and
+the full `Spec`, which is why a replacement can be dispatched verbatim to a
+different node. `ErrSessionClaimLost` is deliberately not logged: it is the
+normal outcome of a race, and logging it would train operators to ignore the
+log.
 
 Sessions live in `executor_sessions`; health in `executor_health` (migrations
 `0013`, `0014`), so both survive a hub restart.
+
+### The failover cap and the node-killer quarantine (Task 20391)
+
+A workload that takes its own node down — a fork bomb, one that exhausts
+memory, one that panics the kernel — kills the replacement too. Without a
+ceiling, failover carried it to every enrolled device in turn.
+`executors.failover.max_attempts` bounds that: how many times one dispatch may
+be started again elsewhere. Unset it is 2; 0 turns re-dispatch off; the most it
+may be is 10. It is a hub-scope key, read from the hub's configuration with its
+per-instance overlay at every claim, so lowering it takes effect at the next
+failover.
+
+The cap is applied **inside the claim**: the same conditional `UPDATE` that
+rotates the token sets the session to `requeued` when its attempt is at most the
+cap and to `failover_exhausted` past it. Whoever wins the claim also fixes the
+session's fate, so two supervisors — or two hub members whose overlays set
+different caps — cannot each decide differently, and a crash between deciding
+and recording is impossible. `redispatchSession` refuses any session the store
+does not hold as `requeued`, or one already replaced, whatever the event it was
+handed says (it can arrive from another hub member).
+
+The failover handler then settles the tasks the lost node was running — on
+every claim, placed or not:
+
+| Outcome | Its tasks |
+| --- | --- |
+| requeued (re-dispatched, or no candidate) | back to `pending`, fail count raised, for the next run |
+| `failover_exhausted` | **failed**, the reason naming every node the run was lost on and when it went unreachable |
+| the task's losses name 2+ distinct executors | **failed and quarantined** as a suspected node killer |
+
+Which tasks those are has two sources. A run on an executor sharing the hub's
+filesystem writes the hub's plan, so its `in_progress` tasks are the answer. A
+run on a device works on a copy, so the session watcher follows the run's own
+announcements — the orchestrator's `━━━ Task 7/12: …` lines and their outcome
+lines — and records them on the session as `running_tasks`
+(`pkg/ui/run_progress.go`). A task the hub's plan already shows finished is
+never charged.
+
+Every loss is recorded against the task in the project's `task_node_losses`.
+A failed task gets its verdict sidecar first (source `failover`), so stale-run
+recovery fails it again rather than resurrecting it; then, for a node killer,
+its row in `task_quarantine`; then its status. Each write is what makes losing
+the next one safe: a mark that landed without its status leaves a task that
+reads pending but is held, never a failed task without a mark. The project journal gets a
+`failover` row for each task and for an exhausted run; the hub's trail gets
+`executor.failover_exhausted` with every lost node, and the project's gets
+`task.quarantine`.
+
+A quarantined task runs again only after an **explicit reset** — `cloop task
+reset`, `cloop task bulk reset`, a reset to pending from the dashboard, or
+`PATCH /tasks/{id}` on `cloop serve` — which deletes the mark and the losses
+behind it and is audited as `task.quarantine_release`. `--retry-failed` skips
+it, and the orchestrator's gate holds it even if something else set it pending.
+The mark is not a `plan_tasks` column: no save writes or erases it, so a run
+holding a copy of the plan from before the mark cannot undo it, and a device
+cannot release it — or mark another task — through the result it sends back.
+It travels to a device in the seed, so the device's orchestrator holds it too.
+
+`cloop executor list --inventory` lists every quarantined task in the projects
+a failover has touched, with the nodes it went down under and the command that
+releases it.
 
 ---
 

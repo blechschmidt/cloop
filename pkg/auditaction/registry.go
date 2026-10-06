@@ -89,6 +89,27 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note:      "`outcome` carries the terminal status; `reason` carries why, when there is one.",
 	},
+	{
+		Action:    ActionTaskQuarantine,
+		Home:      HomeProject,
+		Entity:    "task",
+		Trigger:   "Failover marks a task as a suspected node killer: two or more distinct executors went unreachable while it was running.",
+		Payload:   []string{"task_id", "title", "kind", "nodes", "reason"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`nodes` lists each executor that went down under the task with when it went unreachable. " +
+			"A marked task runs again only after an explicit reset, recorded as task.quarantine_release.",
+	},
+	{
+		Action:    ActionTaskQuarantineRelease,
+		Home:      HomeProject,
+		Entity:    "task",
+		Trigger:   "An explicit reset returns a suspected node killer to pending, clearing its mark and the losses behind it.",
+		Payload:   []string{"task_id", "kind", "nodes", "marked_at", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "`via` names the reset — the dashboard, `cloop task reset`, `cloop task bulk reset`; the actor is who pressed it.",
+	},
 
 	// ── run ────────────────────────────────────────────────────────────────
 	{
@@ -387,10 +408,24 @@ var registry = []Entry{
 		Home:      HomeControlPlane,
 		Entity:    "executor_session",
 		Trigger:   "A session is moved off an executor that stopped answering, or fails to be placed anywhere.",
-		Payload:   []string{"session_id", "from", "to", "attempt", "project_path", "task_id", "placed", "error"},
+		Payload:   []string{"session_id", "from", "to", "attempt", "max_attempts", "project_path", "task_id", "running_tasks", "placed", "error"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "`placed` distinguishes a successful move from an exhausted one; on failure `to` is empty and `error` says why.",
+		Note: "`placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. " +
+			"A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.",
+	},
+	{
+		Action:  ActionExecutorFailoverExhausted,
+		Home:    HomeControlPlane,
+		Entity:  "executor_session",
+		Trigger: "An executor goes unreachable holding a session that was already re-dispatched as often as executors.failover.max_attempts allows, so nothing re-dispatches it.",
+		Payload: []string{
+			"session_id", "from", "attempt", "max_attempts", "project_path", "running_tasks", "nodes", "error",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`nodes` names every executor the run was lost on, oldest first, each with when it went unreachable. " +
+			"A workload that takes down every node it lands on ends here instead of on the next node.",
 	},
 
 	// ── workspace ──────────────────────────────────────────────────────────

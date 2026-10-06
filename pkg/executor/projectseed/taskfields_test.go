@@ -8,6 +8,7 @@ import (
 	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // seedDerived are the task fields a seed does not carry, because the device
@@ -140,5 +141,64 @@ func TestAnOlderDeviceDoesNotWipeTheHubsTDDVerdict(t *testing.T) {
 		if id == 1 {
 			t.Errorf("task 1 reported as updated: %s", rep.Summary())
 		}
+	}
+}
+
+// TestADeviceCannotReleaseOrSetAQuarantine: a quarantine travels to the device
+// so its orchestrator holds the task (Task 20391), but the way back carries
+// none — a device is where a suspected node killer runs, and a hostile one
+// must not be able to release its own task, or mark an innocent one, by what
+// it reports.
+func TestADeviceCannotReleaseOrSetAQuarantine(t *testing.T) {
+	isolateHome(t)
+	mark := &pm.TaskQuarantine{Kind: pm.QuarantineNodeKiller, Reason: "two nodes", Nodes: []pm.NodeLoss{
+		{ExecutorID: "sgx", SessionID: "s1"}, {ExecutorID: "edge-2", SessionID: "s2"},
+	}}
+	hub := hubProject(t, &state.ProjectState{
+		Goal: "g", Status: "initialized",
+		Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{
+			{ID: 1, Title: "suspect", Status: pm.TaskFailed, Quarantine: mark},
+			{ID: 2, Title: "innocent", Status: pm.TaskPending},
+		}},
+	})
+	seed := seedFromHub(t, hub)
+	dev := onDevice(t, seed, func(dir string, st *state.ProjectState) {
+		if !st.Plan.TaskByID(1).Quarantined() {
+			t.Fatal("the mark did not reach the device, whose orchestrator must hold the task")
+		}
+		// The device claims to have released task 1, and marks task 2.
+		db, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = db.ClearTaskQuarantine(1)
+		_ = db.PutTaskQuarantine(2, *mark)
+		db.Close()
+		st.Plan.TaskByID(1).Status = pm.TaskPending
+		st.Plan.TaskByID(2).Status = pm.TaskDone
+		if err := st.Save(); err != nil {
+			t.Fatalf("device save: %v", err)
+		}
+	})
+	data, err := Harvest(dev, seed, nil)
+	if err != nil {
+		t.Fatalf("Harvest: %v", err)
+	}
+	res, err := DecodeResult(data)
+	if err != nil {
+		t.Fatalf("DecodeResult: %v", err)
+	}
+	if _, err := Apply(hub, res, Provenance{ExecutorID: "edge", ExecutorKind: "remote", Isolation: "remote"}, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got, err := state.Load(hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Plan.TaskByID(1).Quarantined() {
+		t.Error("a device's result released the hub's quarantine")
+	}
+	if got.Plan.TaskByID(2).Quarantined() {
+		t.Error("a device's result quarantined a task on the hub")
 	}
 }

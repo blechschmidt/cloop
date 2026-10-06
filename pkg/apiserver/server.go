@@ -842,6 +842,15 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteFromError(w, fmt.Errorf("save state: %w", err))
 		return
 	}
+	// Setting a task pending through the API is an explicit reset, which
+	// is what releases a suspected node killer (Task 20391).
+	if body.Status == string(pm.TaskPending) {
+		if _, err := state.ReleaseQuarantine(s.WorkDir, id, "api", "cloop serve"); err != nil {
+			apierror.WriteFromError(w, fmt.Errorf("release quarantine: %w", err))
+			return
+		}
+		task.Quarantine = nil
+	}
 	jsonOK(w, task)
 }
 

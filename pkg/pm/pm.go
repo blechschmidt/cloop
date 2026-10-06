@@ -284,6 +284,16 @@ type Task struct {
 	// changes, and which of the pushes it held were published (Task 20357).
 	// Nil when the gate was off. See review.go.
 	Review *TaskReview `json:"review,omitempty"`
+	// Quarantine marks a task the control plane suspects of taking down the
+	// nodes that ran it (Task 20391): two or more distinct executors went
+	// unreachable while it was running. It runs again only after an explicit
+	// reset. See quarantine.go.
+	//
+	// Not a plan_tasks column: it lives in task_quarantine, written by the
+	// failover that marks it and deleted by the reset that clears it, and by
+	// nothing else. A run's save holds a copy of the plan loaded before the
+	// mark existed, and must be able to neither write it back nor away.
+	Quarantine *TaskQuarantine `json:"quarantine,omitempty"`
 }
 
 // BackgroundWork records processes an agent left running after it reported the

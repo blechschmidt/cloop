@@ -130,3 +130,35 @@ func TestValidateReportsOtherExecutorProblems(t *testing.T) {
 		t.Errorf("an unsupported container runtime was reported clean; findings: %+v", rep.Findings)
 	}
 }
+
+// TestValidateReportsAnOutOfBandFailoverCap: `cloop config validate` reports
+// what Load would silently repair (Task 20391) — an operator who typed
+// max_attempts: 100 believes their fleet is protected by a cap of 100, and is
+// running under the default instead.
+func TestValidateReportsAnOutOfBandFailoverCap(t *testing.T) {
+	dir := writeConfig(t, "executors:\n  failover:\n    max_attempts: 100\n")
+	rep, err := Run(context.Background(), dir, ValidateOptions{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var found bool
+	for _, f := range rep.Findings {
+		if f.Field == "config.executors" && strings.Contains(f.Message, "failover.max_attempts") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("an out-of-band failover cap was reported clean; findings: %+v", rep.Findings)
+	}
+
+	dir = writeConfig(t, "executors:\n  failover:\n    max_attempts: 0\n")
+	rep, err = Run(context.Background(), dir, ValidateOptions{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, f := range rep.Findings {
+		if f.Field == "config.executors" {
+			t.Errorf("max_attempts: 0 — failover off, a legitimate choice — reported as a problem: %+v", f)
+		}
+	}
+}

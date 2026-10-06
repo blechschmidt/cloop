@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 136 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 139 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,11 +76,11 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 119 |
-| `project` | the project's .cloop/state.db | 15 |
+| `control-plane` | the hub's own state.db | 120 |
+| `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
-Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.status`, `task.upsert`.
+Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
 
 Recorded in whichever chain the decision was scoped to: `authz.denied`, `authz.granted`.
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-136 actions in 37 families. Every action is listed: this section is the whole
+139 actions in 37 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (16) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -100,6 +100,8 @@ vocabulary of the `event_type` column.
 | `task.delete` | `task` | project | stable | A task disappears from the plan between two saves, or is deleted outright. |
 | `task.dispatch` | `task` | project | stable | A task is handed to an executor, recording where it will run and what it was given. |
 | `task.finish` | `task` | project | stable | A dispatched task reaches a terminal outcome — done, failed, skipped, timed out, or aborted. |
+| `task.quarantine` | `task` | project | stable | Failover marks a task as a suspected node killer: two or more distinct executors went unreachable while it was running. |
+| `task.quarantine_release` | `task` | project | stable | An explicit reset returns a suspected node killer to pending, clearing its mark and the losses behind it. |
 | `task.status` | `task` | project | stable | Somebody flips a task's status by hand, rather than the orchestrator moving it. |
 | `task.upsert` | `task` | project | stable | A task is created, or a saved task's audited fields differ from the ones already stored. |
 
@@ -108,11 +110,15 @@ Payload keys:
 - `task.delete` — `id`
 - `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `spec_sha256`, `setup_sha256`, `lease_ids`
 - `task.finish` — `task_id`, `outcome`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `reason`, `started_at`, `completed_at`, `duration_ms`, `abort_class`, `abort_cleared`, `fail_count`, `write_back_commit`
+- `task.quarantine` — `task_id`, `title`, `kind`, `nodes`, `reason`
+- `task.quarantine_release` — `task_id`, `kind`, `nodes`, `marked_at`, `via`
 - `task.status` — `id`, `old_status`, `new_status`
 - `task.upsert` — `id`, `title`, `status`, `priority`, `role`, `description`
 
 - `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables.
 - `task.finish` — `outcome` carries the terminal status; `reason` carries why, when there is one.
+- `task.quarantine` — `nodes` lists each executor that went down under the task with when it went unreachable. A marked task runs again only after an explicit reset, recorded as task.quarantine_release.
+- `task.quarantine_release` — `via` names the reset — the dashboard, `cloop task reset`, `cloop task bulk reset`; the actor is who pressed it.
 - `task.upsert` — Emitted from the diff SaveState computes inside its own transaction, not from the plan — a byte-identical re-save produces no row. Before that diff existed this action was 99.7% of a 1.09M-row table.
 
 ### run.*
@@ -192,6 +198,7 @@ Payload keys, on every action above: `yaml`
 | `executor.drain` | `executor` | control-plane | stable | An executor is set to shed in-flight work as well as refuse new work. |
 | `executor.enroll` | `executor` | control-plane | stable | A remote agent completes outbound enrolment and joins the fleet. |
 | `executor.failover` | `executor_session` | control-plane | stable | A session is moved off an executor that stopped answering, or fails to be placed anywhere. |
+| `executor.failover_exhausted` | `executor_session` | control-plane | stable | An executor goes unreachable holding a session that was already re-dispatched as often as executors.failover.max_attempts allows, so nothing re-dispatches it. |
 | `executor.firewall` | `executor` | control-plane | stable | An admin sets or clears a device's firewall rule set, the superset every sandbox on it must fit inside. |
 | `executor.limits` | `executor` | control-plane | stable | An admin sets the most CPU, memory, disk and processes any one workload on an executor may be given. |
 | `executor.revoke` | `executor` | control-plane | stable | An enrolled agent's credential is revoked and it is removed from the fleet. |
@@ -210,7 +217,8 @@ Payload keys:
 - `executor.cordon` — `action`, `executor_id`, `reason`, `state`
 - `executor.drain` — `action`, `executor_id`, `reason`, `state`
 - `executor.enroll` — `action`, `executor_id`, `name`, `expires_at`, `workdir_root`, `labels`
-- `executor.failover` — `session_id`, `from`, `to`, `attempt`, `project_path`, `task_id`, `placed`, `error`
+- `executor.failover` — `session_id`, `from`, `to`, `attempt`, `max_attempts`, `project_path`, `task_id`, `running_tasks`, `placed`, `error`
+- `executor.failover_exhausted` — `session_id`, `from`, `attempt`, `max_attempts`, `project_path`, `running_tasks`, `nodes`, `error`
 - `executor.firewall` — `action`, `executor_id`, `from`, `to`, `fingerprint`, `cleared`, `constrained`
 - `executor.limits` — `action`, `executor_id`, `from`, `to`, `cleared`
 - `executor.revoke` — `action`, `executor_id`, `name`, `kind`
@@ -224,7 +232,8 @@ Payload keys:
 - `executor.audience` — `action` is "admit" or "withdraw"; `restricted` is whether the executor is access-controlled *after* the change, and `members` how many principals remain. Withdrawing the last entry sets restricted=false, which widens the executor to the whole fleet — the one edit here that grants rather than revokes.
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.
 - `executor.enroll` — `action` repeats the verb without the family prefix — `enroll`, not `executor.enroll`.
-- `executor.failover` — `placed` distinguishes a successful move from an exhausted one; on failure `to` is empty and `error` says why.
+- `executor.failover` — `placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.
+- `executor.failover_exhausted` — `nodes` names every executor the run was lost on, oldest first, each with when it went unreachable. A workload that takes down every node it lands on ends here instead of on the next node.
 - `executor.firewall` — `from` and `to` describe the whole rule set — allowlist, denylist, ports, resolvers and the public-Internet switch — so a widened device is legible from this row alone. `cleared` is true when the rule set was removed, which leaves the device bounded only by its configuration. `constrained` counts the virtual executors and project rule sets the save narrowed to fit; each of those has its own row (`executor.virtual` with action "constrain", `project.firewall` with action "constrain").
 - `executor.limits` — Records its previous ceiling as well as the new one. A raised cap is the change worth reviewing, and it is invisible in the new value alone. `cleared` is true when the ceiling was removed, which makes the executor uncapped rather than capped at zero.
 - `executor.sandbox` — One of two executor actions that record their previous value: it changes a containment boundary, so `from` is what makes "when did this device stop isolating its workloads" answerable from the trail alone. `cleared` is true when the configuration was removed rather than replaced.

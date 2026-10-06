@@ -971,11 +971,14 @@ var taskColumns = []string{
 	"risk_score", "impact_score", "retry_budget",
 }
 
-// taskSelect reads every task column, then the task's run id. The run id is not
-// a plan_tasks column: it lives in task_runs, which SaveState's lifecycle diff
-// maintains (Task 20282).
+// taskSelect reads every task column, then the task's run id and quarantine.
+// Neither is a plan_tasks column: the run id lives in task_runs, which
+// SaveState's lifecycle diff maintains (Task 20282), and the quarantine in
+// task_quarantine, which only a failover and an explicit reset write (Task
+// 20391, task_quarantine.go).
 var taskSelect = `SELECT ` + strings.Join(taskColumns, ", ") + `,
-		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
+		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), ''),
+		` + quarantineSelect + `
 	FROM plan_tasks`
 
 // upsertTaskSQL writes every column of taskColumns, updating all but the id
@@ -1033,6 +1036,7 @@ type taskScanner struct {
 	status, role                                string
 	lists                                       taskListColumns
 	bgJSON, abortJSON, reviewJSON               string
+	quarantineJSON                              string
 	startedAt, completedAt, deadline, nextRunAt sql.NullString
 	reqApproval, approved, pinned               int
 	dest                                        []any
@@ -1056,7 +1060,7 @@ func newTaskScanner() *taskScanner {
 		&t.Assignee, &t.ExternalURL, &sc.lists.Links, &t.TDDStatus, &t.TDDScore,
 		&t.SprintID, &t.ComplexitySize, &t.StoryPoints, &sc.lists.OnSuccess, &sc.lists.OnFailure,
 		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
-		&t.RunID,
+		&t.RunID, &sc.quarantineJSON,
 	}
 	return sc
 }
@@ -1078,6 +1082,7 @@ func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
 		return nil, err
 	}
 	t.Background = decodeBackground(sc.bgJSON)
+	t.Quarantine = decodeQuarantine(sc.quarantineJSON)
 	t.Abort = decodeAbort(sc.abortJSON)
 	t.Review = decodeReview(sc.reviewJSON)
 	t.RequiresApproval = sc.reqApproval == 1

@@ -1611,6 +1611,38 @@ ls` and fix the reachability. `--force` stops *waiting* rather than failing — 
 node stays draining, and the sessions it reports are still running and were not
 touched.
 
+### A task is quarantined as a suspected node killer
+
+Two or more executors went unreachable while one task was running, so the
+hub's failover failed the task and marked it (Task 20391): it will not run
+again — not on the next dispatch, not under retry-failed — until somebody
+resets it. Find them, with the nodes each went down under:
+
+```bash
+cloop executor list --inventory    # "Suspected node killers", per project
+```
+
+The task's details on the dashboard say the same, and the project's Event
+History has a `failover` row for each lost node. Before releasing it, look at
+why those nodes went down: a device's own journal (`journalctl -b -1` after a
+reboot, the kernel's OOM and panic lines) usually names the culprit, and a task
+that exhausted memory on two devices will on a third. Two unrelated node
+failures can mark an innocent task, which is why the mark is a suspicion a
+person clears rather than a verdict.
+
+To run it again, reset it — from the task's status control on the dashboard,
+or in the project's directory:
+
+```bash
+cloop task reset <id>
+```
+
+The reset deletes the mark and the losses behind it, so the task starts with
+no evidence against it, and is recorded as `task.quarantine_release` with who
+did it. A run that loses more nodes than `executors.failover.max_attempts`
+allows stops being re-dispatched whether or not any task is marked; its
+journal row names every node it lost.
+
 ### Pruning leaked worktrees by hand
 
 Parallel task execution gives each task a git worktree under

@@ -505,6 +505,20 @@ function _renderTaskDetails(d) {
     }
   }
 
+  // A suspected node killer (Task 20391). Above the result, like an abort: it
+  // says why the task failed, and why nothing will run it again on its own.
+  if (t.quarantine && t.quarantine.kind) {
+    const nodes = t.quarantine.nodes || [];
+    const distinct = new Set(nodes.map(n => n.executor_id)).size;
+    html += '<div class="td-section fail"><h3>Suspected node killer</h3>'+
+      '<div class="td-text">'+distinct+' executor'+(distinct === 1 ? '' : 's')+
+      ' went unreachable while this task was running, so it is held back: retries and '+
+      'automatic resumes skip it. Reset it to pending to run it again.</div>'+
+      (nodes.length ? '<ul>'+nodes.map(n => '<li><code>'+esc(n.executor_id || '')+'</code> unreachable '+
+        esc(_fmtDateTime(n.lost_at))+'</li>').join('')+'</ul>' : '')+
+      '</div>';
+  }
+
   // The review gate's verdict (Task 20357). Above the result, like background
   // work: it says whether what the result describes ever left this machine.
   if (t.review && t.review.verdict) html += _tdReviewSection(t.review);

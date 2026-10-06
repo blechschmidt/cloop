@@ -19,6 +19,7 @@ package statedb
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -36,7 +37,17 @@ const (
 	ExecutorSessionFinished = "finished"
 	// ExecutorSessionFailed: the work ended in failure and was not requeued.
 	ExecutorSessionFailed = "failed"
+	// ExecutorSessionFailoverExhausted: the executor went unreachable after
+	// the session had already been re-dispatched as often as
+	// executors.failover.max_attempts allows (Task 20391). The claim closed
+	// it in this state instead of requeued, and nothing re-dispatches it.
+	ExecutorSessionFailoverExhausted = "failover_exhausted"
 )
+
+// maxSessionChain bounds ExecutorSessionChain's walk. A chain is at most
+// executors.failover.max_attempts + 1 long (ten re-dispatches at most), so
+// anything near this is a cycle written by hand, not history.
+const maxSessionChain = 64
 
 // ExecutorHealthRow is the scheduler's probe-driven view of one executor.
 // ExecutorID shares the identifier space with ExecutorRow.ID but is not a
@@ -74,6 +85,12 @@ type ExecutorSessionRow struct {
 	// of the process that started it could not be requeued by the process
 	// that replaces it, which is exactly when requeueing matters most.
 	SpecJSON string
+	// RunningTasks are the tasks the workload last announced it was working
+	// on (Task 20391), kept so a failover can say which tasks a lost node
+	// was running even when the hub's own copy of the project cannot: a run
+	// on a device works on a copy. Written by SetExecutorSessionRunningTasks
+	// while the session runs; empty when nothing was observed.
+	RunningTasks []int
 }
 
 // PutExecutorHealth inserts or updates the health row for row.ExecutorID.
@@ -217,13 +234,14 @@ func (d *DB) OpenExecutorSession(row ExecutorSessionRow) error {
 	_, err := d.conn.Exec(
 		`INSERT INTO executor_sessions(id, executor_id, handle_id, project_path, task_id,
 		                               claim_token, state, attempt, started_at, updated_at,
-		                               ended_at, requeued_from, spec_json)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                               ended_at, requeued_from, spec_json, running_tasks)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.ExecutorID, row.HandleID, row.ProjectPath, row.TaskID,
 		row.ClaimToken, row.State, row.Attempt,
 		row.StartedAt.UTC().Format(time.RFC3339Nano),
 		row.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		formatOptionalTime(row.EndedAt), row.RequeuedFrom, row.SpecJSON,
+		encodeRunningTasks(row.RunningTasks),
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: open executor session %q: %w", row.ID, classifyDriverErr(err))
@@ -250,9 +268,7 @@ func (d *DB) GetExecutorSession(id string) (ExecutorSessionRow, error) {
 // result to work that is still in flight, which is what failover and capacity
 // checks ask for.
 func (d *DB) ListExecutorSessions(executorID string, onlyRunning bool) ([]ExecutorSessionRow, error) {
-	query := `SELECT id, executor_id, handle_id, project_path, task_id, claim_token,
-	                 state, attempt, started_at, updated_at, ended_at, requeued_from,
-	                 spec_json
+	query := `SELECT ` + executorSessionColumns + `
 	          FROM executor_sessions`
 	var (
 		clauses []string
@@ -320,10 +336,19 @@ func (d *DB) CountRunningExecutorSessions(executorID string) (int, error) {
 	return n, nil
 }
 
-// CloseExecutorSession moves a session to a terminal state. Returns
+// CloseExecutorSession moves a running session to a terminal state. Returns
 // ErrExecutorSessionNotFound when the ID is unknown, so a driver reporting
 // completion for a session the control plane never opened surfaces loudly
 // instead of being silently dropped.
+//
+// A session that is no longer running is left as it is and the call succeeds:
+// its end is already recorded. That matters for the one writer that gets
+// there first on purpose — a failover's claim, which records requeued or
+// failover_exhausted (Task 20391). The workload's own watcher notices the end
+// much later, often only when the dead node's stream finally closes, and
+// before this condition its close overwrote the claim's verdict with
+// "failed": the exhausted session vanished from the record, and with it what
+// stops a re-dispatch.
 func (d *DB) CloseExecutorSession(id, state string, at time.Time) error {
 	if state == "" {
 		state = ExecutorSessionFinished
@@ -336,8 +361,8 @@ func (d *DB) CloseExecutorSession(id, state string, at time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	res, err := d.conn.Exec(
-		`UPDATE executor_sessions SET state = ?, updated_at = ?, ended_at = ? WHERE id = ?`,
-		state, stamp, stamp, id)
+		`UPDATE executor_sessions SET state = ?, updated_at = ?, ended_at = ? WHERE id = ? AND state = ?`,
+		state, stamp, stamp, id, ExecutorSessionRunning)
 	if err != nil {
 		return fmt.Errorf("statedb: close executor session %q: %w", id, classifyDriverErr(err))
 	}
@@ -346,7 +371,11 @@ func (d *DB) CloseExecutorSession(id, state string, at time.Time) error {
 		return fmt.Errorf("statedb: close executor session %q: %w", id, classifyDriverErr(err))
 	}
 	if n == 0 {
-		return fmt.Errorf("%w: %q", ErrExecutorSessionNotFound, id)
+		if _, readErr := d.getExecutorSessionLocked(id); errors.Is(readErr, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %q", ErrExecutorSessionNotFound, id)
+		} else if readErr != nil {
+			return fmt.Errorf("statedb: close executor session %q: %w", id, classifyDriverErr(readErr))
+		}
 	}
 	return nil
 }
@@ -368,15 +397,27 @@ func (d *DB) CloseExecutorSession(id, state string, at time.Time) error {
 // function exists to make impossible, so the read and the write must not be
 // separable.
 //
+// The failover cap is decided in the same statement (Task 20391). A session
+// whose attempt is at most maxAttempts — re-dispatched fewer times than the
+// cap — becomes requeued; one past it becomes failover_exhausted, and the
+// returned row's State says which. Deciding it here rather than in the caller
+// is what makes every supervisor and every hub member agree: whoever wins the
+// claim also fixes the session's fate, and a loser has nothing left to decide
+// differently. maxAttempts below zero is read as zero — no re-dispatch —
+// because no reading of a bad cap may be "no cap".
+//
 // The follow-up read on a zero-row update is only to tell the operator which
 // of two situations they are in; it never grants a claim, so a row appearing
 // or vanishing between the two statements cannot turn a loss into a win.
-func (d *DB) ClaimExecutorSessionRequeue(id, claimToken, newClaimToken string, at time.Time) (ExecutorSessionRow, error) {
+func (d *DB) ClaimExecutorSessionRequeue(id, claimToken, newClaimToken string, maxAttempts int, at time.Time) (ExecutorSessionRow, error) {
 	if strings.TrimSpace(claimToken) == "" {
 		return ExecutorSessionRow{}, errors.New("statedb: executor session claim token is required")
 	}
 	if strings.TrimSpace(newClaimToken) == "" {
 		return ExecutorSessionRow{}, errors.New("statedb: executor session replacement claim token is required")
+	}
+	if maxAttempts < 0 {
+		maxAttempts = 0
 	}
 	if at.IsZero() {
 		at = time.Now()
@@ -387,9 +428,11 @@ func (d *DB) ClaimExecutorSessionRequeue(id, claimToken, newClaimToken string, a
 	defer d.mu.Unlock()
 	res, err := d.conn.Exec(
 		`UPDATE executor_sessions
-		 SET state = ?, claim_token = ?, updated_at = ?, ended_at = ?
+		 SET state = CASE WHEN attempt <= ? THEN ? ELSE ? END,
+		     claim_token = ?, updated_at = ?, ended_at = ?
 		 WHERE id = ? AND claim_token = ? AND state = ?`,
-		ExecutorSessionRequeued, newClaimToken, stamp, stamp,
+		maxAttempts, ExecutorSessionRequeued, ExecutorSessionFailoverExhausted,
+		newClaimToken, stamp, stamp,
 		id, claimToken, ExecutorSessionRunning)
 	if err != nil {
 		return ExecutorSessionRow{}, fmt.Errorf("statedb: claim executor session %q: %w", id, classifyDriverErr(err))
@@ -421,12 +464,16 @@ func (d *DB) ClaimExecutorSessionRequeue(id, claimToken, newClaimToken string, a
 // means in their context.
 func (d *DB) getExecutorSessionLocked(id string) (ExecutorSessionRow, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, executor_id, handle_id, project_path, task_id, claim_token,
-		        state, attempt, started_at, updated_at, ended_at, requeued_from,
-		        spec_json
+		`SELECT `+executorSessionColumns+`
 		 FROM executor_sessions WHERE id = ?`, id)
 	return scanExecutorSessionRow(row)
 }
+
+// executorSessionColumns is what every session read selects, in the order
+// scanExecutorSessionRow scans it.
+const executorSessionColumns = `id, executor_id, handle_id, project_path, task_id, claim_token,
+	state, attempt, started_at, updated_at, ended_at, requeued_from,
+	spec_json, running_tasks`
 
 func scanExecutorHealthRow(sc rowScanner) (ExecutorHealthRow, error) {
 	var (
@@ -447,14 +494,152 @@ func scanExecutorSessionRow(sc rowScanner) (ExecutorSessionRow, error) {
 	var (
 		rec                           ExecutorSessionRow
 		startedAt, updatedAt, endedAt string
+		running                       string
 	)
 	if err := sc.Scan(&rec.ID, &rec.ExecutorID, &rec.HandleID, &rec.ProjectPath, &rec.TaskID,
 		&rec.ClaimToken, &rec.State, &rec.Attempt,
-		&startedAt, &updatedAt, &endedAt, &rec.RequeuedFrom, &rec.SpecJSON); err != nil {
+		&startedAt, &updatedAt, &endedAt, &rec.RequeuedFrom, &rec.SpecJSON, &running); err != nil {
 		return ExecutorSessionRow{}, err
 	}
 	rec.StartedAt = parseOptionalTime(startedAt)
 	rec.UpdatedAt = parseOptionalTime(updatedAt)
 	rec.EndedAt = parseOptionalTime(endedAt)
+	rec.RunningTasks = decodeRunningTasks(running)
 	return rec, nil
+}
+
+// maxRunningTasks bounds the running-tasks record. It is written from what a
+// workload printed, and a workload is hostile by assumption: a run announcing
+// ten thousand tasks must not turn one row into a megabyte.
+const maxRunningTasks = 64
+
+// encodeRunningTasks renders a running-tasks record for its column: positive
+// ids only, deduplicated, at most maxRunningTasks of them.
+func encodeRunningTasks(ids []int) string {
+	ids = normalizeRunningTasks(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// decodeRunningTasks reads the column back. Damage reads as "nothing
+// observed": the record attributes a lost node to tasks, and a guess is worse
+// than an honest blank.
+func decodeRunningTasks(s string) []int {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var ids []int
+	if err := json.Unmarshal([]byte(s), &ids); err != nil {
+		return nil
+	}
+	return normalizeRunningTasks(ids)
+}
+
+func normalizeRunningTasks(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, len(ids))
+	out := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		if len(out) == maxRunningTasks {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// SetExecutorSessionRunningTasks records which tasks a running session's
+// workload is working on (Task 20391). Only a session still running is
+// written: once a claim has taken it, what it was running is history the
+// failover already read, and a late write from a stream that had not caught
+// up must not change it.
+//
+// It reports whether a row was written.
+func (d *DB) SetExecutorSessionRunningTasks(id string, tasks []int) (bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return false, errors.New("statedb: executor session id is required")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE executor_sessions SET running_tasks = ? WHERE id = ? AND state = ?`,
+		encodeRunningTasks(tasks), id, ExecutorSessionRunning)
+	if err != nil {
+		return false, fmt.Errorf("statedb: record running tasks of session %q: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: record running tasks of session %q: %w", id, classifyDriverErr(err))
+	}
+	return n > 0, nil
+}
+
+// ExecutorSessionChain returns the failover chain that ends at id, oldest
+// first: the session the run was first dispatched as, then each replacement a
+// failover opened (requeued_from), down to id itself (Task 20391). It is how a
+// failover names every node a run has lost so far.
+//
+// The walk is bounded (maxSessionChain) and refuses to revisit a session, so a
+// cycle written into the table by hand ends the walk rather than the process.
+// A predecessor that is gone — pruned by retention — ends it too: the chain is
+// then what is left of it.
+func (d *DB) ExecutorSessionChain(id string) ([]ExecutorSessionRow, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var (
+		chain []ExecutorSessionRow
+		seen  = make(map[string]bool)
+	)
+	for cur := id; cur != "" && !seen[cur] && len(chain) < maxSessionChain; {
+		seen[cur] = true
+		row, err := d.getExecutorSessionLocked(cur)
+		if errors.Is(err, sql.ErrNoRows) {
+			if len(chain) == 0 {
+				return nil, fmt.Errorf("%w: %q", ErrExecutorSessionNotFound, id)
+			}
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("statedb: read executor session %q: %w", cur, classifyDriverErr(err))
+		}
+		chain = append(chain, row)
+		cur = row.RequeuedFrom
+	}
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain, nil
+}
+
+// ExecutorSessionSuccessor returns the session a failover opened to replace
+// id, if there is one.
+func (d *DB) ExecutorSessionSuccessor(id string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var next string
+	err := d.conn.QueryRow(
+		`SELECT id FROM executor_sessions WHERE requeued_from = ? ORDER BY started_at ASC, id ASC LIMIT 1`,
+		id).Scan(&next)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("statedb: find the successor of executor session %q: %w", id, classifyDriverErr(err))
+	}
+	return next, true, nil
 }

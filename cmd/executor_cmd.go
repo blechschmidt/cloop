@@ -91,6 +91,9 @@ var executorListCmd = &cobra.Command{
 		// line sent anyone who tried it to a usage dump listing every
 		// subcommand except the one it had just named.
 		dim.Println("\nBind a project to one of these in the Executors panel of the Web UI.")
+		if inventory, _ := cmd.Flags().GetBool("inventory"); inventory {
+			return printFleetInventory(header, dim)
+		}
 		return nil
 	},
 }
@@ -492,6 +495,8 @@ func init() {
 	executorTestCmd.Flags().Bool("skip-preflight", false,
 		"run the workload even if preflight reports a fatal problem")
 
+	executorListCmd.Flags().Bool("inventory", false,
+		"also show each enrolled device's hardware and build, and the tasks quarantined as suspected node killers")
 	executorCmd.AddCommand(executorListCmd)
 	executorCmd.AddCommand(executorTestCmd)
 	executorCmd.AddCommand(executorReapCmd)

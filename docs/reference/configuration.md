@@ -1149,6 +1149,32 @@ bundles its own work, and the hub applies it again when that work arrives. A
 refusal says which bundle was too large and names this setting. Values outside
 `0..128` are refused when the configuration is loaded; `0` means the default.
 
+### Failover
+
+When an executor stops answering while it holds a run, the hub's supervisor
+starts the run again on another executor. This bounds how many times one
+dispatch may be started again elsewhere:
+
+```yaml
+executors:
+  failover:
+    max_attempts: 2   # the default; 0 = never re-dispatch; at most 10
+```
+
+Past the cap nothing re-dispatches the run: its session closes as
+`failover_exhausted`, and the tasks it was running fail, naming every node the
+run was lost on and when it went unreachable. Independently of the cap, a task
+that two or more distinct executors went down under is quarantined as a
+suspected node killer and runs again only after an explicit reset — `cloop task
+reset <id>`, or a reset to pending from the dashboard. `cloop executor list
+--inventory` lists the quarantined tasks.
+
+A hub-scope key, read at every failover, so a per-instance overlay may set it
+for one hub alone and a change applies without a restart. `cloop config set`
+refuses a value outside `0..10`; one written into the file by hand is reset to
+the default when the configuration is loaded, with a warning — never to "no
+cap". See [the failover cap](../architecture/executors.md#the-failover-cap-and-the-node-killer-quarantine-task-20391).
+
 ### Pushing a run's work back
 
 A run on an executor that does not share the hub's filesystem — a remote
@@ -1893,6 +1919,7 @@ ui:
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
+| `executors.failover` | `max_attempts`, the cap on re-dispatching a run whose executor went unreachable. Read at every failover. |
 | `executors.write_back` | Whether a run on an executor that does not share this hub's filesystem pushes its work back to the project's origin. Read on each dispatch. |
 | `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |

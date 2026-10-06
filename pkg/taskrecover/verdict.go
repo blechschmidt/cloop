@@ -94,6 +94,10 @@ const (
 	SourceProvider = "provider_error"
 	// SourceOperator: a person chose the outcome.
 	SourceOperator = "operator"
+	// SourceFailover: the hub's executor failover (Task 20391) — the run's
+	// node went unreachable after executors.failover.max_attempts was used
+	// up, or the task is a suspected node killer.
+	SourceFailover = "failover"
 	// SourceOrchestrator: anything else the orchestrator decides on its own —
 	// a risk check, a pre-task hook, a dry run, an implicit completion.
 	SourceOrchestrator = "orchestrator"

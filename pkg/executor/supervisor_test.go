@@ -181,8 +181,8 @@ type drainStore struct {
 
 func (s *drainStore) RunningSessions(string) ([]Session, error) { return nil, nil }
 
-func (s *drainStore) ClaimRequeue(string, string, time.Time) (Session, error) {
-	return Session{}, ErrSessionClaimLost
+func (s *drainStore) ClaimRequeue(string, string, int, time.Time) (Session, bool, error) {
+	return Session{}, false, ErrSessionClaimLost
 }
 
 func (s *drainStore) CountRunning(string) (int, error) {
@@ -865,6 +865,11 @@ type claimStore struct {
 	granted   int
 	rotations int
 
+	// exhausted records the sessions a claim closed as past the failover
+	// cap, and caps the cap each granted claim was decided under.
+	exhausted map[string]bool
+	caps      []int
+
 	// listGate holds every caller of RunningSessions until all N supervisors
 	// have read the same snapshot. Without it the race is real but not
 	// guaranteed: a supervisor that happened to read after the winner's claim
@@ -938,24 +943,44 @@ func (s *claimStore) RunningSessions(executorID string) ([]Session, error) {
 	return out, nil
 }
 
-func (s *claimStore) ClaimRequeue(sessionID, claimToken string, at time.Time) (Session, error) {
+// ClaimRequeue mirrors the store's single conditional UPDATE: the token
+// check, the rotation and the cap decision happen under one lock. Like the
+// real store it leaves Attempt alone — the claimed session is the dispatch
+// that was lost, and its replacement is opened at Attempt+1 by the handler.
+func (s *claimStore) ClaimRequeue(sessionID, claimToken string, maxAttempts int, at time.Time) (Session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attempts++
 	sess, ok := s.sessions[sessionID]
 	if !ok {
-		return Session{}, fmt.Errorf("no such session %q", sessionID)
+		return Session{}, false, fmt.Errorf("no such session %q", sessionID)
 	}
 	if !s.ignoreToken && sess.ClaimToken != claimToken {
-		return Session{}, ErrSessionClaimLost
+		return Session{}, false, ErrSessionClaimLost
 	}
 	s.rotations++
 	s.granted++
+	s.caps = append(s.caps, maxAttempts)
+	if maxAttempts < 0 {
+		maxAttempts = 0
+	}
+	exhausted := sess.Attempt > maxAttempts
+	if exhausted {
+		if s.exhausted == nil {
+			s.exhausted = map[string]bool{}
+		}
+		s.exhausted[sessionID] = true
+	}
 	sess.ClaimToken = fmt.Sprintf("%s-rotated-%d", sessionID, s.rotations)
-	sess.Attempt++
-	sess.ExecutorID = "" // requeued: no longer running on the dead node
+	sess.ExecutorID = "" // claimed: no longer running on the dead node
 	sess.StartedAt = at
-	return *sess, nil
+	return *sess, exhausted, nil
+}
+
+func (s *claimStore) isExhausted(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exhausted[id]
 }
 
 func (s *claimStore) CountRunning(executorID string) (int, error) {
@@ -1152,8 +1177,14 @@ func TestFailoverRequeuesExactlyOnceUnderConcurrentSupervisors(t *testing.T) {
 			t.Errorf("session %s handed to the handler with token %q, want the rotated one",
 				ev.Session.ID, ev.Session.ClaimToken)
 		}
-		if ev.Session.Attempt != 2 {
-			t.Errorf("session %s attempt = %d, want 2", ev.Session.ID, ev.Session.Attempt)
+		// The claimed session is the dispatch that was lost; its replacement
+		// is opened at Attempt+1 by whoever re-dispatches it.
+		if ev.Session.Attempt != 1 {
+			t.Errorf("session %s attempt = %d, want 1", ev.Session.ID, ev.Session.Attempt)
+		}
+		if ev.Exhausted || ev.MaxAttempts != DefaultMaxFailoverAttempts {
+			t.Errorf("session %s: exhausted=%v under cap %d, want a requeue under the default cap %d",
+				ev.Session.ID, ev.Exhausted, ev.MaxAttempts, DefaultMaxFailoverAttempts)
 		}
 	}
 }
@@ -1190,6 +1221,9 @@ func TestFailoverExactlyOnceGuardIsLoadBearing(t *testing.T) {
 // TestFailoverRecordsUnplacedSessions: when there is nowhere to put the work,
 // the claim still happens and the event still fires with the reason. Releasing
 // the claim instead would re-arm the double-execution risk it exists to prevent.
+//
+// The handler runs once, with no target, so the control plane can settle the
+// tasks the lost node was running (Task 20391); it cannot re-dispatch them.
 func TestFailoverRecordsUnplacedSessions(t *testing.T) {
 	dead := newCapExec("edge-dead", fullCaps(func(c *Capabilities) { c.Isolation = IsolationRemote }))
 	dead.failWith(errors.New("connection refused"))
@@ -1213,8 +1247,11 @@ func TestFailoverRecordsUnplacedSessions(t *testing.T) {
 		WithCandidateSource(func() []Candidate {
 			return []Candidate{{Executor: dead, Health: Health{State: NodeUnreachable}}}
 		}),
-		WithFailoverHandler(func(context.Context, FailoverEvent) error {
+		WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
 			handlerRuns++
+			if ev.To != "" || ev.Err == nil {
+				t.Errorf("handler given target %q, err %v — an unplaced session has neither a target nor no reason", ev.To, ev.Err)
+			}
 			return nil
 		}),
 	)
@@ -1235,8 +1272,8 @@ func TestFailoverRecordsUnplacedSessions(t *testing.T) {
 	if ev.Reason == "" {
 		t.Error("event carries no rendered reason; the event payload would be opaque")
 	}
-	if handlerRuns != 0 {
-		t.Errorf("re-dispatch handler ran %d times with nowhere to dispatch to, want 0", handlerRuns)
+	if handlerRuns != 1 {
+		t.Errorf("handler ran %d times for an unplaced session, want once — to settle its tasks", handlerRuns)
 	}
 	// The claim was still consumed, so a second supervisor cannot re-run it.
 	if _, granted := store.stats(); granted != 1 {

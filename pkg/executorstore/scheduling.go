@@ -27,11 +27,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -42,6 +44,7 @@ const (
 	AuditEntityExecutor    = "executor"
 	AuditEventStateChange  = auditaction.ActionExecutorStateChange
 	AuditEventFailover     = auditaction.ActionExecutorFailover
+	AuditEventExhausted    = auditaction.ActionExecutorFailoverExhausted
 	AuditActorSupervisor   = "supervisor"
 	auditSessionEntityType = "executor_session"
 )
@@ -180,17 +183,18 @@ func (s *Scheduler) OpenSession(sess executor.Session) error {
 		sess.StartedAt = time.Now().UTC()
 	}
 	row := statedb.ExecutorSessionRow{
-		ID:          sess.ID,
-		ExecutorID:  sess.ExecutorID,
-		HandleID:    sess.HandleID,
-		ProjectPath: sess.ProjectPath,
-		TaskID:      sess.TaskID,
-		ClaimToken:  sess.ClaimToken,
-		State:       statedb.ExecutorSessionRunning,
-		Attempt:     sess.Attempt,
-		StartedAt:   sess.StartedAt,
-		UpdatedAt:   sess.StartedAt,
-		SpecJSON:    marshalSpec(sess.Spec),
+		ID:           sess.ID,
+		ExecutorID:   sess.ExecutorID,
+		HandleID:     sess.HandleID,
+		ProjectPath:  sess.ProjectPath,
+		TaskID:       sess.TaskID,
+		ClaimToken:   sess.ClaimToken,
+		State:        statedb.ExecutorSessionRunning,
+		Attempt:      sess.Attempt,
+		StartedAt:    sess.StartedAt,
+		UpdatedAt:    sess.StartedAt,
+		SpecJSON:     marshalSpec(sess.Spec),
+		RunningTasks: sess.RunningTasks,
 	}
 	if err := s.db.OpenExecutorSession(row); err != nil {
 		return fmt.Errorf("executorstore: open session %s: %w", sess.ID, err)
@@ -258,26 +262,115 @@ func (s *Scheduler) CountRunning(executorID string) (int, error) {
 // the same unreachable transition — presents a token that no longer matches and
 // receives executor.ErrSessionClaimLost.
 //
+// The same UPDATE applies the failover cap (Task 20391): a session already
+// re-dispatched maxAttempts times is closed as failover_exhausted instead of
+// requeued, and exhausted reports it. The winner learns the session's fate
+// from the row the claim wrote, not from a check of its own, so it cannot
+// disagree with what was recorded.
+//
 // The sentinel is translated at this boundary for the same reason store.go
 // translates the enrollment sentinels: the supervisor distinguishes "I lost the
 // race, do nothing" from "the database is broken, complain", and collapsing
 // both into an opaque storage error would turn a benign race into log noise
 // that hides a real outage.
-func (s *Scheduler) ClaimRequeue(sessionID, claimToken string, at time.Time) (executor.Session, error) {
+func (s *Scheduler) ClaimRequeue(sessionID, claimToken string, maxAttempts int, at time.Time) (executor.Session, bool, error) {
 	next, err := NewClaimToken()
 	if err != nil {
-		return executor.Session{}, fmt.Errorf("executorstore: mint claim token: %w", err)
+		return executor.Session{}, false, fmt.Errorf("executorstore: mint claim token: %w", err)
 	}
-	row, err := s.db.ClaimExecutorSessionRequeue(sessionID, claimToken, next, at)
+	row, err := s.db.ClaimExecutorSessionRequeue(sessionID, claimToken, next, maxAttempts, at)
 	switch {
 	case errors.Is(err, statedb.ErrExecutorSessionClaimLost):
-		return executor.Session{}, fmt.Errorf("%w: session %s", executor.ErrSessionClaimLost, sessionID)
+		return executor.Session{}, false, fmt.Errorf("%w: session %s", executor.ErrSessionClaimLost, sessionID)
 	case errors.Is(err, statedb.ErrExecutorSessionNotFound):
-		return executor.Session{}, fmt.Errorf("%w: session %s", executor.ErrSessionClaimLost, sessionID)
+		return executor.Session{}, false, fmt.Errorf("%w: session %s", executor.ErrSessionClaimLost, sessionID)
 	case err != nil:
-		return executor.Session{}, fmt.Errorf("executorstore: claim session %s: %w", sessionID, err)
+		return executor.Session{}, false, fmt.Errorf("executorstore: claim session %s: %w", sessionID, err)
 	}
-	return sessionFromRow(row), nil
+	return sessionFromRow(row), row.State == statedb.ExecutorSessionFailoverExhausted, nil
+}
+
+// SetRunningTasks records which tasks a running session's workload is working
+// on (Task 20391). It reports whether the session was still running to record
+// it on.
+func (s *Scheduler) SetRunningTasks(sessionID string, tasks []int) (bool, error) {
+	ok, err := s.db.SetExecutorSessionRunningTasks(sessionID, tasks)
+	if err != nil {
+		return false, fmt.Errorf("executorstore: %w", err)
+	}
+	return ok, nil
+}
+
+// RunningTasksOf returns the tasks a session last recorded as running.
+func (s *Scheduler) RunningTasksOf(sessionID string) ([]int, error) {
+	row, err := s.db.GetExecutorSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("executorstore: %w", err)
+	}
+	return row.RunningTasks, nil
+}
+
+// LostNodes returns every node the run behind sessionID has been lost on so
+// far, oldest first: one entry per session in its failover chain that a claim
+// took off an unreachable executor — requeued or failover_exhausted — with
+// when the claim found it gone (Task 20391).
+func (s *Scheduler) LostNodes(sessionID string) ([]pm.NodeLoss, error) {
+	chain, err := s.db.ExecutorSessionChain(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("executorstore: read the failover chain of %s: %w", sessionID, err)
+	}
+	var out []pm.NodeLoss
+	for _, row := range chain {
+		if row.State != statedb.ExecutorSessionRequeued && row.State != statedb.ExecutorSessionFailoverExhausted {
+			continue
+		}
+		at := row.EndedAt
+		if at.IsZero() {
+			at = row.UpdatedAt
+		}
+		out = append(out, pm.NodeLoss{ExecutorID: row.ExecutorID, LostAt: at, SessionID: row.ID, Attempt: row.Attempt})
+	}
+	return out, nil
+}
+
+// FailedOverProjects returns the hub path of every project a session was ever
+// failed over or exhausted for (Task 20391), sorted: the projects that can hold
+// a task quarantined as a suspected node killer.
+func (s *Scheduler) FailedOverProjects() ([]string, error) {
+	rows, err := s.db.ListExecutorSessions("", false)
+	if err != nil {
+		return nil, fmt.Errorf("executorstore: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, row := range rows {
+		if row.State != statedb.ExecutorSessionRequeued && row.State != statedb.ExecutorSessionFailoverExhausted {
+			continue
+		}
+		p := FailoverProjectPath(sessionFromRow(row))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// SessionState returns a session's recorded state and whether a failover has
+// already opened a replacement for it — the two facts a re-dispatch checks
+// before starting anything (Task 20391).
+func (s *Scheduler) SessionState(sessionID string) (state string, replaced bool, err error) {
+	row, err := s.db.GetExecutorSession(sessionID)
+	if err != nil {
+		return "", false, fmt.Errorf("executorstore: %w", err)
+	}
+	_, replaced, err = s.db.ExecutorSessionSuccessor(sessionID)
+	if err != nil {
+		return "", false, fmt.Errorf("executorstore: %w", err)
+	}
+	return row.State, replaced, nil
 }
 
 // CloseSession marks a session finished or failed.
@@ -295,15 +388,16 @@ func (s *Scheduler) CloseSession(sessionID, state string, at time.Time) error {
 
 func sessionFromRow(row statedb.ExecutorSessionRow) executor.Session {
 	return executor.Session{
-		ID:          row.ID,
-		ExecutorID:  row.ExecutorID,
-		HandleID:    row.HandleID,
-		ProjectPath: row.ProjectPath,
-		TaskID:      row.TaskID,
-		ClaimToken:  row.ClaimToken,
-		Attempt:     row.Attempt,
-		StartedAt:   row.StartedAt,
-		Spec:        unmarshalSpec(row.SpecJSON),
+		ID:           row.ID,
+		ExecutorID:   row.ExecutorID,
+		HandleID:     row.HandleID,
+		ProjectPath:  row.ProjectPath,
+		TaskID:       row.TaskID,
+		ClaimToken:   row.ClaimToken,
+		Attempt:      row.Attempt,
+		StartedAt:    row.StartedAt,
+		RunningTasks: row.RunningTasks,
+		Spec:         unmarshalSpec(row.SpecJSON),
 	}
 }
 
@@ -433,31 +527,68 @@ func (s *Scheduler) ExecutorTransition(t executor.Transition) {
 }
 
 // ExecutorFailover records one session moved off a dead node, including the
-// case where no replacement was found.
+// case where no replacement was found, and — as executor.failover_exhausted —
+// the case where the cap allowed none (Task 20391).
 func (s *Scheduler) ExecutorFailover(ev executor.FailoverEvent) {
 	payload := map[string]any{
 		"session_id":   ev.Session.ID,
 		"from":         ev.From,
 		"attempt":      ev.Session.Attempt,
-		"project_path": ev.Session.ProjectPath,
+		"max_attempts": ev.MaxAttempts,
+		"project_path": FailoverProjectPath(ev.Session),
 		"task_id":      ev.Session.TaskID,
 	}
-	if ev.To != "" {
-		payload["to"] = ev.To
+	if len(ev.Session.RunningTasks) > 0 {
+		payload["running_tasks"] = ev.Session.RunningTasks
 	}
 	if ev.Reason != "" {
 		payload["error"] = ev.Reason
 	}
-	payload["placed"] = ev.To != "" && ev.Err == nil
+	var action auditaction.Action = auditaction.ActionExecutorFailover
+	if ev.Exhausted {
+		action = auditaction.ActionExecutorFailoverExhausted
+		delete(payload, "task_id")
+		// Every node the run went down on, so the row alone says what this
+		// workload cost the fleet.
+		if lost, err := s.LostNodes(ev.Session.ID); err == nil {
+			nodes := make([]map[string]string, 0, len(lost))
+			for _, l := range lost {
+				nodes = append(nodes, map[string]string{
+					"executor_id":    l.ExecutorID,
+					"unreachable_at": l.LostAt.UTC().Format(time.RFC3339Nano),
+				})
+			}
+			payload["nodes"] = nodes
+		}
+	} else {
+		if ev.To != "" {
+			payload["to"] = ev.To
+		}
+		payload["placed"] = ev.To != "" && ev.Err == nil
+	}
 
 	_ = s.db.AppendAuditEvent(&statedb.AuditEvent{
 		Timestamp:  ev.At,
 		Actor:      s.actor,
-		EventType:  string(AuditEventFailover),
+		EventType:  string(action),
 		EntityType: auditSessionEntityType,
 		EntityID:   ev.Session.ID,
 		Payload:    statedb.MarshalAuditPayload(payload),
 	})
+}
+
+// FailoverProjectPath is the hub's own path to the project a session belongs
+// to. A session dispatched to an executor that does not share the hub's
+// filesystem records the executor's work directory as its ProjectPath — a path
+// relative to the device's work root, meaningless on the hub — while the
+// project label every hub dispatch carries names the hub's path (uiSpec). The
+// label wins; the recorded path is the fallback for sessions dispatched
+// without one.
+func FailoverProjectPath(sess executor.Session) string {
+	if p := strings.TrimSpace(sess.Spec.Labels["project"]); p != "" {
+		return p
+	}
+	return sess.ProjectPath
 }
 
 // ------------------------------------------------------------------- identity

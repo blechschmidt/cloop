@@ -24,6 +24,12 @@ const (
 	ActionTaskDispatch Action = "task.dispatch"
 	// ActionTaskFinish records a dispatched task reaching a terminal outcome.
 	ActionTaskFinish Action = "task.finish"
+	// ActionTaskQuarantine records a task marked as a suspected node killer
+	// (Task 20391).
+	ActionTaskQuarantine Action = "task.quarantine"
+	// ActionTaskQuarantineRelease records an explicit reset releasing such a
+	// task.
+	ActionTaskQuarantineRelease Action = "task.quarantine_release"
 
 	// ── run ────────────────────────────────────────────────────────────────
 
@@ -151,6 +157,10 @@ const (
 	ActionExecutorStateChange Action = "executor.state_change"
 	// ActionExecutorFailover records a session moving off a failed executor.
 	ActionExecutorFailover Action = "executor.failover"
+	// ActionExecutorFailoverExhausted records a session lost after it had
+	// already been re-dispatched as often as executors.failover.max_attempts
+	// allows, so nothing re-dispatches it (Task 20391).
+	ActionExecutorFailoverExhausted Action = "executor.failover_exhausted"
 
 	// ── workspace ──────────────────────────────────────────────────────────
 

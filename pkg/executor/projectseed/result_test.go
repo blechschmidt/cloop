@@ -19,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // isolateHome keeps cost.AppendLedger's mirror into ~/.config/cloop out of the
@@ -36,6 +37,23 @@ func hubProject(t *testing.T, st *state.ProjectState) string {
 	st.WorkDir = dir
 	if err := st.SaveDirect(); err != nil {
 		t.Fatalf("save hub project: %v", err)
+	}
+	// A quarantine is never saved with the plan — only a failover writes one
+	// (Task 20391) — so a task the hub holds as quarantined is written the way
+	// a failover writes it.
+	if st.Plan != nil {
+		db, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			t.Fatalf("open hub project: %v", err)
+		}
+		defer db.Close()
+		for _, task := range st.Plan.Tasks {
+			if task.Quarantine != nil {
+				if err := db.PutTaskQuarantine(task.ID, *task.Quarantine); err != nil {
+					t.Fatalf("quarantine task %d on the hub: %v", task.ID, err)
+				}
+			}
+		}
 	}
 	return dir
 }

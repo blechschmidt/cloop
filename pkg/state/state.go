@@ -626,6 +626,16 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 			}
 		}
 	}
+	// A quarantine is the hub's failover's and the explicit reset's, never the
+	// run's (Task 20391), so the disk's mark — or its absence — is the one in
+	// force: a task marked while this run holds the plan is held from its next
+	// sync, and one a person released runs again. No save writes the field, so
+	// adopting it cannot undo anything this process did.
+	for _, t := range s.Plan.Tasks {
+		if d, ok := diskTasks[t.ID]; ok {
+			t.Quarantine = d.Quarantine
+		}
+	}
 	// Append every disk task whose ID is absent from memory (full content preserved).
 	for _, t := range disk.Plan.Tasks {
 		if _, exists := inMemIDs[t.ID]; !exists {
@@ -1179,5 +1189,30 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 	}
 	defer db.Close()
 
-	return db.SaveState(toRaw(s))
+	if err := db.SaveState(toRaw(s)); err != nil {
+		return err
+	}
+	return importQuarantines(db, s.Plan)
+}
+
+// importQuarantines writes the quarantine marks a state.json carries into the
+// database it was migrated into (Task 20391).
+//
+// SaveState never writes a mark — a run's save must not be able to erase or
+// resurrect one — so without this a project carried to a device as a seed
+// would arrive with its suspected node killers unmarked, and a run there with
+// retry-failed on would run one again on the very kind of node it takes down.
+func importQuarantines(db *statedb.DB, plan *pm.Plan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, t := range plan.Tasks {
+		if t == nil || t.Quarantine == nil {
+			continue
+		}
+		if err := db.PutTaskQuarantine(t.ID, *t.Quarantine); err != nil {
+			return fmt.Errorf("import the quarantine of task %d: %w", t.ID, err)
+		}
+	}
+	return nil
 }

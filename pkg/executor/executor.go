@@ -1105,6 +1105,11 @@ var (
 	// This is the exactly-once latch reporting that it worked, not a
 	// failure — a supervisor that sees it must do nothing further.
 	ErrSessionClaimLost = errors.New("executor: session claim lost to another requeue")
+	// ErrFailoverExhausted: a session's executor went unreachable after it
+	// had already been re-dispatched as often as executors.failover.
+	// max_attempts allows (Task 20391). The claim that decided it closed the
+	// session; nothing re-dispatches it.
+	ErrFailoverExhausted = errors.New("executor: failover attempts exhausted")
 	// ErrDrainTimeout: a drain did not reach zero in-flight sessions before
 	// its deadline.
 	ErrDrainTimeout = errors.New("executor: drain timed out with sessions still in flight")

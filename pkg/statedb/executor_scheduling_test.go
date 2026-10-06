@@ -334,7 +334,7 @@ func TestCloseExecutorSession(t *testing.T) {
 
 	// A closed session is no longer claimable for failover — the work already
 	// ended, so requeueing it would be a duplicate execution.
-	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-2", time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-2", 2, time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
 		t.Fatalf("claim on a finished session = %v, want ErrExecutorSessionClaimLost", err)
 	}
 
@@ -372,7 +372,7 @@ func TestClaimExecutorSessionRequeue(t *testing.T) {
 	}
 
 	at := time.Now().Truncate(time.Millisecond)
-	got, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-2", at)
+	got, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-2", 2, at)
 	if err != nil {
 		t.Fatalf("ClaimExecutorSessionRequeue: %v", err)
 	}
@@ -391,23 +391,23 @@ func TestClaimExecutorSessionRequeue(t *testing.T) {
 
 	// The old token can never win again — this is what makes a winner's retry
 	// safe instead of a second requeue.
-	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-3", time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-3", 2, time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
 		t.Fatalf("replay with the spent token = %v, want ErrExecutorSessionClaimLost", err)
 	}
 	// Even the new token loses, because the session is no longer running.
-	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-2", "tok-3", time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-2", "tok-3", 2, time.Now()); !errors.Is(err, ErrExecutorSessionClaimLost) {
 		t.Fatalf("claim on a requeued session = %v, want ErrExecutorSessionClaimLost", err)
 	}
 
 	// A genuinely unknown id is reported as not-found so an operator chasing a
 	// stale session id is not told they lost a race that never existed.
-	if _, err := db.ClaimExecutorSessionRequeue("ghost", "tok", "tok-new", time.Now()); !errors.Is(err, ErrExecutorSessionNotFound) {
+	if _, err := db.ClaimExecutorSessionRequeue("ghost", "tok", "tok-new", 2, time.Now()); !errors.Is(err, ErrExecutorSessionNotFound) {
 		t.Fatalf("ClaimExecutorSessionRequeue(unknown) = %v, want ErrExecutorSessionNotFound", err)
 	}
-	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "", "tok-3", time.Now()); err == nil {
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "", "tok-3", 2, time.Now()); err == nil {
 		t.Error("claim with a blank current token succeeded, want error")
 	}
-	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-2", "  ", time.Now()); err == nil {
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-2", "  ", 2, time.Now()); err == nil {
 		t.Error("claim with a blank replacement token succeeded, want error")
 	}
 }
@@ -442,7 +442,7 @@ func TestClaimExecutorSessionRequeueIsExactlyOnce(t *testing.T) {
 			defer wg.Done()
 			<-start // release all eight at once
 			rows[i], errs[i] = db.ClaimExecutorSessionRequeue(
-				"sess-hot", "tok-original", fmt.Sprintf("tok-supervisor-%d", i), time.Now())
+				"sess-hot", "tok-original", fmt.Sprintf("tok-supervisor-%d", i), 2, time.Now())
 		}(i)
 	}
 	close(start)

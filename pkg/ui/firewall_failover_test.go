@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
@@ -64,8 +65,9 @@ func TestFirewall_FailoverComposesForTheReplacement(t *testing.T) {
 	db.Close()
 
 	stale := executor.FirewallRules{AllowCIDRs: []string{"10.0.0.0/8"}, AllowPorts: []int{22}}
-	ev := executor.FailoverEvent{From: "gone", To: target.id, Session: executor.Session{ID: "s-1",
-		Spec: executor.Spec{WorkDir: dir, Argv: []string{"cloop", "run"}, EgressRules: &stale}}}
+	ev := executor.FailoverEvent{From: "gone", To: target.id,
+		Session: claimedSession(t, dir, executor.Session{ID: "s-1", ExecutorID: "gone",
+			Spec: executor.Spec{WorkDir: dir, Argv: []string{"cloop", "run"}, EgressRules: &stale}})}
 	_ = redispatchSession(context.Background(), dir, ev)
 	select {
 	case got := <-target.got:
@@ -76,4 +78,29 @@ func TestFirewall_FailoverComposesForTheReplacement(t *testing.T) {
 	default:
 		t.Fatal("the replacement was never started")
 	}
+}
+
+// claimedSession records sess as dispatched and claims it for failover, the
+// state a re-dispatch requires of the session it is handed (Task 20391).
+func claimedSession(t *testing.T, dir string, sess executor.Session) executor.Session {
+	t.Helper()
+	sched, db, err := newScheduler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if sess.ClaimToken == "" {
+		sess.ClaimToken = "tok-" + sess.ID
+	}
+	if err := sched.OpenSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	claimed, exhausted, err := sched.ClaimRequeue(sess.ID, sess.ClaimToken, executor.DefaultMaxFailoverAttempts, time.Now())
+	if err != nil || exhausted {
+		t.Fatalf("claim = exhausted %v, %v", exhausted, err)
+	}
+	// The stored spec is the persisted, redacted copy; the test's own spec is
+	// what the event carries, as the supervisor's does.
+	claimed.Spec = sess.Spec
+	return claimed
 }

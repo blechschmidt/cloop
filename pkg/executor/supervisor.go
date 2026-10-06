@@ -91,9 +91,17 @@ type Session struct {
 	// supervisor, or from this one after a restart — finds a token that no
 	// longer matches and is refused with ErrSessionClaimLost.
 	ClaimToken string `json:"claim_token"`
-	// Attempt counts dispatches, starting at 1.
+	// Attempt counts dispatches, starting at 1: a session that has been
+	// re-dispatched n times carries n+1. The failover cap is checked against
+	// it inside the claim (see SessionStore.ClaimRequeue).
 	Attempt   int       `json:"attempt"`
 	StartedAt time.Time `json:"started_at"`
+	// RunningTasks are the tasks the workload announced it was working on,
+	// as last observed by the control plane (Task 20391). A run on an
+	// executor that does not share the hub's filesystem works on a copy of
+	// the project, so the hub's own plan cannot say which task a node died
+	// under; this can. Empty when nothing was observed.
+	RunningTasks []int `json:"running_tasks,omitempty"`
 	// Spec is the workload the session was dispatched with, so a failover
 	// can re-dispatch it verbatim. It is persisted rather than held in
 	// memory precisely because the control plane that requeues a session is
@@ -107,12 +115,22 @@ type SessionStore interface {
 	// executor. Passing "" returns every running session.
 	RunningSessions(executorID string) ([]Session, error)
 	// ClaimRequeue atomically transfers ownership of a session away from its
-	// current claim token, returning the session with its new token.
+	// current claim token, returning the session with its new token, and
+	// decides in the same write whether the failover may re-dispatch it.
 	//
 	// It must be a single conditional write ("UPDATE ... WHERE id = ? AND
 	// claim_token = ?"): that is the entire double-execution guard. It
 	// returns ErrSessionClaimLost when the token no longer matches.
-	ClaimRequeue(sessionID, claimToken string, at time.Time) (Session, error)
+	//
+	// maxAttempts is the failover cap (Task 20391): how many times one
+	// dispatch may be started again elsewhere. A session whose Attempt
+	// already exceeds it — it has been re-dispatched maxAttempts times — is
+	// claimed as exhausted rather than requeued, and exhausted reports so.
+	// The cap belongs in the claim and not before it: decided outside, two
+	// supervisors could each read the session as eligible, or one could close
+	// it while another re-dispatched it, and the session's terminal state
+	// would record whichever wrote last rather than what was decided.
+	ClaimRequeue(sessionID, claimToken string, maxAttempts int, at time.Time) (claimed Session, exhausted bool, err error)
 	// CountRunning returns the number of in-flight sessions on an executor,
 	// which drain waits on and the UI displays.
 	CountRunning(executorID string) (int, error)
@@ -134,25 +152,50 @@ type FailoverEvent struct {
 	Session Session `json:"session"`
 	// From is the executor that went unreachable.
 	From string `json:"from"`
-	// To is the replacement executor, or "" when none was found.
+	// Unreachable is when From was found unreachable: the transition's time.
+	Unreachable time.Time `json:"unreachable_at,omitempty"`
+	// To is the replacement executor, or "" when none was found or the
+	// session is exhausted.
 	To string `json:"to,omitempty"`
-	// Err is set when placement or re-dispatch failed. The task is still
-	// marked failed-with-retry; it just has nowhere to go right now.
+	// Exhausted reports that the claim found the session had already been
+	// re-dispatched MaxAttempts times (Task 20391): nothing re-dispatches it,
+	// and the store closed it as failover_exhausted.
+	Exhausted bool `json:"exhausted,omitempty"`
+	// MaxAttempts is the failover cap the claim was decided under.
+	MaxAttempts int `json:"max_attempts"`
+	// Err is set when the session is exhausted, or placement or re-dispatch
+	// failed. The handler still settles the session's tasks; the work just
+	// has nowhere to go.
 	Err error `json:"-"`
 	// Reason renders Err for the event payload.
 	Reason string    `json:"reason,omitempty"`
 	At     time.Time `json:"at"`
 }
 
-// FailoverHandler re-dispatches a claimed session. It is supplied by the
-// control plane (pkg/ui) because only that layer knows how to mark a task
-// failed-with-retry and start a fresh run.
+// FailoverHandler settles a claimed session. It is supplied by the control
+// plane (pkg/ui) because only that layer knows how to mark a task
+// failed-with-retry, fail one for good, and start a fresh run.
 //
-// It is called *after* the claim succeeds, so it is guaranteed to run at most
-// once per session per failure. Returning an error records the failover as
-// unplaced; it does not release the claim, because releasing it would re-arm
-// the double-execution risk the claim exists to prevent.
+// It is called for every claimed session — placed (ev.To set, ev.Err nil),
+// unplaced (ev.To empty, ev.Err the placement failure) and exhausted
+// (ev.Exhausted) — and it re-dispatches only the first. It is called *after*
+// the claim succeeds, so it is guaranteed to run at most once per session per
+// failure. Returning an error records the failover as unplaced; it does not
+// release the claim, because releasing it would re-arm the double-execution
+// risk the claim exists to prevent.
 type FailoverHandler func(ctx context.Context, ev FailoverEvent) error
+
+// DefaultMaxFailoverAttempts is how many times a session is re-dispatched
+// after the executor running it went unreachable, when nothing configures it
+// (executors.failover.max_attempts). Two replacements: enough to ride out one
+// flaky node and one unlucky placement, and few enough that a workload that
+// takes down every node it lands on costs a fleet three nodes, not all of
+// them.
+const DefaultMaxFailoverAttempts = 2
+
+// MaxFailoverAttemptsCeiling is the most executors.failover.max_attempts may
+// be. Each attempt is one more node a node-killing workload can take down.
+const MaxFailoverAttemptsCeiling = 10
 
 // SupervisorConfig tunes probing. The zero value is usable; DefaultSupervisorConfig
 // spells out the defaults.
@@ -238,6 +281,10 @@ type Supervisor struct {
 	// at all. See WithProbeFilter.
 	probeFilter func(Executor) bool
 
+	// failoverLimit supplies the failover cap at each claim. Nil uses
+	// DefaultMaxFailoverAttempts. See WithFailoverLimit.
+	failoverLimit func() int
+
 	mu        sync.Mutex
 	nextProbe map[string]time.Time // executor ID → earliest next probe
 	running   bool
@@ -297,6 +344,31 @@ func WithProbeFilter(fn func(Executor) bool) SupervisorOption {
 // WithCandidateSource overrides how the failover placement pool is assembled.
 func WithCandidateSource(fn func() []Candidate) SupervisorOption {
 	return func(sv *Supervisor) { sv.candidates = fn }
+}
+
+// WithFailoverLimit supplies the failover cap — executors.failover.max_attempts
+// — read at each claim rather than once at start (Task 20391), so an operator
+// who lowers it sees the next failover honour it without a restart.
+//
+// A value outside [0, MaxFailoverAttemptsCeiling] is clamped into it: the cap
+// is a bound, and no reading of a bad value may be "no bound".
+func WithFailoverLimit(fn func() int) SupervisorOption {
+	return func(sv *Supervisor) { sv.failoverLimit = fn }
+}
+
+// maxFailoverAttempts is the cap in force for the next claim.
+func (sv *Supervisor) maxFailoverAttempts() int {
+	if sv.failoverLimit == nil {
+		return DefaultMaxFailoverAttempts
+	}
+	n := sv.failoverLimit()
+	switch {
+	case n < 0:
+		return 0
+	case n > MaxFailoverAttemptsCeiling:
+		return MaxFailoverAttemptsCeiling
+	}
+	return n
 }
 
 // NewSupervisor builds a supervisor over reg. A nil registry uses
@@ -595,10 +667,19 @@ func (sv *Supervisor) failOver(ctx context.Context, tr Transition) {
 	}
 }
 
+// failOverSession claims one stranded session and settles it.
+//
+// The claim decides everything this function does afterwards: whether this
+// supervisor acts at all (it lost the race, or it did not), and whether the
+// session may be re-dispatched or has used up executors.failover.max_attempts
+// (Task 20391). Both are one conditional write in the store, so two
+// supervisors — two hub members, or one hub restarted mid-failover — cannot
+// disagree about either.
 func (sv *Supervisor) failOverSession(ctx context.Context, tr Transition, sess Session) {
 	now := sv.clock.Now()
+	limit := sv.maxFailoverAttempts()
 
-	claimed, err := sv.sessions.ClaimRequeue(sess.ID, sess.ClaimToken, now)
+	claimed, exhausted, err := sv.sessions.ClaimRequeue(sess.ID, sess.ClaimToken, limit, now)
 	if err != nil {
 		// ErrSessionClaimLost is the normal outcome of a race and is not
 		// worth logging: it means the guard worked.
@@ -608,18 +689,29 @@ func (sv *Supervisor) failOverSession(ctx context.Context, tr Transition, sess S
 		return
 	}
 
-	ev := FailoverEvent{Session: claimed, From: tr.ExecutorID, At: now}
+	ev := FailoverEvent{
+		Session: claimed, From: tr.ExecutorID, Unreachable: tr.At,
+		MaxAttempts: limit, At: now,
+	}
 
-	target, placeErr := sv.placeReplacement(tr.ExecutorID, claimed)
-	if placeErr != nil {
+	if exhausted {
+		// Past the cap no placement is even attempted: a replacement chosen
+		// now is a node this workload would be handed next.
+		ev.Exhausted = true
+		ev.Err = fmt.Errorf("%w: session %s was re-dispatched %d time(s), the most executors.failover.max_attempts (%d) allows",
+			ErrFailoverExhausted, claimed.ID, redispatchesOf(claimed), limit)
+		ev.Reason = ev.Err.Error()
+	} else if target, placeErr := sv.placeReplacement(tr.ExecutorID, claimed); placeErr != nil {
 		ev.Err = placeErr
 		ev.Reason = placeErr.Error()
 	} else {
 		ev.To = target.ID()
 	}
 
-	if ev.Err == nil && sv.failover != nil {
-		if err := sv.failover(ctx, ev); err != nil {
+	// The handler settles every claimed session — it is what marks the tasks
+	// a lost node was running — and re-dispatches only a placed one.
+	if sv.failover != nil {
+		if err := sv.failover(ctx, ev); err != nil && ev.Err == nil {
 			ev.Err = err
 			ev.Reason = err.Error()
 		}
@@ -627,6 +719,15 @@ func (sv *Supervisor) failOverSession(ctx context.Context, tr Transition, sess S
 	if sv.sink != nil {
 		sv.sink.ExecutorFailover(ev)
 	}
+}
+
+// redispatchesOf is how many times a session has been started again
+// elsewhere: its attempt number less the original dispatch.
+func redispatchesOf(s Session) int {
+	if s.Attempt <= 1 {
+		return 0
+	}
+	return s.Attempt - 1
 }
 
 // placeReplacement picks a healthy node for a requeued session, excluding the

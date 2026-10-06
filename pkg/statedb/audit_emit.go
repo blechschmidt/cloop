@@ -105,6 +105,69 @@ func AuditTaskStatus(d *DB, taskID int, oldStatus, newStatus, actor string) {
 	})
 }
 
+// AuditTaskQuarantine records a task marked as a suspected node killer (Task
+// 20391). It belongs in the project's chain: d must be the project's handle.
+func AuditTaskQuarantine(d *DB, t *pm.Task, q pm.TaskQuarantine, actor string) {
+	if t == nil {
+		return
+	}
+	if actor == "" {
+		actor = "failover"
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionTaskQuarantine),
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", t.ID),
+		Payload: MarshalAuditPayload(map[string]any{
+			"task_id": t.ID,
+			"title":   t.Title,
+			"kind":    q.Kind,
+			"nodes":   auditNodeLosses(q.Nodes),
+			"reason":  truncateReason(q.Reason),
+		}),
+	})
+}
+
+// AuditTaskQuarantineRelease records an explicit reset releasing a suspected
+// node killer. via names the reset; actor is who pressed it.
+func AuditTaskQuarantineRelease(d *DB, taskID int, q pm.TaskQuarantine, actor, via string) {
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{
+		"task_id": taskID,
+		"kind":    q.Kind,
+		"nodes":   auditNodeLosses(q.Nodes),
+		"via":     via,
+	}
+	if !q.MarkedAt.IsZero() {
+		payload["marked_at"] = q.MarkedAt.UTC().Format(time.RFC3339Nano)
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionTaskQuarantineRelease),
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", taskID),
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
+// auditNodeLosses renders losses for an audit payload: executor and time, the
+// two things a detection rule keys on. Session ids stay out — they are the
+// control plane's join key, not the project's.
+func auditNodeLosses(losses []pm.NodeLoss) []map[string]string {
+	out := make([]map[string]string, 0, len(losses))
+	for _, l := range pm.SortNodeLosses(losses) {
+		n := map[string]string{"executor_id": l.ExecutorID}
+		if !l.LostAt.IsZero() {
+			n["unreachable_at"] = l.LostAt.UTC().Format(time.RFC3339Nano)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 func auditStepAppend(d *DB, row StepRow, actor string) {
 	if actor == "" {
 		actor = "orchestrator"

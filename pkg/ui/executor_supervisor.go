@@ -26,11 +26,12 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
-	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -98,6 +99,9 @@ func startExecutorSupervisor(dir string) {
 		executor.WithSessionStore(sched),
 		executor.WithEventSink(sched),
 		executor.WithFailoverHandler(failoverHandler(dir)),
+		// The cap is read from the hub's configuration at each claim (Task
+		// 20391): hub-scope, so a per-instance overlay applies.
+		executor.WithFailoverLimit(failoverLimit),
 		// One process speaks for each executor (Task 20354). Nil — probe
 		// everything — for a standalone hub.
 		executor.WithProbeFilter(clusterProbeFilter(currentCluster())),
@@ -198,6 +202,41 @@ func closeSession(dir, sessionID, state string) {
 	}
 }
 
+// runProgressMinWrite is the least time between two writes of one session's
+// running-task record, in nanoseconds. Atomic so a test can lower it while
+// other tests' watchers read it.
+var runProgressMinWrite atomic.Int64
+
+func init() { runProgressMinWrite.Store(int64(time.Second)) }
+
+// recordRunningTasks stores the tasks a session's run last announced, for the
+// failover that needs them if the node is lost. Best-effort: a write that
+// fails costs the attribution of one failover, never the run.
+func recordRunningTasks(dir, sessionID string, tasks []int) {
+	sched, db, err := newScheduler(dir)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	if _, err := sched.SetRunningTasks(sessionID, tasks); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: record running tasks of session %s: %v\n", sessionID, err)
+	}
+}
+
+// recordedRunningTasks reads the tasks a session last recorded as running.
+func recordedRunningTasks(dir, sessionID string) []int {
+	sched, db, err := newScheduler(dir)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	tasks, err := sched.RunningTasksOf(sessionID)
+	if err != nil {
+		return nil
+	}
+	return tasks
+}
+
 // watchSessionExit closes a session when its workload reaches a terminal state.
 //
 // It mirrors wipeLeaseOnExit's strategy — subscribe to the stream, because the
@@ -217,8 +256,46 @@ func watchSessionExit(dir string, ex executor.Executor, handleID, sessionID stri
 
 	terminal := statedb.ExecutorSessionFinished
 	if lines, err := ex.Stream(ctx, handleID); err == nil {
-		for range lines {
-			// Another subscriber owns the content; we only need the close.
+		// Another subscriber owns the content. This one reads it for the
+		// close, and for which tasks the run says it is working on, which a
+		// failover needs if this node is lost (Task 20391). It starts from
+		// what the session already recorded, so a run this process adopted
+		// after a restart keeps its attribution until it announces more.
+		progress := runProgress{running: recordedRunningTasks(dir, sessionID)}
+		// A change is written at once when the last write is old enough, and
+		// otherwise by the next tick: a workload printing task headers as
+		// fast as it can must not turn each one into a database write.
+		var (
+			lastWrite time.Time
+			dirty     bool
+		)
+		flush := func() {
+			recordRunningTasks(dir, sessionID, progress.tasks())
+			lastWrite, dirty = time.Now(), false
+		}
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+	stream:
+		for {
+			select {
+			case line, ok := <-lines:
+				if !ok {
+					if dirty {
+						flush()
+					}
+					break stream
+				}
+				if progress.observe(line.Text) {
+					dirty = true
+					if time.Since(lastWrite) >= time.Duration(runProgressMinWrite.Load()) {
+						flush()
+					}
+				}
+			case <-tick.C:
+				if dirty {
+					flush()
+				}
+			}
 		}
 	} else {
 		ticker := time.NewTicker(5 * time.Second)
@@ -267,67 +344,53 @@ func watchSessionExit(dir string, ex executor.Executor, handleID, sessionID stri
 // By the time this runs the claim has already been won, so it is guaranteed to
 // execute at most once per session per failure. That is what makes it safe to
 // do something as consequential as starting a second agent run.
+//
+// It runs for every claimed session (Task 20391): one with a replacement, one
+// with nowhere to go, and one the claim found exhausted. All three have tasks
+// to settle — see settleFailover — and only the first is started again.
 func failoverHandler(dir string) executor.FailoverHandler {
 	return func(ctx context.Context, ev executor.FailoverEvent) error {
-		// Mark first, dispatch second. If the re-dispatch fails, the task is
-		// still visibly pending and a human can press Run; if the order were
-		// reversed and marking failed, a run would be in flight against a
-		// task the UI still shows as in-progress on a dead node.
-		if err := requeueTasksForFailover(ev); err != nil {
-			fmt.Fprintf(os.Stderr, "ui: failover mark tasks for %s: %v\n", ev.Session.ProjectPath, err)
+		// Settle first, dispatch second. If the re-dispatch fails, the tasks
+		// are still visibly pending and a human can press Run; if the order
+		// were reversed and settling failed, a run would be in flight against
+		// tasks the UI still shows as in progress on a dead node.
+		settleFailover(dir, ev)
+		if ev.Exhausted || ev.To == "" {
+			return ev.Err
 		}
 		return redispatchSession(ctx, dir, ev)
 	}
 }
 
-// requeueTasksForFailover returns the project's in-flight tasks to pending so
-// the replacement run picks them up.
-//
-// "Failed-with-retry" is what this means operationally: the attempt on the dead
-// node did fail, and the task is going to be retried. It is recorded as a
-// FailCount bump plus a return to pending rather than as TaskFailed, because
-// TaskFailed is a terminal state that the orchestrator will not re-run without
-// --retry-failed — and a task whose executor died deserves an automatic retry,
-// not a manual one.
-func requeueTasksForFailover(ev executor.FailoverEvent) error {
-	projectPath := ev.Session.ProjectPath
-	if projectPath == "" {
-		return nil
+// failoverLimit reads executors.failover.max_attempts from the hub's own
+// configuration, overlay included, at each claim — so an operator who lowers
+// it is obeyed by the next failover without a restart. A configuration that
+// cannot be read yields the default, never "no cap".
+func failoverLimit() int {
+	cfg, err := controlPlaneConfig()
+	if err != nil || cfg == nil {
+		return config.FailoverMaxAttemptsDefault
 	}
-	st, err := state.Load(projectPath)
+	return cfg.Executors.Failover.MaxRedispatches()
+}
+
+// requireRequeued refuses a re-dispatch of a session the store does not hold
+// as requeued, or one a failover has already replaced.
+func requireRequeued(dir, sessionID string) error {
+	sched, db, err := newScheduler(dir)
 	if err != nil {
-		return fmt.Errorf("load project state: %w", err)
+		return fmt.Errorf("failover: cannot confirm session %s may be re-dispatched: %w", sessionID, err)
 	}
-	if st == nil || st.Plan == nil {
-		return nil
+	defer db.Close()
+	st, replaced, err := sched.SessionState(sessionID)
+	if err != nil {
+		return fmt.Errorf("failover: cannot confirm session %s may be re-dispatched: %w", sessionID, err)
 	}
-
-	var requeued []int
-	for _, task := range st.Plan.Tasks {
-		if task.Status != pm.TaskInProgress {
-			continue
-		}
-		task.Status = pm.TaskPending
-		task.FailCount++
-		requeued = append(requeued, task.ID)
-	}
-	if len(requeued) == 0 {
-		return nil
-	}
-	if err := st.SaveDirect(); err != nil {
-		return fmt.Errorf("persist requeued tasks: %w", err)
-	}
-
-	for _, id := range requeued {
-		state.LogEventDetails(projectPath, state.EventRow{
-			Type:    statedb.EventTaskStatusChange,
-			TaskID:  id,
-			Message: fmt.Sprintf("executor %s became unreachable; task requeued for retry", ev.From),
-		}, map[string]any{
-			"executor":   ev.From,
-			"session_id": ev.Session.ID,
-			"failover":   true,
-		})
+	switch {
+	case st != statedb.ExecutorSessionRequeued:
+		return fmt.Errorf("failover: session %s is %s, not requeued; nothing re-dispatches it", sessionID, st)
+	case replaced:
+		return fmt.Errorf("failover: session %s has already been re-dispatched", sessionID)
 	}
 	return nil
 }
@@ -337,6 +400,16 @@ func requeueTasksForFailover(ev executor.FailoverEvent) error {
 func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent) error {
 	if ev.To == "" {
 		return fmt.Errorf("failover: no replacement executor for session %s", ev.Session.ID)
+	}
+	if ev.Exhausted {
+		return fmt.Errorf("failover: session %s is exhausted; nothing re-dispatches it", ev.Session.ID)
+	}
+	// The claim's record, not the event, decides (Task 20391). The event can
+	// arrive from another hub member (agentOpRedispatch), and whatever it
+	// says, a session the claim closed as failover_exhausted — or one already
+	// replaced — is never started again here.
+	if err := requireRequeued(dir, ev.Session.ID); err != nil {
+		return err
 	}
 	// A replacement that is an edge agent connected to another hub member
 	// can only be started there (Task 20354).

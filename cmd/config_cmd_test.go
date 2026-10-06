@@ -258,3 +258,37 @@ func TestApplyConfigKey_AllowHostProcess(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyConfigKey_FailoverMaxAttempts: the failover cap (Task 20391) is
+// refused out of band rather than clamped, 0 is a real setting ("never
+// re-dispatch"), and an empty value clears the key back to the default instead
+// of parsing as 0 — which would turn failover off by accident.
+func TestApplyConfigKey_FailoverMaxAttempts(t *testing.T) {
+	for _, v := range []string{"0", "2", " 7 ", "10"} {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, "executors.failover.max_attempts", v); err != nil {
+			t.Fatalf("applyConfigKey(%q): %v", v, err)
+		}
+		if cfg.Executors.Failover.MaxAttempts == nil {
+			t.Fatalf("%q was not recorded", v)
+		}
+		if err := cfg.ValidateNumeric(); err != nil {
+			t.Errorf("%q passed the key and failed ValidateNumeric: %v", v, err)
+		}
+	}
+	for _, v := range []string{"-1", "11", "1000", "two", "2.5"} {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, "executors.failover.max_attempts", v); err == nil {
+			t.Errorf("applyConfigKey accepted %q", v)
+		}
+	}
+	cfg := config.Default()
+	three := 3
+	cfg.Executors.Failover.MaxAttempts = &three
+	if err := applyConfigKey(cfg, "executors.failover.max_attempts", ""); err != nil {
+		t.Fatalf("clearing the key: %v", err)
+	}
+	if cfg.Executors.Failover.MaxAttempts != nil || cfg.Executors.Failover.MaxRedispatches() != config.FailoverMaxAttemptsDefault {
+		t.Errorf("an empty value left the cap at %v, want it cleared to the default", cfg.Executors.Failover.MaxAttempts)
+	}
+}

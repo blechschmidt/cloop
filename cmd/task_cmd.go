@@ -696,7 +696,29 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 	dimColor := color.New(color.Faint)
 	fmt.Printf("Task %d: %s — %s", id, task.Title, verb)
 	dimColor.Printf(" (was: %s)\n", old)
+
+	// A reset is the explicit act that releases a suspected node killer
+	// (Task 20391) — after the status is saved, so a release can never leave
+	// a failed task unmarked for --retry-failed to pick up.
+	if status == pm.TaskPending {
+		released, err := state.ReleaseQuarantine(workdir, id, operatorActor(), "cloop task reset")
+		if err != nil {
+			return err
+		}
+		reportReleasedQuarantine(id, released)
+	}
 	return nil
+}
+
+// reportReleasedQuarantine tells the operator a reset released a suspected
+// node killer, naming the nodes it went down under, so the decision to run it
+// again is made knowing what it was.
+func reportReleasedQuarantine(id int, mark *pm.TaskQuarantine) {
+	if mark == nil {
+		return
+	}
+	color.New(color.FgYellow).Printf("Task %d was quarantined as a suspected node killer (%s); "+
+		"the reset released it and it may run again.\n", id, pm.DescribeNodeLosses(mark.Nodes))
 }
 
 func printTaskListFiltered(plan *pm.Plan, tagFilter []string) {

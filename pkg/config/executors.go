@@ -215,6 +215,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 		return fmt.Errorf("executors.write_back: %q is not a write-back mode; use %q, or leave it unset "+
 			"so runs return no work", v, WriteBackPush)
 	}
+	if v := e.Failover.MaxAttempts; v != nil && !ValidFailoverMaxAttempts(*v) {
+		return FailoverMaxAttemptsError(*v)
+	}
 	if e.FeatureBundleMB < 0 || e.FeatureBundleMB > MaxFeatureBundleMB {
 		return fmt.Errorf("executors.feature_bundle_mb: %d is outside 0..%d (0 uses the default of 32)",
 			e.FeatureBundleMB, MaxFeatureBundleMB)

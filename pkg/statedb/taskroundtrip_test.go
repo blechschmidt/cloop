@@ -28,6 +28,10 @@ var notPlanTaskColumns = map[string]string{
 	"ChainInput": "derived: a copy of the chained predecessor's output, up to 16 MiB, which the " +
 		"orchestrator reads again when it dispatches the chained task (ensureChainInput) rather " +
 		"than rewriting it into every save",
+	"Quarantine": "task_quarantine, written only by the failover that marks a suspected node killer and " +
+		"deleted only by the explicit reset that releases it (Task 20391); the readers join it in, and " +
+		"neither SaveState nor UpsertTask writes it, so a run saving a copy loaded before the mark can " +
+		"neither erase it nor write one back (TestQuarantineSurvivesAStaleSave)",
 }
 
 // TestEveryTaskFieldSurvivesTheDatabase saves a task with every field set and

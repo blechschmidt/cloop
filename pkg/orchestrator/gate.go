@@ -40,6 +40,10 @@ const (
 	// GateConditionError records an evaluator failure. The task still runs:
 	// a transient provider outage must not silently skip work.
 	GateConditionError GateEventKind = "condition_error"
+	// GateHoldQuarantined records a pending task held back because it is
+	// quarantined as a suspected node killer (Task 20391). Its status is left
+	// alone: it waits, visibly pending, for the explicit reset that releases it.
+	GateHoldQuarantined GateEventKind = "hold_quarantined"
 )
 
 // GateEvent is one decision the gate made about one task, carrying both the
@@ -126,7 +130,8 @@ func (d GateDecision) SkippedIDs() []int {
 
 // GateTasks decides what runs next. It applies, in order:
 //
-//  1. Eligibility — pending tasks whose dependencies are all done or skipped.
+//  1. Eligibility — pending tasks whose dependencies are all done or skipped,
+//     and which are not quarantined as suspected node killers.
 //  2. The blocked sweep — only when nothing is eligible, so a task whose
 //     failed dependency is still being healed is not skipped prematurely.
 //  3. Selection — every eligible task in parallel mode, otherwise the single
@@ -147,6 +152,31 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 	// (1) Eligibility. ReadyTasks is pending && DepsReady in plan order.
 	eligible := plan.ReadyTasks()
 
+	// A quarantined task never runs, whatever its status (Task 20391). It
+	// fails when it is marked, and the explicit reset that returns it to
+	// pending is the one thing that clears the mark — so a quarantined task
+	// that is pending got there some other way: --retry-failed on a build that
+	// predates the mark, a hand edit, a plan import. Running it would hand the
+	// next node the workload two nodes already went down under.
+	if held := quarantinedOf(eligible); len(held) > 0 {
+		kept := make([]*pm.Task, 0, len(eligible)-len(held))
+		for _, t := range eligible {
+			if !t.Quarantined() {
+				kept = append(kept, t)
+			}
+		}
+		eligible = kept
+		for _, t := range held {
+			d.Events = append(d.Events, GateEvent{
+				Kind: GateHoldQuarantined,
+				Task: t,
+				Line: fmt.Sprintf("  Task %d is held: quarantined as a suspected node killer (%s). "+
+					"Reset it (`cloop task reset %d`) to run it again.\n",
+					t.ID, pm.DescribeNodeLosses(t.Quarantine.Nodes), t.ID),
+			})
+		}
+	}
+
 	// (2) The blocked sweep runs only when nothing is eligible. This is the
 	// sequential path's trigger, adopted for both: the parallel path used to
 	// sweep on every iteration, which skips a dependent task the moment its
@@ -156,12 +186,17 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 	// PermanentlyBlocked only ever becomes true, never false, for a task whose
 	// dependency stays failed.
 	if len(eligible) == 0 {
+		swept := 0
 		for _, t := range plan.Tasks {
 			if t.Status == pm.TaskPending && plan.PermanentlyBlocked(t) {
 				d.Events = append(d.Events, applySkip(blockedSkip(t)))
+				swept++
 			}
 		}
-		d.Exhausted = len(d.Events) == 0
+		// Exhausted when the sweep changed nothing. Counted from the sweep
+		// alone: a held quarantined task is an event too, and counting it
+		// would keep the caller looping over a plan with nothing it may run.
+		d.Exhausted = swept == 0
 		return d
 	}
 
@@ -220,6 +255,17 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 
 	d.Runnable = kept
 	return d
+}
+
+// quarantinedOf returns the quarantined tasks among ts.
+func quarantinedOf(ts []*pm.Task) []*pm.Task {
+	var out []*pm.Task
+	for _, t := range ts {
+		if t.Quarantined() {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // gateConfig builds the gate's view of the run configuration. Both PM paths

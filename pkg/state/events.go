@@ -63,6 +63,7 @@ const (
 	EventFirewall          = statedb.EventFirewall
 	EventCredentialRefresh = statedb.EventCredentialRefresh
 	EventEgress            = statedb.EventEgress
+	EventFailover          = statedb.EventFailover
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
 )

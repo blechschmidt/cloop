@@ -635,6 +635,10 @@ type ExecutorsConfig struct {
 	// silently re-enabling a sweep they had turned off.
 	OrphanSweepIntervalMinutes *int `yaml:"orphan_sweep_interval_minutes,omitempty"`
 
+	// Failover bounds how often the hub moves a workload off an executor that
+	// stopped answering onto another one (Task 20391). See FailoverConfig.
+	Failover FailoverConfig `yaml:"failover,omitempty"`
+
 	// FeatureBundleMB caps the git bundles a feature run on an isolating
 	// executor moves (Task 20367): the feature's branch shipped to the
 	// sandbox, and the work the run returns. 0 uses the default of 32; the
@@ -959,6 +963,66 @@ func (e ExecutorsConfig) ApplyRatchets() {
 	if ceiling, err := e.Limits.Ceiling(); err == nil {
 		executor.ApplyResourceCeiling(ceiling)
 	}
+}
+
+// FailoverConfig bounds executor failover (Task 20391).
+//
+// When an executor stops answering while it holds a workload, the hub's
+// supervisor claims the workload's session and starts it again on another
+// executor. Before this section that happened with no ceiling, so a workload
+// that itself takes its node down — a fork bomb, a memory hog, a module that
+// panics the kernel — was carried to the next healthy node, and the next,
+// until it had taken down every enrolled device in turn.
+type FailoverConfig struct {
+	// MaxAttempts is how many times one dispatch may be started again
+	// elsewhere after the executor running it went unreachable. Absent means
+	// FailoverMaxAttemptsDefault (2); 0 turns re-dispatch off, so the first
+	// lost node ends the run. Past the cap nothing re-dispatches: the session
+	// closes as failover_exhausted and the tasks it was running fail with the
+	// nodes that went down named in the reason.
+	//
+	// Checked inside the claim that makes a failover exactly-once, so of two
+	// supervisors or hub members racing for one session, the one that wins
+	// decides, and the other has nothing left to decide. A hub-scope key: a
+	// per-instance overlay may set it for one hub alone.
+	//
+	// A *int for the reason OrphanSweepIntervalMinutes is one: absent and an
+	// explicit 0 are different intentions, and a plain int with omitempty
+	// would drop an operator's deliberate 0 on the next Save — silently
+	// turning re-dispatch back on.
+	MaxAttempts *int `yaml:"max_attempts,omitempty"`
+}
+
+// Bounds of executors.failover.max_attempts. The ceiling is not a claim about
+// fleets: each re-dispatch is one more node a node-killing workload can take
+// down, and ten is already more than any fleet should be asked to sacrifice
+// to one run.
+const (
+	FailoverMaxAttemptsDefault = executor.DefaultMaxFailoverAttempts
+	FailoverMaxAttemptsLower   = 0
+	FailoverMaxAttemptsUpper   = executor.MaxFailoverAttemptsCeiling
+)
+
+// ValidFailoverMaxAttempts reports whether v may be stored as
+// executors.failover.max_attempts.
+func ValidFailoverMaxAttempts(v int) bool {
+	return v >= FailoverMaxAttemptsLower && v <= FailoverMaxAttemptsUpper
+}
+
+// FailoverMaxAttemptsError is the refusal every writer of
+// executors.failover.max_attempts returns for a value outside its band.
+func FailoverMaxAttemptsError(v int) error {
+	return fmt.Errorf("executors.failover.max_attempts must be between %d (no re-dispatch) and %d (got %d); "+
+		"unset, it is %d", FailoverMaxAttemptsLower, FailoverMaxAttemptsUpper, v, FailoverMaxAttemptsDefault)
+}
+
+// MaxRedispatches is the effective cap: the configured value, or the default
+// when it is unset or — defensively, since Load repairs it — out of band.
+func (f FailoverConfig) MaxRedispatches() int {
+	if f.MaxAttempts == nil || !ValidFailoverMaxAttempts(*f.MaxAttempts) {
+		return FailoverMaxAttemptsDefault
+	}
+	return *f.MaxAttempts
 }
 
 // MaxFeatureBundleMB is the most executors.feature_bundle_mb may be: the hard
@@ -3119,6 +3183,14 @@ func (c *Config) validateAndClamp(path string) {
 		warn("orchestrator.min_free_disk_mb", fmt.Sprintf("value %d outside [%d, %d] (use 0 to turn the check off); using the default %d",
 			*v, MinFreeDiskMBLower, MinFreeDiskMBUpper, MinFreeDiskMBDefault))
 		c.Orchestrator.MinFreeDiskMB = nil
+	}
+	// executors.failover.max_attempts: 0 ("no re-dispatch") is honoured;
+	// anything outside the band goes back to unset, the default cap. Never to
+	// "no cap": an unbounded failover is the defect this key exists to close.
+	if v := c.Executors.Failover.MaxAttempts; v != nil && !ValidFailoverMaxAttempts(*v) {
+		warn("executors.failover.max_attempts", fmt.Sprintf("value %d outside [%d, %d]",
+			*v, FailoverMaxAttemptsLower, FailoverMaxAttemptsUpper))
+		c.Executors.Failover.MaxAttempts = nil
 	}
 	// The executor sections below are clamped by their own functions, which
 	// report a repair as "field: detail". Some repairs switch a section off

@@ -182,6 +182,17 @@ func bulkStatusFn(newStatus pm.TaskStatus, verb string) func(*cobra.Command, []s
 		for i, t := range targets {
 			auditManualTaskStatus(workdir, t.ID, priorStatus[i], newStatus)
 		}
+		// A bulk reset is as explicit as a single one (Task 20391): it
+		// releases every suspected node killer it names.
+		if newStatus == pm.TaskPending {
+			for _, t := range targets {
+				released, err := state.ReleaseQuarantine(workdir, t.ID, operatorActor(), "cloop task bulk reset")
+				if err != nil {
+					return err
+				}
+				reportReleasedQuarantine(t.ID, released)
+			}
+		}
 
 		green := color.New(color.FgGreen)
 		green.Printf("Bulk %s: %d task(s)\n", verb, len(targets))

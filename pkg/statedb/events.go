@@ -184,6 +184,17 @@ const (
 	// sight. It never carries the session's credential: the proxy URL is not
 	// written here, only its address.
 	EventEgress EventType = "egress"
+
+	// EventFailover records what executor failover did to the project's run
+	// and tasks (Task 20391): a lost node's tasks returned to pending for a
+	// retry, a task marked as a suspected node killer, a run that used up
+	// executors.failover.max_attempts and was not re-dispatched, and a
+	// quarantine an explicit reset released.
+	//
+	// On the project's journal because the cause — nodes going unreachable,
+	// the cap — is the hub's, and the effect, a task that failed or will not
+	// run, is what the developer sees.
+	EventFailover EventType = "failover"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

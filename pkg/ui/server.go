@@ -4275,7 +4275,19 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		// hand left no row in it naming who did the killing.
 		s.auditTaskStatus(r, workDir, req.ID, oldStatus, req.Status)
 	}
-	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status})
+	// A reset from the dashboard is the explicit act that releases a
+	// suspected node killer (Task 20391) — after the status is saved, so a
+	// release can never leave a failed task unmarked for --retry-failed.
+	released := false
+	if newStatus == pm.TaskPending {
+		mark, err := state.ReleaseQuarantine(workDir, req.ID, s.auditActor(r), "dashboard")
+		if err != nil {
+			jsonErr(w, "status saved, but the quarantine could not be released: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		released = mark != nil
+	}
+	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status, "released_quarantine": released})
 }
 
 // handleTaskMove reorders a task up or down by swapping priorities.
