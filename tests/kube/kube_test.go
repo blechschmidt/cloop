@@ -175,8 +175,8 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	kubeconfigPayload := targetKubeconfig(ctx, t, x)
 
 	// ── 5. The release, with both monitors on ──────────────────────────────
-	nodeCIDR := strings.TrimSpace(x.kubectl(ctx, "get", "nodes", "-o", "jsonpath={.items[0].spec.podCIDR}"))
-	hubIP := strings.TrimSpace(x.kubectl(ctx, "get", "svc", "-n", ns, fullname, "-o", "jsonpath={.spec.clusterIP}"))
+	nodeCIDR := x.out(ctx, "get", "nodes", "-o", "jsonpath={.items[0].spec.podCIDR}")
+	hubIP := x.out(ctx, "get", "svc", "-n", ns, fullname, "-o", "jsonpath={.spec.clusterIP}")
 	if nodeCIDR == "" || hubIP == "" {
 		t.Fatalf("could not read the pod CIDR (%q) or the hub's ClusterIP (%q)", nodeCIDR, hubIP)
 	}
@@ -210,9 +210,12 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 
 	// ── 7. Grants, through the hub's API ───────────────────────────────────
 	hub := hubClient{t: t, base: x.portForward(ns, fullname, 8080), http: &http.Client{Timeout: time.Minute}}
-	hub.token = strings.TrimSpace(x.kubectl(ctx, "exec", "-n", ns, "deploy/"+fullname, "--",
+	hub.token = x.out(ctx, "exec", "-n", ns, "deploy/"+fullname, "--",
 		"/usr/local/bin/cloop", "hub", "token", "create", "kube-e2e-"+stamp, "--role", "admin",
-		"--expires-in", "2h", "--quiet"))
+		"--expires-in", "2h", "--quiet")
+	if !strings.HasPrefix(hub.token, "cloop_pat_") || strings.ContainsAny(hub.token, " \n") {
+		t.Fatalf("cloop hub token create printed something other than a token (%d bytes)", len(hub.token))
+	}
 	idx := projectIndex(t, hub, projectDir)
 	hub.must("POST", fmt.Sprintf("/api/init?project_idx=%d", idx), map[string]any{
 		"goal": "Task 20385: prove the git proxy and the kube guard from a Pod", "provider": "claudecode",
@@ -483,9 +486,9 @@ func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertes
 				"ports": []any{map[string]any{"name": "https", "port": 443, "targetPort": 9443}}}},
 	)
 	x.kubectl(ctx, "rollout", "status", "-n", forgeNS, "deploy/forge", "--timeout=3m")
-	ip := strings.TrimSpace(x.kubectl(ctx, "get", "svc", "-n", forgeNS, "forge", "-o", "jsonpath={.spec.clusterIP}"))
-	pod := strings.TrimSpace(x.kubectl(ctx, "get", "pods", "-n", forgeNS, "-l", "app=cloop-e2e-forge",
-		"--field-selector=status.phase=Running", "-o", "jsonpath={.items[0].metadata.name}"))
+	ip := x.out(ctx, "get", "svc", "-n", forgeNS, "forge", "-o", "jsonpath={.spec.clusterIP}")
+	pod := x.out(ctx, "get", "pods", "-n", forgeNS, "-l", "app=cloop-e2e-forge",
+		"--field-selector=status.phase=Running", "-o", "jsonpath={.items[0].metadata.name}")
 	if ip == "" || pod == "" {
 		t.Fatalf("the forge has no ClusterIP (%q) or running Pod (%q)", ip, pod)
 	}
@@ -507,9 +510,9 @@ func targetKubeconfig(ctx context.Context, t *testing.T, x tool) string {
 			"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"},
 			"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": "e2e-editor", "namespace": targetNS}}},
 	)
-	token := strings.TrimSpace(x.kubectl(ctx, "create", "token", "e2e-editor", "-n", targetNS, "--duration=2h"))
-	caData := strings.TrimSpace(x.kubectl(ctx, "config", "view", "--raw", "--minify",
-		"-o", "jsonpath={.clusters[0].cluster.certificate-authority-data}"))
+	token := x.out(ctx, "create", "token", "e2e-editor", "-n", targetNS, "--duration=2h")
+	caData := x.out(ctx, "config", "view", "--raw", "--minify",
+		"-o", "jsonpath={.clusters[0].cluster.certificate-authority-data}")
 	if token == "" || caData == "" {
 		t.Fatal("could not mint a token for e2e-editor or read the cluster's CA")
 	}
@@ -553,8 +556,8 @@ func upgradeRelease(ctx context.Context, t *testing.T, x tool, release, ns, full
 func startStateHelper(ctx context.Context, t *testing.T, x tool, ns, fullname string, keep bool) string {
 	t.Helper()
 	name := "kube-e2e-state-helper"
-	hubNode := strings.TrimSpace(x.kubectl(ctx, "get", "pods", "-n", ns,
-		"-l", "app.kubernetes.io/name=cloop-hub", "-o", "jsonpath={.items[0].spec.nodeName}"))
+	hubNode := x.out(ctx, "get", "pods", "-n", ns,
+		"-l", "app.kubernetes.io/name=cloop-hub", "-o", "jsonpath={.items[0].spec.nodeName}")
 	x.apply(ctx, map[string]any{"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{"name": name, "namespace": ns},
 		"spec": map[string]any{
@@ -830,7 +833,7 @@ func infoValue(lines []string, key string) string {
 // repository rather than through any path under test.
 func forgeRefs(ctx context.Context, t *testing.T, x tool, forgePod, repo string) map[string]string {
 	t.Helper()
-	out := x.kubectl(ctx, "exec", "-n", forgeNS, forgePod, "--", "git", "--git-dir=/srv/git/"+repo+".git",
+	out := x.out(ctx, "exec", "-n", forgeNS, forgePod, "--", "git", "--git-dir=/srv/git/"+repo+".git",
 		"for-each-ref", "--format=%(refname) %(objectname)")
 	refs := map[string]string{}
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -917,7 +920,7 @@ func assertAudit(t *testing.T, hub hubClient, since time.Time, denied, allowed s
 
 func releaseValues(ctx context.Context, x tool, release, ns string) map[string]any {
 	x.t.Helper()
-	out, _ := x.run(ctx, nil, false, "helm", "get", "values", release, "-n", ns, "--all", "-o", "json")
+	out := x.stdout(ctx, "helm", "get", "values", release, "-n", ns, "--all", "-o", "json")
 	var v map[string]any
 	if err := json.Unmarshal([]byte(out), &v); err != nil {
 		x.t.Fatalf("helm get values %s: %v\n%s", release, err, tail(out, 10))

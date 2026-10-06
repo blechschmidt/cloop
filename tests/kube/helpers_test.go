@@ -46,6 +46,31 @@ func (x tool) run(ctx context.Context, stdin []byte, allowFail bool, name string
 	return out.String(), err
 }
 
+// stdout runs name args and returns its stdout alone, failing the test with
+// both streams when it fails. helm and kubectl both print warnings — a
+// group-readable kubeconfig, a deprecated API — on stderr, and a value the test
+// parses must not include them.
+func (x tool) stdout(ctx context.Context, name string, args ...string) string {
+	x.t.Helper()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(toolEnv(), "KUBECONFIG="+x.kubeconfig)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		x.t.Fatalf("%s %s: %v\n%s\n%s", name, strings.Join(redactArgs(args), " "), err,
+			tail(stdout.String(), 30), tail(stderr.String(), 30))
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+// out runs kubectl and returns its stdout alone — for a value the test parses,
+// which a warning on stderr must not become part of. On failure the test fails
+// with both streams.
+func (x tool) out(ctx context.Context, args ...string) string {
+	x.t.Helper()
+	return x.stdout(ctx, "kubectl", args...)
+}
+
 func (x tool) kubectl(ctx context.Context, args ...string) string {
 	x.t.Helper()
 	out, _ := x.run(ctx, nil, false, "kubectl", args...)
@@ -58,9 +83,20 @@ func (x tool) kubectlIn(ctx context.Context, stdin []byte, args ...string) strin
 	return out
 }
 
+// kubectlMay runs kubectl and returns its stdout and whether it succeeded,
+// without failing the test: for polling, where an error is a reason to look
+// again.
 func (x tool) kubectlMay(ctx context.Context, args ...string) (string, error) {
 	x.t.Helper()
-	return x.run(ctx, nil, true, "kubectl", args...)
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.Env = append(toolEnv(), "KUBECONFIG="+x.kubeconfig)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err != nil {
+		return stdout.String() + stderr.String(), err
+	}
+	return stdout.String(), nil
 }
 
 // apply submits objects (each a JSON-able value) with kubectl apply.

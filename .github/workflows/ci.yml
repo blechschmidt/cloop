@@ -1808,7 +1808,8 @@ jobs:
           CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
         run: |
           set -euo pipefail
-          kind get kubeconfig --name cloop-ci > "$RUNNER_TEMP/kubeconfig"
+          # 0600, or helm and kubectl warn on every call that it is readable.
+          (umask 077 && kind get kubeconfig --name cloop-ci > "$RUNNER_TEMP/kubeconfig")
           # The workload runs the cloop the hub image carries: the build under
           # test, and statically linked, so it runs on the harness's alpine.
           id=$(docker create cloop-hub:ci)
