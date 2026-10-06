@@ -29,6 +29,9 @@ function _pcAutoFollowChange() {
   const cb = document.getElementById('pcAutoFollow');
   _pcAutoFollow = !!(cb && cb.checked);
 }
+// The filter bar names both inline (oninput, onchange), so they have to be global.
+window._pcDebouncedReload = _pcDebouncedReload;
+window._pcAutoFollowChange = _pcAutoFollowChange;
 
 function _pcStatusBadge(status) {
   const map = {

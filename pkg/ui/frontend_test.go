@@ -322,7 +322,11 @@ var dashboardSource = func() string {
 // chase nested calls. JS keywords (`if`, `event`, `document`, `location`,
 // `window`, `return`) are filtered out.
 func extractOnclickHandlers(html string) map[string]struct{} {
-	re := regexp.MustCompile(`onclick="([a-zA-Z_$][a-zA-Z0-9_$]*)`)
+	// Every inline event attribute, not only onclick: an oninput or onchange
+	// naming a function the IIFE keeps to itself throws on every keystroke
+	// just the same, and four did — the KB search box, both Provider Calls
+	// filters and the init form's provider select (found in Task 20386).
+	re := regexp.MustCompile(`on(?:click|change|input|keydown|keyup|submit|blur|focus)="([a-zA-Z_$][a-zA-Z0-9_$]*)`)
 	out := map[string]struct{}{}
 	keywords := map[string]bool{
 		"if": true, "for": true, "while": true, "return": true,

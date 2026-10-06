@@ -43,6 +43,8 @@ function filterKBCards(q) {
   );
   renderKBCards(filtered);
 }
+// The search box names it inline (oninput), so it has to be global.
+window.filterKBCards = filterKBCards;
 
 window.toggleKBAddForm = function() {
   const form = document.getElementById('kbAddForm');

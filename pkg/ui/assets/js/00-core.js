@@ -402,6 +402,8 @@ function updateModelDropdown() {
   const models = providerModels[prov] || [{value:'', label:'(default)'}];
   sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
 }
+// The init form's provider select names it inline, so it has to be global.
+window.updateModelDropdown = updateModelDropdown;
 
 // Track current project's provider+model+effort for pre-populating the
 // Provider/Model picker modal opened from the Provider stat card.
