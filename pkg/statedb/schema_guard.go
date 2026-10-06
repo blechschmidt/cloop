@@ -169,8 +169,12 @@ func (e *SchemaTooNewError) blockers() string {
 		switch {
 		case s.Name != "" && s.Compat == CompatBreaking:
 			parts = append(parts, s.Name)
-		case s.Name != "":
+		case s.Name != "" && s.Compat == CompatUnknown:
 			parts = append(parts, s.Name+" (unclassified)")
+		case s.Name != "":
+			// A verdict a newer build records and this one predates, as
+			// additive-columns was to every build before Task 20388.
+			parts = append(parts, fmt.Sprintf("%s (recorded %q, a verdict this build does not know)", s.Name, s.Compat))
 		default:
 			parts = append(parts, fmt.Sprintf("v%d (unrecorded)", s.Version))
 		}
@@ -270,6 +274,14 @@ func checkNotFromFuture(db *sql.DB, current, latest int, allow bool) error {
 // a MAX, so a gap means the database knows something happened that it cannot
 // describe, and that is not a basis for relaxing a safety check.
 func breakingVersionsAhead(db *sql.DB, latest, current int) ([]SchemaStamp, error) {
+	return versionsAheadNotTolerated(db, latest, current, MigrationCompat.Tolerable)
+}
+
+// versionsAheadNotTolerated is breakingVersionsAhead for a given reading of
+// the verdicts. The guard passes MigrationCompat.Tolerable; a test passes the
+// reading an earlier build shipped with, to show what that build does with a
+// verdict it predates.
+func versionsAheadNotTolerated(db *sql.DB, latest, current int, tolerable func(MigrationCompat) bool) ([]SchemaStamp, error) {
 	has, err := hasColumn(db, "schema_migrations", "compat")
 	if err != nil {
 		return nil, err
@@ -300,7 +312,7 @@ func breakingVersionsAhead(db *sql.DB, latest, current int) ([]SchemaStamp, erro
 		}
 		seen[st.Version] = true
 		st.Compat = MigrationCompat(compat)
-		if !st.Compat.Tolerable() {
+		if !tolerable(st.Compat) {
 			blocking = append(blocking, st)
 		}
 	}

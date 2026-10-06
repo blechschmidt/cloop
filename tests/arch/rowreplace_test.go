@@ -64,9 +64,10 @@ import (
 //	"<file> <func>"          a replacing statement in that function
 //
 // A reason must say why no row is replaced — or, if one is, why it has to be,
-// and how a later ADD COLUMN on that table is kept from the builds that replace
-// its rows (pkg/statedb/schema_compat.go records what an older build may
-// open). TestRowReplaceAllowancesAreStillUsed rejects an entry nothing needs.
+// and that the table is added to rewrittenTables in
+// pkg/statedb/schema_compat.go, so that a later ADD COLUMN on it is recorded
+// additive-columns: the verdict the builds that replace its rows refuse.
+// TestRowReplaceAllowancesAreStillUsed rejects an entry nothing needs.
 var rowReplaceAllowed = map[string]string{}
 
 func TestNoWriterReplacesRows(t *testing.T) {
@@ -260,9 +261,10 @@ type rowReplacement struct {
 var (
 	// replacingSQL matches the statements that replace a row on conflict.
 	replacingSQL = regexp.MustCompile(`(?i)\b(INSERT\s+OR\s+REPLACE|REPLACE\s+INTO|UPDATE\s+OR\s+REPLACE|ON\s+CONFLICT\s+REPLACE)\b`)
-	// deleteSQL and insertSQL find the table a statement writes. A table name
-	// the literal does not contain — it ends at FROM or INTO, or carries a
-	// format verb there — is captured as "", which stands for every table.
+	// deleteSQL and insertSQL find the table a statement writes. When the
+	// literal does not name it — it ends at FROM or INTO, or carries a format
+	// verb there — the group captures nothing, and tableAt reads that as
+	// anyTable.
 	deleteSQL = regexp.MustCompile(`(?i)\bDELETE\s+FROM\s+(?:["` + "`" + `\[]?([A-Za-z_][A-Za-z0-9_]*)|%[a-z]|$)`)
 	insertSQL = regexp.MustCompile(`(?i)\b(?:INSERT\s+(?:OR\s+[A-Za-z]+\s+)?|REPLACE\s+)INTO\s+(?:["` + "`" + `\[]?([A-Za-z_][A-Za-z0-9_]*)|%[a-z]|$)`)
 )

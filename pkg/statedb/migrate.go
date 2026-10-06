@@ -251,7 +251,7 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 			if err := completeBaseline(db, migrations[0]); err != nil {
 				return nil, wrap(ErrSchemaMismatch, err)
 			}
-			if err := recordVersion(db, 1, "baseline (pre-framework adoption)", classifyMigration(migrations[0].SQL)); err != nil {
+			if err := recordVersion(db, 1, "baseline (pre-framework adoption)", migrationVerdict(migrations[0])); err != nil {
 				return nil, wrap(ErrSchemaMismatch, err)
 			}
 			report.BaselineApplied = true
@@ -483,7 +483,7 @@ func backfillCompat(db *sql.DB, migrations []migration) error {
 		}
 		if _, err := db.Exec(
 			`UPDATE schema_migrations SET compat = ? WHERE version = ? AND compat = ''`,
-			string(classifyMigration(m.SQL)), m.Version,
+			string(migrationVerdict(m)), m.Version,
 		); err != nil {
 			return fmt.Errorf("classify migration %d: %w", m.Version, err)
 		}
@@ -652,7 +652,7 @@ func applyOne(db *sql.DB, m migration) error {
 	if _, err := tx.Exec(
 		`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat) VALUES (?, ?, ?, ?, ?)`,
 		m.Version, time.Now().UTC().Format(time.RFC3339Nano), m.Name, binaryVersion(),
-		string(classifyMigration(m.SQL)),
+		string(migrationVerdict(m)),
 	); err != nil {
 		// A unique-constraint failure means a concurrent process won the race
 		// and recorded this version first — already applied, not an error.

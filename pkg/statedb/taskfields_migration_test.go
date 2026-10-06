@@ -27,10 +27,14 @@ var cloopMigrateColumns = []string{
 	`ALTER TABLE plan_tasks ADD COLUMN links TEXT NOT NULL DEFAULT '[]'`,
 }
 
+// TestTaskFieldsMigrationIsAdditive asks the verdict this build records for
+// 0054. Its SQL appends to plan_tasks, which classifyMigration now reads as
+// additive-columns, but 0054 shipped before that verdict existed and keeps the
+// additive every database holding it already records (Task 20388).
 func TestTaskFieldsMigrationIsAdditive(t *testing.T) {
 	m := embeddedMigration(t, 54)
-	if got := classifyMigration(m.SQL); got != CompatAdditive {
-		t.Fatalf("%s classified %q, want %q: an older hub sharing the control plane "+
+	if got := migrationVerdict(m); got != CompatAdditive {
+		t.Fatalf("%s is recorded %q, want %q: an older hub sharing the control plane "+
 			"would refuse every database it is applied to", m.Name, got, CompatAdditive)
 	}
 }

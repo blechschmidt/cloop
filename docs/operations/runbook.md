@@ -1159,13 +1159,31 @@ appended one is invisible to an older binary, and the default keeps the rows it
 inserts legal. A column that is `NOT NULL` with no default is `breaking`,
 because every older `INSERT` would fail on it.
 
+Naming its columns keeps an older binary's reads and inserts off a new column,
+but not a write that replaces a whole row, and builds before Task 20388 wrote
+three tables that way: `plan_tasks` (every save emptied the table and inserted
+the plan again), `ci_exchanges` (`INSERT OR REPLACE`) and `quota_counters`
+(the gauge rows were deleted and inserted again). Each such write resets every
+column the writing binary does not know, so a build one migration behind erased
+that migration's column on its first save. A column appended to one of those
+tables is therefore recorded `additive-columns`. Builds from Task 20388 on write
+those rows in place and open the database; earlier builds have never heard of
+the verdict, read it as unknown, and refuse — a refusal instead of an erasure.
+Migrations 0001–0059 keep the verdicts they were recorded with: an older build
+that predates one of their columns goes on erasing it until it is replaced.
+
 A migration that altered, dropped or constrained something that already existed
 is otherwise `breaking`. Anything unclassified, including rows written by a
-build that predates this bookkeeping, counts as breaking.
+build that predates this bookkeeping, and any verdict the reading build does not
+know, counts as breaking.
 
-A database whose extra migrations are all additive opens normally. Otherwise the
-binary refuses, naming both versions, the build that moved the schema forward,
-and which migrations specifically are incompatible.
+A database whose extra migrations are all ones the binary can tolerate —
+`additive`, and for a build from Task 20388 on `additive-columns` — opens
+normally. Otherwise the binary refuses, naming both versions, the build that
+moved the schema forward, and which migrations specifically are incompatible.
+A build from before Task 20226 has no guard at all and opens any database; no
+verdict can stop it, so do not run one against a database a newer build has
+migrated.
 
 ```console
 $ cloop ui
@@ -1203,7 +1221,10 @@ CLOOP_ALLOW_SCHEMA_DOWNGRADE=1 cloop ui
 ```
 
 This is an escape hatch for a rollback you have already reasoned about, not a
-default. `cloop hub doctor` reports the variable being set as its own finding —
+default. Do not use it to open a database whose extra migrations include one
+recorded `additive-columns` with a build from before Task 20388: that build
+does open it, and its first write to that table erases the new column.
+`cloop hub doctor` reports the variable being set as its own finding —
 `storage.schema_guard`, a warning on its own and a failure while a skew is
 actually present — so an exemption left in a Deployment manifest does not
 quietly outlive the incident that justified it. Unset it once the rollback is

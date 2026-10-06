@@ -337,6 +337,27 @@ old one. The stopping member hands over its runs and agents before it exits.
 Run one build across the cluster otherwise; mixed versions are meant for the
 length of a rolling update.
 
+**Schema during an upgrade.** The first member of the new build applies its
+migrations, and the old members go on serving the migrated database only as
+long as they tolerate every migration they lack: each checks, every time it
+opens a database, the verdict the applying build recorded (see
+[Rollback](../operations/runbook.md#rollback)). A project's database is opened
+for every save of its plan, and the control plane for every CI exchange
+recorded and at startup for the quota gauges — so an old member is refused at
+its next such write, not later. Tolerating a migration means more than reading
+around it: the old member must also leave the new columns alone when it
+writes. Every writer since Task 20388 does — it updates the columns it knows
+and deletes only the rows that go, and `tests/arch` rejects one that replaces
+rows — but builds before Task 20388 replace the rows of `plan_tasks`,
+`ci_exchanges` and `quota_counters`, erasing any column they do not know. A
+migration appending to one of those tables is therefore recorded
+`additive-columns`, which those builds refuse: for the rest of the rollout
+their members fail requests that touch the migrated database instead of
+erasing the column. To avoid that window, roll the cluster to a build from
+Task 20388 on before rolling it to one that carries such a migration. Never mix
+in a build from before Task 20226: it has no guard, opens any database and
+replaces rows on every save.
+
 **Upgrading from a build before the cluster.** An older hub holds the
 control-plane lease without being a member. A current build refuses to start
 beside a live one — it would neither forward to it nor see its events — with an

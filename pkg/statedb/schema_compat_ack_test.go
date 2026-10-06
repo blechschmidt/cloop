@@ -35,9 +35,9 @@ package statedb
 //
 // The list is also checked in the other direction: an entry whose migration no
 // longer classifies as breaking is itself a failure. Otherwise the improvement
-// that reclassified it — additiveAlter, which turned nine of these from
-// breaking to additive — would leave stale entries behind, and a list that
-// drifts is one an author stops trusting enough to read.
+// that reclassified it — the ADD COLUMN rule, now alterVerdict, which turned
+// nine of these from breaking to additive — would leave stale entries behind,
+// and a list that drifts is one an author stops trusting enough to read.
 
 import (
 	"fmt"
@@ -152,9 +152,10 @@ func TestAcknowledgementGateActuallyFires(t *testing.T) {
 // TestNoStaleBreakingAcknowledgement fails when an acknowledged migration is no
 // longer breaking, or names a version that does not exist.
 //
-// Keeps the list above honest. additiveAlter reclassified nine migrations that
-// had been recorded as breaking; without this, their entries would have
-// survived as folklore about a problem that no longer exists.
+// Keeps the list above honest. The ADD COLUMN rule, now alterVerdict,
+// reclassified nine migrations that had been recorded as breaking; without
+// this, their entries would have survived as folklore about a problem that no
+// longer exists.
 func TestNoStaleBreakingAcknowledgement(t *testing.T) {
 	migrations, err := loadMigrations()
 	if err != nil {
@@ -206,14 +207,14 @@ func TestShippedMigrationsAreOverwhelminglyAdditive(t *testing.T) {
 	var additive []string
 	var breaking []string
 	for _, m := range migrations {
-		if classifyMigration(m.SQL) == CompatAdditive {
+		if migrationVerdict(m).Tolerable() {
 			additive = append(additive, m.Name)
 		} else {
 			breaking = append(breaking, fmt.Sprintf("%s (%s)", m.Name, reasonFor(m.Version)))
 		}
 	}
 
-	t.Logf("%d migrations: %d additive, %d breaking", len(migrations), len(additive), len(breaking))
+	t.Logf("%d migrations: %d tolerable, %d breaking", len(migrations), len(additive), len(breaking))
 	for _, b := range breaking {
 		t.Logf("  breaking: %s", b)
 	}

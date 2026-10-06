@@ -166,7 +166,7 @@ func TestEmbeddedMigrationsClassifyDeterministically(t *testing.T) {
 	var additive, breaking int
 	for _, m := range migrations {
 		got := classifyMigration(m.SQL)
-		if got != CompatAdditive && got != CompatBreaking {
+		if got != CompatAdditive && got != CompatAdditiveColumns && got != CompatBreaking {
 			t.Errorf("%s: classifier returned %q, want a definite verdict", m.Name, got)
 		}
 		// Deterministic: the verdict is recorded once and read back by another
@@ -174,7 +174,10 @@ func TestEmbeddedMigrationsClassifyDeterministically(t *testing.T) {
 		if again := classifyMigration(m.SQL); again != got {
 			t.Errorf("%s: classifier is not deterministic (%q then %q)", m.Name, got, again)
 		}
-		if got == CompatAdditive {
+		if first, again := migrationVerdict(m), migrationVerdict(m); first != again {
+			t.Errorf("%s: the recorded verdict is not deterministic (%q then %q)", m.Name, first, again)
+		}
+		if got.Tolerable() {
 			additive++
 		} else {
 			breaking++
@@ -184,7 +187,7 @@ func TestEmbeddedMigrationsClassifyDeterministically(t *testing.T) {
 				"as additive, got %q", m.Name, got)
 		}
 	}
-	t.Logf("%d embedded migrations: %d additive, %d breaking", len(migrations), additive, breaking)
+	t.Logf("%d embedded migrations: %d tolerable, %d breaking", len(migrations), additive, breaking)
 	if additive == 0 {
 		t.Error("no migration classified additive — the classifier is rejecting everything")
 	}
@@ -398,7 +401,9 @@ func TestMigrateRecordsCompatForEveryMigrationItApplies(t *testing.T) {
 			t.Fatalf("scan: %v", err)
 		}
 		seen++
-		if MigrationCompat(compat) != CompatAdditive && MigrationCompat(compat) != CompatBreaking {
+		switch MigrationCompat(compat) {
+		case CompatAdditive, CompatAdditiveColumns, CompatBreaking:
+		default:
 			t.Errorf("v%d (%s): compat = %q, want a recorded verdict", version, name, compat)
 		}
 	}
@@ -494,8 +499,14 @@ func TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt(t *testing.T) {
 		// The migration runner's idempotent form (addcolumn.go, Task 20361)
 		// adds the same column or nothing, so it classifies the same way.
 		name: "the runner's IF NOT EXISTS form is additive on the same terms",
-		sql:  `ALTER TABLE plan_tasks ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';`,
+		sql:  `ALTER TABLE costs ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';`,
 		want: CompatAdditive,
+	}, {
+		// The same terms include the table: builds before Task 20388 rewrite
+		// plan_tasks, so an append to it is additive-columns in either form.
+		name: "and additive-columns on the same terms",
+		sql:  `ALTER TABLE plan_tasks ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';`,
+		want: CompatAdditiveColumns,
 	}, {
 		name: "and breaking on the same terms",
 		sql:  `ALTER TABLE plan_tasks ADD IF NOT EXISTS links TEXT NOT NULL;`,

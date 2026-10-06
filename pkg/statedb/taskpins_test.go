@@ -18,7 +18,9 @@ import (
 // and carrying no UNIQUE, PRIMARY KEY, REFERENCES or CHECK. This migration is
 // inside that form, but the margin is one word wide — adding a constraint, or
 // dropping the default from the NOT NULL, flips the verdict silently. Asserting
-// it here is what makes that edit fail in CI instead of in production.
+// it here is what makes that edit fail in CI instead of in production. It is
+// asked of the verdict this build records, which for 0042 — shipped before
+// additive-columns existed — stays additive (Task 20388).
 func TestTaskPinsMigrationIsAdditive(t *testing.T) {
 	migrations, err := loadMigrations()
 	if err != nil {
@@ -30,8 +32,8 @@ func TestTaskPinsMigrationIsAdditive(t *testing.T) {
 			continue
 		}
 		found = true
-		if got := classifyMigration(string(m.SQL)); got != CompatAdditive {
-			t.Errorf("0042_task_pinned classified %q, want %q — an older hub "+
+		if got := migrationVerdict(m); got != CompatAdditive {
+			t.Errorf("0042_task_pinned is recorded %q, want %q — an older hub "+
 				"sharing this control plane would refuse to open every project "+
 				"database until it was rebuilt", got, CompatAdditive)
 		}

@@ -8,7 +8,9 @@ import (
 )
 
 // Task 20357. The review record is a new plan_tasks column, and an older hub
-// sharing the control plane must keep opening the database.
+// sharing the control plane must keep opening the database. Asked of the
+// verdict this build records: 0053 shipped before additive-columns existed,
+// and keeps the additive it was recorded with (Task 20388).
 func TestTaskReviewMigrationIsAdditive(t *testing.T) {
 	migrations, err := loadMigrations()
 	if err != nil {
@@ -18,8 +20,8 @@ func TestTaskReviewMigrationIsAdditive(t *testing.T) {
 		if m.Version != 53 {
 			continue
 		}
-		if got := classifyMigration(string(m.SQL)); got != CompatAdditive {
-			t.Fatalf("0053_task_review classified %q, want %q", got, CompatAdditive)
+		if got := migrationVerdict(m); got != CompatAdditive {
+			t.Fatalf("0053_task_review is recorded %q, want %q", got, CompatAdditive)
 		}
 		return
 	}
