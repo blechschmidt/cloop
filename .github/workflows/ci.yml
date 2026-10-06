@@ -1898,8 +1898,8 @@ jobs:
         # its requests reach one that did not mint the session and are
         # forwarded to the one that did (docs/architecture/hub-cluster.md).
         #
-        # Advisory until it has passed twice on main; then this line goes.
-        continue-on-error: true
+        # Gating: it landed advisory and passed on main twice (runs
+        # 37423088052 and 37423518993) before this.
         timeout-minutes: 30
         env:
           CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
@@ -1917,9 +1917,7 @@ jobs:
           }
 
       - name: Hub diagnostics on failure
-        # Also after an advisory end-to-end step fails, which does not fail
-        # the job while it is continue-on-error.
-        if: failure() || steps.kube-e2e.outcome == 'failure' || steps.kube-e2e-cluster.outcome == 'failure'
+        if: failure()
         run: |
           kubectl -n cloop get pods -o wide || true
           kubectl -n cloop describe pods || true
