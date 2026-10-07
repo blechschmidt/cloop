@@ -1276,8 +1276,10 @@ Every row above is asserted in
 
 ## Identity, roles and permissions
 
-Deny by default: an identity that matches no binding gets `oidc.default_role`,
-which `cloop hub bootstrap` writes as `none`.
+Deny by default, once a policy is in force: an identity that matches no binding
+gets `oidc.default_role`, which `cloop hub bootstrap` writes as `none`. A hub
+with single sign-on and no policy at all runs with RBAC **off** — see
+[when RBAC is in force](#when-rbac-is-in-force).
 
 **Roles**, in ascending order (`pkg/authz/authz.go:156-222`):
 
@@ -1655,7 +1657,8 @@ narrowed at that instant cannot keep their old authority by having several
 requests in flight. The same mechanism is what keeps a dashboard panel that
 fires six admin calls from becoming six calls to the provider.
 
-**Only where claims decide.** On a hub without role mappings privileged
+**Only where claims decide.** On a hub whose RBAC is off — single sign-on
+with no role policy — privileged
 actions are granted by the deployment, not by claims, so there is nothing for
 re-asserting them to narrow and the check does not run — unless runtime role
 bindings exist, since a deny binding may match a group. Sharing a project does
@@ -2011,7 +2014,8 @@ ui:
     client_id: cloop-dashboard
     redirect_url: https://cloop.example.com/auth/callback
     # client_secret: "..."             # optional; see below. Prefer CLOOP_OIDC_CLIENT_SECRET
-    admin_emails: [ops@example.com]   # optional: these users see all projects
+    admin_emails: [ops@example.com]   # these users administer the hub and see all projects
+    default_role: none                # deny by default; with no role policy, RBAC is off
     # scopes: [openid, profile, email]  # default
     # session_ttl_hours: 24             # default; 1..720
     # idle_timeout_hours: 8             # default; 1..720, clamped to session_ttl_hours
@@ -2100,12 +2104,27 @@ request, and are worth knowing before using it:
   from what startup accepts.
 - **It refuses two things startup does not check.** Enabling SSO with no
   administrator — no `admin_emails`, no mapping granting `admin`, and
-  `default_role` not `admin` — is valid configuration that denies every
-  signed-in user everything, including this panel. And a change that would strip
-  the *caller's own* admin access is refused, since the surface that would tell
-  them is the one they just lost. Both are answered by building the prospective
-  policy and asking it, so a mapping granting admin through a group claim counts
-  exactly as much as an entry in `admin_emails`.
+  `default_role` not `admin` — is valid configuration that, under a policy,
+  denies every signed-in user everything, including this panel; without one it
+  leaves nobody able to manage executors or ever enforce deny-by-default. And a
+  change that would strip the *caller's own* admin access is refused, since the
+  surface that would tell them is the one they just lost — a block that leaves
+  RBAC off strips nobody, so it is not. Both are answered by building the
+  prospective policy and asking it, so a mapping granting admin through a group
+  claim counts exactly as much as an entry in `admin_emails`.
+- **It never switches RBAC as a side effect.** The default-role select shows
+  the saved value, unset included. A save that would put a policy in force on a
+  hub that ran SSO without one — or leave SSO without one, from a block that had
+  a policy or had SSO off — is refused with `409` and the consequence spelled
+  out (`rbac_change`: `rbac_turns_on` or `rbac_off`); the panel asks, and resends
+  with `confirm_rbac` only on yes. Until Task 20395 the select pre-selected
+  `none` for an unset role, so saving any field of such a hub's form wrote
+  `default_role: none` and, at the next restart, locked out every identity
+  without a mapping (`TestOIDCSave_DoesNotSwitchRBACAsASideEffect`,
+  `TestDashboard_OIDCPanelShowsTheHubsRBACVerdict`).
+- **It says whether RBAC is in force** — the hub's verdict, never one the page
+  works out — and on an SSO hub without a policy offers **Enforce
+  deny-by-default** (see [when RBAC is in force](#when-rbac-is-in-force)).
 - **A save is not live until the hub restarts.** The authenticator is built once
   at startup, so the panel shows the running configuration beside the saved one
   and says when they differ. Turning SSO on and reloading the page does not
@@ -2298,12 +2317,11 @@ never reveal whether a project exists. Every denial and every privileged
 action is appended to the audit log (`cloop events`) with the acting subject.
 The dashboard hides or disables controls your role cannot use.
 
-**Enabling RBAC is opt-in.** With no `role_mappings` and no `default_role`,
-authorization behaves exactly as it did before — every authenticated user has
-full access — so turning on SSO does not lock out a deployment that has not
-written a policy yet. Writing a single mapping (or setting `default_role`,
-including to `none`) switches the deployment to deny-by-default. An invalid
-role or claim name aborts startup rather than silently never matching.
+**Enabling RBAC is opt-in**, and the state without it is loud — see
+[when RBAC is in force](#when-rbac-is-in-force). Writing a single mapping (or a
+`default_role`, including `none`) switches the deployment to deny-by-default.
+An invalid role or claim name aborts startup rather than silently never
+matching.
 
 **A mapping the provider cannot satisfy is reported once.** Startup validation
 covers the half of the contract cloop can see — the role names and claim kinds
@@ -2332,6 +2350,59 @@ this user is the ordinary case, since most mappings belong to somebody else,
 and reporting those would drown the one that is genuinely dead. It fires once
 per hub, not once per request: this is a configuration fact, and repeating it
 is how a warning becomes something people filter out.
+
+### When RBAC is in force
+
+RBAC is in force when single sign-on is on **and** an operator wrote a policy:
+at least one `role_mappings` entry, or a `default_role` — `none` included.
+`admin_emails` alone is not a policy, and neither are the runtime bindings
+`cloop hub role` writes. That rule is `authz.Enforced`, and it is stated once:
+the request gate, `cloop hub doctor`, Settings → Single sign-on, `/api/me`
+(`rbac_enforced`) and the startup banner all ask it, and `tests/arch` fails a
+second copy in `pkg/ui`, `pkg/hubdoctor` or `cmd`, an unclassified read of a
+default role there, or a reporter that stops asking
+(`TestRBACEnforcementHasOneDefinition`, `TestEveryRBACReporterAsksThePredicate`).
+
+**Single sign-on without a policy runs with RBAC off.** That is the upgrade
+rule: a deployment that turned SSO on before RBAC existed is not locked out by
+upgrading. It is also the widest configuration cloop has — every identity the
+issuer authenticates, for a corporate tenant the whole company, holds every
+permission except executor administration (which `admin_emails` gates): they
+create projects, start agent runs, mint API tokens and edit `ui.oidc`, and
+quotas never count them. So the state is impossible to miss:
+
+- `cloop ui` prints `RBAC: off` on its banner and, on stderr, *"RBAC is off:
+  everyone who can sign in through ‹issuer› has full access"* with the remedy
+  (`TestReportRBACAcrossTheMatrix`, `TestE2ESSOHubWithoutAPolicyWarnsOnStderr`).
+- `cloop hub doctor` fails `rbac.enforced` with the same sentence, and reports
+  `rbac.default_role` only where a policy makes it mean something
+  (`TestRBACEnforcementAcrossTheMatrix`).
+- Settings → Single sign-on says it, shows the default role as saved — unset —
+  and offers **Enforce deny-by-default**; `/api/me` reports
+  `rbac_enforced: false` (`TestRBACReportersAcrossTheMatrix`).
+- `cloop config set ui.oidc.*` warns when the block it leaves is in that state.
+
+And easy to leave. **Enforce deny-by-default** (`POST
+/api/config/oidc/enforce`, `user.manage`) writes `default_role: none` and a
+hub-wide admin mapping for the acting admin — on their `sub`, which the provider
+promises is stable, and only if `admin_emails` does not already make them one —
+keeps `admin_emails`, and runs the save path's own check that the result still
+has an administrator, so a caller with no session on a hub with no
+`admin_emails` is refused. Every current admin stays one
+(`TestOIDCEnforce_KeepsEveryCurrentAdminAnAdmin`). It is audited as
+[`oidc.rbac.enforced`](../reference/audit-events.md#oidc) under the signed-in
+user's name — on such a hub every row used to name the actor `local` — and,
+like every save of this block, takes effect at the next restart. Afterwards,
+review the API tokens minted while RBAC was off (`cloop hub token list`):
+every signed-in identity held `token.admin` then, and a service-account token
+keeps the roles it was minted with.
+
+`ui.oidc.require_rbac: true` makes `cloop ui` refuse to start in that state,
+before it serves anything, so a later edit that drops the policy fails loudly
+instead of opening the hub (`TestE2ERequireRBACRefusesToStart`). It is off by
+default, for the upgrade rule's sake; the Settings panel refuses to save a block
+it would refuse (`TestOIDCSave_RefusesRequireRBACWithoutAPolicy`), and `cloop
+hub doctor` says the start will fail.
 
 ### Quotas: how much, not whether
 
@@ -3095,6 +3166,21 @@ listed.
 | Refusals are counted and audited, and the audit is rate-limited | `pkg/ui: TestRefusalsAreCountedAndAudited`, `TestRefusalAuditIsRateLimited`, `TestRefusedUpgradesAreCountedToo` |
 | In Chrome, a page on another port and on another site submits a `text/plain` form and `no-cors` fetches and opens a WebSocket: all refused, nothing written; a rebound name gets 421; the dashboard in the same browser still adds a task and saves a setting | `pkg/ui: TestAPageElsewhereCannotDriveAnOpenHubInBrowser` |
 | `cloop serve` grants CORS only with a token, refuses forged and form requests and, without a token, rebinding names | `pkg/apiserver: TestServeWithoutATokenGrantsNoPageElsewhere`, `TestServeWithoutATokenRefusesARebindingHost`, `TestServeWithATokenKeepsCORSForTheTokenHolder` |
+
+### RBAC enforcement — the package suites
+
+Whether a role policy is in force is `authz.Enforced`, and everything that
+reports it asks (Task 20395; [when RBAC is in force](#when-rbac-is-in-force)).
+
+| Guarantee | Test |
+| --- | --- |
+| RBAC is in force only with single sign-on and a written policy — a mapping or a `default_role`; not `admin_emails`, not runtime bindings | `pkg/authz: TestEnforcedIsSSOAndAWrittenPolicy` |
+| `pkg/ui`, `pkg/hubdoctor` and `cmd` hold no second copy of the rule and no unclassified read of a default role, `pkg/authz` reads its policy bit only in `Enforced`, and every reporter calls it | `tests/arch: TestRBACEnforcementHasOneDefinition`, `TestDefaultRoleUsesAreStillListed`, `TestEveryRBACReporterAsksThePredicate`, `TestRBACGateFlagsASecondCopy` |
+| For {SSO off, SSO only, SSO + `admin_emails`, SSO + `default_role`, SSO + mappings}: the doctor's `rbac.enforced` and `rbac.default_role`, the Settings view and `/api/me`, and the startup banner and stderr warning agree with the predicate | `pkg/hubdoctor: TestRBACEnforcementAcrossTheMatrix`, `pkg/ui: TestRBACReportersAcrossTheMatrix`, `cmd: TestReportRBACAcrossTheMatrix` |
+| The built binary warns on stderr, and with `require_rbac` refuses to start before binding | `tests/e2e: TestE2ESSOHubWithoutAPolicyWarnsOnStderr`, `TestE2ERequireRBACRefusesToStart` |
+| A save switches RBAC on or off only when the request confirms it, and the panel shows and submits the saved default role | `pkg/ui: TestOIDCSave_DoesNotSwitchRBACAsASideEffect`, `TestOIDCSave_ConfirmsBeforeLeavingSSOWithoutAPolicy`, `TestDashboard_OIDCPanelShowsTheHubsRBACVerdict` |
+| Enforce deny-by-default keeps every current admin an admin, reuses the no-administrator gate, and is audited under the signed-in user | `pkg/ui: TestOIDCEnforce_KeepsEveryCurrentAdminAnAdmin`, `TestOIDCEnforce_ReusesTheNoAdministratorGate`, `TestAuditNamesTheSignedInUserWhenRBACIsOff` |
+| :8888's own `ui.oidc` keeps exactly its access | `pkg/ui: TestHub8888AccessIsUnchanged`, `pkg/hubdoctor: TestHub8888IsReportedEnforced`, `cmd: TestReportRBACOnHub8888` |
 
 ### Sessions — `sessions_test.go` and the package suites
 

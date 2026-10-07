@@ -336,13 +336,17 @@ provider instead of a shared token; with it on, every browser request needs a
 provider session, projects are owned by the user who created them, and roles
 come from the claims your IdP releases.
 
-Two defaults in it are chosen rather than inherited. The client secret is
-optional — leave it blank and the hub signs in as a public client using PKCE,
-so there is no secret to leak. And the default role is **none**, which denies
-everything: a hub with no administrator cannot be administered, so at least one
-admin email or a claim mapping granting `admin` is required before SSO can be
-turned on at all. The full picture is in
-[the security model](../security/model.md).
+Two choices in it matter more than the rest. The client secret is optional —
+leave it blank and the hub signs in as a public client using PKCE, so there is
+no secret to leak. And the default role decides whether a role policy is in
+force at all: **none** denies everything a mapping does not grant, while leaving
+it unset with no mapping keeps RBAC off — everyone who can sign in through your
+provider gets full access. Saving that asks first, and the panel keeps saying
+so, beside an **Enforce deny-by-default** button, until a policy is written. A
+hub with no administrator cannot be administered, so at least one admin email
+or a claim mapping granting `admin` is required before SSO can be turned on at
+all. The full picture is in
+[the security model](../security/model.md#when-rbac-is-in-force).
 
 ---
 

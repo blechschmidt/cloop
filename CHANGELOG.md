@@ -310,6 +310,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **An SSO hub without a role policy says it runs with RBAC off, and one click
+  leaves that state.** With `ui.oidc` enabled and neither `role_mappings` nor a
+  `default_role` — the upgrade rule, and the shape of a hub configured with
+  only `admin_emails` — every identity the issuer authenticates holds every
+  permission but executor administration, and quotas never count them. `cloop
+  hub doctor` reported that as `rbac.default_role` PASS "deny-by-default", the
+  startup banner as `default role "none"`, and Settings → Single sign-on
+  pre-selected "none — deny by default", so saving any field of that form wrote
+  `default_role: none` and, at the next restart, locked out every identity
+  without a mapping. Whether RBAC is in force is now one predicate,
+  `authz.Enforced`, that the request gate and every reporter ask, and a
+  `tests/arch` gate fails a second copy: the doctor fails `rbac.enforced`
+  naming the issuer, `cloop ui` warns on stderr, `/api/me` reports
+  `rbac_enforced`, and Settings says *"RBAC is off: everyone who can sign in
+  through ‹issuer› has full access"*, shows the default role as saved — unset —
+  and offers **Enforce deny-by-default** (`POST /api/config/oidc/enforce`,
+  audited as `oidc.rbac.enforced`), which writes `default_role: none` plus an
+  admin mapping for the acting admin and keeps every current admin one. A save
+  of `ui.oidc` that would switch RBAC on or off is refused with 409
+  `rbac_change` unless it carries `confirm_rbac`, which the panel asks for. New
+  `ui.oidc.require_rbac: true` (Helm `oidc.requireRBAC`) refuses to start in
+  the RBAC-off state. On such a hub audit rows named every actor `local`, and a
+  signed-in user outside `admin_emails` could not save the form at all; both are
+  fixed. :8888's policy is unchanged (Task 20395).
 - **A web page can no longer drive the hub.** No HTTP route checked where a
   state-changing request came from, and every handler decoded its body as JSON
   whatever its `Content-Type` said, so a form with `enctype=text/plain` on any

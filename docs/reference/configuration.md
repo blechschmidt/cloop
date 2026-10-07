@@ -1656,6 +1656,16 @@ see [editing it from the dashboard](../security/model.md#editing-it-from-the-das
 `role_mappings` is the one key `cloop config set` cannot reach, being a list of
 records; use the file or the panel's table.
 
+`default_role` and `role_mappings` together decide whether a role policy is in
+force. With neither set, single sign-on runs with **RBAC off**: every identity
+the issuer authenticates holds every permission except executor administration
+(`admin_emails`). The hub keeps that for deployments that enabled SSO before
+RBAC existed, and says so — a warning on stderr at every start, a failing
+`rbac.enforced` in `cloop hub doctor`, and a notice in Settings with an
+**Enforce deny-by-default** button. `require_rbac: true` turns the state into a
+refusal to start; see
+[when RBAC is in force](../security/model.md#when-rbac-is-in-force).
+
 If two hubs share a working directory, `ui.oidc` belongs in that hub's
 [`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory)
 instead — `redirect_url` names one origin, and the hub it does not name cannot
@@ -1680,6 +1690,7 @@ ui:
     max_claim_age_minutes: 5       # claim freshness required for privileged actions
     clock_skew_seconds: 300        # leeway on an ID token's exp/iat
     require_idp: false             # refuse to start if the issuer will not resolve
+    require_rbac: false            # refuse to start with SSO on and no role policy
 ```
 
 | Key | Default | Range | What it bounds |
@@ -1690,6 +1701,7 @@ ui:
 | `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. With `CLOOP_SECRET_KEY` the hub re-asks with the session's refresh token; without one the dashboard re-asserts the claims from the user's browser instead (see below). |
 | `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
 | `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
+| `require_rbac` | `false` | — | Makes single sign-on without a role policy — no `role_mappings` and no `default_role` — fatal at startup instead of a warning. The Settings panel refuses to save a block it would refuse, and `cloop hub doctor` says the start will fail. |
 
 Out-of-range values are clamped rather than rejected, and an
 `idle_timeout_hours` larger than `session_ttl_hours` is held down to it — an

@@ -76,8 +76,10 @@ every local user and process can still drive it.
 
 To make it reachable, give it a way to tell people apart first:
 
-- **OIDC single sign-on** (`ui.oidc.*`) for people, with claim-based RBAC. With
-  it on, the hub listens on every interface.
+- **OIDC single sign-on** (`ui.oidc.*`) for people, with claim-based RBAC once
+  a role policy is written — without one, everyone who can sign in has full
+  access, and the hub warns about it at every start. With it on, the hub
+  listens on every interface.
 - **Scoped API tokens** (`cloop hub token create`) for scripts and CI. They
   carry roles, can be limited to specific projects, expire, and are revocable
   one at a time. They restrict the callers that present one, but a request
