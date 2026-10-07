@@ -153,6 +153,7 @@ started crashing again — fails.
 | `pkg/configvalidate` | `FuzzValidate`          | JSON-schema-style config validator (`Run`).                |
 | `pkg/hubdoctor`      | `FuzzRedirectVerdictMatchesStartup` | `ui.oidc.redirect_url`: `cloop hub doctor` says the hub will not start exactly when `oidcauth.New` refuses it. |
 | `pkg/ui`             | `FuzzOIDCCallbackRoutes` | Every redirect URL `oidcauth.New` accepts registers in the real route table and routes the browser's return to the callback. |
+| `pkg/exposure`       | `FuzzDecideNeverOpensAnOpenHub` | `--listen` / `ui.listen`: a hub without sign-in or the acknowledgement binds a loopback IP literal or is refused, and every accepted address is a well-formed `host:port`. |
 
 ### Adding a new fuzz target
 

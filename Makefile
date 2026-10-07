@@ -88,9 +88,11 @@ e2e-stack:
 ## fuzz: run each fuzz target for $(FUZZTIME) (default 30s) — see CONTRIBUTING.md
 ##       targets: pkg/config, pkg/planio (yaml/json/toml), pkg/state, pkg/pm,
 ##                pkg/configvalidate, none of which should panic on hostile
-##                input; and two agreements — the doctor's redirect verdict is
+##                input; two agreements — the doctor's redirect verdict is
 ##                startup's (pkg/hubdoctor), and every callback path startup
-##                accepts is one the router serves (pkg/ui).
+##                accepts is one the router serves (pkg/ui); and one guarantee —
+##                no listen address lets a hub without sign-in off loopback
+##                (pkg/exposure).
 ##
 ## This list is the single source of truth. CI's Parser fuzzing job runs this
 ## same target with a shorter budget rather than repeating the targets in YAML,
@@ -106,7 +108,8 @@ FUZZ_TARGETS := \
 	./pkg/pm/:FuzzParseDeadline \
 	./pkg/configvalidate/:FuzzValidate \
 	./pkg/hubdoctor/:FuzzRedirectVerdictMatchesStartup \
-	./pkg/ui/:FuzzOIDCCallbackRoutes
+	./pkg/ui/:FuzzOIDCCallbackRoutes \
+	./pkg/exposure/:FuzzDecideNeverOpensAnOpenHub
 
 ## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
 ## two of its distinctions matter locally as much as in CI: Go intermittently

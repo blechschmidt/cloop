@@ -1487,12 +1487,14 @@ jobs:
         # the run is bounded and a timeout fails the step.
         run: |
           set -uo pipefail
+          # Steps run under bash -e, and the refusal is a non-zero exit: the
+          # status is captured rather than allowed to end the step here.
+          status=0
           timeout 60 docker run --name open-hub \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,noexec,nosuid,size=64m \
             -v open-hub-state:/var/lib/cloop \
-            cloop-hub:ci > /tmp/open-hub.log 2>&1
-          status=$?
+            cloop-hub:ci > /tmp/open-hub.log 2>&1 || status=$?
           docker rm -f open-hub >/dev/null 2>&1 || true
           docker volume rm open-hub-state >/dev/null 2>&1 || true
           cat /tmp/open-hub.log
