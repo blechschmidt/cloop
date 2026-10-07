@@ -45,6 +45,11 @@ the difference is deliberate:
 | Dashboard auth | none | token, then SSO |
 | `CLOOP_SECRET_KEY` | unset | generated, 256 bits, mode 0600 |
 | Container user | — | 65532, read-only rootfs, no capabilities |
+| Listen address | `127.0.0.1` without sign-in, every interface with it | `0.0.0.0`, named — refused without sign-in |
+
+One default is not opt-in: a hub **without sign-in** listens on `127.0.0.1`
+only, and refuses an address beyond loopback unless told otherwise. See
+[Listening on the network](#listening-on-the-network).
 
 ---
 
@@ -265,6 +270,10 @@ docker run --rm -p 8080:8080 \
   cloop-hub:dev
 ```
 
+The image starts `cloop ui --listen 0.0.0.0 --port 8080 --no-browser`. Without
+`CLOOP_UI_TOKEN` (or `ui.oidc` in a mounted config) it refuses to start, which
+is deliberate — see [Listening on the network](#listening-on-the-network).
+
 Multi-stage build: `golang:1.25` compiles a static `CGO_ENABLED=0` binary onto
 `gcr.io/distroless/static-debian12:nonroot`. About 31 MB, runs as UID 65532,
 works with a read-only root filesystem and all capabilities dropped.
@@ -313,6 +322,54 @@ The image ships `/var/lib/cloop` owned by 65532 so a fresh named volume seeds
 with the right ownership. Mount the volume anywhere else and the hub gets a
 root-owned directory it cannot write a database into — which surfaces as a
 SQLite permission error several layers from the cause.
+
+### Listening on the network
+
+A hub with no sign-in — neither `ui.oidc` nor `CLOOP_UI_TOKEN` — lets anyone
+who reaches it list its projects, queue tasks and start agent runs on its host.
+So `cloop ui` keeps such a hub on `127.0.0.1` unless an address is named
+(`--listen` or `ui.listen`), and refuses an address beyond loopback unless
+`ui.allow_unauthenticated_network: true` acknowledges it, warning at every start
+while it does ([the full rule](../docs/reference/configuration.md#web-ui-cloop-ui)).
+A hub with sign-in listens on every interface by default.
+
+A container changes one thing: its loopback is its own, so a port the runtime
+publishes reaches only what listens on the container's interfaces. A hub that
+fell back to `127.0.0.1` there would be unreachable while its HEALTHCHECK —
+which probes from inside — reported it healthy. So every artifact here names
+the address:
+
+| Artifact | Listens | Sign-in | Without sign-in |
+| --- | --- | --- | --- |
+| Image (`Dockerfile` `CMD`) | `--listen 0.0.0.0` | `CLOOP_UI_TOKEN` or `ui.oidc` you provide | refuses to start, and says why |
+| Helm chart | `--listen 0.0.0.0` | `oidc.enabled` or `secrets.uiToken` (the chart refuses to render neither, with `secrets.create`) | the Pod refuses to start; an `existingSecret` must carry `CLOOP_UI_TOKEN` unless SSO is on |
+| Evaluation stack | `--listen 0.0.0.0` | SSO through dex | — |
+| `cloop hub bootstrap` | default (every interface) | `CLOOP_UI_TOKEN` in `hub.env`, SSO once enabled | — |
+
+To run the image with no sign-in on purpose — a laptop, a demo — acknowledge
+it in a mounted config and publish the port on the **host's** loopback only, so
+the network still cannot reach it:
+
+```bash
+printf 'ui:\n  allow_unauthenticated_network: true\n' > open-hub.yaml
+docker run --rm -p 127.0.0.1:8080:8080 \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m -v cloop-state:/var/lib/cloop \
+  -v "$PWD/open-hub.yaml:/var/lib/cloop/.cloop/config.yaml:ro" \
+  cloop-hub:dev
+```
+
+The hub then prints `WARNING: this hub has no sign-in and listens on *:8080
+because ui.allow_unauthenticated_network is set` at every start. Remote
+executor agents dial the hub, so a hub serving them over the network needs SSO
+or a token whatever it binds.
+
+**Behind a TLS proxy on the same host** (bare metal with nginx, say), pin a hub
+that has sign-in to loopback too — `ui.listen: 127.0.0.1` — so the proxy is the
+only way in and nothing reaches the plaintext port directly. `cloop hub doctor`
+reports `ui.exposure` as a warning until you do, and as a failure for any hub
+without sign-in that it finds reachable beyond loopback, whichever build is
+serving it.
 
 ---
 
@@ -583,7 +640,9 @@ So it boots the things:
 2. Runs the container with `--read-only --cap-drop ALL --security-opt
    no-new-privileges`; asserts `/healthz` and `/readyz` return 200, that
    unauthenticated `/api/state` returns 401, and that the in-image
-   `cloop hub healthcheck` works.
+   `cloop hub healthcheck` works. Then runs it again with no
+   `CLOOP_UI_TOKEN` and asserts it refuses to listen on every interface,
+   saying why, rather than serving the network open.
 3. Runs `cloop hub bootstrap` and asserts the generated config still contains
    `allow_host_process: false`, `default_role: none`, and a 0600 `hub.env`.
 4. `helm lint` across the interesting value sets, and asserts the chart's guard

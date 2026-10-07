@@ -273,4 +273,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/usr/local/bin/cloop", "hub", "healthcheck", "--url", "http://127.0.0.1:8080"]
 
 ENTRYPOINT ["/usr/local/bin/cloop"]
-CMD ["ui", "--port", "8080", "--no-browser"]
+# Every interface, explicitly (Task 20393). A container's loopback is its own,
+# so a published port reaches only what listens on the container's interfaces —
+# and without --listen a hub with no sign-in would bind 127.0.0.1 and be
+# unreachable while its HEALTHCHECK, which probes from inside, reported it
+# healthy. Naming the address instead makes an open hub refuse to start, with
+# the reason: give it CLOOP_UI_TOKEN or ui.oidc, or set
+# ui.allow_unauthenticated_network: true in a mounted config and publish it on
+# the host's loopback only (-p 127.0.0.1:8080:8080).
+CMD ["ui", "--listen", "0.0.0.0", "--port", "8080", "--no-browser"]

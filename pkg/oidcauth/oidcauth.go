@@ -672,6 +672,16 @@ func (a *Authenticator) Issuer() string {
 	return a.cfg.Issuer
 }
 
+// RedirectURL returns the configured redirect_url: the callback browsers are
+// sent back to, and so the origin they sign in at ("" when disabled). Safe on
+// nil.
+func (a *Authenticator) RedirectURL() string {
+	if !a.Enabled() {
+		return ""
+	}
+	return a.cfg.RedirectURL
+}
+
 // DefaultCallbackPath is where cloop serves the OIDC redirect when
 // redirect_url does not say otherwise. It is only a default: the IdP decides
 // this path, and on a registration somebody else already created it is

@@ -178,15 +178,16 @@ For anything longer than a few tasks, run the dashboard in a second terminal:
 
 ```console
 $ cloop ui
-cloop dashboard running at http://localhost:8080
+cloop dashboard running at http://127.0.0.1:8080, listening on 127.0.0.1:8080
 ```
 
 `--port` moves it, `--no-browser` stops it opening a tab. It streams progress
-live and can start and stop runs. It is **unauthenticated on loopback by
-default**, which is correct for your own machine and wrong for anything else; if
-it needs to be reachable, mint a scoped token with `cloop hub token create`
-rather than using the deprecated static `--token`, and terminate TLS
-(`--tls-cert`/`--tls-key`, or `ui.tls` in the config). The
+live and can start and stop runs. It is **unauthenticated by default, and so
+listens on loopback only** — correct for your own machine. If it needs to be
+reachable, configure sign-in first — OIDC (`ui.oidc`) for people — and
+terminate TLS (`--tls-cert`/`--tls-key`, or `ui.tls` in the config). A scoped
+token from `cloop hub token create` is not sign-in: it restricts a script that
+presents it, and does not stop a request that presents none. The
 [dashboard guide](web-ui.md) covers it properly, and the
 [security model](../security/model.md) explains what the boundary is worth.
 

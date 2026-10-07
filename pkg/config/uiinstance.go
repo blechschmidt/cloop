@@ -46,9 +46,10 @@
 //	                       re-dispatching a lost node's work, Task 20391)
 //	sandbox.image_policy   the image trust policy, at the hub's early check
 //	                       and in the copy each driver takes at startup
-//	ui.*                   oidc, tls, the origin allowlists, the WebSocket
-//	                       caps, quotas, cluster, ci, telemetry,
-//	                       auto_resume_on_cap_reset
+//	ui.*                   listen and allow_unauthenticated_network (where
+//	                       the dashboard binds, Task 20393), oidc, tls, the
+//	                       origin allowlists, the WebSocket caps, quotas,
+//	                       cluster, ci, telemetry, auto_resume_on_cap_reset
 //	stt                    the hub's dictation settings and key; a project's
 //	                       own stt section still overrides them for requests
 //	                       about that project

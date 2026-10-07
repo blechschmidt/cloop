@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -31,9 +32,10 @@ const envClusterAdvertiseURL = "CLOOP_CLUSTER_ADVERTISE_URL"
 const envClusterAdvertiseHost = "CLOOP_CLUSTER_ADVERTISE_HOST"
 
 // joinHubCluster makes this process a member of the cluster serving workdir's
-// control plane.
-func joinHubCluster(workdir string, cfg *config.Config) (*hubcluster.Node, error) {
-	advertise, err := clusterAdvertiseURL(cfg)
+// control plane. listen is where this process will serve (Task 20393): its
+// display address, and where on this machine the others reach it by default.
+func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*hubcluster.Node, error) {
+	advertise, err := clusterAdvertiseURL(cfg, listen.LocalHost())
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +45,7 @@ func joinHubCluster(workdir string, cfg *config.Config) (*hubcluster.Node, error
 	}
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),
-		Address:      ":" + strconv.Itoa(uiPort),
+		Address:      listen.String(),
 		AdvertiseURL: advertise,
 		Version:      Version(),
 		Peer:         peer,
@@ -74,8 +76,11 @@ func joinHubCluster(workdir string, cfg *config.Config) (*hubcluster.Node, error
 
 // clusterAdvertiseURL resolves where peers reach this process: the flag, then
 // the environment (a URL, then a host), then ui.cluster.advertise_url, then
-// loopback on this port.
-func clusterAdvertiseURL(cfg *config.Config) (string, error) {
+// this machine's way to the listener on this port — local, which is the bound
+// address, or 127.0.0.1 for every interface (exposure.Plan.LocalHost). A hub
+// that binds one interface address is not reachable at 127.0.0.1, so the
+// default follows the bind rather than assuming loopback (Task 20393).
+func clusterAdvertiseURL(cfg *config.Config, local string) (string, error) {
 	scheme := "http"
 	if uiTLSCert != "" || (cfg != nil && cfg.UI.TLS.CertFile != "") {
 		scheme = "https"
@@ -93,7 +98,10 @@ func clusterAdvertiseURL(cfg *config.Config) (string, error) {
 		u = strings.TrimSpace(cfg.UI.Cluster.AdvertiseURL)
 	}
 	if u == "" {
-		u = scheme + "://127.0.0.1:" + strconv.Itoa(uiPort)
+		if local = strings.Trim(strings.TrimSpace(local), "[]"); local == "" {
+			local = exposure.LoopbackHost
+		}
+		u = scheme + "://" + net.JoinHostPort(local, strconv.Itoa(uiPort))
 	}
 	if err := config.ValidateAdvertiseURL(u); err != nil {
 		return "", fmt.Errorf("hub cluster advertise URL: %w", err)
@@ -151,10 +159,10 @@ func clusterPeerOptions(cfg *config.Config) (hubcluster.PeerOptions, error) {
 // acquireExclusiveHub takes the control plane alone (ui.cluster.exclusive):
 // the pre-cluster fence, plus a refusal when members are serving without a
 // leader at this instant — they would not see this process's lease as theirs.
-func acquireExclusiveHub(workdir string) (*hublease.Lease, error) {
+func acquireExclusiveHub(workdir string, listen exposure.Plan) (*hublease.Lease, error) {
 	lease, err := hublease.Acquire(hublease.Options{
 		DBPath:  state.DBPath(workdir),
-		Address: ":" + strconv.Itoa(uiPort),
+		Address: listen.String(),
 		Version: Version(),
 	})
 	if err != nil {

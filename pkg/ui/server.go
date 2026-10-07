@@ -517,6 +517,19 @@ type Server struct {
 	// config.UIConfig.ExternalURL.
 	ExternalURL string
 
+	// ListenHost is the address Run binds, without the port: --listen, else
+	// ui.listen. Empty takes the default for this hub's authentication —
+	// every interface with OIDC or a Token, 127.0.0.1 without either — and
+	// an address beyond loopback on a hub with neither is refused unless
+	// AllowUnauthenticatedNetwork is set (Task 20393; pkg/exposure). Run
+	// decides before it starts anything, so a refused start leaves nothing
+	// running.
+	ListenHost string
+	// AllowUnauthenticatedNetwork is ui.allow_unauthenticated_network: a hub
+	// with no browser credential may bind the address ListenHost names even
+	// beyond loopback, and warns at every start that it does.
+	AllowUnauthenticatedNetwork bool
+
 	// TLSCertFile / TLSKeyFile enable native HTTPS. Both must be set or
 	// neither; Run refuses to start on a half-configuration rather than
 	// silently falling back to plaintext. TLSMinVersion is "1.2" (default)
@@ -637,6 +650,9 @@ type Server struct {
 	// underlying server has been replaced.
 	shutdownMu sync.Mutex
 	httpServer *http.Server
+	// boundAddr is the address the listener actually holds, set by Run once
+	// it has bound (guarded by shutdownMu). See BoundAddr.
+	boundAddr net.Addr
 
 	// Lease fences this process as the sole control plane for its state.db
 	// (Task 20214). Set by `cloop ui` before the server is constructed, so
@@ -1284,6 +1300,14 @@ func (s *Server) Start() error {
 // failure it returns the underlying error. Calling Run more than once on the
 // same Server is not supported.
 func (s *Server) Run(ctx context.Context) error {
+	// Where to listen is decided before anything starts (Task 20393). A hub
+	// about to refuse an address must not have started its sweeps, joined the
+	// cluster bus or restored an executor first.
+	plan, err := s.listenPlan()
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.registerProviderCallNotifier()
@@ -1331,8 +1355,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.StartLeaseJanitor(watcherCtx)
 	defer s.StopLeaseJanitor()
 
-	addr := ":" + strconv.Itoa(s.Port)
-	srv := newUIHTTPServer(addr, s.buildHandler(mux))
+	srv := newUIHTTPServer(plan.Addr(), s.buildHandler(mux))
 
 	// Resolve TLS before announcing anything, so a broken certificate is an
 	// error at startup rather than a dashboard that printed "https" and is
@@ -1341,27 +1364,43 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	scheme := "http"
 	if tlsCfg != nil {
 		srv.TLSConfig = tlsCfg
-		scheme = "https"
+	}
+
+	// Bound here rather than inside ListenAndServe, so the banner below names
+	// an address the hub holds rather than one it is about to try.
+	ln, err := net.Listen("tcp", plan.Addr())
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", plan, err)
+	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		plan.Port = tcp.Port // the port actually bound, when Port was 0
 	}
 	auth := ""
 	if s.Token != "" {
 		auth = " (token auth enabled)"
 	}
-	fmt.Printf("cloop dashboard running at %s://localhost%s%s\n", scheme, addr, auth)
+	fmt.Printf("cloop dashboard running at %s, listening on %s%s\n", plan.URL(), plan, auth)
 	// Name the API description the way `cloop serve` does. An operator who
 	// has just started a hub is exactly the person about to ask what it
 	// exposes, and the answer is otherwise only findable in the docs.
-	fmt.Printf("API description: %s://localhost%s/api/openapi.json\n", scheme, addr)
+	fmt.Printf("API description: %s/api/openapi.json\n", plan.URL())
 	if tlsCfg != nil {
 		fmt.Printf("TLS enabled (minimum %s, certificate %s)\n",
 			tlsconf.VersionName(tlsCfg.MinVersion), s.TLSCertFile)
 	}
+	// Said at every start, not once: an open hub serving the network is the
+	// configuration nobody should be able to forget they chose.
+	if text, warning := plan.Notice(); warning {
+		fmt.Fprintln(os.Stderr, text)
+	} else if text != "" {
+		fmt.Println(text)
+	}
 
 	s.shutdownMu.Lock()
 	s.httpServer = srv
+	s.boundAddr = ln.Addr()
 	s.shutdownMu.Unlock()
 
 	errCh := make(chan error, 1)
@@ -1369,10 +1408,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if tlsCfg != nil {
 			// Empty paths: the certificate is already loaded into TLSConfig,
 			// so this does not re-read (and cannot disagree with) the files.
-			errCh <- srv.ListenAndServeTLS("", "")
+			errCh <- srv.ServeTLS(ln, "", "")
 			return
 		}
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(ln)
 	}()
 
 	select {

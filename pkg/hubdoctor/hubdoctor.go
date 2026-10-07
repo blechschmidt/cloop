@@ -49,6 +49,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -309,6 +310,18 @@ type Options struct {
 	// floor without anything filling a disk; nil means diskusage.Volumes.
 	DiskProbe func(paths ...string) ([]diskusage.Volume, error)
 
+	// Port is the port of the hub being diagnosed (`cloop hub doctor
+	// --port`). The exposure check looks for that hub's listener on it and
+	// asks it whether it requires sign-in; zero judges the configuration
+	// alone (Task 20393).
+	Port int
+
+	// Listeners overrides how the exposure check reads the sockets listening
+	// on a port. Tests substitute one so a hub can appear to listen on every
+	// interface without one binding there; nil reads the kernel's socket
+	// tables (listeners.go).
+	Listeners func(port int) ([]netip.AddrPort, error)
+
 	// GlobalBudget overrides how the host-wide spend caps are read, which
 	// budget.Enforce reads from the running user's config directory. Tests
 	// substitute one so a machine's own caps cannot decide them; nil means
@@ -407,6 +420,9 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkLoadRepairs(cfg, add)
 	checkOIDC(ctx, cfg, opts, add)
 	checkTLS(cfg, opts, add)
+	// Beside the transport checks: whether a hub that cannot tell people
+	// apart is reachable from the network (Task 20393).
+	checkExposure(ctx, dir, cfg, opts, add)
 	checkSecretKey(dir, cfg, add)
 	checkRBAC(cfg, add)
 	checkImagePolicy(ctx, dir, cfg, opts, add)

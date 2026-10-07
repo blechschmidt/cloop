@@ -74,7 +74,11 @@ cloop ui --port 8081 &
 Put any load balancer in front of the two. It needs no stickiness and no
 WebSocket affinity — only a health check (`/healthz` for liveness, `/readyz` to
 take a member out of rotation). Each member advertises
-`http://127.0.0.1:<port>` to the others unless told otherwise.
+`http://127.0.0.1:<port>` to the others unless told otherwise — or, when it
+listens on one interface's address (`--listen`, `ui.listen`), that address.
+Members without sign-in listen on `127.0.0.1` only, so on one machine they
+still reach each other; on several, they need sign-in to listen on the
+network at all ([Web UI](../reference/configuration.md#web-ui-cloop-ui)).
 
 Per-member settings, if a member needs any, go in its instance overlay
 (`.cloop/config.ui-<port>.yaml`); `.cloop/config.yaml` is shared by all of them.
@@ -109,10 +113,10 @@ Hub cluster
   /srv/cloop/.cloop/state.db
 
   hub_d74093a016f4198a7ec530075841bd4f  serving
-      host hub-1 pid 2476196, listening :8080, reachable at http://127.0.0.1:8080
+      host hub-1 pid 2476196, listening *:8080, reachable at http://127.0.0.1:8080
       version v0.9.0, started 2026-09-28T22:07:33Z
   hub_2fe01f4e6fca955c89bf53189ef133df leader  serving
-      host hub-1 pid 2476198, listening :8081, reachable at http://127.0.0.1:8081
+      host hub-1 pid 2476198, listening *:8081, reachable at http://127.0.0.1:8081
       version v0.9.0, started 2026-09-28T22:07:33Z
 
   2 member(s) serving
@@ -324,7 +328,8 @@ the host of `ui.external_url` when that is unset.
 
 The advertise URL is resolved in the order above — flag, URL variable, host
 variable, configuration — and defaults to `http://127.0.0.1:<port>`
-(`https://` when the member serves TLS). A member that finds another live
+(`https://` when the member serves TLS), or to the bound address for a member
+that listens on one interface rather than loopback or all of them. A member that finds another live
 member advertising the same address warns at startup: requests forwarded to
 either would reach whichever process answers there.
 

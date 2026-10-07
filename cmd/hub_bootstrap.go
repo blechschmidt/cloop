@@ -331,6 +331,13 @@ ui:
   allowed_ws_origins:
     - {{.ExternalURL}}
 
+  # Where the dashboard listens; the port is --port. Unset, a hub with sign-in
+  # (this one has CLOOP_UI_TOKEN, and SSO once enabled) listens on every
+  # interface, and one without listens on 127.0.0.1 only. When TLS terminates
+  # at a proxy on this host, pin it to loopback so nothing else reaches the
+  # plaintext port — ` + "`cloop hub doctor`" + ` reports ui.exposure until you do:
+  # listen: 127.0.0.1
+
 {{- if .BehindProxy}}
   # TLS terminates at a reverse proxy or Ingress, so the hub itself speaks
   # plain HTTP and must never be published directly.

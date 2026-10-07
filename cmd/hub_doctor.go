@@ -169,6 +169,7 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	rep := hubdoctor.Run(cmd.Context(), dir, cfg, hubdoctor.Options{
 		Offline:            offline,
 		Timeout:            timeout,
+		Port:               port, // the hub whose listener ui.exposure looks for (Task 20393)
 		ProbeNetworkPolicy: probeNetpol,
 		ProbeExecutorID:    probeExecutor,
 		ProbeImage:         probeImage,
@@ -359,6 +360,8 @@ func groupTitle(group string) string {
 		return "IDENTITY"
 	case "tls":
 		return "TRANSPORT"
+	case "ui":
+		return "NETWORK EXPOSURE"
 	case "secret_key":
 		return "SECRETS"
 	case "rbac":

@@ -5,11 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -39,12 +40,16 @@ var (
 	// uiAdvertiseURL is how other hub processes serving the same control
 	// plane reach this one (Task 20354).
 	uiAdvertiseURL string
+	// uiListen is the address the dashboard binds, without the port
+	// (Task 20393). Empty defers to ui.listen, then to the default for the
+	// hub's authentication.
+	uiListen string
 )
 
 var uiCmd = &cobra.Command{
 	Use:   "ui",
 	Short: "Start a local web dashboard for monitoring and controlling cloop",
-	Long: `Start a local web server that serves a real-time dashboard on http://localhost:8080.
+	Long: `Start a web server that serves a real-time dashboard on port 8080.
 
 The dashboard shows the project goal, status, step history with outputs,
 task list (PM mode), live progress via SSE, and run/stop controls.
@@ -55,6 +60,15 @@ task list (PM mode), live progress via SSE, and run/stop controls.
   cloop ui --projects /a /b /c        # multi-project overview dashboard
   cloop ui --scan /root/Projects      # auto-discover cloop projects under dir
   cloop ui --tls-cert c.pem --tls-key k.pem   # serve HTTPS directly
+  cloop ui --listen 0.0.0.0           # every interface (needs sign-in)
+
+Where it listens depends on whether it can tell people apart. A hub with no
+sign-in — no ui.oidc and no CLOOP_UI_TOKEN — lets anyone who reaches it start
+agent runs on this host, so it listens on 127.0.0.1 only. A hub with sign-in
+listens on every interface. --listen (or ui.listen) names an address instead;
+one beyond loopback is refused on a hub without sign-in unless
+ui.allow_unauthenticated_network is true. Remote executor agents need to reach
+the hub, so a hub that serves them over the network needs SSO or a token.
 
 TLS may also be configured under ui.tls in .cloop/config.yaml; the flags win
 when both are present. Run ` + "`cloop hub tls-init`" + ` for a development
@@ -95,6 +109,22 @@ but not for anything reachable from a network.`,
 			}
 		}
 
+		token := uiToken
+		if token == "" {
+			token = os.Getenv("CLOOP_UI_TOKEN")
+		}
+
+		// Where to listen (Task 20393), decided before the control plane is
+		// touched: a hub refused an address leaves no member row, lease or
+		// reconciled executor behind. Run decides again from what the server
+		// holds, and reaches the same answer because it is given the same
+		// request.
+		listenReq := uiListenRequest(cfg, token)
+		listen, err := exposure.Decide(listenReq)
+		if err != nil {
+			return err
+		}
+
 		// Join the control plane before anything touches it. This is the
 		// first thing done to state.db on purpose: ui.New reconciles executors
 		// and sweeps orphaned sessions, and doing that without knowing which
@@ -115,23 +145,19 @@ but not for anything reachable from a network.`,
 			node  *hubcluster.Node
 		)
 		if cfg != nil && cfg.UI.Cluster.Exclusive {
-			lease, err = acquireExclusiveHub(workdir)
+			lease, err = acquireExclusiveHub(workdir, listen)
 			if err != nil {
 				return err
 			}
 			defer lease.Release()
 		} else {
-			node, err = joinHubCluster(workdir, cfg)
+			node, err = joinHubCluster(workdir, cfg, listen)
 			if err != nil {
 				return err
 			}
 			defer node.Close()
 		}
 
-		token := uiToken
-		if token == "" {
-			token = os.Getenv("CLOOP_UI_TOKEN")
-		}
 		if token != "" {
 			warnStaticTokenDeprecated()
 		}
@@ -157,6 +183,8 @@ but not for anything reachable from a network.`,
 
 		srv := ui.NewInCluster(workdir, uiPort, token, node)
 		srv.Lease = lease
+		srv.ListenHost = listenReq.Listen
+		srv.AllowUnauthenticatedNetwork = listenReq.AllowUnauthenticatedNetwork
 		srv.Projects = projectPaths
 		srv.RPS = uiRateLimit
 		srv.Burst = uiRateBurst
@@ -311,15 +339,41 @@ but not for anything reachable from a network.`,
 		// matches what the server will actually speak. Opening http:// against
 		// an HTTPS listener produces an empty tab and a confusing bug report.
 		if !uiNoBrowser {
-			scheme := "http"
-			if srv.TLSEnabled() {
-				scheme = "https"
-			}
-			go openBrowser(scheme + "://localhost:" + strconv.Itoa(uiPort))
+			listen.TLS = srv.TLSEnabled()
+			go openBrowser(listen.URL())
 		}
 
 		return srv.Start()
 	},
+}
+
+// uiListenRequest gathers what pkg/exposure decides the dashboard's address
+// from (Task 20393): --listen over ui.listen, the browser credentials this
+// start will have, and the acknowledgement. token is the static token as
+// resolved from --token and CLOOP_UI_TOKEN.
+//
+// SSO counts as configured when ui.oidc.enabled is set: an enabled block that
+// does not validate stops the start before the hub serves anything, so a hub
+// that gets as far as listening has the sign-in this assumed.
+func uiListenRequest(cfg *config.Config, token string) exposure.Request {
+	r := exposure.Request{
+		Listen:      strings.TrimSpace(uiListen),
+		Source:      "--listen",
+		Port:        uiPort,
+		StaticToken: token != "",
+		TLS:         strings.TrimSpace(uiTLSCert) != "",
+	}
+	if cfg == nil {
+		return r
+	}
+	if r.Listen == "" {
+		r.Listen, r.Source = strings.TrimSpace(cfg.UI.Listen), "ui.listen"
+	}
+	r.SSO = cfg.UI.OIDC.Enabled
+	r.AllowUnauthenticatedNetwork = cfg.UI.AllowUnauthenticatedNetwork
+	r.TLS = r.TLS || strings.TrimSpace(cfg.UI.TLS.CertFile) != ""
+	r.ExternalURL, r.ExternalURLKey = cfg.UI.PublicURL()
+	return r
 }
 
 // describeRuntimeBindings annotates the RBAC startup line with the runtime
@@ -416,6 +470,10 @@ func warnStaticTokenDeprecated() {
 
 func init() {
 	uiCmd.Flags().IntVar(&uiPort, "port", defaultUIPort, "Port to listen on")
+	uiCmd.Flags().StringVar(&uiListen, "listen", "",
+		"Address to listen on, without the port: 127.0.0.1, 0.0.0.0, :: or one interface's address "+
+			"(overrides ui.listen). Default: every interface with sign-in (ui.oidc or a token), "+
+			"127.0.0.1 without; beyond loopback without sign-in needs ui.allow_unauthenticated_network")
 	uiCmd.Flags().BoolVar(&uiNoBrowser, "no-browser", false, "Do not open the browser automatically")
 	uiCmd.Flags().StringVar(&uiToken, "token", "",
 		"DEPRECATED: unscoped static auth token (also reads CLOOP_UI_TOKEN). "+

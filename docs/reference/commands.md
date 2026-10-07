@@ -967,14 +967,17 @@ In `.cursor/mcp.json` at the project root:
 Start a web dashboard with real-time updates over a WebSocket (`/api/ws`),
 falling back to SSE where a WebSocket cannot be established.
 
-The listener binds every interface on its port, not just localhost, and
-authenticates nothing unless a token or OIDC is configured — see
-[Web UI](configuration.md#web-ui-cloop-ui) before exposing it.
+It authenticates nothing unless a token or OIDC is configured, and so,
+without either, listens on `127.0.0.1` only; with one it listens on every
+interface. `--listen` names an address instead, and an address beyond loopback
+is refused on a hub without sign-in unless `ui.allow_unauthenticated_network`
+is set — see [Web UI](configuration.md#web-ui-cloop-ui) before exposing it.
 
 ```bash
-cloop ui                  # start on default port 8080
-cloop ui --port 9090      # use a custom port
-cloop ui --no-browser     # don't open the browser automatically
+cloop ui                    # start on default port 8080
+cloop ui --port 9090        # use a custom port
+cloop ui --no-browser       # don't open the browser automatically
+cloop ui --listen 0.0.0.0   # every interface — needs sign-in (ui.oidc or CLOOP_UI_TOKEN)
 ```
 
 The dashboard shows: project goal, status, step history with outputs, task list (PM mode), live progress, and run/stop controls.
@@ -982,8 +985,9 @@ The dashboard shows: project goal, status, step history with outputs, task list 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `8080` | Port to listen on |
+| `--listen` | `127.0.0.1` without sign-in, every interface with it | Address to listen on, without the port (overrides `ui.listen`) |
 | `--no-browser` | `false` | Do not open the browser automatically |
-| `--advertise-url` | `http(s)://127.0.0.1:<port>` | Where the other hubs serving this directory reach this one (also `CLOOP_CLUSTER_ADVERTISE_URL`, or `CLOOP_CLUSTER_ADVERTISE_HOST` for the host alone) |
+| `--advertise-url` | `http(s)://127.0.0.1:<port>`, or the bound address when `--listen` names one interface | Where the other hubs serving this directory reach this one (also `CLOOP_CLUSTER_ADVERTISE_URL`, or `CLOOP_CLUSTER_ADVERTISE_HOST` for the host alone) |
 
 Several `cloop ui` in one directory serve it together, as members of one
 [hub cluster](../architecture/hub-cluster.md) behind a load balancer:

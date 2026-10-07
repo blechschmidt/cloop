@@ -1820,16 +1820,83 @@ the IdP is unreachable, are in
 
 ### Web UI (`cloop ui`)
 
-The web dashboard binds to **every interface** on its port. The listener is
-opened on `:<port>`, and there is no bind-address flag — the `http://localhost`
-URL printed at startup is where *you* reach it, not a limit on who else can.
-With no `--token`, no scoped API token and no OIDC issuer configured, requests
-are not authenticated at all, so on a shared network the default is a dashboard
-anyone routable to the port can drive.
+Where the dashboard listens depends on whether it can tell people apart
+(Task 20393). A hub with **no sign-in** — neither `ui.oidc` nor a static
+`--token`/`CLOOP_UI_TOKEN` — answers every request from anyone who reaches it:
+it lists the projects, queues tasks and starts agent runs on this host. So it
+listens on **`127.0.0.1` only**, and says so at startup:
 
-Put it somewhere private before that matters: run it behind a reverse proxy
-bound to `127.0.0.1`, publish the container port as `127.0.0.1:8080:8080`, or
-configure OIDC and give people accounts.
+```
+cloop dashboard running at http://127.0.0.1:8080, listening on 127.0.0.1:8080
+No sign-in is configured, so the dashboard listens on 127.0.0.1:8080 only. To reach it from another machine, configure SSO (ui.oidc) or a token (CLOOP_UI_TOKEN) — the hub then listens on every interface — or tunnel: ssh -L 8080:127.0.0.1:8080 <this-host>.
+```
+
+A hub **with** sign-in listens on every interface, as every hub did before.
+`ui.listen` (or `--listen`, which overrides it) names an address instead —
+without the port, which stays `--port`:
+
+| | `ui.listen` unset | loopback: `127.0.0.1`, `::1`, `localhost` | beyond loopback: `0.0.0.0`, `::`, an interface's address, a host name |
+| --- | --- | --- | --- |
+| no sign-in | `127.0.0.1` | as named | **refused** — or, with `ui.allow_unauthenticated_network: true`, as named and with a warning at every start |
+| static token | every interface | as named | as named |
+| `ui.oidc` | every interface | as named | as named |
+
+```yaml
+ui:
+  # The address, never the port. --listen overrides it.
+  listen: 127.0.0.1
+  # Only for a hub without sign-in that must listen beyond loopback anyway:
+  # a lab network, a container published on the host's loopback. It never
+  # widens the default, and the hub warns at every start while it applies.
+  allow_unauthenticated_network: false
+```
+
+- **A scoped API token is not sign-in.** API tokens restrict the callers that
+  present one; a request presenting none is still served by a hub without
+  `ui.oidc` or a static token. Such a hub counts as having no sign-in — which
+  is why removing the static token from a hub without SSO
+  ([migrating off it](../security/model.md#migrating-off-the-static-token))
+  now takes it off the network instead of leaving it open there.
+- **The refusal says what to do.** A hub without sign-in asked for an address
+  beyond loopback exits before it touches the control plane:
+
+  ```
+  Error: refusing to listen on *:8080 (--listen): this hub has no sign-in — ui.oidc is off and no --token or CLOOP_UI_TOKEN is set — so anyone who can reach that address could list its projects, queue tasks and start agent runs on this host.
+    Remote executor agents need to reach the hub, and a hub that serves them over the network needs SSO (ui.oidc) or a token (CLOOP_UI_TOKEN).
+    To keep it on this machine, drop --listen: a hub without sign-in listens on 127.0.0.1, which an SSH tunnel (ssh -L 8080:127.0.0.1:8080 <this-host>) or an authenticating reverse proxy can reach.
+    To serve it without sign-in anyway, set ui.allow_unauthenticated_network: true in .cloop/config.yaml.
+  ```
+
+- **Remote executor agents dial the hub**, so a hub that enrolls devices over
+  the network needs SSO or a token. A loopback-only hub serves agents on its
+  own machine, or through a tunnel.
+- **Loopback is read from the address, never resolved.** IP literals count by
+  their value, and `localhost` is bound as `127.0.0.1`. Every other host name —
+  `hub.localhost`, this machine's own name mapped to `127.0.1.1` — counts as
+  beyond loopback, whatever it resolves to today.
+- **Behind a TLS proxy on the same host**, set `listen: 127.0.0.1` on a hub
+  with sign-in too: the proxy reaches it there, and nothing else reaches the
+  plaintext port. Startup prints a note, and `cloop hub doctor` warns
+  (`ui.exposure`), while a hub serves plaintext beyond loopback and its public
+  URL — `ui.external_url`, or `ui.oidc.redirect_url` without one — is https.
+- **Per process.** Where two hubs share a directory, `ui.listen` belongs in the
+  hub's own overlay, `config.ui-<port>.yaml` (below).
+- **Containers name the address.** A container's loopback is its own, so the
+  image, the Helm chart and the compose stack start `cloop ui --listen
+  0.0.0.0`; a container hub without sign-in refuses that and exits. See
+  [Deploying the cloop hub](../../deploy/README.md#listening-on-the-network).
+- **Hub-cluster members** reach each other at their advertise URLs, which
+  default to `http(s)://127.0.0.1:<port>` for a hub on loopback or every
+  interface, and to the bound address for a hub on one interface.
+
+`cloop hub doctor --port N` reports `ui.exposure`. It reads where the process on
+port `N` actually listens from the kernel's socket table, and asks it for
+`/api/projects` without credentials: **fail** for a hub without sign-in that is
+reachable beyond loopback — whatever build it is, so an older binary that binds
+every interface regardless is caught too — and **warn** for the plaintext
+behind an https URL above. With nothing on the port it judges what
+`cloop ui --port N` would do with this configuration (a static token counts
+when `CLOOP_UI_TOKEN` is exported in the doctor's shell).
 
 > **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It still works and will keep
 > working, but it bypasses RBAC entirely, sees every project on the hub, and
@@ -1932,7 +1999,7 @@ ui:
 | `executors.write_back` | Whether a run on an executor that does not share this hub's filesystem pushes its work back to the project's origin. Read on each dispatch. |
 | `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
-| `ui.*` | Sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
+| `ui.*` | Where it listens (`listen`, `allow_unauthenticated_network`, read at startup), sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
 | `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |
 | `retention`, `audit` | The janitor's policy for the hub's own directory. Every other project keeps its own. |
 | `backup` | Auto-backup of the hub's own directory. |

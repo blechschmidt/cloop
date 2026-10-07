@@ -31,6 +31,7 @@ cloop ui --projects /srv/app --projects /srv/api
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--port` | `8080` | Port to listen on |
+| `--listen` | see below | Address to listen on, without the port; overrides `ui.listen` |
 | `--no-browser` | `false` | Do not open a browser window at startup |
 | `--projects` | — | Additional project directories, repeatable |
 | `--scan` | — | Scan a directory for cloop projects and add them |
@@ -47,34 +48,48 @@ come from `ui.*` in `.cloop/config.yaml`; a YAML parse error here is fatal
 rather than a warning, because it is where the security settings live. See
 [the configuration reference](../reference/configuration.md#tls).
 
-**There is no bind-address flag.** The listener is opened on `:<port>`, which
-means every interface on the machine, not just loopback. The startup line
-prints a `localhost` URL because that is the address to open in a browser — not
-because the socket is restricted to it.
+**Where it listens depends on whether it can tell people apart.** A plain
+`cloop ui` — no sign-in configured — listens on `127.0.0.1` only, and says so:
+
+```
+cloop dashboard running at http://127.0.0.1:8080, listening on 127.0.0.1:8080
+No sign-in is configured, so the dashboard listens on 127.0.0.1:8080 only. To reach it from another machine, configure SSO (ui.oidc) or a token (CLOOP_UI_TOKEN) — the hub then listens on every interface — or tunnel: ssh -L 8080:127.0.0.1:8080 <this-host>.
+```
+
+With sign-in it listens on every interface. `--listen` (or `ui.listen`) names an
+address instead — `127.0.0.1`, `0.0.0.0`, `::` or one interface's address — and
+a hub without sign-in refuses one beyond loopback unless
+`ui.allow_unauthenticated_network: true` says it may. The full rule, and the
+refusal it prints, is in
+[the configuration reference](../reference/configuration.md#web-ui-cloop-ui).
 
 ---
 
 ## What it authenticates by default
 
-**Nothing.** With no `--token`, no scoped API token and no OIDC configured,
-every route — including the ones that start a run, edit a plan or delete a
-project — is served without authentication. Combined with the bind behaviour
-above, a plain `cloop ui` on a machine other people can reach is a machine
-other people can run code on.
+**Nothing.** With no `--token` and no OIDC configured, every route — including
+the ones that start a run, edit a plan or delete a project — is served without
+authentication. That is why such a hub stays on loopback: on this machine it is
+the right default, and on a machine other people can reach it would make that
+a machine other people can run code on. Loopback is not a credential, though —
+every local user and process can still drive it.
 
-That default is the right one for a laptop and wrong for anything else. If the
-port is reachable from a network, configure one of the real options before you
-start it:
+To make it reachable, give it a way to tell people apart first:
 
+- **OIDC single sign-on** (`ui.oidc.*`) for people, with claim-based RBAC. With
+  it on, the hub listens on every interface.
 - **Scoped API tokens** (`cloop hub token create`) for scripts and CI. They
   carry roles, can be limited to specific projects, expire, and are revocable
-  one at a time.
-- **OIDC single sign-on** (`ui.oidc.*`) for people, with claim-based RBAC.
+  one at a time. They restrict the callers that present one, but a request
+  presenting none is still served — so they do not, on their own, make a hub
+  safe to put on a network, and do not change where it listens.
 
-`--token` / `CLOOP_UI_TOKEN` still works and prints a deprecation warning at
-startup: it bypasses RBAC entirely, sees every project on the hub, and cannot
-be revoked for one caller without breaking every other. Both proper options are
-covered in [the security model](../security/model.md).
+`--token` / `CLOOP_UI_TOKEN` also counts as sign-in, and still works, but
+prints a deprecation warning at startup: it bypasses RBAC entirely, sees every
+project on the hub, and cannot be revoked for one caller without breaking every
+other. Both proper options are covered in
+[the security model](../security/model.md). Remote executor agents dial the
+hub, so a hub that serves them over the network needs SSO or a token.
 
 ---
 

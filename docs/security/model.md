@@ -58,6 +58,7 @@ hostile by assumption** — it runs code the hub did not write, chosen by an LLM
 | --- | --- | --- |
 | Transport | TLS 1.2 minimum; ECDHE+AEAD cipher suites only — no CBC, no static RSA | `pkg/tlsconf/tlsconf.go:122-168` |
 | Authentication | OIDC ID token validated against provider JWKS (RS256/ES256), **or** a static bearer token for headless deployments | `pkg/oidcauth/oidcauth.go:162-211,309-328` |
+| Exposure | A hub with neither listens on `127.0.0.1` unless an address is named; one beyond loopback is refused unless `ui.allow_unauthenticated_network` acknowledges it. API tokens do not count: they restrict the callers that present one | `pkg/exposure`, `pkg/ui/listen.go` |
 | Session | `cloop_session` cookie: `HttpOnly`, `Secure` (`auto`/`always`/`never`), `SameSite=Strict` under TLS and `Lax` on loopback plaintext | `pkg/oidcauth/oidcauth.go:495-507` |
 | CSRF | `SameSite=Strict` is the primary defence; login flow handles the cross-site navigation case explicitly | `pkg/oidcauth/oidcauth.go:334-354` |
 | WebSocket hijacking | `wsOriginAllowed`: absent `Origin` (CLI/agent), loopback, `Origin` host == request host, or an explicit `ui.allowed_ws_origins` entry | `pkg/ui/server.go` |
@@ -1982,6 +1983,13 @@ To migrate:
    **LAST USED** — that is how you know nothing is still on the old credential.
 4. Remove `--token` and `CLOOP_UI_TOKEN` and restart the hub.
 
+Without `ui.oidc`, step 4 leaves the hub with no sign-in: API tokens restrict
+the callers that present one, and a request presenting none is still served.
+Such a hub listens on `127.0.0.1` only, and refuses an address beyond loopback
+(`ui.listen`, `--listen`) at startup ([Network exposure](#network-exposure--exposure_testgo-and-the-package-suites)).
+A hub that must stay reachable from the network needs SSO configured before
+the static token goes.
+
 While the static token is configured, `cloop ui` warns at startup and the
 Tokens panel shows a banner. Both disappear once it is gone.
 
@@ -3046,6 +3054,22 @@ plaintext simply accumulates on a disk.
 | A project-scoped token holds nothing on an out-of-scope project, at every role | `TestScopedTokenIsDeniedOutOfScopeProjectsRegardlessOfRole` |
 | A revoked or expired token resolves to an empty permission set, not just a failed login | `TestRevokedOrExpiredTokenHoldsNothing` |
 | `token.admin` is held by `admin` alone | `TestTokenAdminIsAdminOnly` |
+
+### Network exposure — `exposure_test.go` and the package suites
+
+A hub without sign-in — neither `ui.oidc` nor a static token — lets anyone who
+reaches it start runs on its host, so it is kept off the network unless an
+operator says otherwise (Task 20393; the rule is in
+[the configuration reference](../reference/configuration.md#web-ui-cloop-ui)).
+
+| Guarantee | Test |
+| --- | --- |
+| Every address an operator could give an open `Server` ends on loopback or in the refusal: the default, `0.0.0.0`, `::` and the host's own network address alike | `TestAnOpenHubNeverListensBeyondLoopback` |
+| Only `ui.allow_unauthenticated_network` lifts the refusal — not TLS, not an https URL — and a hub it lets out warns at every start | `TestOnlyTheAcknowledgementLetsAnOpenHubOut` |
+| The bind for {no sign-in, static token, SSO} × {default, loopback, beyond loopback with and without the acknowledgement} | `TestBindAddressForEveryAuthAndListen`, `TestUIBindAddressMatrix` |
+| Loopback is read from the address, never resolved | `TestLoopbackIsDecidedFromTheAddressNotTheResolver` |
+| The built binary, open, is not reachable on the host's network address, and refuses `--listen 0.0.0.0` and `ui.listen: 0.0.0.0` | `TestE2EOpenHubIsNotReachableBeyondLoopback`, `TestE2EOpenHubRefusesANetworkAddress` |
+| `cloop hub doctor` fails a hub without sign-in it finds reachable beyond loopback, whichever build serves it, and warns for plaintext beyond loopback behind an https URL | `TestExposureFailsAnOpenHubOnTheNetwork`, `TestExposureWarnsOfPlaintextBehindHTTPS` |
 
 ### Sessions — `sessions_test.go` and the package suites
 

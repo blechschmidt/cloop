@@ -137,6 +137,7 @@ What it checks, and what each one catches that nothing else does:
 | `policy` | whether `executors.allow_host_process` was *decided* or merely defaulted |
 | `oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config |
 | `tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
+| `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one |
 | `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
 | `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's |
 | `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable where the container or Kubernetes executor verifies signatures — and a warning that enrolled devices do not — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names |
@@ -1776,6 +1777,29 @@ cloop audit-log list --entity session --since 24h
 cloop audit-log list --entity role_binding --since 24h
 cloop audit-log list --entity quota --since 24h
 ```
+
+#### An open hub is reachable from the network
+
+`cloop hub doctor` fails `ui.exposure` with *a hub without sign-in listens on
+\*:8080 (GET /api/projects … answered 200 without credentials)*. Anyone who can
+reach that port can list the projects and start agent runs on the host, so
+close it first and investigate second:
+
+```bash
+# 1. Close it, either way:
+systemctl stop cloop-ui                                   # the unit serving that port
+iptables -I INPUT -p tcp --dport 8080 ! -i lo -j DROP     # or keep it, loopback only
+ip6tables -I INPUT -p tcp --dport 8080 ! -i lo -j DROP
+# 2. What did it do while it was open? Projects, runs and tasks it was asked for:
+cloop audit-log list --since 72h
+# 3. Restart it with a build that defaults to loopback, or give it sign-in
+#    (ui.oidc, or CLOOP_UI_TOKEN) before it listens on the network again.
+```
+
+The finding names the cause when it can: *this build would listen on
+127.0.0.1:8080, so the process on the port is an older build or was started with
+--listen*. A binary from before the loopback default binds every interface
+whatever its configuration says, so only stopping it, or the firewall, closes it.
 
 #### A session was stolen
 

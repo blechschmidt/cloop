@@ -87,7 +87,12 @@ spec:
         - name: hub
           image: {{ include "cloop-hub.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["ui", "--port", "8080", "--no-browser"]
+          # Every interface, explicitly (Task 20393): the Service, the
+          # kubelet's probes and the other replicas all reach the Pod at its
+          # IP, never at its loopback. The chart installs a hub with sign-in
+          # (oidc.enabled or CLOOP_UI_TOKEN, see _validate.tpl); a hub without
+          # either refuses this address and the Pod says why in its log.
+          args: ["ui", "--listen", "0.0.0.0", "--port", "8080", "--no-browser"]
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:

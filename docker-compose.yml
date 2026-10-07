@@ -149,7 +149,11 @@ services:
         condition: service_completed_successfully
       dex:
         condition: service_healthy
-    command: ["ui", "--port", "8080", "--no-browser"]
+    # Every interface of this container, named (Task 20393): the proxy
+    # reaches the hub over the compose network, never through its loopback.
+    # The hub has SSO (deploy/eval/cloop-config.yaml), so it may; it is still
+    # not published to the host — see `expose` below.
+    command: ["ui", "--listen", "0.0.0.0", "--port", "8080", "--no-browser"]
     environment:
       # Deny-by-default RBAC, no host execution, TLS at the proxy: the same
       # posture `cloop hub bootstrap` writes, expressed as a mounted config.

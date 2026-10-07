@@ -28,11 +28,21 @@ func TestClusterAdvertiseURL(t *testing.T) {
 	}
 	cases := []struct {
 		name, flag, envURL, envHost, cert string
-		cfg                               *config.Config
-		want                              string
-		wantErr                           bool
+		// local is where this machine reaches the listener
+		// (exposure.Plan.LocalHost); empty reads as loopback.
+		local   string
+		cfg     *config.Config
+		want    string
+		wantErr bool
 	}{
 		{name: "loopback on this port by default", want: "http://127.0.0.1:8080"},
+		{name: "loopback for a hub on every interface", local: "127.0.0.1", want: "http://127.0.0.1:8080"},
+		// Task 20393: a hub bound to one interface is not listening on
+		// 127.0.0.1, so its peers on this machine are sent to the bind.
+		{name: "the bound address when the hub binds one", local: "10.0.0.5", want: "http://10.0.0.5:8080"},
+		{name: "a bound IPv6 address is bracketed", local: "::1", cert: "/c", want: "https://[::1]:8080"},
+		{name: "a configured URL beats the bound address", local: "10.0.0.5",
+			cfg: withConfig("http://10.0.0.9:8080"), want: "http://10.0.0.9:8080"},
 		{name: "https when serving TLS", cert: "/etc/cloop/tls.crt", want: "https://127.0.0.1:8080"},
 		{name: "config", cfg: withConfig("http://10.0.0.9:8080/"), want: "http://10.0.0.9:8080"},
 		{name: "a host beats the config", envHost: "10.1.2.3", cfg: withConfig("http://10.0.0.9:8080"),
@@ -53,7 +63,7 @@ func TestClusterAdvertiseURL(t *testing.T) {
 			uiAdvertiseURL, uiTLSCert = tc.flag, tc.cert
 			t.Setenv(envClusterAdvertiseURL, tc.envURL)
 			t.Setenv(envClusterAdvertiseHost, tc.envHost)
-			got, err := clusterAdvertiseURL(tc.cfg)
+			got, err := clusterAdvertiseURL(tc.cfg, tc.local)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("clusterAdvertiseURL = %q, want an error", got)

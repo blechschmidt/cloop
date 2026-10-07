@@ -1707,6 +1707,22 @@ type UIConfig struct {
 	// --server is not passed.
 	ExternalURL string `yaml:"external_url,omitempty"`
 
+	// Listen is the address the dashboard binds, without the port (that is
+	// --port): 127.0.0.1, 0.0.0.0, ::, one interface's address, or a host
+	// name. The --listen flag overrides it. Empty takes the default for this
+	// hub's authentication: every interface when it has a browser credential
+	// (ui.oidc or a static token), 127.0.0.1 when it has none (Task 20393;
+	// pkg/exposure). Per process, so where two hubs share a directory it
+	// belongs in the instance overlay, config.ui-<port>.yaml.
+	Listen string `yaml:"listen,omitempty"`
+
+	// AllowUnauthenticatedNetwork lets a hub with no browser credential
+	// listen beyond loopback, on an address ui.listen or --listen names.
+	// Without it such a hub refuses to start; with it, the hub warns at every
+	// start. It never widens the default: an open hub that names no address
+	// still listens on 127.0.0.1.
+	AllowUnauthenticatedNetwork bool `yaml:"allow_unauthenticated_network,omitempty"`
+
 	// TLS configures native HTTPS for `cloop ui` and `cloop serve`.
 	// Disabled (plaintext) when cert_file and key_file are unset, which is
 	// correct for loopback development and for a deployment that terminates
@@ -1733,6 +1749,23 @@ type UIConfig struct {
 	// Cluster configures how this hub process cooperates with others serving
 	// the same control plane. See ClusterConfig.
 	Cluster ClusterConfig `yaml:"cluster,omitempty"`
+}
+
+// PublicURL is the URL browsers reach this hub at, and the key that says so:
+// ui.external_url, or — when that is unset on a hub with SSO — the callback
+// ui.oidc.redirect_url, which names the origin people sign in at. Both empty
+// when neither is known. It is what decides whether TLS terminates in front
+// of a hub that serves plaintext itself (Task 20393).
+func (u UIConfig) PublicURL() (url, key string) {
+	if ext := strings.TrimSpace(u.ExternalURL); ext != "" {
+		return ext, "ui.external_url"
+	}
+	if u.OIDC.Enabled {
+		if r := strings.TrimSpace(u.OIDC.RedirectURL); r != "" {
+			return r, "ui.oidc.redirect_url"
+		}
+	}
+	return "", ""
 }
 
 // ClusterConfig is how several `cloop ui` processes share one control plane

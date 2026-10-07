@@ -36,10 +36,10 @@ cloop ui
 
 The dashboard comes up on port 8080 and opens a browser. Two things about that
 default are worth reading [the dashboard page](web-ui.md#what-it-authenticates-by-default)
-for before you put it on a network: it listens on every interface, and with no
-token and no SSO configured it authenticates nobody. On a laptop that is the
-right default. Anywhere else, set up
-[scoped tokens or OIDC](../security/model.md) first.
+for before you put it on a network: with no token and no SSO configured it
+authenticates nobody, and for that reason it listens on `127.0.0.1` only. On a
+laptop that is the right default. To reach it from elsewhere, set up
+[OIDC](../security/model.md) first — the hub then listens on every interface.
 
 ---
 
