@@ -16,6 +16,7 @@ var (
 	serveRateBurst int
 	serveTLSCert   string
 	serveTLSKey    string
+	serveListen    string
 )
 
 var serveCmd = &cobra.Command{
@@ -41,10 +42,16 @@ Authentication:
   If --token is provided (or CLOOP_API_TOKEN env var is set), every request
   must include "Authorization: Bearer <token>" or "?token=<token>".
 
+  Without a token anyone who reaches the server can start runs on this host,
+  so it then listens on 127.0.0.1 only; with one it listens on every
+  interface. --listen names an address instead, and one beyond loopback is
+  refused without a token unless ui.allow_unauthenticated_network is true.
+
 Examples:
   cloop serve                          # start on default port 8081
   cloop serve --port 9000              # custom port
-  cloop serve --token mysecret         # enable bearer-token auth
+  cloop serve --token mysecret         # enable bearer-token auth (every interface)
+  cloop serve --listen 127.0.0.1 --token mysecret   # loopback only, behind a proxy
   CLOOP_API_TOKEN=abc cloop serve      # token via env var
 
   # CI/CD usage
@@ -70,6 +77,7 @@ certificate.`,
 		srv := apiserver.New(workdir, servePort, token)
 		srv.RPS = serveRateLimit
 		srv.Burst = serveRateBurst
+		srv.ListenHost = serveListen
 
 		// Unlike cloop ui this command was flags-only; it now reads the shared
 		// ui.tls block so a deployment configures TLS once and both servers
@@ -90,6 +98,10 @@ certificate.`,
 			srv.TLSCertFile = cfg.UI.TLS.CertFile
 			srv.TLSKeyFile = cfg.UI.TLS.KeyFile
 			srv.TLSMinVersion = cfg.UI.TLS.MinVersion
+			// The acknowledgement is the dashboard's key, from the same shared
+			// ui block: one decision about serving without a credential, not one
+			// per server (Task 20393).
+			srv.AllowUnauthenticatedNetwork = cfg.UI.AllowUnauthenticatedNetwork
 		}
 		if serveTLSCert != "" || serveTLSKey != "" {
 			srv.TLSCertFile, srv.TLSKeyFile = serveTLSCert, serveTLSKey
@@ -100,6 +112,10 @@ certificate.`,
 
 func init() {
 	serveCmd.Flags().IntVar(&servePort, "port", 8081, "Port to listen on")
+	serveCmd.Flags().StringVar(&serveListen, "listen", "",
+		"Address to listen on, without the port: 127.0.0.1, 0.0.0.0, :: or one interface's address. "+
+			"Default: every interface with a token, 127.0.0.1 without; beyond loopback without a token "+
+			"needs ui.allow_unauthenticated_network")
 	serveCmd.Flags().StringVar(&serveToken, "token", "", "Bearer auth token (also reads CLOOP_API_TOKEN env var)")
 	serveCmd.Flags().Float64Var(&serveRateLimit, "rate-limit", 0, "Requests per second per IP (default 20; 0 = use default)")
 	serveCmd.Flags().IntVar(&serveRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")

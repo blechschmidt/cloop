@@ -117,6 +117,19 @@ type Server struct {
 	TLSKeyFile    string
 	TLSMinVersion string
 
+	// ListenHost is the address Run binds, without the port (--listen).
+	// Empty takes the default for this server's authentication: every
+	// interface with a Token, 127.0.0.1 without one — because without one
+	// POST /run/start starts a run on this host for anyone who reaches it.
+	// An address beyond loopback without a Token is refused unless
+	// AllowUnauthenticatedNetwork is set (Task 20393; pkg/exposure).
+	ListenHost string
+	// AllowUnauthenticatedNetwork is ui.allow_unauthenticated_network, read
+	// from the same shared ui block as TLS: a server without a Token may bind
+	// the address ListenHost names even beyond loopback, and warns at every
+	// start that it does.
+	AllowUnauthenticatedNetwork bool
+
 	mu sync.Mutex
 	// runExec and runHandle identify the in-flight run. The server holds the
 	// resolving executor rather than re-resolving on stop: a binding changed
@@ -136,6 +149,9 @@ type Server struct {
 	// shutdownMu serialises Shutdown vs Run-failure cleanup.
 	shutdownMu sync.Mutex
 	httpServer *http.Server
+	// boundAddr is the address the listener holds once Run has bound
+	// (guarded by shutdownMu). See BoundAddr.
+	boundAddr net.Addr
 
 	// ReadyCheck overrides the readiness check used by /readyz. nil means
 	// use defaultReadyCheck (stat state.db, open it, run SELECT 1 bounded
@@ -409,10 +425,17 @@ func (s *Server) Start() error {
 // ctx is cancelled or the underlying http.Server fails. On ctx cancellation
 // it triggers a bounded graceful shutdown (10s) and returns nil.
 func (s *Server) Run(ctx context.Context) error {
+	// Where to listen is decided first (Task 20393): a refused address must
+	// leave nothing running.
+	plan, err := s.listenPlan()
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
-	addr := ":" + strconv.Itoa(s.Port)
+	addr := plan.Addr()
 
 	// Settle TLS before announcing anything. A broken or half-finished
 	// certificate must stop startup rather than degrade to plaintext — this
@@ -423,17 +446,29 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	scheme := "http"
-	if tlsCfg != nil {
-		scheme = "https"
+	plan.TLS = tlsCfg != nil
+
+	// Bound before the banner, so the banner names an address the server
+	// holds rather than one it is about to try.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", plan, err)
+	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		plan.Port = tcp.Port // the port actually bound, when Port was 0
 	}
 
 	auth := ""
 	if s.Token != "" {
 		auth = " (token auth enabled)"
 	}
-	fmt.Printf("cloop API server running at %s://localhost%s%s\n", scheme, addr, auth)
-	fmt.Printf("OpenAPI spec: %s://localhost%s/openapi.json\n", scheme, addr)
+	fmt.Printf("cloop API server running at %s, listening on %s%s\n", plan.URL(), plan, auth)
+	fmt.Printf("OpenAPI spec: %s/openapi.json\n", plan.URL())
+	if text, warning := listenNotice(plan); warning {
+		fmt.Fprintln(os.Stderr, text)
+	} else if text != "" {
+		fmt.Println(text)
+	}
 	s.log().Info(logger.EventSessionStart, 0, "cloop API server listening", map[string]interface{}{
 		"port":    s.Port,
 		"auth":    s.Token != "",
@@ -459,16 +494,17 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.shutdownMu.Lock()
 	s.httpServer = httpSrv
+	s.boundAddr = ln.Addr()
 	s.shutdownMu.Unlock()
 
 	errCh := make(chan error, 1)
 	go func() {
 		if tlsCfg != nil {
 			// Empty paths: the key pair is already in TLSConfig.
-			errCh <- httpSrv.ListenAndServeTLS("", "")
+			errCh <- httpSrv.ServeTLS(ln, "", "")
 			return
 		}
-		errCh <- httpSrv.ListenAndServe()
+		errCh <- httpSrv.Serve(ln)
 	}()
 
 	select {

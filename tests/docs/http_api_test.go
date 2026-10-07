@@ -83,6 +83,13 @@ hub holds no refresh token for the session. See
 bearer token and no permission model, so its endpoints are either behind that
 token or exempt from it.
 
+A hub with neither single sign-on nor a static token serves a request that
+presents no credential at all — an API token restricts only the caller that
+presents it — and so does ` + "`cloop serve`" + ` without its token. Each of them
+therefore listens on ` + "`127.0.0.1`" + ` only, and refuses to listen beyond loopback
+unless ` + "`ui.allow_unauthenticated_network`" + ` is set; see
+[the configuration reference](configuration.md#web-ui-cloop-ui).
+
 ## Reading the tables
 
 **Permission** is what a caller must hold to reach the endpoint; it is the same
