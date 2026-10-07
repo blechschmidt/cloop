@@ -1089,6 +1089,14 @@ Hardening before any device has enrolled is a supported intermediate state —
 remote executors arrive at runtime, not through this file — so the config still
 loads and warns rather than refusing to boot.
 
+The other half of hardening is who can reach the hub at all. A hub without
+sign-in listens on `127.0.0.1` only, and refuses an address beyond loopback
+unless `ui.allow_unauthenticated_network` says otherwise — which a hosted
+deployment should never set. Configure `ui.oidc` before the hub listens on a
+network; behind a TLS proxy on the same host, set `ui.listen: 127.0.0.1` so the
+plaintext port is reachable through the proxy alone. `cloop hub doctor`
+checks both (`ui.exposure`); see [Web UI](#web-ui-cloop-ui).
+
 ### Minimum agent build
 
 A fleet-wide floor on the cloop build a remote executor agent may be running and

@@ -75,6 +75,14 @@ the task then runs in an environment nobody described.
 
 ## Before you start
 
+A hub on a critical host is a hub anyone who reaches it can drive unless it can
+tell people apart: without sign-in (`ui.oidc`, or `CLOOP_UI_TOKEN` from
+`hub.env`) it listens on `127.0.0.1` only and refuses an address beyond loopback.
+Give it sign-in before it listens on the network, or reach it through an SSH
+tunnel; pin it to `ui.listen: 127.0.0.1` behind a TLS proxy on the same host.
+`cloop hub doctor` reports where it actually listens (`ui.exposure`). See
+[the Web UI section of the configuration reference](../reference/configuration.md#web-ui-cloop-ui).
+
 Every `cloop secret` command on this page seals or opens a payload, so the hub's
 master key has to be in the environment:
 
