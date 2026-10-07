@@ -35,20 +35,17 @@ import (
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
 
-// authzActive reports whether RBAC is in force. Two conditions must hold:
-//
-//   - OIDC is enabled. Without an IdP there are no claims to map, and a
-//     resolver alone would lock the operator out of their own local
-//     dashboard. This is what keeps single-tenant local use frictionless.
-//   - A policy was actually configured (see authz.Resolver.Configured).
-//     Enabling SSO must not silently enable deny-by-default and lock out a
-//     deployment that upgraded without writing any role mappings.
+// authzActive reports whether RBAC is in force on this hub: authz.Enforced
+// over the running single sign-on switch and resolver, and nothing else
+// (Task 20395). Every pkg/ui reporter — /api/me, the Settings panel — asks
+// this, so what the hub says about RBAC is what its request gate does;
+// tests/arch fails a second copy of the rule.
 //
 // When RBAC is inactive every request is granted everything, which is
 // exactly the pre-RBAC behavior — including the admin_emails check that
 // requireExecutorAdmin still applies on top.
 func (s *Server) authzActive() bool {
-	return s.oidcEnabled() && s.Authz.Configured()
+	return authz.Enforced(s.oidcEnabled(), s.Authz)
 }
 
 // authzActiveFor is authzActive plus the per-request case that has no
@@ -347,7 +344,7 @@ func (s *Server) newGrant(r *http.Request) *grant {
 // would put a line in the log for every request of every user for as long as
 // the typo lived, which is how an operator learns to filter it out.
 func (s *Server) warnUnsatisfiableBindings(subject *authz.Subject) {
-	if subject == nil || !s.Authz.Configured() {
+	if subject == nil || !s.authzActive() {
 		return
 	}
 	s.claimGapOnce.Do(func() {

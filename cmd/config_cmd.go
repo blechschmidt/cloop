@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -109,8 +110,26 @@ var configSetCmd = &cobra.Command{
 		}
 
 		color.Green("Config updated: %s = %s", key, displayValue(key, value))
+		reportOIDCKeyRBAC(os.Stderr, key, cfg.UI.OIDC)
 		return nil
 	},
+}
+
+// reportOIDCKeyRBAC warns, after a ui.oidc key is set, when the block it leaves
+// turns single sign-on on with no role policy (Task 20395) — the state `cloop
+// ui` warns about at every start. Said here too, because this is the command
+// that produces it: `ui.oidc.enabled true` on a block with only admin_emails.
+func reportOIDCKeyRBAC(w io.Writer, key string, oc config.OIDCConfig) {
+	if !strings.HasPrefix(key, "ui.oidc.") || !oc.Enabled {
+		return
+	}
+	if enforced, err := oc.RBACEnforced(); err != nil || enforced {
+		return
+	}
+	warnRBACOff(w, oc)
+	if err := oc.RequireRBACRefusal(); err != nil {
+		color.New(color.FgRed).Fprintln(w, "  ui.oidc.require_rbac is set, so `cloop ui` will refuse to start until a policy is written.")
+	}
 }
 
 func applyConfigKey(cfg *config.Config, key, value string) error {
@@ -497,6 +516,15 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 			cfg.UI.OIDC.RequireIdP = false
 		default:
 			return fmt.Errorf("ui.oidc.require_idp: expected true/false, got %q", value)
+		}
+	case "ui.oidc.require_rbac":
+		switch strings.ToLower(value) {
+		case "true", "1", "yes", "on":
+			cfg.UI.OIDC.RequireRBAC = true
+		case "false", "0", "no", "off":
+			cfg.UI.OIDC.RequireRBAC = false
+		default:
+			return fmt.Errorf("ui.oidc.require_rbac: expected true/false, got %q", value)
 		}
 
 	// Container executor (Task 20157). Each case assigns into a copy that is

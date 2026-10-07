@@ -19,6 +19,13 @@ package hubdoctor
 // builder `cloop ui` uses (config.OIDCConfig.AuthzConfig) and normalized by
 // authz.New — not the YAML. Judging the YAML is how this check came to fail a
 // hub whose mapping said "role: Admin", which authz grants as admin (Task 20387).
+//
+// And before any of them, rbac.enforced: whether a policy is in force at all,
+// asked of authz.Enforced like everything else that reports it (Task 20395).
+// A hub with SSO and no policy runs with RBAC off — every identity the issuer
+// authenticates holds every permission but executor administration — and this
+// file used to call it "deny-by-default", because an empty default_role reads
+// as "none" to a resolver that is never consulted.
 
 import (
 	"fmt"
@@ -61,12 +68,48 @@ func checkRBAC(cfg *config.Config, add addFn) {
 	}
 	add(Finding{
 		Check: "rbac.policy", Title: "Role mappings", Severity: SeverityPass,
-		Message: fmt.Sprintf("%d mapping(s) parse, default role %q", len(oc.RoleMappings), resolver.DefaultRole()),
+		Message: fmt.Sprintf("%d role mapping(s) and %d admin email(s) parse",
+			len(oc.RoleMappings), len(oc.AdminEmails)),
 	})
 
-	checkDefaultRole(resolver, add)
-	checkAdminReachable(resolver, add)
+	enforced := authz.Enforced(oc.Enabled, resolver)
+	checkEnforced(oc, resolver, enforced, add)
+	if enforced {
+		// default_role is what a user matching no mapping gets only while a
+		// policy is in force. With RBAC off nobody consults it, and reporting
+		// its zero value as "deny-by-default" is the misreport this replaced.
+		checkDefaultRole(resolver, add)
+	}
+	checkAdminReachable(resolver, enforced, add)
 	checkMappingHygiene(oc, add)
+}
+
+// checkEnforced reports whether RBAC is in force — the finding that makes an
+// SSO hub without a policy impossible to miss (Task 20395).
+//
+// A fail, not a warning, although the hub works and the state is the upgrade
+// rule rather than a mistake: "everyone the issuer authenticates has full
+// access" is, for a corporate tenant, the whole company, and it is the one
+// RBAC configuration nothing at request time ever complains about.
+func checkEnforced(oc config.OIDCConfig, resolver *authz.Resolver, enforced bool, add addFn) {
+	if enforced {
+		add(Finding{
+			Check: "rbac.enforced", Title: "RBAC enforcement", Severity: SeverityPass,
+			Message: fmt.Sprintf("RBAC is in force: a signed-in identity matching no role mapping gets %q",
+				resolver.DefaultRole()),
+		})
+		return
+	}
+	msg := config.RBACOff(oc.Issuer) + ": " + config.RBACOffConsequence
+	if oc.RequireRBACRefusal() != nil {
+		msg += ". ui.oidc.require_rbac is set, so `cloop ui` will refuse to start"
+	}
+	add(Finding{
+		Check: "rbac.enforced", Title: "RBAC enforcement", Severity: SeverityFail,
+		Message:     msg,
+		Remediation: config.RBACOffRemedy,
+		Details:     map[string]any{"issuer": oc.Issuer},
+	})
 }
 
 // checkDefaultRole reports the blast radius of authenticating at all.
@@ -109,7 +152,12 @@ func checkDefaultRole(resolver *authz.Resolver, add addFn) {
 //
 // Routes are counted once each: an address in admin_emails that an email
 // mapping also makes admin is one way in, not two.
-func checkAdminReachable(resolver *authz.Resolver, add addFn) {
+//
+// With RBAC off (enforced false) the routes are admin_emails alone, and what
+// they gate is executor administration — every signed-in identity holds the
+// rest — so the finding with none says that rather than "every request is
+// denied", which is true only under a policy.
+func checkAdminReachable(resolver *authz.Resolver, enforced bool, add addFn) {
 	var routes []string
 	seen := map[string]bool{}
 	for _, b := range resolver.GlobalAdminBindings() {
@@ -120,6 +168,16 @@ func checkAdminReachable(resolver *authz.Resolver, add addFn) {
 		}
 	}
 
+	if len(routes) == 0 && !enforced {
+		add(Finding{
+			Check: "rbac.admin", Title: "Administrator access", Severity: SeverityFail,
+			Message: "ui.oidc.admin_emails is empty and no role mapping grants admin: nobody signed in can " +
+				"manage executors, and deny-by-default cannot be enforced without locking every user out",
+			Remediation: "List an address in ui.oidc.admin_emails (or add a global admin mapping) before " +
+				"enforcing deny-by-default",
+		})
+		return
+	}
 	if len(routes) == 0 {
 		add(Finding{
 			Check: "rbac.admin", Title: "Administrator access", Severity: SeverityFail,

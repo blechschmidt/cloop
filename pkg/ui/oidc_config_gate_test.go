@@ -58,10 +58,12 @@ func TestOIDCConfig_ReachableOnATokenOnlyHub(t *testing.T) {
 	}
 
 	// And the write works, which is the actual point: this is how SSO gets
-	// turned on for the first time.
+	// turned on for the first time — deny-by-default, since a first enable
+	// with no default role and no mapping leaves RBAC off and has to be
+	// confirmed (Task 20395).
 	body := `{"enabled":true,"issuer":"https://idp.example.com","client_id":"cloop",` +
 		`"client_secret":"s3cret","redirect_url":"https://h.example.com/auth/callback",` +
-		`"admin_emails":["ops@example.com"]}`
+		`"admin_emails":["ops@example.com"],"default_role":"none"}`
 	if code, resp := do(t, http.DefaultClient, http.MethodPut, ts.URL+"/api/config/oidc", body); code != http.StatusOK {
 		t.Fatalf("PUT /api/config/oidc on a token-only hub = %d, want 200 (body: %s)", code, resp)
 	}

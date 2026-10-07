@@ -56,6 +56,8 @@ func TestApplyConfigKey_OIDCScalars(t *testing.T) {
 		{"ui.oidc.max_claim_age_minutes", "10", func(o config.OIDCConfig) bool { return o.MaxClaimAgeMinutes == 10 }},
 		{"ui.oidc.clock_skew_seconds", "120", func(o config.OIDCConfig) bool { return o.ClockSkewSeconds == 120 }},
 		{"ui.oidc.require_idp", "true", func(o config.OIDCConfig) bool { return o.RequireIdP }},
+		// Task 20395: refuse to start with SSO on and no role policy.
+		{"ui.oidc.require_rbac", "true", func(o config.OIDCConfig) bool { return o.RequireRBAC }},
 	}
 
 	for _, tc := range cases {
@@ -103,6 +105,7 @@ func TestApplyConfigKey_OIDCRejectsOutOfRange(t *testing.T) {
 		{"ui.oidc.clock_skew_seconds", "99999"},
 		{"ui.oidc.default_role", "superuser"},
 		{"ui.oidc.require_idp", "maybe"},
+		{"ui.oidc.require_rbac", "maybe"},
 		{"ui.oidc.cookie_secure", "sometimes"},
 	}
 	for _, tc := range cases {

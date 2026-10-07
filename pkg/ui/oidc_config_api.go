@@ -2,11 +2,12 @@ package ui
 
 // The Settings panel that edits ui.oidc (Task 20308).
 //
-// Three routes, all global-scoped and gated on user.manage:
+// Four routes, all global-scoped and gated on user.manage:
 //
-//	GET  /api/config/oidc        what is configured, and what is running
-//	PUT  /api/config/oidc        change it, or be told why it was refused
-//	POST /api/config/oidc/test   contact an issuer without saving anything
+//	GET  /api/config/oidc          what is configured, and what is running
+//	PUT  /api/config/oidc          change it, or be told why it was refused
+//	POST /api/config/oidc/test     contact an issuer without saving anything
+//	POST /api/config/oidc/enforce  leave the RBAC-off state in one step
 //
 // user.manage rather than config.write, which every other Settings route uses.
 // This block decides who may sign in and what authority they arrive with, so
@@ -90,6 +91,7 @@ type oidcSettingsView struct {
 	MaxClaimAgeMinutes     int    `json:"max_claim_age_minutes"`
 	ClockSkewSeconds       int    `json:"clock_skew_seconds"`
 	RequireIdP             bool   `json:"require_idp"`
+	RequireRBAC            bool   `json:"require_rbac"`
 	CookieSecure           string `json:"cookie_secure"`
 
 	// ClientSecretSet and ClientSecretSource describe the credential without
@@ -107,6 +109,9 @@ type oidcSettingsView struct {
 	// authenticator disagree.
 	RestartRequired bool `json:"restart_required"`
 
+	// RBAC is whether a role policy is in force, running and saved.
+	RBAC oidcRBACView `json:"rbac"`
+
 	// Bounds and enumerations for the form.
 	Limits oidcLimitsView `json:"limits"`
 	Roles  []string       `json:"roles"`
@@ -122,6 +127,36 @@ type oidcActiveView struct {
 	// Error the reason it has not. Same source /readyz reads.
 	IdPReady bool   `json:"idp_ready"`
 	Error    string `json:"error,omitempty"`
+}
+
+// oidcRBACView says whether role-based access control is in force — for this
+// process and for the saved block — as authz.Enforced answers it (Task 20395).
+//
+// Served rather than worked out in the panel, which would have to restate the
+// rule from default_role and role_mappings. That is how the panel came to show
+// "none — deny by default" on a hub whose RBAC was off: an unset default_role
+// rendered as what it would mean if a policy existed.
+type oidcRBACView struct {
+	// Enforced is this process: the answer its request gate acts on.
+	Enforced bool `json:"enforced"`
+
+	// SavedEnforced is the saved block: what the next start will enforce.
+	SavedEnforced bool `json:"saved_enforced"`
+
+	// DefaultRole is what a signed-in identity matching no mapping gets under
+	// the saved block, set only when that block enforces a policy — the
+	// resolver's answer, so an unset default_role reads "none" here only where
+	// a mapping makes it mean that.
+	DefaultRole string `json:"default_role,omitempty"`
+
+	// Warning is set while single sign-on runs, or will run after a restart,
+	// without a role policy. It leads with config.RBACOff, the sentence the
+	// startup warning and `cloop hub doctor` lead with too.
+	Warning string `json:"warning,omitempty"`
+
+	// CanEnforce is set when the saved block turns single sign-on on with no
+	// policy, so POST /api/config/oidc/enforce has something to write.
+	CanEnforce bool `json:"can_enforce"`
 }
 
 // oidcBound is one numeric field's accepted range, as the panel should
@@ -216,6 +251,7 @@ func (s *Server) oidcViewOf(o config.OIDCConfig) oidcSettingsView {
 		MaxClaimAgeMinutes:     o.MaxClaimAgeMinutes,
 		ClockSkewSeconds:       o.ClockSkewSeconds,
 		RequireIdP:             o.RequireIdP,
+		RequireRBAC:            o.RequireRBAC,
 		CookieSecure:           o.CookieSecure,
 		Limits:                 oidcLimits(),
 		Roles:                  oidcRoleNames(),
@@ -250,7 +286,37 @@ func (s *Server) oidcViewOf(o config.OIDCConfig) oidcSettingsView {
 		}
 	}
 	view.RestartRequired = s.oidcRestartRequired(o)
+	view.RBAC = s.oidcRBACOf(o)
 	return view
+}
+
+// oidcRBACOf reports RBAC enforcement for the panel: this process through
+// authzActive, the saved block o through RBACEnforced — both authz.Enforced.
+func (s *Server) oidcRBACOf(o config.OIDCConfig) oidcRBACView {
+	v := oidcRBACView{Enforced: s.authzActive()}
+	saved, err := authz.New(o.AuthzConfig(nil))
+	if err == nil {
+		v.SavedEnforced = authz.Enforced(o.Enabled, saved)
+		if v.SavedEnforced {
+			v.DefaultRole = string(saved.DefaultRole())
+		}
+	}
+	// An invalid policy is not "off": it is a hub that will not start, which
+	// the save path refuses and the restart banner reports.
+	savedOff := o.Enabled && err == nil && !v.SavedEnforced
+	v.CanEnforce = savedOff
+	switch {
+	case s.oidcEnabled() && !v.Enforced:
+		// Named after the issuer this process signs people in through, which
+		// is who holds full access right now.
+		v.Warning = config.RBACOff(s.OIDC.Issuer()) + "."
+		if v.SavedEnforced {
+			v.Warning += " Deny-by-default is saved: restart the hub to enforce it."
+		}
+	case savedOff:
+		v.Warning = "Saved without a role policy — after a restart, " + config.RBACOff(o.Issuer) + "."
+	}
+	return v
 }
 
 // oidcRestartRequired reports whether the saved block differs from what this
@@ -272,6 +338,12 @@ func (s *Server) oidcRestartRequired(o config.OIDCConfig) bool {
 		return false
 	}
 	if strings.TrimSpace(o.Issuer) != strings.TrimSpace(s.OIDC.Issuer()) {
+		return true
+	}
+	// Whether a role policy is in force (Task 20395), asked of authz.Enforced
+	// on both sides — so this fires on exactly the difference the request gate
+	// will act on after a restart, and on no other.
+	if enforced, err := o.RBACEnforced(); err == nil && enforced != s.authzActive() {
 		return true
 	}
 	// Effective values on both sides: the running authenticator holds clamped
@@ -326,7 +398,15 @@ type oidcSettingsRequest struct {
 	MaxClaimAgeMinutes     *int    `json:"max_claim_age_minutes"`
 	ClockSkewSeconds       *int    `json:"clock_skew_seconds"`
 	RequireIdP             *bool   `json:"require_idp"`
+	RequireRBAC            *bool   `json:"require_rbac"`
 	CookieSecure           *string `json:"cookie_secure"`
+
+	// ConfirmRBAC says the caller has seen what this save does to whether RBAC
+	// is in force and means it (Task 20395). Without it, a save that turns a
+	// policy on for a hub whose RBAC was off — or that leaves single sign-on
+	// without one — is refused with 409 and the consequence spelled out, so the
+	// switch is never a side effect of editing another field.
+	ConfirmRBAC bool `json:"confirm_rbac"`
 
 	// ClearClientSecret removes the stored credential. Explicit, because an
 	// empty ClientSecret means "keep what is stored" — the panel cannot
@@ -374,6 +454,16 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 		writeOIDCProblem(w, err)
 		return
 	}
+	// Whether RBAC is in force changes only when the request says it means it
+	// to. The panel used to submit "none" for an unset default role, so saving
+	// any other field of an SSO hub without a policy switched RBAC on and
+	// locked out every identity without a mapping, at the next restart.
+	if change := rbacChangeOf(was, cfg.UI.OIDC); change != nil && !req.ConfirmRBAC {
+		hubConfigMu.Unlock()
+		apierror.WriteError(w, apierror.New(apierror.CodeConflict, change.message).
+			WithDetails(map[string]any{"rbac_change": change.code}))
+		return
+	}
 	err = save.commit(func(overlay string) error {
 		return config.SaveUIInstanceOIDC(overlay, cfg.UI.OIDC)
 	})
@@ -387,6 +477,110 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 
 	s.auditOIDCConfig(r, was, saved)
 	jsonOK(w, s.oidcViewOf(saved))
+}
+
+// handleOIDCEnforce serves POST /api/config/oidc/enforce: the one-step way out
+// of single sign-on without a role policy (Task 20395).
+//
+// It writes the smallest policy that is deny-by-default and strands nobody who
+// administers the hub now: `default_role: none`, admin_emails kept as they are
+// — each is a hub-wide admin binding — and a hub-wide admin mapping for the
+// acting admin unless the result already makes them one. The mapping binds
+// their `sub`, not their email: an address can be renamed at some providers,
+// and the subject is the claim OIDC promises is stable for this client.
+//
+// Then it runs the save path's own gate, validateOIDCConfig — so a hub with no
+// administrator left (a static-token caller, no admin_emails) is refused here
+// exactly as a hand-written block would be — writes where the hub reads, and
+// records oidc.rbac.enforced. Like every save, it is not live until a restart,
+// and the view it answers with says so.
+//
+// Gated on user.manage like the rest of the block. On a hub whose RBAC is off
+// every signed-in identity holds that, and so can call this; it grants nothing
+// they could not already write through PUT /api/config/oidc, and it only ever
+// narrows what everyone else holds.
+func (s *Server) handleOIDCEnforce(w http.ResponseWriter, r *http.Request) {
+	var req struct{}
+	if !decodeSecretsBody(w, r, &req) {
+		return
+	}
+	caller := s.callerSubject(r)
+
+	hubConfigMu.Lock()
+	save, err := s.beginHubSettingsSave()
+	if err != nil {
+		hubConfigMu.Unlock()
+		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "load hub config"))
+		return
+	}
+	cfg := save.Config
+	next, bound, err := enforceDenyByDefault(cfg.UI.OIDC, caller)
+	if err != nil {
+		hubConfigMu.Unlock()
+		apierror.WriteError(w, apierror.New(apierror.CodeConflict, err.Error()))
+		return
+	}
+	if err := validateOIDCConfig(next, caller, s.runtimeRoleSource()); err != nil {
+		hubConfigMu.Unlock()
+		writeOIDCProblem(w, err)
+		return
+	}
+	cfg.UI.OIDC = next
+	err = save.commit(func(overlay string) error {
+		return config.SaveUIInstanceOIDC(overlay, next)
+	})
+	hubConfigMu.Unlock()
+	if err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
+		return
+	}
+
+	s.appendOIDCAudit(r, auditaction.ActionOIDCRBACEnforced, map[string]any{
+		"issuer":           next.Issuer,
+		"default_role":     next.DefaultRole,
+		"bound":            bound,
+		"admin_emails":     len(next.AdminEmails),
+		"role_mappings":    len(next.RoleMappings),
+		"restart_required": s.oidcRestartRequired(next),
+	})
+	jsonOK(w, s.oidcViewOf(next))
+}
+
+// enforceDenyByDefault returns the block the enforce action writes over o, and
+// the mapping it added for caller as "claim=value" ("" when none was needed).
+// It refuses a block with nothing to enforce: single sign-on off, a policy
+// already in force, or one authz.New rejects.
+func enforceDenyByDefault(o config.OIDCConfig, caller *authz.Subject) (config.OIDCConfig, string, error) {
+	if !o.Enabled {
+		return o, "", errors.New("single sign-on is off in the saved configuration, so there is no RBAC to enforce: " +
+			"turn it on first")
+	}
+	enforced, err := o.RBACEnforced()
+	if err != nil {
+		return o, "", fmt.Errorf("the saved role policy is invalid, so the hub will not start: %w", err)
+	}
+	if enforced {
+		return o, "", errors.New("RBAC is already in force in the saved configuration")
+	}
+	next := o
+	next.RoleMappings = append([]config.RoleMapping(nil), o.RoleMappings...)
+	next.DefaultRole = string(authz.RoleNone)
+	if caller == nil || caller.Sub == "" {
+		// No session to bind — the static token or a service account, whose
+		// authority this block does not decide. validateOIDCConfig then asks
+		// whether anybody is left to administer the hub.
+		return next, "", nil
+	}
+	policy, err := authz.New(next.AuthzConfig(nil))
+	if err == nil && policy.Resolve(caller, authz.GlobalScope).Allows(authz.PermUserManage) {
+		return next, "", nil // already an admin through admin_emails
+	}
+	next.RoleMappings = append(next.RoleMappings, config.RoleMapping{
+		Claim: string(authz.ClaimSub),
+		Value: caller.Sub,
+		Role:  string(authz.RoleAdmin),
+	})
+	return next, string(authz.ClaimSub) + "=" + caller.Sub, nil
 }
 
 // applyOIDCRequest overlays the supplied fields onto o.
@@ -445,9 +639,64 @@ func applyOIDCRequest(o *config.OIDCConfig, req oidcSettingsRequest) {
 	if req.RequireIdP != nil {
 		o.RequireIdP = *req.RequireIdP
 	}
+	if req.RequireRBAC != nil {
+		o.RequireRBAC = *req.RequireRBAC
+	}
 	if req.CookieSecure != nil {
 		o.CookieSecure = strings.ToLower(strings.TrimSpace(*req.CookieSecure))
 	}
+}
+
+// The two transitions of whether RBAC is in force that a save must not make
+// unasked (Task 20395). Machine-readable, so the panel can ask before it
+// resends with confirm_rbac.
+const (
+	// rbacChangeTurnsOn: the saved block ran single sign-on without a policy,
+	// and this save writes one — after a restart, an identity matching no
+	// mapping gets the default role.
+	rbacChangeTurnsOn = "rbac_turns_on"
+	// rbacChangeStaysOff: this save leaves single sign-on on with no policy,
+	// from a block that either had one or had single sign-on off.
+	rbacChangeStaysOff = "rbac_off"
+)
+
+// rbacChange is a save's effect on whether RBAC is in force, when it is one an
+// admin has to have meant.
+type rbacChange struct {
+	code    string
+	message string
+}
+
+// rbacChangeOf compares the saved block with the one about to replace it, both
+// through RBACEnforced — authz.Enforced — and returns the transition that needs
+// confirming, or nil. Staying in the same state never does: that is the save
+// of an unrelated field, which must not move RBAC either way.
+func rbacChangeOf(was, now config.OIDCConfig) *rbacChange {
+	nowEnforced, err := now.RBACEnforced()
+	if err != nil {
+		// An invalid policy: refused by validateOIDCConfig while enabled, and
+		// read by nothing while disabled.
+		return nil
+	}
+	wasEnforced, wasErr := was.RBACEnforced()
+	wasOff := was.Enabled && wasErr == nil && !wasEnforced
+	nowOff := now.Enabled && !nowEnforced
+	switch {
+	case wasOff && nowEnforced:
+		role := authz.RoleNone
+		if r, err := authz.New(now.AuthzConfig(nil)); err == nil {
+			role = r.DefaultRole()
+		}
+		return &rbacChange{code: rbacChangeTurnsOn, message: fmt.Sprintf(
+			"this save turns RBAC on: after the next restart, a signed-in user who matches no role "+
+				"mapping gets %q, and only the admin emails and role mappings keep their access — "+
+				"confirm to save it", role)}
+	case nowOff && !wasOff:
+		return &rbacChange{code: rbacChangeStaysOff, message: "this save leaves single sign-on without " +
+			"a role policy: after the next restart, " + config.RBACOff(now.Issuer) + " — choose a " +
+			"default role (none denies by default) or a role mapping, or confirm to save it"}
+	}
+	return nil
 }
 
 // trimmedList drops blank entries, so a textarea the user left a trailing
@@ -630,17 +879,32 @@ func (s *Server) auditOIDCConfig(r *http.Request, was, now config.OIDCConfig) {
 		// answer: when did somebody last touch who can sign in.
 		return
 	}
-	blob, err := json.Marshal(map[string]any{
-		"changed":          strings.Join(changed, ","),
-		"enabled":          now.Enabled,
-		"was_enabled":      was.Enabled,
-		"issuer":           now.Issuer,
-		"default_role":     now.DefaultRole,
-		"admin_emails":     len(now.AdminEmails),
-		"role_mappings":    len(now.RoleMappings),
-		"require_idp":      now.RequireIdP,
-		"restart_required": s.oidcRestartRequired(now),
+	// Errors read as "not enforced": an invalid policy enforces nothing, and
+	// the save path refuses one while SSO is on.
+	wasEnforced, _ := was.RBACEnforced()
+	nowEnforced, _ := now.RBACEnforced()
+	s.appendOIDCAudit(r, auditaction.ActionOIDCConfigUpdated, map[string]any{
+		"changed":           strings.Join(changed, ","),
+		"enabled":           now.Enabled,
+		"was_enabled":       was.Enabled,
+		"issuer":            now.Issuer,
+		"default_role":      now.DefaultRole,
+		"admin_emails":      len(now.AdminEmails),
+		"role_mappings":     len(now.RoleMappings),
+		"require_idp":       now.RequireIdP,
+		"require_rbac":      now.RequireRBAC,
+		"rbac_enforced":     nowEnforced,
+		"was_rbac_enforced": wasEnforced,
+		"restart_required":  s.oidcRestartRequired(now),
 	})
+}
+
+// appendOIDCAudit writes one ui.oidc row to the hub's own journal, not a
+// project's: these are properties of the deployment. Best-effort, matching
+// every other emitter here — a wedged journal must not stop an operator
+// repairing their identity provider.
+func (s *Server) appendOIDCAudit(r *http.Request, action auditaction.Action, payload map[string]any) {
+	blob, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
@@ -648,9 +912,6 @@ func (s *Server) auditOIDCConfig(r *http.Request, was, now config.OIDCConfig) {
 	if actor == "" {
 		actor = "anonymous"
 	}
-	// The hub's own journal, not a project's: this is a property of the
-	// deployment. Best-effort, matching every other emitter here — a wedged
-	// journal must not stop an operator repairing their identity provider.
 	log, logErr := eventlog.Open(s.WorkDir)
 	if logErr != nil {
 		if logErr != eventlog.ErrNoProject {
@@ -662,7 +923,7 @@ func (s *Server) auditOIDCConfig(r *http.Request, was, now config.OIDCConfig) {
 	defer log.Close()
 	if err := log.Append(&eventlog.AuditEvent{
 		Actor:      actor,
-		EventType:  string(auditaction.ActionOIDCConfigUpdated),
+		EventType:  string(action),
 		EntityType: "config",
 		EntityID:   "ui.oidc",
 		Payload:    string(blob),
@@ -697,6 +958,7 @@ func oidcChangedFields(was, now config.OIDCConfig) []string {
 	add("max_claim_age_minutes", was.MaxClaimAgeMinutes != now.MaxClaimAgeMinutes)
 	add("clock_skew_seconds", was.ClockSkewSeconds != now.ClockSkewSeconds)
 	add("require_idp", was.RequireIdP != now.RequireIdP)
+	add("require_rbac", was.RequireRBAC != now.RequireRBAC)
 	add("cookie_secure", was.CookieSecure != now.CookieSecure)
 	return changed
 }

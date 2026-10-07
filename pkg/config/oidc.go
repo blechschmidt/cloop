@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -79,6 +81,66 @@ func (o OIDCConfig) AuthzConfig(runtime authz.RuntimeSource) authz.Config {
 		AdminEmails: o.AdminEmails,
 		Runtime:     runtime,
 	}
+}
+
+// RBACEnforced reports whether a hub started from this block enforces RBAC:
+// authz.Enforced over the block's single sign-on switch and the policy it
+// builds (Task 20395). A wrapper, not a second rule — `cloop hub doctor` and
+// the Settings panel judge a saved block with it, and `cloop ui` asks
+// authz.Enforced of the resolver it has just built from the same builder.
+//
+// The error is authz.New's refusal of an invalid policy, which startup treats
+// as fatal; a block that will not start enforces nothing.
+func (o OIDCConfig) RBACEnforced() (bool, error) {
+	r, err := authz.New(o.AuthzConfig(nil))
+	if err != nil {
+		return false, err
+	}
+	return authz.Enforced(o.Enabled, r), nil
+}
+
+// RBACOff is the one sentence every reporter leads with when single sign-on
+// runs without a role policy — the startup warning, `cloop hub doctor`, the
+// Settings panel and `cloop config set` — naming the issuer whose identities
+// hold that access.
+func RBACOff(issuer string) string {
+	issuer = strings.TrimSpace(issuer)
+	if issuer == "" {
+		issuer = "the identity provider"
+	}
+	return "RBAC is off: everyone who can sign in through " + issuer + " has full access"
+}
+
+// RBACOffConsequence is what RBACOff means, for the reporters with room to say
+// it.
+const RBACOffConsequence = "ui.oidc has no role_mappings and no default_role, so every identity " +
+	"the issuer authenticates holds every permission except executor administration " +
+	"(ui.oidc.admin_emails), and quotas never count them"
+
+// RBACOffRemedy is how to leave that state, for the same reporters.
+const RBACOffRemedy = "Enforce deny-by-default: Settings → Single sign-on → Enforce deny-by-default " +
+	"(writes default_role: none and makes you an admin), or set ui.oidc.default_role: none with an " +
+	"administrator in ui.oidc.admin_emails or a role mapping granting admin; then restart the hub. " +
+	"ui.oidc.require_rbac: true makes `cloop ui` refuse to start in this state"
+
+// RequireRBACRefusal is the refusal ui.oidc.require_rbac makes of a block that
+// turns single sign-on on without a role policy, or nil. `cloop ui` returns it
+// before serving anything, the Settings panel refuses to save a block it would
+// return it for — a block startup refuses is a hub that does not boot — and
+// `cloop hub doctor` says the start will fail.
+//
+// An invalid policy is not this refusal's to report: authz.New's error stops
+// the start first, and each caller reports it as such.
+func (o OIDCConfig) RequireRBACRefusal() error {
+	if !o.Enabled || !o.RequireRBAC {
+		return nil
+	}
+	enforced, err := o.RBACEnforced()
+	if err != nil || enforced {
+		return nil
+	}
+	return fmt.Errorf("ui.oidc.require_rbac is set, but %s: %s. %s",
+		RBACOff(o.Issuer), RBACOffConsequence, RBACOffRemedy)
 }
 
 // QuotaConfig converts ui.quotas into the quota model: field copies, with every

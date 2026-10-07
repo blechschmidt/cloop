@@ -252,6 +252,15 @@ oidc:
   # provider answers, which is correct but noisy.
   requireIdP: true
 
+  # Refuse to start with SSO on and no role policy — defaultRole "" and no
+  # roleMappings — the state in which every identity your issuer authenticates
+  # holds every permission but executor administration. Off by default, like
+  # cloop's own, so an upgrade never fails a release that runs that way on
+  # purpose; with the deny-by-default above it never fires. Turn it on so a
+  # values change that drops the policy fails its rollout instead of opening
+  # the hub to the whole directory.
+  requireRBAC: false
+
 # ── Secrets ─────────────────────────────────────────────────────────────────
 secrets:
   # Reference a Secret you created out-of-band. This is the production path:

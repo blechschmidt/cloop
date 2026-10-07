@@ -1,0 +1,24 @@
+# The ui.oidc section of :8888's .cloop/config.ui-8081.yaml, copied on
+# 2026-10-07 for Task 20395. It holds no secret: that hub signs in as a public
+# client with PKCE, and its file has no client_secret key. Keep this in step
+# with the live file when its policy changes on purpose; the tests that load it
+# assert that this task left that hub's access exactly as it was.
+ui:
+  oidc:
+    enabled: true
+    issuer: https://login.microsoftonline.com/microsoftblechschmidt.onmicrosoft.com/v2.0
+    client_id: 33dc8f31-6f43-4b46-abf9-86ea785b6008
+    redirect_url: https://aiden.blechschmidt.io:8888/auth/oidc
+    scopes:
+    - openid
+    - profile
+    - email
+    - offline_access
+    default_role: none
+    admin_emails:
+    - microsoft@blechschmidt.saarland
+    role_mappings:
+    - claim: email
+      value: microsoft@blechschmidt.saarland
+      role: admin
+    cookie_secure: always

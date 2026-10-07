@@ -207,8 +207,8 @@ func TestResolveNilResolverDenies(t *testing.T) {
 	if d.Allows(PermProjectRead) {
 		t.Error("nil resolver granted project.read")
 	}
-	if r.Configured() {
-		t.Error("nil resolver reported Configured() == true")
+	if Enforced(true, r) {
+		t.Error("a nil resolver reported RBAC in force")
 	}
 }
 
@@ -410,8 +410,8 @@ func TestAdminEmailsBecomeGlobalAdminBindings(t *testing.T) {
 
 	// admin_emails alone must NOT count as an RBAC policy, or enabling
 	// OIDC would flip a deployment into deny-by-default.
-	if r.Configured() {
-		t.Error("admin_emails alone must not report Configured() == true")
+	if Enforced(true, r) {
+		t.Error("admin_emails alone must not put RBAC in force")
 	}
 
 	// A project-scoped binding can still narrow a legacy admin.
@@ -424,9 +424,9 @@ func TestAdminEmailsBecomeGlobalAdminBindings(t *testing.T) {
 	}
 }
 
-// TestConfiguredReportsPolicyPresence documents exactly what opts a
-// deployment into deny-by-default.
-func TestConfiguredReportsPolicyPresence(t *testing.T) {
+// TestEnforcedIsSSOAndAWrittenPolicy documents exactly what puts RBAC in
+// force (Task 20395): single sign-on, and a policy an operator wrote.
+func TestEnforcedIsSSOAndAWrittenPolicy(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -436,14 +436,22 @@ func TestConfiguredReportsPolicyPresence(t *testing.T) {
 	}{
 		{"empty config", Config{}, false},
 		{"admin emails only", Config{AdminEmails: []string{"a@b.c"}}, false},
+		{"runtime bindings only", Config{Runtime: &staticRuntime{bindings: []Binding{
+			{Claim: ClaimEmail, Value: "a@b.c", Role: RoleAdmin}}}}, false},
 		{"one binding", Config{Bindings: []Binding{{Claim: ClaimGroup, Value: "g", Role: RoleViewer}}}, true},
 		{"explicit default role", Config{DefaultRole: RoleViewer}, true},
 		{"explicit none default is still a policy", Config{DefaultRole: RoleNone}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mustResolver(t, tc.cfg).Configured(); got != tc.want {
-				t.Errorf("Configured() = %v, want %v", got, tc.want)
+			r := mustResolver(t, tc.cfg)
+			if got := Enforced(true, r); got != tc.want {
+				t.Errorf("Enforced(sso on) = %v, want %v", got, tc.want)
+			}
+			// Without single sign-on there are no claims to map, whatever
+			// the policy says.
+			if Enforced(false, r) {
+				t.Error("Enforced(sso off) = true; RBAC needs an identity provider")
 			}
 		})
 	}

@@ -302,9 +302,12 @@ but not for anything reachable from a network.`,
 				srv.Authz = resolver
 
 				fmt.Printf("OIDC authentication enabled (issuer: %s)\n", cfg.UI.OIDC.Issuer)
-				fmt.Printf("RBAC: %d role mapping(s), default role %q%s\n",
-					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole),
-					describeRuntimeBindings(resolver.RuntimeBindings()))
+				// Whether RBAC is in force, asked of authz.Enforced (Task
+				// 20395); a hub running SSO without a policy warns on stderr,
+				// or refuses to start under ui.oidc.require_rbac.
+				if err := reportRBAC(os.Stdout, os.Stderr, cfg.UI.OIDC, resolver); err != nil {
+					return err
+				}
 				fmt.Printf("Sessions: %s absolute / %s idle, %s\n",
 					time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours())*time.Hour,
 					time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours())*time.Hour,
@@ -439,15 +442,6 @@ func describeRuntimeBindings(bindings []authz.Binding) string {
 	}
 	return fmt.Sprintf(", plus %d runtime binding(s) (%d deny) — see `cloop hub role list`",
 		len(bindings), denies)
-}
-
-// effectiveDefaultRole renders the configured default for the startup
-// banner, substituting the deny-by-default that an empty setting means.
-func effectiveDefaultRole(configured string) string {
-	if configured == "" {
-		return string(authz.RoleNone)
-	}
-	return configured
 }
 
 // describeRevalidation renders the IdP-revocation state for the startup

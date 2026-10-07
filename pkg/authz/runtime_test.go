@@ -200,7 +200,7 @@ func TestDeniedByWorksWithoutConfiguredPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if r.Configured() {
+	if Enforced(true, r) {
 		t.Fatal("runtime bindings must not switch deny-by-default on — that turns a " +
 			"targeted demotion into a lockout of everyone who matches no binding")
 	}

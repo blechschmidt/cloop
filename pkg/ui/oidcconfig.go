@@ -114,14 +114,20 @@ func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject, runtime auth
 		// fatal, so each must be refused here.
 		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
 	}
-	if err := wouldStrandTheHub(configured); err != nil {
+	// ui.oidc.require_rbac with no policy is a start `cloop ui` refuses
+	// (Task 20395), so it is refused here for the reason every startup
+	// refusal is: saving it would be a hub that does not boot.
+	if err := o.RequireRBACRefusal(); err != nil {
+		return oidcConfigProblem{Field: "require_rbac", Message: err.Error()}
+	}
+	if err := wouldStrandTheHub(o, configured); err != nil {
 		return err
 	}
 	withRuntime, err := authz.New(o.AuthzConfig(runtime))
 	if err != nil {
 		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
 	}
-	return wouldDemoteCaller(withRuntime, caller)
+	return wouldDemoteCaller(o, withRuntime, caller)
 }
 
 // oidcStartupParity asks the constructor that runs at startup whether it would
@@ -178,14 +184,27 @@ func oidcBlameField(err error) string {
 // answer `cloop hub doctor` gives. Asking the YAML went wrong twice (Task
 // 20387): "role: Admin" grants admin but was not counted, and an admin binding
 // narrowed to one project was counted though it cannot reach this panel.
-func wouldStrandTheHub(resolver *authz.Resolver) error {
+//
+// Without a policy (authz.Enforced false) nobody is locked out — RBAC stays
+// off and every signed-in identity keeps everything but executor
+// administration — and it is refused anyway, saying so: such a hub has nobody
+// who can manage executors, and nobody who could enforce deny-by-default later
+// without locking every user out (Task 20395).
+func wouldStrandTheHub(o config.OIDCConfig, resolver *authz.Resolver) error {
 	if resolver.DefaultRole() == authz.RoleAdmin || len(resolver.GlobalAdminBindings()) > 0 {
 		return nil
 	}
+	const fix = "add an admin email, or a role mapping granting the admin role with no project or executor"
+	if !authz.Enforced(o.Enabled, resolver) {
+		return oidcConfigProblem{
+			Field: "admin_emails",
+			Message: "enabling SSO with no administrator leaves nobody able to manage executors, or to " +
+				"enforce deny-by-default without locking every user out: " + fix,
+		}
+	}
 	return oidcConfigProblem{
-		Field: "admin_emails",
-		Message: "enabling SSO with no administrator would lock every user out: " +
-			"add an admin email, or a role mapping granting the admin role with no project or executor",
+		Field:   "admin_emails",
+		Message: "enabling SSO with no administrator would lock every user out: " + fix,
 	}
 }
 
@@ -197,11 +216,20 @@ func wouldStrandTheHub(resolver *authz.Resolver) error {
 // grant, and the surface that would tell them so is the one they just lost.
 // Checked against the prospective resolver, so it answers "would I still be an
 // admin under the config I am about to save" and not "am I one now".
-func wouldDemoteCaller(resolver *authz.Resolver, caller *authz.Subject) error {
+//
+// Only where that resolver will decide anything: a block that leaves single
+// sign-on without a role policy keeps RBAC off (authz.Enforced), and with it
+// every signed-in identity's user.manage. Asking the resolver anyway refused
+// every save by a user outside admin_emails on such a hub — any field, so the
+// form could not even be used to leave the state (Task 20395).
+func wouldDemoteCaller(o config.OIDCConfig, resolver *authz.Resolver, caller *authz.Subject) error {
 	if caller == nil {
 		// No session: the caller authenticated with the static bearer token or
 		// a service-account token, whose authority does not come from this
 		// block and so cannot be revoked by it.
+		return nil
+	}
+	if !authz.Enforced(o.Enabled, resolver) {
 		return nil
 	}
 	if resolver.Resolve(caller, authz.GlobalScope).Allows(authz.PermUserManage) {

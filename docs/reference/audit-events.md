@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 141 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 142 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 122 |
+| `control-plane` | the hub's own state.db | 123 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-141 actions in 38 families. Every action is listed: this section is the whole
+142 actions in 38 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -599,10 +599,15 @@ Payload keys:
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
 | `oidc.config.updated` | `config` | control-plane | stable | The hub's single sign-on configuration is changed, from the Settings panel or `cloop config set ui.oidc.*`. |
+| `oidc.rbac.enforced` | `config` | control-plane | stable | An admin enforces deny-by-default from Settings → Single sign-on on a hub whose single sign-on ran without a role policy: `default_role: none`, plus a hub-wide admin mapping for them unless they already hold admin. |
 
-Payload keys, on every action above: `changed`, `enabled`, `was_enabled`, `issuer`, `default_role`, `admin_emails`, `role_mappings`, `require_idp`, `restart_required`
+Payload keys:
 
-- `oidc.config.updated` — `changed` lists the field names that moved, so the row answers what was touched without storing two copies of the block. The client secret appears in `changed` when it moves and nowhere else — not its value, not its length. `admin_emails` and `role_mappings` are counts, not contents. `restart_required` records whether the change was live yet, because the authenticator is built at startup: a row with it set means the hub was still running the previous configuration when the change landed.
+- `oidc.config.updated` — `changed`, `enabled`, `was_enabled`, `issuer`, `default_role`, `admin_emails`, `role_mappings`, `require_idp`, `require_rbac`, `rbac_enforced`, `was_rbac_enforced`, `restart_required`
+- `oidc.rbac.enforced` — `issuer`, `default_role`, `bound`, `admin_emails`, `role_mappings`, `restart_required`
+
+- `oidc.config.updated` — `changed` lists the field names that moved, so the row answers what was touched without storing two copies of the block. The client secret appears in `changed` when it moves and nowhere else — not its value, not its length. `admin_emails` and `role_mappings` are counts, not contents. `rbac_enforced` and `was_rbac_enforced` say whether the saved block puts a role policy in force after and before the change, so the rows where RBAC switched on or off are a filter, not a reconstruction; the Settings panel makes either switch only when the request confirms it. `restart_required` records whether the change was live yet, because the authenticator is built at startup: a row with it set means the hub was still running the previous configuration when the change landed.
+- `oidc.rbac.enforced` — It changes ui.oidc as `oidc.config.updated` does, and is written instead of it, so a query for who last changed single sign-on reads both. `bound` is the mapping added for the acting admin as `sub=<subject>` — the subject, because an email can be renamed at some providers — and empty when they were already an admin. `admin_emails` and `role_mappings` are counts. Not live until the hub restarts, which `restart_required` records.
 
 ### telemetry.*
 

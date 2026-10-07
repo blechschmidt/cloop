@@ -255,6 +255,7 @@
       set('oidcAdminEmails', (d.admin_emails || []).join(', '));
       set('oidcCookieSecure', d.cookie_secure || 'auto');
       check('oidcRequireIdp', d.require_idp);
+      check('oidcRequireRbac', d.require_rbac);
 
       // The numeric fields show the effective default when unset rather than a
       // bare 0, because "0" reads as "no session lifetime" to someone who has not
@@ -280,17 +281,61 @@
       renderOIDCRoleOptions(d.roles || [], d.default_role || '');
       renderOIDCSecretState(d);
       renderOIDCStatus(d);
+      renderOIDCRBAC(d);
       renderOIDCMappings();
     }
 
+    // The select shows the saved value, unset included (Task 20395). It used to
+    // pre-select "none" for an unset role, so saving any other field of the form
+    // wrote default_role: none — which puts a role policy in force, and locked
+    // out every identity without a mapping at the next restart.
     function renderOIDCRoleOptions(roles, selected) {
       const sel = document.getElementById('oidcDefaultRole');
       if (!sel) return;
-      sel.innerHTML = roles.map(r => {
+      sel.innerHTML = '<option value="">unset — no default role written</option>' + roles.map(r => {
         const label = r === 'none' ? 'none — deny by default (recommended)' : r;
         return '<option value="' + esc(r) + '">' + esc(label) + '</option>';
       }).join('');
-      sel.value = selected || 'none';
+      sel.value = selected || '';
+    }
+
+    // renderOIDCRBAC says whether a role policy is in force: the hub's own
+    // verdict in d.rbac (authz.Enforced, for this process and the saved block),
+    // never worked out here from default_role and role_mappings.
+    function renderOIDCRBAC(d) {
+      const r = d.rbac || {};
+      const btn = document.getElementById('oidcEnforceBtn');
+      if (btn) btn.style.display = r.can_enforce ? '' : 'none';
+      const note = document.getElementById('oidcRbacNote');
+      if (!note) return;
+      if (r.warning) {
+        note.style.cssText = 'display:block;font-size:12px;padding:8px 10px;margin-bottom:8px;' +
+          'border:1px solid var(--border);border-left:3px solid var(--red,#f85149);border-radius:4px';
+        note.textContent = r.warning + (r.can_enforce
+          ? ' Enforce deny-by-default writes default role none and keeps you and every admin email an admin.'
+          : '');
+      } else if (r.enforced && r.saved_enforced) {
+        note.style.cssText = 'display:block;font-size:12px;color:var(--muted);margin-bottom:8px';
+        note.textContent = 'RBAC is in force: a signed-in user who matches no mapping gets "' +
+          (r.default_role || 'none') + '".';
+      } else {
+        note.style.display = 'none';
+        note.textContent = '';
+      }
+    }
+
+    // oidcEnforce writes deny-by-default in one step: default role none, plus an
+    // admin mapping for the caller unless they already are one.
+    function oidcEnforce() {
+      if (!confirm('Enforce deny-by-default?\n\nAfter the next restart, a signed-in user who matches no ' +
+        'role mapping gets nothing. Admin emails stay admins, and so do you.')) return;
+      return apiMethod('POST', '/api/config/oidc/enforce', {}).then(d => {
+        if (!d || d.error) { toast(oidcErrText(d), 'err'); return; }
+        oidcState.view = d;
+        oidcState.mappings = (d.role_mappings || []).map(m => Object.assign({}, m));
+        renderOIDCSettings(d);
+        toast('Deny-by-default saved — restart the hub to enforce it', 'ok');
+      }).catch(() => toast('Request failed', 'err'));
     }
 
     function renderOIDCSecretState(d) {
@@ -353,9 +398,11 @@
       if (!oidcState.mappings.length) {
         body.innerHTML = '';
         if (empty) {
+          const saved = oidcState.view && oidcState.view.rbac && oidcState.view.rbac.saved_enforced;
           empty.style.display = '';
-          empty.textContent = 'No role mappings. Every signed-in user gets the default role above; ' +
-            'admin emails still apply.';
+          empty.textContent = saved
+            ? 'No role mappings. Every signed-in user gets the default role above; admin emails still apply.'
+            : 'No role mappings.';
         }
         return;
       }
@@ -420,6 +467,13 @@
     }
 
     function saveOIDCSettings() {
+      return putOIDCSettings(false);
+    }
+
+    // putOIDCSettings saves the form. The hub refuses a save that would switch
+    // RBAC on, or leave single sign-on without a policy, unless it says it means
+    // to (Task 20395): that refusal is asked as a question, and resent only on yes.
+    function putOIDCSettings(confirmed) {
       const secretEl = document.getElementById('oidcClientSecret');
       const body = {
         enabled: !!document.getElementById('oidcEnabled').checked,
@@ -436,15 +490,22 @@
         max_claim_age_minutes: oidcNum('oidcMaxClaimAge'),
         clock_skew_seconds: oidcNum('oidcClockSkew'),
         require_idp: !!document.getElementById('oidcRequireIdp').checked,
+        require_rbac: !!document.getElementById('oidcRequireRbac').checked,
         cookie_secure: document.getElementById('oidcCookieSecure').value,
       };
+      if (confirmed) body.confirm_rbac = true;
       // Only send the secret when one was typed. Absent means keep, which is what
       // makes every other field editable without re-entering a credential the
       // panel cannot display.
       const typed = secretEl ? secretEl.value.trim() : '';
       if (typed) body.client_secret = typed;
 
-      apiMethod('PUT', '/api/config/oidc', body).then(d => {
+      return apiMethod('PUT', '/api/config/oidc', body).then(d => {
+        if (oidcErrDetail(d, 'rbac_change') && !confirmed) {
+          const msg = oidcErrText(d);
+          if (confirm(msg.charAt(0).toUpperCase() + msg.slice(1) + '.')) return putOIDCSettings(true);
+          return;
+        }
         if (d && d.error) {
           oidcShowFieldError(d);
           return;
@@ -479,9 +540,15 @@
     // (Task 20320), and it parks the original object there precisely so the details
     // this needs survive the flattening.
     function oidcErrField(d) {
+      return oidcErrDetail(d, 'field');
+    }
+
+    // oidcErrDetail reads one of the details an apierror body carries, from
+    // either shape parseAPIResponse may leave it in.
+    function oidcErrDetail(d, key) {
       if (!d) return '';
       var e = (d.error && typeof d.error !== 'string') ? d.error : d.errorDetail;
-      return (e && e.details && e.details.field) || '';
+      return (e && e.details && e.details[key]) || '';
     }
 
     // oidcShowFieldError puts a refusal beside the input that caused it.
@@ -517,6 +584,7 @@
         cookie_secure: 'oidcCookieSecure',
         admin_emails: 'oidcAdminEmails',
         default_role: 'oidcDefaultRole',
+        require_rbac: 'oidcRequireRbac',
         max_claim_age_minutes: 'oidcMaxClaimAge',
         clock_skew_seconds: 'oidcClockSkew',
       };
@@ -1437,7 +1505,7 @@
     return h.mount({
       open, saveConfigField, saveAnthropicCfg, saveOpenAICfg, saveOllamaCfg, saveSTTCfg,
       clearSTTCfg, confirmReset, saveProvider, saveCCModel, loadOIDCSettings, oidcAddMapping,
-      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, loadTelemetryPolicy,
+      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadTelemetryPolicy,
       onTelemetryPolicyToggle, saveTelemetryPolicy, ghAppDiscover, ghAppSaveInstallation,
       loadGitHubApps, loadCISettings, saveCISettings, copyCISnippet, loadCIRules, ciNewRule,
       ciCancelRule, ciSaveRule, ciTestRule, loadCISessions, loadCIExchanges, loadCIPanel,
@@ -1598,11 +1666,14 @@
           <h4 style="margin-top:20px">Who gets in</h4>
           <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
             The default role applies to a signed-in user matching no mapping below.
-            <strong>none</strong> denies everything, which is the safe default — but a hub with no
-            administrator cannot be administered, so at least one admin email or a mapping granting
-            <code>admin</code> to the whole hub (no project or executor) is required before SSO can be
-            turned on.
+            <strong>none</strong> denies everything, which is the safe default. With the default role
+            unset and no mappings, RBAC is off: everyone who can sign in has full access, so saving
+            that asks first. A hub with no administrator cannot be administered, so at least one admin
+            email or a mapping granting <code>admin</code> to the whole hub (no project or executor) is
+            required before SSO can be turned on.
           </p>
+          <div id="oidcRbacNote" style="display:none"></div>
+          <button class="btn" id="oidcEnforceBtn" style="display:none;margin-bottom:12px" data-act="oidcEnforce">Enforce deny-by-default</button>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="oidcAdminEmails">Admin emails (comma separated)</label>
@@ -1650,6 +1721,10 @@
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:26px">
                 <input type="checkbox" id="oidcRequireIdp">
                 Refuse to start if the IdP is unreachable
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:8px">
+                <input type="checkbox" id="oidcRequireRbac">
+                Refuse to start without a role policy
               </label>
             </div>
           </div>

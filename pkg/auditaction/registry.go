@@ -1380,14 +1380,32 @@ var registry = []Entry{
 		Entity:  "config",
 		Trigger: "The hub's single sign-on configuration is changed, from the Settings panel or `cloop config set ui.oidc.*`.",
 		Payload: []string{"changed", "enabled", "was_enabled", "issuer", "default_role",
-			"admin_emails", "role_mappings", "require_idp", "restart_required"},
+			"admin_emails", "role_mappings", "require_idp", "require_rbac", "rbac_enforced",
+			"was_rbac_enforced", "restart_required"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`changed` lists the field names that moved, so the row answers what was touched without storing two copies of the block. " +
 			"The client secret appears in `changed` when it moves and nowhere else — not its value, not its length. " +
 			"`admin_emails` and `role_mappings` are counts, not contents. " +
+			"`rbac_enforced` and `was_rbac_enforced` say whether the saved block puts a role policy in force after and before the change, " +
+			"so the rows where RBAC switched on or off are a filter, not a reconstruction; the Settings panel makes either switch only " +
+			"when the request confirms it. " +
 			"`restart_required` records whether the change was live yet, because the authenticator is built at startup: " +
 			"a row with it set means the hub was still running the previous configuration when the change landed.",
+	},
+	{
+		Action:  ActionOIDCRBACEnforced,
+		Home:    HomeControlPlane,
+		Entity:  "config",
+		Trigger: "An admin enforces deny-by-default from Settings → Single sign-on on a hub whose single sign-on ran without a role policy: `default_role: none`, plus a hub-wide admin mapping for them unless they already hold admin.",
+		Payload: []string{"issuer", "default_role", "bound", "admin_emails", "role_mappings",
+			"restart_required"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "It changes ui.oidc as `oidc.config.updated` does, and is written instead of it, so a query for who last changed " +
+			"single sign-on reads both. `bound` is the mapping added for the acting admin as `sub=<subject>` — the subject, " +
+			"because an email can be renamed at some providers — and empty when they were already an admin. " +
+			"`admin_emails` and `role_mappings` are counts. Not live until the hub restarts, which `restart_required` records.",
 	},
 
 	// ── telemetry ──────────────────────────────────────────────────────────

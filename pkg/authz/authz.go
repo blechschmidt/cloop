@@ -927,7 +927,9 @@ func Deny(src Source, subjectLabel string, scope Scope) Decision {
 // and oidc.default_role in .cloop/config.yaml.
 type Config struct {
 	// DefaultRole applies to authenticated identities that match no
-	// binding. The zero value means RoleNone: deny by default.
+	// binding. The zero value means RoleNone: deny by default — but only
+	// once a policy is in force. Left zero with no Bindings, it writes no
+	// policy at all, and Enforced reports RBAC off.
 	DefaultRole Role
 
 	// Bindings are the configured claim→role mappings.
@@ -972,22 +974,38 @@ type Resolver struct {
 	configured  bool
 }
 
-// Configured reports whether an operator actually supplied an RBAC policy —
-// at least one role mapping, or an explicit default_role.
+// Enforced reports whether role-based access control is in force on a hub
+// whose single sign-on switch is sso and whose policy is r. It is the one
+// definition (Task 20395): the request gate, `cloop hub doctor`, the Settings
+// panel, /api/me and the startup log all ask it, and tests/arch fails a
+// second copy in pkg/ui, pkg/hubdoctor or cmd.
 //
-// This distinction exists so that turning on OIDC does not silently turn on
-// deny-by-default. A deployment that enabled SSO before RBAC existed has no
-// role_mappings; if the empty policy were enforced, upgrading would lock
-// every user out of their own dashboard. Callers therefore treat an
-// unconfigured resolver as "RBAC not in force" and keep the pre-RBAC
-// behavior. Writing a single role_mapping (or setting default_role
-// explicitly, including to "none") opts the deployment in, and from that
-// point deny-by-default applies to everything the policy does not grant.
+// Two conditions, both required:
 //
-// admin_emails alone does not count: it predates RBAC and only ever meant
-// "sees every project".
-func (r *Resolver) Configured() bool {
-	return r != nil && r.configured
+//   - Single sign-on is on. Without an identity provider there are no claims
+//     to map, and enforcing a policy would lock the operator out of their own
+//     local dashboard.
+//   - An operator wrote a policy: at least one role mapping, or an explicit
+//     default_role — including "none".
+//
+// The second condition is the upgrade rule. A deployment that enabled SSO
+// before RBAC existed has no role_mappings; if the empty policy were enforced,
+// upgrading would lock every user out of their own dashboard. So such a hub
+// keeps the pre-RBAC behavior, which is the state this predicate exists to make
+// impossible to miss: every identity the issuer authenticates holds every
+// permission except executor administration (admin_emails), and quotas never
+// count them. Writing a single role mapping or a default_role opts the hub in,
+// and from then on deny-by-default applies to everything the policy does not
+// grant.
+//
+// Two things do not count as a policy. admin_emails predates RBAC and only ever
+// meant "sees every project and manages executors". Runtime bindings are an
+// operator's incident tooling: flipping enforcement on because somebody wrote
+// one emergency deny would lock out every user who matches no mapping, turning
+// a targeted demotion into an outage — and a deny bites without enforcement
+// anyway (DeniedBy).
+func Enforced(sso bool, r *Resolver) bool {
+	return sso && r != nil && r.configured
 }
 
 // New validates cfg and returns a Resolver.
@@ -1031,11 +1049,9 @@ func New(cfg Config) (*Resolver, error) {
 		defaultRole: def,
 		bindings:    bindings,
 		runtime:     cfg.Runtime,
-		// Deliberately not influenced by Runtime. Configured() decides whether
-		// deny-by-default is in force at all, and flipping that on because an
-		// operator wrote one emergency binding would lock out every user who
-		// matches no mapping — turning a targeted demotion into an outage. A
-		// deny binding does not need RBAC to be active to bite; see DeniedBy.
+		// Whether an operator wrote a policy, which Enforced turns into
+		// whether RBAC is in force. Deliberately not influenced by Runtime or
+		// AdminEmails; Enforced says why.
 		configured: len(cfg.Bindings) > 0 || cfg.DefaultRole != "",
 	}, nil
 }
@@ -1335,7 +1351,7 @@ func (r *Resolver) runtimeBindings() []Binding {
 //
 // It exists as a separate entry point because a deny must bite on hubs where
 // Resolve is never consulted. RBAC is inactive unless an operator configured a
-// policy (see Configured), and a deployment running on oidc.admin_emails alone
+// policy (see Enforced), and a deployment running on oidc.admin_emails alone
 // has not — so every request there takes an allow-all path that never reaches
 // Resolve. A demotion that only worked on hubs which had already adopted RBAC
 // would be missing on exactly the older deployments most likely to still have a

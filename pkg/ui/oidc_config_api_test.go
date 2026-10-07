@@ -82,6 +82,8 @@ func savedOIDC(t *testing.T, srv *Server) config.OIDCConfig {
 }
 
 // A complete, valid block — the baseline each refusal test breaks one way.
+// Deny-by-default, so a save of one of its fields never switches RBAC on or off
+// (Task 20395); the RBAC-off state is built explicitly where it is the subject.
 func validOIDC() config.OIDCConfig {
 	return config.OIDCConfig{
 		Enabled:     true,
@@ -89,6 +91,7 @@ func validOIDC() config.OIDCConfig {
 		ClientID:    "cloop-dashboard",
 		RedirectURL: "https://cloop.example.com/auth/callback",
 		AdminEmails: []string{"ops@example.com"},
+		DefaultRole: "none",
 	}
 }
 
@@ -235,7 +238,7 @@ func TestOIDCSave_RefusesDemotingTheCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build resolver: %v", err)
 	}
-	if err := wouldDemoteCaller(resolver, caller); err == nil {
+	if err := wouldDemoteCaller(o, resolver, caller); err == nil {
 		t.Fatal("expected a refusal: this configuration removes the caller's own admin access")
 	} else if !strings.Contains(err.Error(), "alice@example.com") {
 		t.Errorf("refusal should name the caller, got: %v", err)
@@ -247,13 +250,13 @@ func TestOIDCSave_RefusesDemotingTheCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build resolver: %v", err)
 	}
-	if err := wouldDemoteCaller(resolver, caller); err != nil {
+	if err := wouldDemoteCaller(o, resolver, caller); err != nil {
 		t.Errorf("caller retains admin, so this must be accepted: %v", err)
 	}
 
 	// No session — a static-token or service-account caller — has authority
 	// this block cannot revoke, so there is nobody to strand.
-	if err := wouldDemoteCaller(resolver, nil); err != nil {
+	if err := wouldDemoteCaller(o, resolver, nil); err != nil {
 		t.Errorf("a caller with no session must not be blocked: %v", err)
 	}
 }
@@ -691,6 +694,7 @@ func TestOIDCSave_WritesConfigYAMLWithoutAnOverlay(t *testing.T) {
 		"client_id":    "cloop-dashboard",
 		"redirect_url": "https://cloop.example.com/auth/callback",
 		"admin_emails": []string{"ops@example.com"},
+		"default_role": "none",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT = %d, want 200 (%s)", rec.Code, rec.Body.String())

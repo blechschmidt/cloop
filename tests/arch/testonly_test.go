@@ -2,10 +2,12 @@ package arch_test
 
 // Test-only packages stay out of the binary (Task 20372).
 //
-// internal/ holds six packages written for tests: hometest sandboxes $HOME,
+// internal/ holds seven packages written for tests: hometest sandboxes $HOME,
 // taskfill builds fully populated tasks, dbtemplate and statedbtest hand
-// tests a migrated state.db by copying a file instead of migrating one, and
-// cosigntest and edgetest stand in for cosign and an edge release (Task 20376). Go's
+// tests a migrated state.db by copying a file instead of migrating one,
+// cosigntest and edgetest stand in for cosign and an edge release (Task 20376),
+// and rbactest holds the ui.oidc blocks the RBAC reporters are tested against
+// (Task 20395). Go's
 // internal/ rule only stops other modules from importing them; nothing stops a
 // production file in this one from doing so.
 //
@@ -41,6 +43,7 @@ var testOnly = map[string]string{
 	"internal/statedbtest": "seeds a migrated state.db without migrating one",
 	"internal/cosigntest":  "stands in for cosign, accepting a bundle only for the identity it names",
 	"internal/edgetest":    "stages a device install and an edge release for upgrade tests",
+	"internal/rbactest":    "the ui.oidc blocks every RBAC reporter is tested against, and a copy of :8888's",
 }
 
 func TestTestOnlyPackagesAreImportedOnlyByTests(t *testing.T) {

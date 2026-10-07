@@ -787,6 +787,9 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/config/oidc", Handler: s.handleOIDCSettings, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "PUT /api/config/oidc", Handler: s.handleOIDCSettingsSave, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "POST /api/config/oidc/test", Handler: s.handleOIDCTest, Perm: userMgmt, Scope: scopeGlobal},
+		// Deny-by-default in one step for an SSO hub without a role policy
+		// (Task 20395): default_role none plus an admin mapping for the caller.
+		{Pattern: "POST /api/config/oidc/enforce", Handler: s.handleOIDCEnforce, Perm: userMgmt, Scope: scopeGlobal},
 
 		{Pattern: "POST /api/options/toggle", Handler: s.handleOptionsToggle, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/max-parallel", Handler: s.handleMaxParallelSet, Perm: cfgWrite, Scope: scopeProject},

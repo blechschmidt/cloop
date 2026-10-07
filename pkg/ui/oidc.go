@@ -375,8 +375,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	decision := s.permissionsFor(r, scope)
 	body := map[string]interface{}{
 		"oidc_enabled": s.oidcEnabled(),
-		"role":         string(decision.Role),
-		"permissions":  permissionStrings(decision.Permissions()),
+		// Whether a role policy decides what callers may do, or — with SSO on
+		// and no policy — every signed-in identity holds everything but
+		// executor administration (Task 20395). The request gate's own answer.
+		"rbac_enforced": s.authzActive(),
+		"role":          string(decision.Role),
+		"permissions":   permissionStrings(decision.Permissions()),
 		// Global permissions gate the fleet-wide tabs (executors, global
 		// budget), which are not about the selected project.
 		"global_permissions": permissionStrings(s.permissionsFor(r, authz.GlobalScope).Permissions()),

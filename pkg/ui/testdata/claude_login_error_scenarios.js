@@ -166,8 +166,9 @@ async function main() {
     };
     const sandbox = {};
     // eslint-disable-next-line no-new-func
-    new Function('out', grab('errText') + grab('normalizeAPIError') + grab('oidcErrField', settings, '    ') +
-      'out.f = {errText, normalizeAPIError, oidcErrField};')(sandbox);
+    // oidcErrField reads through oidcErrDetail (Task 20395), so both come out.
+    new Function('out', grab('errText') + grab('normalizeAPIError') + grab('oidcErrDetail', settings, '    ') +
+      grab('oidcErrField', settings, '    ') + 'out.f = {errText, normalizeAPIError, oidcErrField};')(sandbox);
     const {normalizeAPIError, oidcErrField} = sandbox.f;
 
     const nested = {error: {code: 'INVALID_INPUT', message: 'issuer must be https',

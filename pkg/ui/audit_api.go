@@ -39,6 +39,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/auditmerge"
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -569,8 +570,19 @@ func (s *Server) openAuditLog(w http.ResponseWriter, r *http.Request) (*eventlog
 // the grant's label is what keeps the actor string identical to the one
 // auditAuthz already writes, so an operator filtering by actor sees a
 // person's whole session rather than half of it under a second spelling.
+//
+// One bypass is not single-tenant: a single sign-on hub whose RBAC is off
+// (Task 20395). Its grant labels every caller "local" — on a hub everyone in
+// the directory may be signing in to — so the session's own identity is named
+// instead, in the same spelling a policy would have given it.
 func (s *Server) auditActor(r *http.Request) string {
-	return s.grantFor(r).subjectLabel()
+	g := s.grantFor(r)
+	if g != nil && g.token == nil && g.bypass == authz.SourceAuthzDisabled && s.oidcEnabled() {
+		if id := s.sessionIdentity(r); id != nil {
+			return subjectFromIdentity(id).Label()
+		}
+	}
+	return g.subjectLabel()
 }
 
 // auditTaskStatus records a manual task status flip (Task 20282).

@@ -2333,6 +2333,18 @@ type OIDCConfig struct {
 	// quietly replacing one that worked.
 	RequireIdP bool `yaml:"require_idp,omitempty"`
 
+	// RequireRBAC makes `cloop ui` refuse to start with single sign-on on and
+	// no role policy — no role_mappings and no default_role — which is the
+	// state where every identity the issuer authenticates holds every
+	// permission but executor administration (Task 20395).
+	//
+	// Off by default, because that state is the upgrade rule: a deployment
+	// that turned on SSO before RBAC existed must not be locked out by
+	// upgrading. Turn it on once a policy is written, so that a later edit
+	// which drops it fails loudly at the next start instead of quietly
+	// handing the whole directory full access.
+	RequireRBAC bool `yaml:"require_rbac,omitempty"`
+
 	// CookieSecure controls the session cookie's Secure flag:
 	// "auto" (default — set when the request arrived over TLS or with
 	// X-Forwarded-Proto: https), "always", or "never".

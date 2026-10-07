@@ -113,6 +113,12 @@ func TestEveryNonPassCarriesRemediation(t *testing.T) {
 		Bindings: []config.QuotaBinding{{Claim: "group", Value: "eng"}},
 	}
 
+	// Single sign-on with no role policy: rbac.enforced fails (Task 20395).
+	noPolicy := hubCfg()
+	noPolicy.UI.OIDC.DefaultRole = ""
+	noPolicy.UI.OIDC.RoleMappings = nil
+	noPolicy.UI.OIDC.RequireRBAC = true
+
 	fixtures := []struct {
 		name string
 		cfg  *config.Config
@@ -121,6 +127,7 @@ func TestEveryNonPassCarriesRemediation(t *testing.T) {
 		{"default config", config.Default()},
 		{"well-formed hub", hubCfg()},
 		{"comprehensively broken", broken},
+		{"SSO without a role policy", noPolicy},
 	}
 
 	for _, fx := range fixtures {

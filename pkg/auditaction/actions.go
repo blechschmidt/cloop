@@ -410,6 +410,9 @@ const (
 	// ActionOIDCConfigUpdated records the hub's single sign-on configuration
 	// being changed.
 	ActionOIDCConfigUpdated Action = "oidc.config.updated"
+	// ActionOIDCRBACEnforced records an admin enforcing deny-by-default on a
+	// hub whose single sign-on ran without a role policy.
+	ActionOIDCRBACEnforced Action = "oidc.rbac.enforced"
 
 	// ── telemetry ──────────────────────────────────────────────────────────
 
