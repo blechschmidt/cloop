@@ -459,7 +459,7 @@ rate(cloop_apitoken_auth_failures_total{reason="bad_secret"}[5m]) > 1
 | `cloop_cross_origin_refusals_total` | counter | `reason` |
 
 Counts what the hub refused because a page on another origin asked for it
-(Task 20394; [the security model](../security/model.md#browser-hub)). `reason`
+(Task 20394; [the threat model](../security/threat-model.md)). `reason`
 is one of:
 
 | `reason` | Meaning |
