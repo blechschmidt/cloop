@@ -96,6 +96,29 @@ const (
 	// whether waiting is worth anything.
 	CodeQuotaExceeded Code = "QUOTA_EXCEEDED"
 
+	// CodeCrossOrigin indicates a state-changing request a page on another
+	// origin made: the browser said so in Sec-Fetch-Site, or sent an Origin
+	// that is none of the server's own, and the request carries no bearer
+	// token (Task 20394). Maps to HTTP 403. Distinct from CodeForbidden,
+	// which is about who the caller is: this is about which page asked, and
+	// the remedy — an API token, or ui.allowed_origins for the server's own
+	// address behind a proxy — is a different one.
+	CodeCrossOrigin Code = "CROSS_ORIGIN"
+
+	// CodeUnsupportedMediaType indicates a request body in a media type the
+	// endpoint does not take: anything but application/json on a JSON
+	// endpoint (Task 20394). Maps to HTTP 415. A page on another origin can
+	// send form data and text/plain without a preflight, so a JSON API that
+	// refuses both cannot be reached by one.
+	CodeUnsupportedMediaType Code = "UNSUPPORTED_MEDIA_TYPE"
+
+	// CodeMisdirectedRequest indicates a request addressed to a host name the
+	// server does not answer to (Task 20394). Maps to HTTP 421: a server
+	// without sign-in refuses names it was not configured with, because DNS
+	// rebinding points such a name at it to make a page elsewhere
+	// same-origin with it.
+	CodeMisdirectedRequest Code = "MISDIRECTED_REQUEST"
+
 	// CodeInternal indicates an unexpected server-side failure. Maps to
 	// HTTP 500. Use sparingly; prefer a specific code when one fits.
 	CodeInternal Code = "INTERNAL"
@@ -115,8 +138,12 @@ func defaultStatus(c Code) int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden:
+	case CodeForbidden, CodeCrossOrigin:
 		return http.StatusForbidden
+	case CodeUnsupportedMediaType:
+		return http.StatusUnsupportedMediaType
+	case CodeMisdirectedRequest:
+		return http.StatusMisdirectedRequest
 	case CodeNotFound:
 		return http.StatusNotFound
 	case CodeMethodNotAllowed:
@@ -338,6 +365,10 @@ func FromHTTPStatus(status int) Code {
 		return CodeConflict
 	case http.StatusRequestEntityTooLarge:
 		return CodePayloadTooLarge
+	case http.StatusUnsupportedMediaType:
+		return CodeUnsupportedMediaType
+	case http.StatusMisdirectedRequest:
+		return CodeMisdirectedRequest
 	case http.StatusTooManyRequests:
 		return CodeRateLimited
 	case http.StatusServiceUnavailable:

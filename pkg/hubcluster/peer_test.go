@@ -27,6 +27,8 @@ func peerServer(t *testing.T, n **hubcluster.Node) *httptest.Server {
 			"host":   r.Host,
 			"cookie": r.Header.Get("Cookie"),
 			"query":  r.URL.RawQuery,
+			"xfp":    r.Header.Get("X-Forwarded-Proto"),
+			"xfh":    r.Header.Get("X-Forwarded-Host"),
 		}
 		if err != nil {
 			out["peer_error"] = err.Error()
@@ -131,6 +133,44 @@ func TestForwardCarriesTheRequestAndProvesTheSender(t *testing.T) {
 	if got["host"] != "cloop.example.com" || got["cookie"] != "cloop_session=abc" ||
 		got["query"] != "project_idx=2" || got["body"] != "payload" {
 		t.Fatalf("forwarded request lost something: %+v", got)
+	}
+}
+
+// TestForwardAsCarriesTheBrowsersSchemeAndHost: behind a TLS-terminating
+// proxy the forwarding member's own hop is plaintext from loopback, which is
+// what httputil's SetXForwarded would describe. The owner judges the request's
+// origin from the browser's scheme and host (Task 20394), so ForwardAs sends
+// what the forwarding member resolved instead.
+func TestForwardAsCarriesTheBrowsersSchemeAndHost(t *testing.T) {
+	a, b, _ := pair(t)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = a.ForwardAs(w, r, memberOf(t, a, b.ID()), hubcluster.Client{
+			IP: "203.0.113.9", Proto: "https", Host: "hub.example.com:8888",
+		})
+	}))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/echo", nil)
+	req.Host = "hub.example.com:8888"
+	// What a client sent to the forwarding member is not what reaches the
+	// owner: the forwarding member says what it believed.
+	req.Header.Set("X-Forwarded-Proto", "gopher")
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["peer_error"] != "" || got["client_ip"] != "203.0.113.9" {
+		t.Fatalf("peer claim: %+v", got)
+	}
+	if got["xfp"] != "https" || got["xfh"] != "hub.example.com:8888" || got["host"] != "hub.example.com:8888" {
+		t.Errorf("the owner was told scheme %q, forwarded host %q, Host %q; want https, hub.example.com:8888",
+			got["xfp"], got["xfh"], got["host"])
 	}
 }
 

@@ -653,10 +653,7 @@ func (s *Server) handleQuotaSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req quotaUpdateRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
-			"invalid JSON body: "+err.Error()))
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

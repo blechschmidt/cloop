@@ -323,6 +323,10 @@ func TestGatedHandlersRefuseUnderStrictMode(t *testing.T) {
 			}
 			req := httptest.NewRequest(tc.method, tc.path, body)
 			req.Header.Set("Content-Type", "application/json")
+			// Addressed by loopback, as a browser on this machine would: this
+			// hub has no sign-in, so it refuses httptest's example.com as a
+			// name it does not answer to (Task 20394) before any handler runs.
+			req.Host = "127.0.0.1"
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 

@@ -60,7 +60,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -199,11 +198,9 @@ func (s *Server) handleTaskReproduce(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SkipTests bool `json:"skip_tests"`
 	}
-	if r.Body != nil {
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		// An empty body is the common case from a plain button press, so a
-		// decode failure is not worth refusing the request over.
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	// An empty body is the common case from a plain button press.
+	if !decodeOptionalJSON(w, r, &req) {
+		return
 	}
 
 	// The agent re-run needs the Claude credential the original had (Task

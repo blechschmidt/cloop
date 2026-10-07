@@ -34,7 +34,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -88,9 +87,7 @@ func (s *Server) handleTaskRevise(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req reviseRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

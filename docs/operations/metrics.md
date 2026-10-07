@@ -452,6 +452,36 @@ tried with wrong secrets:
 rate(cloop_apitoken_auth_failures_total{reason="bad_secret"}[5m]) > 1
 ```
 
+## Requests from other origins
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_cross_origin_refusals_total` | counter | `reason` |
+
+Counts what the hub refused because a page on another origin asked for it
+(Task 20394; [the security model](../security/model.md#browser-hub)). `reason`
+is one of:
+
+| `reason` | Meaning |
+| --- | --- |
+| `cross_site` | the browser sent `Sec-Fetch-Site: cross-site` on a state-changing request |
+| `same_site` | `Sec-Fetch-Site: same-site` — another port of the hub's host, or a sibling subdomain |
+| `unknown_fetch_site` | a `Sec-Fetch-Site` value the hub does not know, refused rather than guessed at |
+| `foreign_origin` | no `Sec-Fetch-Site`, and an `Origin` that is none of the hub's own; also every refused WebSocket handshake |
+| `media_type` | a state-changing request whose body is form data or `text/plain` — what a form on another site can send |
+| `unknown_host` | a hub without sign-in was addressed by a host name it does not answer to: the shape DNS rebinding takes |
+
+The origin and host are in the audit trail
+([`request.origin_refused`](../reference/audit-events.md#request),
+[`request.host_refused`](../reference/audit-events.md#request)), not here: the
+sender chooses both. A burst of `foreign_origin` or `media_type` right after a
+proxy change usually means the proxy no longer passes the hub its own origin —
+see [`ui.trusted_proxies`](../reference/configuration.md#tls).
+
+```promql
+sum by (reason) (rate(cloop_cross_origin_refusals_total[5m])) > 0
+```
+
 ## Write-back
 
 | Metric | Type | Labels |

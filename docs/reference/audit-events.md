@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 139 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 141 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 120 |
+| `control-plane` | the hub's own state.db | 122 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-139 actions in 37 families. Every action is listed: this section is the whole
+141 actions in 38 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -521,6 +521,18 @@ Payload keys, on every action above: `event`, `session_id`, `subject`, `email`, 
 - `session.claims_stale` — A block, not a revocation: the session stays, and ordinary reads keep working.
 - `session.renewal_mismatch` — The session is left exactly as it was: nothing of the other identity is applied or recorded. The benign reading is a user who switched accounts at the provider in another tab; the other is a browser signed into somebody else's account at the provider in the hope that the renewal adopts it. `ip` and `user_agent` are the browser that performed the renewal.
 - `session.role_narrowed` — `prior_role` and `role` bracket the demotion; `dropped_claims` names what the IdP stopped asserting. `via` is `browser_renewal` when the narrowed claims arrived through a silent renewal from the user's browser, and absent when the hub's own refresh found them.
+
+### request.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `request.host_refused` | `request` | control-plane | beta | A hub without sign-in refuses a request addressed to a host name it does not answer to — the shape DNS rebinding takes. |
+| `request.origin_refused` | `request` | control-plane | beta | The hub refuses a state-changing request or a WebSocket handshake because a page on another origin made it, or because its body is form data or text/plain. |
+
+Payload keys, on every action above: `reason`, `method`, `path`, `origin`, `sec_fetch_site`, `host`, `content_type`, `ip`, `user_agent`, `session`, `open_hub`, `own_origin`, `suppressed`
+
+- `request.host_refused` — Only a hub with neither SSO nor a static token checks the Host: rebinding cannot carry a credential to a hub that has one. A burst after a new DNS name was pointed at the hub is that name missing from `ui.allowed_hosts`. Rate-limited like `request.origin_refused`.
+- `request.origin_refused` — The browser that sent it belongs to whoever was using it: the row records the page that asked (`origin`, `sec_fetch_site`), not an identity, and `session` says only whether that browser carried a sign-in cookie. `reason` is a `cloop_cross_origin_refusals_total` label. Rows are written at most 30 a minute; `suppressed` counts the refusals since the previous row that were not.
 
 ### role_binding.*
 

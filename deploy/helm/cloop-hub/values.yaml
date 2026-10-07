@@ -111,6 +111,22 @@ config:
   # registered at your identity provider.
   externalURL: https://cloop.example.com
 
+  # Peers whose X-Forwarded-Proto, X-Forwarded-Host and X-Forwarded-For the
+  # hub believes: your Ingress controller's pods (ui.trusted_proxies, Task
+  # 20394). Inside a cluster the controller is never loopback, so without an
+  # entry the hub ignores the headers — it treats every request as plaintext
+  # from the controller's address: /install.sh is refused, enrollment offers
+  # no one-line installer, and every client shares one rate-limit bucket and
+  # one sign-in lockout. The default covers the private ranges pod networks
+  # are drawn from; narrow it to the controller's pod CIDR, because any pod in
+  # a listed range can claim any scheme, host and client address.
+  trustedProxies:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - fc00::/7
+
   # false means no run can ever fork a harness on the hub Pod. Leave it.
   # The hub becomes useful by having an executor (below), not by being
   # allowed to execute.

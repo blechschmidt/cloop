@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -107,6 +108,13 @@ but not for anything reachable from a network.`,
 			if err := cfg.UI.Cluster.Validate(); err != nil {
 				return err
 			}
+			// Fatal like the cluster block: an entry that does not parse
+			// would otherwise be dropped, and the proxy it named would see
+			// every browser behind it judged as plaintext from the proxy's
+			// own address (Task 20394).
+			if _, err := sameorigin.ParseProxies(cfg.UI.TrustedProxies); err != nil {
+				return err
+			}
 		}
 
 		token := uiToken
@@ -195,6 +203,13 @@ but not for anything reachable from a network.`,
 			srv.AllowedWSOrigins = cfg.UI.AllowedWSOrigins
 			srv.AllowedOrigins = cfg.UI.AllowedOrigins
 			srv.ExternalURL = cfg.UI.ExternalURL
+			// Validated above. Whose X-Forwarded-* the hub believes, and the
+			// names a hub without sign-in answers to (Task 20394).
+			srv.TrustedProxies, _ = sameorigin.ParseProxies(cfg.UI.TrustedProxies)
+			srv.AllowedHosts = cfg.UI.AllowedHosts
+			for _, w := range unusableOriginEntries(cfg.UI) {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+			}
 			// TLS: flags override config so an operator can point a running
 			// deployment at a renewed certificate without editing YAML.
 			if err := cfg.UI.TLS.Validate(); err != nil {
@@ -250,6 +265,9 @@ but not for anything reachable from a network.`,
 				// claims current (Task 20359). The renewal completes inside
 				// oidcauth, where hubmetrics is not reachable.
 				authCfg.RenewObserver = ui.RecordRenewOutcome
+				// cookie_secure "auto" believes X-Forwarded-Proto from the
+				// proxies the hub does, and nowhere else (Task 20394).
+				authCfg.RequestIsTLS = srv.RequestIsTLS
 				auth, oidcErr := oidcauth.New(authCfg)
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
@@ -345,6 +363,31 @@ but not for anything reachable from a network.`,
 
 		return srv.Start()
 	},
+}
+
+// unusableOriginEntries names the origin settings that cannot be read as an
+// origin and therefore match nothing (Task 20394): origins are matched
+// exactly now, so an entry that does not parse is not a looser match — it is
+// no match at all, and an operator who wrote one expects it to do something.
+func unusableOriginEntries(u config.UIConfig) []string {
+	var out []string
+	check := func(key string, entries []string) {
+		if _, bad := sameorigin.ParseEntries(entries); len(bad) > 0 {
+			out = append(out, fmt.Sprintf("%s: %q is not an origin (https://host[:port], or host[:port] for https) "+
+				"and matches nothing", key, bad))
+		}
+	}
+	if ext := strings.TrimSpace(u.ExternalURL); ext != "" {
+		check("ui.external_url", []string{ext})
+	}
+	check("ui.allowed_origins", u.AllowedOrigins)
+	check("ui.allowed_ws_origins", u.AllowedWSOrigins)
+	for _, h := range u.AllowedHosts {
+		if _, _, err := sameorigin.SplitHostPort(h); err != nil || strings.Contains(h, "://") {
+			out = append(out, fmt.Sprintf("ui.allowed_hosts: %q is not a host name or host:port and matches nothing", h))
+		}
+	}
+	return out
 }
 
 // uiListenRequest gathers what pkg/exposure decides the dashboard's address

@@ -110,14 +110,23 @@ type HubOptions struct {
 	// Nil means enabled. See Options.AutoInstallHarness.
 	AutoInstallHarness func() bool
 	// ExternalURL is what this deployment calls itself, e.g.
-	// https://cloop.example.com. Its host is always an accepted WebSocket
+	// https://cloop.example.com. Its origin is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
-	// proxy rewrites Host so the same-origin check cannot fire.
+	// proxy rewrites Host so the request's own origin cannot be seen.
 	ExternalURL string
 	// AllowedOrigins lists additional browser Origins permitted to open an
-	// agent WebSocket, on top of loopback, same-origin, and ExternalURL.
-	// Entries may be full origins, host:port, or bare hosts.
+	// agent WebSocket, on top of the request's own and ExternalURL's. Matched
+	// exactly: full origins, or host[:port] meaning https (Task 20394).
 	AllowedOrigins []string
+	// ForwardedTrusted reports whether a request's X-Forwarded-Proto and
+	// X-Forwarded-Host are believed when working out the origin it was
+	// addressed to. Nil believes them from loopback only. The dashboard passes
+	// its own rule (loopback, ui.trusted_proxies, cluster members), so the
+	// two endpoints judge one request alike.
+	ForwardedTrusted func(*http.Request) bool
+	// OnOriginRefused, when set, is told of every handshake refused for its
+	// Origin, so the hub can count and audit it with the dashboard's own.
+	OnOriginRefused func(*http.Request)
 	// Logf receives operational messages. Nil discards them.
 	Logf func(format string, args ...any)
 	// Now overrides the clock for tests.

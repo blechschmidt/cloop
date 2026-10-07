@@ -19,19 +19,19 @@ package remote
 //     token supplied in the ?token= query parameter, which *is* readable from
 //     a link the operator was tricked into loading.
 //
-// So: absent Origin is allowed, present-and-unrecognised is refused. That is
-// the same posture as pkg/ui's wsOriginAllowed, and the two must not drift —
-// the hub is mounted inside the same server, on the same host, behind the same
-// proxy.
+// So: absent Origin is allowed; present, it must be one of the hub's own
+// origins exactly — scheme, host and port (Task 20394). That is the same
+// posture as pkg/ui's wsOriginAllowed, and the two cannot drift: both ask
+// pkg/sameorigin. Loopback is no longer admitted wholesale, and neither is
+// every port of the hub's host name: a page on http://localhost:3000, or on
+// another port of the hub's host, is another origin.
 
 import (
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 
-	"github.com/blechschmidt/cloop/pkg/tlsconf"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 )
 
 // originDecision is the result of the check, carrying the operator-facing
@@ -45,103 +45,45 @@ type originDecision struct {
 //
 // Allowed:
 //   - no Origin header (a headless agent — the normal case);
-//   - loopback origins (a developer's browser or a local test);
-//   - same-origin: the Origin host equals the request's Host, meaning the
-//     page and the socket came from this same server;
-//   - the host of the configured ExternalURL, which is what the deployment
+//   - an Origin equal to the one the request was addressed to: the scheme and
+//     host the connection — or, from a trusted proxy (HubOptions.ForwardedTrusted),
+//     X-Forwarded-Proto and X-Forwarded-Host — report;
+//   - the origin of the configured ExternalURL, which is what the deployment
 //     calls itself even when a reverse proxy rewrites Host;
-//   - any entry in AllowedOrigins, matched as a full origin ("https://a.b"),
-//     a host:port, or a bare host.
+//   - an AllowedOrigins entry: a full origin, or host[:port] meaning https.
 //
-// Everything else is refused. Note that ExternalURL and AllowedOrigins are
-// matched on host only, not scheme: an operator who has configured
-// https://hub.example.com should not have a cross-origin page at
-// http://hub.example.com treated as a stranger — it is the same deployment
-// mid-migration, and TLS is enforced by HSTS and by the agent's own transport
-// policy rather than by this check.
+// Everything else is refused, scheme mismatches included: an http page on the
+// hub's host name is one anybody on the network path can serve.
 func (h *Hub) checkOrigin(r *http.Request) originDecision {
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
-		return originDecision{allowed: true, reason: "no Origin header (non-browser client)"}
+	own, addressed := h.ownOrigins(r)
+	v := sameorigin.CheckUpgrade(r, own)
+	if v.Allowed {
+		return originDecision{allowed: true, reason: string(v.Reason)}
 	}
-
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return originDecision{false, fmt.Sprintf("Origin %q is not a valid URL", origin)}
+	if h.opts.OnOriginRefused != nil {
+		h.opts.OnOriginRefused(r)
 	}
-	originHost := u.Hostname()
-
-	if isLoopbackHostname(originHost) {
-		return originDecision{true, "loopback origin"}
-	}
-
-	// Same-origin: the page that opened this socket was served by this very
-	// server, so it is inherently as trusted as the server itself.
-	if r.Host != "" {
-		if strings.EqualFold(u.Host, r.Host) {
-			return originDecision{true, "same-origin"}
-		}
-		reqHost := r.Host
-		if h, _, splitErr := net.SplitHostPort(reqHost); splitErr == nil {
-			reqHost = h
-		}
-		if strings.EqualFold(originHost, reqHost) {
-			return originDecision{true, "same-origin (host match)"}
-		}
-	}
-
-	for _, allowed := range h.allowedOriginHosts() {
-		if strings.EqualFold(allowed, u.Host) || strings.EqualFold(allowed, originHost) {
-			return originDecision{true, "configured allowed origin"}
-		}
-	}
-
 	return originDecision{false, fmt.Sprintf(
-		"Origin %q is not permitted; add it to ui.allowed_origins or set ui.external_url", origin)}
+		"Origin %q is not one of this hub's own origins (this request was addressed to %s); "+
+			"if that is the hub's own address behind a proxy, add it to ui.allowed_origins or set ui.external_url",
+		strings.TrimSpace(r.Header.Get("Origin")), addressed)}
 }
 
-// allowedOriginHosts is the effective allowlist: the configured external URL's
-// host plus every AllowedOrigins entry, normalised to a host or host:port so a
-// full URL and a bare hostname both work in config.
-func (h *Hub) allowedOriginHosts() []string {
-	out := make([]string, 0, len(h.opts.AllowedOrigins)+1)
-	if ext := strings.TrimSpace(h.opts.ExternalURL); ext != "" {
-		if host := originHostOf(ext); host != "" {
-			out = append(out, host)
-		}
+// ownOrigins is every origin the hub accepts a browser's socket from, and the
+// one r was addressed to, rendered for a message.
+func (h *Hub) ownOrigins(r *http.Request) ([]sameorigin.Origin, string) {
+	entries := append([]string{h.opts.ExternalURL}, h.opts.AllowedOrigins...)
+	own, _ := sameorigin.ParseEntries(entries)
+	trusted := false
+	if h.opts.ForwardedTrusted != nil {
+		trusted = h.opts.ForwardedTrusted(r)
+	} else {
+		trusted = sameorigin.Proxies{}.TrustsPeer(r)
 	}
-	for _, a := range h.opts.AllowedOrigins {
-		if host := originHostOf(a); host != "" {
-			out = append(out, host)
-		}
+	addressed := "an origin the hub cannot determine"
+	if o, ok := sameorigin.ViewOf(r, trusted).Origin(); ok {
+		own = append(own, o)
+		addressed = o.String()
 	}
-	return out
+	return own, addressed
 }
-
-// originHostOf normalises a config entry into a host or host:port. Accepts
-// "https://a.b", "a.b:443" and "a.b" alike, because operators write all three
-// and rejecting two of them is a support ticket, not a security control.
-func originHostOf(s string) string {
-	v := strings.TrimSpace(s)
-	if v == "" {
-		return ""
-	}
-	if strings.Contains(v, "://") {
-		if u, err := url.Parse(v); err == nil && u.Host != "" {
-			return u.Host
-		}
-		return ""
-	}
-	return strings.TrimSuffix(v, "/")
-}
-
-// isLoopbackHostname delegates to tlsconf so the hub, the dashboard and the
-// agent all answer "is this loopback" identically.
-//
-// An earlier version of this file carried its own copy, to spare
-// pkg/executor/remote a dependency. The copies drifted within one change —
-// this one accepted *.localhost, 127.0.0.0/8 and IPv4-mapped forms while
-// pkg/ui's accepted three exact strings, so the same Origin was refused by the
-// dashboard socket and accepted by the agent endpoint on the same server. The
-// dependency is free anyway: the agent binary already links tlsconf.
-func isLoopbackHostname(host string) bool { return tlsconf.IsLoopbackHost(host) }

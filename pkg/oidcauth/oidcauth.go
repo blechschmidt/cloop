@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -300,6 +301,15 @@ type Config struct {
 	// in". Called on verdicts only, never on the redirect to the provider.
 	// Implementations must not block.
 	RenewObserver func(RenewOutcome)
+
+	// RequestIsTLS reports whether a request reached the hub over TLS as the
+	// browser sees it: the hub's own listener, or a proxy the hub trusts that
+	// said so in X-Forwarded-Proto (Task 20394). cookie_secure "auto"
+	// follows it. Nil believes X-Forwarded-Proto from a loopback peer only —
+	// the hub's rule with no ui.trusted_proxies — because the header is
+	// anybody's to send, and a session cookie's attributes are not theirs to
+	// choose.
+	RequestIsTLS func(*http.Request) bool
 }
 
 // StateOwner returns the StatePrefix a login's state parameter carries, or ""
@@ -1223,6 +1233,13 @@ func (a *Authenticator) sessionCookie(r *http.Request, value string, maxAge int)
 }
 
 // cookieSecure resolves the Secure flag from config and the request.
+//
+// "auto" is Secure when the request arrived over TLS as the browser sees it
+// (Config.RequestIsTLS), or when the redirect URL is https. The second is not
+// a guess: the session cookie is set on the response to the callback, and the
+// provider sends the browser to exactly the redirect URL, so an https one
+// means that response reached the browser over TLS — whatever a proxy in
+// front of the hub did or did not say about it.
 func (a *Authenticator) cookieSecure(r *http.Request) bool {
 	switch {
 	case a.cfg.CookieSecure == "always":
@@ -1230,15 +1247,40 @@ func (a *Authenticator) cookieSecure(r *http.Request) bool {
 	case !CookieSecureFollowsRequest(a.cfg.CookieSecure):
 		return false
 	default:
-		return r.TLS != nil || ForwardedProtoHTTPS(r.Header)
+		return a.requestIsTLS(r) || a.redirectIsHTTPS()
 	}
+}
+
+// requestIsTLS applies Config.RequestIsTLS, or its loopback-only default.
+func (a *Authenticator) requestIsTLS(r *http.Request) bool {
+	if a.cfg.RequestIsTLS != nil {
+		return a.cfg.RequestIsTLS(r)
+	}
+	return r.TLS != nil || (peerIsLoopback(r) && ForwardedProtoHTTPS(r.Header))
+}
+
+// redirectIsHTTPS reports an https redirect URL.
+func (a *Authenticator) redirectIsHTTPS() bool {
+	u, err := url.Parse(strings.TrimSpace(a.cfg.RedirectURL))
+	return err == nil && strings.EqualFold(u.Scheme, "https")
+}
+
+// peerIsLoopback reports whether r's direct TCP peer is on this machine.
+func peerIsLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ForwardedProtoHTTPS reads the client-facing hop from X-Forwarded-Proto: a
 // proxy chain may append ("https, http"), and the first entry is the one that
-// decided the browser's view. The dashboard's HSTS decision reads it with this
-// too; the cookie used to compare the whole header, so a chain that sends
-// "https, http" got HSTS and a session cookie without Secure.
+// decided the browser's view. The cookie used to compare the whole header, so
+// a chain that sends "https, http" got HSTS and a session cookie without
+// Secure. Whether the header is believed at all is the caller's question —
+// see Config.RequestIsTLS.
 func ForwardedProtoHTTPS(h http.Header) bool {
 	proto := h.Get("X-Forwarded-Proto")
 	if i := strings.IndexByte(proto, ','); i >= 0 {

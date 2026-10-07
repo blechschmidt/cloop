@@ -78,10 +78,8 @@ package ui
 // page size rather than by how much the agent has written.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -212,9 +210,7 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 		ReadOnly bool `json:"read_only"`
 	}
 	if r.Body != nil {
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil && !errors.Is(err, io.EOF) {
-			respondToBodyError(w, err)
+		if !decodeOptionalJSON(w, r, &opts) {
 			return
 		}
 	}
@@ -590,11 +586,8 @@ func (s *Server) glassesLinkView(r *http.Request, tok *apitoken.Token) glassesLi
 func (s *Server) glassesURL(r *http.Request, plaintext string) string {
 	base := strings.TrimRight(strings.TrimSpace(s.ExternalURL), "/")
 	if base == "" {
-		scheme := "http"
-		if s.requestIsTLS(r) {
-			scheme = "https"
-		}
-		base = scheme + "://" + r.Host
+		v := s.clientView(r)
+		base = v.Scheme + "://" + v.Host
 	}
 	return base + "/glasses?token=" + url.QueryEscape(plaintext)
 }

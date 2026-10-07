@@ -528,21 +528,62 @@ func asPreflight(err error, target **PreflightError) bool {
 // TestSessionCookieReadsTheClientFacingHop: behind a proxy chain that sends
 // "https, http", the session cookie is Secure — it reads X-Forwarded-Proto's
 // first entry, as the dashboard's HSTS decision does, instead of comparing the
-// whole header and leaving the flag off (Task 20387).
+// whole header and leaving the flag off (Task 20387). The redirect URL is
+// plaintext here, so that the header alone decides.
 func TestSessionCookieReadsTheClientFacingHop(t *testing.T) {
 	t.Parallel()
-	a, err := New(entraCfg("https://idp.example.com", "https://cloop.example.com/auth/callback"))
+	a, err := New(entraCfg("https://idp.example.com", "http://localhost:8080/auth/callback"))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	for proto, want := range map[string]bool{"https": true, "https, http": true, "HTTPS ,http": true,
 		"http, https": false, "": false} {
 		r := httptest.NewRequest(http.MethodGet, "http://cloop.example.com/", nil)
+		r.RemoteAddr = "127.0.0.1:41000" // a proxy on this machine
 		if proto != "" {
 			r.Header.Set("X-Forwarded-Proto", proto)
 		}
 		if got := a.cookieSecure(r); got != want {
 			t.Errorf("X-Forwarded-Proto %q: Secure=%v, want %v", proto, got, want)
 		}
+	}
+}
+
+// TestSessionCookieBelievesOnlyATrustedProxy: X-Forwarded-Proto is anybody's
+// to send, so with no RequestIsTLS hook it is believed from loopback only, and
+// with one the hook decides (Task 20394). An https redirect URL makes the
+// cookie Secure whatever the header says: the callback that sets it is served
+// at that URL.
+func TestSessionCookieBelievesOnlyATrustedProxy(t *testing.T) {
+	t.Parallel()
+	plainRedirect, err := New(entraCfg("https://idp.example.com", "http://localhost:8080/auth/callback"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	fromAfar := httptest.NewRequest(http.MethodGet, "http://cloop.example.com/", nil)
+	fromAfar.RemoteAddr = "203.0.113.9:5000"
+	fromAfar.Header.Set("X-Forwarded-Proto", "https")
+	if plainRedirect.cookieSecure(fromAfar) {
+		t.Error("X-Forwarded-Proto from a peer nobody trusted marked the cookie Secure")
+	}
+
+	cfg := entraCfg("https://idp.example.com", "http://localhost:8080/auth/callback")
+	cfg.RequestIsTLS = func(r *http.Request) bool { return r.RemoteAddr == "203.0.113.9:5000" }
+	hooked, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !hooked.cookieSecure(fromAfar) {
+		t.Error("the hub's own rule (RequestIsTLS) was not consulted")
+	}
+
+	httpsRedirect, err := New(entraCfg("https://idp.example.com", "https://cloop.example.com/auth/callback"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	plain := httptest.NewRequest(http.MethodGet, "http://cloop.example.com/auth/callback", nil)
+	plain.RemoteAddr = "203.0.113.9:5000"
+	if !httpsRedirect.cookieSecure(plain) {
+		t.Error("a hub whose callback is https issued a session cookie without Secure")
 	}
 }

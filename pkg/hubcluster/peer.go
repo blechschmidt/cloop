@@ -333,6 +333,29 @@ func (n *Node) memberURL(to Member) (*url.URL, error) {
 // owner uses it instead of this member's address. It writes a 502 itself when
 // the member cannot be reached, and returns the error so the caller can log.
 func (n *Node) Forward(w http.ResponseWriter, r *http.Request, to Member, clientIP string) error {
+	return n.ForwardAs(w, r, to, Client{IP: clientIP})
+}
+
+// Client is what the forwarding member resolved about the browser behind a
+// request: its address, and the scheme and host it addressed — which a proxy
+// in front of the forwarding member may have reported in X-Forwarded-* that
+// the owner never sees. The owner judges the request's origin from them
+// (Task 20394), so they travel as X-Forwarded-Proto and X-Forwarded-Host on
+// the signed hop; the owner believes them because the hop is signed.
+type Client struct {
+	// IP is the client's address.
+	IP string
+	// Proto is "https" or "http", the scheme the browser used; empty takes
+	// the forwarding connection's own.
+	Proto string
+	// Host is the host[:port] the browser addressed; empty takes r.Host.
+	Host string
+}
+
+// ForwardAs is Forward with everything the forwarding member knows about the
+// client.
+func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Client) error {
+	clientIP := c.IP
 	if n == nil || n.peer == nil {
 		return errors.New("hubcluster: not a cluster member")
 	}
@@ -354,6 +377,15 @@ func (n *Node) Forward(w http.ResponseWriter, r *http.Request, to Member, client
 			// Host, so it must see the host the client addressed.
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
+			// SetXForwarded describes this member's own inbound hop, which
+			// behind a TLS-terminating proxy is plaintext from loopback;
+			// what the owner needs is the browser's.
+			if c.Proto == "https" || c.Proto == "http" {
+				pr.Out.Header.Set("X-Forwarded-Proto", c.Proto)
+			}
+			if h := strings.TrimSpace(c.Host); h != "" {
+				pr.Out.Header.Set("X-Forwarded-Host", h)
+			}
 			StripPeerHeaders(pr.Out.Header)
 			n.peer.sign(pr.Out, to.ID, clientIP)
 		},

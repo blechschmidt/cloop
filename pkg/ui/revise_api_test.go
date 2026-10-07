@@ -226,6 +226,7 @@ func postRevise(t *testing.T, dir string, id string, body map[string]any) *httpt
 	}
 	srv := &Server{WorkDir: dir}
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/"+id+"/revise", strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
 	srv.handleTaskRevise(rec, req)

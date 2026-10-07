@@ -469,22 +469,12 @@ func (s *Server) ciBaseURL(r *http.Request) string {
 	if ext := strings.TrimSpace(s.ExternalURL); ext != "" {
 		return strings.TrimSuffix(ext, "/") + ciMountPath
 	}
-	scheme := "https"
-	if r.TLS == nil {
-		// X-Forwarded-Proto is honoured because the common deployment puts a
-		// TLS-terminating proxy in front; without it every such hub would
-		// advertise http:// and the pipeline would refuse or downgrade.
-		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); fwd != "" {
-			scheme = strings.ToLower(fwd)
-		} else {
-			scheme = "http"
-		}
-	}
-	host := r.Host
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		host = fwd
-	}
-	return scheme + "://" + host + ciMountPath
+	// A TLS-terminating proxy in front reports the scheme and host in
+	// X-Forwarded-Proto and X-Forwarded-Host; without them every such hub
+	// would advertise http:// and the pipeline would refuse or downgrade.
+	// They are believed from a trusted proxy only (Task 20394).
+	v := s.clientView(r)
+	return v.Scheme + "://" + v.Host + ciMountPath
 }
 
 // isCIFederationEndpoint reports whether a request is one of the two the CI

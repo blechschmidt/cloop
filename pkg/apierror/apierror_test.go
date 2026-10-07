@@ -32,6 +32,9 @@ func TestCodeStability(t *testing.T) {
 		{CodeConflict, "CONFLICT"},
 		{CodePayloadTooLarge, "PAYLOAD_TOO_LARGE"},
 		{CodeRateLimited, "RATE_LIMITED"},
+		{CodeCrossOrigin, "CROSS_ORIGIN"},
+		{CodeUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE"},
+		{CodeMisdirectedRequest, "MISDIRECTED_REQUEST"},
 		{CodeInternal, "INTERNAL"},
 		{CodeUnavailable, "UNAVAILABLE"},
 	}
@@ -59,6 +62,9 @@ func TestDefaultStatusMapping(t *testing.T) {
 		{CodeConflict, http.StatusConflict},
 		{CodePayloadTooLarge, http.StatusRequestEntityTooLarge},
 		{CodeRateLimited, http.StatusTooManyRequests},
+		{CodeCrossOrigin, http.StatusForbidden},
+		{CodeUnsupportedMediaType, http.StatusUnsupportedMediaType},
+		{CodeMisdirectedRequest, http.StatusMisdirectedRequest},
 		{CodeUnavailable, http.StatusServiceUnavailable},
 		{CodeInternal, http.StatusInternalServerError},
 	}
@@ -341,6 +347,8 @@ func TestFromHTTPStatus(t *testing.T) {
 		{http.StatusConflict, CodeConflict},
 		{http.StatusRequestEntityTooLarge, CodePayloadTooLarge},
 		{http.StatusTooManyRequests, CodeRateLimited},
+		{http.StatusUnsupportedMediaType, CodeUnsupportedMediaType},
+		{http.StatusMisdirectedRequest, CodeMisdirectedRequest},
 		{http.StatusServiceUnavailable, CodeUnavailable},
 		{http.StatusInternalServerError, CodeInternal},
 		{http.StatusBadGateway, CodeInternal},          // unknown → internal

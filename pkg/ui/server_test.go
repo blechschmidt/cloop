@@ -8,6 +8,7 @@ package ui
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -90,33 +92,80 @@ func apiGET(t *testing.T, ts *httptest.Server, path string) map[string]interface
 	return out
 }
 
-// TestWSOriginAllowed verifies the WebSocket origin gate: loopback and
-// same-origin (Origin host == request Host) requests are accepted so the
-// dashboard works behind a reverse proxy on a public hostname, while
-// genuinely cross-origin browser requests are rejected (anti-CSWSH).
+// TestWSOriginAllowed is the WebSocket origin table (Task 20394): an Origin is
+// admitted only when it is exactly — scheme, host and port — the origin the
+// request was addressed to, ui.external_url, or a configured entry. Loopback
+// is not a credential, and neither is the hub's host name on another port:
+// both are pages somebody other than the hub can serve.
 func TestWSOriginAllowed(t *testing.T) {
-	s := &Server{AllowedWSOrigins: []string{"configured.example.com"}}
+	s := &Server{
+		AllowedWSOrigins: []string{"configured.example.com"},
+		AllowedOrigins:   []string{"http://ops.lan:8081"},
+		TrustedProxies:   sameorigin.MustParseProxies("10.9.0.0/16"),
+	}
 	cases := []struct {
-		name   string
-		host   string // request Host
-		origin string // Origin header ("" = absent)
-		want   bool
+		name      string
+		host      string // request Host
+		tls       bool   // the connection itself is TLS
+		remote    string // RemoteAddr; "" keeps httptest's 192.0.2.1
+		forwarded map[string]string
+		origin    string // Origin header ("" = absent)
+		want      bool
 	}{
-		{"no origin (CLI)", "aiden.example.com:1234", "", true},
-		{"loopback", "localhost:8080", "http://localhost:8080", true},
-		{"loopback ip", "127.0.0.1:8080", "http://127.0.0.1:9999", true},
-		{"same-origin host:port", "aiden.example.com:1234", "https://aiden.example.com:1234", true},
-		{"same-origin host only", "aiden.example.com", "https://aiden.example.com", true},
-		{"same host, proxy dropped port", "aiden.example.com", "https://aiden.example.com:1234", true},
-		{"configured extra origin", "internal:8080", "https://configured.example.com", true},
-		{"cross-origin attacker", "aiden.example.com:1234", "https://evil.com", false},
-		{"look-alike subdomain", "aiden.example.com:1234", "https://aiden.example.com.evil.com", false},
-		{"malformed origin", "aiden.example.com:1234", "://:::", false},
+		{name: "no origin (CLI)", host: "aiden.example.com:1234", want: true},
+
+		{name: "loopback, same origin", host: "127.0.0.1:8080", origin: "http://127.0.0.1:8080", want: true},
+		{name: "localhost, same origin", host: "localhost:8080", origin: "http://localhost:8080", want: true},
+		{name: "same origin over TLS", host: "aiden.example.com:1234", tls: true, origin: "https://aiden.example.com:1234", want: true},
+		{name: "same origin, default port", host: "aiden.example.com", tls: true, origin: "https://aiden.example.com", want: true},
+		{name: "explicit default port", host: "aiden.example.com:443", tls: true, origin: "https://aiden.example.com", want: true},
+
+		// A proxy on this machine, as on :8888: nginx passes Host $http_host
+		// and X-Forwarded-Proto $scheme from 127.0.0.1.
+		{name: "loopback proxy", host: "aiden.blechschmidt.io:8888", remote: "127.0.0.1:50000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https"},
+			origin:    "https://aiden.blechschmidt.io:8888", want: true},
+		{name: "trusted proxy rewriting Host", host: "cloop-hub:8080", remote: "10.9.3.4:50000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "hub.example.com"},
+			origin:    "https://hub.example.com", want: true},
+		// The same headers from anybody else are not believed: a client that
+		// could set them would choose the origin it is judged against.
+		{name: "untrusted peer's X-Forwarded-Proto", host: "aiden.example.com", remote: "203.0.113.9:50000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https"},
+			origin:    "https://aiden.example.com", want: false},
+		{name: "untrusted peer's X-Forwarded-Host", host: "cloop-hub:8080", remote: "203.0.113.9:50000",
+			forwarded: map[string]string{"X-Forwarded-Host": "hub.example.com"},
+			origin:    "http://hub.example.com", want: false},
+
+		{name: "configured dashboard origin", host: "internal:8080", origin: "https://configured.example.com", want: true},
+		{name: "configured plaintext origin", host: "internal:8080", origin: "http://ops.lan:8081", want: true},
+
+		// Refused: every one of these used to be admitted.
+		{name: "another loopback port", host: "127.0.0.1:8080", origin: "http://127.0.0.1:9999", want: false},
+		{name: "localhost page, 127.0.0.1 hub", host: "127.0.0.1:8080", origin: "http://localhost:8080", want: false},
+		{name: "loopback page, remote hub", host: "aiden.example.com", tls: true, origin: "http://localhost:8080", want: false},
+		{name: "same host, other port", host: "aiden.example.com:1234", tls: true, origin: "https://aiden.example.com:1235", want: false},
+		{name: "same host, proxy dropped port", host: "aiden.example.com", tls: true, origin: "https://aiden.example.com:1234", want: false},
+		{name: "same host, other scheme", host: "aiden.example.com:1234", origin: "https://aiden.example.com:1234", want: false},
+		{name: "configured host, other scheme", host: "internal:8080", origin: "http://configured.example.com", want: false},
+		{name: "cross-origin attacker", host: "aiden.example.com:1234", origin: "https://evil.com", want: false},
+		{name: "look-alike subdomain", host: "aiden.example.com:1234", origin: "https://aiden.example.com.evil.com", want: false},
+		{name: "malformed origin", host: "aiden.example.com:1234", origin: "://:::", want: false},
+		{name: "opaque origin", host: "aiden.example.com:1234", origin: "null", want: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/api/ws", nil)
 			r.Host = c.host
+			if c.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			if c.remote != "" {
+				r.RemoteAddr = c.remote
+			}
+			for k, v := range c.forwarded {
+				r.Header.Set(k, v)
+			}
 			if c.origin != "" {
 				r.Header.Set("Origin", c.origin)
 			}

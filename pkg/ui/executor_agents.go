@@ -126,6 +126,12 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// the one name the whole deployment answers to.
 			ExternalURL:    s.ExternalURL,
 			AllowedOrigins: s.AllowedOrigins,
+			// The dashboard's rule for whose X-Forwarded-* to believe, so one
+			// request's origin is the same at both endpoints, and its record
+			// of a refusal, so a page that tried the agent endpoint shows up
+			// beside one that tried the dashboard (Task 20394).
+			ForwardedTrusted: s.forwardedTrusted,
+			OnOriginRefused:  s.recordAgentOriginRefusal,
 			// Mirror into storage, then push the change to open dashboards
 			// so the Executors panel's status dot is event-driven rather
 			// than polled (Tasks 20126/20134, 20160).

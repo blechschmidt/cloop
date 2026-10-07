@@ -1528,13 +1528,7 @@ func (s *Server) auditLeaseRevoke(r *http.Request, leaseID, executorID, projectI
 // as "use the defaults": every route here creates or changes access, and
 // there is no safe default for "which repositories may this token touch".
 func decodeSecretsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
-			"invalid JSON body: "+err.Error()))
-		return false
-	}
-	return true
+	return decodeJSON(w, r, dst)
 }
 
 // grantTTL validates the requested lifetime, defaulting to the broker's own.

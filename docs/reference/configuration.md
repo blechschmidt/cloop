@@ -2136,9 +2136,11 @@ being asked for HTTPS is discovered from a packet capture, if at all.
 
 ```yaml
 ui:
-  external_url: https://cloop.example.com   # also an accepted WebSocket Origin
+  external_url: https://cloop.example.com   # one of the hub's own origins
   allowed_origins: [ops.example.com]        # deployment-wide (dashboard + agents)
   allowed_ws_origins: [legacy.example.com]  # dashboard socket only
+  trusted_proxies: [10.42.0.0/16]           # whose X-Forwarded-* to believe (loopback always)
+  allowed_hosts: [devbox.lan]               # names a hub WITHOUT sign-in answers to
   tls:
     cert_file: /etc/cloop/tls/fullchain.pem
     key_file:  /etc/cloop/tls/privkey.pem   # mode 0600
@@ -2152,35 +2154,116 @@ secrecy are offered — no CBC, no static RSA. For local development,
 `pkg/atomicfile`, never briefly world-readable) and prints the pin to give
 devices.
 
-**HSTS and cookies.** Responses delivered over TLS carry
-`Strict-Transport-Security: max-age=31536000; includeSubDomains`, and the OIDC
-session cookie becomes `Secure` + `SameSite=Strict`. Both are keyed off the
-request's real scheme, so they are also correct behind a TLS-terminating
-reverse proxy (`X-Forwarded-Proto`, trusted only from a loopback peer). Neither
-is applied on plaintext: HSTS on `http://localhost` would pin a developer's
-browser to HTTPS for a year and break every other local project on that
-hostname.
+**Proxies: `ui.trusted_proxies`.** Behind a reverse proxy the hub cannot see
+the browser's scheme, or — when the proxy rewrites `Host` — the name it used,
+or the client's address. The proxy says so in `X-Forwarded-Proto`,
+`X-Forwarded-Host` and `X-Forwarded-For`, and any client can send those headers
+too. So they are believed only from a peer on **loopback** (a proxy on this
+machine, always trusted) or inside a prefix of **`ui.trusted_proxies`** (CIDR
+prefixes or addresses; one covering every address, `0.0.0.0/0` or `::/0`, is
+refused at startup), and ignored from every other peer (Task 20394). Until then
+`X-Forwarded-Proto` was also believed from *any* peer once `ui.external_url` was
+https, and `X-Forwarded-For` was read from its leftmost entry — which a proxy
+that appends (nginx's `$proxy_add_x_forwarded_for`) passes through from the
+client, so anybody could pick a fresh address for the rate limiter and the
+sign-in lockout. `X-Forwarded-For` is now walked from the right, past trusted
+proxies, to the first address that is not one.
+
+A TLS terminator on another host — an Ingress controller, a load balancer —
+belongs in `trusted_proxies`. Without it the hub treats that proxy's requests as
+plaintext: it refuses `/install.sh`, offers no one-line installer at enrollment
+and builds `ws://` agent URLs, and a browser without `Sec-Fetch-Site` is judged
+against an `http://` origin (set `external_url` and it is still matched). The
+same list applies to `cloop serve`. Members of a hub cluster need no entry: a
+request another member forwards is signed, and carries the browser's scheme and
+host with it.
+
+**HSTS and cookies.** Responses delivered over TLS — the hub's own listener, or
+a trusted proxy's `X-Forwarded-Proto: https` — carry
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`, and so does
+every response of a hub whose public URL — `ui.external_url`, else
+`ui.oidc.redirect_url` — is https: the operator has declared the deployment
+HTTPS, and a browser ignores the header on a response that did arrive in
+plaintext. The OIDC session cookie becomes `Secure` +
+`SameSite=Strict` under `cookie_secure: auto` when the request arrived over TLS
+by the same rule, or when `ui.oidc.redirect_url` is https — the cookie is set on
+the response to that URL, so it reached the browser over TLS whatever a proxy
+said. Neither is applied on plaintext otherwise: HSTS on `http://localhost`
+would pin a developer's browser to HTTPS for a year and break every other local
+project on that hostname.
+
+**The hub's own origins.** Several checks below ask whether a browser's request
+came from one of the hub's own pages. The hub's own origins are, matched
+exactly — scheme, host and port — the origin the request was addressed to (its
+scheme and `Host`, or a trusted proxy's `X-Forwarded-Proto` and
+`X-Forwarded-Host`), `ui.external_url`, the origin of `ui.oidc.redirect_url`,
+and `ui.allowed_origins` (`ui.allowed_ws_origins` too, for the dashboard socket).
+An entry is a full origin (`https://ops.example.com`, `http://hub.lan:8081`) or
+`host[:port]`, which means **https** — plaintext has to be asked for by name,
+because an `http` origin is one anybody on the network path can serve. An entry
+that does not parse matches nothing and is named in a warning at startup.
+Loopback is not special: a page on `http://localhost:3000` is another origin
+than a hub on `:8080`, and so is another port of the hub's own host name.
+
+**State-changing requests (Task 20394).** A `POST`, `PUT`, `PATCH` or `DELETE`
+— any method but `GET`, `HEAD` and `OPTIONS` — is refused with
+**403 `CROSS_ORIGIN`** unless it carries an `Authorization: Bearer` credential
+(API tokens, the static token, the CI relay, executor agents: a page elsewhere
+can attach one only after a CORS preflight, and the hub grants none), or:
+
+- the browser's `Sec-Fetch-Site` — which every current browser sends and no page
+  can set — is `same-origin` or `none`; `same-site` (another port of the hub's
+  host, a sibling subdomain) and `cross-site` are refused whatever else the
+  request says;
+- without `Sec-Fetch-Site`, its `Origin` is absent (not a browser) or exactly one
+  of the hub's own origins.
+
+This holds on every hub, with or without sign-in — a hub with no credential has
+nothing for SameSite to withhold, and an authenticating proxy's own cookie or
+Basic credential rides along like a session cookie does. Its body, if it has a
+`Content-Type`, must be `application/json` (`multipart/form-data` on the three
+upload routes, `/api/voice`, `/api/transcribe` and `/api/glasses/transcribe`), or
+it is refused with **415 `UNSUPPORTED_MEDIA_TYPE`**: a form or `fetch(…,
+{mode: 'no-cors'})` on another origin can send only form data and `text/plain`
+without asking first. Every handler reads its JSON body through one decoder
+(`pkg/jsonbody`) that refuses the same, and a body with no `Content-Type`. The
+Anthropic relay under `/api/ci/anthropic/` passes bodies through unread and is
+exempt from the media type only. No route accepts a cross-site write; the one
+that would need to — an OIDC callback with `response_mode=form_post` — does not
+exist, because the hub's callback is a `GET`.
+
+A refusal names `ui.allowed_origins` and the origin the hub thinks the request
+was addressed to, is counted in `cloop_cross_origin_refusals_total` and is
+audited as `request.origin_refused` (at most 30 rows a minute). The hub sends no
+CORS headers to any origin.
+
+**Host names a hub without sign-in answers to: `ui.allowed_hosts`.** On a hub
+with neither SSO nor a static token, a request whose `Host` (or trusted
+`X-Forwarded-Host`) is not one the hub answers to gets **421
+`MISDIRECTED_REQUEST`**. DNS rebinding points a name the attacker controls at
+127.0.0.1, which makes a page on that name same-origin with a loopback hub —
+every check above then truthfully says "same-origin" — so the hub refuses the
+name itself. It answers to `localhost` and `*.localhost`, any IP address (a
+browser sends an IP-literal `Host` only to a page whose own origin is that
+address), `ui.external_url`'s host, the advertise hosts of its cluster members,
+and the entries of `ui.allowed_hosts` (a host name, any port, or `host:port`).
+`/healthz` and `/readyz` answer any name. A hub with sign-in does not check:
+a rebound name carries none of its credentials. Refusals are counted
+(`reason="unknown_host"`) and audited as `request.host_refused`.
 
 **WebSocket origins.** Both the dashboard socket and the executor-agent
-endpoint accept an upgrade only from a recognised `Origin` — loopback,
-same-origin, `ui.external_url`, or `ui.allowed_origins`. A request with *no*
-`Origin` is allowed, because that is what every non-browser agent sends and a
-browser cannot suppress the header. A cross-origin upgrade gets 403 with the
-reason, before any token is examined — so it cannot burn a single-use
-enrollment token on the way to being refused.
+endpoint accept an upgrade only from an `Origin` that is exactly one of the
+hub's own (above). A request with *no* `Origin` is allowed, because that is what
+every non-browser agent sends and a browser cannot suppress the header. A
+cross-origin upgrade gets 403 with the reason, before any token is examined — so
+it cannot burn a single-use enrollment token on the way to being refused.
 
 The two allowlists differ in blast radius and are deliberately not merged:
 `allowed_origins` is deployment-wide and reaches `/api/executors/connect`,
 where an entry can open an agent connection; `allowed_ws_origins` is scoped to
 the dashboard socket only. Prefer setting `external_url` — it covers the
-reverse-proxy case without either list.
-
-Note that same-origin matching falls back to comparing hostnames when the
-`Origin` and `Host` ports differ, which is what makes a proxy that rewrites
-`Host` work. The consequence is that another *port* on the same hostname counts
-as same-origin. If something you do not control is served from the hub's
-hostname, set `external_url` and treat that hostname as part of the trust
-boundary.
+reverse-proxy case without either list. Until Task 20394 both endpoints also
+admitted every loopback origin and every port of the hub's host name.
 
 **Outbound.** All three remote providers (Anthropic, OpenAI, custom
 OpenAI-compatible) and the executor agent validate certificates against the

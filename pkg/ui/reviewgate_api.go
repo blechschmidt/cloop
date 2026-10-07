@@ -1,10 +1,10 @@
 package ui
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -46,11 +46,7 @@ func (s *Server) handleReviewGateGet(w http.ResponseWriter, r *http.Request) {
 // "model":"claude-opus-5-5","effort":"","mode":"fix","max_fix_rounds":2,"instructions":"..."}
 func (s *Server) handleReviewGateSet(w http.ResponseWriter, r *http.Request) {
 	var req pm.ReviewGate
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: maxJSONBodyBytes, Strict: true}) {
 		return
 	}
 	req.Normalize()

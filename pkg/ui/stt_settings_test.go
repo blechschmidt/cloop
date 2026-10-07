@@ -52,6 +52,7 @@ func putSTTKey(t *testing.T, srv *Server, target, key string) *httptest.Response
 		t.Fatalf("marshal body: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPut, target, nil)
+	req.Header.Set("Content-Type", "application/json")
 	req.Body = io.NopCloser(bytes.NewReader(blob))
 	rec := httptest.NewRecorder()
 	srv.handleSTTSettingsSave(rec, req)

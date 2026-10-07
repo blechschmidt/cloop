@@ -353,6 +353,16 @@ const (
 	// different subject than the session's, which leaves the session as it was.
 	ActionSessionRenewalMismatch Action = "session.renewal_mismatch"
 
+	// ── request ────────────────────────────────────────────────────────────
+
+	// ActionRequestOriginRefused records a state-changing request or a
+	// WebSocket handshake refused because a page on another origin made it
+	// (Task 20394).
+	ActionRequestOriginRefused Action = "request.origin_refused"
+	// ActionRequestHostRefused records a hub without sign-in refusing a Host
+	// it does not answer to — the shape DNS rebinding takes (Task 20394).
+	ActionRequestHostRefused Action = "request.host_refused"
+
 	// ── role_binding ───────────────────────────────────────────────────────
 
 	// ActionRoleBindingGranted records a runtime binding granting a role.

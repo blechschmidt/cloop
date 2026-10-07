@@ -22,7 +22,6 @@ package ui
 // complete. Neither is `start`, since neither spends a provider call.
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -136,9 +135,7 @@ func (s *Server) handleTaskClearAborted(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Note string `json:"note"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	note := strings.TrimSpace(req.Note)

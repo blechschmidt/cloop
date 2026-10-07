@@ -153,7 +153,7 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		supplied := false
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			supplied = true
-			if !s.authLockoutActive(clientIP(r)) &&
+			if !s.authLockoutActive(s.clientIP(r)) &&
 				subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
@@ -161,14 +161,14 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		}
 		if tok := r.URL.Query().Get("token"); tok != "" {
 			supplied = true
-			if !s.authLockoutActive(clientIP(r)) &&
+			if !s.authLockoutActive(s.clientIP(r)) &&
 				subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
 		}
 		if supplied {
-			s.recordAuthFailure(clientIP(r))
+			s.recordAuthFailure(s.clientIP(r))
 			setSignInHint(w)
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return

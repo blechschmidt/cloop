@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -113,24 +114,21 @@ func TestRequestIsTLS(t *testing.T) {
 		{"ipv6 loopback proxy", "", "[::1]:5555", nil, "https", true},
 		{"case insensitive", "", "127.0.0.1:5555", nil, "HTTPS", true},
 
-		// Without a declared external URL the header is only believed from a
-		// loopback peer, matching clientIP's trust model for X-Forwarded-For.
+		// The header is believed from loopback and ui.trusted_proxies only,
+		// matching clientIP's trust model for X-Forwarded-For (Task 20394).
 		{"remote client cannot claim https", "", "203.0.113.5:80", nil, "https", false},
-
-		// With one, a proxy on another host is recognised — the standard
-		// enterprise topology (nginx, ALB, ingress), where the loopback-only
-		// rule silently drops HSTS from every response forever.
-		{"declared https + remote proxy", "https://hub.example.com", "10.0.0.7:80", nil, "https", true},
-		{"declared https, no header", "https://hub.example.com", "10.0.0.7:80", nil, "", false},
-		{"declared https, proxy says http", "https://hub.example.com", "10.0.0.7:80", nil, "http", false},
-		// A declared *http* external URL grants nothing: the operator did not
-		// claim TLS, so a client header cannot manufacture it.
-		{"declared http + remote proxy", "http://hub.example.com", "10.0.0.7:80", nil, "https", false},
-		{"malformed external url", "://broken", "10.0.0.7:80", nil, "https", false},
+		{"trusted remote proxy", "", "10.0.0.7:80", nil, "https", true},
+		{"trusted remote proxy says http", "", "10.0.0.7:80", nil, "http", false},
+		// A declared https external URL no longer makes anybody's header
+		// believable — that is what let a client choose the scheme its
+		// origin was judged by. HSTS for that topology is sent on the
+		// declaration alone (TestSecurityHeadersHSTS).
+		{"declared https + untrusted proxy", "https://hub.example.com", "172.16.0.7:80", nil, "https", false},
+		{"declared http + untrusted proxy", "http://hub.example.com", "172.16.0.7:80", nil, "https", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := &Server{ExternalURL: c.externalURL}
+			s := &Server{ExternalURL: c.externalURL, TrustedProxies: sameorigin.MustParseProxies("10.0.0.0/8")}
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.RemoteAddr = c.remoteAddr
 			r.TLS = c.tlsState
@@ -174,9 +172,11 @@ func TestSecurityHeadersHSTS(t *testing.T) {
 	})
 
 	t.Run("set behind a remote https proxy with a declared external URL", func(t *testing.T) {
+		// The proxy is in nobody's ui.trusted_proxies, so its header is not
+		// believed (Task 20394); the declaration alone is what sends HSTS,
+		// which a browser ignores on a response that did arrive in plaintext.
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.RemoteAddr = "10.0.0.7:41000"
-		r.Header.Set("X-Forwarded-Proto", "https")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
 		if w.Header().Get("Strict-Transport-Security") == "" {
@@ -197,14 +197,22 @@ func TestSecurityHeadersHSTS(t *testing.T) {
 		}
 	})
 
-	t.Run("absent on plaintext", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.RemoteAddr = "127.0.0.1:5555"
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		if got := w.Header().Get("Strict-Transport-Security"); got != "" {
-			t.Errorf("HSTS = %q on a plaintext response; "+
-				"this would pin localhost to https in the developer's browser", got)
+	t.Run("absent on plaintext from a hub that never said it was https", func(t *testing.T) {
+		local := (&Server{}).securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		for _, forged := range []string{"", "https"} {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = "203.0.113.9:5555"
+			if forged != "" {
+				// From a peer nobody trusts: a client cannot talk a
+				// local hub into the header.
+				r.Header.Set("X-Forwarded-Proto", forged)
+			}
+			w := httptest.NewRecorder()
+			local.ServeHTTP(w, r)
+			if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+				t.Errorf("HSTS = %q on a plaintext response (X-Forwarded-Proto %q); "+
+					"this would pin localhost to https in the developer's browser", got, forged)
+			}
 		}
 	})
 
@@ -244,12 +252,18 @@ func TestWSOriginAllowedHonoursExternalURL(t *testing.T) {
 		want        bool
 	}{
 		{"no origin", "", nil, "hub.example.com", "", true},
-		{"same origin", "", nil, "hub.example.com", "https://hub.example.com", true},
-		{"loopback", "", nil, "hub.example.com", "http://localhost:8080", true},
+		{"same origin", "", nil, "hub.example.com", "http://hub.example.com", true},
+		// The request is plaintext and its peer is no proxy, so only the
+		// external URL can vouch for https.
+		{"same host, other scheme", "", nil, "hub.example.com", "https://hub.example.com", false},
+		{"external url vouches for https", "https://hub.example.com", nil, "hub.example.com", "https://hub.example.com", true},
+		{"loopback is not a credential", "", nil, "hub.example.com", "http://localhost:8080", false},
 		{"external url behind a rewriting proxy", "https://hub.example.com", nil,
 			"10.0.0.5:8080", "https://hub.example.com", true},
 		{"external url with port", "https://hub.example.com:8443", nil,
 			"internal:8080", "https://hub.example.com:8443", true},
+		{"external url, other port", "https://hub.example.com:8443", nil,
+			"internal:8080", "https://hub.example.com", false},
 		{"dashboard allowlist", "", []string{"ops.example.com"}, "hub.example.com", "https://ops.example.com", true},
 		{"cross origin", "https://hub.example.com", nil, "hub.example.com", "https://evil.example", false},
 		{"suffix confusion", "https://hub.example.com", nil, "hub.example.com",

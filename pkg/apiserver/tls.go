@@ -12,10 +12,10 @@ package apiserver
 import (
 	"crypto/tls"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -52,7 +52,11 @@ func (s *Server) serverTLSConfig() (*tls.Config, error) {
 func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if s.requestIsTLS(r) {
+		// Or when this process is configured for TLS: a plaintext port
+		// fronted by a terminator elsewhere is the same HTTPS deployment, and
+		// a browser ignores the header on a response that arrived in
+		// plaintext.
+		if s.requestIsTLS(r) || strings.TrimSpace(s.TLSCertFile) != "" {
 			w.Header().Set("Strict-Transport-Security", hstsValue)
 		}
 		next.ServeHTTP(w, r)
@@ -60,32 +64,11 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 }
 
 // requestIsTLS reports whether the client reached this deployment over TLS,
-// directly or through a reverse proxy that said so via X-Forwarded-Proto.
-//
-// The header is believed from a loopback peer (a proxy on this host), or from
-// any peer once this process is itself configured for TLS — in which case the
-// operator has already declared the deployment to be HTTPS, and a plaintext
-// port fronted by an off-host terminator is the same deployment. Restricting
-// to loopback alone would silently drop HSTS from every response in the
-// standard enterprise topology, forever, with nothing in the logs to say so.
-// See pkg/ui/tls.go for the same reasoning against ui.external_url.
+// directly or through a reverse proxy that said so via X-Forwarded-Proto —
+// believed from loopback and ui.trusted_proxies only (Task 20394), as the
+// dashboard does. It used to be believed from any peer once this process had a
+// certificate; HSTS for that topology is now sent on the declaration alone
+// (securityHeadersMiddleware), without trusting the header.
 func (s *Server) requestIsTLS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if i := strings.IndexByte(proto, ','); i >= 0 {
-		proto = proto[:i]
-	}
-	if !strings.EqualFold(strings.TrimSpace(proto), "https") {
-		return false
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return true
-	}
-	return strings.TrimSpace(s.TLSCertFile) != ""
+	return sameorigin.ViewOf(r, s.TrustedProxies.TrustsPeer(r)).TLS()
 }

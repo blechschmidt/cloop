@@ -162,7 +162,9 @@ func checkProxyTermination(external string, oidc config.OIDCConfig, add addFn) {
 		// header changes nothing about the session cookie.
 		if oidc.Enabled && oidcauth.CookieSecureFollowsRequest(oidc.CookieSecure) {
 			f.Details = map[string]any{
-				"requires": "the proxy MUST set X-Forwarded-Proto: https, or session cookies lose the Secure attribute",
+				"requires": "the proxy MUST set X-Forwarded-Proto: https, from loopback or an address in " +
+					"ui.trusted_proxies — the hub ignores it from anywhere else — or session cookies lose the " +
+					"Secure attribute unless ui.oidc.redirect_url is https",
 			}
 		}
 		add(f)

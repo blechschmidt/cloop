@@ -1232,6 +1232,33 @@ var registry = []Entry{
 			"`ip` and `user_agent` are the browser that performed the renewal.",
 	},
 
+	// ── request ────────────────────────────────────────────────────────────
+	{
+		Action:    ActionRequestOriginRefused,
+		Home:      HomeControlPlane,
+		Entity:    "request",
+		Trigger:   "The hub refuses a state-changing request or a WebSocket handshake because a page on another origin made it, or because its body is form data or text/plain.",
+		Payload:   requestRefusalPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "The browser that sent it belongs to whoever was using it: the row records the page that asked " +
+			"(`origin`, `sec_fetch_site`), not an identity, and `session` says only whether that browser carried " +
+			"a sign-in cookie. `reason` is a `cloop_cross_origin_refusals_total` label. Rows are written at most " +
+			"30 a minute; `suppressed` counts the refusals since the previous row that were not.",
+	},
+	{
+		Action:    ActionRequestHostRefused,
+		Home:      HomeControlPlane,
+		Entity:    "request",
+		Trigger:   "A hub without sign-in refuses a request addressed to a host name it does not answer to — the shape DNS rebinding takes.",
+		Payload:   requestRefusalPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Only a hub with neither SSO nor a static token checks the Host: rebinding cannot carry a credential " +
+			"to a hub that has one. A burst after a new DNS name was pointed at the hub is that name missing from " +
+			"`ui.allowed_hosts`. Rate-limited like `request.origin_refused`.",
+	},
+
 	// ── role_binding ───────────────────────────────────────────────────────
 	{
 		Action:    ActionRoleBindingGranted,
@@ -1614,6 +1641,13 @@ var (
 		"event", "session_id", "subject", "email", "actor", "reason", "ip",
 		"user_agent", "prior_role", "role", "dropped_claims",
 		"issued_at", "selector", "selected", "via", "os_user",
+	}
+
+	// requestRefusalPayload is what a refused request said about where it came
+	// from, plus the count of refusals the rate limit did not write.
+	requestRefusalPayload = []string{
+		"reason", "method", "path", "origin", "sec_fetch_site", "host", "content_type",
+		"ip", "user_agent", "session", "open_hub", "own_origin", "suppressed",
 	}
 
 	// roleBindingPayload is the binding itself plus the block every hub-admin

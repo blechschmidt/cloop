@@ -10,6 +10,7 @@ package remote
 // near-miss hostnames a substring match would wrongly accept.
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -174,43 +175,65 @@ func TestHubCheckOrigin(t *testing.T) {
 		externalURL string
 		allowed     []string
 		host        string
+		tls         bool              // the connection itself is TLS
+		remote      string            // RemoteAddr; "" keeps httptest's 192.0.2.1
+		forwarded   map[string]string // X-Forwarded-* headers
 		origin      string
 		want        bool
 	}{
 		// A real agent — Go, Python, curl — sends no Origin at all. Refusing
 		// these would refuse the entire feature.
-		{"no origin is the agent case", "", nil, "hub.example.com", "", true},
+		{name: "no origin is the agent case", host: "hub.example.com", want: true},
 
-		{"same origin", "", nil, "hub.example.com", "https://hub.example.com", true},
-		{"same origin with port", "", nil, "hub.example.com:8443", "https://hub.example.com:8443", true},
-		{"same host, different port", "", nil, "hub.example.com:8443", "https://hub.example.com", true},
+		// Exact: scheme, host and port (Task 20394).
+		{name: "same origin, plaintext", host: "hub.example.com", origin: "http://hub.example.com", want: true},
+		{name: "same origin, TLS", host: "hub.example.com", tls: true, origin: "https://hub.example.com", want: true},
+		{name: "same origin with port", host: "hub.example.com:8443", tls: true, origin: "https://hub.example.com:8443", want: true},
+		{name: "loopback, same origin", host: "127.0.0.1:8080", origin: "http://127.0.0.1:8080", want: true},
+		{name: "same host, different port", host: "hub.example.com:8443", tls: true, origin: "https://hub.example.com", want: false},
+		{name: "same host, other scheme", host: "hub.example.com", origin: "https://hub.example.com", want: false},
+		// Loopback is not a credential: another port of localhost is another
+		// origin, and so is another loopback name for the same port.
+		{name: "loopback, other port", host: "127.0.0.1:8080", origin: "http://127.0.0.1:3000", want: false},
+		{name: "loopback name for a loopback address", host: "127.0.0.1:8080", origin: "http://localhost:8080", want: false},
+		{name: "loopback page, remote hub", host: "hub.example.com", origin: "http://localhost:8080", want: false},
+		{name: "loopback v6 page", host: "hub.example.com", origin: "http://[::1]:8080", want: false},
 
-		{"loopback name", "", nil, "hub.example.com", "http://localhost:8080", true},
-		{"loopback v4", "", nil, "hub.example.com", "http://127.0.0.1:8080", true},
-		{"loopback v6", "", nil, "hub.example.com", "http://[::1]:8080", true},
+		// Behind a proxy that rewrites Host, the request's own origin cannot
+		// be seen, so the deployment's own name has to be configured.
+		{name: "external url", externalURL: "https://hub.example.com", host: "10.0.0.5:8080", origin: "https://hub.example.com", want: true},
+		{name: "external url with port", externalURL: "https://hub.example.com:8443", host: "internal:8080", origin: "https://hub.example.com:8443", want: true},
+		{name: "external url, other scheme", externalURL: "https://hub.example.com", host: "internal", origin: "http://hub.example.com", want: false},
+		{name: "external url, other port", externalURL: "https://hub.example.com", host: "internal", origin: "https://hub.example.com:8443", want: false},
 
-		// Behind a proxy that rewrites Host, same-origin cannot fire, so the
-		// deployment's own name has to be configured.
-		{"external url host", "https://hub.example.com", nil, "10.0.0.5:8080", "https://hub.example.com", true},
-		{"external url with port", "https://hub.example.com:8443", nil, "internal:8080", "https://hub.example.com:8443", true},
-		{"external url scheme mismatch still matches host", "https://hub.example.com", nil, "internal", "http://hub.example.com", true},
+		// Or the proxy says so — and is believed only from loopback.
+		{name: "loopback proxy reports the origin", host: "127.0.0.1:8081", remote: "127.0.0.1:40000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "hub.example.com:8888"},
+			origin:    "https://hub.example.com:8888", want: true},
+		{name: "a proxy elsewhere is not believed", host: "127.0.0.1:8081", remote: "203.0.113.9:40000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "hub.example.com:8888"},
+			origin:    "https://hub.example.com:8888", want: false},
+		{name: "a client cannot choose the scheme it is judged by", host: "hub.example.com", remote: "203.0.113.9:40000",
+			forwarded: map[string]string{"X-Forwarded-Proto": "https"}, origin: "https://hub.example.com", want: false},
 
-		{"allowlist bare host", "", []string{"ops.example.com"}, "hub.example.com", "https://ops.example.com", true},
-		{"allowlist host:port", "", []string{"ops.example.com:8443"}, "hub.example.com", "https://ops.example.com:8443", true},
-		{"allowlist full origin", "", []string{"https://ops.example.com"}, "hub.example.com", "https://ops.example.com", true},
+		{name: "allowlist bare host means https", allowed: []string{"ops.example.com"}, host: "hub.example.com", origin: "https://ops.example.com", want: true},
+		{name: "allowlist bare host is not http", allowed: []string{"ops.example.com"}, host: "hub.example.com", origin: "http://ops.example.com", want: false},
+		{name: "allowlist host:port", allowed: []string{"ops.example.com:8443"}, host: "hub.example.com", origin: "https://ops.example.com:8443", want: true},
+		{name: "allowlist full origin", allowed: []string{"https://ops.example.com"}, host: "hub.example.com", origin: "https://ops.example.com", want: true},
+		{name: "allowlist plaintext origin", allowed: []string{"http://ops.lan:8081"}, host: "hub.example.com", origin: "http://ops.lan:8081", want: true},
 
 		// The refusals.
-		{"cross origin", "", nil, "hub.example.com", "https://evil.example", false},
-		{"external url set, stranger refused", "https://hub.example.com", nil, "hub.example.com", "https://evil.example", false},
+		{name: "cross origin", host: "hub.example.com", origin: "https://evil.example", want: false},
+		{name: "external url set, stranger refused", externalURL: "https://hub.example.com", host: "hub.example.com", origin: "https://evil.example", want: false},
 		// Suffix confusion: the classic bypass. "hub.example.com.evil.test"
 		// is a hostname the attacker fully controls.
-		{"suffix confusion", "https://hub.example.com", nil, "hub.example.com", "https://hub.example.com.evil.test", false},
-		{"prefix confusion", "https://hub.example.com", nil, "hub.example.com", "https://evilhub.example.com", false},
-		{"loopback lookalike", "", nil, "hub.example.com", "http://localhost.evil.test", false},
-		{"allowlist near miss", "", []string{"ops.example.com"}, "hub.example.com", "https://ops.example.com.evil.test", false},
-		{"malformed origin", "", nil, "hub.example.com", "://not a url", false},
-		{"null origin (sandboxed iframe)", "", nil, "hub.example.com", "null", false},
-		{"empty allowlist entries are ignored", "", []string{"", "  "}, "hub.example.com", "https://evil.example", false},
+		{name: "suffix confusion", externalURL: "https://hub.example.com", host: "hub.example.com", origin: "https://hub.example.com.evil.test", want: false},
+		{name: "prefix confusion", externalURL: "https://hub.example.com", host: "hub.example.com", origin: "https://evilhub.example.com", want: false},
+		{name: "loopback lookalike", host: "hub.example.com", origin: "http://localhost.evil.test", want: false},
+		{name: "allowlist near miss", allowed: []string{"ops.example.com"}, host: "hub.example.com", origin: "https://ops.example.com.evil.test", want: false},
+		{name: "malformed origin", host: "hub.example.com", origin: "://not a url", want: false},
+		{name: "null origin (sandboxed iframe)", host: "hub.example.com", origin: "null", want: false},
+		{name: "empty allowlist entries are ignored", allowed: []string{"", "  "}, host: "hub.example.com", origin: "https://evil.example", want: false},
 	}
 
 	for _, c := range cases {
@@ -218,6 +241,15 @@ func TestHubCheckOrigin(t *testing.T) {
 			h := newOriginHub(t, c.externalURL, c.allowed)
 			r := httptest.NewRequest(http.MethodGet, "/api/executors/connect", nil)
 			r.Host = c.host
+			if c.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			if c.remote != "" {
+				r.RemoteAddr = c.remote
+			}
+			for k, v := range c.forwarded {
+				r.Header.Set(k, v)
+			}
 			if c.origin != "" {
 				r.Header.Set("Origin", c.origin)
 			}
@@ -230,6 +262,39 @@ func TestHubCheckOrigin(t *testing.T) {
 				t.Error("a refusal must carry a reason the operator can act on")
 			}
 		})
+	}
+}
+
+// TestHubUsesTheDashboardsForwardingRule: the hub is handed the dashboard's
+// rule for whose X-Forwarded-* to believe, and tells it of every refusal, so
+// one request is judged and recorded alike at both endpoints.
+func TestHubUsesTheDashboardsForwardingRule(t *testing.T) {
+	t.Parallel()
+	var refused []string
+	h, err := NewHub(HubOptions{
+		Store:            newOriginStore(),
+		Registry:         executor.NewRegistry(),
+		ForwardedTrusted: func(r *http.Request) bool { return strings.HasPrefix(r.RemoteAddr, "10.") },
+		OnOriginRefused:  func(r *http.Request) { refused = append(refused, r.Header.Get("Origin")) },
+	})
+	if err != nil {
+		t.Fatalf("NewHub: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/executors/connect", nil)
+	r.Host = "cloop-hub:8080"
+	r.RemoteAddr = "10.4.0.9:5000"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "hub.example.com")
+	r.Header.Set("Origin", "https://hub.example.com")
+	if d := h.checkOrigin(r); !d.allowed {
+		t.Fatalf("an ingress the rule trusts was not believed: %s", d.reason)
+	}
+	r.Header.Set("Origin", "https://evil.example")
+	if d := h.checkOrigin(r); d.allowed {
+		t.Fatal("a foreign origin was admitted")
+	}
+	if len(refused) != 1 || refused[0] != "https://evil.example" {
+		t.Errorf("OnOriginRefused saw %v", refused)
 	}
 }
 
@@ -335,25 +400,5 @@ func TestHubAllowsAgentWithoutOrigin(t *testing.T) {
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (bad credential, origin accepted)", w.Code)
-	}
-}
-
-func TestOriginHostOf(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"https://hub.example.com":      "hub.example.com",
-		"https://hub.example.com:8443": "hub.example.com:8443",
-		"https://hub.example.com/":     "hub.example.com",
-		"hub.example.com":              "hub.example.com",
-		"hub.example.com:8443":         "hub.example.com:8443",
-		"hub.example.com/":             "hub.example.com",
-		"":                             "",
-		"   ":                          "",
-		"://broken":                    "",
-	}
-	for in, want := range cases {
-		if got := originHostOf(in); got != want {
-			t.Errorf("originHostOf(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

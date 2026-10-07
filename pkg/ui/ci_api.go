@@ -41,6 +41,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ciauth"
 	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -108,9 +109,7 @@ func (s *Server) handleCIExchange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ciExchangeRequest
-	limitJSONBody(w, r, maxCIAssertionBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: maxCIAssertionBytes}) {
 		return
 	}
 	assertion := strings.TrimSpace(req.Token)
@@ -1141,7 +1140,7 @@ func (s *Server) recordCIExchange(r *http.Request, row statedb.CIExchangeRow, cl
 	}
 	row.ID = id
 	row.At = time.Now().UTC()
-	row.RemoteAddr = clientIP(r)
+	row.RemoteAddr = s.clientIP(r)
 	if claims != nil {
 		row.Issuer = claims.Issuer
 		row.Subject = claims.Subject

@@ -2835,7 +2835,8 @@ the hub's URL and pin — and it **refuses to answer over plaintext HTTP** with 
 `403`, no loopback exemption and no redirect. Its body is piped into a root
 shell on a device that has not yet decided whom to trust, so anyone able to
 rewrite it in flight owns the device. The URL and pin are rendered from the
-request (honouring `X-Forwarded-Proto` / `X-Forwarded-Host`), because a hosted
+request (honouring `X-Forwarded-Proto` / `X-Forwarded-Host` from loopback and
+`ui.trusted_proxies` only — Task 20394), because a hosted
 hub's configured name is frequently not the one the operator reached. The script
 carries no credential: it locates a `cloop` binary and hands off to
 `cloop executor agent install`, where the hardening above actually lives.

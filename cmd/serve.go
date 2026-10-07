@@ -6,6 +6,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apiserver"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/spf13/cobra"
 )
 
@@ -102,6 +103,15 @@ certificate.`,
 			// ui block: one decision about serving without a credential, not one
 			// per server (Task 20393).
 			srv.AllowUnauthenticatedNetwork = cfg.UI.AllowUnauthenticatedNetwork
+			// Whose X-Forwarded-* to believe, and the names a server without a
+			// token answers to: the same shared ui block (Task 20394). An
+			// entry that does not parse is fatal, as it is for cloop ui.
+			proxies, err := sameorigin.ParseProxies(cfg.UI.TrustedProxies)
+			if err != nil {
+				return err
+			}
+			srv.TrustedProxies = proxies
+			srv.AllowedHosts = cfg.UI.AllowedHosts
 		}
 		if serveTLSCert != "" || serveTLSKey != "" {
 			srv.TLSCertFile, srv.TLSKeyFile = serveTLSCert, serveTLSKey

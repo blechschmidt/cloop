@@ -52,7 +52,7 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requestIsTLS(r) {
+	if !s.requestIsTLS(r) {
 		// 403 rather than a redirect: a redirect would be followed silently
 		// by curl -L, and the operator would never learn that the first
 		// request — the one an attacker could have answered — went in the
@@ -62,7 +62,7 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := install.BootstrapScript(install.BootstrapParams{
-		Server: agentConnectURL(r),
+		Server: s.agentConnectURL(r),
 		Pin:    s.transportPin(),
 	})
 
@@ -91,27 +91,6 @@ replace it. Serve the hub over HTTPS — configure ui.tls (or run
 ` + "`cloop hub tls-init`" + ` for a development certificate), or terminate TLS at a
 proxy that sets X-Forwarded-Proto: https.
 `
-
-// requestIsTLS reports whether the client's connection to the deployment was
-// encrypted.
-//
-// X-Forwarded-Proto is honoured because the common hosted topology terminates
-// TLS at a proxy, leaving r.TLS nil on a request the browser nonetheless made
-// over HTTPS. That header is only trustworthy from a trusted proxy — but the
-// alternative is refusing to serve every reverse-proxied deployment, and a
-// client able to forge the header is already inside the network path this
-// check is defending. The same trade-off is made by agentConnectURL.
-func requestIsTLS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
-	if i := strings.Index(proto, ","); i >= 0 {
-		// Proxies chain this header; the first entry is the client's leg.
-		proto = strings.TrimSpace(proto[:i])
-	}
-	return strings.EqualFold(proto, "https")
-}
 
 // transportPin returns this hub's SPKI fingerprint, or "" when it has no
 // certificate of its own.
@@ -151,30 +130,23 @@ var pinWarnOnce sync.Once
 // world-readable through /proc for the lifetime of the process, so an argument
 // form would expose the token to every local user on the device at exactly the
 // moment it is still redeemable.
-func installCommandFor(r *http.Request, bundle string) string {
-	base := externalBaseURL(r)
+func (s *Server) installCommandFor(r *http.Request, bundle string) string {
+	base := s.externalBaseURL(r)
 	return fmt.Sprintf("CLOOP_ENROLL_BUNDLE=%s \\\n  sh -c \"$(curl -fsSL %s%s)\"",
 		shellSingleQuote(bundle), base, installScriptPath)
 }
 
-// externalBaseURL reconstructs the https:// origin the caller reached, from
-// the same forwarded headers agentConnectURL trusts.
-func externalBaseURL(r *http.Request) string {
-	scheme := "http"
-	if requestIsTLS(r) {
-		scheme = "https"
-	}
-	host := r.Host
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		if i := strings.Index(fwd, ","); i >= 0 {
-			fwd = strings.TrimSpace(fwd[:i])
-		}
-		host = fwd
-	}
+// externalBaseURL reconstructs the origin the caller reached: the scheme and
+// host the connection, or a trusted proxy's X-Forwarded-Proto and
+// X-Forwarded-Host, report (Task 20394 — a header from anyone else is not
+// believed).
+func (s *Server) externalBaseURL(r *http.Request) string {
+	v := s.clientView(r)
+	host := v.Host
 	if host == "" {
 		host = "YOUR-CONTROL-PLANE"
 	}
-	return scheme + "://" + host
+	return v.Scheme + "://" + host
 }
 
 // shellSingleQuote makes a value safe to paste into a POSIX shell.

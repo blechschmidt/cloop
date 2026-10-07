@@ -45,6 +45,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -640,9 +641,7 @@ func (s *Server) dropProjectMembers(r *http.Request, entry multiui.ProjectEntry)
 
 func decodeMemberRequest(w http.ResponseWriter, r *http.Request) (memberRequest, bool) {
 	var req memberRequest
-	limitJSONBody(w, r, maxMemberBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: maxMemberBodyBytes}) {
 		return memberRequest{}, false
 	}
 	if req.Reason != nil && len(strings.TrimSpace(*req.Reason)) > projectmember.MaxReasonLen {

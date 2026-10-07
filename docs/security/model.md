@@ -60,8 +60,10 @@ hostile by assumption** — it runs code the hub did not write, chosen by an LLM
 | Authentication | OIDC ID token validated against provider JWKS (RS256/ES256), **or** a static bearer token for headless deployments | `pkg/oidcauth/oidcauth.go:162-211,309-328` |
 | Exposure | A hub with neither listens on `127.0.0.1` unless an address is named; one beyond loopback is refused unless `ui.allow_unauthenticated_network` acknowledges it. API tokens do not count: they restrict the callers that present one | `pkg/exposure`, `pkg/ui/listen.go`, `pkg/apiserver/listen.go` |
 | Session | `cloop_session` cookie: `HttpOnly`, `Secure` (`auto`/`always`/`never`), `SameSite=Strict` under TLS and `Lax` on loopback plaintext | `pkg/oidcauth/oidcauth.go:495-507` |
-| CSRF | `SameSite=Strict` is the primary defence; login flow handles the cross-site navigation case explicitly | `pkg/oidcauth/oidcauth.go:334-354` |
-| WebSocket hijacking | `wsOriginAllowed`: absent `Origin` (CLI/agent), loopback, `Origin` host == request host, or an explicit `ui.allowed_ws_origins` entry | `pkg/ui/server.go` |
+| CSRF | A state-changing request must come from one of the hub's own pages — `Sec-Fetch-Site: same-origin`/`none`, or without it an `Origin` exactly the hub's own — unless it carries `Authorization: Bearer`, on every hub, cookie or none; its body must be JSON (multipart on the upload routes), and every handler decodes through one decoder that refuses the rest; no CORS header is sent to anyone. `SameSite=Strict` stays as depth: it does not tell origins of one site apart | `pkg/sameorigin`, `pkg/ui/originguard.go`, `pkg/jsonbody` |
+| DNS rebinding | A hub without sign-in answers only to `localhost`, IP addresses, `ui.external_url`'s host, its cluster's advertise hosts and `ui.allowed_hosts`; any other `Host` is 421 | `pkg/ui/originguard.go` (`hostGuard`) |
+| WebSocket hijacking | `wsOriginAllowed`: absent `Origin` (CLI/agent), or an `Origin` exactly — scheme, host, port — one of the hub's own: the one the request was addressed to, `ui.external_url`, `ui.allowed_origins`, `ui.allowed_ws_origins`. No loopback or other-port allowance | `pkg/ui/originguard.go`, `pkg/executor/remote/origin.go` |
+| Forwarded headers | `X-Forwarded-Proto`/`-Host`/`-For` believed from loopback, `ui.trusted_proxies` and signed cluster forwards only; `X-Forwarded-For` walked from the right | `pkg/sameorigin/proxies.go` |
 | Authorization | every route declares its `Perm` in `routeTable()`; `gate()` wraps each one; `require()` is the single enforcement point | `pkg/ui/routes.go:143,210`, `pkg/ui/authz.go:214` |
 | Abuse | per-IP token-bucket rate limiting; bounded WebSocket connections per IP and in total | `pkg/ui` |
 
@@ -3071,6 +3073,28 @@ operator says otherwise (Task 20393; the rule is in
 | The built binary, open, is not reachable on the host's network address, and refuses `--listen 0.0.0.0` and `ui.listen: 0.0.0.0` | `TestE2EOpenHubIsNotReachableBeyondLoopback`, `TestE2EOpenHubRefusesANetworkAddress` |
 | `cloop hub doctor` fails a hub without sign-in it finds reachable beyond loopback, whichever build serves it, and warns for plaintext beyond loopback behind an https URL | `TestExposureFailsAnOpenHubOnTheNetwork`, `TestExposureWarnsOfPlaintextBehindHTTPS` |
 | `cloop serve`, whose `POST /run/start` starts a run on the host, follows the same rule with its own token: loopback without one, the refusal for `--listen` beyond loopback | `TestServeBindsLoopbackWithoutAToken`, `TestServeRefusesTheNetworkWithoutAToken` |
+
+### Requests from other origins — `originguard_test.go` and the package suites
+
+A web page must not be able to drive the hub (Task 20394; the rules are in
+[the configuration reference](../reference/configuration.md#tls)). The sweep is
+derived from `routeTable()`, so a route added later is covered without being
+listed.
+
+| Guarantee | Test |
+| --- | --- |
+| Every state-changing route refuses a cookie-bearing request from another site, from another origin of the same site, and from a browser too old to send `Sec-Fetch-Site`; and a `text/plain` or form body — on a hub without sign-in and on one with a token | `pkg/ui: TestEveryUnsafeRouteRefusesAPageElsewhere` |
+| The same routes admit the hub's own pages, a browser without `Sec-Fetch-Site` on the hub's own or external origin, a bearer token from anywhere, and a CLI; multipart only on the three upload routes | `pkg/ui: TestUnsafeRoutesAdmitTheHubsOwnPagesAndBearerTokens`, `TestMultipartRoutesAreRoutes` |
+| No route accepts a cross-site write, and the OIDC callback is not a form_post target | `pkg/ui: TestCrossSiteWritableRoutesAreJustified` |
+| No handler decodes a request body except through the decoder that refuses anything but `application/json` | `pkg/ui: TestHandlersReadJSONOnlyThroughTheDecoder`, `pkg/jsonbody: TestDecode` |
+| The decision itself: bearer only (not Basic or Negotiate), `same-site` refused like `cross-site`, an `Origin` matched exactly, `null` refused — under fuzzing | `pkg/sameorigin: TestCheckUnsafe`, `FuzzCheckUnsafe` |
+| A hub without sign-in refuses a rebinding `Host` for reads and writes, keeps answering loopback names, addresses and configured names, and the probes; a hub with a token does not care | `pkg/ui: TestDNSRebindingIsRefusedOnAnOpenHub`, `pkg/sameorigin: TestHostAllowed`, `FuzzHostAllowed` |
+| A WebSocket's `Origin` is matched exactly at both endpoints, loopback and other ports included | `pkg/ui: TestWSOriginAllowed`, `TestWSOriginAllowedHonoursExternalURL`, `pkg/executor/remote: TestHubCheckOrigin` |
+| `X-Forwarded-*` from an untrusted peer change neither the origin a request is judged by nor the client address; from loopback or `ui.trusted_proxies` they do | `pkg/ui: TestForwardedHeadersFromAnUntrustedPeerAreIgnored`, `TestRequestIsTLS`, `pkg/sameorigin: TestClientIPWalksForwardedForFromTheRight` |
+| The hub answers no origin's CORS preflight or read | `pkg/ui: TestTheHubGrantsNoCrossOriginRead` |
+| Refusals are counted and audited, and the audit is rate-limited | `pkg/ui: TestRefusalsAreCountedAndAudited`, `TestRefusalAuditIsRateLimited`, `TestRefusedUpgradesAreCountedToo` |
+| In Chrome, a page on another port and on another site submits a `text/plain` form and `no-cors` fetches and opens a WebSocket: all refused, nothing written; a rebound name gets 421; the dashboard in the same browser still adds a task and saves a setting | `pkg/ui: TestAPageElsewhereCannotDriveAnOpenHubInBrowser` |
+| `cloop serve` grants CORS only with a token, refuses forged and form requests and, without a token, rebinding names | `pkg/apiserver: TestServeWithoutATokenGrantsNoPageElsewhere`, `TestServeWithoutATokenRefusesARebindingHost`, `TestServeWithATokenKeepsCORSForTheTokenHolder` |
 
 ### Sessions — `sessions_test.go` and the package suites
 

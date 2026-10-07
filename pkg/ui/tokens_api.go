@@ -192,7 +192,7 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request) (*
 		return nil, false, false
 	}
 
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if s.authLockoutActive(ip) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "60")
@@ -285,7 +285,7 @@ func (s *Server) tokenKindAdmitted(w http.ResponseWriter, r *http.Request, tok *
 			TokenID:   tok.Prefix,
 			Extra: map[string]any{
 				"reason": "unowned_link_on_multi_tenant_hub",
-				"ip":     clientIP(r),
+				"ip":     s.clientIP(r),
 				"path":   r.URL.Path,
 			},
 		})

@@ -985,6 +985,7 @@ func TestSecureLoginLandsOnTheReturnPath(t *testing.T) {
 
 	done := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=c&state="+url.QueryEscape(loc.Query().Get("state")), nil)
+	req.RemoteAddr = "127.0.0.1:40000" // TLS terminated by a proxy on this machine
 	req.Header.Set("X-Forwarded-Proto", "https")
 	a.HandleCallback(done, req)
 	if done.Code != http.StatusOK {

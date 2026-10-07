@@ -11,7 +11,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -68,8 +68,10 @@ func (s *Server) handleClusterAutoResume(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		Project string `json:"project"`
 	}
-	limitJSONBody(w, r, 64<<10)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Project) == "" {
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: 64 << 10}) {
+		return
+	}
+	if strings.TrimSpace(req.Project) == "" {
 		jsonErr(w, "project is required", http.StatusBadRequest)
 		return
 	}

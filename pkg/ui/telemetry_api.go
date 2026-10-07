@@ -69,7 +69,6 @@ package ui
 // the audit trail holds, gated by the same permission, for the same reason.
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -78,6 +77,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/telemetry"
@@ -166,10 +166,8 @@ func (s *Server) ingestTelemetry(w http.ResponseWriter, r *http.Request, src tel
 		return
 	}
 
-	limitJSONBody(w, r, telemetryMaxBodyBytes)
 	var batch telemetry.Batch
-	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &batch, jsonbody.Options{Limit: telemetryMaxBodyBytes}) {
 		return
 	}
 
@@ -177,7 +175,7 @@ func (s *Server) ingestTelemetry(w http.ResponseWriter, r *http.Request, src tel
 		Source:    src,
 		At:        time.Now().UTC(),
 		UserAgent: r.UserAgent(),
-		ClientIP:  clientIP(r),
+		ClientIP:  s.clientIP(r),
 		Actor:     s.telemetryActor(r),
 	})
 	if len(events) == 0 {

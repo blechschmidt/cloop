@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/featurehub"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/featureops"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -206,9 +207,7 @@ func (s *Server) handleProjectFeatureCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req createFeatureRequest
-	limitJSONBody(w, r, maxFeatureBody)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: maxFeatureBody}) {
 		return
 	}
 	slug, err := req.validate()
@@ -360,9 +359,7 @@ func (s *Server) handleProjectFeatureDelete(w http.ResponseWriter, r *http.Reque
 			DeleteBranch bool `json:"delete_branch"`
 			Force        bool `json:"force"`
 		}
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !isEmptyBody(err) {
-			respondToBodyError(w, err)
+		if !decodeOptionalJSON(w, r, &body) {
 			return
 		}
 		deleteBranch = deleteBranch || body.DeleteBranch
@@ -463,9 +460,7 @@ func (s *Server) handleProjectFeaturePR(w http.ResponseWriter, r *http.Request) 
 	}
 	var req featurePRRequest
 	if r.ContentLength != 0 {
-		limitJSONBody(w, r, maxFeatureBody)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !isEmptyBody(err) {
-			respondToBodyError(w, err)
+		if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: maxFeatureBody, Optional: true}) {
 			return
 		}
 	}

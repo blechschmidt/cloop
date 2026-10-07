@@ -282,6 +282,24 @@ var (
 	})
 )
 
+// Requests a page on another origin made (Task 20394): a state-changing
+// request or a WebSocket handshake the hub refused because the browser said
+// it came from elsewhere, a form body a JSON API does not take, or — on a hub
+// with no sign-in — a Host name DNS rebinding would use. The reasons are
+// sameorigin.Reason's refusals, a closed set.
+//
+// Never labelled by origin or host: those are chosen by whoever sends the
+// request, so every one would be a new series. The origin is in the audit
+// trail (request.origin_refused, request.host_refused), which can afford it.
+var (
+	CrossOriginRefusals = Default.MustRegister(Definition{
+		Name:   "cloop_cross_origin_refusals_total",
+		Help:   "Requests refused because a page on another origin made them, by reason (cross_site, same_site, unknown_fetch_site, foreign_origin, media_type, unknown_host). Any sustained rate is a page somebody opened trying to drive the hub, or a proxy that hides the hub's own origin from it.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+)
+
 // Result write-back. The distinction the labels carry is the one the code
 // makes: a rejection is the hub refusing what a sandbox returned, an outage is
 // the hub being unable to find out. They page differently — the first is a

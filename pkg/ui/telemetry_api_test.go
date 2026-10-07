@@ -52,6 +52,7 @@ func postTelemetry(t *testing.T, srv *Server, path string, body any) *httptest.R
 	}
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	if strings.Contains(path, "/glasses/") {
 		srv.handleGlassesTelemetryIngest(w, req)
@@ -220,6 +221,7 @@ func TestTelemetry_IngestRejectsNonPOST(t *testing.T) {
 func TestTelemetry_IngestRejectsMalformedJSON(t *testing.T) {
 	srv := telemetryServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/telemetry", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleTelemetryIngest(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -241,6 +243,7 @@ func TestTelemetry_IngestBodyIsCappedBelowTheDefault(t *testing.T) {
 	huge := strings.Repeat("x", int(telemetryMaxBodyBytes)+1024)
 	req := httptest.NewRequest(http.MethodPost, "/api/telemetry",
 		strings.NewReader(`{"events":[{"kind":"note","message":"`+huge+`"}]}`))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleTelemetryIngest(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {

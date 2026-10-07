@@ -168,6 +168,14 @@ func (p Plan) String() string {
 // Open reports a hub with no browser credential.
 func (p Plan) Open() bool { return !p.Authenticated }
 
+// HasSignIn is the one definition of "this hub can tell people apart": SSO or
+// a static token. API tokens do not count — a hub whose only credentials are
+// API tokens serves every caller that presents none. Decide asks it about a
+// configuration, and a running hub asks it about itself before it guards a
+// request against DNS rebinding (Task 20394), so the bind address and the Host
+// check cannot disagree about which hubs are open.
+func HasSignIn(sso, staticToken bool) bool { return sso || staticToken }
+
 // BeyondLoopback reports a listener another machine may reach.
 func (p Plan) BeyondLoopback() bool { return p.Scope != ScopeLoopback }
 
@@ -216,7 +224,7 @@ func Decide(r Request) (Plan, error) {
 	}
 	p := Plan{
 		Port:           r.Port,
-		Authenticated:  r.SSO || r.StaticToken,
+		Authenticated:  HasSignIn(r.SSO, r.StaticToken),
 		TLS:            r.TLS,
 		ExternalHTTPS:  isHTTPS(r.ExternalURL),
 		ExternalURL:    strings.TrimSpace(r.ExternalURL),

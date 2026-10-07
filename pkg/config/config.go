@@ -1677,35 +1677,57 @@ type UIConfig struct {
 	// a multi-GB body. Applies to both cloop ui and cloop serve.
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes,omitempty"`
 
-	// AllowedWSOrigins lists additional Origin hosts permitted to open a
-	// WebSocket to the dashboard, on top of the always-allowed loopback
-	// origins and same-origin requests (where the Origin host matches the
-	// request Host). This is required when the dashboard is served behind a
-	// reverse proxy on a public hostname AND the browser's Origin differs
-	// from the Host the server sees (e.g. proxy rewrites Host). Each entry
-	// is a host or host:port pattern accepted by the websocket library,
-	// e.g. "aiden.example.com" or "aiden.example.com:1234". Same-origin
-	// requests already work without listing anything here.
+	// AllowedWSOrigins lists additional origins permitted to open a
+	// WebSocket to the dashboard socket only, on top of the request's own
+	// origin, ui.external_url and AllowedOrigins. Matched exactly — scheme,
+	// host and port (Task 20394): a full origin ("https://aiden.example.com"),
+	// or host[:port], which means https. Needed only when the browser's origin
+	// differs from what the hub can see of the request: a proxy that rewrites
+	// Host and is not in TrustedProxies.
 	AllowedWSOrigins []string `yaml:"allowed_ws_origins,omitempty"`
 
-	// AllowedOrigins lists browser Origins permitted to open a WebSocket to
-	// *any* endpoint of this hub, including the executor-agent endpoint at
-	// /api/executors/connect. It is the deployment-wide setting;
-	// AllowedWSOrigins remains the dashboard-only one and both are honoured
-	// for the dashboard. Entries may be full origins
-	// ("https://cloop.example.com"), host:port, or bare hosts.
+	// AllowedOrigins is the deployment-wide origin allowlist: origins, besides
+	// the request's own and ui.external_url, that may open a WebSocket to any
+	// endpoint of this hub — the executor-agent endpoint at
+	// /api/executors/connect included — and that a browser without
+	// Sec-Fetch-Site may send a state-changing request from. AllowedWSOrigins
+	// remains the dashboard-only one and both are honoured for the dashboard.
 	//
-	// Loopback and same-origin requests are always allowed and need no entry
-	// here — this exists for the reverse-proxy case where the browser's
-	// Origin and the Host the server sees genuinely differ.
+	// Matched exactly (Task 20394): a full origin ("https://cloop.example.com",
+	// "http://hub.lan:8081"), or host[:port], which means https. Loopback is
+	// not special — a page on another port of localhost is another origin —
+	// and the request's own origin never needs an entry.
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
 
 	// ExternalURL is what this deployment calls itself, e.g.
-	// https://cloop.example.com. Its host is always an accepted Origin, so a
-	// correctly-set external URL usually makes allowed_origins unnecessary.
-	// It is also what `cloop executor enroll` puts in enrollment bundles when
-	// --server is not passed.
+	// https://cloop.example.com. Its origin is always one of the hub's own, so
+	// a correctly-set external URL usually makes allowed_origins unnecessary;
+	// an https one also sends HSTS on every response. It is also what `cloop
+	// executor enroll` puts in enrollment bundles when --server is not passed.
 	ExternalURL string `yaml:"external_url,omitempty"`
+
+	// TrustedProxies lists the peers — CIDR prefixes or addresses — whose
+	// X-Forwarded-Proto, X-Forwarded-Host and X-Forwarded-For the hub believes
+	// (Task 20394). Loopback is always trusted and needs no entry: a proxy on
+	// this machine is the default deployment. From any other peer the headers
+	// are ignored, because they decide the origin a browser's request is
+	// judged against and the address the sign-in lockout counts — a client
+	// that could set them would choose both. A TLS terminator on another host
+	// (an Ingress controller, a load balancer) belongs here; without it the
+	// hub treats that proxy's requests as plaintext, refuses install.sh over
+	// them and offers no one-line installer. A prefix covering every address
+	// is refused.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+
+	// AllowedHosts lists the host names a hub without sign-in answers to,
+	// besides localhost, *.localhost, IP addresses, ui.external_url's host and
+	// the hub cluster's advertise hosts (Task 20394). Each entry is a host
+	// name (any port) or host:port. Any other Host is refused with 421: DNS
+	// rebinding points a name somebody else controls at the hub, which makes a
+	// page on it same-origin with an open hub and able to read and drive it.
+	// A hub with SSO or a token ignores this — rebinding cannot carry its
+	// credential.
+	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
 
 	// Listen is the address the dashboard binds, without the port (that is
 	// --port): 127.0.0.1, 0.0.0.0, ::, one interface's address, or a host

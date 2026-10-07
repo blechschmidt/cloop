@@ -18,12 +18,7 @@ import (
 // listenPlan is where this server listens, or the refusal of an address a hub
 // without sign-in may not bind.
 func (s *Server) listenPlan() (exposure.Plan, error) {
-	// The URL browsers reach this hub at, as config.UIConfig.PublicURL reads
-	// it: the external URL, else the SSO callback.
-	public, key := strings.TrimSpace(s.ExternalURL), "ui.external_url"
-	if public == "" && s.oidcEnabled() {
-		public, key = s.OIDC.RedirectURL(), "ui.oidc.redirect_url"
-	}
+	public, key := s.publicURL()
 	return exposure.Decide(exposure.Request{
 		Listen:                      s.ListenHost,
 		Port:                        s.Port,
@@ -34,6 +29,21 @@ func (s *Server) listenPlan() (exposure.Plan, error) {
 		ExternalURL:                 public,
 		ExternalURLKey:              key,
 	})
+}
+
+// publicURL is the URL browsers reach this hub at, as config.UIConfig.PublicURL
+// reads it — the external URL, else the SSO callback — and the setting it came
+// from.
+func (s *Server) publicURL() (url, key string) {
+	if ext := strings.TrimSpace(s.ExternalURL); ext != "" {
+		return ext, "ui.external_url"
+	}
+	if s.oidcEnabled() {
+		if cb := strings.TrimSpace(s.OIDC.RedirectURL()); cb != "" {
+			return cb, "ui.oidc.redirect_url"
+		}
+	}
+	return "", ""
 }
 
 // BoundAddr is the address Run's listener holds, or nil before it has bound

@@ -12,7 +12,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,6 +21,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 )
 
 // clusterRevokeRequest is what a member asks another to revoke.
@@ -70,8 +70,10 @@ func (s *Server) mergePeerRevocations(ctx context.Context, out *leaseRevocation,
 // handleClusterRevokeLease is the peer side of mergePeerRevocations.
 func (s *Server) handleClusterRevokeLease(w http.ResponseWriter, r *http.Request) {
 	var req clusterRevokeRequest
-	limitJSONBody(w, r, 64<<10)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.LeaseID) == "" {
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: 64 << 10}) {
+		return
+	}
+	if strings.TrimSpace(req.LeaseID) == "" {
 		jsonErr(w, "lease_id is required", http.StatusBadRequest)
 		return
 	}
@@ -189,8 +191,10 @@ func (s *Server) revokeLeasesOnAgentOwner(executorID, reason, actor string) bool
 // handleClusterAgentOp performs an agent operation another member routed here.
 func (s *Server) handleClusterAgentOp(w http.ResponseWriter, r *http.Request) {
 	var op clusterAgentOp
-	limitJSONBody(w, r, 64<<10)
-	if err := json.NewDecoder(r.Body).Decode(&op); err != nil || strings.TrimSpace(op.Agent) == "" {
+	if !jsonbody.Decode(w, r, &op, jsonbody.Options{Limit: 64 << 10}) {
+		return
+	}
+	if strings.TrimSpace(op.Agent) == "" {
 		jsonErr(w, "agent is required", http.StatusBadRequest)
 		return
 	}

@@ -15,7 +15,6 @@
 package ui
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -42,10 +41,7 @@ type offboardRequest struct {
 // handleUserOffboard serves POST /api/users/offboard.
 func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 	var req offboardRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
-			"invalid JSON body: "+err.Error()))
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	identity := strings.TrimSpace(req.Identity)

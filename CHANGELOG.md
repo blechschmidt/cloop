@@ -310,6 +310,58 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A web page can no longer drive the hub.** No HTTP route checked where a
+  state-changing request came from, and every handler decoded its body as JSON
+  whatever its `Content-Type` said, so a form with `enctype=text/plain` on any
+  page reached any mutating route — on an SSO hub from another port of its host
+  or a sibling subdomain (SameSite does not tell origins of one site apart),
+  and on a hub without sign-in from anywhere. Now every `POST`/`PUT`/`PATCH`/
+  `DELETE` without an `Authorization: Bearer` credential is refused with 403
+  `CROSS_ORIGIN` unless the browser's `Sec-Fetch-Site` is `same-origin` or
+  `none` — or, from a browser too old to send it, its `Origin` is exactly one of
+  the hub's own: the scheme and host it was addressed to, `ui.external_url`,
+  the SSO callback's origin, `ui.allowed_origins`. A body must be
+  `application/json` (multipart on the three upload routes), else 415
+  `UNSUPPORTED_MEDIA_TYPE`, and every handler decodes through one decoder,
+  `pkg/jsonbody`, that refuses the rest. The hub sends no CORS header to anyone:
+  it used to answer every loopback `Origin`, which let any page on another port
+  of localhost read a hub without sign-in. Refusals are counted
+  (`cloop_cross_origin_refusals_total`) and audited as `request.origin_refused`.
+  A route-table sweep and a Chrome test — a page on another port and another
+  site submitting a text/plain form, `no-cors` fetches and a WebSocket — prove it
+  (Task 20394).
+- **DNS rebinding is refused on a hub without sign-in.** A page on a name the
+  attacker controls, re-pointed at 127.0.0.1, was same-origin with a loopback
+  hub and could read and drive every API — on a developer's machine, queue a
+  task an agent runs with `bypassPermissions`. Such a hub now answers only to
+  `localhost`, `*.localhost`, IP addresses, `ui.external_url`'s host, its
+  cluster's advertise hosts and the new `ui.allowed_hosts`; any other `Host` is
+  421 `MISDIRECTED_REQUEST`, audited as `request.host_refused` (Task 20394).
+- **WebSocket origins are matched exactly.** The dashboard socket and the
+  executor-agent endpoint admitted every loopback origin and every port of the
+  hub's host name; they now require the scheme, host and port of one of the
+  hub's own origins (Task 20394). A schemeless `ui.allowed_origins` or
+  `ui.allowed_ws_origins` entry means https.
+- **`X-Forwarded-*` are believed only from a trusted proxy.** The scheme an
+  origin was judged by came from `X-Forwarded-Proto`, believed from any peer
+  once `ui.external_url` was https, and the client address the sign-in lockout
+  and rate limiter count was the leftmost `X-Forwarded-For` entry — which
+  nginx's `$proxy_add_x_forwarded_for` passes through from the client, so
+  anyone could reset their lockout per request. The headers are now believed
+  from loopback and the new `ui.trusted_proxies` (CIDR list) only, and
+  `X-Forwarded-For` is walked from the right; HSTS is still sent whenever
+  the public URL (`ui.external_url`, else the SSO callback) is https, and the
+  session cookie is `Secure` under
+  `cookie_secure: auto` whenever `ui.oidc.redirect_url` is. A proxy on another
+  host now needs a `ui.trusted_proxies` entry for `/install.sh` and the
+  one-line installer; the Helm chart lists the private pod ranges by default
+  (`config.trustedProxies`) and the compose stack its network (Task 20394).
+- **`cloop serve` no longer answers every origin with
+  `Access-Control-Allow-Origin: *`.** Without a token — its default, on
+  loopback — any page on the Internet could read the plan and `POST
+  /run/start`. CORS is now granted only to a server with a token, and the same
+  origin, media-type and Host rules apply (Task 20394).
+
 - **Executor failover is capped, and a task that takes nodes down is
   quarantined.** A run stranded on an executor that stopped answering was
   re-dispatched to the next healthy one with no ceiling, so a workload that

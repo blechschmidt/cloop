@@ -343,9 +343,11 @@ ui:
   # plain HTTP and must never be published directly.
   #
   # The proxy MUST set X-Forwarded-Proto: https. That header is what tells
-  # cloop the browser's connection was encrypted, and therefore what marks
-  # the session cookie Secure. Without it every login issues a cookie that a
-  # downgrade attack can replay over http.
+  # cloop the browser's connection was encrypted. It is believed only from
+  # loopback and from ui.trusted_proxies: a proxy on another host goes there,
+  # or the hub treats its requests as plaintext — install.sh is refused and
+  # enrollment offers no one-line installer.
+  # trusted_proxies: [10.0.0.5]
   tls: {}
 {{- else}}
   tls:
@@ -567,8 +569,9 @@ func printHubBootstrapSummary(o *hubBootstrapOpts, configPath, envPath string, l
 		warn.Printf("  ! %s\n", w)
 	}
 	if o.BehindProxy {
-		warn.Println("  ! TLS terminates at your proxy. It MUST set X-Forwarded-Proto: https —")
-		warn.Println("    without it the session cookie is issued without the Secure attribute.")
+		warn.Println("  ! TLS terminates at your proxy. It MUST set X-Forwarded-Proto: https, and the")
+		warn.Println("    hub believes it only from loopback or ui.trusted_proxies — add the proxy's")
+		warn.Println("    address there if it runs on another host.")
 	} else if _, err := os.Stat(o.TLSCert); err != nil {
 		warn.Printf("  ! %s does not exist yet — the hub will not start until it does.\n", o.TLSCert)
 		dim.Printf("    Development: cloop hub tls-init --dir %s\n", filepath.Dir(o.TLSCert))

@@ -20,9 +20,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -141,10 +139,8 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		Count int    `json:"count"`
 		Input string `json:"input"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
 	// An empty body is the defaults — a brainstorm of five — as it always was.
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		respondToBodyError(w, err)
+	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
 	request, err := suggest.CleanRequest(req.Input)
@@ -280,9 +276,7 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 		IDs         []int                 `json:"ids"`
 		Suggestions []*suggest.Suggestion `json:"suggestions"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)

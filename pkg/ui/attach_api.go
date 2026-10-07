@@ -214,6 +214,16 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "GET required: this endpoint is a WebSocket upgrade", http.StatusMethodNotAllowed)
 		return
 	}
+	// Same CSWSH mitigation as the dashboard socket. A terminal is the last
+	// thing that should be openable by a page on another origin — and it is
+	// checked before the request is forwarded, so a page elsewhere cannot
+	// make this member open a connection to the run's owner on its behalf
+	// (Task 20394). The owner checks again, from the scheme and host this
+	// member forwards with it.
+	if !s.wsOriginAllowed(r) {
+		s.refuseUpgrade(w, r)
+		return
+	}
 	workDir := s.resolveWorkDir(r)
 	// Forwarded whole, upgrade included, to the member streaming the run
 	// (Task 20354).
@@ -223,12 +233,6 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 	taskID, err := attachTaskID(r)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Same CSWSH mitigation as the dashboard socket. A terminal is the last
-	// thing that should be openable by a page on another origin.
-	if !s.wsOriginAllowed(r) {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
 		return
 	}
 

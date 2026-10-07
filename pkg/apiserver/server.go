@@ -29,9 +29,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/reqid"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
@@ -129,6 +131,14 @@ type Server struct {
 	// the address ListenHost names even beyond loopback, and warns at every
 	// start that it does.
 	AllowUnauthenticatedNetwork bool
+
+	// TrustedProxies is ui.trusted_proxies, from the same shared ui block:
+	// the peers whose X-Forwarded-* are believed, loopback always among them
+	// (Task 20394).
+	TrustedProxies sameorigin.Proxies
+	// AllowedHosts is ui.allowed_hosts: names a server without a token
+	// answers to besides localhost and IP addresses (originGuard).
+	AllowedHosts []string
 
 	mu sync.Mutex
 	// runExec and runHandle identify the in-flight run. The server holds the
@@ -282,46 +292,6 @@ func (s *Server) effectiveMaxBodyBytes() int64 {
 	return maxJSONBodyBytes
 }
 
-// limitJSONBody wraps r.Body with http.MaxBytesReader so a subsequent
-// json.NewDecoder().Decode() stops reading after maxBytes and returns
-// *http.MaxBytesError instead of streaming attacker-controlled data into
-// memory. Task 20102.
-func limitJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
-	if r != nil && r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	}
-}
-
-// respondToBodyError translates a JSON decode failure into the right HTTP
-// response: HTTP 413 (PAYLOAD_TOO_LARGE) if MaxBytesReader fired, HTTP 400
-// (INVALID_INPUT) otherwise. The helper centralises detection of
-// *http.MaxBytesError so each handler's decode-error path stays consistent.
-// Task 20102 / 20103.
-func respondToBodyError(w http.ResponseWriter, err error) {
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		apierror.Write(w, apierror.CodePayloadTooLarge, "request body too large")
-		return
-	}
-	apierror.Write(w, apierror.CodeInvalidInput, "invalid JSON body")
-}
-
-// remoteIP extracts the client IP from the request, honouring X-Forwarded-For
-// when the connection comes from localhost (reverse-proxy pattern).
-func remoteIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 // allow reports whether the request from ip is within the rate limit. It
 // refills the bucket based on elapsed time and consumes one token.
 func (s *Server) allow(ip string) bool {
@@ -395,7 +365,7 @@ func (s *Server) evictRLBucketsLocked(now time.Time) {
 // rateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.allow(remoteIP(r)) {
+		if !s.allow(s.clientIP(r)) {
 			rps := s.RPS
 			if rps <= 0 {
 				rps = defaultRPS
@@ -561,8 +531,12 @@ func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
 	// reach every response, probes included — an HSTS header that is absent
 	// on the one endpoint a load balancer hits most often is a gap a browser
 	// following a redirect can fall into.
+	//
+	// originGuard (Task 20394) sits inside the rate limiter and outside
+	// authentication: a page elsewhere is turned away before anything reads
+	// what it sent.
 	return requestIDMiddleware(s.securityHeadersMiddleware(
-		s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux)))))
+		s.probeBypass(s.rateLimitMiddleware(s.originGuard(s.authMiddleware(mux))))))
 }
 
 // requestIDMiddleware threads a correlation ID through every request.
@@ -704,13 +678,19 @@ func (s *Server) defaultReadyCheck(ctx context.Context) error {
 // s.Token is set. The /openapi.json endpoint is always public.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CORS pre-flight
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+		// CORS, and its preflight, only for a server with a token (Task
+		// 20394): every request to it must carry the token, so a page on
+		// another origin gets nothing it was not handed. Without one, a
+		// wildcard Access-Control-Allow-Origin let any page on the Internet
+		// read the plan and start runs.
+		if s.Token != "" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 
 		// OpenAPI spec is always public.
@@ -826,9 +806,7 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		Priority int      `json:"priority"`
 		Tags     []string `json:"tags"`
 	}
-	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &body, jsonbody.Options{Limit: s.effectiveMaxBodyBytes()}) {
 		return
 	}
 
@@ -900,9 +878,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		Provider    string `json:"provider"`
 		Model       string `json:"model"`
 	}
-	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: s.effectiveMaxBodyBytes(), Optional: true}) {
 		return
 	}
 

@@ -737,16 +737,21 @@ func TestSecureCookieModes(t *testing.T) {
 	idp := newFakeIdP(t)
 	plain := httptest.NewRequest(http.MethodGet, "/", nil)
 	proxied := httptest.NewRequest(http.MethodGet, "/", nil)
+	proxied.RemoteAddr = "127.0.0.1:40000" // a proxy on this machine
 	proxied.Header.Set("X-Forwarded-Proto", "https")
+	// The same header from a peer nobody said was a proxy (Task 20394).
+	forged := httptest.NewRequest(http.MethodGet, "/", nil)
+	forged.Header.Set("X-Forwarded-Proto", "https")
 
 	for _, tc := range []struct {
-		mode        string
-		plainSecure bool
-		proxySecure bool
+		mode         string
+		plainSecure  bool
+		proxySecure  bool
+		forgedSecure bool
 	}{
-		{"auto", false, true},
-		{"always", true, true},
-		{"never", false, false},
+		{"auto", false, true, false},
+		{"always", true, true, true},
+		{"never", false, false, false},
 	} {
 		a := newTestAuthenticator(t, idp)
 		a.cfg.CookieSecure = tc.mode
@@ -755,6 +760,9 @@ func TestSecureCookieModes(t *testing.T) {
 		}
 		if got := a.sessionCookie(proxied, "v", 60).Secure; got != tc.proxySecure {
 			t.Errorf("mode %s proxied: Secure = %v, want %v", tc.mode, got, tc.proxySecure)
+		}
+		if got := a.sessionCookie(forged, "v", 60).Secure; got != tc.forgedSecure {
+			t.Errorf("mode %s forged: Secure = %v, want %v", tc.mode, got, tc.forgedSecure)
 		}
 	}
 }

@@ -27,7 +27,6 @@ package ui
 // ask for more.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -175,9 +174,7 @@ func executorEnforcesLimits(id string) bool {
 
 func (s *Server) serveExecutorLimitsPut(w http.ResponseWriter, r *http.Request, id string) {
 	var req executorLimitsRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !isEmptyBody(err) {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
 
@@ -339,9 +336,7 @@ func (s *Server) renderExecutorAudience(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) serveExecutorAudienceWrite(w http.ResponseWriter, r *http.Request, id string) {
 	var req executorAudienceRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !isEmptyBody(err) {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
 	kind := strings.ToLower(strings.TrimSpace(req.Kind))

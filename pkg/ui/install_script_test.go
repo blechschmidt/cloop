@@ -24,23 +24,52 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
-// installScriptRequest builds a request for /install.sh as a reverse proxy
-// would forward it: the hop to this process is plaintext, and the client's leg
-// is described by X-Forwarded-Proto. That is the shape of every hosted
-// deployment, so it is the default the tests exercise.
+// installScriptRequest builds a request for /install.sh as a reverse proxy on
+// this machine would forward it: the hop to this process is plaintext from
+// loopback, and the client's leg is described by X-Forwarded-Proto. That is
+// the shape of every hosted deployment, so it is the default the tests
+// exercise. (A proxy elsewhere is believed only from ui.trusted_proxies —
+// TestInstallScript_BelievesOnlyATrustedProxy.)
 //
 // The http:// target is deliberate — httptest.NewRequest populates r.TLS from
 // an https:// target, which would make every case here take the direct-TLS
 // branch and leave the forwarded-header logic untested.
 func installScriptRequest(method string, secure bool) *http.Request {
 	r := httptest.NewRequest(method, "http://hub.example.com/install.sh", nil)
+	r.RemoteAddr = "127.0.0.1:41000"
 	if secure {
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}
 	return r
+}
+
+// TestInstallScript_BelievesOnlyATrustedProxy: the plaintext refusal exists
+// because the script is piped into a root shell, and X-Forwarded-Proto is
+// anybody's to send. From a peer that is neither loopback nor in
+// ui.trusted_proxies the header changes nothing (Task 20394); from one that is,
+// it is the proxy's word for the client's leg.
+func TestInstallScript_BelievesOnlyATrustedProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proxies sameorigin.Proxies
+		want    int
+	}{
+		{"untrusted peer", sameorigin.Proxies{}, http.StatusForbidden},
+		{"peer in ui.trusted_proxies", sameorigin.MustParseProxies("10.20.0.0/16"), http.StatusOK},
+	} {
+		s := &Server{WorkDir: t.TempDir(), TrustedProxies: tc.proxies}
+		r := installScriptRequest(http.MethodGet, true)
+		r.RemoteAddr = "10.20.30.40:5000"
+		rr := httptest.NewRecorder()
+		s.handleInstallScript(rr, r)
+		if rr.Code != tc.want {
+			t.Errorf("%s: GET /install.sh with X-Forwarded-Proto: https = %d, want %d", tc.name, rr.Code, tc.want)
+		}
+	}
 }
 
 func TestInstallScript_RefusesPlaintextHTTP(t *testing.T) {
@@ -307,7 +336,11 @@ func TestInstallScript_RBACIsEvaluatedBeforeTheTLSRefusal(t *testing.T) {
 // carry the bundle out-of-band and point at this hub's own /install.sh.
 func TestExecutorEnroll_OffersTheOneCommandInstaller(t *testing.T) {
 	dir := setupProjectDir(t, "enroll installer", nil)
-	ts := newTestServer(t, dir, nil)
+	srv := New(dir, 0, "")
+	// The hub has no sign-in, so it answers only to names it was given
+	// (Task 20394); the proxy in front of it forwards cloop.example.com.
+	srv.AllowedHosts = []string{"cloop.example.com"}
+	ts := newTestServerFor(t, srv)
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/executors/enroll",
 		strings.NewReader(`{"name":"edge-1"}`))

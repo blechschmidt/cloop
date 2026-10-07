@@ -126,9 +126,13 @@ ui:
   # plain HTTP and must never be published directly.
   #
   # The proxy MUST set X-Forwarded-Proto: https. That header is what tells
-  # cloop the browser's connection was encrypted, and therefore what marks
-  # the session cookie Secure. Without it every login issues a cookie that a
-  # downgrade attack can replay over http.
+  # cloop the browser's connection was encrypted. It is believed only from
+  # loopback and the peers below (Task 20394): the nginx container reaches the
+  # hub over the compose network, never through its loopback, and Docker
+  # draws that network from these pools.
+  trusted_proxies:
+    - 172.16.0.0/12
+    - 192.168.0.0/16
   tls: {}
 
   # Bound the resources one client can consume before authenticating.

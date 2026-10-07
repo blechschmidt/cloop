@@ -47,6 +47,7 @@ func putOIDC(t *testing.T, srv *Server, body map[string]any) *httptest.ResponseR
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/api/config/oidc", strings.NewReader(string(blob)))
+	req.Header.Set("Content-Type", "application/json")
 	srv.handleOIDCSettingsSave(rec, req)
 	return rec
 }

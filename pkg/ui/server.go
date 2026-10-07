@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,6 +41,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -52,6 +52,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
+	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
@@ -512,10 +513,24 @@ type Server struct {
 	AllowedOrigins []string
 
 	// ExternalURL is what this deployment calls itself, e.g.
-	// https://cloop.example.com. Its host is an accepted WebSocket Origin for
-	// both the dashboard and the executor-agent endpoint. Populated from
+	// https://cloop.example.com. Its origin is one of the hub's own for the
+	// dashboard, the executor-agent endpoint and the forgery guard, and its
+	// host one an open hub answers to (Task 20394). Populated from
 	// config.UIConfig.ExternalURL.
 	ExternalURL string
+
+	// TrustedProxies is ui.trusted_proxies: the peers whose
+	// X-Forwarded-Proto, X-Forwarded-Host and X-Forwarded-For are believed,
+	// loopback always among them (Task 20394). The zero value is loopback
+	// only — a proxy on this machine — which is what the hub trusted before
+	// the setting existed, minus the X-Forwarded-Proto it used to take from
+	// anyone once ui.external_url was https.
+	TrustedProxies sameorigin.Proxies
+
+	// AllowedHosts is ui.allowed_hosts: host names a hub with no sign-in
+	// answers to besides localhost, IP addresses, ui.external_url's host and
+	// the cluster's advertise hosts. Any other Host is refused (hostGuard).
+	AllowedHosts []string
 
 	// ListenHost is the address Run binds, without the port: --listen, else
 	// ui.listen. Empty takes the default for this hub's authentication —
@@ -548,6 +563,10 @@ type Server struct {
 	// taking ten minutes — long enough to trip the default per-package test
 	// timeout and fail CI. Tests point this at a stub.
 	SelfExe string
+
+	// refusals rate-limits the audit rows the origin guards write (Task
+	// 20394); the zero value is ready.
+	refusals refusalLog
 
 	// ci holds the CI/CD federation service — the OIDC verifier, the session
 	// registry and the Anthropic relay (Task 20278). It is per-Server rather
@@ -992,7 +1011,7 @@ func (s *Server) uiRateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !s.uiAllow(clientIP(r)) {
+		if !s.uiAllow(s.clientIP(r)) {
 			rps := s.RPS
 			if rps <= 0 {
 				rps = 20.0
@@ -1110,8 +1129,14 @@ func (s *Server) Handler() http.Handler {
 // authenticated, so the identity it resolves into a permission set is the one
 // the route gates will enforce (Task 20164).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	app := s.uiRateLimitMiddleware(s.securityHeaders(s.executorConnectBypass(
-		s.clusterInternalBypass(s.authMiddleware(s.authzMiddleware(mux))))))
+	//
+	// hostGuard and forgeryGuard (Task 20394) sit inside the rate limiter and
+	// the hardening headers, so a refusal is limited and carries them, and
+	// outside everything that acts on a request: the agent endpoint, the
+	// cluster's internal API, authentication. A page elsewhere must be turned
+	// away before any of them looks at what it sent.
+	app := s.uiRateLimitMiddleware(s.securityHeaders(s.hostGuard(s.forgeryGuard(s.executorConnectBypass(
+		s.clusterInternalBypass(s.authMiddleware(s.authzMiddleware(mux))))))))
 	// gzip wraps the application but sits below the panic recovery, so a
 	// handler that panics mid-body still unwinds into the 500 rather than
 	// leaving a half-written deflate stream the browser cannot parse.
@@ -1684,21 +1709,23 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// actively harmful on a loopback dev server, where it would pin
 		// localhost to https in the operator's browser for a year and break
 		// every other local project on that hostname.
-		if s.requestIsTLS(r) {
+		//
+		// Or when the operator declared the deployment https — ui.external_url,
+		// else the SSO callback: a TLS terminator on another host that is not
+		// in ui.trusted_proxies cannot tell the hub so (Task 20394), and the
+		// header is harmless on a response that did arrive in plaintext — a
+		// browser ignores it there.
+		if s.requestIsTLS(r) || s.publicURLIsHTTPS() {
 			w.Header().Set("Strict-Transport-Security", hstsValue)
 		}
-		// Restrict CORS to localhost only (not wildcard). Parse the Origin
-		// and compare the hostname exactly — a prefix match would also
-		// accept e.g. http://localhost.evil.com.
-		w.Header().Set("Vary", "Origin")
-		if origin := r.Header.Get("Origin"); origin != "" {
-			if u, err := url.Parse(origin); err == nil {
-				switch u.Hostname() {
-				case "localhost", "127.0.0.1", "::1":
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-				}
-			}
-		}
+		// No CORS headers, to anyone. The dashboard and the glasses page are
+		// served from the hub's own origin and need none; a page elsewhere
+		// must get none. This used to answer every loopback Origin with
+		// Access-Control-Allow-Origin, which let any page on another port of
+		// localhost — a dev server, a notebook — read every API of a hub
+		// without sign-in. Without it a preflight never succeeds either, which
+		// is what makes a bearer token proof that no page elsewhere sent the
+		// request (sameorigin.HasBearer).
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1729,31 +1756,22 @@ func (s *Server) frameSrcDirective() string {
 	return "frame-src 'self' " + strings.Join(origins, " ")
 }
 
-// clientIP extracts the real client IP. X-Forwarded-For is only honoured
-// when the direct peer is a loopback address (i.e. a reverse proxy running
-// on this host); otherwise any remote client could spoof the header to
-// bypass per-IP rate limits, auth lockout, and WebSocket connection caps.
-func clientIP(r *http.Request) string {
-	// A request another hub member forwarded names the client that member
-	// saw, under its signature (Task 20354); the connection's own address is
-	// the member's.
+// clientIP is the address of the client that made r: the one another hub
+// member saw, for a request that member forwarded under its signature (Task
+// 20354); otherwise the TCP peer, unless that is a trusted proxy — loopback or
+// ui.trusted_proxies — whose X-Forwarded-For is walked from the right to the
+// first address that is not one (sameorigin.Proxies.ClientIP).
+//
+// From the right, not the left: a proxy appends the peer it saw, so the
+// leftmost entries are whatever the client sent. Reading the first entry, as
+// this did until Task 20394, let anyone behind nginx's
+// $proxy_add_x_forwarded_for pick a new address per request — and with it a
+// fresh rate-limit bucket, auth-failure lockout and WebSocket allowance.
+func (s *Server) clientIP(r *http.Request) string {
 	if pc, ok := peerCallFrom(r); ok && pc.ClientIP != "" {
 		return pc.ClientIP
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			// Take first address only.
-			if idx := strings.Index(fwd, ","); idx != -1 {
-				return strings.TrimSpace(fwd[:idx])
-			}
-			return strings.TrimSpace(fwd)
-		}
-	}
-	return host
+	return s.TrustedProxies.ClientIP(r)
 }
 
 // authMiddleware enforces authentication. With OIDC enabled (Server.OIDC
@@ -1789,7 +1807,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ip := clientIP(r)
+		ip := s.clientIP(r)
 
 		// Check the per-IP failure lockout before evaluating the token.
 		if s.authLockoutActive(ip) {
@@ -2383,30 +2401,19 @@ func (s *Server) effectiveMaxBodyBytes() int64 {
 	return maxJSONBodyBytes
 }
 
-// limitJSONBody wraps r.Body with http.MaxBytesReader so a subsequent
-// json.NewDecoder().Decode() stops reading after maxBytes and returns
-// *http.MaxBytesError instead of streaming attacker-controlled data into
-// memory. Safe to call once per request before decoding.
-func limitJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
-	if r != nil && r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	}
+// decodeJSON reads a required JSON request body of at most maxJSONBodyBytes
+// into dst — the way every handler in this package reads one (Task 20394;
+// pkg/jsonbody). Anything but Content-Type: application/json is refused with
+// 415, so a form or a no-cors fetch on another origin cannot deliver a body
+// here. On false the response has been written.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return jsonbody.Decode(w, r, dst, jsonbody.Options{Limit: maxJSONBodyBytes})
 }
 
-// respondToBodyError writes the right HTTP error response for a JSON
-// decode failure. *http.MaxBytesError (returned when MaxBytesReader's
-// limit is reached) yields HTTP 413 (Request Entity Too Large); every
-// other failure (malformed JSON, type mismatch, EOF) yields HTTP 400.
-// Centralising the translation here keeps every handler's decode error
-// path consistent and frees callers from importing net/http's error
-// type. Task 20102.
-func respondToBodyError(w http.ResponseWriter, err error) {
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		jsonErr(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	jsonErr(w, "invalid request body", http.StatusBadRequest)
+// decodeOptionalJSON is decodeJSON for a body the handler can do without: an
+// empty one leaves dst as it was, the handler's defaults.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return jsonbody.Decode(w, r, dst, jsonbody.Options{Limit: maxJSONBodyBytes, Optional: true})
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────────
@@ -2447,7 +2454,6 @@ func (s *Server) handleClientError(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
 	var req struct {
 		Message   string `json:"message"`
 		Stack     string `json:"stack"`
@@ -2458,8 +2464,7 @@ func (s *Server) handleClientError(w http.ResponseWriter, r *http.Request) {
 		Line      int    `json:"line"`
 		Col       int    `json:"col"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: s.effectiveMaxBodyBytes()}) {
 		return
 	}
 	kind := req.Kind
@@ -2471,7 +2476,7 @@ func (s *Server) handleClientError(w http.ResponseWriter, r *http.Request) {
 		"client_url": truncate(req.URL, clientErrorMaxField),
 		"user_agent": truncate(req.UserAgent, clientErrorMaxField),
 		"tab":        truncate(req.Tab, 64),
-		"client_ip":  clientIP(r),
+		"client_ip":  s.clientIP(r),
 		"stack":      truncate(req.Stack, clientErrorMaxField),
 	}
 	if req.Line > 0 {
@@ -2983,81 +2988,8 @@ var wsRetryAfterSeconds = 5
 // Retry-After header when either MaxWebSocketConns (total) or
 // MaxWebSocketConnsPerIP would be exceeded. Defaults: 256 total, 8 per IP.
 // Configure via Config.UI.MaxWebSocketConns / MaxWebSocketConnsPerIP.
-// wsOriginAllowed reports whether the WebSocket upgrade request may be
-// accepted based on its Origin header. It allows:
-//   - requests with no Origin header (non-browser clients: CLI, tests);
-//   - loopback origins (localhost / 127.0.0.1 / ::1, any port);
-//   - same-origin requests, where the Origin host matches the request Host
-//     (the page and the socket are served by the same server — safe even
-//     behind a reverse proxy on a public hostname);
-//   - the host of s.ExternalURL, i.e. what this deployment calls itself;
-//   - any host listed in s.AllowedWSOrigins (for proxies that rewrite Host).
-//
-// A malformed or genuinely cross-origin browser Origin is rejected, which
-// blocks cross-site WebSocket hijacking. The executor-agent endpoint applies
-// the same policy through remote.Hub.checkOrigin, fed from the same two
-// config values — see pkg/executor/remote/origin.go.
-func (s *Server) wsOriginAllowed(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true // non-browser client; no CSWSH risk
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	originHost := u.Hostname()
-
-	// Loopback is always allowed (local dashboard use). Shared with the
-	// executor-agent endpoint via tlsconf so one server cannot give two
-	// different answers to "is this origin loopback".
-	if tlsconf.IsLoopbackHost(originHost) {
-		return true
-	}
-
-	// Same-origin: Origin host[:port] matches the Host the server sees.
-	// Compare both the full host:port and the bare hostname so a proxy that
-	// forwards the original Host (with or without an explicit port) matches.
-	if r.Host != "" {
-		if strings.EqualFold(u.Host, r.Host) {
-			return true
-		}
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(reqHost); err == nil {
-			reqHost = h
-		}
-		if strings.EqualFold(originHost, reqHost) {
-			return true
-		}
-	}
-
-	// The deployment's own external URL, which is the common case behind a
-	// proxy that rewrites Host: the operator has already told us what this
-	// server is called, so requiring them to repeat it in allowed_origins
-	// would be a second chance to get it wrong.
-	if ext := strings.TrimSpace(s.ExternalURL); ext != "" {
-		if u2, err := url.Parse(ext); err == nil && u2.Host != "" {
-			if strings.EqualFold(u2.Host, u.Host) || strings.EqualFold(u2.Hostname(), originHost) {
-				return true
-			}
-		}
-	}
-
-	// Operator-configured extra origins (host or host:port). The dashboard
-	// honours both lists; the agent endpoint honours only AllowedOrigins.
-	for _, allowed := range append(append([]string(nil), s.AllowedWSOrigins...), s.AllowedOrigins...) {
-		if strings.TrimSpace(allowed) == "" {
-			continue
-		}
-		if strings.EqualFold(allowed, u.Host) || strings.EqualFold(allowed, originHost) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if ok, reason := s.admitWebSocket(ip); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(wsRetryAfterSeconds))
 		w.Header().Set("Content-Type", "application/json")
@@ -3071,15 +3003,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer s.releaseWebSocket(ip)
 
 	// Origin enforcement: we do our own check (InsecureSkipVerify tells the
-	// websocket lib to skip its OriginPatterns matching) so we can accept
-	// same-origin requests behind a reverse proxy on any hostname, not just
-	// loopback. wsOriginAllowed permits: no Origin header (CLI/tests),
-	// loopback origins, the request's own Host (same-origin — the page and
-	// the socket come from the same server, which is inherently safe), and
-	// any operator-configured AllowedWSOrigins. Cross-origin browser
-	// requests are still rejected, preventing cross-site WebSocket hijacking.
+	// websocket lib to skip its OriginPatterns matching) so the hub's own
+	// origin is judged the way the forgery guard judges it — the scheme and
+	// host the browser addressed, as a trusted proxy reports them, plus the
+	// configured ones — and matched exactly, scheme and port included (Task
+	// 20394). No Origin header (CLI/tests) is admitted; every other origin,
+	// another port of localhost included, is refused: cross-site WebSocket
+	// hijacking.
 	if !s.wsOriginAllowed(r) {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
+		s.refuseUpgrade(w, r)
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -3826,9 +3758,7 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		Key   string `json:"key"`
 		Value string `json:"value"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
@@ -3897,9 +3827,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Priority    int    `json:"priority"`
 		DependsOn   []int  `json:"depends_on"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
@@ -4138,9 +4066,7 @@ func (s *Server) handleTaskDecomposeApply(w http.ResponseWriter, r *http.Request
 	var req struct {
 		SubTasks []decomposeSubtaskWire `json:"subtasks"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -4254,9 +4180,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		ID     int    `json:"id"`
 		Status string `json:"status"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	validStatuses := map[string]pm.TaskStatus{
@@ -4342,9 +4266,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		ID        int    `json:"id"`
 		Direction string `json:"direction"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Direction != "up" && req.Direction != "down" {
@@ -4416,9 +4338,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		// "inherit project default"). See Task 20143.
 		MaxMinutes *int `json:"max_minutes"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.MaxMinutes != nil {
@@ -4477,9 +4397,7 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID int `json:"id"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -4536,9 +4454,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		// (which means "fall back to the project / process-wide default").
 		MaxMinutes *int `json:"max_minutes"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Validate the per-task timeout against the same bounds the orchestrator
@@ -4647,7 +4563,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	clientID := r.Header.Get("X-Client-ID")
 	if clientID == "" {
-		clientID = clientIP(r)
+		clientID = s.clientIP(r)
 	}
 	conflict := false
 	if len(mutatedFields) > 0 {
@@ -4903,9 +4819,7 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []int `json:"ids"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.IDs) == 0 {
@@ -5010,9 +4924,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		MaxSteps     int    `json:"maxSteps"`
 		PMMode       bool   `json:"pmMode"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
@@ -5070,9 +4982,7 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Goal string `json:"goal"`
 		}
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondToBodyError(w, err)
+		if !decodeJSON(w, r, &req) {
 			return
 		}
 		req.Goal = strings.TrimSpace(req.Goal)
@@ -5122,9 +5032,7 @@ func (s *Server) handleInstructions(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Instructions string `json:"instructions"`
 		}
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondToBodyError(w, err)
+		if !decodeJSON(w, r, &req) {
 			return
 		}
 		req.Instructions = strings.TrimSpace(req.Instructions)
@@ -5167,7 +5075,7 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 
 	// 32 MB max upload.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		respondToBodyError(w, err)
+		writeMultipartError(w, err)
 		return
 	}
 
@@ -5292,9 +5200,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message string `json:"message"`
 	}
-	limitJSONBody(w, r, maxChatJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Message) == "" {
@@ -5362,9 +5268,7 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 			Content string `json:"content"`
 		} `json:"history"`
 	}
-	limitJSONBody(w, r, maxChatJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Message) == "" {
@@ -6421,7 +6325,6 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 	if denyHostSideEffect(w, workDir, "git (inline task replay)") {
 		return
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
 
 	var req struct {
 		TaskID    int    `json:"task_id"`
@@ -6430,8 +6333,7 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 		Judge     string `json:"judge"` // "<provider>:<model>" or empty
 		MaxTokens int    `json:"max_tokens"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.TaskID <= 0 {
@@ -6689,9 +6591,8 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PM bool `json:"pm"`
 	}
-	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	if !decodeOptionalJSON(w, r, &req) {
+		return
 	}
 
 	// The admission gates handleRun applies, in its order (Task 20391). The
@@ -6850,9 +6751,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		// client sends.
 		projectAccessRequest
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
@@ -7129,9 +7028,7 @@ func (s *Server) handleProjectHidden(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Hidden bool `json:"hidden"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -7180,15 +7077,13 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// Parse delete_root from either query string or JSON body so the same
 	// endpoint serves both URL-style callers and the UI's fetch wrapper.
 	deleteRoot := r.URL.Query().Get("delete_root") == "true"
-	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
-		var req struct {
-			DeleteRoot bool `json:"delete_root"`
-		}
-		limitJSONBody(w, r, maxJSONBodyBytes)
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			deleteRoot = deleteRoot || req.DeleteRoot
-		}
+	var req struct {
+		DeleteRoot bool `json:"delete_root"`
 	}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	deleteRoot = deleteRoot || req.DeleteRoot
 
 	// Safety: refuse to delete the UI server's own working directory.
 	if s.WorkDir != "" {
@@ -7387,9 +7282,7 @@ func (s *Server) handleKBAdd(w http.ResponseWriter, r *http.Request) {
 		Body  string   `json:"body"`
 		Tags  []string `json:"tags"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
@@ -8001,9 +7894,7 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 		DailyTokenLimit   int     `json:"daily_token_limit"`
 		AlertThresholdPct int     `json:"alert_threshold_pct"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Reject negative spend limits and out-of-range alert thresholds before
@@ -8052,9 +7943,7 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 		MaxFiveHourPct    float64 `json:"max_five_hour_pct"`
 		BlockExtraUsage   *bool   `json:"block_extra_usage,omitempty"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// All percentages: [0, 100].
@@ -8271,9 +8160,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 		MaxWeeklyOpusPct   float64 `json:"max_weekly_opus_pct"`
 		MaxWeeklySonnetPct float64 `json:"max_weekly_sonnet_pct"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct, req.MaxWeeklyOpusPct, req.MaxWeeklySonnetPct} {
@@ -8358,12 +8245,8 @@ func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.R
 		Email   string `json:"email"`
 		SSO     bool   `json:"sso"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondToBodyError(w, err)
-			return
-		}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
 	}
 	sess, err := s.claudeAuthManager().Start(r.Context(), scope.Owner, scope.ConfigDir, claudecodeauth.LoginOptions{
 		Console: req.Console,
@@ -8395,9 +8278,7 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 	var req struct {
 		Code string `json:"code"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	st, err := s.claudeAuthManager().SubmitCode(scope.Owner, req.Code)
@@ -8464,9 +8345,7 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		Flag  string `json:"flag"`
 		Value bool   `json:"value"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
@@ -8566,9 +8445,7 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value int `json:"value"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Bound to [1, 64]: zero (or negative) would either disable parallel
@@ -8610,9 +8487,7 @@ func (s *Server) handleStepTimeoutSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value string `json:"value"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Validate: must be "0", empty, or a valid Go duration inside a sane
@@ -8667,9 +8542,7 @@ func (s *Server) handleTaskTimeoutSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value int `json:"value"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// 0 is the sentinel for "use the process-wide default"; everything else
@@ -8712,9 +8585,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		Model    string  `json:"model"`
 		Effort   *string `json:"effort"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Whitelist providers to prevent garbage in state.json.

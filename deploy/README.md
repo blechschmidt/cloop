@@ -243,7 +243,7 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 
 | Flag | Effect |
 | --- | --- |
-| `--behind-proxy` | Leave `ui.tls` empty; a proxy or Ingress terminates TLS. **The proxy must set `X-Forwarded-Proto: https`** — that header is what marks the session cookie `Secure`. |
+| `--behind-proxy` | Leave `ui.tls` empty; a proxy or Ingress terminates TLS. **The proxy must set `X-Forwarded-Proto: https`**, and the hub believes it only from loopback or an address in `ui.trusted_proxies` — add the proxy's address there when it runs on another host. That header is what tells the hub the browser's connection was encrypted: without it `/install.sh` is refused and enrollment offers no one-line installer. |
 | `--oidc-issuer`, `--oidc-client-id` | Enable SSO. A client *secret* is optional — without one the hub is a public client and PKCE authenticates the code exchange. Where one is used it is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
 | `--admin-email` | Break-glass admin, matched on the email claim. Repeatable. |
 | `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. |
@@ -604,10 +604,17 @@ disappears exactly when someone turns that file off.
 ### TLS
 
 The Ingress terminates TLS and the hub speaks plain HTTP inside the cluster.
-Your Ingress controller **must** set `X-Forwarded-Proto: https`. Most do by
-default; nginx-ingress and Traefik both do. Without it, cloop cannot tell that
-the browser's connection was encrypted and issues session cookies without the
-`Secure` attribute.
+Your Ingress controller **must** set `X-Forwarded-Proto: https` (most do by
+default; nginx-ingress and Traefik both do), and the hub believes it only from
+an address in `config.trustedProxies` — rendered to `ui.trusted_proxies`. The
+default lists the private ranges pod networks are drawn from; narrow it to your
+controller's pod CIDR, since any pod in a listed range can claim any scheme,
+host and client address. From a peer outside it the hub ignores
+`X-Forwarded-*`: it treats the request as plaintext, refuses `/install.sh`,
+offers no one-line installer at enrollment, and keys every client's rate limit
+and sign-in lockout on the controller's address. The session cookie is
+`Secure` regardless — the chart sets `cookie_secure: always`, and an https
+callback URL implies it.
 
 The chart's default annotations also raise the proxy read timeout to an hour
 and the body-size limit to 10 MiB. Both are ingress-nginx-specific; on another

@@ -13,12 +13,10 @@ package ui
 import (
 	"crypto/tls"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -69,55 +67,34 @@ func (s *Server) TLSEnabled() bool {
 // encrypted — either directly to this process, or to a reverse proxy in front
 // of it that said so via X-Forwarded-Proto.
 //
-// X-Forwarded-Proto is believed from two sources, and only those:
-//
-//   - a loopback peer, i.e. a proxy on this host, matching clientIP's trust
-//     model in server.go;
-//   - any peer, when the operator has declared an https ui.external_url. A
-//     proxy on a *different* host is the standard enterprise topology (nginx,
-//     an ALB, an ingress controller), and the loopback rule alone silently
-//     drops HSTS from every response in that deployment — forever, with
-//     nothing in the logs to say so. The external URL is operator-supplied
-//     configuration, not an attacker-controlled header, so keying on it does
-//     not extend trust to the client.
-//
-// Getting this wrong in the permissive direction costs nothing: a browser
-// ignores HSTS received over plaintext (RFC 6797 §8.1). Getting it wrong in
-// the strict direction costs the header entirely.
+// X-Forwarded-Proto is believed only from a trusted proxy: loopback, an
+// address in ui.trusted_proxies, or another member of this hub's cluster
+// (Task 20394). Until then it was also believed from *any* peer once
+// ui.external_url was https — configuration.md said loopback only — and the
+// scheme it yields is no longer just a header choice: it is half of the origin
+// the forgery guard and the WebSocket check judge a browser's request
+// against. A client that could set it would choose the origin it is compared
+// with. A TLS terminator on another host belongs in ui.trusted_proxies; HSTS
+// for such a deployment is kept by securityHeaders, which sends it whenever
+// ui.external_url is https.
 func (s *Server) requestIsTLS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	if !forwardedProtoIsHTTPS(r) {
-		return false
-	}
-	return peerIsLoopback(r) || s.externalURLIsHTTPS()
+	return s.clientView(r).TLS()
 }
 
-// externalURLIsHTTPS reports whether the operator declared this deployment as
-// https, which is what licenses trusting a non-loopback proxy's
-// X-Forwarded-Proto.
-func (s *Server) externalURLIsHTTPS() bool {
-	ext := strings.TrimSpace(s.ExternalURL)
-	if ext == "" {
+// publicURLIsHTTPS reports whether the operator declared this deployment as
+// https — ui.external_url, else the SSO callback (publicURL): browsers reach it
+// over TLS, whatever this process can see of it.
+func (s *Server) publicURLIsHTTPS() bool {
+	public, _ := s.publicURL()
+	if public == "" {
 		return false
 	}
-	u, err := url.Parse(ext)
+	u, err := url.Parse(public)
 	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
-// forwardedProtoIsHTTPS reads the client-facing hop from X-Forwarded-Proto,
-// by the parser the session cookie's Secure flag uses.
-func forwardedProtoIsHTTPS(r *http.Request) bool {
-	return oidcauth.ForwardedProtoHTTPS(r.Header)
-}
-
-// peerIsLoopback reports whether the direct TCP peer is on this host.
-func peerIsLoopback(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
+// RequestIsTLS is requestIsTLS for the OIDC authenticator: cookie_secure
+// "auto" follows the same rule about whose X-Forwarded-Proto to believe as
+// HSTS and the origin checks do (oidcauth.Config.RequestIsTLS; wired by
+// cmd/ui_cmd.go).
+func (s *Server) RequestIsTLS(r *http.Request) bool { return s.requestIsTLS(r) }

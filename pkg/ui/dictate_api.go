@@ -39,7 +39,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -216,7 +215,7 @@ func (s *Server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
 	// Bound the body before parsing, for the same reason.
 	r.Body = http.MaxBytesReader(w, r.Body, maxDictationBytes)
 	if err := r.ParseMultipartForm(dictationMemoryBytes); err != nil {
-		respondToBodyError(w, err)
+		writeMultipartError(w, err)
 		return
 	}
 	defer func() {
@@ -434,9 +433,7 @@ func (s *Server) handleSTTSettingsSave(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		GroqAPIKey string `json:"groq_api_key"`
 	}
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondToBodyError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	key := strings.TrimSpace(req.GroqAPIKey)

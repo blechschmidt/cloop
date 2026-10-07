@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provideraudit"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -200,14 +201,16 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
 	var body struct {
 		Prompt       *string `json:"prompt"`
 		SystemPrompt *string `json:"system_prompt"`
 		Model        *string `json:"model"`
 	}
-	// Empty body is fine — replay verbatim.
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	// Empty body is fine — replay verbatim. A malformed one is refused rather
+	// than replayed verbatim: the caller asked for an edit it did not get.
+	if !jsonbody.Decode(w, r, &body, jsonbody.Options{Limit: s.effectiveMaxBodyBytes(), Optional: true}) {
+		return
+	}
 
 	replayPrompt := original.Prompt
 	if body.Prompt != nil {

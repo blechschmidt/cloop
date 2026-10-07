@@ -191,7 +191,8 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, m hubcluster.
 	}
 	// The member that answers names itself; this one only passed it on.
 	w.Header().Del(hubcluster.HeaderServedBy)
-	if err := n.Forward(w, r, m, clientIP(r)); err != nil {
+	v := s.clientView(r)
+	if err := n.ForwardAs(w, r, m, hubcluster.Client{IP: s.clientIP(r), Proto: v.Scheme, Host: v.Host}); err != nil {
 		s.log().Warn("cluster", 0, "forwarding to the owning hub member failed",
 			map[string]interface{}{"member": m.ID, "path": r.URL.Path, "error": err.Error()})
 	}

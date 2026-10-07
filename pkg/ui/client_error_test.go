@@ -81,6 +81,7 @@ func TestClientError_LogsStructuredEntry(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/client-error", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleClientError(w, req)
 
@@ -155,6 +156,7 @@ func TestClientError_TruncatesOversizeFields(t *testing.T) {
 	}
 	buf, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/client-error", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleClientError(w, req)
 
@@ -185,6 +187,7 @@ func TestClientError_RejectsInvalidJSON(t *testing.T) {
 
 	srv := New(t.TempDir(), 0, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleClientError(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -203,6 +206,7 @@ func TestClientError_DefaultMessage(t *testing.T) {
 	srv.Log = cap
 
 	req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader(`{"kind":"unhandledrejection"}`))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleClientError(w, req)
 

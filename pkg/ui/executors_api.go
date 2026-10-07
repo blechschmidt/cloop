@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -915,11 +914,9 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req enrollRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
 	// An empty body is legitimate: every field has a usable default, and
 	// "enroll a device with default settings" should not require a payload.
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !isEmptyBody(err) {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
 
@@ -976,7 +973,7 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 	// hub's certificate pin alongside the token, which is what lets the
 	// panel offer a one-command install (Task 20172) and what stops a device
 	// from trusting whichever server answers at that hostname.
-	serverURL := agentConnectURL(r)
+	serverURL := s.agentConnectURL(r)
 	pin := s.transportPin()
 	bundle, rec, err := remote.MintBundle(store, remote.MintOptions{
 		Name:        strings.TrimSpace(req.Name),
@@ -1019,8 +1016,8 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 		Notice: "This token is shown once and cannot be recovered — only its hash is stored. " +
 			"It is single-use and expires at the time above. If it leaks, revoke it from this panel.",
 	}
-	if requestIsTLS(r) {
-		resp.InstallCommand = installCommandFor(r, encoded)
+	if s.requestIsTLS(r) {
+		resp.InstallCommand = s.installCommandFor(r, encoded)
 	} else {
 		resp.InstallUnavailable = "The one-command installer is served only over HTTPS, because it is piped " +
 			"into a root shell on a device that does not yet know which control plane to trust. " +
@@ -1055,30 +1052,17 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 //
 // Deriving it from the request rather than from config is what makes the
 // pasted command correct behind a reverse proxy, which is where a hosted
-// deployment always lives. X-Forwarded-Proto is honoured for the same reason:
-// the TLS terminates at the proxy, so r.TLS is nil on a connection the browser
-// nonetheless made over HTTPS.
-func agentConnectURL(r *http.Request) string {
+// deployment always lives. The scheme and host are the ones a trusted proxy
+// reports in X-Forwarded-Proto and X-Forwarded-Host — loopback or
+// ui.trusted_proxies (Task 20394) — because the TLS terminates at the proxy,
+// so r.TLS is nil on a connection the browser nonetheless made over HTTPS.
+func (s *Server) agentConnectURL(r *http.Request) string {
+	v := s.clientView(r)
 	scheme := "ws"
-	if r.TLS != nil {
+	if v.TLS() {
 		scheme = "wss"
 	}
-	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
-		// Take the first entry: proxies chain this header.
-		if i := strings.Index(proto, ","); i >= 0 {
-			proto = strings.TrimSpace(proto[:i])
-		}
-		if strings.EqualFold(proto, "https") {
-			scheme = "wss"
-		}
-	}
-	host := r.Host
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		if i := strings.Index(fwd, ","); i >= 0 {
-			fwd = strings.TrimSpace(fwd[:i])
-		}
-		host = fwd
-	}
+	host := v.Host
 	if host == "" {
 		host = "YOUR-CONTROL-PLANE"
 	}
@@ -1287,12 +1271,7 @@ func (s *Server) executorSchedTarget(w http.ResponseWriter, r *http.Request) (*e
 // decodeExecutorBody decodes an all-optional JSON body, treating an empty one
 // as "use the defaults".
 func decodeExecutorBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil && !isEmptyBody(err) {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
-		return false
-	}
-	return true
+	return decodeOptionalJSON(w, r, dst)
 }
 
 // writeExecutorSchedErr maps a supervisor admin error onto a status code.
@@ -1483,9 +1462,7 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req bindExecutorRequest
-	limitJSONBody(w, r, maxJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !isEmptyBody(err) {
-		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
 	id := strings.TrimSpace(req.ExecutorID)
@@ -1634,13 +1611,6 @@ func refuseFeatureConfig(w http.ResponseWriter, e projectEntry, what string) boo
 	jsonErr(w, "a feature uses its project's "+what+" — change it on the project ("+
 		filepath.Base(e.Parent)+") instead", http.StatusConflict)
 	return true
-}
-
-// isEmptyBody reports whether a JSON decode failed because there was nothing
-// to decode, as opposed to because what was there was malformed. Handlers
-// whose fields are all optional treat the former as "use the defaults".
-func isEmptyBody(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // requireExecutorAdmin gates fleet-level mutations. With OIDC disabled the

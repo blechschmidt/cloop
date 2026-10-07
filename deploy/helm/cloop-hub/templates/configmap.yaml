@@ -200,9 +200,14 @@ data:
       # origin the hub is actually served from.
       allowed_ws_origins:
         - {{ .Values.config.externalURL | quote }}
+      # The Ingress controller's pods: X-Forwarded-* from anybody else is
+      # ignored (values.config.trustedProxies).
+      {{- with .Values.config.trustedProxies }}
+      trusted_proxies: {{ toJson . }}
+      {{- end }}
       # TLS terminates at the Ingress, so the hub speaks plain HTTP inside the
-      # cluster. The Ingress MUST set X-Forwarded-Proto: https — that header
-      # is what marks the session cookie Secure.
+      # cluster. The Ingress MUST set X-Forwarded-Proto: https, and is believed
+      # only from trustedProxies above.
       tls: {}
       max_websocket_conns: 256
       max_websocket_conns_per_ip: 16

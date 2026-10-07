@@ -34,6 +34,7 @@ func TestSessionCookieSameSiteFollowsSecure(t *testing.T) {
 	plain := httptest.NewRequest(http.MethodGet, "/", nil)
 
 	proxied := httptest.NewRequest(http.MethodGet, "/", nil)
+	proxied.RemoteAddr = "127.0.0.1:40000" // a proxy on this machine
 	proxied.Header.Set("X-Forwarded-Proto", "https")
 
 	direct := httptest.NewRequest(http.MethodGet, "/", nil)

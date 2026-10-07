@@ -24,6 +24,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -77,8 +78,7 @@ func (s *Server) handleGitHubAppInstallations(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var req connectGitHubAppRequest
-	limitJSONBody(w, r, githubAppKeyMaxBytes)
-	if !decodeSecretsBody(w, r, &req) {
+	if !jsonbody.Decode(w, r, &req, jsonbody.Options{Limit: githubAppKeyMaxBytes}) {
 		return
 	}
 	appID := strings.TrimSpace(req.AppID.String())
