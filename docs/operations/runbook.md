@@ -1801,6 +1801,15 @@ The finding names the cause when it can: *this build would listen on
 --listen*. A binary from before the loopback default binds every interface
 whatever its configuration says, so only stopping it, or the firewall, closes it.
 
+Then check what forwards to the port. A reverse proxy on the same host that
+passes requests to the hub without authenticating them — an nginx
+`proxy_pass http://127.0.0.1:8080` with no `auth_request` or `auth_basic` —
+publishes the hub whatever it binds and whatever the firewall drops on 8080,
+and the doctor cannot see it: ask through the proxy
+(`curl -so /dev/null -w '%{http_code}' https://<host>:<proxy-port>/api/projects`
+answering 200 is the same finding). Remove that server block, or put
+authentication in it, as well.
+
 #### A session was stolen
 
 Contain the session, then the credentials behind it. Order matters: revoking the
