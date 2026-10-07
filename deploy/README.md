@@ -342,7 +342,7 @@ the address:
 | Artifact | Listens | Sign-in | Without sign-in |
 | --- | --- | --- | --- |
 | Image (`Dockerfile` `CMD`) | `--listen 0.0.0.0` | `CLOOP_UI_TOKEN` or `ui.oidc` you provide | refuses to start, and says why |
-| Helm chart | `--listen 0.0.0.0` | `oidc.enabled` or `secrets.uiToken` (the chart refuses to render neither, with `secrets.create`) | the Pod refuses to start; an `existingSecret` must carry `CLOOP_UI_TOKEN` unless SSO is on |
+| Helm chart | `--listen 0.0.0.0` | `oidc.enabled` or `secrets.uiToken` (with `secrets.create`, the chart will not render without one of them) | the Pod refuses to start; an `existingSecret` must carry `CLOOP_UI_TOKEN` unless SSO is on |
 | Evaluation stack | `--listen 0.0.0.0` | SSO through dex | — |
 | `cloop hub bootstrap` | default (every interface) | `CLOOP_UI_TOKEN` in `hub.env`, SSO once enabled | — |
 
@@ -366,10 +366,10 @@ or a token whatever it binds.
 
 **Behind a TLS proxy on the same host** (bare metal with nginx, say), pin a hub
 that has sign-in to loopback too — `ui.listen: 127.0.0.1` — so the proxy is the
-only way in and nothing reaches the plaintext port directly. `cloop hub doctor`
-reports `ui.exposure` as a warning until you do, and as a failure for any hub
-without sign-in that it finds reachable beyond loopback, whichever build is
-serving it.
+only way in and nothing reaches the plaintext port directly. While the hub's
+public URL (`ui.external_url`) is https, `cloop hub doctor` reports
+`ui.exposure` as a warning until you do — and as a failure for any hub without
+sign-in that it finds reachable beyond loopback, whichever build is serving it.
 
 ---
 

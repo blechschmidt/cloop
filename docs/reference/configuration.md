@@ -1886,8 +1886,8 @@ ui:
   0.0.0.0`; a container hub without sign-in refuses that and exits. See
   [Deploying the cloop hub](../../deploy/README.md#listening-on-the-network).
 - **Hub-cluster members** reach each other at their advertise URLs, which
-  default to `http(s)://127.0.0.1:<port>` for a hub on loopback or every
-  interface, and to the bound address for a hub on one interface.
+  default to the address the member is bound to, or to
+  `http(s)://127.0.0.1:<port>` for a member on every interface.
 
 `cloop hub doctor --port N` reports `ui.exposure`. It reads where the process on
 port `N` actually listens from the kernel's socket table, and asks it for
