@@ -626,6 +626,39 @@ func (d *DB) ExecutorSessionChain(id string) ([]ExecutorSessionRow, error) {
 	return chain, nil
 }
 
+// ExecutorSessionForHandle returns the session recorded for the workload
+// handleID on executorID, the most recent one if several name it, and whether
+// there is one (Task 20396).
+//
+// It is how the hub learns, from a run it follows — which it knows by its
+// executor and handle, not by its session — whether the failover claim has
+// taken that run off its executor. Read from the table rather than told by
+// the supervisor because the supervisor that claims a session is often in
+// another process: another hub member, or this hub before a restart.
+//
+// The executor_id half of idx_executor_sessions_executor_state narrows the
+// scan to one executor's sessions.
+func (d *DB) ExecutorSessionForHandle(executorID, handleID string) (ExecutorSessionRow, bool, error) {
+	if strings.TrimSpace(executorID) == "" || strings.TrimSpace(handleID) == "" {
+		return ExecutorSessionRow{}, false, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	row := d.conn.QueryRow(
+		`SELECT `+executorSessionColumns+`
+		 FROM executor_sessions WHERE executor_id = ? AND handle_id = ?
+		 ORDER BY started_at DESC, id DESC LIMIT 1`, executorID, handleID)
+	out, err := scanExecutorSessionRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ExecutorSessionRow{}, false, nil
+	}
+	if err != nil {
+		return ExecutorSessionRow{}, false, fmt.Errorf("statedb: find the session of handle %q on %q: %w",
+			handleID, executorID, classifyDriverErr(err))
+	}
+	return out, true, nil
+}
+
 // ExecutorSessionSuccessor returns the session a failover opened to replace
 // id, if there is one.
 func (d *DB) ExecutorSessionSuccessor(id string) (string, bool, error) {

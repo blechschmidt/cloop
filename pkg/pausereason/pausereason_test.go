@@ -150,7 +150,7 @@ func TestCodesOrder(t *testing.T) {
 		"usage_cap", "budget", "token_budget", "step_limit",
 		"approval", "abort", "cancelled", "plan_only",
 		"idle", "operator", "stale", "state_not_persisted",
-		"uncommitted_work", "disk_low",
+		"uncommitted_work", "disk_low", "executor_lost",
 	}
 	got := Codes()
 	if len(got) != len(want) {
@@ -173,6 +173,22 @@ func TestDiskLowLabel(t *testing.T) {
 	r.Detail = "/ has 812 MB free, below the 1.0 GB floor"
 	if got := r.Summary(time.UTC); got != r.Detail {
 		t.Errorf("Summary() = %q, want the detail %q", got, r.Detail)
+	}
+}
+
+// TestExecutorLostIsNotAutoResumable: a run whose executor was lost waits for
+// a human — the executor coming back, or the project moving to another — and
+// is not a live run's claim either: nothing is executing it any more.
+func TestExecutorLostIsNotAutoResumable(t *testing.T) {
+	r := New(CodeExecutorLost, "executor edge-1 stopped answering and no executor could take its run")
+	if r.AutoResumable(time.Now().Add(24 * time.Hour)) {
+		t.Error("an executor_lost pause resumes on its own")
+	}
+	if r.RunWaits() {
+		t.Error("an executor_lost pause claims a waiting run")
+	}
+	if got := (&Reason{Code: CodeExecutorLost}).Label(); got != "executor lost" {
+		t.Errorf("Label() = %q, want %q", got, "executor lost")
 	}
 }
 

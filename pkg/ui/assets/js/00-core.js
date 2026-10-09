@@ -934,6 +934,7 @@ const pauseReasonLabels = {
   state_not_persisted: 'progress not saved',
   uncommitted_work: 'work left uncommitted',
   disk_low: 'disk space low',
+  executor_lost: 'executor lost',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

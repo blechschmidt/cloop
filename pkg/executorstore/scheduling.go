@@ -373,6 +373,75 @@ func (s *Scheduler) SessionState(sessionID string) (state string, replaced bool,
 	return row.State, replaced, nil
 }
 
+// HandleLoss is what the session store says about one dispatched workload,
+// looked up by its executor and handle (Task 20396): whether the failover
+// claim took it off its executor, and what replaced it.
+//
+// It exists because the hub follows a run by its executor and handle, while
+// the supervisor that decides the run's fate claims it by session — and is
+// often in another process. The store is where the two meet.
+type HandleLoss struct {
+	// SessionID is the session the workload ran as, "" when none is recorded
+	// (session tracking is best-effort: a dispatch whose row could not be
+	// written runs untracked, and is never failed over).
+	SessionID string
+	// State is the session's recorded state.
+	State string
+	// Attempt is the session's dispatch count, 1 for a first dispatch.
+	Attempt int
+	// ClaimedAt is when the claim took the session, for a claimed one: the
+	// time its state last changed.
+	ClaimedAt time.Time
+	// Successor is the session a failover opened to replace this one, and
+	// SuccessorExecutor and SuccessorHandle where it runs; all "" when none.
+	Successor         string
+	SuccessorExecutor string
+	SuccessorHandle   string
+}
+
+// Claimed reports whether the failover claim took the session off its
+// executor: requeued (re-dispatched, or with nowhere to go) or
+// failover_exhausted. A claimed session's workload is no longer the run of its
+// project, whatever its driver still says about it.
+func (l HandleLoss) Claimed() bool {
+	return l.State == statedb.ExecutorSessionRequeued || l.State == statedb.ExecutorSessionFailoverExhausted
+}
+
+// Replaced reports whether a failover started a replacement for it.
+func (l HandleLoss) Replaced() bool { return l.Successor != "" }
+
+// Exhausted reports whether the claim closed it past the failover cap.
+func (l HandleLoss) Exhausted() bool { return l.State == statedb.ExecutorSessionFailoverExhausted }
+
+// LossOfHandle reads what the store recorded about the workload handleID on
+// executorID. A workload with no session yields the zero HandleLoss and a nil
+// error: "never tracked" is a normal answer, not a failed lookup.
+func (s *Scheduler) LossOfHandle(executorID, handleID string) (HandleLoss, error) {
+	row, found, err := s.db.ExecutorSessionForHandle(executorID, handleID)
+	if err != nil {
+		return HandleLoss{}, fmt.Errorf("executorstore: %w", err)
+	}
+	if !found {
+		return HandleLoss{}, nil
+	}
+	out := HandleLoss{SessionID: row.ID, State: row.State, Attempt: row.Attempt}
+	if !out.Claimed() {
+		return out, nil
+	}
+	out.ClaimedAt = row.UpdatedAt
+	next, ok, err := s.db.ExecutorSessionSuccessor(row.ID)
+	if err != nil {
+		return HandleLoss{}, fmt.Errorf("executorstore: %w", err)
+	}
+	if ok {
+		out.Successor = next
+		if succ, err := s.db.GetExecutorSession(next); err == nil {
+			out.SuccessorExecutor, out.SuccessorHandle = succ.ExecutorID, succ.HandleID
+		}
+	}
+	return out, nil
+}
+
 // CloseSession marks a session finished or failed.
 func (s *Scheduler) CloseSession(sessionID, state string, at time.Time) error {
 	switch state {

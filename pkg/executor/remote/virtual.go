@@ -178,6 +178,12 @@ func (v *Virtual) Signal(ctx context.Context, handleID string, sig executor.Sign
 	return v.parent.Signal(ctx, handleID, sig)
 }
 
+// Abandon implements executor.Abandoner: the workload runs on the device, so
+// the device's driver gives it up.
+func (v *Virtual) Abandon(ctx context.Context, handleID, reason string) error {
+	return v.parent.Abandon(ctx, handleID, reason)
+}
+
 // Status implements executor.Executor.
 func (v *Virtual) Status(ctx context.Context, handleID string) (executor.Status, error) {
 	st, err := v.parent.Status(ctx, handleID)
@@ -384,4 +390,5 @@ var (
 	_ executor.BuildReporter             = (*Virtual)(nil)
 	_ executor.Revoker                   = (*Virtual)(nil)
 	_ executor.EgressScopeExplainer      = (*Virtual)(nil)
+	_ executor.Abandoner                 = (*Virtual)(nil)
 )

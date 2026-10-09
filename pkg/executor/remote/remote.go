@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,12 @@ type handleState struct {
 	// heldWorkspace names the parked credential, for the run's owner row
 	// (Task 20390). Set and cleared with releaseWorkspace.
 	heldWorkspace executor.HeldWorkspaceCredential
+	// abandoned marks a workload the control plane gave up after failing its
+	// session over to another executor (Task 20396), and abandonReason says
+	// why. An abandoned handle is terminal here, and a resume offer for it is
+	// answered with "terminate" — see Abandon.
+	abandoned     bool
+	abandonReason string
 }
 
 // takeWorkspaceRelease returns the parked workspace release, at most once.
@@ -1030,6 +1037,70 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 	return nil
 }
 
+// maxAbandonReason bounds the reason an abandoned handle carries: it is
+// repeated in a resume frame for every such handle the device offers back.
+const maxAbandonReason = 256
+
+// Abandon implements executor.Abandoner (Task 20396): the control plane failed
+// handleID's session over to another executor, so the workload is no longer
+// its project's run.
+//
+// Three things, in this order. The workload is killed if the agent can still
+// hear — after a failover it usually cannot, a device is failed over because
+// it stopped answering. The handle becomes terminal here, with reason in its
+// status, which closes its output stream: every watcher on the hub lets go of
+// it, the run's credential lease with them, and its durable row is forgotten
+// so a restarted hub does not rehydrate it. And it stays known as abandoned,
+// so a device that comes back offering to resume it is told to terminate it
+// (reconcileResume) rather than to carry on beside its replacement.
+//
+// A signal that could not be delivered is returned, but the handle is
+// abandoned all the same: the kill is the part a device out of reach can
+// miss, the refusal on its return is the part that holds.
+func (e *Executor) Abandon(ctx context.Context, handleID, reason string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hs, err := e.lookup(handleID)
+	if err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "the control plane failed this workload over to another executor"
+	}
+	if len(reason) > maxAbandonReason {
+		reason = reason[:maxAbandonReason]
+	}
+	hs.mu.Lock()
+	already := hs.abandoned
+	if !already {
+		// The first word stands: it is the one the device will be told.
+		hs.abandoned = true
+		hs.abandonReason = reason
+	}
+	hs.mu.Unlock()
+	if already {
+		return nil
+	}
+	var signalErr error
+	if !hs.snapshotStatus().State.Terminal() && e.currentSession() != nil {
+		signalErr = e.Signal(ctx, handleID, executor.SignalKill)
+	}
+	st := hs.snapshotStatus()
+	e.applyStatus(handleID, StatusPayload{Status: executor.Status{
+		HandleID:   handleID,
+		ExecutorID: e.id,
+		State:      executor.StateFailed,
+		StartedAt:  st.StartedAt,
+		FinishedAt: e.opts.now(),
+		Error:      "abandoned by the control plane: " + reason,
+	}})
+	return signalErr
+}
+
+var _ executor.Abandoner = (*Executor)(nil)
+
 // Status implements executor.Executor.
 //
 // When the agent is unreachable this returns the last known status with State
@@ -1304,7 +1375,25 @@ func (e *Executor) reconcileResume(offers []ResumeHandle, version int) []ResumeA
 		}
 		hs.mu.Lock()
 		from := hs.receivedOffset
+		abandoned, why := hs.abandoned, hs.abandonReason
 		hs.mu.Unlock()
+		if abandoned {
+			// The control plane failed this workload's session over while the
+			// device was out of reach (Task 20396): its tasks went back to the
+			// plan, and a replacement may be running them on another executor.
+			// Resumed, it would be a second harness on the same work. Not
+			// counted against maxResumeRefusals — that bound is for handles
+			// the peer invents, and an abandoned handle is one this hub
+			// tracks, so there are at most maxRetainedHandles of them.
+			if canTerminate {
+				acks = append(acks, ResumeAck{
+					HandleID: offer.HandleID,
+					Action:   ResumeTerminate,
+					Reason:   why,
+				})
+			}
+			continue
+		}
 		// Action is set explicitly even though it is the default, so the frame
 		// says what it means rather than relying on a reader inferring consent
 		// from an absent field. An older agent ignores it and behaves as before.

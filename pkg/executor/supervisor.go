@@ -277,6 +277,10 @@ type Supervisor struct {
 	// the registry's own executors with their persisted health.
 	candidates func() []Candidate
 
+	// candidateFilter, when set, removes executors from the placement pool.
+	// See WithCandidateFilter.
+	candidateFilter func(Executor) bool
+
 	// probeFilter, when set, decides which executors this supervisor probes
 	// at all. See WithProbeFilter.
 	probeFilter func(Executor) bool
@@ -344,6 +348,15 @@ func WithProbeFilter(fn func(Executor) bool) SupervisorOption {
 // WithCandidateSource overrides how the failover placement pool is assembled.
 func WithCandidateSource(fn func() []Candidate) SupervisorOption {
 	return func(sv *Supervisor) { sv.candidates = fn }
+}
+
+// WithCandidateFilter keeps only the executors fn accepts in the failover
+// placement pool, whichever source assembled it (Task 20396). The control
+// plane uses it for what this package cannot see: an executor restricted to
+// an access list is no place for a run the supervisor moves on nobody's
+// behalf.
+func WithCandidateFilter(fn func(Executor) bool) SupervisorOption {
+	return func(sv *Supervisor) { sv.candidateFilter = fn }
 }
 
 // WithFailoverLimit supplies the failover cap — executors.failover.max_attempts
@@ -739,6 +752,9 @@ func (sv *Supervisor) placeReplacement(deadID string, sess Session) (Candidate, 
 		if c.ID() == deadID {
 			continue
 		}
+		if sv.candidateFilter != nil && c.Executor != nil && !sv.candidateFilter(c.Executor) {
+			continue
+		}
 		filtered = append(filtered, c)
 	}
 	return Select(filtered, sv.requirementsFor(sess))
@@ -747,12 +763,25 @@ func (sv *Supervisor) placeReplacement(deadID string, sess Session) (Candidate, 
 // requirementsFor derives placement requirements for a requeued session.
 //
 // A requeue inherits only the constraints the control plane can prove: the
-// isolation posture demanded by policy. It deliberately does not inherit the
-// dead node's labels — "it ran on edge-1, so put it on something exactly like
-// edge-1" would make a single-device fleet unable to fail over at all, which is
-// the opposite of the point.
-func (sv *Supervisor) requirementsFor(Session) Requirements {
-	return Requirements{RequireIsolation: !HostExecutionAllowed()}
+// isolation posture demanded by policy, and the isolation the run already had.
+// It deliberately does not inherit the dead node's labels — "it ran on edge-1,
+// so put it on something exactly like edge-1" would make a single-device fleet
+// unable to fail over at all, which is the opposite of the point.
+//
+// The second rule is Task 20396's. A run bound to a device, a container or a
+// VM was placed there to keep it off the control-plane host, and a failover is
+// not anyone's decision to change that: without the rule a host driver with no
+// concurrency limit outranked every device on free slots, and once a
+// replacement became a real dispatch it would have run on the hub as a host
+// process, the hub's environment and filesystem in reach. A dead executor this
+// supervisor cannot identify any more is treated as isolating — the loud
+// reading, as everywhere isolation is in doubt.
+func (sv *Supervisor) requirementsFor(sess Session) Requirements {
+	req := Requirements{RequireIsolation: !HostExecutionAllowed()}
+	if dead, err := sv.registry.Get(sess.ExecutorID); err != nil || IsolatesFromHost(dead) {
+		req.RequireIsolation = true
+	}
+	return req
 }
 
 // candidatePool assembles the placement pool, defaulting to the registry with

@@ -22,7 +22,7 @@ type capFixture struct {
 	mu         sync.Mutex
 }
 
-func (f *capFixture) supervisor(t *testing.T, limit func() int) *Supervisor {
+func (f *capFixture) supervisor(t *testing.T, limit func() int, extra ...SupervisorOption) *Supervisor {
 	t.Helper()
 	dead := newCapExec("edge-dead", fullCaps(func(c *Capabilities) { c.Isolation = IsolationRemote }))
 	dead.failWith(errors.New("connection refused"))
@@ -60,6 +60,7 @@ func (f *capFixture) supervisor(t *testing.T, limit func() int) *Supervisor {
 	if limit != nil {
 		opts = append(opts, WithFailoverLimit(limit))
 	}
+	opts = append(opts, extra...)
 	return NewSupervisor(reg, cfg, opts...)
 }
 
@@ -299,5 +300,98 @@ func TestRacingSupervisorsWithDifferentCapsRecordOneDecision(t *testing.T) {
 	f.store.mu.Unlock()
 	if len(caps) != 1 || caps[0] != ev.MaxAttempts {
 		t.Fatalf("granted claims were decided under caps %v, want exactly the winner's %d", caps, ev.MaxAttempts)
+	}
+}
+
+// TestCandidateFilterKeepsAnExecutorOutOfPlacement (Task 20396): the control
+// plane can rule an executor out as a failover target — one restricted to an
+// access list, which nobody can be checked against when the supervisor moves
+// a run. A filtered spare is no candidate, so the session has nowhere to go
+// and the failover reports it, rather than landing it there.
+func TestCandidateFilterKeepsAnExecutorOutOfPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		allow  bool
+		wantTo string
+	}{
+		{"the spare is allowed", true, "edge-spare"},
+		{"the spare is filtered out", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCapFixture(1, 1)
+			var asked []string
+			sv := f.supervisor(t, func() int { return 2 }, WithCandidateFilter(func(ex Executor) bool {
+				asked = append(asked, ex.ID())
+				return tc.allow || ex.ID() != "edge-spare"
+			}))
+			sv.ProbeOnce(context.Background())
+			evs := f.events()
+			if len(evs) != 1 {
+				t.Fatalf("handler ran %d times, want once", len(evs))
+			}
+			ev := evs[0]
+			if ev.To != tc.wantTo {
+				t.Fatalf("placed on %q, want %q", ev.To, tc.wantTo)
+			}
+			if tc.wantTo == "" && ev.Err == nil {
+				t.Error("a session with every candidate filtered out reports no error")
+			}
+			for _, id := range asked {
+				if id == "edge-dead" {
+					t.Error("the filter was asked about the node that just died; it is never a candidate")
+				}
+			}
+		})
+	}
+}
+
+// TestFailoverNeverBringsAnIsolatedRunOntoTheHost (Task 20396): a run that was
+// isolated from the control-plane host stays off it. The dead node is a
+// device; the only other executor is the hub's own host driver, which no
+// concurrency limit ranks above anything — the session has nowhere to go
+// rather than being moved onto the hub.
+func TestFailoverNeverBringsAnIsolatedRunOntoTheHost(t *testing.T) {
+	f := newCapFixture(1, 1)
+	dead := newCapExec("edge-dead", fullCaps(func(c *Capabilities) { c.Isolation = IsolationRemote }))
+	dead.failWith(errors.New("connection refused"))
+	host := newCapExec("hub-host", fullCaps(func(c *Capabilities) {
+		c.Isolation = IsolationNone
+		c.MaxConcurrent = 0
+	}))
+	reg := NewRegistry()
+	for _, ex := range []*capExec{dead, host} {
+		if err := reg.Register(ex); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := probeTestConfig()
+	cfg.Policy = HealthPolicy{DegradeAfter: 1, UnreachableAfter: 1}
+	sv := NewSupervisor(reg, cfg,
+		WithClock(newFakeClock()),
+		WithHealthStore(newMemHealthStore()),
+		WithSessionStore(f.store),
+		WithEventSink(f.sink),
+		WithFailoverLimit(func() int { return 2 }),
+		WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
+			f.mu.Lock()
+			f.handled = append(f.handled, ev)
+			f.mu.Unlock()
+			return nil
+		}),
+	)
+	if !HostExecutionAllowed() {
+		t.Skip("host execution is denied process-wide; the policy alone would refuse the host")
+	}
+	sv.ProbeOnce(context.Background())
+	evs := f.events()
+	if len(evs) != 1 {
+		t.Fatalf("handler ran %d times, want once", len(evs))
+	}
+	if evs[0].To != "" {
+		t.Fatalf("a run isolated on a device was failed over onto %q, the hub's own host", evs[0].To)
+	}
+	var pe *PlacementError
+	if !errors.As(evs[0].Err, &pe) || pe.Constraint != ConstraintIsolation {
+		t.Errorf("the failover reports %v, want the isolation constraint named", evs[0].Err)
 	}
 }

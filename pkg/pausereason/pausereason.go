@@ -83,6 +83,15 @@ const (
 	// checks again every minute, and carries on once the volume is back above
 	// the floor plus a tenth — see RunWaits.
 	CodeDiskLow Code = "disk_low"
+	// CodeExecutorLost is a run whose executor stopped answering mid-run and
+	// that nothing carried on (Task 20396): the supervisor declared the node
+	// lost and claimed its session, and either no executor could take the run,
+	// executors.failover.max_attempts allowed no further re-dispatch, a task it
+	// was running was quarantined as a suspected node killer, or the
+	// replacement could not be started. The detail names the lost executor and
+	// why the run stopped there. A human decides: bring the executor back or
+	// bind the project to another, then press Run.
+	CodeExecutorLost Code = "executor_lost"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -110,6 +119,7 @@ var codeLabels = map[Code]string{
 	CodeStateNotPersisted: "run progress could not be saved",
 	CodeUncommittedWork:   "work left uncommitted",
 	CodeDiskLow:           "disk space low",
+	CodeExecutorLost:      "executor lost",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -127,7 +137,7 @@ func Codes() []Code {
 		CodeUsageCap, CodeBudget, CodeTokenBudget, CodeStepLimit,
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
-		CodeUncommittedWork, CodeDiskLow,
+		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost,
 	}
 }
 

@@ -373,3 +373,37 @@ func TestFailoverCapMigrationIsAdditive(t *testing.T) {
 	}
 	t.Fatal("no failover_cap migration is embedded")
 }
+
+// TestExecutorSessionForHandleFindsTheWorkloadsSession: the hub follows a run
+// by its executor and handle, and learns from the session recorded for that
+// pair whether a failover claim took it (Task 20396). The most recent session
+// wins when a handle was recorded twice; another executor's handle of the
+// same name is not it; an unknown or blank one is "none", not an error.
+func TestExecutorSessionForHandleFindsTheWorkloadsSession(t *testing.T) {
+	db := openTestDB(t)
+	start := time.Now().Add(-time.Hour)
+	for i, row := range []ExecutorSessionRow{
+		{ID: "old", ExecutorID: "edge-1", HandleID: "h1", ClaimToken: "t-old", StartedAt: start},
+		{ID: "new", ExecutorID: "edge-1", HandleID: "h1", ClaimToken: "t-new", StartedAt: start.Add(time.Minute)},
+		{ID: "elsewhere", ExecutorID: "edge-2", HandleID: "h1", ClaimToken: "t-else", StartedAt: start.Add(2 * time.Minute)},
+	} {
+		if err := db.OpenExecutorSession(row); err != nil {
+			t.Fatalf("OpenExecutorSession #%d: %v", i, err)
+		}
+	}
+	got, ok, err := db.ExecutorSessionForHandle("edge-1", "h1")
+	if err != nil || !ok || got.ID != "new" {
+		t.Fatalf("ExecutorSessionForHandle(edge-1, h1) = %q, %v, %v; want the most recent session, new", got.ID, ok, err)
+	}
+	if _, err := db.ClaimExecutorSessionRequeue("new", "t-new", "t-next", 2, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := db.ExecutorSessionForHandle("edge-1", "h1"); got.State != ExecutorSessionRequeued {
+		t.Fatalf("after the claim the handle's session is %q, want requeued", got.State)
+	}
+	for _, c := range [][2]string{{"edge-1", "h2"}, {"edge-3", "h1"}, {"", "h1"}, {"edge-1", ""}} {
+		if got, ok, err := db.ExecutorSessionForHandle(c[0], c[1]); err != nil || ok {
+			t.Errorf("ExecutorSessionForHandle(%q, %q) = %q, %v, %v; want none", c[0], c[1], got.ID, ok, err)
+		}
+	}
+}
