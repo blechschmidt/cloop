@@ -105,6 +105,9 @@ func startExecutorSupervisor(dir string) {
 		// One process speaks for each executor (Task 20354). Nil — probe
 		// everything — for a standalone hub.
 		executor.WithProbeFilter(clusterProbeFilter(currentCluster())),
+		// A run is never moved onto an executor restricted to an access list
+		// (Task 20396): nobody who could be checked against it is there.
+		executor.WithCandidateFilter(failoverPlaceable),
 	)
 	stop := sv.Start(context.Background())
 
@@ -347,18 +350,31 @@ func watchSessionExit(dir string, ex executor.Executor, handleID, sessionID stri
 //
 // It runs for every claimed session (Task 20391): one with a replacement, one
 // with nowhere to go, and one the claim found exhausted. All three have tasks
-// to settle — see settleFailover — and only the first is started again.
+// to settle — see settleFailover. A placed one is started again as the
+// project's run (failover_runs.go, Task 20396); every other one — and one
+// whose replacement could not start — ends with its executor, and the project
+// is settled paused with an executor_lost reason rather than left "running".
 func failoverHandler(dir string) executor.FailoverHandler {
 	return func(ctx context.Context, ev executor.FailoverEvent) error {
+		// Before settling, which may hand the project to nobody: the server
+		// following the stranded run is found by that run.
+		s := failoverServer(dir, ev.From, ev.Session.HandleID, executorstore.FailoverProjectPath(ev.Session))
 		// Settle first, dispatch second. If the re-dispatch fails, the tasks
 		// are still visibly pending and a human can press Run; if the order
 		// were reversed and settling failed, a run would be in flight against
 		// tasks the UI still shows as in progress on a dead node.
-		settleFailover(dir, ev)
-		if ev.Exhausted || ev.To == "" {
+		out := settleFailover(dir, ev)
+		cause := failoverStopCause(ev, out)
+		if cause == nil {
+			if cause = redispatchSession(ctx, dir, ev, s); cause == nil {
+				return nil
+			}
+		}
+		settleLostRun(s, dir, ev, out, cause)
+		if ev.Err != nil {
 			return ev.Err
 		}
-		return redispatchSession(ctx, dir, ev)
+		return cause
 	}
 }
 
@@ -395,9 +411,11 @@ func requireRequeued(dir, sessionID string) error {
 	return nil
 }
 
-// redispatchSession starts the stranded workload on the replacement node and
-// records the new session, linked to the one it replaces.
-func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent) error {
+// redispatchSession starts the stranded workload's run again on the
+// replacement node, as the project's run, on the hub member able to start it:
+// this one, or — for an edge agent connected to another member — that one
+// (Task 20354). s is this process's hub; the run is followed there.
+func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent, s *Server) error {
 	if ev.To == "" {
 		return fmt.Errorf("failover: no replacement executor for session %s", ev.Session.ID)
 	}
@@ -412,90 +430,16 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 		return err
 	}
 	// A replacement that is an edge agent connected to another hub member
-	// can only be started there (Task 20354).
+	// can only be started there (Task 20354), and is followed there.
 	if routed, err := redispatchOnAgentOwner(ctx, ev); routed {
 		return err
 	}
-	spec := ev.Session.Spec
-	if err := spec.Validate(); err != nil {
-		// A session with no recorded spec cannot be re-dispatched. Say so
-		// plainly: the tasks are already back to pending, so the run is
-		// recoverable by hand, and pretending otherwise would hide it.
-		return fmt.Errorf("failover: session %s has no re-dispatchable spec: %w", ev.Session.ID, err)
-	}
-	target, err := executor.Get(ev.To)
-	if err != nil {
-		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
-	}
-
-	// Failover must not launder a credential onto a backend that cannot give
-	// it back. The spec being re-dispatched is the one the original run
-	// carried, bindings and all, so a replacement chosen for liveness alone
-	// could otherwise be the exact placement RequireRevocable exists to refuse.
-	if err := executor.RequireRevocable(target, spec); err != nil {
-		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
-	}
-
-	// And re-apply the resource ceilings, for the same reason and against a
-	// sharper version of the same risk. This spec was persisted at its original
-	// dispatch, so its limits are the ones that were in force *then*: an
-	// operator who has since tightened a ceiling would watch a failover put the
-	// workload back at the old allowance, and a session created before ceilings
-	// existed at all carries whatever its .cloop/sandbox.yaml asked for. A
-	// stranded run is exactly when a cap matters most — the node it stranded on
-	// may have died of the load.
-	spec, clamps := applyResourceCeiling(spec, spec.WorkDir, target)
-	logResourceClamps(spec.WorkDir, clamps)
-	logUnenforceableCeiling(target, spec.WorkDir, clamps)
-
-	// And the firewall levels, composed again for the replacement (Task
-	// 20363). The spec's rules were composed for the executor it stranded on,
-	// under that device's rule set; the replacement may be another device with
-	// rules of its own, and its driver refuses a spec that does not carry them.
-	spec.EgressRules, spec.EgressBound = nil, nil
-	spec, err = applyFirewall(spec, target, spec.WorkDir)
-	if err != nil {
-		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
-	}
-
-	// Detached from ctx: ctx belongs to the probe round that noticed the
-	// failure, and the replacement run must outlive it exactly as the
-	// original outlived the HTTP request that started it.
-	handle, err := target.Start(context.WithoutCancel(ctx), spec)
-	if err != nil {
-		return fmt.Errorf("failover: start on %s: %w", ev.To, err)
-	}
-
-	sched, db, err := newScheduler(dir)
-	if err != nil {
-		// The workload is running; we just cannot track it. Report rather
-		// than kill it — the user's task is making progress either way.
-		return fmt.Errorf("failover: started on %s but could not record session: %w", ev.To, err)
-	}
-	defer db.Close()
-
-	sessionID, err := executorstore.NewSessionID()
-	if err != nil {
-		return fmt.Errorf("failover: mint session ID: %w", err)
-	}
-	token, err := executorstore.NewClaimToken()
-	if err != nil {
-		return fmt.Errorf("failover: mint claim token: %w", err)
-	}
-	next := executor.Session{
-		ID:          sessionID,
-		ExecutorID:  target.ID(),
-		HandleID:    handle.ID,
-		ProjectPath: spec.WorkDir,
-		TaskID:      ev.Session.TaskID,
-		ClaimToken:  token,
-		Attempt:     ev.Session.Attempt + 1,
-		StartedAt:   handle.StartedAt,
-		Spec:        spec,
-	}
-	if err := sched.OpenRequeuedSession(next, ev.Session.ID); err != nil {
-		return fmt.Errorf("failover: record replacement session: %w", err)
-	}
-	go watchSessionExit(dir, target, handle.ID, sessionID)
-	return nil
+	// Everything a run started by a person passes — the harness credential,
+	// a fresh lease, the sandbox, the firewall levels composed for the
+	// replacement, the resource ceilings as they stand now, the revocation
+	// guarantee — through the one dispatch path, pinned to the executor the
+	// failover placed it on. Before Task 20396 this replayed the stored spec,
+	// which lacks the leased credentials and the project seed by design, so
+	// a replacement on an isolating executor started without either.
+	return s.startReplacement(ctx, dir, ev)
 }

@@ -42,6 +42,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
+	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -425,6 +426,19 @@ func (s *Server) verifyRunOwnership() {
 		if err != nil || !found || o.Self {
 			continue
 		}
+		// A run taken off its executor by a failover is not handed over:
+		// its replacement holds the row now, and the stranded run's leases
+		// are closed rather than passed on to a run that has its own
+		// (Task 20396).
+		if run, ok := s.trackedRun(workDir); ok && run.ex != nil {
+			if loss, ok := lossOfHandle(controlPlaneDir(), run.ex.ID(), run.handleID); ok && loss.Claimed() {
+				s.retireLostRun(workDir, run.ex.ID(), run.handleID, runVerdict{
+					Detail: fmt.Sprintf("its executor %s stopped answering; the run failed over", run.ex.ID()),
+					Lost:   true,
+				}, false)
+				continue
+			}
+		}
 		s.detachRun(workDir)
 	}
 }
@@ -514,6 +528,14 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		// the project once the grace runs out.
 		return
 	}
+	// A run whose session a failover claim took is no run to resume (Task
+	// 20396): its tasks went back to the plan, and a replacement may be
+	// running them. Resuming it here is how a dead device's project used to
+	// come back "running" with every adoption sweep.
+	if loss, ok := lossOfHandle(controlPlaneDir(), meta.Executor, meta.Handle); ok && loss.Claimed() {
+		s.settleOrphanedLostRun(o, meta, loss)
+		return
+	}
 	ok, err := n.Adopt(o, meta)
 	if err != nil || !ok {
 		return
@@ -580,6 +602,39 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	s.restoreRunEgress(workDir, ex, meta.Handle, meta.Egress)
 	go watchAdoptedSessions(ex, meta.Handle)
 	s.resumeRun(workDir, ex, meta.Handle)
+}
+
+// settleOrphanedLostRun deals with an orphaned owner row whose run a failover
+// claimed: nothing is adopted. A replacement owns its own row, so a row still
+// naming the stranded run is stale and goes; with no replacement, the project
+// is settled here, once nothing more is expected — exhausted, or past the
+// window a replacement takes to start.
+func (s *Server) settleOrphanedLostRun(o hubcluster.Owner, meta runOwnerMeta, loss executorstore.HandleLoss) {
+	n := s.clusterNode()
+	workDir := o.Key
+	switch classifyLoss(loss, time.Now()) {
+	case runReplacementPending:
+		return // look again on the next sweep
+	case runReplaced:
+		if ok, _ := n.Drop(o); ok {
+			s.log().Info("cluster", 0, "cleared the owner row of a run that was failed over",
+				map[string]interface{}{"project": workDir, "member": o.InstanceID})
+		}
+		return
+	}
+	if ok, _ := n.Drop(o); !ok {
+		return // another member got there first
+	}
+	detail := fmt.Sprintf("executor %s stopped answering and nothing replaced the run", meta.Executor)
+	if loss.Exhausted() {
+		detail = exhaustedDetail(meta.Executor, max(loss.Attempt-1, 0))
+	}
+	s.retireRunLeases(meta.Leases, "its run's executor was lost")
+	if meta.Workspace != nil {
+		s.retireRunLeases([]string{meta.Workspace.Lease}, "its run's executor was lost")
+	}
+	retireRunEgressRecords(meta.Egress, "its run's executor was lost")
+	s.reconcileDeadRun(workDir, runVerdict{Detail: detail, Lost: true})
 }
 
 // resumeRun starts streaming and settling a run this member did not dispatch.

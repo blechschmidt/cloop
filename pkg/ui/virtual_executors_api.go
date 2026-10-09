@@ -389,6 +389,7 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 		for _, p := range bound {
 			executor.DefaultRegistry.Unbind(p)
 		}
+		s.publishBindingChange(bound...)
 		s.auditExecutorAction(r, "virtual", id, map[string]any{
 			"action":    "delete",
 			"parent_id": cur.ParentID,
@@ -503,6 +504,7 @@ func (s *Server) deleteVirtualExecutorsOf(r *http.Request, db *statedb.DB, paren
 		for _, p := range bindings[v.ID] {
 			executor.DefaultRegistry.Unbind(p)
 		}
+		s.publishBindingChange(bindings[v.ID]...)
 		s.auditExecutorAction(r, "virtual", v.ID, map[string]any{
 			"action":    "delete",
 			"parent_id": parentID,

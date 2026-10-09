@@ -259,12 +259,15 @@ func (s *Server) applyProjectAccess(r *http.Request, bs *brokerSet, projectPath 
 				}
 			}
 			executor.DefaultRegistry.Unbind(projectPath)
+			s.publishBindingChange(projectPath)
 		})
 		// Mirror into the in-memory registry so the first run honours it
-		// without waiting for the persistent lookup's next read.
+		// without waiting for the persistent lookup's next read, and drop any
+		// other member's mirror of a binding at this path (Task 20396).
 		if memErr := executor.Bind(projectPath, id); memErr != nil {
 			fmt.Fprintf(os.Stderr, "ui: in-memory bind of %s to %s: %v\n", projectPath, id, memErr)
 		}
+		s.publishBindingChange(projectPath)
 		// Where a project's code runs is the most consequential setting on
 		// this hub, and it is no less so for having been chosen in the
 		// creation dialog rather than the Executors panel.

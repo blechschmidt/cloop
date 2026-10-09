@@ -1480,6 +1480,7 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		executor.DefaultRegistry.Unbind(entry.Path)
+		s.publishBindingChange(entry.Path)
 		statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
 			Action: "unbind",
 			Actor:  s.auditActor(r),
@@ -1555,6 +1556,9 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	if err := executor.Bind(entry.Path, id); err != nil {
 		fmt.Fprintf(os.Stderr, "ui: in-memory bind of %s to %s: %v\n", entry.Path, id, err)
 	}
+	// And out of the other members' mirrors, which would go on resolving the
+	// old binding (Task 20396).
+	s.publishBindingChange(entry.Path)
 
 	fmt.Fprintf(os.Stderr, "ui: project %s bound to executor %s\n", entry.Path, id)
 	// Where a project's code runs is the single most consequential setting

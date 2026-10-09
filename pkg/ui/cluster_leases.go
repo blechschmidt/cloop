@@ -207,7 +207,9 @@ func (s *Server) handleClusterAgentOp(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "failover event is required", http.StatusBadRequest)
 			return
 		}
-		if err := redispatchSession(r.Context(), controlPlaneDir(), *op.Failover); err != nil {
+		// This member holds the replacement agent's socket, so it starts the
+		// replacement and follows it as the project's run (Task 20396).
+		if err := s.startReplacement(r.Context(), controlPlaneDir(), *op.Failover); err != nil {
 			jsonErr(w, err.Error(), http.StatusConflict)
 			return
 		}

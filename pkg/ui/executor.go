@@ -404,11 +404,21 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 // reaches a sandbox that would get no Claude login. A handler may have settled
 // it earlier to answer before claiming anything; the answer is reused unless
 // the binding moved in between. Nil only for workloads that run no harness.
-func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClearance, identity, workDir string, argv []string, labels map[string]string) (_ executor.Executor, _ executor.Handle, err error) {
+//
+// options adjust the dispatch; the one there is pins it to the executor a
+// failover placed the run on (asReplacementFor, Task 20396), so that the
+// replacement passes every gate a run started by a person does.
+func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClearance, identity, workDir string, argv []string, labels map[string]string, options ...dispatchOption) (_ executor.Executor, _ executor.Handle, err error) {
 	registerBuiltinExecutors()
-	ex, err := executor.Resolve(workDir)
+	var opts dispatchOptions
+	for _, o := range options {
+		if o != nil {
+			o(&opts)
+		}
+	}
+	ex, err := opts.resolve(workDir)
 	if err != nil {
-		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
+		return nil, executor.Handle{}, err
 	}
 	defer func() { countRunStart(ex, err) }()
 	if err := checkFeatureExecutor(workDir, ex); err != nil {
@@ -620,10 +630,58 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// Record the dispatch so the supervisor can fail it over if this executor
 	// dies holding it. Best-effort: a session that cannot be recorded yields
 	// an empty ID and the run proceeds untracked rather than not at all.
-	if sessionID := openSessionFor(controlPlaneDir(), ex, handle, spec); sessionID != "" {
+	if sessionID := opts.openSession(controlPlaneDir(), ex, handle, spec); sessionID != "" {
 		go watchSessionExit(controlPlaneDir(), ex, handle.ID, sessionID)
 	}
 	return ex, handle, nil
+}
+
+// dispatchOption adjusts one dispatch made through startWorkloadAs.
+type dispatchOption func(*dispatchOptions)
+
+// dispatchOptions is what the options of one dispatch set.
+type dispatchOptions struct {
+	// target, when set, is the executor the workload starts on instead of the
+	// one the project resolves to: a failover's replacement, placed by the
+	// supervisor (Task 20396).
+	target executor.Executor
+	// replaces is the claimed session a replacement continues. Its session is
+	// recorded as the next attempt of that one's chain — what the failover cap
+	// counts — instead of as a fresh first dispatch.
+	replaces *executor.Session
+}
+
+// resolve picks the dispatch's executor: the pinned target, under the same
+// host-execution policy executor.Resolve applies to a binding, or else the
+// project's own.
+func (o dispatchOptions) resolve(workDir string) (executor.Executor, error) {
+	if o.target == nil {
+		ex, err := executor.Resolve(workDir)
+		if err != nil {
+			return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
+		}
+		return ex, nil
+	}
+	// Placement already asks for isolation when the policy forbids the host;
+	// this is the dispatch path's own copy of that rule, as Resolve is for a
+	// binding, so a target chosen anywhere else is held to it too.
+	if !executor.HostExecutionAllowed() && !executor.IsolatesFromHost(o.target) {
+		return nil, &executor.HostExecutionDeniedError{
+			ExecutorID:   o.target.ID(),
+			ProjectPath:  workDir,
+			Alternatives: executor.IsolatedIDs(),
+		}
+	}
+	return o.target, nil
+}
+
+// openSession records the dispatch's session: a first dispatch's, or a
+// replacement's as the next attempt of the session it continues.
+func (o dispatchOptions) openSession(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec) string {
+	if o.replaces != nil {
+		return openReplacementSession(dir, ex, handle, spec, *o.replaces)
+	}
+	return openSessionFor(dir, ex, handle, spec)
 }
 
 // wipeLeaseOnExit closes a lease once its workload reaches a terminal state,

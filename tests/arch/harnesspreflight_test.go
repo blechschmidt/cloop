@@ -76,10 +76,10 @@ const rawDispatch = "raw dispatch"
 // exemptDispatches are dispatches the rules above do not fit, keyed
 // "function → what", each with the reason. TestDispatchExemptionsAreStillUsed
 // rejects an entry that no longer matches a call.
-var exemptDispatches = map[string]string{
-	"redispatchSession → " + rawDispatch: "failover starts the recorded spec of a run whose own dispatch settled " +
-		"its clearance; it mints no lease and dispatches no new workload of its own",
-}
+//
+// It is empty since Task 20396: failover's replacement used to start the
+// recorded spec raw, and now goes through startWorkloadAs like every run.
+var exemptDispatches = map[string]string{}
 
 func TestEveryDispatchSettlesThePreflight(t *testing.T) {
 	scan, err := scanHarnessDispatches(filepath.Join(repoRoot(t), uiDir))

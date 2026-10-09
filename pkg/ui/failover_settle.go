@@ -203,10 +203,11 @@ type journalFailure struct {
 	quarantined bool
 }
 
-// journalFailover writes what the failover did to the project's journal: a
-// row per task it touched, and — when the run is not going anywhere — a row
-// for the run itself, so a project with nothing attributed still says why its
-// run stopped.
+// journalFailover writes what the failover did to the project's tasks to its
+// journal: a row per task it touched. What became of the run itself — failed
+// over to another executor, or stopped with this one — is written once the
+// handler knows (journalFailedOver, journalLost), so a project with nothing
+// attributed still says why its run stopped (Task 20396).
 func journalFailover(projectPath string, ev executor.FailoverEvent, out failoverOutcome, failed map[int]journalFailure) {
 	details := map[string]any{
 		"executor":     ev.From,
@@ -235,20 +236,6 @@ func journalFailover(projectPath string, ev executor.FailoverEvent, out failover
 			TaskID:  id,
 			Step:    state.NoStep,
 			Message: msg,
-		}, details)
-	}
-	switch {
-	case ev.Exhausted:
-		state.LogEventDetails(projectPath, state.EventRow{
-			Type:    state.EventFailover,
-			Step:    state.NoStep,
-			Message: "run not re-dispatched: " + exhaustedReason(ev, out.Lost),
-		}, details)
-	case ev.To == "" && ev.Reason != "":
-		state.LogEventDetails(projectPath, state.EventRow{
-			Type:    state.EventFailover,
-			Step:    state.NoStep,
-			Message: fmt.Sprintf("executor %s became unreachable and no executor could take its run: %s", ev.From, ev.Reason),
 		}, details)
 	}
 }

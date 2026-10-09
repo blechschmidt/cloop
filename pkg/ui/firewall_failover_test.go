@@ -6,6 +6,8 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,7 +27,7 @@ type fwFailoverTarget struct {
 func (r *fwFailoverTarget) ID() string   { return r.id }
 func (r *fwFailoverTarget) Kind() string { return executor.KindContainer }
 func (r *fwFailoverTarget) Capabilities() executor.Capabilities {
-	return executor.Capabilities{Isolation: executor.IsolationContainer, NetworkEgress: true}
+	return executor.Capabilities{Isolation: executor.IsolationContainer, NetworkEgress: true, SharesHostFilesystem: true}
 }
 func (r *fwFailoverTarget) Start(_ context.Context, spec executor.Spec) (executor.Handle, error) {
 	r.got <- spec
@@ -45,10 +47,16 @@ func (r *fwFailoverTarget) EgressPosture() executor.EgressPosture {
 
 // TestFirewall_FailoverComposesForTheReplacement: a session re-dispatched onto
 // another executor carries that executor's device rules, not the ones it was
-// composed under — and not none, which its driver would refuse.
+// composed under — and not none, which its driver would refuse. Since Task
+// 20396 the replacement is dispatched afresh through startWorkloadAs, so the
+// stored spec's rules never reach it at all.
 func TestFirewall_FailoverComposesForTheReplacement(t *testing.T) {
 	dir := setupProjectDir(t, "firewall failover", nil)
 	withControlPlaneDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"), []byte(failoverConfig("")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(dir, 0, "")
 	target := &fwFailoverTarget{id: "fw-failover-target", got: make(chan executor.Spec, 1)}
 	if err := executor.DefaultRegistry.Register(target); err != nil {
 		t.Fatal(err)
@@ -66,9 +74,10 @@ func TestFirewall_FailoverComposesForTheReplacement(t *testing.T) {
 
 	stale := executor.FirewallRules{AllowCIDRs: []string{"10.0.0.0/8"}, AllowPorts: []int{22}}
 	ev := executor.FailoverEvent{From: "gone", To: target.id,
-		Session: claimedSession(t, dir, executor.Session{ID: "s-1", ExecutorID: "gone",
-			Spec: executor.Spec{WorkDir: dir, Argv: []string{"cloop", "run"}, EgressRules: &stale}})}
-	_ = redispatchSession(context.Background(), dir, ev)
+		Session: claimedSession(t, dir, executor.Session{ID: "s-1", ExecutorID: "gone", ProjectPath: dir,
+			Spec: executor.Spec{WorkDir: dir, Argv: []string{"cloop", "run"}, EgressRules: &stale,
+				Labels: map[string]string{"project": dir}}})}
+	_ = redispatchSession(context.Background(), dir, ev, srv)
 	select {
 	case got := <-target.got:
 		if got.EgressRules == nil || !fwpolicy.Equal(*got.EgressRules, rules) || got.EgressBound == nil {

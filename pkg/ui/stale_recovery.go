@@ -94,6 +94,10 @@ type dispatchedRun struct {
 	// tracked is when this member began tracking the run: its dispatch, or
 	// its adoption from another member.
 	tracked time.Time
+	// lost marks a run the failover claim took off an executor that stopped
+	// answering (Task 20396), between being given up and being forgotten. It
+	// is not executing, whatever its driver says.
+	lost bool
 }
 
 // trackRun remembers the workload dispatched for workDir.
@@ -192,19 +196,35 @@ func (s *Server) trackedRun(workDir string) (dispatchedRun, bool) {
 //
 // It fails closed: a driver that cannot be reached is treated as still running
 // it, because refusing to repair is always recoverable and repairing a live run
-// is not.
+// is not — with one exception, the session store's verdict (Task 20396). A
+// run whose session the failover claim recorded as requeued, replaced or
+// failover_exhausted is not this project's run any more, however its driver
+// answers: a device that stopped answering says "unknown" for as long as the
+// hub lives, and before this check that kept its project "running" forever.
+// A replacement another member follows still counts, through the owner row.
+// A requeued session with no replacement yet counts as executing for
+// failoverReplacementWindow, so nobody starts a second run beside one that is
+// about to begin.
 func (s *Server) projectExecuting(workDir string) bool {
 	if multiui.IsCloopRunningInDir(workDir) {
 		return true
 	}
 	if run, ok := s.trackedRun(workDir); ok {
+		if run.lost {
+			return s.peerRunExecuting(workDir)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), workloadStatusTimeout)
 		defer cancel()
 		st, err := run.ex.Status(ctx, run.handleID)
-		if err != nil {
-			return true
+		if err == nil && st.State.Terminal() {
+			return false
 		}
-		return !st.State.Terminal()
+		// Alive by its driver's account, or no account at all.
+		switch s.runLossState(run) {
+		case runReplaced, runLostForGood:
+			return s.peerRunExecuting(workDir)
+		}
+		return true
 	}
 	// A run another hub member started (Task 20354). It is in neither this
 	// member's process table nor its handle map, and before this check a
@@ -236,12 +256,20 @@ type runVerdict struct {
 	// database refused its writes (Task 20362), and could not store even
 	// that: the hub records the same reason the run would have.
 	Unsaved bool
+	// Lost reports that the run stopped with its executor (Task 20396): the
+	// supervisor declared the executor lost, the failover claim took the
+	// run's session, and nothing carried the run on. Detail names the
+	// executor and why the run stopped there.
+	Lost bool
 }
 
 // deadRunPauseReason turns a verdict about a vanished run into the reason the
 // dashboard shows. A stop the operator asked for is not a fault and should not
 // be dressed as one; everything else is a run that ended without saying so.
 func deadRunPauseReason(v runVerdict) pausereason.Reason {
+	if v.Lost {
+		return pausereason.New(pausereason.CodeExecutorLost, v.Detail)
+	}
 	if v.Requested {
 		return pausereason.New(pausereason.CodeOperator, "run stopped")
 	}
@@ -463,7 +491,13 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 	if claimed == "paused" && st.PauseReason.RunWaits() {
 		claimed = "paused (waiting for disk space)"
 	}
-	staleStatus := st.ClaimsLiveRun()
+	// A run lost with its executor is paused whatever the status says (Task
+	// 20396). A run on a device works on a copy of the project, so the hub's
+	// own status may never have claimed it live — the dashboard showed it
+	// running from the hub's knowledge of the run — and without this its
+	// project would fall back to whatever the run before it left, with no word
+	// that an executor was lost.
+	staleStatus := st.ClaimsLiveRun() || verdict.Lost
 	if staleStatus {
 		st.SetPaused(deadRunPauseReason(verdict))
 	}
@@ -505,7 +539,11 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 // reason a repair fails.
 func logDeadRun(workDir, claimed string, verdict runVerdict, repaired int) {
 	var b strings.Builder
-	b.WriteString("The run ended without recording an outcome")
+	if verdict.Lost {
+		b.WriteString("The run stopped with its executor")
+	} else {
+		b.WriteString("The run ended without recording an outcome")
+	}
 	if verdict.Detail != "" {
 		b.WriteString(": ")
 		b.WriteString(verdict.Detail)

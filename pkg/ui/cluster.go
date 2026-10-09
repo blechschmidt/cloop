@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 )
 
@@ -82,6 +83,11 @@ const (
 	// invalidateCIConfig: CI federation's settings were saved on a member
 	// (Task 20390); each re-reads its own and stops serving if it is off.
 	invalidateCIConfig = "ci_config"
+	// invalidateBinding: projects were bound to another executor, or unbound,
+	// on a member (Task 20396). Each drops its in-memory mirror of their
+	// bindings, which the executor registry consults before the database, so
+	// the database every member reads answers.
+	invalidateBinding = "binding"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -275,6 +281,23 @@ var relayedWSTypes = map[string]bool{
 	"task_deleted":  true,
 	"task_mutation": true,
 	"provider_call": true,
+}
+
+// bindingInvalidation is invalidateBinding's payload.
+type bindingInvalidation struct {
+	Projects []string `json:"projects"`
+}
+
+// publishBindingChange tells the other members that projects' executor
+// bindings changed here (Task 20396). Without it a member that had mirrored
+// the old binding in memory went on resolving it — so a project rebound
+// through one member, say away from a device that was lost, kept being
+// dispatched to the old executor by the member a Run reached.
+func (s *Server) publishBindingChange(projects ...string) {
+	if len(projects) == 0 {
+		return
+	}
+	s.publishInvalidate(invalidateBinding, bindingInvalidation{Projects: projects})
 }
 
 // publishInvalidate tells every other member to drop what key names.
@@ -579,6 +602,23 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		}
 		if err := ev.Decode(&p); err == nil && p.Project != "" {
 			s.detachRun(p.Project)
+		}
+	case invalidateBinding:
+		var p bindingInvalidation
+		if err := ev.Decode(&p); err == nil {
+			for _, project := range p.Projects {
+				executor.DefaultRegistry.Unbind(project)
+			}
+		}
+	case invalidateRunLost:
+		// The run this member follows was taken off its executor by a
+		// failover another member handled (Task 20396).
+		var p runLossNotice
+		if err := ev.Decode(&p); err == nil {
+			go func() {
+				defer recoverGoroutine("apply run loss notice")
+				s.applyRunLossNotice(p)
+			}()
 		}
 	}
 }

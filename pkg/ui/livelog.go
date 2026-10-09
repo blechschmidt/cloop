@@ -208,6 +208,23 @@ func (s *Server) liveLogSetRunning(workDir string, running bool) {
 	room.remote = false
 }
 
+// liveLogStopLocal clears workDir's run flag if it is this member's own, and
+// leaves one relayed from another member alone: a member giving up a run it
+// streamed must not unset the flag of the run that replaced it elsewhere,
+// whose announcement may have arrived first (Task 20396).
+func (s *Server) liveLogStopLocal(workDir string) {
+	if workDir == "" {
+		return
+	}
+	s.liveLogMu.Lock()
+	defer s.liveLogMu.Unlock()
+	room := s.liveLogRoomFor(workDir, false)
+	if room == nil || room.remote {
+		return
+	}
+	room.running = false
+}
+
 // liveLogRunningFor reports whether this server is streaming a run for
 // workDir. False for projects it has never run, including runs started
 // outside the daemon — callers pair it with a /proc probe.

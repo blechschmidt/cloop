@@ -825,6 +825,9 @@ type Server struct {
 	// lastSessionSweep is when the leader last retired the records of proxy
 	// sessions that ended or lapsed (Task 20383). Guarded by clusterMu.
 	lastSessionSweep time.Time
+	// lastLostRunSweep is when the watcher last checked the runs this member
+	// follows against the session store (Task 20396). Guarded by clusterMu.
+	lastLostRunSweep time.Time
 
 	// walCheck is the leader's record of its attempts to truncate the
 	// control plane's write-ahead log (Task 20392). See statedb_wal.go.
@@ -889,7 +892,7 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// hub's per-instance overlay, whose hub-scope settings the executors are
 	// started from (Task 20364).
 	bootstrapExecutors(workdir, port)
-	return &Server{
+	srv := &Server{
 		Cluster:         node,
 		WorkDir:         workdir,
 		Port:            port,
@@ -906,6 +909,10 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 		diffCache:       newStateCache(),
 	}
+	// The process-wide supervisor hands each failover to the Server that
+	// follows the run, or serves this control plane (Task 20396).
+	registerRunServer(srv)
+	return srv
 }
 
 // uiAllow reports whether the request from ip is within the rate limit.
@@ -1500,6 +1507,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// still writing health rows into a database handle that is about to be
 	// closed under it.
 	stopExecutorSupervisor()
+	// And take no more failovers: the runs this server follows are being
+	// handed to whichever member adopts them.
+	unregisterRunServer(s)
 	// And stop the periodic orphan sweep for the same reason: it is detached
 	// from the reconciliation pass that started it, so this is what owns it
 	// (Task 20281).
@@ -5840,6 +5850,10 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 	// it) lets it go here if the handover message was missed.
 	s.verifyRunOwnership()
 	s.maybeAdoptOrphanedRuns(now)
+	// A run this member follows whose session a failover claim took, by the
+	// session store — the claim's process may be another member, and its
+	// message saying so may not have arrived (Task 20396).
+	s.maybeSweepLostRuns(now)
 	s.maybeSweepProxySessionRecords(now)
 	// Egress restores of adopted runs that failed for a reason that may pass
 	// (Task 20383): cheap when there is none.
