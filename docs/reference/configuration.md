@@ -1173,9 +1173,15 @@ Past the cap nothing re-dispatches the run: its session closes as
 `failover_exhausted`, and the tasks it was running fail, naming every node the
 run was lost on and when it went unreachable. Independently of the cap, a task
 that two or more distinct executors went down under is quarantined as a
-suspected node killer and runs again only after an explicit reset — `cloop task
-reset <id>`, or a reset to pending from the dashboard. `cloop executor list
---inventory` lists the quarantined tasks.
+suspected node killer, its run is not re-dispatched, and the task runs again
+only after an explicit reset — `cloop task reset <id>`, or a reset to pending
+from the dashboard. `cloop executor list --inventory` lists the quarantined
+tasks.
+
+A replacement is dispatched like any run, and followed as the project's run
+(Task 20396). It never lands on an executor restricted to an access list. When
+nothing replaces a run, the project is paused with reason `executor_lost`,
+naming the executor.
 
 A hub-scope key, read at every failover, so a per-instance overlay may set it
 for one hub alone and a change applies without a restart. `cloop config set`

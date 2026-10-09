@@ -1943,10 +1943,14 @@ transition → unreachable
             ClaimRequeue(sessionID, claimToken, maxAttempts, now)   ← one atomic UPDATE … WHERE claim_token = ?
               │  token mismatch → ErrSessionClaimLost → return quietly (the guard worked)
               │  attempt > maxAttempts → state failover_exhausted: no placement, no re-dispatch
-              └─ otherwise state requeued → placeReplacement: Select(pool minus dead node, …)
+              └─ otherwise state requeued → placeReplacement: Select(pool minus dead node
+                   │                          and restricted executors, …)
                    │  no candidate → FailoverEvent.Err
-                   └─ FailoverHandler settles the session's tasks (every claim),
-                      then re-dispatches the persisted Spec (a placed one only)
+                   └─ FailoverHandler settles the session's tasks (every claim), then
+                      ├─ placed, no task quarantined → the run starts again as the
+                      │                                project's run (see below)
+                      └─ otherwise, or the replacement refused → the project is paused
+                                                                executor_lost
                         └─ EventSink.ExecutorFailover(ev)  → executor.failover or
                                                              executor.failover_exhausted
 ```
@@ -1954,10 +1958,11 @@ transition → unreachable
 The exactly-once latch is the **claim token**, rotated on every requeue. A
 `Session` persists `ID`, `ExecutorID`, `HandleID`, `ProjectPath`, `TaskID`,
 `ClaimToken`, `Attempt`, the tasks its run last announced (`RunningTasks`), and
-the full `Spec`, which is why a replacement can be dispatched verbatim to a
-different node. `ErrSessionClaimLost` is deliberately not logged: it is the
-normal outcome of a race, and logging it would train operators to ignore the
-log.
+the `Spec` it was dispatched with, leased values redacted. A replacement takes
+the command and the project from it, and nothing else: it is dispatched afresh
+for the executor it lands on (see [below](#the-replacement-is-the-projects-run-task-20396)).
+`ErrSessionClaimLost` is deliberately not logged: it is the normal outcome of a
+race, and logging it would train operators to ignore the log.
 
 Sessions live in `executor_sessions`; health in `executor_health` (migrations
 `0013`, `0014`), so both survive a hub restart.
@@ -1989,7 +1994,7 @@ every claim, placed or not:
 | --- | --- |
 | requeued (re-dispatched, or no candidate) | back to `pending`, fail count raised, for the next run |
 | `failover_exhausted` | **failed**, the reason naming every node the run was lost on and when it went unreachable |
-| the task's losses name 2+ distinct executors | **failed and quarantined** as a suspected node killer |
+| the task's losses name 2+ distinct executors | **failed and quarantined** as a suspected node killer, and the run is not re-dispatched (Task 20396) |
 
 Which tasks those are has two sources. A run on an executor sharing the hub's
 filesystem writes the hub's plan, so its `in_progress` tasks are the answer. A
@@ -2022,6 +2027,84 @@ It travels to a device in the seed, so the device's orchestrator holds it too.
 `cloop executor list --inventory` lists every quarantined task in the projects
 a failover has touched, with the nodes it went down under and the command that
 releases it.
+
+### The replacement is the project's run (Task 20396)
+
+Before this, a replacement was started from the stored spec and watched only for
+its session to close. The stored spec carries neither the run's leased
+credentials nor its project seed, so on an isolating executor the replacement
+started with no Claude login and no plan; nothing streamed its output, merged
+its result or settled the project; and the hub went on following the stranded
+run, whose driver answers "unknown" for as long as the device is away — so its
+project showed "running" for as long as the hub lived.
+
+`failover_runs.go` makes the replacement a run like any other:
+
+- **Dispatched as a run.** `startReplacement` calls `startWorkloadAs` with
+  `asReplacementFor(target, session)`: the dispatch is pinned to the executor
+  placement chose, under the same host-execution policy `Resolve` applies to a
+  binding, and its session is recorded as the next attempt of the stranded one's
+  chain — which is what the cap counts. Everything else is the ordinary
+  dispatch: the harness-credential preflight (acting, like the automatic
+  resume, for whoever started the run), a fresh lease checked against the grants
+  as they stand, a fresh project seed of the plan the failover just settled, the
+  sandbox, firewall levels, egress session, workspace and ceilings composed for
+  the replacement, the revocation guarantee, and a placement record naming the
+  replacement — so its orchestrator stamps it on the tasks and `task.dispatch`
+  rows it writes. Only a `cloop run` is re-dispatched; a session row asking for
+  anything else is refused, since it is read back from a database. A project
+  the hub no longer serves is not brought back.
+- **Followed as a run.** `followReplacement` swaps the replacement in for the
+  stranded run in one critical section — the project is never without a run in
+  between, which the watcher would read as a death — takes the run's owner row,
+  writes a line into the live log saying where the run went, and follows it as
+  `handleRun` does: the live log on every dashboard, `consumeRunOutput`, and
+  `runEnded` when it ends, which merges a seeded run's result and settles the
+  project. The journal records "Run failed over from executor X to Y".
+- **The stranded run given up.** Its egress session and leases close — a
+  workload out of reach keeps no credential, and with the lease go its git-proxy
+  and Kubernetes-monitor sessions — and its driver is told to give it up. A
+  driver that implements `executor.Abandoner` (the remote one) marks the handle
+  terminal, which closes its stream and lets every watcher go, forgets its
+  durable row, and answers the device's resume offer for it with "terminate"
+  when it comes back. Any other driver is asked to kill it. Its consumer is
+  marked handed over, so a stream that ends after all does not settle the
+  project under its replacement.
+- **A loss nothing replaced.** With no candidate, past the cap, with a task
+  quarantined, or when the replacement is refused (no harness credential, a
+  sandbox the executor cannot honour), the stranded run is given up and the
+  project settled at once — paused with an `executor_lost` reason naming the
+  executor and the cause — and the journal records "Executor X was lost and the
+  run was not re-dispatched: …". Starting it again is an ordinary dispatch to
+  the project's binding. A project that is running again by then — a person
+  pressed Run while the failover was under way — gets no replacement and no
+  pause: another run is executing it.
+- **The session store is authoritative.** `projectExecuting` asks it about a
+  followed run whose driver calls it alive or cannot answer: a session the claim
+  recorded as replaced, `failover_exhausted`, or requeued long enough ago that
+  no replacement is coming is not executing; a requeued one with no replacement
+  yet counts as executing for `failoverReplacementWindow` (5 minutes), so nobody
+  starts a second run beside one about to begin. With no verdict an unreachable
+  driver still fails closed.
+- **Restricted executors, and the hub's own host.** An executor with an access
+  list is checked against the claims of the person starting a run, and a
+  failover starts it on nobody's behalf. Placement passes over every restricted
+  executor (`WithCandidateFilter`), and the dispatch path refuses one routed to
+  it anyway. And a run that was isolated from the hub — on a device, a
+  container, a VM — is never failed over onto the hub's own host, whatever
+  `allow_host_process` says (`requirementsFor`): the host driver, with no
+  concurrency limit, would otherwise outrank every device on free slots.
+
+On a hub cluster (Task 20354) the parts happen where they can. The supervisor
+that claims a session runs on the member probing the executor — the leader, for
+an agent no member holds. A replacement on an edge agent is started by the
+member holding the agent's socket (`agentOpRedispatch`), which follows it and
+takes the run's owner row from the member that followed the stranded run. That
+member is told so on the bus (`run_lost`) and retires the stranded run; if the
+message is lost, its watcher finds the claim in the session store within ten
+seconds (`sweepLostRuns`) — and a run whose owner died is never adopted once a
+failover has claimed it. A loss nothing replaced is settled by the member that
+followed the stranded run, told the same way.
 
 ---
 

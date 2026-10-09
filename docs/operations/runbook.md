@@ -1681,6 +1681,31 @@ ls` and fix the reachability. `--force` stops *waiting* rather than failing — 
 node stays draining, and the sessions it reports are still running and were not
 touched.
 
+### A project is paused because its executor was lost
+
+The project's status badge reads "executor lost", with the executor named in
+the reason. Its executor stopped answering mid-run — about 1½–3 minutes of
+failed probes — and the hub failed the run over (Task 20396): the tasks it was
+running went back to pending (or failed, see below), and nothing carried the run
+on, for the reason the badge gives:
+
+| The reason says | What it means |
+| --- | --- |
+| no executor could take the run | no other healthy executor could take it — a single-device project, or every other executor down, cordoned, or restricted to an access list (a failover never moves a run onto one, nor a run that was isolated onto the hub's own host) |
+| failover gave up after N re-dispatches | the run had already been failed over as often as `executors.failover.max_attempts` allows; the task it was on failed, naming every node it was lost on |
+| task N is quarantined as a suspected node killer | two executors went down under that task — see the next section |
+| the replacement on X could not start | the replacement was refused like any run would be — the Event History row says why (no Claude credential granted for X, a sandbox X cannot honour, …) |
+
+The Event History has a `failover` row saying "Executor X was lost …" with the
+full reason. To go on: bring the executor back, or bind the project to another
+one, and press Run — an ordinary dispatch. If the device does come back, it is
+told to terminate the run it was carrying: that run's tasks are already back in
+the plan, and its credentials were released when it was lost.
+
+A project whose run *was* failed over keeps running on the replacement; its
+Event History says "Run failed over from executor X to Y", the live log marks
+where one run ended and the other began, and Stop stops the replacement.
+
 ### A task is quarantined as a suspected node killer
 
 Two or more executors went unreachable while one task was running, so the
@@ -1709,7 +1734,10 @@ cloop task reset <id>
 
 The reset deletes the mark and the losses behind it, so the task starts with
 no evidence against it, and is recorded as `task.quarantine_release` with who
-did it. A run that loses more nodes than `executors.failover.max_attempts`
+did it. The run the task was in was not re-dispatched when it was marked
+(Task 20396), so the project is paused with an `executor_lost` reason; press Run
+once the task is reset or left held — the gate skips a held task and runs the
+rest. A run that loses more nodes than `executors.failover.max_attempts`
 allows stops being re-dispatched whether or not any task is marked; its
 journal row names every node it lost.
 

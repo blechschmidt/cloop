@@ -220,6 +220,13 @@ database.
 - **Refreshing an OIDC session** takes a cluster-wide lock, so a refresh token
   that the provider rotates is redeemed once.
 - **`config.yaml` and `projects.json`** are written under a file lock.
+- **Project → executor bindings** live in the database every member reads; a
+  member also mirrors the bindings it makes in memory, and since Task 20396 a
+  bind or unbind on one member — or a deleted virtual executor's — tells the
+  others to drop their mirror, so a project rebound through one member (say,
+  away from a device that was lost) is not dispatched to the old executor by
+  another. The others hear of it within a bus poll (a quarter of a second); a
+  Run that reaches one of them sooner still sees the old binding.
 
 ---
 
@@ -276,6 +283,20 @@ mid-run](executors.md#the-project-comes-back-task-20339) and
 Executor health probes are divided the same way: an agent is probed by the
 member holding its connection, every other executor by the leader, so an
 executor is never marked offline by a member that simply cannot see it.
+
+A run whose executor is *lost* — declared unreachable by those probes, rather
+than its member stopping — is failed over, and that too happens where it can
+(Task 20396). The member probing the executor claims the run's session and
+settles its tasks. A replacement on an edge agent is started by the member
+holding the agent's connection, which follows it as the project's run and takes
+the run's owner row; any other replacement is started and followed by the
+member that claimed the session. The member that followed the stranded run
+gives it up when it is told so on the bus, or, should that message be lost,
+when its own watcher finds the claim in the session store, within ten seconds.
+A run whose session a failover claimed is never adopted. When nothing replaces
+the run, the project is paused with an `executor_lost` reason by the member
+that followed it. See [the replacement is the project's
+run](executors.md#the-replacement-is-the-projects-run-task-20396).
 
 ---
 
