@@ -32,7 +32,11 @@
 //     probe's results, the forge's refs, the gitproxy.push_denied and
 //     kubeguard audit rows, that the granted harness login is in the
 //     container's environment but nowhere in the Pod object (Task 20401), and
-//     that the run's Pod, Secrets and NetworkPolicy are gone afterwards.
+//     that the run's Pod, Secrets and NetworkPolicy are gone afterwards;
+//  7. and, because the repository has no .cloop/ — the project and its task
+//     live only on the hub — that the run got its project from the hub's seed
+//     and brought its outcome back: the hub's plan shows the task done, and a
+//     second Start does not run it again (Task 20402).
 //
 // It changes the release it is pointed at and leaves the monitors on. Point it
 // only at a throwaway cluster.
@@ -42,7 +46,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
@@ -59,8 +62,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
 	"github.com/blechschmidt/cloop/pkg/secretbroker/secretbrokertest"
@@ -215,7 +216,10 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		"hostAliases[0].hostnames[0]=github.com",
 	})
 
-	// ── 6. The project: hub-side checkout, forge-side state ────────────────
+	// ── 6. The project: hub-side checkout and state, nothing in the repo ───
+	// The forge's acme/granted holds one commit and no .cloop/. Everything a
+	// run needs to know — the goal, the task, the provider — exists only on the
+	// hub, so the Pod can only have it from the seed the hub sends (Task 20402).
 	projectDir := "/var/lib/cloop/.cloop/e2e/kube-" + stamp
 	helper := startStateHelper(ctx, t, x, ns, fullname, keep)
 	registerProject(ctx, t, x, ns, helper, projectDir, "https://github.com/"+grantedRepo+".git")
@@ -227,7 +231,14 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		// against it without the value ever being written anywhere.
 		"HARNESS_KEY_SHA256": hex.EncodeToString(harnessKeySum[:]),
 	}
-	seedForgeProject(ctx, t, x, forgePod, params)
+	if refs := forgeRefs(ctx, t, x, forgePod, grantedRepo); refs["refs/heads/main"] == "" {
+		t.Fatalf("the forge's %s has no main branch: %v", grantedRepo, refs)
+	}
+	if files := x.out(ctx, "exec", "-n", forgeNS, forgePod, "--", "git", "--git-dir=/srv/git/"+grantedRepo+".git",
+		"ls-tree", "-r", "--name-only", "main"); strings.Contains(files, ".cloop") {
+		t.Fatalf("the forge's %s commits .cloop/; this test proves a run that gets its project from the hub:\n%s",
+			grantedRepo, files)
+	}
 
 	// ── 7. Grants, through the hub's API ───────────────────────────────────
 	hub := hubClient{t: t, base: x.portForward(ns, fullname, 8080), http: &http.Client{Timeout: time.Minute}}
@@ -241,6 +252,22 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	hub.must("POST", fmt.Sprintf("/api/init?project_idx=%d", idx), map[string]any{
 		"goal": "Task 20385: prove the git proxy and the kube guard from a Pod", "provider": "claudecode",
 	}, nil)
+	var added struct {
+		Task struct {
+			ID int `json:"id"`
+		} `json:"task"`
+	}
+	hub.must("POST", fmt.Sprintf("/api/tasks?project_idx=%d", idx), map[string]any{
+		"title":       "Kubernetes git proxy and kube guard probe",
+		"description": probeTaskDescription(params),
+	}, &added)
+	taskID := added.Task.ID
+	if taskID <= 0 {
+		t.Fatal("the hub did not report the added task's id")
+	}
+	if st := hubTask(t, hub, idx, taskID); st.Status != "pending" {
+		t.Fatalf("task %d is %q before the run, want pending", taskID, st.Status)
+	}
 	hub.must("POST", "/api/secrets", map[string]any{
 		"name": "kube-e2e-pat-" + stamp, "kind": "github_pat", "payload": pat, "personal": false,
 	}, nil)
@@ -273,8 +300,29 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	lines, podJSON, objects := awaitRun(ctx, t, x, hub, idx, workloadNS)
 	results := parseResults(lines)
 
+	// ── 8b. The outcome came home (Task 20402) ─────────────────────────────
+	// The Pod ran the task in its own copy of the project; the hub's plan
+	// changes only if the run's outcome came back out of the Pod's log.
+	var done hubTaskState
+	waitFor(t, "the hub's plan to show the task the Pod finished", 2*time.Minute, func() (bool, string) {
+		done = hubTask(t, hub, idx, taskID)
+		return done.Status == "done", fmt.Sprintf("task %d is %q", taskID, done.Status)
+	})
+	t.Logf("the hub's plan shows task %d %s (completed %s, executor %s/%s)",
+		taskID, done.Status, done.CompletedAt, done.ExecutorKind, done.ExecutorID)
+	if done.ExecutorKind != "kubernetes" {
+		t.Errorf("task %d is attributed to executor kind %q, want kubernetes — the hub stamps its own dispatch",
+			taskID, done.ExecutorKind)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "read the run's project state back from pod") {
+		t.Error("the run's log does not say its project state came back")
+	}
+	if strings.Contains(strings.Join(lines, "\n"), "##cloop-project-result-v1##") {
+		t.Error("the project result frame reached the run's live log")
+	}
+
 	// ── 9. What the Pod saw ────────────────────────────────────────────────
-	for _, id := range append([]string{"A1", "H1", "T1", "C1", "WS1", "WS2", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
+	for _, id := range append([]string{"A1", "H1", "T1", "C1", "WS1", "WS2", "S1", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
 		conditional(enforced, "E1")...) {
 		r, ok := results[id]
 		switch {
@@ -365,6 +413,22 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		return strings.TrimSpace(out) == "", strings.Join(strings.Fields(out), ", ")
 	})
 	t.Logf("the run's %s are gone from %s", strings.Join(objects, ", "), workloadNS)
+
+	// ── 13. A second Start does not run the task again (Task 20402) ────────
+	// Before the outcome came back, the hub's plan still had the task pending
+	// after a Kubernetes run, and the next Start ran it again.
+	hub.must("POST", fmt.Sprintf("/api/run?project_idx=%d", idx), map[string]any{}, nil)
+	second := awaitIdleRun(ctx, t, x, hub, idx, workloadNS)
+	joined := strings.Join(second, "\n")
+	for _, ran := range []string{"stand-in:", "SUMMARY kube", "RESULT A1"} {
+		if strings.Contains(joined, ran) {
+			t.Errorf("the second run executed the finished task again (its log has %q):\n%s", ran, joined)
+		}
+	}
+	if again := hubTask(t, hub, idx, taskID); again.Status != "done" || again.CompletedAt != done.CompletedAt {
+		t.Errorf("after the second Start task %d is %q completed %q, want done at %q",
+			taskID, again.Status, again.CompletedAt, done.CompletedAt)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -666,28 +730,9 @@ printf 'ref: refs/heads/main\n' > %[1]q/.git/HEAD
 		"cat > "+registry+".tmp && mv "+registry+".tmp "+registry)
 }
 
-// seedForgeProject commits the project's state — one task, carrying the probe
-// — into the granted repository on the forge. A Kubernetes run reads its
-// project from the tree it fetched; nothing of the hub's copy reaches the Pod.
-func seedForgeProject(ctx context.Context, t *testing.T, x tool, forgePod string, params map[string]string) {
-	t.Helper()
-	cloopBin := os.Getenv(binEnv)
-	if cloopBin == "" {
-		cloopBin = filepath.Join(t.TempDir(), "cloop")
-		goBuild(ctx, t, repoRoot(t), cloopBin, ".")
-	}
-	work := t.TempDir()
-	home := t.TempDir()
-	cli := func(args ...string) {
-		cmd := exec.CommandContext(ctx, cloopBin, args...)
-		cmd.Dir = work
-		// A clean environment: an agent's CLOOP_* and provider keys must not
-		// shape a project that ships to a sandbox.
-		cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8"}
-		if b, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("cloop %s: %v\n%s", args[0], err, b)
-		}
-	}
+// probeTaskDescription renders the task the stand-in harness runs: the probe,
+// preceded by its parameters as shell assignments, base64 on one line.
+func probeTaskDescription(params map[string]string) string {
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
@@ -698,51 +743,69 @@ func seedForgeProject(ctx context.Context, t *testing.T, x tool, forgePod string
 		fmt.Fprintf(&script, "%s=%q\n", k, params[k])
 	}
 	script.WriteString(probeScript)
-	b64 := base64.StdEncoding.EncodeToString([]byte(script.String()))
-
-	cli("init", "Task 20385: prove the git proxy and the kube guard from a Pod")
-	cli("task", "add", "Kubernetes git proxy and kube guard probe", "--no-ai", "--auto", "--desc",
-		"Run the Kubernetes probe in this sandbox and report what it prints.\nE2E-SCRIPT-B64: "+b64)
-	checkpoint(t, filepath.Join(work, ".cloop", "state.db"))
-
-	tarball, err := exec.CommandContext(ctx, "tar", "-C", work, "-cf", "-", ".cloop").Output()
-	if err != nil {
-		t.Fatalf("tar the project state: %v", err)
-	}
-	seed := fmt.Sprintf(`set -e
-export HOME=/srv/home GIT_CONFIG_NOSYSTEM=1
-w=$(mktemp -d /tmp/seed.XXXXXX)
-git clone -q /srv/git/%[1]s.git "$w"
-tar -x -C "$w" -f /tmp/project.tar
-cd "$w"
-git add -f .cloop
-git -c user.name=cloop-e2e -c user.email=e2e@example.invalid commit -qm "the project the Pod runs"
-git push -q origin HEAD:refs/heads/main
-cd / && rm -rf "$w" /tmp/project.tar
-`, grantedRepo)
-	x.kubectlIn(ctx, tarball, "exec", "-i", "-n", forgeNS, forgePod, "--", "sh", "-c",
-		"cat > /tmp/project.tar && sh -c "+shellQuote(seed))
+	return "Run the Kubernetes probe in this sandbox and report what it prints.\nE2E-SCRIPT-B64: " +
+		base64.StdEncoding.EncodeToString([]byte(script.String()))
 }
 
-// checkpoint folds the write-ahead log into the database file, so the state
-// committed to git is the state the CLI wrote.
-func checkpoint(t *testing.T, path string) {
+// hubTaskState is what the hub's plan says about one task.
+type hubTaskState struct {
+	ID           int    `json:"id"`
+	Status       string `json:"status"`
+	CompletedAt  string `json:"completed_at"`
+	ExecutorID   string `json:"executor_id"`
+	ExecutorKind string `json:"executor_kind"`
+}
+
+// hubTask reads one task out of the hub's own copy of the project — the one
+// the dashboard renders.
+func hubTask(t *testing.T, hub hubClient, idx, id int) hubTaskState {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
+	var st struct {
+		Plan *struct {
+			Tasks []hubTaskState `json:"tasks"`
+		} `json:"plan"`
 	}
-	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		t.Fatalf("checkpoint %s: %v", path, err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, side := range []string{"-wal", "-shm"} {
-		if err := os.Remove(path + side); err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
+	hub.must("GET", fmt.Sprintf("/api/state?project_idx=%d", idx), nil, &st)
+	if st.Plan != nil {
+		for _, task := range st.Plan.Tasks {
+			if task.ID == id {
+				return task
+			}
 		}
 	}
+	t.Fatalf("the hub's plan has no task %d", id)
+	return hubTaskState{}
+}
+
+// awaitIdleRun waits for a run that has nothing to do: it starts, its Pod comes
+// and goes, and the live log settles. It returns the run's log.
+func awaitIdleRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int, workloadNS string) []string {
+	t.Helper()
+	var lines []string
+	sawPod, started, begun := false, false, time.Now()
+	waitFor(t, "the second run to finish", 6*time.Minute, func() (bool, string) {
+		if !sawPod {
+			out, err := x.kubectlMay(ctx, "get", "pods", "-n", workloadNS,
+				"-l", "cloop.dev/managed=true,cloop.dev/task-id!=probe", "-o", "name")
+			sawPod = err == nil && strings.TrimSpace(out) != ""
+		}
+		var live struct {
+			Running bool     `json:"running"`
+			Lines   []string `json:"lines"`
+		}
+		hub.must("GET", fmt.Sprintf("/api/livelog?project_idx=%d", idx), nil, &live)
+		lines = logLines(live.Lines)
+		started = started || live.Running
+		if !live.Running && len(live.Lines) > 0 && (started || sawPod || time.Since(begun) > 45*time.Second) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("running=%v pod-seen=%v, %d lines, last: %s", live.Running, sawPod,
+			len(live.Lines), lastLine(live.Lines))
+	})
+	for _, l := range lines {
+		t.Logf("second run | %s", l)
+	}
+	return lines
 }
 
 func projectIndex(t *testing.T, hub hubClient, dir string) int {

@@ -107,6 +107,21 @@ else
 	res WS1 FAIL "the working directory is not a git checkout"
 fi
 
+# ── The project came with the run, not with the repository (Task 20402) ────
+# The repository commits no .cloop/; the run is reading the project the hub
+# sent, which the init container placed — and git must not see it, or a
+# write-back would commit the hub's project into the repository.
+tracked=$(git -C "$BASE" ls-files -- .cloop 2>/dev/null | head -n 1)
+if [ -n "$tracked" ]; then
+	res S1 FAIL "the repository tracks $tracked, so this run may not have needed the seed"
+elif [ ! -s "$BASE/.cloop/state.db" ] && [ ! -s "$BASE/.cloop/state.json" ]; then
+	res S1 FAIL "the workspace has no project state in .cloop/"
+elif git -C "$BASE" status --porcelain 2>/dev/null | grep -q '\.cloop'; then
+	res S1 FAIL "git sees the placed .cloop/ as a change, so a write-back would commit it"
+else
+	res S1 PASS "the project came from the hub's seed: the repository tracks no .cloop/ and git ignores the placed one"
+fi
+
 # ── Clone and pushes through the proxy ────────────────────────────────────
 cd "$W" || exit 0
 if git clone -q "$GH/$REPO" repo >"$O" 2>&1; then

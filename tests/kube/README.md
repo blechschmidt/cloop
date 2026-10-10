@@ -29,8 +29,9 @@ minted their sessions and are forwarded.
    only when the probe proved the CNI enforces policies; otherwise the log says
    it is not asserted.
 3. Serves the forge in `cloop-e2e-forge-<stamp>` with a certificate for `github.com`
-   from a throwaway CA, and seeds `acme/granted` with the project the Pod runs —
-   a Kubernetes run reads its project from the tree it fetches.
+   from a throwaway CA. `acme/granted` holds one commit and **no `.cloop/`**:
+   the project and its task exist only on the hub, so the Pod can only have
+   them from the seed the hub sends in the run's lease Secret (Task 20402).
 4. Creates `cloop-e2e-target-<stamp>` and a ServiceAccount that may *edit* it, so a
    refused write can only have been refused by the monitor.
 5. `helm upgrade --reuse-values` with `executor.gitProxy`, `executor.kubeGuard`
@@ -39,7 +40,8 @@ minted their sessions and are forwarded.
    `hostAliases` pointing github.com at the forge and `extraCACerts` trusting
    its CA.
 6. Registers a project whose origin is `https://github.com/acme/granted.git`,
-   then over the API: a `github_pat` secret granted for `acme/granted` only,
+   then over the API: the project's goal and its one task (`POST /api/init`,
+   `POST /api/tasks`); a `github_pat` secret granted for `acme/granted` only,
    writes limited to `cloop/e2e-allowed-*`; a kubeconfig grant for
    the target namespace with no verbs (read-only); a harness credential; the
    binding to the `kubernetes` executor. Then `POST /api/run`.
@@ -51,6 +53,7 @@ minted their sessions and are forwarded.
 | T1 | no GitHub token is in the environment, the lease directory or the workspace's git config |
 | C1 | the chart's CA is mounted at `/etc/cloop/git-ca/ca.crt` and trusted for the proxy's URL only — no `GIT_SSL_CAINFO` |
 | WS1, WS2 | the init container provisioned the workspace through the proxy (the `cloop-ws-<handle>` Secret's session username at work), and its `.git/config` holds no credential |
+| S1 | the repository tracks no `.cloop/`, the workspace holds the project the hub sent, and git ignores it, so a write-back cannot commit it |
 | P1 | `git clone https://github.com/acme/granted` works, through the proxy |
 | B1 | a push to `cloop/e2e-allowed-<stamp>` is accepted |
 | B2 | a push to `cloop/e2e-other-<stamp>` is refused by the proxy, with a message naming the grant's branches |
@@ -68,6 +71,13 @@ minted their sessions and are forwarded.
    `gitproxy.push_allowed`, a refusal naming `acme/other`,
    `kubeguard.request_denied` for configmaps and `kubeguard.request_allowed` for
    pods; and the run's Pod, Secrets and NetworkPolicy are deleted.
+8. Checks the round trip (Task 20402): the hub's own plan — the one the
+   dashboard renders — shows the task done and attributed to the `kubernetes`
+   executor, which can only be true if the run's outcome came back out of the
+   Pod's log; the live log says the project state came back, and carries none
+   of the frame it came in. Then it presses Start again and checks the second
+   run did not execute the task: no probe output in its log, and the task still
+   done at the same moment.
 
 ## Running it
 
