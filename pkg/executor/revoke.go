@@ -172,6 +172,13 @@ type RevokeReport struct {
 	// Killed lists the handles terminated — for RevokeKill, and for a
 	// RevokeScrub the driver could not honour without terminating.
 	Killed []string `json:"killed,omitempty"`
+	// Eventual reports that files were withdrawn from the object a running
+	// workload reads them through rather than from the workload's own
+	// filesystem, so they disappear inside it when the platform next syncs
+	// that object — a Kubernetes Pod's projected Secret volume, within the
+	// kubelet's sync period (about a minute) — not at the moment of this
+	// report. Only the Kubernetes driver sets it (Task 20403).
+	Eventual bool `json:"eventual,omitempty"`
 	// Error is non-empty when part of the revocation failed. The report is
 	// still returned: "I tried and this is what went wrong" is far more
 	// actionable than silence, which a hub can only read as unreachable.
@@ -218,6 +225,12 @@ type RevokeOutcome struct {
 	Ack *RevokeReport `json:"ack,omitempty"`
 	// Error explains a failed or unreachable outcome.
 	Error string `json:"error,omitempty"`
+	// Widened explains why a revocation naming one grant took the whole lease
+	// back on this executor — an agent too old to narrow it (Task 20403).
+	// Empty when the executor took back what was asked. It is said rather than
+	// hidden because the workload lost credentials nobody revoked, and its next
+	// failure should not be a mystery.
+	Widened string `json:"widened,omitempty"`
 }
 
 // Pending reports whether this outcome still needs to be delivered.
@@ -512,6 +525,17 @@ func (rl *RevocationLog) Settle(leaseID, grantID string, ack RevokeReport, at ti
 	}
 	entry.State = RevokeStateRevoked
 	entry.Error = ""
+}
+
+// Widen records on an entry why its revocation went out for the whole lease
+// rather than the one grant it named.
+func (rl *RevocationLog) Widen(leaseID, grantID, why string) {
+	key := revocationKey(leaseID, grantID)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if entry, ok := rl.byLease[key]; ok {
+		entry.Widened = why
+	}
 }
 
 // Fail marks an entry undelivered, without discarding it: it stays in the log

@@ -44,6 +44,7 @@ var testOnly = map[string]string{
 	"internal/cosigntest":  "stands in for cosign, accepting a bundle only for the identity it names",
 	"internal/edgetest":    "stages a device install and an edge release for upgrade tests",
 	"internal/rbactest":    "the ui.oidc blocks every RBAC reporter is tested against, and a copy of :8888's",
+	"internal/drivertest":  "stands in for a container runtime CLI and a Kubernetes API server, to drive the real drivers",
 }
 
 func TestTestOnlyPackagesAreImportedOnlyByTests(t *testing.T) {

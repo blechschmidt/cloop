@@ -236,7 +236,12 @@ func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResul
 	rctx, cancel := context.WithTimeout(ctx, revokeTimeout)
 	defer cancel()
 
-	ack, err := sess.revokeLease(rctx, p)
+	send, widened := e.narrowable(sess, p)
+	if widened != "" {
+		e.revocations.Widen(res.LeaseID, res.GrantID, widened)
+		res.Widened = widened
+	}
+	ack, err := sess.revokeLease(rctx, send)
 	if err != nil {
 		state := RevokeStateFailed
 		if isUnreachable(err) {
@@ -262,6 +267,23 @@ func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResul
 		}
 	}
 	return res
+}
+
+// narrowable returns the frame to send for p on sess, widened to the whole lease
+// when p names a grant and the agent is too old to take back only that grant
+// (Task 20403), with the reason it was widened. An older agent's vault knew one
+// grant per lease: the narrowed frame would have taken the whole lease back or
+// left the revoked grant on the device, depending on which grant was named.
+// Sending the lease-wide frame makes the first the only outcome.
+func (e *Executor) narrowable(sess *Session, p RevokePayload) (RevokePayload, string) {
+	if strings.TrimSpace(p.GrantID) == "" || SupportsGrantRevocation(sess.Version()) {
+		return p, ""
+	}
+	why := executor.NeedsProtocol("Agent "+e.id, sess.Version(), MinGrantRevocationVersion,
+		"to take back one grant of a lease and leave the others",
+		"The whole lease was taken back instead, so the run lost the lease's other credentials until its next dispatch.")
+	p.GrantID = ""
+	return p, why
 }
 
 // isUnreachable reports whether err means "the link is gone" rather than "the
@@ -308,12 +330,16 @@ func (e *Executor) replayRevocations(sess *Session, owed []RevokeResult) {
 	}
 	for _, r := range owed {
 		ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
-		ack, err := sess.revokeLease(ctx, RevokePayload{
+		send, widened := e.narrowable(sess, RevokePayload{
 			LeaseID: r.LeaseID,
 			GrantID: r.GrantID,
 			Reason:  r.Reason,
 			Action:  r.Action,
 		})
+		if widened != "" {
+			e.revocations.Widen(r.LeaseID, r.GrantID, widened)
+		}
+		ack, err := sess.revokeLease(ctx, send)
 		cancel()
 		if err != nil {
 			state := RevokeStateFailed

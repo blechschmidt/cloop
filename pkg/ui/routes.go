@@ -1031,6 +1031,10 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
+		// Which running workloads hold a grant, for the revoke confirmation
+		// (Task 20403): narrowed in the handler to grants the caller may
+		// revoke, as the DELETE above is.
+		{Pattern: "GET /api/grants/{id}/holders", Handler: s.handleGrantHolders, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		// Connecting a GitHub App (Task 20306). Discovery takes a private key

@@ -171,6 +171,55 @@ func TestRevokeSendsFrameAndRecordsAck(t *testing.T) {
 	}
 }
 
+// TestGrantRevocationIsWidenedForAnAgentThatCannotNarrowIt pins the v19 rule
+// (Task 20403). An agent older than MinGrantRevocationVersion remembered one
+// grant per lease, so a frame naming a grant either took the whole lease or,
+// for any grant but the first, answered "not held" and left the revoked file
+// on the device. The hub sends such an agent the lease-wide frame instead, and
+// says on the outcome that it did.
+func TestGrantRevocationIsWidenedForAnAgentThatCannotNarrowIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		version   int
+		wantGrant string
+		widened   bool
+	}{
+		{name: "older agent", version: remote.MinGrantRevocationVersion - 1, wantGrant: "", widened: true},
+		{name: "current agent", version: remote.ProtocolVersion, wantGrant: "grant_1", widened: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ex := newTestExecutor(t, nil)
+			p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1"}, helloAt(tc.version), nil)
+			defer sess.Close()
+			startLeased(t, ex, p, "lease_two")
+
+			sent := answerRevoke(t, p, remote.RevokedPayload{Known: true, FilesRemoved: 1})
+			res := ex.RevokeLease(context.Background(), remote.RevokePayload{
+				LeaseID: "lease_two", GrantID: "grant_1", Action: remote.RevokeScrub,
+			})
+			got := <-sent
+			if got.GrantID != tc.wantGrant {
+				t.Errorf("frame carried grant %q, want %q", got.GrantID, tc.wantGrant)
+			}
+			if res.State != remote.RevokeStateRevoked {
+				t.Fatalf("state = %q (%s), want revoked", res.State, res.Error)
+			}
+			if res.GrantID != "grant_1" {
+				t.Errorf("outcome names grant %q; it must keep the grant the operator revoked", res.GrantID)
+			}
+			if (res.Widened != "") != tc.widened {
+				t.Errorf("Widened = %q, want widened=%v", res.Widened, tc.widened)
+			}
+			if tc.widened && !strings.Contains(res.Widened, "whole lease") {
+				t.Errorf("the widening does not say what it cost: %q", res.Widened)
+			}
+			if logged := ex.Revocations(); len(logged) != 1 || (logged[0].Widened != "") != tc.widened {
+				t.Errorf("revocation log = %+v, want one entry recording the widening=%v", logged, tc.widened)
+			}
+		})
+	}
+}
+
 // TestRevokeOnOfflineAgentIsUnreachableNotRevoked is the honesty test.
 //
 // When the device cannot be reached the credential is still on it. Reporting

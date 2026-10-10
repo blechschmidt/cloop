@@ -504,7 +504,15 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 		// project holding both would be leased both, and the looser of the two
 		// is the one git would end up using. So a revocation that fails takes
 		// the new grant back out rather than leave the pair standing.
-		if err := bs.secret.Revoke(r.Context(), replaced.ID, s.auditActor(r)); err != nil {
+		//
+		// Superseded rather than revoked (Task 20403): the new grant still
+		// authorises the work a running task is doing with the old one, so
+		// its lease stands on the new grant instead of losing the credential
+		// — and its App token is re-minted at once, held to the edit. Only
+		// if that cannot be recorded is the old grant withdrawn outright.
+		ctx, _ := withGrantCascade(r.Context(), s)
+		err := s.supersedeGrant(ctx, bs, replaced.ID, grant.ID, s.auditActor(r))
+		if err != nil {
 			if rerr := bs.secret.Revoke(r.Context(), grant.ID, s.auditActor(r)); rerr != nil {
 				apierror.WriteError(w, apierror.New(apierror.CodeInternal, fmt.Sprintf(
 					"replaced grant %s could not be revoked (%v), and neither could its replacement %s "+
@@ -636,13 +644,19 @@ func (s *Server) handleProjectRepositoriesRevoke(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if err := bs.secret.Revoke(r.Context(), grantID, s.auditActor(r)); err != nil {
+	// Taken back from the runs holding it as Revoke returns (Task 20403).
+	ctx, cascade := withGrantCascade(r.Context(), s)
+	if err := bs.secret.Revoke(ctx, grantID, s.auditActor(r)); err != nil {
 		writeBrokerError(w, err, "revoke grant")
 		return
 	}
 	s.broadcastAuditAppend(string(secretbroker.ActionRevoke))
 	s.broadcastSecretsUpdate("grant_revoked", grantID)
-	jsonOK(w, map[string]any{"ok": true, "grant_id": grantID})
+	resp := map[string]any{"ok": true, "grant_id": grantID}
+	if res, ok := cascade.result(grantID); ok {
+		resp["state"], resp["leases"], resp["note"] = string(res.State), res.Leases, grantRevokeNote(res)
+	}
+	jsonOK(w, resp)
 }
 
 // ---------------------------------------------------------------------------

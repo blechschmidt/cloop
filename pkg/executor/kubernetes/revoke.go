@@ -56,6 +56,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -150,11 +151,12 @@ func (e *Executor) RevokeLease(ctx context.Context, req executor.RevokeRequest) 
 
 	var errs []error
 	for _, handleID := range executor.SortedHandles(held) {
-		removed, killed, err := e.revokeHandle(ctx, handleID, held[handleID])
-		ack.FilesRemoved += removed
-		if killed {
+		res, err := e.revokeHandle(ctx, handleID, held[handleID], req)
+		ack.FilesRemoved += res.removed
+		if res.killed {
 			ack.Killed = append(ack.Killed, handleID)
 		}
+		ack.Eventual = ack.Eventual || res.eventual
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -265,14 +267,31 @@ func (e *Executor) settle(out *executor.RevokeOutcome, ack executor.RevokeReport
 	out.State = executor.RevokeStateRevoked
 }
 
-// revokeHandle deletes one Pod's credential Secrets and, when the Pod is still
-// running, the Pod itself.
+// handleRevocation is what revoking a lease's material did to one Pod.
+type handleRevocation struct {
+	// removed counts what was destroyed: lease Secrets deleted, or — when the
+	// Pod keeps running — file keys emptied in its lease Secret.
+	removed int
+	// killed: the Pod was deleted, because the material was already inside a
+	// running container.
+	killed bool
+	// eventual: files were emptied in the lease Secret and reach the running
+	// container at the kubelet's next sync of the volume.
+	eventual bool
+}
+
+// revokeHandle takes req's material back from one Pod.
 //
-// removed counts Secrets deleted rather than files, because a Secret is the
-// unit this backend can actually destroy: the files inside it are projected
-// copies the API server does not address individually.
+// A Pod still running keeps running when everything req covers reached it as
+// files: those keys of its lease Secret are emptied, and the kubelet empties
+// the projected files at its next sync of the volume (Task 20403). It is how a
+// revocation of one grant leaves the lease's other grants working, and how a
+// lapsed lease's files leave a Pod without the Pod going. Anything req covers
+// that reached the container as an environment variable — or a kill — still
+// deletes the Pod and both Secrets: no API takes a variable out of a running
+// process.
 func (e *Executor) revokeHandle(ctx context.Context, handleID string,
-	bindings []executor.SecretBinding) (removed int, killed bool, err error) {
+	bindings []executor.SecretBinding, req executor.RevokeRequest) (handleRevocation, error) {
 
 	rec, lookupErr := e.lookup(handleID)
 	if lookupErr != nil {
@@ -281,8 +300,78 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 		// wrong; drop the stale index entry so a second revocation does not
 		// chase it again.
 		e.leases.Release(handleID)
-		return 0, false, nil
+		return handleRevocation{}, nil
 	}
+
+	if req.Effective() != executor.RevokeKill && len(executor.EnvKeys(bindings)) == 0 && !rec.finished() {
+		if out, kept := e.emptyLeaseFiles(ctx, rec, bindings); kept {
+			return out, nil
+		}
+		// The keys could not be emptied — an adopted record that does not know
+		// them, a Role without patch — so the Pod goes, which is the one
+		// withdrawal that does not depend on either.
+	}
+	removed, killed, err := e.deletePodMaterial(ctx, rec, handleID, bindings)
+	return handleRevocation{removed: removed, killed: killed}, err
+}
+
+// emptyLeaseFiles empties the lease Secret keys bindings' files are projected
+// from, in a Pod that keeps running. kept reports that the Pod may stay: every
+// file's key was known and the patch landed. A Secret that is already gone has
+// nothing left to empty, which counts as kept.
+func (e *Executor) emptyLeaseFiles(ctx context.Context, rec *record,
+	bindings []executor.SecretBinding) (out handleRevocation, kept bool) {
+
+	cli := rec.client()
+	st := rec.leaseSecretState()
+	if cli == nil || st == nil {
+		return out, false
+	}
+	data := map[string][]byte{}
+	for _, b := range bindings {
+		for _, path := range b.Files {
+			key, ok := st.keyFor(path)
+			if !ok {
+				return out, false
+			}
+			// Empty, not absent. The volume lists each key as an item of a
+			// non-optional Secret, and a kubelet refreshing such a volume from
+			// a Secret missing one of its keys fails the refresh and goes on
+			// serving the old file — the credential this call exists to take
+			// away. An empty value is projected as an empty file. A nil slice
+			// would encode as null, which a merge patch reads as "delete".
+			data[key] = []byte{}
+		}
+	}
+	if len(data) == 0 {
+		return out, true
+	}
+	st.mu.Lock()
+	name, deleted := st.secretName, st.deleted
+	st.mu.Unlock()
+	if name == "" || deleted {
+		return out, true
+	}
+	if err := cli.patchSecretData(ctx, rec.namespace, name, data); err != nil {
+		if ae, ok := asAPIError(err); ok && ae.NotFound() {
+			return out, true
+		}
+		fmt.Fprintf(os.Stderr, "kubernetes: could not empty revoked keys of %s/%s (%v); deleting pod %s instead\n",
+			rec.namespace, name, err, rec.podName)
+		return out, false
+	}
+	out.removed, out.eventual = len(data), true
+	return out, true
+}
+
+// deletePodMaterial deletes one Pod's credential Secrets and, when the Pod is
+// still running, the Pod itself.
+//
+// removed counts Secrets deleted rather than files, because a Secret is the
+// unit this backend can actually destroy: the files inside it are projected
+// copies the API server does not address individually.
+func (e *Executor) deletePodMaterial(ctx context.Context, rec *record, handleID string,
+	bindings []executor.SecretBinding) (removed int, killed bool, err error) {
 
 	// A record adopted after a hub restart has no *workspaceState and no
 	// *leaseSecretState — rehydrate rebuilds neither — but both Secret names

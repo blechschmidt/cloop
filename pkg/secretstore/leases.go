@@ -103,6 +103,32 @@ func (s *Store) TakeLease(id, from, holder string) (bool, error) {
 	return s.db.TakeSecretLease(id, from, holder)
 }
 
+// SetLeaseGrants rewrites the grants a record carries if holder holds it (Task
+// 20403).
+func (s *Store) SetLeaseGrants(id, holder string, grantIDs []string) (bool, error) {
+	row, err := s.db.GetSecretLease(id)
+	if err != nil {
+		return false, translateErr(err)
+	}
+	if row.Holder != holder {
+		return false, nil
+	}
+	var doc leaseDoc
+	if err := json.Unmarshal([]byte(row.Record), &doc); err != nil {
+		return false, fmt.Errorf("secretstore: decode lease %s: %w", id, err)
+	}
+	doc.GrantIDs = append([]string(nil), grantIDs...)
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return false, fmt.Errorf("secretstore: encode lease %s: %w", id, err)
+	}
+	return s.db.RewriteSecretLeaseRecord(id, holder, string(raw))
+}
+
+// Location names the database the store reads, for a subscriber to the
+// broker's revocations that must tell control planes apart (Task 20403).
+func (s *Store) Location() string { return s.db.Path() }
+
 // DeleteLease removes a record if holder holds it.
 func (s *Store) DeleteLease(id, holder string) (bool, error) {
 	return s.db.DeleteSecretLease(id, holder)

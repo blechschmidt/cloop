@@ -553,7 +553,11 @@ func (s *Server) supersedeHarnessGrants(ctx context.Context, r *http.Request, bs
 		if !g.Personal() && !canRevokeShared {
 			continue
 		}
-		if err := bs.secret.Revoke(ctx, g.ID, actor); err != nil {
+		// Superseded, not withdrawn (Task 20403): a run holding the old grant
+		// keeps its credential, standing on the new one, rather than being cut
+		// off by the grant meant to let it run longer.
+		cctx, _ := withGrantCascade(ctx, s)
+		if err := s.supersedeGrant(cctx, bs, g.ID, grant.ID, actor); err != nil {
 			s.log().Warn("secret_supersede", 0, "harness credential: could not revoke a grant the new one replaces",
 				map[string]interface{}{"grant": g.ID, "error": err.Error()})
 			continue

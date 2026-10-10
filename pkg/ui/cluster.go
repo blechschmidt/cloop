@@ -636,6 +636,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 				executor.DefaultRegistry.Unbind(project)
 			}
 		}
+	case invalidateGrant:
+		// A grant revoked by a process that is no member — `cloop secret
+		// revoke` (Task 20403). Each member takes it back from what it holds
+		// and answers the announcer.
+		s.onBusGrantRevoked(ev)
 	case invalidateRunLost:
 		// The run this member follows was taken off its executor by a
 		// failover another member handled (Task 20396).

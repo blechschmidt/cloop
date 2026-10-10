@@ -112,14 +112,18 @@ func (v *vault) refresh(leaseID string, files []executor.SecretFile) refreshRepo
 		report.handles = append(report.handles, h)
 	}
 	sort.Strings(report.handles)
-	if held.scrubbed {
+	if held.allScrubbed() {
 		report.errors = append(report.errors, fmt.Sprintf(
 			"lease %s was already taken back on this device, so there is nothing to refresh", id))
 		return report
 	}
+	// Only the files of grants not taken back: a grant revoked on its own
+	// (Task 20403) must not have its credential put back by a refresh of the
+	// lease that carried it.
+	live := held.liveFiles()
 	for _, f := range files {
 		var matches []string
-		for _, p := range held.files {
+		for _, p := range live {
 			if filepath.Base(p) == f.Name {
 				matches = append(matches, p)
 			}

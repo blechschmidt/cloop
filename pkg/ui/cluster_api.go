@@ -31,6 +31,9 @@ const (
 	// clusterAPIOffboardClaude: a departed identity's Claude logins on the
 	// member asked (Task 20400). See offboard_claude.go.
 	clusterAPIOffboardClaude = clusterAPIPrefix + "offboard/claude"
+	// clusterAPIGrantRevoked: a grant revoked on another member, for this one
+	// to take back from what it holds (Task 20403). See grant_revoke.go.
+	clusterAPIGrantRevoked = clusterAPIPrefix + "grants/revoked"
 )
 
 // clusterInternalBypass serves the member-to-member endpoints. Anything under
@@ -59,6 +62,8 @@ func (s *Server) clusterInternalBypass(next http.Handler) http.Handler {
 			s.handleClusterAgentOp(w, r)
 		case r.URL.Path == clusterAPIOffboardClaude && r.Method == http.MethodPost:
 			s.handleClusterOffboardClaude(w, r)
+		case r.URL.Path == clusterAPIGrantRevoked && r.Method == http.MethodPost:
+			s.handleClusterGrantRevoked(w, r)
 		default:
 			jsonErr(w, "unknown cluster endpoint", http.StatusNotFound)
 		}

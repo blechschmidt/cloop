@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -132,13 +133,44 @@ func (s *Server) revokeLeaseEverywhere(ctx context.Context, leaseID, grantID, re
 func (s *Server) revokeLeaseHere(ctx context.Context, leaseID, grantID, reason string, action remote.RevokeAction, actor string) leaseRevocation {
 	out := leaseRevocation{}
 
-	sl, held := liveLeases.revoke(leaseID)
+	// One grant of a lease that keeps others gives back only that grant's
+	// share of the hub's copy (Task 20403); the lease, its keepalive and its
+	// other grants stay. A lease that carried nothing else ends with it, and
+	// one that never carried the grant has nothing of it here to take.
+	var (
+		sl   *secretLease
+		held bool
+	)
+	if g := strings.TrimSpace(grantID); g != "" {
+		if cur := liveLeases.get(leaseID); cur != nil {
+			switch carries, others := cur.carriesOthers(g); {
+			case others:
+				if err := cur.withdrawGrant(ctx, g, reason); err != nil {
+					fmt.Fprintf(os.Stderr, "ui: withdraw grant %s from lease %s: %v\n", g, leaseID, err)
+				}
+				sl, held = cur, true
+			case !carries:
+				sl = cur
+			}
+		}
+	}
+	if sl == nil {
+		sl, held = liveLeases.revoke(leaseID)
+	}
 	out.WipedLocally = held
 	executorID, projectID := "", ""
 	var secretNames []string
 	if held && sl != nil && sl.lease != nil {
 		executorID, projectID = sl.lease.ExecutorID, sl.lease.ProjectID
 		secretNames = sl.lease.SecretNames()
+		if g := strings.TrimSpace(grantID); g != "" {
+			secretNames = nil
+			for _, m := range sl.lease.Materials {
+				if m.GrantID == g && !slices.Contains(secretNames, m.SecretName) {
+					secretNames = append(secretNames, m.SecretName)
+				}
+			}
+		}
 	}
 
 	req := remote.RevokePayload{
@@ -289,7 +321,8 @@ var (
 	leaseJanitorStop func()
 )
 
-// StartLeaseJanitor begins sweeping expired leases off live agents.
+// StartLeaseJanitor begins sweeping expired leases, and grants revoked without
+// a cascade, off every holder this member reaches.
 //
 // This is what makes a lease TTL bind the whole system rather than just the
 // hub. Lease.Expired and Lease.TTL existed from the start, but nothing ever
@@ -303,8 +336,9 @@ var (
 func (s *Server) StartLeaseJanitor(ctx context.Context) {
 	hub, err := s.remoteHub()
 	if err != nil || hub == nil {
-		// No remote fleet: the hub's own leases are wiped when their
-		// workloads exit, and there is nothing out there to sweep.
+		// The agent hub's ticker drives the sweep, and it exists whenever the
+		// control-plane database opens. When it does not, no broker opens
+		// either — no lease is issued, and there is nothing to sweep.
 		return
 	}
 
@@ -328,12 +362,26 @@ func (s *Server) StopLeaseJanitor() {
 	}
 }
 
-// sweepExpiredLeases reports the leases whose TTL has run out.
+// sweepExpiredLeases takes back the leases whose TTL has run out, and the
+// grants live leases still carry that no longer authorise them.
 //
-// It also wipes the hub's own copy of each, because a lapsed lease is lapsed
-// everywhere: leaving the tmpfs mount in place would let a workload that has
-// the directory path keep reading a credential the broker considers expired.
+// A lapsed lease is lapsed everywhere, so its material comes back from every
+// holder this member can reach — the hub's own copy (a tmpfs mount a workload
+// with the path could otherwise keep reading), the agents connected here, and
+// the hub-local drivers: a container's staged lease files and a Pod's lease
+// Secret, which nothing used to take back from a lapsed lease until the
+// workload exited (Task 20403). The other members do the same for theirs.
+//
+// It returns the lapsed leases for the agent hub's sweep, which scrubs them off
+// the agents connected here: everything else is taken back here.
 func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
+	ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
+	defer cancel()
+	// Grants first: a grant revoked by something that told no hub is taken
+	// back from the lease that carries it, which then goes on — rather than
+	// lapsing below with every other grant it carries.
+	s.reconcileWithdrawnGrants(ctx)
+
 	var out []remote.ExpiredLease
 	for _, sl := range liveLeases.snapshot() {
 		// The lease's *current* deadline, which the keepalive moves forward
@@ -361,21 +409,34 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 	if len(out) == 0 {
 		return nil
 	}
-	// Wipe the hub's copies here rather than leaving it to the fan-out: the
-	// janitor's caller only revokes on agents that hold the lease, and a
-	// hub-local executor never appears in that list.
 	for _, expired := range out {
-		if _, held := liveLeases.revoke(expired.LeaseID); held {
-			fmt.Fprintf(os.Stderr, "ui: swept expired lease %s (%s)\n", expired.LeaseID, expired.Reason)
+		res := s.revokeLapsedLeaseLocally(ctx, expired.LeaseID, expired.Reason)
+		if res.WipedLocally || len(res.Local) > 0 {
+			fmt.Fprintf(os.Stderr, "ui: swept expired lease %s (%s): %s\n", expired.LeaseID, expired.Reason, res.State)
 		}
-		s.auditRevokeSent("janitor", expired.LeaseID, "", "", "", expired.Reason,
-			remote.RevokeScrub, nil, nil)
 	}
 	s.broadcastSecretsUpdate("lease_expired", out[0].LeaseID)
-	// The agents holding these may be connected to another hub member
-	// (Task 20354); the fan-out this return value feeds reaches only this
-	// member's. Scrub on theirs too.
+	// The agents and drivers holding these may be on another hub member
+	// (Task 20354); scrub on theirs too.
 	s.revokeExpiredOnPeers(out)
+	return out
+}
+
+// revokeLapsedLeaseLocally is revokeLeaseHere without the agents, which the
+// agent hub's own sweep scrubs with the list sweepExpiredLeases returns: the
+// hub's copy, and every hub-local driver holding the lease — a container's
+// staged files, a Pod's lease Secret (Task 20403).
+func (s *Server) revokeLapsedLeaseLocally(ctx context.Context, leaseID, reason string) leaseRevocation {
+	out := leaseRevocation{}
+	_, out.WipedLocally = liveLeases.revoke(leaseID)
+	s.auditRevokeSent("janitor", leaseID, "", "", "", reason, remote.RevokeScrub, nil, nil)
+	out.Local = s.revokeOnLocalDrivers(ctx, remote.RevokePayload{
+		LeaseID: leaseID, Reason: reason, Action: remote.RevokeScrub,
+	})
+	for _, res := range out.Local {
+		s.auditRevokeResult("janitor", "", res)
+	}
+	out.State = aggregateState(out.Local, out.WipedLocally)
 	return out
 }
 

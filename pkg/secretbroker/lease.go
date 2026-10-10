@@ -166,6 +166,11 @@ type Lease struct {
 	// see that a credential it was granted — often a departed colleague's —
 	// was destroyed.
 	Refused []RefusedCredential `json:"refused,omitempty"`
+	// Withdrawn names grants a lease taken over from another hub process
+	// still carried that were revoked while nobody held it (Task 20403). The
+	// process that took it over takes their material back from the workload
+	// and drops them from the lease. Metadata only.
+	Withdrawn []WithdrawnGrant `json:"withdrawn,omitempty"`
 }
 
 // Kinds returns the distinct credential kinds the lease carries, sorted.
@@ -824,6 +829,42 @@ func (d *Delivery) Files() []DeliveredFile {
 	return out
 }
 
+// Withdraw zeroes and drops the file contents grantID contributed, and reports
+// how many files there were: one grant of a lease taken back while the others
+// stay (Task 20403). A refresh never re-delivers them, and a heap dump taken
+// later does not contain them.
+func (d *Delivery) Withdraw(grantID string) int {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return 0
+	}
+	var (
+		kept    []placedFile
+		removed int
+	)
+	for _, f := range d.files {
+		if f.GrantID != grantID {
+			kept = append(kept, f)
+			continue
+		}
+		for j := range f.Content {
+			f.Content[j] = 0
+		}
+		removed++
+	}
+	d.files = kept
+	for i := range d.bindings {
+		if d.bindings[i].GrantID == grantID {
+			d.bindings[i].Files = nil
+		}
+	}
+	return removed
+}
+
 // Close zeroes the buffers holding the plaintext and drops the rest. It is
 // idempotent, so it is safe in a defer beside an explicit call.
 //
@@ -1022,6 +1063,55 @@ func (m *Mount) Close() error {
 	// operator "this credential is destroyed" needs every reason it might not
 	// be, and the first failure is not reliably the worst one.
 	return errors.Join(errs...)
+}
+
+// Withdraw wipes the files grantID wrote into the mount and forgets them, and
+// reports how many there were: one grant of a lease taken back while the
+// others stay (Task 20403). The directory stays, holding the other grants'
+// files; Close removes it with them. A file shared with another grant — the
+// gitconfig several GitHub grants install their helpers through — belongs to
+// the first grant's binding and goes with it, which errs toward less access.
+func (m *Mount) Withdraw(grantID string) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, nil
+	}
+	doomed := map[string]bool{}
+	for i := range m.bindings {
+		if m.bindings[i].GrantID != grantID {
+			continue
+		}
+		for _, path := range m.bindings[i].Files {
+			doomed[path] = true
+		}
+		m.bindings[i].Files = nil
+	}
+	var (
+		errs    []error
+		kept    []string
+		removed int
+	)
+	for _, path := range m.files {
+		if !doomed[path] {
+			kept = append(kept, path)
+			continue
+		}
+		_, statErr := os.Lstat(path)
+		if err := wipeFile(path); err != nil {
+			errs = append(errs, err)
+			kept = append(kept, path)
+			continue
+		}
+		if statErr == nil {
+			removed++
+		}
+	}
+	m.files = kept
+	return removed, errors.Join(errs...)
 }
 
 // wipeFile overwrites a file's contents with zeros, syncs, and removes it.

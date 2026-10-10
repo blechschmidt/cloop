@@ -146,6 +146,7 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 		RevokedAt:       formatTime(g.RevokedAt),
 		Owner:           g.Owner,
 		RevokedCause:    string(g.RevokedCause),
+		SupersededBy:    g.SupersededBy,
 	})
 }
 
@@ -191,6 +192,15 @@ var _ secretbroker.CausedRevoker = (*Store)(nil)
 // RevokeGrantWithCause stamps a grant revoked and records why.
 func (s *Store) RevokeGrantWithCause(id string, at time.Time, cause secretbroker.RevocationCause) error {
 	return translateErr(s.db.RevokeBrokerGrantWithCause(id, at, string(cause)))
+}
+
+// Compile-time proof that a supersession here names its successor (Task
+// 20403).
+var _ secretbroker.SupersedingRevoker = (*Store)(nil)
+
+// RevokeGrantSuperseded stamps a grant revoked because successorID replaced it.
+func (s *Store) RevokeGrantSuperseded(id string, at time.Time, successorID string) error {
+	return translateErr(s.db.SupersedeBrokerGrant(id, at, successorID))
 }
 
 // Meta reads a broker-scoped metadata value.
@@ -250,6 +260,7 @@ func toGrant(row statedb.BrokerGrantRow) (secretbroker.Grant, error) {
 		RevokedAt:    parseTime(row.RevokedAt),
 		Owner:        row.Owner,
 		RevokedCause: secretbroker.RevocationCause(row.RevokedCause),
+		SupersededBy: row.SupersededBy,
 	}, nil
 }
 

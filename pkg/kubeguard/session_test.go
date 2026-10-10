@@ -116,6 +116,30 @@ func TestAuthenticateReportsExpiryAndRevocationDistinctly(t *testing.T) {
 	}
 }
 
+// TestCloseForGrantRevokesOnlyThatGrantsSessions (Task 20403): revoking one
+// grant of a lease ends its monitor sessions and leaves the lease's other
+// grants' sessions authenticating.
+func TestCloseForGrantRevokesOnlyThatGrantsSessions(t *testing.T) {
+	reg := newTestRegistry(t)
+	revoked, err := reg.Mint(MintRequest{Kubeconfig: testKubeconfig(""), LeaseID: "lease-1", GrantID: "grant-a"})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	kept, err := reg.Mint(MintRequest{Kubeconfig: testKubeconfig(""), LeaseID: "lease-1", GrantID: "grant-b"})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if n := reg.CloseForGrant("lease-1", "grant-a", "grant revoked"); n != 1 {
+		t.Fatalf("CloseForGrant closed %d sessions, want 1", n)
+	}
+	if _, err := reg.Authenticate(revoked.Token); !errors.Is(err, ErrSessionClosed) {
+		t.Errorf("the revoked grant's session still authenticates: %v", err)
+	}
+	if _, err := reg.Authenticate(kept.Token); err != nil {
+		t.Errorf("the other grant's session was closed too: %v", err)
+	}
+}
+
 // TestCloseForLeaseRevokesEverySessionTheLeaseMinted is the gap Task 20178
 // closed for the other secret kinds: without it, releasing a lease wipes the
 // kubeconfig file in the sandbox while the session it already authenticated

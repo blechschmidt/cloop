@@ -35,7 +35,7 @@ func TestWipeBindingFilesRefusesPathsOutsideALeaseDirectory(t *testing.T) {
 	removed, err := wipeBindingFiles([]executor.SecretBinding{{
 		LeaseID: "l1",
 		Files:   []string{outside},
-	}})
+	}}, true)
 
 	if err == nil {
 		t.Fatal("a path outside a lease directory was accepted silently.\n" +
@@ -69,7 +69,7 @@ func TestWipeBindingFilesRemovesLeaseMaterial(t *testing.T) {
 		LeaseID: "l1",
 		Files:   []string{token},
 		Dir:     dir,
-	}})
+	}}, true)
 	if err != nil {
 		t.Fatalf("wipeBindingFiles: %v", err)
 	}
@@ -83,6 +83,56 @@ func TestWipeBindingFilesRemovesLeaseMaterial(t *testing.T) {
 	// is a needless hint about what was granted.
 	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
 		t.Errorf("the lease directory %s survived with nothing in it", dir)
+	}
+}
+
+// TestRevokingOneGrantKeepsTheOtherGrantsFiles pins the narrowing on a host
+// workload (Task 20403). Every grant of a lease writes into the one lease
+// directory, and each binding names that directory, so a revocation of one
+// grant that also removed the directory took the other grants' credentials
+// with it — a workload still entitled to its kubeconfig lost it because a PAT
+// was withdrawn.
+func TestRevokingOneGrantKeepsTheOtherGrantsFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), securewipe.LeaseDirPrefix+"two")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pat := filepath.Join(dir, "github-token")
+	kube := filepath.Join(dir, "kubeconfig")
+	for path, body := range map[string]string{pat: "ghp_canary", kube: "token: kube_canary"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", path, err)
+		}
+	}
+	bindings := []executor.SecretBinding{
+		{LeaseID: "l1", GrantID: "grant_pat", Files: []string{pat}, Dir: dir},
+		{LeaseID: "l1", GrantID: "grant_kube", Files: []string{kube}, Dir: dir},
+	}
+
+	e := New("test-host")
+	e.leases.Bind("h1", bindings)
+	out := e.RevokeLease(t.Context(), executor.RevokeRequest{LeaseID: "l1", GrantID: "grant_pat"})
+	if out.State != executor.RevokeStateRevoked {
+		t.Fatalf("State = %q (%s), want revoked", out.State, out.Error)
+	}
+	if out.Ack == nil || out.Ack.FilesRemoved != 1 {
+		t.Errorf("ack = %+v, want exactly the revoked grant's one file removed", out.Ack)
+	}
+	if _, err := os.Stat(pat); !os.IsNotExist(err) {
+		t.Errorf("the revoked grant's token survived at %s", pat)
+	}
+	if got, err := os.ReadFile(kube); err != nil || string(got) != "token: kube_canary" {
+		t.Errorf("revoking grant_pat took grant_kube's kubeconfig with it: %v / %q", err, got)
+	}
+
+	// The lease-wide revocation that follows takes everything, the directory
+	// included.
+	out = e.RevokeLease(t.Context(), executor.RevokeRequest{LeaseID: "l1"})
+	if out.State != executor.RevokeStateRevoked {
+		t.Fatalf("lease-wide State = %q (%s)", out.State, out.Error)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("a lease-wide revocation left the lease directory %s", dir)
 	}
 }
 

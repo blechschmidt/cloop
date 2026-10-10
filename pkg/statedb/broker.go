@@ -55,8 +55,11 @@ type BrokerGrantRow struct {
 	// listing can be scoped without resolving each row's secret.
 	Owner string
 	// RevokedCause is why a revoked grant was revoked — "owner_offboarded",
-	// "secret_deleted", or "" — see migration 0062.
+	// "secret_deleted", "superseded", or "" — see migration 0062.
 	RevokedCause string
+	// SupersededBy names the grant that replaced a superseded one — see
+	// migration 0063.
+	SupersededBy string
 }
 
 // PutBrokerSecret inserts or replaces a secret.
@@ -272,18 +275,18 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 	if _, err := d.conn.Exec(
 		`INSERT INTO broker_grants(id, secret_id, scope, subject_type, subject_value,
 		     constraints_json, expires_at, created_at, created_by, revoked_at, owner,
-		     revoked_cause)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		     revoked_cause, superseded_by)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   secret_id=excluded.secret_id, scope=excluded.scope,
 		   subject_type=excluded.subject_type, subject_value=excluded.subject_value,
 		   constraints_json=excluded.constraints_json, expires_at=excluded.expires_at,
 		   created_at=excluded.created_at, created_by=excluded.created_by,
 		   revoked_at=excluded.revoked_at, owner=excluded.owner,
-		   revoked_cause=excluded.revoked_cause`,
+		   revoked_cause=excluded.revoked_cause, superseded_by=excluded.superseded_by`,
 		row.ID, row.SecretID, row.Scope, row.SubjectType, row.SubjectValue,
 		defaultJSON(row.ConstraintsJSON), row.ExpiresAt, row.CreatedAt,
-		row.CreatedBy, row.RevokedAt, row.Owner, row.RevokedCause,
+		row.CreatedBy, row.RevokedAt, row.Owner, row.RevokedCause, row.SupersededBy,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker grant %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -298,11 +301,12 @@ func (d *DB) GetBrokerGrant(id string) (BrokerGrantRow, error) {
 	var row BrokerGrantRow
 	err := d.conn.QueryRow(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
-		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause
+		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
+		        superseded_by
 		 FROM broker_grants WHERE id = ?`, id,
 	).Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType, &row.SubjectValue,
 		&row.ConstraintsJSON, &row.ExpiresAt, &row.CreatedAt, &row.CreatedBy, &row.RevokedAt,
-		&row.Owner, &row.RevokedCause)
+		&row.Owner, &row.RevokedCause, &row.SupersededBy)
 	if err == sql.ErrNoRows {
 		return BrokerGrantRow{}, fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
 	}
@@ -323,7 +327,8 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 
 	rows, err := d.conn.Query(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
-		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause
+		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
+		        superseded_by
 		 FROM broker_grants ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker grants: %w", classifyDriverErr(err))
@@ -335,7 +340,8 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 		var row BrokerGrantRow
 		if err := rows.Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType,
 			&row.SubjectValue, &row.ConstraintsJSON, &row.ExpiresAt,
-			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt, &row.Owner, &row.RevokedCause); err != nil {
+			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt, &row.Owner, &row.RevokedCause,
+			&row.SupersededBy); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker grant: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)
@@ -355,6 +361,32 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 // caller's desired end state holds.
 func (d *DB) RevokeBrokerGrant(id string, at time.Time) error {
 	return d.RevokeBrokerGrantWithCause(id, at, "")
+}
+
+// SupersedeBrokerGrant stamps a grant revoked because successor replaced it
+// (migration 0063): revoked_cause 'superseded' and superseded_by naming the
+// successor. As with any revocation, a grant already revoked keeps the time and
+// cause — and successor — it was revoked with.
+func (d *DB) SupersedeBrokerGrant(id string, at time.Time, successor string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	stamp := at.UTC().Format(time.RFC3339Nano)
+	res, err := d.conn.Exec(
+		`UPDATE broker_grants SET revoked_at = ?, revoked_cause = 'superseded', superseded_by = ?
+		  WHERE id = ? AND revoked_at = ''`,
+		stamp, successor, id)
+	if err != nil {
+		return fmt.Errorf("statedb: supersede broker grant %s: %w", id, classifyDriverErr(err))
+	}
+	if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+		var exists int
+		if qerr := d.conn.QueryRow(
+			`SELECT COUNT(*) FROM broker_grants WHERE id = ?`, id).Scan(&exists); qerr == nil && exists == 0 {
+			return fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
+		}
+	}
+	return nil
 }
 
 // RevokeBrokerGrantWithCause is RevokeBrokerGrant recording why (migration

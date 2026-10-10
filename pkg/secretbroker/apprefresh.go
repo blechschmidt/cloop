@@ -135,6 +135,15 @@ type appTokenSlot struct {
 	// confirmed: a restored slot's scope was held to its grant and the
 	// installation (confirmScope) before its first token was minted.
 	confirmed bool
+	// confirmedFor is the grant whose constraints the slot's scope was last
+	// held to: grantID at mint, or the successor a refresh re-read after
+	// grantID was superseded (Task 20403). A refresh whose grant differs from
+	// it holds the scope to the new one first (confirmScope), so a successor
+	// that narrowed the assignment narrows the token and one that widened it
+	// cannot widen it. Empty means grantID. reconfirm asks the keepalive to
+	// refresh a file token now rather than near its end, for the same reason.
+	confirmedFor string
+	reconfirm    bool
 }
 
 // retiringToken is a superseded token awaiting destruction.
@@ -280,7 +289,11 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 
 	b.mu.Lock()
 	scope := slot.scope
-	confirm := slot.restored && !slot.confirmed
+	confirmedFor := slot.confirmedFor
+	if confirmedFor == "" {
+		confirmedFor = slot.grantID
+	}
+	confirm := (slot.restored && !slot.confirmed) || g.ID != confirmedFor
 	b.mu.Unlock()
 	var narrowed string
 	if confirm {
@@ -297,7 +310,7 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 		}
 		scope, narrowed = confirmed, note
 		b.mu.Lock()
-		slot.scope, slot.confirmed = confirmed, true
+		slot.scope, slot.confirmed, slot.confirmedFor, slot.reconfirm = confirmed, true, g.ID, false
 		b.mu.Unlock()
 	}
 
@@ -399,7 +412,9 @@ func (b *Broker) slotEvent(slot *appTokenSlot) Event {
 // database says nothing about the grant.
 func (b *Broker) refreshAuthority(slot *appTokenSlot) (cred *AppCredential, g Grant, final bool, cause error) {
 	now := b.now()
-	g, err := b.store.GetGrant(slot.grantID)
+	// The grant the slot stands on: its own, or — once its own was
+	// superseded — the successor the grant row names (Task 20403).
+	g, err := b.authorityFor(slot.grantID)
 	if err != nil {
 		if errors.Is(err, ErrGrantNotFound) {
 			return nil, Grant{}, true, fmt.Errorf("%w: grant %s is gone", ErrGrantNotFound, slot.grantID)
@@ -616,7 +631,10 @@ func (b *Broker) AppTokensDue(leaseID string) bool {
 		if slot.guarded || slot.abandoned || slot.ended {
 			continue
 		}
-		if slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow || !slot.delivered {
+		// A slot moved onto a successor's authority is re-minted at once, so
+		// an edit that narrowed the assignment narrows the token in the
+		// sandbox's file within a keepalive tick (Task 20403).
+		if slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow || !slot.delivered || slot.reconfirm {
 			return true
 		}
 	}
@@ -712,7 +730,7 @@ func (b *Broker) RefreshLeaseFiles(ctx context.Context, lease *Lease) (*LeaseFil
 		if slot.guarded || slot.abandoned || slot.ended {
 			continue
 		}
-		if slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow || !slot.delivered {
+		if slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow || !slot.delivered || slot.reconfirm {
 			candidates = append(candidates, slot)
 		}
 	}
@@ -726,7 +744,9 @@ func (b *Broker) RefreshLeaseFiles(ctx context.Context, lease *Lease) (*LeaseFil
 	var parts []string
 	for _, slot := range candidates {
 		b.mu.Lock()
-		due := slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow
+		// A slot whose grant was superseded is re-minted now, held to the
+		// successor (Task 20403), whatever its token has left.
+		due := slot.current.expiresAt.Sub(now) <= AppTokenRefreshWindow || slot.reconfirm
 		held := slot.current.token
 		b.mu.Unlock()
 		if due {

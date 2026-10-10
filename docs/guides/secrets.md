@@ -33,10 +33,11 @@ Three nouns, and the distinction between them is the whole design:
 | **Grant** | who may use it, narrowed by kind-specific constraints, until when | `--ttl`, default 24 h |
 | **Lease** | a short-lived, *minimised* materialisation of every grant matching one (executor, project) | ≤ 15 min |
 
-Executors receive leases. They never receive the store. That is why revoking a
-grant takes effect within one lease period rather than at the grant's expiry:
-the executor must come back and ask again, and the answer is recomputed from
-current grants each time.
+Executors receive leases. They never receive the store. Every lease and every
+renewal is recomputed from current grants, so a revoked grant is never issued
+again — and revoking it also takes it back from the workloads already holding
+it, at once, without waiting for their lease to end (see
+[Revoking a grant](#revoking-a-grant)).
 
 **Minimisation is the point.** For `kubeconfig`, `registry` and `env`, the
 broker *rewrites the payload* before delivery — a narrower credential cannot be
@@ -1079,9 +1080,9 @@ Revoking a `local_repo` grant behaves differently from revoking a token, and the
 difference is a genuine limitation rather than an oversight. A revoked lease's
 files are wiped and its environment variables scrubbed, but a bind mount already
 in a running sandbox's mount namespace cannot be taken back from outside it. The
-grant stops being *re-issued* immediately — the next lease renewal, at most 15
-minutes away, will not contain it, so no new run gets the repository — but the
-run already holding it keeps it until it exits.
+grant leaves the run's lease at once and is never issued again, so no new run
+gets the repository — but the run already holding the bind keeps it until it
+exits.
 
 To cut access to a repository *now*, stop the workload: the dashboard's Stop
 button, or [cordon the executor](../architecture/executors.md#placement). There
@@ -1383,9 +1384,9 @@ when a spec carrying devices is placed or failed over across a fleet — see
 
 This is the same limitation `local_repo` has, and harder. A device already in a
 running sandbox's cgroup and mount namespace cannot be taken back from outside it,
-exactly as a bind mount cannot. Revoking the grant stops it being *re-issued*
-immediately — the next lease, at most 15 minutes away, will not contain it, so no
-new run gets the hardware — but the run already holding it keeps it until it exits.
+exactly as a bind mount cannot. Revoking the grant takes it out of the run's
+lease at once and it is never issued again, so no new run gets the hardware — but
+the run already holding it keeps it until it exits.
 The devices are recorded on the lease for the audit trail rather than for
 revocation, which is the honest reading of what the hub can and cannot do.
 
@@ -1395,10 +1396,13 @@ dashboard's Stop button, or by
 top-level `cloop stop`:
 
 ```console
-$ cloop secret revoke <grant-id>
-✓ revoked grant_7f3a1c
-  already-materialised credentials survive until the workload exits
+$ cloop secret revoke grant_7f3a1c
+✓ revoked grant grant_7f3a1c (bench-gpu)
+  hub member hub-5d1e0c on build-01: taken back from 1 lease(s) — revoked
 ```
+
+"Taken back" covers what the lease delivered as files and variables; the device
+node itself stays in the sandbox until the run is stopped.
 
 **Grant TTLs are the routine control here, not revocation.** Eight hours for a
 bench session is better than a week, because the grant lapsing is what makes it a
@@ -1653,19 +1657,34 @@ $ cloop secret lease --project /srv/app --executor edge-01
 
 `helper-scoped=true` confirms no bare `GITHUB_TOKEN` was exported.
 
-**Revoking:**
+### Revoking a grant
 
 ```console
 $ cloop secret revoke grant_8ce0add1fec2ed4fa00c3a23
+✓ revoked grant grant_8ce0add1fec2ed4fa00c3a23 (deploy-pat)
+  hub member hub-5d1e0c on build-01: taken back from 1 lease(s) — revoked
+    container: revoked — 3 file(s) removed
 $ cloop egress revoke egress_b9c92d36cdec6a598e1bd797
 $ cloop egress list --all
 ```
 
-The two differ, and the difference matters during an incident:
+Both take access back from a run that already has it, by different routes, and
+the difference matters during an incident:
 
-- **Secret grants** stop being honoured at the next lease or renewal. Material
-  already materialised is taken back by revoking the *lease* (below), not the
-  grant.
+- **Secret grants** are taken back from every workload holding them at once,
+  not at the next renewal. Each hub member holding a lease that carries the
+  grant wipes the grant's files from its own copy, sends every executor holding
+  the lease a revocation narrowed to that grant, closes the git proxy and
+  Kubernetes monitor sessions the grant fed, and destroys the GitHub App tokens
+  minted for it. A lease that carries other grants keeps them, and the run keeps
+  working on them. The Secrets panel's **Revoke** does this from the hub, and
+  says first how many running workloads hold the grant and which hold it in
+  their environment. `cloop secret revoke` runs outside the hub, so it announces
+  the revocation on the hub bus and waits up to `--wait` (default `60s`) for
+  every running member to say what it took back; it names a member that did not
+  answer, and says so when no hub is running at all. What no announcement
+  reaches — a hub started with `ui.cluster.exclusive` reads no bus — the lease
+  janitor finds within a minute.
 - **Egress grants** are cut immediately: every live session under the grant is
   closed at the proxy, mid-tunnel. Revoked in the dashboard of the hub holding
   the session, it closes at once; revoked with the CLI or on another hub member,
@@ -1673,16 +1692,38 @@ The two differ, and the difference matters during an incident:
   of the run. The project's journal records the close and how many open tunnels
   it cut.
 
-Revoking an already-revoked grant succeeds. Every grant, revoke and lease
-decision is audited with actor, subject, constraints and reason — and never with
-material ([`TestSecretBrokerDecisionsNeverCarryMaterial`](../security/model.md#the-guarantee--test-table)).
+What a grant revocation cannot take back is what a lease scrub cannot
+([below](#what-a-scrub-actually-reaches)): a variable already in a running
+process's environment. A host process or a device's task keeps its copy until
+it exits. A container or a Kubernetes Pod holding the grant in its environment
+is removed instead, because its runtime keeps a copy that only removing the
+workload destroys — the outcome says the workload was *terminated*, and the
+panel's confirmation names those workloads before you press it. A repository
+bound in by `local_repo`, a `host_device` and a `network_interface` stay in the
+sandbox until it exits (their sections below say why). When the credential
+itself is compromised, rotate it at the source as well, and revoke the run's
+lease with `action=kill`.
+
+**Editing is not revoking.** Changing a project's repository assignment in the
+panel, or granting a Claude credential again for longer, files a new grant and
+retires the old one as *superseded* — the old grant's row names its successor.
+Nothing is taken back from a running task: its lease stands on the new grant,
+extended while that stands and ended with it, and a GitHub App token it holds
+is re-minted at once within the new grant's repositories and permissions. To
+take access away from a running task, revoke the assignment rather than edit it.
+
+Revoking an already-revoked grant succeeds and takes nothing back a second time.
+Every grant, revoke and lease decision is audited with actor, subject,
+constraints and reason — and never with material
+([`TestSecretBrokerDecisionsNeverCarryMaterial`](../security/model.md#the-guarantee--test-table)).
 
 ---
 
 ## Revoking a lease from a running task
 
-Revoking a *grant* changes what the next lease will contain. Revoking a *lease*
-takes material back from a task that is already running:
+Revoking a *grant* takes that grant back from every lease that carries it.
+Revoking a *lease* takes back everything one running task holds, whichever grant
+it came from:
 
 ```console
 $ curl -X POST https://cloop.example.com/api/leases/lease_8ce0add1/revoke \
@@ -1754,19 +1795,24 @@ so it is safe to re-run. See
 [Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works),
 and the build-version reporting that tells you which devices need it.
 
-### The three triggers
+### The four triggers
 
-Revocation is driven from three places, all through the same path:
+Revocation is driven from four places, all through the same path:
 
 1. **Explicit** — the Secrets panel or `POST /api/leases/{id}/revoke`.
-2. **TTL expiry** — a janitor sweeps live agent sessions once a minute and
-   scrubs leases whose TTL has lapsed. Before this existed, `Lease.Expired` was
-   consulted only by the caller that *minted* the lease, so a fifteen-minute
+2. **TTL expiry** — a janitor sweeps once a minute and scrubs every lease whose
+   TTL has lapsed from every holder: a device, and the hub's own host-process,
+   container and Kubernetes drivers — a container's staged files are unlinked
+   and a Pod's lease Secret loses its keys. Before this existed, `Lease.Expired`
+   was consulted only by the caller that *minted* the lease, so a fifteen-minute
    credential handed to a three-hour task simply stayed there for three hours.
 3. **Cordon and drain** — taking a device out of rotation scrubs everything it
    is holding. It scrubs rather than kills, because draining explicitly waits
    for in-flight work to finish and killing it would contradict the operation
    you asked for.
+4. **Grant revocation** — [revoking a grant](#revoking-a-grant), or deleting
+   the secret it points at, scrubs that grant from every lease carrying it and
+   leaves the lease's other grants in place.
 
 Each step is audited as `lease.revoke_sent`, then `lease.revoke_acked` or
 `lease.revoke_failed`, with the lease and executor IDs and how long the ack
@@ -1792,6 +1838,9 @@ hub. Three tables, matching the three concepts in [The model](#the-model):
   allowlist for the rest. The wizard offers only secrets matching the chosen
   kind, and there is no "allow everything" default — an empty allowlist is
   rejected by the same `Constraints.ValidateFor` the CLI goes through.
+  **Revoke** first says how many running workloads hold the grant and which
+  hold it in their environment — those a container or a Pod will be removed
+  for — then takes it back from every one and lists what each holder did.
 - **Live leases** — what is outstanding *right now*: which executor, which
   project, which credentials, and how long is left. **Revoke** wipes that
   workload's credential directory immediately instead of waiting out the lease.
@@ -1829,6 +1878,12 @@ The tab is hidden, and every route behind it refused, below **maintainer**:
 | `GET`/`POST` `/api/secrets`, `/api/grants`, `GET /api/leases` | `secret.grant` |
 | `DELETE /api/secrets/{id}`, `DELETE /api/grants/{id}`, `POST /api/leases/{id}/revoke` | `secret.revoke` |
 
+`GET /api/grants/{id}/holders`, the preview the revoke confirmation reads,
+answers for a grant the caller can see in `GET /api/grants`. The owner of a
+personal grant sees how many of their workloads hold it and how; which executor
+and project each one is shows only to a caller with `secret.grant`, who may read
+the fleet's leases anyway.
+
 Reads sit at `secret.grant` rather than `project.read` on purpose: the list of
 which credentials exist, which executor holds them, and what each may reach is
 reconnaissance, and a role that cannot broker access has no reason to enumerate
@@ -1862,7 +1917,7 @@ departed owner could grant it again. See the
 | | Default | Ceiling | Guidance |
 | --- | --- | --- | --- |
 | Secret grant `--ttl` | 24 h | — | match the work, not the calendar. A one-off migration is `--ttl 2h` |
-| Lease | 15 min | 15 min | not configurable per grant; swept off live agents within a minute of lapsing |
+| Lease | 15 min | 15 min | not configurable per grant; swept off every holder within a minute of lapsing |
 | Egress grant `--ttl` | 24 h | — | as above |
 | Egress `--session-ttl` | 15 min | 4 h | longer sessions mean revocation lands later |
 | Enrollment token `--ttl` | 15 min | 24 h | it is a bearer secret in transit — keep it short |
@@ -1870,8 +1925,8 @@ departed owner could grant it again. See the
 The lease TTL is the number to reason about when nobody is watching: an
 executor holding a lapsed lease has it swept within a minute of expiry, so the
 TTL plus the janitor interval bounds how long unattended material stays live.
-When someone *is* watching, revoke the lease directly — that lands in one round
-trip rather than at the end of the TTL. Either way, an unreachable agent is
+When someone *is* watching, revoke the lease or the grant directly — that lands
+in one round trip rather than at the end of the TTL. Either way, an unreachable agent is
 bounded by neither; see
 [When the agent is unreachable](#when-the-agent-is-unreachable).
 

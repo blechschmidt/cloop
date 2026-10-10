@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -227,6 +228,20 @@ Examples:
 			fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the revoked tokens: %v\n", err)
 		}
 
+		// The grants were revoked in this process, which holds no lease and
+		// reaches no workload: tell the running hubs, which take each back
+		// from the workloads holding it (Task 20403).
+		var grantRep *ui.GrantRevocationReport
+		var grantErr error
+		if !dryRun && len(rep.GrantsRevoked) > 0 {
+			anns := make([]ui.GrantRevocationAnnouncement, 0, len(rep.GrantsRevoked))
+			for _, g := range rep.GrantsRevoked {
+				anns = append(anns, ui.GrantRevocationAnnouncement{GrantID: g.ID, Actor: operatorActor()})
+			}
+			gr, err := ui.AnnounceGrantsRevoked(db, cliOrigin(), anns, offboardGrantWait)
+			grantRep, grantErr = &gr, err
+		}
+
 		if asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -235,6 +250,10 @@ Examples:
 			}
 		} else {
 			printOffboardReport(rep, announced)
+			if grantRep != nil {
+				fmt.Println("\nRevoked grants, taken back from running workloads:")
+				printGrantRevocationReport(*grantRep, grantErr, offboardGrantWait)
+			}
 		}
 
 		// A partial run is an error even though most of it worked: the operator
@@ -251,6 +270,10 @@ Examples:
 
 // printOffboardReport renders the plan, and for a real run what came of it.
 // announced says whether running hubs were told of the revocations.
+// offboardGrantWait bounds how long `hub user offboard` waits for running hubs
+// to say what they took back of the grants it revoked.
+const offboardGrantWait = 60 * time.Second
+
 func printOffboardReport(rep offboard.Report, announced bool) {
 	bold := color.New(color.Bold)
 	faint := color.New(color.Faint)

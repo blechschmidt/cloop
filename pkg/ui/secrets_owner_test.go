@@ -408,6 +408,9 @@ func TestSecretsRoutesNarrowOperatorsToTheirOwn(t *testing.T) {
 		"GET /api/grants":          true,
 		"POST /api/grants":         true,
 		"DELETE /api/grants/{id}":  true,
+		// The revoke confirmation's preview (Task 20403), narrowed like the
+		// DELETE it precedes; fleet identifiers only with secret.grant.
+		"GET /api/grants/{id}/holders": true,
 	}
 	// Leases stay above the floor. A lease is live fleet state — which
 	// executor is holding which credential right now — and has no personal

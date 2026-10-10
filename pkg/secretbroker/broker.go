@@ -81,6 +81,9 @@ type Broker struct {
 	// slotRestoreMu serialises restoring a lease's App-token slots, so a
 	// retry and the request that needs the slots cannot both add them.
 	slotRestoreMu sync.Mutex
+	// recordMu serialises rewrites of a held lease's grants (DropLeaseGrant),
+	// each a read of the record and a conditional write of it.
+	recordMu sync.Mutex
 
 	clock       func() time.Time
 	maxLeaseTTL time.Duration
@@ -453,6 +456,7 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 		return b.denyf(ev, ErrGrantNotFound, "list grants: %v", err)
 	}
 	now := b.now()
+	var revoked []GrantRevocation
 	revokedFor := "secret " + s.Name + " deleted"
 	grantCause := RevokedSecretDeleted
 	if cause == CauseOffboarded {
@@ -471,6 +475,10 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 			if rerr := b.revokeStored(g.ID, now, cause); rerr != nil {
 				return b.denyf(ev, ErrInvalidGrant, "revoke dependent grant %s: %v", g.ID, rerr)
 			}
+			revoked = append(revoked, GrantRevocation{
+				GrantID: g.ID, SecretID: s.ID, SecretName: s.Name, Kind: s.Kind, Subject: g.Subject,
+				Actor: actor, Cause: cause, Reason: revokedFor, At: now, ControlPlane: b.location(),
+			})
 			// Deleting the App credential does not reach the tokens already
 			// minted from it — those live at GitHub, not here — so they are
 			// destroyed with the grants that produced them. Otherwise deleting
@@ -496,6 +504,9 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 	ev.Decision = DecisionAllow
 	ev.Reason = deletionReason(cause, reason)
 	b.emit(ev)
+	// The workloads holding the grants this deletion revoked give the material
+	// back now (Task 20403), as they would for a grant revoked on its own.
+	b.announceRevoked(ctx, revoked...)
 	return nil
 }
 
@@ -660,10 +671,12 @@ func (b *Broker) ListGrants(f GrantFilter) ([]Grant, error) {
 	return out, nil
 }
 
-// Revoke marks a grant unusable. It takes effect on the next Lease or Renew:
-// credentials already materialised into a running workload's tmpfs stay
-// there until that lease expires, which is exactly the window the short
-// lease TTL exists to bound.
+// Revoke marks a grant unusable: the next Lease or Renew leaves it out, and the
+// subscribers this process registered with OnGrantRevoked — the hub — take its
+// material back from the workloads already holding it (Task 20403). In a
+// process with no subscriber, a CLI, nothing reaches those workloads from here:
+// the caller announces the revocation to the running hub, and failing that the
+// lease lapses within its period, as before.
 func (b *Broker) Revoke(ctx context.Context, grantID, actor string) error {
 	return b.RevokeBecause(ctx, grantID, actor, "")
 }
@@ -680,42 +693,8 @@ func (b *Broker) RevokeBecause(ctx context.Context, grantID, actor, reason strin
 // lets the project's next lease tell it the grant went with its owner — even
 // when the secret is kept under a legal hold, or destroyed days later.
 func (b *Broker) RevokeWithCause(ctx context.Context, grantID, actor string, cause RevocationCause, reason string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	ev := Event{Action: ActionRevoke, Actor: actor, GrantID: grantID}
-
-	g, err := b.store.GetGrant(grantID)
-	if err != nil {
-		return b.denyf(ev, ErrGrantNotFound, "grant %q: %v", grantID, err)
-	}
-	ev.SecretID = g.SecretID
-	ev.Subject = g.Subject.String()
-	ev.Constraints = g.Constraints.Summary()
-	if s, serr := b.store.GetSecret(g.SecretID); serr == nil {
-		ev.SecretName, ev.Kind = s.Name, s.Kind
-	}
-
-	if !g.RevokedAt.IsZero() {
-		// Idempotent: report success so a retry is not an error.
-		ev.Decision = DecisionAllow
-		ev.Reason = "already revoked at " + g.RevokedAt.UTC().Format(time.RFC3339)
-		b.emit(ev)
-		return nil
-	}
-	if err := b.revokeStored(grantID, b.now(), cause); err != nil {
-		return b.denyf(ev, ErrInvalidGrant, "revoke: %v", err)
-	}
-	// For a github_app grant the hub minted the credential, so it can end it
-	// now instead of waiting out the lease period. Done after the store write:
-	// if the write fails the grant is still live, and killing its tokens would
-	// break a running workload that the grant still authorises.
-	b.destroyGrantTokens(ctx, grantID, "grant "+grantID+" revoked")
-
-	ev.Decision = DecisionAllow
-	ev.Reason = strings.TrimSpace(reason)
-	b.emit(ev)
-	return nil
+	_, _, err := b.RevokeGrant(ctx, RevokeGrantRequest{GrantID: grantID, Actor: actor, Cause: cause, Reason: reason})
+	return err
 }
 
 // revokeStored stamps a grant revoked, with its cause where the store keeps
@@ -1158,36 +1137,18 @@ func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) 
 // recheckGrants applies to every grant a live lease carries the checks its
 // issue made — not revoked, not expired, still issued to this requester, its
 // secret still there — and returns the earliest grant expiry, which bounds the
-// lease. A failure is a denial, emitted on ev.
+// lease. A superseded grant is checked, and bounded, by the successor it stands
+// on (Task 20403). A failure is a denial, emitted on ev.
 func (b *Broker) recheckGrants(ev Event, leaseID string, requester Requester, grantIDs []string, now time.Time) (time.Time, error) {
 	var earliest time.Time
 	for _, id := range grantIDs {
-		g, err := b.store.GetGrant(id)
-		if err != nil {
+		authority, sentinel, why, _ := b.standing(id, requester, now)
+		if sentinel != nil {
 			ev.GrantID = id
-			return time.Time{}, b.denyf(ev, ErrGrantNotFound,
-				"lease %s holds grant %s, which can no longer be read: %v", leaseID, id, err)
+			return time.Time{}, b.denyf(ev, sentinel, "lease %s holds grant %s%s", leaseID, id, why)
 		}
-		if reason := g.DenyReason(now); reason != "" {
-			ev.GrantID = id
-			sentinel := ErrGrantExpired
-			if !g.RevokedAt.IsZero() {
-				sentinel = ErrGrantRevoked
-			}
-			return time.Time{}, b.denyf(ev, sentinel, "lease %s holds grant %s: %s", leaseID, id, reason)
-		}
-		if !g.Subject.Matches(requester) {
-			ev.GrantID = id
-			return time.Time{}, b.denyf(ev, ErrInvalidGrant,
-				"lease %s holds grant %s, which is no longer issued to this requester", leaseID, id)
-		}
-		if _, err := b.store.GetSecret(g.SecretID); err != nil {
-			ev.GrantID = id
-			return time.Time{}, b.denyf(ev, ErrSecretNotFound,
-				"lease %s holds grant %s, whose secret %s is gone", leaseID, id, g.SecretID)
-		}
-		if !g.ExpiresAt.IsZero() && (earliest.IsZero() || g.ExpiresAt.Before(earliest)) {
-			earliest = g.ExpiresAt
+		if !authority.ExpiresAt.IsZero() && (earliest.IsZero() || authority.ExpiresAt.Before(earliest)) {
+			earliest = authority.ExpiresAt
 		}
 	}
 	return earliest, nil

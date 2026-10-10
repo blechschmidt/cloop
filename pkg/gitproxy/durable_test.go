@@ -330,6 +330,28 @@ func TestCloseForLeaseClosesOnlyThatLease(t *testing.T) {
 	}
 }
 
+// TestCloseForGrantClosesOnlyThatGrantsSessions (Task 20403): one grant of a
+// lease revoked must end the sessions its credential feeds and leave the
+// sessions of the lease's other grants serving.
+func TestCloseForGrantClosesOnlyThatGrantsSessions(t *testing.T) {
+	reg := newTestRegistry(t, time.Now())
+	revoked := mintOne(t, reg, MintRequest{Credential: Credential{Password: "p", LeaseID: "lease_1", GrantID: "grant_a"}})
+	other := mintOne(t, reg, MintRequest{Credential: Credential{Password: "q", LeaseID: "lease_1", GrantID: "grant_b"}})
+	elsewhere := mintOne(t, reg, MintRequest{Credential: Credential{Password: "r", LeaseID: "lease_2", GrantID: "grant_a"}})
+	if n := reg.CloseForGrant("lease_1", "grant_a", "grant revoked"); n != 1 {
+		t.Fatalf("closed %d sessions, want 1", n)
+	}
+	if reg.Known(revoked.Session.ID) {
+		t.Error("the revoked grant's session is still serving")
+	}
+	if !reg.Known(other.Session.ID) || !reg.Known(elsewhere.Session.ID) {
+		t.Error("CloseForGrant closed a session of another grant or another lease")
+	}
+	if n := reg.CloseForGrant("lease_1", "", "x"); n != 0 {
+		t.Fatalf("an empty grant id closed %d sessions", n)
+	}
+}
+
 // TestReapRecordsTheExpiry of a durable session.
 func TestReapRecordsTheExpiry(t *testing.T) {
 	now := time.Now()

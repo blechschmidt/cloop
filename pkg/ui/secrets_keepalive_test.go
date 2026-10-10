@@ -106,8 +106,10 @@ func TestLeaseKeepaliveOutlivesTheIssuedTTL(t *testing.T) {
 }
 
 // TestLeaseKeepaliveStopsOnARevokedGrant: the extension re-checks the grant,
-// so a revocation still lands within one lease period — the lease lapses on
-// its current deadline and the janitor takes it back.
+// so a revocation no hub was told about still lands — and since Task 20403 it
+// lands at the janitor's next pass rather than at the lease's deadline: the
+// janitor finds the revoked grant the lease carries and takes it back, here
+// with the lease, whose only grant it was.
 func TestLeaseKeepaliveStopsOnARevokedGrant(t *testing.T) {
 	sl, broker, clock := keepaliveLease(t, "edge-revoked")
 	grants, err := broker.ListGrants(secretbroker.GrantFilter{ActiveOnly: true})
@@ -127,9 +129,12 @@ func TestLeaseKeepaliveStopsOnARevokedGrant(t *testing.T) {
 		t.Fatalf("a refused extension moved the deadline from %s to %s", deadline, sl.ExpiresAt())
 	}
 	s := &Server{}
-	swept := s.sweepExpiredLeases(deadline.Add(time.Second))
-	if len(swept) != 1 || swept[0].LeaseID != sl.lease.ID {
-		t.Fatalf("the janitor swept %+v at the unextended deadline, want the revoked lease", swept)
+	s.sweepExpiredLeases(clock.Now())
+	if liveLeases.held(sl.lease.ID) {
+		t.Fatal("a janitor pass before the deadline left the lease of a revoked grant registered")
+	}
+	if !deadline.After(clock.Now()) {
+		t.Fatal("the test swept at the deadline; it would not show the janitor taking the grant back first")
 	}
 }
 

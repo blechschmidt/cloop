@@ -876,3 +876,40 @@ func TestAdoptedHandleTakesItsLeasesRedactions(t *testing.T) {
 		t.Fatalf("the adopted handle's output is not scrubbed: %q", got)
 	}
 }
+
+// TestRevokingAnAdoptedContainersFilesRemovesTheContainer (Task 20403): a
+// container adopted after a hub restart was rebuilt from a row that records no
+// host paths of credentials, so its staged files cannot be found to be wiped.
+// A revocation reaching it — an operator's, or the janitor's for a lapsed lease
+// — must not report a scrub it did not perform: the container is removed, the
+// one withdrawal that does not need the paths, and the report says Killed.
+func TestRevokingAnAdoptedContainersFilesRemovesTheContainer(t *testing.T) {
+	store := executor.NewMemoryHandleStore()
+	rt := stubRuntime(t, liveContainerStub)
+	rec := savedHandle("c-adopted01", "test-adopted", "cloop-project-adopted01", time.Now())
+	rec.SecretsRecorded = true
+	rec.Secrets = []executor.SecretBinding{{
+		LeaseID: "lease_adopted", GrantID: "grant_deploy", SecretName: "deploy-key", Kind: "env",
+		Dir:   "/run/cloop/cloop-lease-adopted",
+		Files: []string{"/run/cloop/cloop-lease-adopted/deploy-key"},
+	}}
+	if err := store.PutHandle(rec); err != nil {
+		t.Fatalf("PutHandle: %v", err)
+	}
+	ex := storeExecutor(t, "test-adopted", rt, store)
+	ex.rehydrate()
+	if !ex.HoldsLease("lease_adopted") {
+		t.Fatal("the adopted container's binding was not restored")
+	}
+
+	out := ex.RevokeLease(context.Background(), executor.RevokeRequest{
+		LeaseID: "lease_adopted", GrantID: "grant_deploy", Reason: "lease TTL expired",
+	})
+	if out.Ack == nil {
+		t.Fatalf("no report: %+v", out)
+	}
+	if len(out.Ack.Killed) != 1 || out.Ack.Killed[0] != rec.HandleID {
+		t.Fatalf("Killed = %v (state %s, %s): files nobody can find were reported scrubbed",
+			out.Ack.Killed, out.State, out.Error)
+	}
+}

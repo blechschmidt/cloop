@@ -129,6 +129,12 @@ const (
 	RevokedOwnerOffboarded RevocationCause = "owner_offboarded"
 	// RevokedSecretDeleted: the secret the grant spent was deleted.
 	RevokedSecretDeleted RevocationCause = "secret_deleted"
+	// RevokedSuperseded: another grant replaced this one — an edited
+	// repository assignment, a credential granted again for longer (Task
+	// 20403). No new lease carries it; a running lease that does keeps it,
+	// standing on the successor the grant names (Grant.SupersededBy), because
+	// the successor still authorises the work the run is doing.
+	RevokedSuperseded RevocationCause = "superseded"
 )
 
 // tellsTheProject reports whether a grant revoked for this cause is one the
@@ -146,6 +152,15 @@ type CausedRevoker interface {
 	// RevokeGrantWithCause is RevokeGrant recording the cause. Revoking an
 	// already-revoked grant changes neither its time nor its cause.
 	RevokeGrantWithCause(id string, at time.Time, cause RevocationCause) error
+}
+
+// SupersedingRevoker is an optional Store extension that revokes a grant as
+// superseded, naming its successor (Task 20403). A store without it records
+// the supersession as a revocation with cause RevokedSuperseded and no
+// successor, so a lease carrying the grant is withdrawn rather than kept on the
+// successor's authority: less access, never more.
+type SupersedingRevoker interface {
+	RevokeGrantSuperseded(id string, at time.Time, successorID string) error
 }
 
 // withdrawnDescription explains a grant withdrawn from a personal secret that

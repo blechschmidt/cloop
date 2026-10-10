@@ -28,6 +28,9 @@ type clusterMember struct {
 	srv  *Server
 	node *hubcluster.Node
 	ts   *httptest.Server
+	// swap replaces the handler the member's address serves, for a test that
+	// has to see — or stand in front of — what its peers ask it.
+	swap func(http.Handler)
 }
 
 func fastClusterOptions(dbPath, advertise string) hubcluster.Options {
@@ -72,10 +75,13 @@ func newClusterMember(t *testing.T, dir string) *clusterMember {
 		cancel()
 		_ = node.Close()
 	})
-	mu.Lock()
-	handler = srv.Handler()
-	mu.Unlock()
-	return &clusterMember{srv: srv, node: node, ts: ts}
+	swap := func(h http.Handler) {
+		mu.Lock()
+		handler = h
+		mu.Unlock()
+	}
+	swap(srv.Handler())
+	return &clusterMember{srv: srv, node: node, ts: ts, swap: swap}
 }
 
 // clusterPair starts two members over one project and waits until each sees

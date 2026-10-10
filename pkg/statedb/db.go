@@ -108,6 +108,19 @@ type DB struct {
 	// AsControlPlane or AsProject. Zero means unclassified, which asserts
 	// nothing. See audit_home.go.
 	role roleField
+
+	// path is the file the handle was opened over, as given to Open.
+	path string
+}
+
+// Path returns the database file this handle was opened over, as the caller
+// named it. A subscriber to the secret broker's revocations uses it to tell
+// which control plane a revocation belongs to (Task 20403).
+func (d *DB) Path() string {
+	if d == nil {
+		return ""
+	}
+	return d.path
 }
 
 // Open opens (or creates) the SQLite database at dbPath, applies tuning
@@ -173,7 +186,7 @@ func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 		}
 		return nil, fmt.Errorf("statedb migrate: %w", err)
 	}
-	return &DB{conn: conn}, nil
+	return &DB{conn: conn, path: dbPath}, nil
 }
 
 // connString is dbPath plus the settings the driver applies to every

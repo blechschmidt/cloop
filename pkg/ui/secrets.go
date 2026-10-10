@@ -284,6 +284,14 @@ type secretLease struct {
 	// session once a driver says which it kept. Guarded by mu.
 	workspace        bool
 	workspaceSession string
+	// controlPlane is the directory of the control plane the lease was issued
+	// from, so a revocation there reaches it and one elsewhere — another
+	// control plane served by the same process — does not (Task 20403).
+	controlPlane string
+	// withdrawn records the grants taken back from this lease while it kept
+	// its others (withdrawGrant, Task 20403), so a grant is withdrawn once.
+	// Guarded by mu.
+	withdrawn map[string]time.Time
 
 	once sync.Once
 }
@@ -428,6 +436,16 @@ func (sl *secretLease) keepAlive(ctx context.Context, now time.Time) bool {
 			sl.handOver()
 			return false
 		}
+		if grantRefusal(err) && len(sl.broker.HeldGrantIDs(sl.lease.ID)) > 1 {
+			// One grant of several no longer authorises the lease. The janitor
+			// takes it back from the workload and drops it from the lease
+			// within a pass (Task 20403), after which the lease extends on the
+			// grants nobody revoked; until then it is not extended past the
+			// grant that was withdrawn.
+			fmt.Fprintf(os.Stderr, "ui: lease %s still carries a withdrawn grant; extending once it is taken back: %v\n",
+				sl.lease.ID, err)
+			return true
+		}
 		if leaseExtensionIsFinal(err) {
 			fmt.Fprintf(os.Stderr, "ui: lease %s will not be extended and lapses at %s: %v\n",
 				sl.lease.ID, current.UTC().Format(time.RFC3339), err)
@@ -462,6 +480,23 @@ func leaseExtensionIsFinal(err error) bool {
 		secretbroker.ErrLeaseMoved,
 	} {
 		if errors.Is(err, final) {
+			return true
+		}
+	}
+	return false
+}
+
+// grantRefusal reports whether an extension was refused over one grant of the
+// lease — revoked, gone, no longer issued to it, its secret deleted — rather
+// than over the lease itself.
+func grantRefusal(err error) bool {
+	for _, grant := range []error{
+		secretbroker.ErrGrantRevoked,
+		secretbroker.ErrGrantNotFound,
+		secretbroker.ErrInvalidGrant,
+		secretbroker.ErrSecretNotFound,
+	} {
+		if errors.Is(err, grant) {
 			return true
 		}
 	}
@@ -763,7 +798,7 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 
 	sl := &secretLease{
 		broker: broker, lease: lease, closer: closeDB, expiry: lease.ExpiresAt,
-		workDir: workDir, auditDB: db,
+		workDir: workDir, auditDB: db, controlPlane: controlPlaneDir,
 	}
 	if ex != nil && ex.Capabilities().SecretFilesFromHostPath {
 		// Name the directory, record the intent, *then* write the plaintext.

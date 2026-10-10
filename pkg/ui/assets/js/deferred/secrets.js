@@ -409,9 +409,11 @@
         const remaining = l.expires_at
           ? Math.max(0, Math.floor((new Date(l.expires_at).getTime() - now) / 1000))
           : (Number(l.remaining_seconds) || 0);
-        const mats = (l.materials || []).map(m =>
-          '<span class="sec-chip kind" title="' + esc(m.summary || '') + '">' +
-            esc(m.secret_name || m.secret_id || '') + ' &middot; ' + esc(m.kind || '') + '</span>'
+        const mats = (l.materials || []).map(m => m.withdrawn
+          ? '<span class="sec-chip warn" title="taken back; the lease keeps its other grants">' +
+              esc(m.secret_name || m.secret_id || '') + ' &middot; withdrawn</span>'
+          : '<span class="sec-chip kind" title="' + esc(m.summary || '') + '">' +
+              esc(m.secret_name || m.secret_id || '') + ' &middot; ' + esc(m.kind || '') + '</span>'
         ).join('');
         return '<tr>' +
           '<td><strong>' + esc(l.executor_id || '—') + '</strong></td>' +
@@ -539,12 +541,84 @@
       }).catch(err => toast('Delete failed: ' + ((err && err.message) || String(err)), 'err'));
     }
 
+    // revokeGrant withdraws a grant. A secret grant is taken back from every
+    // workload holding it at once (Task 20403), so the confirmation first asks
+    // which workloads those are, and says which hold it in their environment.
     function revokeGrant(id) {
-      if (!confirm('Revoke grant ' + id + '?\n\nFor a secret grant this lands at the next lease or renewal — revoke the lease too if a workload is holding the credential now. For an egress grant it also closes live sessions immediately.')) return;
-      apiMethod('DELETE', '/api/grants/' + encodeURIComponent(id)).then(ok).then(d => {
-        toast((d && d.note) ? 'Grant revoked — takes effect at the next lease' : 'Grant revoked', 'ok');
-        loadGrants(); loadSecrets();
+      const egress = String(id).indexOf('egress_') === 0;
+      const preview = egress ? Promise.resolve(null)
+        : api('/api/grants/' + encodeURIComponent(id) + '/holders').catch(() => null);
+      return preview.then(p => {
+        if (!confirm(_secGrantRevokePrompt(id, egress, p))) return;
+        return apiMethod('DELETE', '/api/grants/' + encodeURIComponent(id)).then(ok).then(d => {
+          _secRenderGrantRevocation(id, d);
+          const state = (d && d.state) || 'revoked';
+          toast((d && d.note) || 'Grant revoked', state === 'revoked' ? 'ok' : 'warn');
+          loadGrants(); loadSecrets(); loadLeases();
+        });
       }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
+    }
+
+    function _secGrantRevokePrompt(id, egress, p) {
+      const head = 'Revoke grant ' + id + '?\n\n';
+      if (egress) return head + 'Its live egress proxy sessions close at once.';
+      const w = p && p.workloads;
+      if (!w) {
+        return head + 'It is taken back from every running workload holding it, at once. Which workloads ' +
+          'hold it could not be checked.';
+      }
+      if (!w.length) return head + 'No running workload holds it; the next lease leaves it out.';
+      let msg = head + w.length + ' running workload(s) hold it and give it back now: its files are removed ' +
+        'and the git proxy and Kubernetes sessions it fed are closed. Each keeps its other grants.';
+      const env = w.filter(x => x.in_environment);
+      if (env.length) {
+        const vars = {};
+        env.forEach(x => (x.env_keys || []).forEach(k => { vars[k] = true; }));
+        msg += '\n\n' + env.length + ' hold it in their environment (' + Object.keys(vars).sort().join(', ') +
+          '), which no revocation takes out of a running process.';
+        if (p.terminated) {
+          msg += ' ' + p.terminated + ' of them, container or Kubernetes sandboxes, will be terminated: ' +
+            'their runtime keeps a copy only removing the workload destroys.';
+        }
+        const left = env.length - (p.terminated || 0);
+        if (left > 0) {
+          msg += ' The other ' + left + ' keep their copy of the variable until they exit; ' +
+            '"Revoke & kill" on their lease stops them.';
+        }
+      }
+      const unknown = w.filter(x => !x.known).length;
+      if (unknown) {
+        msg += '\n\n' + unknown + ' were taken over from a hub process that stopped, so what they hold in ' +
+          'their environment is not known here.';
+      }
+      return msg;
+    }
+
+    // _secRenderGrantRevocation shows what revoking a grant did, holder by holder.
+    function _secRenderGrantRevocation(id, d) {
+      const box = document.getElementById('secGrantRevokeResult');
+      if (!box) return;
+      const holders = [].concat((d && d.local) || [], (d && d.remote) || []);
+      if (!d || (!holders.length && !d.note)) { box.style.display = 'none'; return; }
+      const rows = holders.map(o => {
+        const ack = o.ack || {};
+        const did = [];
+        if (ack.files_removed) did.push(ack.files_removed + ' file(s) removed');
+        if (ack.env_scrubbed && ack.env_scrubbed.length) did.push('variables dropped from its copy: ' + ack.env_scrubbed.join(', '));
+        if (ack.killed && ack.killed.length) did.push(ack.killed.length + ' workload(s) terminated');
+        if (ack.eventual) did.push('files empty in the Pod at the kubelet\'s next sync');
+        if (o.ack && !ack.known) did.push('not held there');
+        if (o.widened) did.push(o.widened);
+        if (o.error) did.push(o.error);
+        const cls = o.state === 'revoked' ? 'ok' : (o.state === 'revoke_pending' ? 'kind' : 'warn');
+        return '<tr><td>' + esc(o.executor_id || '—') + '</td><td class="audit-entity">' + esc(o.lease_id || '') +
+          '</td><td><span class="sec-chip ' + cls + '">' + esc(o.state || '') + '</span></td><td>' +
+          esc(did.join(' · ')) + '</td></tr>';
+      }).join('');
+      box.innerHTML = '<div><strong>Grant ' + esc(id) + '</strong>: ' + esc((d && d.note) || '') + '</div>' +
+        (rows ? '<table class="audit-table" id="secGrantRevokeTable"><thead><tr><th>Holder</th><th>Lease</th>' +
+          '<th>State</th><th>What it did</th></tr></thead><tbody>' + rows + '</tbody></table>' : '');
+      box.style.display = '';
     }
 
     function revokeLease(id, action) {
@@ -1987,6 +2061,7 @@
               <tbody id="secGrantsBody"></tbody>
             </table>
           </div>
+          <div id="secGrantRevokeResult" class="sec-hint" style="display:none"></div>
         </div>
 
         <div class="sec-sub">

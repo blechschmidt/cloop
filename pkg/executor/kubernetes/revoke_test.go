@@ -336,3 +336,122 @@ func TestRevokeLease_EnvOnlyMaterialIsStillKillOnly(t *testing.T) {
 		t.Errorf("state = %q (%s), want killed", st.State, st.Error)
 	}
 }
+
+// twoGrantSpec is one lease carrying two grants into one lease directory: a
+// GitHub PAT whose gitconfig the environment points at, and a file-only grant
+// the workload finds by path.
+func twoGrantSpec() executor.Spec {
+	spec := leasedSpec()
+	spec.SecretFiles = append(spec.SecretFiles, executor.SecretFile{
+		LeaseID: revokedLeaseID, GrantID: "grant-2", Dir: leaseDir, Name: "deploy-key",
+		Mode: 0o600, Content: []byte("-----BEGIN OPENSSH PRIVATE KEY----- canary"),
+	})
+	spec.Secrets = append(spec.Secrets, executor.SecretBinding{
+		LeaseID:    revokedLeaseID,
+		GrantID:    "grant-2",
+		SecretName: "deploy-key",
+		Kind:       "env",
+		Dir:        leaseDir,
+		Files:      []string{leaseDir + "/deploy-key"},
+	})
+	return spec
+}
+
+// TestRevokeLease_FileOnlyGrantEmptiesItsKeysAndKeepsThePod pins the narrowing
+// on this backend (Task 20403). A revocation of one grant used to delete the
+// whole lease Secret and the Pod, taking every other grant of the lease — and
+// the run — with it. A grant that reached the Pod only as files is withdrawn by
+// emptying exactly its keys of the lease Secret: the kubelet then empties the
+// projected files at its next sync, and the Pod keeps running on the grants
+// nobody revoked.
+func TestRevokeLease_FileOnlyGrantEmptiesItsKeysAndKeepsThePod(t *testing.T) {
+	ex, api, _ := newTestExecutor(t, nil)
+	handle, err := ex.Start(context.Background(), twoGrantSpec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	podName := api.onlyPodName(t)
+	api.run(podName)
+	name := leaseSecretName(handle.ID)
+	before := api.secretObject(name)
+	if before == nil {
+		t.Fatal("no lease Secret was created")
+	}
+
+	out := ex.RevokeLease(context.Background(), executor.RevokeRequest{
+		LeaseID: revokedLeaseID, GrantID: "grant-2", Reason: "the deploy key rotated",
+	})
+	if out.State != executor.RevokeStateRevoked || out.Ack == nil {
+		t.Fatalf("outcome = %+v, want revoked with a report", out)
+	}
+	if len(out.Ack.Killed) != 0 {
+		t.Errorf("Killed = %v: a grant delivered only as files must not take the Pod with it", out.Ack.Killed)
+	}
+	if out.Ack.FilesRemoved != 1 || !out.Ack.Eventual {
+		t.Errorf("ack = %+v, want one key emptied, reported as reaching the Pod at the kubelet's next sync", out.Ack)
+	}
+	for _, rec := range api.deleteRecords() {
+		if rec.Name == podName {
+			t.Fatalf("the Pod was deleted for a file-only grant (deletes: %v)", api.deleteRecords())
+		}
+	}
+	after := api.secretObject(name)
+	if after == nil {
+		t.Fatal("the lease Secret was deleted; the other grant's material went with it")
+	}
+	revokedKey := secretFileKey(0, "deploy-key")
+	if v, ok := after.Data[revokedKey]; !ok || len(v) != 0 {
+		t.Errorf("key %s = %q (present=%v), want present and empty: an absent key fails the kubelet's "+
+			"volume refresh and leaves the old file in the container", revokedKey, v, ok)
+	}
+	for _, key := range []string{secretFileKey(0, "gitconfig"), secretFileKey(0, "github-token")} {
+		if string(after.Data[key]) != string(before.Data[key]) || len(after.Data[key]) == 0 {
+			t.Errorf("key %s of the grant nobody revoked was changed", key)
+		}
+	}
+	if !ex.HoldsLease(revokedLeaseID) {
+		t.Error("the lease's other grant is still in the Pod, but the executor stopped reporting it as held")
+	}
+
+	// The grant whose gitconfig the environment names is a different matter:
+	// the variable is inside the container, so the Pod goes.
+	out = ex.RevokeLease(context.Background(), executor.RevokeRequest{LeaseID: revokedLeaseID, GrantID: "grant-1"})
+	if out.Ack == nil || !containsString(out.Ack.Killed, handle.ID) {
+		t.Errorf("revoking the env-carrying grant did not take the Pod: %+v", out.Ack)
+	}
+}
+
+// TestRevokeLease_FileOnlyLeaseLapseKeepsThePod: the janitor's lease-wide scrub
+// of a lease that delivered only files empties them and leaves the Pod.
+func TestRevokeLease_FileOnlyLeaseLapseKeepsThePod(t *testing.T) {
+	ex, api, _ := newTestExecutor(t, nil)
+	spec := testSpec()
+	spec.SecretFiles = []executor.SecretFile{{
+		LeaseID: revokedLeaseID, GrantID: "grant-2", Dir: leaseDir, Name: "deploy-key",
+		Mode: 0o600, Content: []byte("canary-deploy-key"),
+	}}
+	spec.Secrets = []executor.SecretBinding{{
+		LeaseID: revokedLeaseID, GrantID: "grant-2", SecretName: "deploy-key", Kind: "env",
+		Dir: leaseDir, Files: []string{leaseDir + "/deploy-key"},
+	}}
+	handle, err := ex.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	podName := api.onlyPodName(t)
+	api.run(podName)
+
+	out := ex.RevokeLease(context.Background(), executor.RevokeRequest{
+		LeaseID: revokedLeaseID, Reason: "lease TTL expired 3s ago",
+	})
+	if out.State != executor.RevokeStateRevoked || out.Ack == nil || len(out.Ack.Killed) != 0 {
+		t.Fatalf("outcome = %+v, want revoked without a kill", out)
+	}
+	obj := api.secretObject(leaseSecretName(handle.ID))
+	if obj == nil {
+		t.Fatal("lease Secret deleted")
+	}
+	if v := obj.Data[secretFileKey(0, "deploy-key")]; len(v) != 0 {
+		t.Errorf("the lapsed lease's file is still in the Secret: %q", v)
+	}
+}

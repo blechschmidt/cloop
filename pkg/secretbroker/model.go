@@ -676,6 +676,11 @@ type Grant struct {
 	// for a grant revoked by hand. It decides whether a lease that meets the
 	// grant hands the refusal back for the project to be told.
 	RevokedCause RevocationCause `json:"revoked_cause,omitempty"`
+	// SupersededBy names the grant that replaced this one, for a grant revoked
+	// with RevokedSuperseded (Task 20403). A lease still carrying this grant
+	// stands on the successor's authority — and on its successor's, should it
+	// be superseded in turn.
+	SupersededBy string `json:"superseded_by,omitempty"`
 }
 
 // Personal reports whether this grant hands out a personally-owned credential.

@@ -554,15 +554,22 @@ func TestAdoptedRunsSessionsAreRestored(t *testing.T) {
 }
 
 // TestSessionsOfARevokedGrantAreNotRestored: a grant revoked while no process
-// held the lease refuses the lease, and its sessions are closed and scrubbed
-// as the lease is — never served again.
+// held the lease is taken back by the process adopting its run (Task 20403) —
+// from every holder, and its session closed rather than restored — while the
+// lease, and the session of the grant nobody revoked, go on.
 func TestSessionsOfARevokedGrantAreNotRestored(t *testing.T) {
 	r := newRestoreRig(t)
 	d := r.dispatch()
 	var scrubbed []string
 	prev := testRevokeLapsedLease
 	testRevokeLapsedLease = func(leaseID, reason string) { scrubbed = append(scrubbed, leaseID) }
-	t.Cleanup(func() { testRevokeLapsedLease = prev })
+	type withdrawal struct{ lease, grant string }
+	var withdrawn []withdrawal
+	prevW := testWithdrawGrantFanout
+	testWithdrawGrantFanout = func(leaseID, grantID, reason string) {
+		withdrawn = append(withdrawn, withdrawal{leaseID, grantID})
+	}
+	t.Cleanup(func() { testRevokeLapsedLease, testWithdrawGrantFanout = prev, prevW })
 
 	r.restart(d, "hub_new")
 	broker, closeDB, err := openUIBroker(r.dir)
@@ -574,32 +581,32 @@ func TestSessionsOfARevokedGrantAreNotRestored(t *testing.T) {
 	}
 	closeDB()
 
-	if taken := r.takeOver(d); taken != nil {
-		t.Fatal("a lease carrying a revoked grant was taken over")
+	taken := r.takeOver(d)
+	if taken == nil {
+		t.Fatal("a lease whose other grant still stands was refused whole")
 	}
-	if len(scrubbed) != 1 || scrubbed[0] != d.lease.lease.ID {
-		t.Fatalf("scrubbed = %v, want the lease", scrubbed)
+	defer taken.Close()
+	if len(scrubbed) != 0 {
+		t.Errorf("the whole lease was scrubbed: %v", scrubbed)
 	}
-	if activeGitProxy().reg.Known(d.gitID) || activeKubeGuard().reg.Known(d.kubeID) {
-		t.Fatal("a session of the refused lease was restored")
+	if len(withdrawn) != 1 || withdrawn[0] != (withdrawal{d.lease.lease.ID, r.kubeGrant.ID}) {
+		t.Fatalf("withdrawn = %+v, want the revoked kubeconfig grant of the lease", withdrawn)
 	}
-	for _, c := range []struct {
-		kind, id string
-		action   auditaction.Action
-	}{
-		{statedb.ProxySessionGit, d.gitID, auditaction.ActionGitProxySessionClosed},
-		{statedb.ProxySessionKube, d.kubeID, auditaction.ActionKubeGuardSessionClosed},
-	} {
-		if _, ok := r.session(c.kind, c.id); ok {
-			t.Errorf("the %s record outlived its retired lease", c.kind)
-		}
-		rows := r.auditRows(c.action, c.id)
-		if len(rows) != 1 || !strings.Contains(rows[0].Payload, "retired") {
-			t.Errorf("%s close rows = %+v", c.kind, rows)
-		}
+	if got := taken.broker.HeldGrantIDs(taken.lease.ID); len(got) != 1 || got[0] != r.appGrant.ID {
+		t.Errorf("the adopted lease carries %v, want only the grant nobody revoked", got)
 	}
-	if code := r.kube(d, "/api/v1/namespaces/app/pods"); code != http.StatusUnauthorized {
-		t.Fatalf("the refused kube session answered %d", code)
+	if activeKubeGuard().reg.Known(d.kubeID) {
+		t.Fatal("the revoked grant's monitor session was restored")
+	}
+	if !activeGitProxy().reg.Known(d.gitID) {
+		t.Fatal("the session of the grant nobody revoked was not restored")
+	}
+	row, ok := r.session(statedb.ProxySessionKube, d.kubeID)
+	if ok && row.Open() {
+		t.Errorf("the revoked grant's session record is still open: %+v", row)
+	}
+	if rows := r.auditRows(auditaction.ActionKubeGuardSessionClosed, d.kubeID); len(rows) != 1 {
+		t.Errorf("kube session close rows = %+v, want one", rows)
 	}
 }
 

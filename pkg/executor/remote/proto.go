@@ -204,7 +204,16 @@ const (
 	// older agent ignores it and would install the firewall without the
 	// proxy in it, so the hub issues no proxy session to a firewalled sandbox
 	// on such a device and journals why. See MinEgressProxyVersion.
-	ProtocolVersion = 18
+	//
+	// v19 makes a revoke frame naming a grant exact (Task 20403): the agent
+	// takes back that grant's files and variables and leaves the lease's other
+	// grants where they are. No frame changes; grant_id was always on the
+	// wire, but an older agent's vault remembered one grant per lease, so it
+	// either took the whole lease back or answered "not held" while the
+	// revoked grant's file stayed on the device. Gated on the hub side: to an
+	// older agent the hub sends the revocation for the whole lease, and says
+	// so. See MinGrantRevocationVersion.
+	ProtocolVersion = 19
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -383,6 +392,20 @@ const MinEgressProxyVersion = 18
 // SupportsEgressProxy reports whether an agent speaking this protocol version
 // opens a workload's egress proxy route in its firewall.
 func SupportsEgressProxy(version int) bool { return version >= MinEgressProxyVersion }
+
+// MinGrantRevocationVersion is the first version whose agents take back
+// exactly the grant a revoke frame names.
+//
+// Not a placement rule. An older agent still honours the frame for the whole
+// lease, which is what the hub sends it instead: taking back more than the
+// revoked grant costs the run credentials it was still entitled to until its
+// next dispatch, where sending the narrowed frame could leave the revoked one
+// on the device.
+const MinGrantRevocationVersion = 19
+
+// SupportsGrantRevocation reports whether an agent speaking this protocol
+// version takes back exactly the grant a revoke frame names.
+func SupportsGrantRevocation(version int) bool { return version >= MinGrantRevocationVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

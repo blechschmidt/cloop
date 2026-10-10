@@ -58,7 +58,7 @@ func restoreSecretLease(controlPlaneDir, workDir, leaseID string) (*secretLease,
 	}
 	sl := &secretLease{
 		broker: broker, lease: lease, closer: closeDB, expiry: lease.ExpiresAt,
-		workDir: workDir, auditDB: db,
+		workDir: workDir, auditDB: db, controlPlane: controlPlaneDir,
 	}
 	sl.startKeepalive(leaseKeepaliveTick)
 	return sl, nil
@@ -95,6 +95,10 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			s.log().Info("cluster", 0, "took over the secret lease of an adopted run",
 				map[string]interface{}{"project": workDir, "lease": id, "executor": ex.ID(), "handle": handleID,
 					"expires_at": sl.ExpiresAt().UTC().Format(time.RFC3339)})
+			// A grant revoked while no hub held the lease is taken back from
+			// the workload now, before anything is restored on its behalf;
+			// the lease keeps the grants nobody revoked (Task 20403).
+			s.withdrawOnAdoption(sl)
 			// And what it feeds: the run's git proxy and Kubernetes monitor
 			// sessions, under the ids and tokens its workload holds, and the
 			// App tokens behind them (Task 20383).
@@ -111,6 +115,34 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 		}
 	}
 }
+
+// withdrawOnAdoption takes back, from every holder, the grants a lease taken
+// over with an adopted run carried that were revoked while no hub held it.
+func (s *Server) withdrawOnAdoption(sl *secretLease) {
+	if sl == nil || sl.lease == nil || len(sl.lease.Withdrawn) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
+	defer cancel()
+	for _, w := range sl.lease.Withdrawn {
+		reason := w.Reason + " while no hub process held its lease; taken back by the process that adopted the run"
+		if testWithdrawGrantFanout != nil {
+			if err := sl.withdrawGrant(ctx, w.GrantID, reason); err != nil {
+				fmt.Fprintf(os.Stderr, "ui: withdraw grant %s from lease %s: %v\n", w.GrantID, sl.lease.ID, err)
+			}
+			testWithdrawGrantFanout(sl.lease.ID, w.GrantID, reason)
+			continue
+		}
+		s.revokeLeaseEverywhere(ctx, sl.lease.ID, w.GrantID, reason, remote.RevokeScrub, "janitor")
+	}
+	s.broadcastSecretsUpdate("grant_revoked", sl.lease.ID)
+}
+
+// testWithdrawGrantFanout, when set, stands in for the fan-out that takes one
+// grant of an adopted lease back from its holders, as testRevokeLapsedLease
+// does for a whole lease. The hub's own side of the withdrawal still runs. Nil
+// in production.
+var testWithdrawGrantFanout func(leaseID, grantID, reason string)
 
 // leaseRefusedForGood reports whether a takeover was refused for a reason that
 // will not change: the lease lapsed while nobody held it, or a grant it carries

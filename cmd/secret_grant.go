@@ -22,6 +22,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -61,6 +62,25 @@ func openBroker() (*secretbroker.Broker, func(), error) {
 	return openBrokerObserved(nil)
 }
 
+// openBrokerDB is openBrokerObserved returning the control-plane database
+// too, for a command that also writes to the hub bus.
+func openBrokerDB(observe secretbroker.Auditor) (*secretbroker.Broker, *statedb.DB, func(), error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("secret: resolve working directory: %w", err)
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("secret: open state database: %w", err)
+	}
+	broker, err := brokerOver(db, observe)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, nil, err
+	}
+	return broker, db, func() { _ = db.Close() }, nil
+}
+
 // openBrokerObserved is openBroker with an extra auditor that sees every event
 // before it is recorded — how `secret lease` shows the reasons a grant was not
 // delivered, which otherwise reach only the audit trail.
@@ -73,10 +93,19 @@ func openBrokerObserved(observe secretbroker.Auditor) (*secretbroker.Broker, fun
 	if err != nil {
 		return nil, nil, fmt.Errorf("secret: open state database: %w", err)
 	}
-	store, err := secretstore.New(db)
+	broker, err := brokerOver(db, observe)
 	if err != nil {
 		_ = db.Close()
 		return nil, nil, err
+	}
+	return broker, func() { _ = db.Close() }, nil
+}
+
+// brokerOver builds the CLI's broker over db.
+func brokerOver(db *statedb.DB, observe secretbroker.Auditor) (*secretbroker.Broker, error) {
+	store, err := secretstore.New(db)
+	if err != nil {
+		return nil, err
 	}
 	var auditor secretbroker.Auditor = secretstore.NewAuditor(db)
 	if observe != nil {
@@ -86,12 +115,7 @@ func openBrokerObserved(observe secretbroker.Auditor) (*secretbroker.Broker, fun
 			recorder.Audit(ev)
 		})
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(auditor))
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, err
-	}
-	return broker, func() { _ = db.Close() }, nil
+	return secretbroker.New(store, secretbroker.WithAuditor(auditor))
 }
 
 // currentActor identifies who ran the command, for the audit trail. cloop
@@ -502,30 +526,103 @@ func truncateCol(s string, width int) string {
 	return s[:width-1] + "…"
 }
 
+// secretRevokeWait bounds how long `secret revoke` waits for running hubs to
+// say what they took back.
+var secretRevokeWait time.Duration
+
 var secretRevokeCmd = &cobra.Command{
 	Use:   "revoke <grant-id>",
-	Short: "Revoke a grant",
-	Long: `Withdraw a grant. It stops being honoured on the next lease or renewal.
+	Short: "Revoke a grant, and take it back from the workloads holding it",
+	Long: `Withdraw a grant. No lease issued from now on carries it, and the running
+workloads already holding it give it back now: the hub's own copy, a host
+process's lease files, a container's staged files, a Kubernetes Pod's lease
+Secret, an edge device's lease directory, and the git proxy and Kubernetes
+monitor sessions it fed. A lease that carries other grants keeps them.
 
-Credentials already materialised inside a running workload survive until that
-workload's lease expires — which is what the short lease TTL bounds. To cut
-access immediately, revoke and then stop the run.`,
+This command revokes from outside the hub, so it tells the running hubs on the
+hub bus and waits up to --wait for every hub member to say what it took back.
+It prints each member's answer, and names any member that did not answer. A
+hub started with ui.cluster.exclusive reads no bus: its lease janitor finds
+the revocation at its next pass, within a minute.
+
+What no revocation reaches is an environment variable already inside a running
+process. A host process or a device's task keeps its copy until it exits; a
+container or a Kubernetes Pod holding the grant in its environment is
+terminated, because its runtime keeps a copy only removing the workload
+destroys. To stop the others now, revoke their lease with action=kill from the
+Secrets panel.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		broker, closeFn, err := openBroker()
+		broker, db, closeFn, err := openBrokerDB(nil)
 		if err != nil {
 			return err
 		}
 		defer closeFn()
 
-		if err := broker.Revoke(cmd.Context(), args[0], currentActor()); err != nil {
+		rev, revoked, err := broker.RevokeGrant(cmd.Context(), secretbroker.RevokeGrantRequest{
+			GrantID: args[0], Actor: currentActor(),
+		})
+		if err != nil {
 			return err
 		}
-		color.Green("✓ revoked grant %s", args[0])
-		color.New(color.Faint).Println("  takes effect on the next lease; running workloads keep their current lease until it expires")
+		if !revoked {
+			color.Yellow("grant %s was already revoked at %s; it was taken back from the workloads then",
+				args[0], rev.At.UTC().Format(time.RFC3339))
+			return nil
+		}
+		color.Green("✓ revoked grant %s (%s)", args[0], rev.SecretName)
+
+		// This process holds no lease and reaches no workload: the running
+		// hubs do, and are told (Task 20403).
+		rep, aerr := ui.AnnounceGrantRevoked(db, cliOrigin(), ui.GrantRevocationAnnouncement{
+			GrantID: rev.GrantID, Actor: rev.Actor,
+		}, secretRevokeWait)
+		printGrantRevocationReport(rep, aerr, secretRevokeWait)
 		return nil
 	},
+}
+
+// printGrantRevocationReport says, member by member, what the running hubs
+// did about a revocation this process announced — and, as plainly, what is
+// not known.
+func printGrantRevocationReport(rep ui.GrantRevocationReport, err error, wait time.Duration) {
+	faint := color.New(color.Faint)
+	if err != nil {
+		color.Yellow("  the running hubs could not be told: %v", err)
+		faint.Println("  A hub's lease janitor finds the revocation at its next pass, within a minute, and takes the")
+		faint.Println("  grant back then; until it does, a workload already holding it keeps it.")
+		return
+	}
+	if rep.NoHub {
+		faint.Println("  No hub is serving this control plane, so no workload holds a lease to take back.")
+		return
+	}
+	for _, m := range rep.Answered {
+		where := m.Member
+		if m.Hostname != "" {
+			where += " on " + m.Hostname
+		}
+		switch {
+		case m.Leases == 0 && m.KeptLeases == 0:
+			fmt.Printf("  hub member %s: no lease there carried the grant\n", where)
+		case m.Leases == 0:
+			fmt.Printf("  hub member %s: %d lease(s) carry a grant it superseded and stand on its successor\n",
+				where, m.KeptLeases)
+		default:
+			fmt.Printf("  hub member %s: taken back from %d lease(s) — %s\n", where, m.Leases, m.State)
+			for _, h := range m.Holders {
+				fmt.Printf("    %s\n", h)
+			}
+		}
+	}
+	for _, id := range rep.Silent {
+		color.Yellow("  hub member %s did not answer within %s: it may still be taking the grant back, and its lease "+
+			"janitor finds the revocation at its next pass if it missed this announcement", id, wait)
+	}
+	if rep.Exclusive != "" {
+		color.Yellow("  hub %s %s", rep.Exclusive, rep.ExclusiveDetail)
+	}
 }
 
 var secretMigrateCmd = &cobra.Command{
@@ -700,6 +797,9 @@ func init() {
 	secretGrantsCmd.Flags().StringVar(&grantsSubjectFlag, "subject", "", "only grants for this subject")
 	secretGrantsCmd.Flags().StringVar(&grantsSecretFlag, "secret", "", "only grants for this secret (id or name)")
 	secretGrantsCmd.Flags().BoolVar(&grantsAllFlag, "all", false, "include expired and revoked grants")
+
+	secretRevokeCmd.Flags().DurationVar(&secretRevokeWait, "wait", 60*time.Second,
+		"how long to wait for running hubs to report what they took back")
 
 	secretLeaseCmd.Flags().String("executor", "", "executor id to simulate")
 	secretLeaseCmd.Flags().String("project", "", "project path (default: working directory)")

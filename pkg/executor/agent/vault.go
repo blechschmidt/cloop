@@ -57,28 +57,81 @@ import (
 const leaseDirPrefix = securewipe.LeaseDirPrefix
 
 // heldLease is one lease's material as this device sees it.
+//
+// The material is kept per grant (Task 20403). A lease carries every grant its
+// project holds, and a revocation can name one of them: an operator revoking a
+// GitHub PAT has not revoked the kubeconfig delivered beside it. The vault used
+// to fold every grant into one record that remembered only the first grant's
+// ID, so a revocation naming the first grant took back all of them and one
+// naming any other was answered "not held" — leaving the revoked credential on
+// the device while the hub was told it was not there.
 type heldLease struct {
 	leaseID string
+	// grants is the material, by grant ID. A binding that named no grant —
+	// sent by a hub that predates per-grant attribution — is filed under "",
+	// and makes any revocation of the lease take all of it back: material that
+	// cannot be told apart cannot be returned in part.
+	grants map[string]*heldGrant
+	// dir is the lease directory, removed once its files are gone.
+	dir string
+	// handles are the workloads started with this material.
+	handles map[string]struct{}
+}
+
+// heldGrant is one grant's share of a held lease.
+type heldGrant struct {
 	grantID string
 	name    string
 	kind    string
-	// envKeys are the variables this lease contributed, by name.
+	// envKeys are the variables this grant contributed, by name.
 	envKeys []string
 	// files are the credential files, already filtered to those this device
 	// is willing to touch (see confinement above). Paths the hub named but
 	// the agent refuses are kept in refused so the ack can report them.
 	files   []string
 	refused []string
-	// dir is the lease directory, removed once its files are gone.
-	dir string
-	// egress marks a lease that also opened a network path.
+	// egress marks a grant that also opened a network path.
 	egress bool
-	// handles are the workloads started with this material.
-	handles map[string]struct{}
 	// scrubbed records that the material has already been taken back, so a
 	// replayed revocation is idempotent rather than reporting a second,
 	// emptier success.
 	scrubbed bool
+}
+
+// liveFiles returns the credential files of the grants not yet taken back.
+func (h *heldLease) liveFiles() []string {
+	var out []string
+	for _, g := range h.sortedGrants() {
+		if !g.scrubbed {
+			out = append(out, g.files...)
+		}
+	}
+	return out
+}
+
+// allScrubbed reports whether every grant of the lease was taken back.
+func (h *heldLease) allScrubbed() bool {
+	for _, g := range h.grants {
+		if !g.scrubbed {
+			return false
+		}
+	}
+	return true
+}
+
+// sortedGrants returns the grants in grant-ID order, so a scrub walks them
+// deterministically.
+func (h *heldLease) sortedGrants() []*heldGrant {
+	ids := make([]string, 0, len(h.grants))
+	for id := range h.grants {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*heldGrant, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, h.grants[id])
+	}
+	return out
 }
 
 // vault indexes held leases for one agent.
@@ -157,23 +210,29 @@ func (v *vault) bind(handleID string, bindings []executor.SecretBinding) {
 		}
 		held, ok := v.leases[id]
 		if !ok {
-			held = &heldLease{leaseID: id, handles: make(map[string]struct{})}
+			held = &heldLease{leaseID: id, grants: make(map[string]*heldGrant), handles: make(map[string]struct{})}
 			v.leases[id] = held
 		}
-		held.grantID = firstNonEmpty(held.grantID, b.GrantID)
-		held.name = firstNonEmpty(held.name, b.SecretName)
-		held.kind = firstNonEmpty(held.kind, b.Kind)
-		held.dir = firstNonEmpty(held.dir, b.Dir)
-		held.egress = held.egress || b.Egress
-		held.envKeys = mergeStrings(held.envKeys, b.EnvKeys)
+		grantID := strings.TrimSpace(b.GrantID)
+		g, ok := held.grants[grantID]
+		if !ok {
+			g = &heldGrant{grantID: grantID}
+			held.grants[grantID] = g
+		}
+		g.name = firstNonEmpty(g.name, b.SecretName)
+		g.kind = firstNonEmpty(g.kind, b.Kind)
+		g.egress = g.egress || b.Egress
+		g.envKeys = mergeStrings(g.envKeys, b.EnvKeys)
 		accepted, refused := partitionLeaseFiles(b.Files)
-		held.files = mergeStrings(held.files, accepted)
-		held.refused = mergeStrings(held.refused, refused)
+		g.files = mergeStrings(g.files, accepted)
+		g.refused = mergeStrings(g.refused, refused)
+		// A grant re-delivered after a scrub is live material again: a
+		// renewal legitimately re-issues the same lease ID, and leaving the
+		// flag set would make the next revocation a no-op that reports
+		// success.
+		g.scrubbed = false
+		held.dir = firstNonEmpty(held.dir, b.Dir)
 		held.handles[handleID] = struct{}{}
-		// A lease re-delivered after a scrub is live material again: a renewal
-		// legitimately re-issues the same lease ID, and leaving the flag set
-		// would make the next revocation a no-op that reports success.
-		held.scrubbed = false
 		v.unretire(id)
 	}
 }
@@ -216,7 +275,7 @@ func (v *vault) release(handleID string) []scrubReport {
 		// come. scrubEnv is nil because the workload is finished — there is no
 		// live environment to scrub, and the driver's copy goes with the
 		// handle.
-		report := v.scrubLocked(held, nil)
+		report := v.scrubLocked(held, held.sortedGrants(), true, nil)
 		report.LeaseID = id
 		if report.FilesRemoved > 0 || len(report.Errors) > 0 {
 			reports = append(reports, report)
@@ -321,13 +380,16 @@ type scrubReport struct {
 
 // scrub invalidates one lease's material and reports what it reached.
 //
-// grantID narrows the scrub to a single grant within the lease; empty takes
-// the whole lease back. The narrowing is best-effort by design: a lease that
-// delivered several grants records the union of their env keys and files, and
-// when the binding did not distinguish them the whole lease is scrubbed. Over-
-// scrubbing costs a task a credential it may still have been entitled to;
-// under-scrubbing leaves a revoked credential live. The first is recoverable
-// by renewing, the second is not.
+// grantID narrows the scrub to a single grant within the lease; empty takes the
+// whole lease back. The narrowing is exact (Task 20403): only that grant's
+// files are wiped and only its variables dropped, and the lease directory stays
+// while another grant's files are still in it. A lease that does not carry the
+// named grant is answered Known=false — its material is not here — unless some
+// of its material was bound without a grant ID, which cannot be told apart from
+// the revoked grant's and is taken back whole: over-scrubbing costs a task a
+// credential it may still have been entitled to, and under-scrubbing leaves a
+// revoked one live. The first is recoverable by the next dispatch, the second
+// is not.
 func (v *vault) scrub(leaseID, grantID string, scrubEnv envScrubber) scrubReport {
 	id := strings.TrimSpace(leaseID)
 	v.mu.Lock()
@@ -340,14 +402,21 @@ func (v *vault) scrub(leaseID, grantID string, scrubEnv envScrubber) scrubReport
 		// given it, or the workload may already have finished.
 		return scrubReport{Known: false}
 	}
-	if g := strings.TrimSpace(grantID); g != "" && held.grantID != "" && held.grantID != g {
-		return scrubReport{Known: false}
+	g := strings.TrimSpace(grantID)
+	if g == "" {
+		return v.scrubLocked(held, held.sortedGrants(), true, scrubEnv)
 	}
-
-	return v.scrubLocked(held, scrubEnv)
+	if target, ok := held.grants[g]; ok {
+		return v.scrubLocked(held, []*heldGrant{target}, false, scrubEnv)
+	}
+	if _, unattributed := held.grants[""]; unattributed {
+		return v.scrubLocked(held, held.sortedGrants(), true, scrubEnv)
+	}
+	return scrubReport{Known: false}
 }
 
-// scrubLocked destroys one held lease's material. Caller holds v.mu.
+// scrubLocked destroys targets — grants of one held lease — and reports what
+// it reached. Caller holds v.mu.
 //
 // It is shared by scrub (an operator or the TTL janitor taking a credential
 // back) and release (a workload finishing normally), which is the whole reason
@@ -355,12 +424,21 @@ func (v *vault) scrub(leaseID, grantID string, scrubEnv envScrubber) scrubReport
 // them wiped anything, and the one that ran on every task was the one that did
 // not. A single body means a future change to what "destroyed" means cannot
 // apply to revocation and miss the ordinary exit.
-func (v *vault) scrubLocked(held *heldLease, scrubEnv envScrubber) scrubReport {
-	report := scrubReport{Known: true, EgressDropped: held.egress}
+//
+// wholeLease removes the lease directory too. Otherwise it goes only once no
+// grant's file is left in it.
+func (v *vault) scrubLocked(held *heldLease, targets []*heldGrant, wholeLease bool, scrubEnv envScrubber) scrubReport {
+	report := scrubReport{Known: true}
 	for h := range held.handles {
 		report.Handles = append(report.Handles, h)
 	}
 	sort.Strings(report.Handles)
+
+	var envKeys []string
+	for _, g := range targets {
+		report.EgressDropped = report.EgressDropped || g.egress
+		envKeys = mergeStrings(envKeys, g.envKeys)
+	}
 
 	// Env values go first, and under this lock. The lock is what makes the
 	// scrub race-safe against a concurrent start binding fresh material for
@@ -372,39 +450,38 @@ func (v *vault) scrubLocked(held *heldLease, scrubEnv envScrubber) scrubReport {
 	// key the workload never received must not be reported as scrubbed.
 	if scrubEnv != nil {
 		for _, handleID := range report.Handles {
-			report.EnvKeys = mergeStrings(report.EnvKeys, scrubEnv(handleID, held.envKeys))
+			report.EnvKeys = mergeStrings(report.EnvKeys, scrubEnv(handleID, envKeys))
 		}
 	}
 
-	if held.scrubbed {
-		// Already taken back. Report the same outcome rather than a hollow
-		// success: a replayed revocation after a reconnect must be idempotent,
-		// and telling the hub "nothing to do" would look like the first
-		// attempt had failed.
-		report.FilesRemoved = 0
-		return report
-	}
-
-	for _, path := range held.files {
-		if err := wipeCredentialFile(path); err != nil {
-			report.Errors = append(report.Errors, err.Error())
+	for _, g := range targets {
+		if g.scrubbed {
+			// Already taken back. Report the same outcome rather than a
+			// hollow success: a replayed revocation after a reconnect must be
+			// idempotent, and telling the hub "nothing to do" would look like
+			// the first attempt had failed.
 			continue
 		}
-		report.FilesRemoved++
+		for _, path := range g.files {
+			if err := wipeCredentialFile(path); err != nil {
+				report.Errors = append(report.Errors, err.Error())
+				continue
+			}
+			report.FilesRemoved++
+		}
+		for _, path := range g.refused {
+			report.Errors = append(report.Errors, fmt.Sprintf(
+				"refused to remove %s: it is not inside a %s* directory this agent recognises "+
+					"as lease-owned, so the control plane may not ask this device to unlink it",
+				path, leaseDirPrefix))
+		}
+		g.scrubbed = true
 	}
-	for _, path := range held.refused {
-		report.Errors = append(report.Errors, fmt.Sprintf(
-			"refused to remove %s: it is not inside a %s* directory this agent recognises "+
-				"as lease-owned, so the control plane may not ask this device to unlink it",
-			path, leaseDirPrefix))
-	}
-	if held.dir != "" {
+	if held.dir != "" && (wholeLease || held.allScrubbed()) {
 		if err := removeLeaseDir(held.dir); err != nil {
 			report.Errors = append(report.Errors, err.Error())
 		}
 	}
-
-	held.scrubbed = true
 	// The names stay so a repeat revoke still reports what this lease covered,
 	// but nothing here is a credential: env keys are names, and the file paths
 	// now point at nothing.

@@ -942,6 +942,9 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// The process-wide supervisor hands each failover to the Server that
 	// follows the run, or serves this control plane (Task 20396).
 	registerRunServer(srv)
+	// And the broker hands it every grant revoked in this process, to take
+	// back from the workloads holding it (Task 20403).
+	ensureGrantRevocationHook()
 	return srv
 }
 

@@ -244,15 +244,27 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	// because that action exists for a credential that is compromised rather
 	// than merely over-granted.
 	envKeys := executor.EnvKeys(bindings)
-	if len(envKeys) == 0 && req.Effective() != executor.RevokeKill {
+	// So do files this process cannot find. A container adopted after a hub
+	// restart was rebuilt from a row that deliberately records no host paths
+	// of credentials, so its stage is unknown: the files are in a directory
+	// bound into the container that nothing here can name (Task 20403).
+	// Reporting the scrub done would be the lie this file exists to remove.
+	lostFiles := rec.secretStage == nil && bindingsCarryFiles(bindings)
+	if len(envKeys) == 0 && !lostFiles && req.Effective() != executor.RevokeKill {
 		return removed, false, errors.Join(errs...)
 	}
 
 	reason := fmt.Sprintf("secret lease %s revoked", req.LeaseID)
-	if len(envKeys) > 0 && req.Effective() != executor.RevokeKill {
+	switch {
+	case req.Effective() == executor.RevokeKill:
+	case len(envKeys) > 0:
 		reason = fmt.Sprintf(
 			"secret lease %s revoked; %s was delivered as an environment variable, which cannot be "+
 				"scrubbed from a running process", req.LeaseID, strings.Join(envKeys, ", "))
+	case lostFiles:
+		reason = fmt.Sprintf(
+			"secret lease %s revoked; the container was adopted after a hub restart, and where its credential "+
+				"files were staged is not recorded, so they could only be taken back with the container", req.LeaseID)
 	}
 
 	// `rm --force` rather than a kill signal: a stopped container still holds
@@ -306,4 +318,14 @@ func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
 		rec.bus.AddRedactions(values...)
 	}
 	return true
+}
+
+// bindingsCarryFiles reports whether any binding delivered a credential file.
+func bindingsCarryFiles(bindings []executor.SecretBinding) bool {
+	for _, b := range bindings {
+		if len(b.Files) > 0 {
+			return true
+		}
+	}
+	return false
 }

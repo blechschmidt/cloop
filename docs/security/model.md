@@ -104,7 +104,7 @@ record and the derived agent credential revoked, and the hub sends `bye` with
 `reconnect=false` so the agent stops rather than backing off and retrying.
 
 **Protocol versioning.** Frames carry a version; the hub accepts
-`[MinProtocolVersion, ProtocolVersion]` = `[1, 2]` and stamps every outbound
+`[MinProtocolVersion, ProtocolVersion]` = `[1, 19]` and stamps every outbound
 frame with the version the session negotiated, not with its own maximum — a v1
 agent rejects a v2 envelope as out of range, so stamping the maximum would make
 negotiation decorative (`TestSessionStampsNegotiatedVersionOnOutboundFrames`).
@@ -597,8 +597,63 @@ three-hour task is a fifteen-minute *label* on three hours of access.
 `POST /api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to
 every executor holding the lease; a TTL janitor sweeps live sessions once a
 minute — on the cluster leader, also the leases a stopped hub process left
-behind (Task 20382); and cordon/drain scrubs everything a device is holding.
-All three go through one path, so they cannot drift apart.
+behind (Task 20382); cordon/drain scrubs everything a device is holding; and
+revoking a *grant* scrubs that grant from every lease carrying it (below). All
+of them go through one path, so they cannot drift apart.
+
+### Revoking a grant
+
+Revoking a grant takes its material back from every workload already holding
+it, at once (Task 20403) — not at the next lease, and not when the lease
+lapses. Three routes make sure no revocation is missed:
+
+- **In the hub.** Every revocation a broker in the hub process makes — the
+  Secrets panel's `DELETE /api/grants/{id}`, a secret's deletion, an
+  offboarding from the dashboard, a project's repository assignment withdrawn —
+  is announced by the broker (`secretbroker.OnGrantRevoked`), and the hub
+  serving that control plane cascades it: every live lease it holds that carries
+  the grant gives it back, and every other hub member is asked to do the same
+  for what it holds. The cascade is hooked once, in the broker, so no caller can
+  revoke and forget to cascade.
+- **From the CLI.** `cloop secret revoke` and `cloop hub user offboard` revoke
+  from a process that holds no lease, so they announce the revocation on the hub
+  bus; each running member takes the grant back from what it holds and answers,
+  and the CLI prints which members answered, what each took back, and which did
+  not answer. A hub started with `ui.cluster.exclusive` reads no bus.
+- **By the janitor.** Once a minute every member checks the grants its live
+  leases carry against the store, and takes back any that was revoked by
+  something that announced nothing — an exclusive hub's CLI, an older binary
+  sharing the control plane. That pass is the bound on a revocation every
+  announcement missed.
+
+Only the revoked grant is taken. The hub wipes that grant's files from its own
+copy, drops its bytes from what it would re-deliver, closes the git proxy and
+Kubernetes monitor sessions it fed, and destroys the App tokens minted for it;
+every holder is sent the revocation narrowed to that grant (`RevokeRequest
+.GrantID`); and the grant is dropped from the lease and its durable record, so
+the keepalive goes on extending the lease on the grants nobody revoked
+(`TestRevokingAGrantReachesEveryHolder`,
+`TestALeaseGivesUpOneGrantAndKeepsTheOthers`). A member adopting a run whose
+lease carried a grant revoked while no hub held it takes that grant back from
+the workload and keeps the rest (`TestRestoreWithdrawsOnlyTheRevokedGrant`,
+`TestSessionsOfARevokedGrantAreNotRestored`). A member acts on a bus
+announcement or a peer's request only for a grant the store says is revoked.
+Revoking a revoked grant is a no-op that cascades nothing.
+
+**Supersession is not revocation.** Editing a project's repository assignment,
+or granting a Claude credential again for longer, creates the successor and then
+revokes the old grant — and the successor still authorises the work a running
+task is doing with the old one. Such a grant is revoked as *superseded*: the
+grant row names its successor (`broker_grants.superseded_by`), nothing is taken
+back, and a lease carrying it stands on the successor — extended while the
+successor stands and bounded by its expiry, withdrawn like any other when the
+successor is revoked in turn (`TestASupersededGrantLeavesTheRunningWorkloadWorking`,
+`TestASupersededGrantsLeaseStandsOnItsSuccessor`). A GitHub App token the lease
+holds is re-minted at once at its original scope held to the successor's
+repositories and permissions — narrowed by an edit that narrowed, never widened
+by one that widened (`TestASupersededAppGrantsTokenIsHeldToItsSuccessor`). The
+rest of the material keeps the terms it was delivered with until the run ends;
+to take it away now, revoke the assignment rather than edit it.
 
 Revocation is a capability of the *executor*, expressed as the optional
 `executor.Revoker` interface. A driver that does not implement it is refused
@@ -614,10 +669,10 @@ strength was delivered rather than flattening them into "revoked".
 
 | Backend | How the material is taken back | Does a scrub kill the workload? |
 | --- | --- | --- |
-| `remote` | `revoke` frame (protocol ≥ 2); the agent wipes files, drops allowlist entries and scrubs its own env copies | No — unless `action=kill` |
-| `container` | the staged lease directory is wiped through `pkg/securewipe`; it is bind-mounted into the sandbox, so the container sees the same inode | **Yes, for env-borne material only** |
-| `kubernetes` | the backing `cloop-lease-*` and `cloop-ws-*` Secrets are deleted | **Yes, whenever the Pod is still running** |
-| `localprocess` | env scrubbed from the driver's retained copies; the lease's files wiped | No — unless `action=kill` |
+| `remote` | `revoke` frame (protocol ≥ 2); the agent wipes files, drops allowlist entries and scrubs its own env copies — one grant's only from protocol v19, the whole lease below it | No — unless `action=kill` |
+| `container` | the staged lease files are wiped through `pkg/securewipe`; the directory is bind-mounted into the sandbox, so the container sees the same inode | **Yes, for env-borne material only** |
+| `kubernetes` | file-only material: its keys of the run's `cloop-lease-*` Secret are emptied and the kubelet empties the projected files at its next sync; env-borne material: the `cloop-lease-*` and `cloop-ws-*` Secrets are deleted and so is the Pod | **Yes, for env-borne material only** |
+| `localprocess` | env scrubbed from the driver's retained copies; the grant's files wiped, the lease directory with the lease's last grant | No — unless `action=kill` |
 
 The two escalations are the interesting rows, and both are forced by the
 backend rather than chosen.
@@ -631,9 +686,23 @@ makes the next read inside the sandbox fail, and the workload keeps running.
 
 A **Kubernetes** Pod cannot have a projected volume un-projected. The kubelet
 serves the last content it synchronised and does not blank the tmpfs when the
-source Secret disappears, and a `secretKeyRef` value was copied into the
-container's environment when it started. Deleting the Secret is therefore
-necessary and not sufficient, and the Pod is deleted too.
+source Secret disappears — and a volume that lists a key the Secret no longer
+has fails its refresh and keeps the old file — and a `secretKeyRef` value was
+copied into the container's environment when it started. So material that
+reached the Pod only as files is withdrawn by *emptying* its keys of the lease
+Secret, which the kubelet projects as empty files at its next sync, and the Pod
+keeps running on the lease's other grants (`ack.eventual` says the files go at
+the sync, not at once). Material in the environment cannot be reached that way:
+the Secrets are deleted and the Pod is deleted too. A Pod adopted after a hub
+restart whose Secret keys are not known here goes the same way.
+
+A lease that **lapses** — its keepalive refused, or its holder gone — is taken
+back from every holder the same way at the janitor's next pass, the hub's own
+container and Kubernetes drivers included
+(`TestOneJanitorPassTakesALapsedLeaseFromContainersAndPods`). Before Task 20403
+the janitor reached only the hub's copy and remote agents, so a container's
+staged files and a Pod's lease Secret kept an expired credential until the
+workload exited.
 
 In both cases the operator asked for the gentler action, the gentler action is
 not available for that material, and the kill is **reported** — `Ack.Killed`
@@ -697,9 +766,10 @@ presenting it, or, without a proxy, by rewriting the sandbox's token file — an
 each one is minted from the scope GitHub was asked for at dispatch: the same
 installation, the same repository IDs (not the grant's globs re-resolved), the
 same permissions, held to what GitHub granted the first token. The grant is
-re-read before every mint, so a revoked or expired grant ends the run's access at
-the next refresh rather than at the end of the run, and its tokens are destroyed
-at GitHub then. A leaked token is still worth at most its own hour — and less,
+re-read before every mint, so an expired grant ends the run's access at the next
+refresh rather than at the end of the run, and its tokens are destroyed at
+GitHub then; a revoked one ends it at once, when the revocation reaches the
+lease. A superseded grant's token is re-minted held to its successor. A leaked token is still worth at most its own hour — and less,
 since a superseded token is destroyed shortly after its replacement reaches the
 workload. See
 [keeping the token past GitHub's hour](../guides/secrets.md#keeping-the-token-past-githubs-hour).
@@ -833,10 +903,12 @@ holding it, and the run's owner row names it. The process that adopts the run
 takes the lease over with a conditional write, so two adopters cannot both hold
 it: from then on it extends the lease, lists it, scrubs the run's output of it
 and releases it, and the process that lost it can neither extend nor release it
-(`ErrLeaseMoved`). A lease that lapsed, or whose grant was revoked, while no hub
-held it is scrubbed from the device instead of taken over, and the leader's
-janitor sweeps one whose holder never came back once it lapses — the TTL binds
-across a restart as it does within one process. A host-process run's lease
+(`ErrLeaseMoved`). A lease that lapsed while no hub held it, or every grant of
+which was revoked, is scrubbed from the device instead of taken over; one some
+of whose grants were revoked meanwhile is taken over and those grants are taken
+back from the device (Task 20403); and the leader's janitor sweeps one whose
+holder never came back once it lapses — the TTL binds across a restart as it
+does within one process. A host-process run's lease
 directory is still wiped by the startup sweep, and its lease is ended rather
 than taken over.
 
@@ -1666,9 +1738,10 @@ somebody else's personal secret. The offboarding's stated reason is never in
 it: for a departure that is often an HR matter, and it stays in the audit trail
 and on the tombstone. The dashboards' Secrets panels are told to re-read without
 being told whom. A lease that colleague's run already holds is not taken away —
-the rest of what it carries is theirs — but its revoked grant stops the
-keepalive extending it, so it lapses within a lease period, and the plan names
-it with the time it lapses by.
+the rest of what it carries is theirs — but the revoked grant is taken back
+from it as the grant is revoked (Task 20403): through the hub serving the
+dashboard, or announced on the bus by the CLI, which prints what each running
+member took back. The plan names such a lease.
 
 **A legal hold** (`--keep-credentials`, or the dashboard's *Legal hold* box)
 keeps the personal secrets and the Claude homes exactly as they are and severs
@@ -3332,6 +3405,14 @@ scanners to one registry and one corpus — see
 | What a restarted hub restores a run's sessions from — `proxy_sessions` and `app_token_slots` — holds no PAT, App key or installation token, cluster credential, kubeconfig, session token or egress credential, verbatim or base64, after a realistic guarded and unguarded run; and each session's `token_sha256` is its token's hash | `TestSessionRecordsHoldNoCredential` (`sessionrecords_test.go`) |
 | No driver drops the wiring: every backend both records bindings at dispatch and restores them on adoption | `TestEveryDriverRehydratesItsLeaseBindings` |
 | The shared adoption rule itself — doubt is not absence, doubt is not scoped to one lease, `Bind` resolves it, `Release` clears it | `TestLeaseIndexAdoptOfAnUnrecordedRecordIsDoubtNotAbsence` and siblings (`pkg/executor`) |
+| Revoking one **grant** reaches every live holder of it — a host process, a container, a Pod, a device — takes exactly that grant's material, and leaves a lease's other grant working | `TestRevokingAGrantReachesEveryHolder` |
+| A host process's wipe of one grant keeps the other grant's files and the lease directory they share | `TestRevokingOneGrantKeepsTheOtherGrantsFiles` (`pkg/executor/localprocess`) |
+| A Pod keeps running when a revoked grant delivered only files: exactly that grant's lease Secret keys are emptied, not deleted, so the kubelet's next volume refresh succeeds and drops the files | `TestRevokeLease_FileOnlyGrantEmptiesItsKeysAndKeepsThePod` (`pkg/executor/kubernetes`) |
+| A lapsed file-only lease likewise empties the Pod's lease Secret rather than evicting it | `TestRevokeLease_FileOnlyLeaseLapseKeepsThePod` (`pkg/executor/kubernetes`) |
+| A container adopted after a hub restart, whose staged files the hub can no longer reach, is removed rather than reported scrubbed | `TestRevokingAnAdoptedContainersFilesRemovesTheContainer` (`pkg/executor/container`) |
+| A device's vault scrubs exactly the revoked grant's files, keeps the lease directory while another grant still uses it, and a refresh never brings the revoked grant back | `TestVaultScrubOfOneGrantKeepsTheOthers`, `TestVaultGrantScrubsEmptyTheDirectoryLast`, `TestVaultRefreshDoesNotRestoreARevokedGrant` (`pkg/executor/agent`) |
+| An agent below protocol v19 cannot narrow a revocation to one grant, so the whole lease is taken back — and the outcome says it was widened, and why | `TestGrantRevocationIsWidenedForAnAgentThatCannotNarrowIt` (`pkg/executor/remote`) |
+| One janitor pass takes a lapsed lease's staged files out of its container and its keys out of its Pod's lease Secret | `TestOneJanitorPassTakesALapsedLeaseFromContainersAndPods` (`pkg/ui`) |
 | A revoke mid-run really removes the credential: the running workload observes its token file disappear | `TestLoopbackRevokeScrubsMaterialMidRun` (`pkg/executor/remote`) |
 | `action=kill` terminates every holder, escalating to `SIGKILL` | `TestLoopbackRevokeKillTerminatesHolder` (`pkg/executor/remote`) |
 | The revoke frame is not an arbitrary-unlink primitive: paths outside a `cloop-lease-*` directory are refused and reported | `TestVaultRefusesPathsOutsideALeaseDirectory`, `TestLoopbackRevokeRefusesPathsOutsideALeaseDirectory` |
@@ -3698,7 +3779,10 @@ not installed.
 | Only `cloop ui` runs the proxy, and every other process that registers the Kubernetes driver with the section enabled refuses git workspaces rather than handing a Pod the forge credential | `pkg/executor/reconcile: TestWorkspaceSourceFailsClosedWithoutTheProxy`, `TestWorkspaceSourceRoutesThroughTheCallersProxy` |
 | A pinned session holds the lease behind its upstream token until the session ends, and releases it exactly once — a `github_app` token is not destroyed while a session still presents it — while a session nothing used is closed when the driver hands it back | `pkg/gitproxy: TestOnEndRunsOnceWhenTheSessionLeaves`, `pkg/executor/gitproxycreds: TestInnerLeaseOutlivesTheDelivery`, `TestUnusedSessionIsClosedOnRelease`, `TestReapedSessionReleasesTheInnerLease` |
 | In a Pod the workspace fetch presents the session id the proxy looks up, from the run's Secret rather than the Pod spec, and the lease credential helper is executable but never writable | `pkg/executor/kubernetes: TestStart_WorkspaceSecretCarriesTheSessionUsername`, `TestBuildPod_CredentialHelperIsExecutable` |
-| A running workload's lease is extended in place only while every grant it holds is still valid, so a revocation still lands within one lease period, and the janitor sweeps at the extended deadline rather than the issued one | `pkg/secretbroker: TestExtendRefusesARevokedGrant`, `TestExtendIsClampedToTheGrant`, `pkg/ui: TestLeaseKeepaliveOutlivesTheIssuedTTL`, `TestLeaseKeepaliveStopsOnARevokedGrant` |
+| A running workload's lease is extended in place only while every grant it holds is still valid — a superseded one on its successor's authority — and the janitor sweeps at the extended deadline rather than the issued one | `pkg/secretbroker: TestExtendRefusesARevokedGrant`, `TestExtendIsClampedToTheGrant`, `TestASupersededGrantsLeaseStandsOnItsSuccessor`, `pkg/ui: TestLeaseKeepaliveOutlivesTheIssuedTTL`, `TestLeaseKeepaliveStopsOnARevokedGrant` |
+| Revoking a grant takes its material back from every workload holding it at once — the hub's copy, a host process's files, a container's staged files, a Pod's lease Secret keys, a device's lease directory — and leaves the lease's other grants working, whoever revoked it: the hub's own routes, the CLI over the bus, another hub member, the janitor for a revocation nothing announced | `tests/security: TestRevokingAGrantReachesEveryHolder`, `pkg/ui: TestRevokingAGrantReachesItsHoldersAndTheLeaseKeepsTheOthers`, `TestACLIRevocationReachesARunningHubThroughTheBus`, `TestAPeerHeldLeaseIsScrubbedThroughTheClusterFanOut`, `TestTheJanitorTakesBackAGrantRevokedBehindTheHubsBack`, `pkg/secretbroker: TestALeaseGivesUpOneGrantAndKeepsTheOthers`, `TestRevocationIsAnnouncedOnceAndOnlyWhenItRevokes` |
+| A lapsed lease is taken back from the hub-local container and Kubernetes drivers too, in one janitor pass | `pkg/ui: TestOneJanitorPassTakesALapsedLeaseFromContainersAndPods`, `TestALapsedLeaseIsTakenBackFromTheHubLocalDrivers` |
+| A superseded grant leaves the running workload working, and its App token is re-minted held to the successor | `pkg/ui: TestASupersededGrantLeavesTheRunningWorkloadWorking`, `pkg/secretbroker: TestASupersededAppGrantsTokenIsHeldToItsSuccessor` |
 | A run's lease outlives the hub process that issued it: the process that adopts the run takes it over (one adopter only), keeps it alive and releases it; one that lapsed or lost its grant meanwhile is scrubbed instead, one nobody took over is swept once it lapses, and the process that lost a lease can neither extend nor release it | `pkg/secretbroker: TestALeaseIsTakenOverWithItsRun`, `TestRestoreRefusesWhatExtendWould`, `pkg/ui: TestAdoptedRunTakesOverItsLease`, `TestAdoptedRunWhoseLeaseLapsedIsScrubbed`, `TestJanitorSweepsALeaseItsHolderLeftBehind`, `tests/e2e: TestE2EDeviceRunSurvivesHubRestart` |
 | A virtual executor's workspace is leased as the virtual executor — never under its device's grants | `pkg/executor/gitcreds: TestVirtualExecutorLeasesItsOwnGrant`, `TestVirtualExecutorDoesNotBorrowTheDevicesGrant`, `pkg/executor/remote: TestVirtualDispatchLeasesAsTheVirtualExecutor` |
 | In a Pod the proxy's CA is trusted for the proxy's URL only, in the provisioner and the harness alike, joining any `GIT_CONFIG_COUNT` block already there — never `GIT_SSL_CAINFO`, which would replace the trust store for every other host; a closed-environment fetch trusts a CA scoped to its own remote and not one scoped elsewhere, and imports nothing else from that block | `pkg/executor/kubernetes: TestBuildPod_GitCABundleReachesBothContainers`, `TestBuildPod_GitCABundleJoinsAnExistingConfigBlock`; `pkg/executor/gitprovision: TestProvisionTrustsACertificateScopedToTheRemote`, `TestTransportConfigImportsOnlyURLScopedCertificateKeys` |

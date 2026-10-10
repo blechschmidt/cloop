@@ -146,6 +146,27 @@ func (d *DB) TakeSecretLease(leaseID, from, holder string) (bool, error) {
 	return n == 1, nil
 }
 
+// RewriteSecretLeaseRecord replaces a lease's record document, provided holder
+// still holds it, and reports whether it did (Task 20403): a grant withdrawn
+// from a live lease, or one standing on its successor, is written into the
+// record so the process that takes the lease over inherits it.
+func (d *DB) RewriteSecretLeaseRecord(leaseID, holder, record string) (bool, error) {
+	if strings.TrimSpace(record) == "" {
+		record = "{}"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE secret_leases SET record_json = ?, updated_at = ?
+		  WHERE lease_id = ? AND holder = ?`,
+		record, formatOptionalTime(time.Now().UTC()), leaseID, holder)
+	if err != nil {
+		return false, fmt.Errorf("statedb: rewrite secret lease %q: %w", leaseID, classifyDriverErr(err))
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 // DeleteSecretLease forgets a lease, provided holder still holds it, and
 // reports whether a row went. A missing row is not an error: a lease can be
 // released twice — once when its run ends, once by a revocation that raced

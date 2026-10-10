@@ -474,6 +474,10 @@ func (b *Broker) KubeconfigUpstream(leaseID, grantID string) ([]byte, error) {
 // heldGrant returns a grant of a lease this broker holds, and its secret, after
 // the checks Extend makes: not revoked or expired, still issued to the lease's
 // requester, its secret still there. A refusal is a denied secret.renew row.
+//
+// For a superseded grant it returns the successor the lease stands on (Task
+// 20403) and the successor's secret: what a restored session is held to, and
+// what it presents upstream, is what authorises the lease now.
 func (b *Broker) heldGrant(leaseID, grantID string) (Grant, Secret, error) {
 	ev := Event{Action: ActionRenew, LeaseID: leaseID, GrantID: grantID}
 	b.mu.Lock()
@@ -499,13 +503,13 @@ func (b *Broker) heldGrant(leaseID, grantID string) (Grant, Secret, error) {
 	if _, err := b.recheckGrants(ev, leaseID, requester, []string{grantID}, b.now()); err != nil {
 		return Grant{}, Secret{}, err
 	}
-	g, err := b.store.GetGrant(grantID)
+	g, err := b.authorityFor(grantID)
 	if err != nil {
 		return Grant{}, Secret{}, b.denyf(ev, ErrGrantNotFound, "grant %s: %v", grantID, err)
 	}
 	s, err := b.store.GetSecret(g.SecretID)
 	if err != nil {
-		return Grant{}, Secret{}, b.denyf(ev, ErrSecretNotFound, "secret %s of grant %s: %v", g.SecretID, grantID, err)
+		return Grant{}, Secret{}, b.denyf(ev, ErrSecretNotFound, "secret %s of grant %s: %v", g.SecretID, g.ID, err)
 	}
 	return g, s, nil
 }

@@ -1079,8 +1079,13 @@ func (m *githubAppMinter) remint(ctx context.Context, cred *AppCredential, scope
 // anything.
 func (m *githubAppMinter) confirmScope(ctx context.Context, cred *AppCredential, scope appTokenScope,
 	c Constraints) (appTokenScope, string, error) {
+	// The permissions first, because a grant whose allowlist admits every
+	// repository can still have narrowed what the token may do with them —
+	// the successor of a superseded grant that went from write to read (Task
+	// 20403).
+	scope, permNote := clampScopePermissions(scope, c)
 	if allowsAllRepos(c.Repos) {
-		return scope, "", nil
+		return scope, permNote, nil
 	}
 	if len(scope.repositoryIDs) == 0 {
 		return appTokenScope{}, "", fmt.Errorf("%w: %w: the recorded token was installation-wide, and the grant "+
@@ -1119,12 +1124,57 @@ func (m *githubAppMinter) confirmScope(ctx context.Context, cred *AppCredential,
 	}
 	sort.Strings(names)
 	out.summary = strings.Join(names, "|")
-	note := ""
+	note := permNote
 	if dropped := len(scope.repositoryIDs) - len(out.repositoryIDs); dropped > 0 {
-		note = fmt.Sprintf("%d recorded repositor%s the grant does not admit now dropped", dropped,
+		if note != "" {
+			note += "; "
+		}
+		note += fmt.Sprintf("%d recorded repositor%s the grant does not admit now dropped", dropped,
 			plural(dropped, "y", "ies"))
 	}
 	return out, note, nil
+}
+
+// clampScopePermissions holds a scope's permissions to what grant constraints c
+// admit: a permission c does not name is dropped and one it names at a lower
+// level is lowered. A scope asked for the installation's whole permission set
+// is held from what GitHub granted it. It never widens, and reports what it
+// narrowed.
+func clampScopePermissions(scope appTokenScope, c Constraints) (appTokenScope, string) {
+	limit, err := GitHubAppPermissions(c)
+	if err != nil || limit == nil {
+		// A "*" grant admits whatever the token already had, and an unusable
+		// permission list was refused when the grant was made.
+		return scope, ""
+	}
+	base := scope.permissions
+	if base == nil {
+		base = scope.granted
+	}
+	clamped := make(map[string]string, len(base))
+	var narrowed []string
+	for name, level := range base {
+		allowed, ok := limit[name]
+		if !ok {
+			narrowed = append(narrowed, name+" dropped")
+			continue
+		}
+		if permissionRank(allowed) < permissionRank(level) {
+			narrowed = append(narrowed, name+" "+level+"→"+allowed)
+			level = allowed
+		}
+		clamped[name] = level
+	}
+	if len(narrowed) == 0 && scope.permissions != nil {
+		return scope, ""
+	}
+	out := scope.clone()
+	out.permissions = clamped
+	if len(narrowed) == 0 {
+		return out, ""
+	}
+	sort.Strings(narrowed)
+	return out, "permissions held to the grant: " + strings.Join(narrowed, ", ")
 }
 
 func (m *githubAppMinter) now() time.Time {

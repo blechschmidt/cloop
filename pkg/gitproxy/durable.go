@@ -344,6 +344,28 @@ func (r *Registry) CloseForLease(leaseID, reason string) int {
 	return n
 }
 
+// CloseForGrant closes the sessions grantID's credential feeds in leaseID —
+// one grant of a lease revoked while the lease's other grants keep working
+// (Task 20403) — and reports how many it closed.
+func (r *Registry) CloseForGrant(leaseID, grantID, reason string) int {
+	grantID = strings.TrimSpace(grantID)
+	if grantID == "" {
+		return 0
+	}
+	n := 0
+	for _, id := range r.sessionsForLease(leaseID) {
+		r.mu.RLock()
+		s := r.sessions[id]
+		r.mu.RUnlock()
+		if s == nil || strings.TrimSpace(s.GrantID) != grantID {
+			continue
+		}
+		r.Close(id, reason)
+		n++
+	}
+	return n
+}
+
 // SuspendForLease suspends every durable session leaseID feeds and returns
 // their ids, sorted. A session its Store holds no record of is closed instead,
 // with reason: nothing could restore it, and a session that simply stopped

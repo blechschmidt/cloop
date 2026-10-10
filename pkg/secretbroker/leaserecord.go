@@ -75,6 +75,15 @@ type LeaseStore interface {
 	DeleteLease(id, holder string) (bool, error)
 }
 
+// LeaseGrantStore is an optional LeaseStore extension that rewrites the grants
+// a held lease carries if holder still holds it (Task 20403). A store without
+// it keeps the grants a record was written with: a process taking such a lease
+// over meets a withdrawn grant as revoked, and withdraws it again —
+// idempotently — rather than carrying it.
+type LeaseGrantStore interface {
+	SetLeaseGrants(id, holder string, grantIDs []string) (bool, error)
+}
+
 // WithLeaseRecords makes every non-empty lease this broker issues durable,
 // held by holder — the hub process's cluster member id. An empty holder
 // records nothing: a lease that names no process is one nothing could take
@@ -165,6 +174,12 @@ func (b *Broker) LeaseRecords() ([]LeaseRecord, error) {
 // alive that its grants no longer allow. A lease another process took over
 // first is refused with ErrLeaseMoved.
 //
+// A lease some of whose grants were revoked while nobody held it, and some not,
+// is taken over rather than refused (Task 20403): the returned Lease names the
+// revoked ones in Withdrawn, for the adopting process to take back from the
+// workload and drop (DropLeaseGrant), and the run keeps the grants nobody
+// revoked. Only a lease every grant of which was withdrawn is refused whole.
+//
 // The returned Lease names the materials the lease carries — grant, secret,
 // kind, constraints — and holds none of their values: the workload already has
 // them, and this process has no business re-reading them to hold a lease.
@@ -197,8 +212,29 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 			"lease %s lapsed at %s while no hub process held it, and cannot be taken over",
 			leaseID, rec.ExpiresAt.UTC().Format(time.RFC3339))
 	}
-	if _, err := b.recheckGrants(ev, leaseID, rec.Requester, rec.GrantIDs, now); err != nil {
-		return nil, err
+	var withdrawn []WithdrawnGrant
+	for _, id := range rec.GrantIDs {
+		_, sentinel, why, final := b.standing(id, rec.Requester, now)
+		if sentinel == nil {
+			continue
+		}
+		if !final {
+			// The store did not answer. That says nothing about the grant, so
+			// neither a takeover nor a withdrawal: the caller tries again.
+			return nil, fmt.Errorf("secretbroker: take over lease %s: grant %s%s", leaseID, id, why)
+		}
+		if errors.Is(sentinel, ErrGrantExpired) || len(rec.GrantIDs) == 1 {
+			// An expired grant bounds the lease, which lapsed with it; and a
+			// lease of one grant has nothing left to take over without it.
+			ev.GrantID = id
+			return nil, b.denyf(ev, sentinel, "lease %s holds grant %s%s", leaseID, id, why)
+		}
+		withdrawn = append(withdrawn, WithdrawnGrant{GrantID: id, Reason: "grant " + id + strings.TrimPrefix(why, ",")})
+	}
+	if len(withdrawn) == len(rec.GrantIDs) {
+		ev.GrantID = withdrawn[0].GrantID
+		return nil, b.denyf(ev, ErrGrantRevoked,
+			"lease %s holds no grant that still authorises it: %s", leaseID, withdrawn[0].Reason)
 	}
 	from := rec.Holder
 	if from != b.leaseHolder {
@@ -235,6 +271,13 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 	if from != "" && from != b.leaseHolder {
 		ev.Reason += " (held until then by " + from + ")"
 	}
+	if len(withdrawn) > 0 {
+		ids := make([]string, 0, len(withdrawn))
+		for _, w := range withdrawn {
+			ids = append(ids, w.GrantID)
+		}
+		ev.Reason += "; its revoked grant(s) " + strings.Join(ids, ", ") + " are taken back from the workload"
+	}
 	b.emit(ev)
 
 	return &Lease{
@@ -245,6 +288,7 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 		IssuedAt:   rec.IssuedAt,
 		ExpiresAt:  rec.ExpiresAt,
 		Materials:  b.heldMaterials(rec.GrantIDs),
+		Withdrawn:  withdrawn,
 	}, nil
 }
 

@@ -1,0 +1,21 @@
+-- broker_grants.superseded_by names the grant that replaced a superseded one
+-- (Task 20403).
+--
+-- Revoking a grant now takes its material back from the workloads holding it
+-- at once. Some revocations are not withdrawals, though: editing a project's
+-- repository assignment, or granting a Claude credential again for longer,
+-- creates the successor and revokes the grant it replaces — and the successor
+-- still authorises the work a running task is doing with the old one. Such a
+-- grant is revoked with revoked_cause 'superseded' and this column names its
+-- successor, so every hub process — a member that did not serve the edit, one
+-- that takes a run over after a restart — keeps a running lease that carries
+-- the old grant standing on the successor, instead of withdrawing it, and
+-- withdraws it the moment the successor is revoked in turn.
+--
+--   superseded_by  the successor's grant id, or '' for a grant that was not
+--                  superseded.
+--
+-- Additive in schema_compat.go's sense: a binary predating this column reads
+-- no superseded grant differently from any revoked one, which is the
+-- behaviour it shipped with.
+ALTER TABLE broker_grants ADD COLUMN superseded_by TEXT NOT NULL DEFAULT '';

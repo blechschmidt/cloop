@@ -589,3 +589,144 @@ func TestVaultReleaseSurfacesAWipeItCouldNotPerform(t *testing.T) {
 		t.Errorf("the directory should still be there — that is what makes it worth reporting: %v", err)
 	}
 }
+
+// twoGrantLease binds one lease carrying two grants into one lease directory,
+// the shape the broker renders for a project holding a GitHub PAT and a
+// kubeconfig.
+func twoGrantLease(t *testing.T, v *vault, leaseID string) (dir, pat, kube string) {
+	t.Helper()
+	dir = filepath.Join(t.TempDir(), leaseDirPrefix+leaseID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir lease dir: %v", err)
+	}
+	pat = filepath.Join(dir, "github-token")
+	kube = filepath.Join(dir, "kubeconfig")
+	for path, body := range map[string]string{pat: "ghp_canary", kube: "token: kube_canary"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	v.bind("handle-1", []executor.SecretBinding{
+		{LeaseID: leaseID, GrantID: "grant_pat", SecretName: "github-ci", Kind: "github_pat",
+			EnvKeys: []string{"GIT_CONFIG_GLOBAL"}, Files: []string{pat}, Dir: dir},
+		{LeaseID: leaseID, GrantID: "grant_kube", SecretName: "prod-kube", Kind: "kubeconfig",
+			EnvKeys: []string{"KUBECONFIG"}, Files: []string{kube}, Dir: dir},
+	})
+	return dir, pat, kube
+}
+
+// TestVaultScrubOfOneGrantKeepsTheOthers pins the narrowing (Task 20403).
+//
+// The vault used to remember one grant per lease — the first — so a revocation
+// naming the first grant took every grant's material, and one naming any other
+// was answered "not held" while the revoked credential stayed on the device.
+// Both directions are asserted, on the bytes.
+func TestVaultScrubOfOneGrantKeepsTheOthers(t *testing.T) {
+	for _, revoked := range []string{"grant_pat", "grant_kube"} {
+		t.Run(revoked, func(t *testing.T) {
+			v := newVault()
+			dir, pat, kube := twoGrantLease(t, v, "lease_two")
+			gone, kept, keptBody, wantKey := pat, kube, "token: kube_canary", "GIT_CONFIG_GLOBAL"
+			if revoked == "grant_kube" {
+				gone, kept, keptBody, wantKey = kube, pat, "ghp_canary", "KUBECONFIG"
+			}
+
+			report := v.scrub("lease_two", revoked, func(_ string, keys []string) []string { return keys })
+			if !report.Known {
+				t.Fatalf("the lease carries %s, but the scrub answered not held", revoked)
+			}
+			if report.FilesRemoved != 1 {
+				t.Errorf("FilesRemoved = %d, want 1", report.FilesRemoved)
+			}
+			if len(report.EnvKeys) != 1 || report.EnvKeys[0] != wantKey {
+				t.Errorf("EnvKeys = %v, want only the revoked grant's %s", report.EnvKeys, wantKey)
+			}
+			if _, err := os.Stat(gone); !os.IsNotExist(err) {
+				t.Errorf("the revoked grant's file %s is still on the device", gone)
+			}
+			if got, err := os.ReadFile(kept); err != nil || string(got) != keptBody {
+				t.Errorf("revoking %s took the other grant's file %s: %v / %q", revoked, kept, err, got)
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("the lease directory went while another grant's file was still in it: %v", err)
+			}
+		})
+	}
+}
+
+// TestVaultScrubOfAGrantTheLeaseDoesNotCarry answers "not held" and touches
+// nothing.
+func TestVaultScrubOfAGrantTheLeaseDoesNotCarry(t *testing.T) {
+	v := newVault()
+	_, pat, kube := twoGrantLease(t, v, "lease_other")
+	report := v.scrub("lease_other", "grant_somebody_else", nil)
+	if report.Known {
+		t.Errorf("a grant the lease does not carry was reported held: %+v", report)
+	}
+	for _, path := range []string{pat, kube} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was removed by a revocation of a grant it does not belong to: %v", path, err)
+		}
+	}
+}
+
+// TestVaultGrantScrubsEmptyTheDirectoryLast: once every grant has been taken
+// back one at a time, the directory goes as a whole-lease scrub would take it.
+func TestVaultGrantScrubsEmptyTheDirectoryLast(t *testing.T) {
+	v := newVault()
+	dir, _, _ := twoGrantLease(t, v, "lease_both")
+	v.scrub("lease_both", "grant_pat", nil)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("directory gone after the first grant: %v", err)
+	}
+	second := v.scrub("lease_both", "grant_kube", nil)
+	if second.FilesRemoved != 1 {
+		t.Errorf("second grant scrub removed %d files, want 1", second.FilesRemoved)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the lease directory %s survived the revocation of its last grant", dir)
+	}
+	// And a repeat of either is the idempotent replay, not a new failure.
+	again := v.scrub("lease_both", "grant_pat", nil)
+	if !again.Known || again.FilesRemoved != 0 || len(again.Errors) != 0 {
+		t.Errorf("replayed grant scrub = %+v, want known, nothing removed, no errors", again)
+	}
+}
+
+// TestVaultGrantScrubOfUnattributedMaterialTakesTheWholeLease: material a hub
+// bound without a grant ID cannot be told apart from the revoked grant's, so a
+// revocation naming any grant takes the lease back whole rather than leave it.
+func TestVaultGrantScrubOfUnattributedMaterialTakesTheWholeLease(t *testing.T) {
+	dir, file := leaseDir(t, "legacy")
+	v := newVault()
+	b := binding("lease_legacy", dir, file)
+	b.GrantID = ""
+	v.bind("handle-1", []executor.SecretBinding{b})
+
+	report := v.scrub("lease_legacy", "grant_whatever", nil)
+	if !report.Known || report.FilesRemoved != 1 {
+		t.Errorf("report = %+v, want the unattributed material taken back", report)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("unattributed material survived a grant revocation: %v", err)
+	}
+}
+
+// TestVaultRefreshDoesNotRestoreARevokedGrant: a refresh of the lease must not
+// put back a file whose grant was taken back on its own.
+func TestVaultRefreshDoesNotRestoreARevokedGrant(t *testing.T) {
+	v := newVault()
+	_, pat, _ := twoGrantLease(t, v, "lease_refresh")
+	v.own("handle-1", []string{pat})
+	v.scrub("lease_refresh", "grant_pat", nil)
+
+	rep := v.refresh("lease_refresh", []executor.SecretFile{{
+		LeaseID: "lease_refresh", GrantID: "grant_pat", Name: "github-token", Content: []byte("ghp_new"),
+	}})
+	if _, err := os.Stat(pat); !os.IsNotExist(err) {
+		t.Fatalf("a refresh recreated the revoked grant's file %s (report %+v)", pat, rep)
+	}
+	if len(rep.errors) == 0 {
+		t.Errorf("the refused refresh was not reported: %+v", rep)
+	}
+}

@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -116,7 +117,7 @@ func (e *Executor) RevokeLease(ctx context.Context, req executor.RevokeRequest) 
 
 		ack.EnvScrubbed = append(ack.EnvScrubbed, e.ScrubSpecSecrets(handleID, bindings)...)
 
-		removed, err := wipeBindingFiles(bindings)
+		removed, err := wipeBindingFiles(bindings, strings.TrimSpace(req.GrantID) == "")
 		ack.FilesRemoved += removed
 		if err != nil {
 			errs = append(errs, fmt.Errorf("handle %s: %w", handleID, err))
@@ -172,7 +173,13 @@ func (e *Executor) settle(out *executor.RevokeOutcome, ack executor.RevokeReport
 // securewipe.File does not apply this rule itself — it checks only that the
 // target is a regular file and not a symlink — so the caller has to. Only
 // securewipe.Dir enforces the prefix.
-func wipeBindingFiles(bindings []executor.SecretBinding) (int, error) {
+//
+// wholeLease says the request named no grant. Only then does the lease
+// directory go: every grant of a lease shares one directory (Binding.Dir is the
+// lease's, not the grant's), so removing it for a revocation narrowed to one
+// grant would take the other grants' files with it — the over-reach a grant ID
+// on the request exists to prevent (Task 20403).
+func wipeBindingFiles(bindings []executor.SecretBinding, wholeLease bool) (int, error) {
 	var (
 		errs    []error
 		removed int
@@ -188,11 +195,21 @@ func wipeBindingFiles(bindings []executor.SecretBinding) (int, error) {
 					"refusing to unlink %s: it is not inside a %s* directory", path, securewipe.LeaseDirPrefix))
 				continue
 			}
+			// Counted only when there was something to wipe: the hub wipes
+			// its own copy of a host workload's files before it asks this
+			// driver, and "2 files removed" for files already gone would
+			// overstate what this call took back.
+			_, statErr := os.Lstat(path)
 			if err := securewipe.File(path); err != nil {
 				errs = append(errs, fmt.Errorf("wipe %s: %w", path, err))
 				continue
 			}
-			removed++
+			if statErr == nil {
+				removed++
+			}
+		}
+		if !wholeLease {
+			continue
 		}
 		if dir := strings.TrimSpace(b.Dir); dir != "" && securewipe.IsLeaseDir(dir) {
 			if err := securewipe.Dir(dir); err != nil {

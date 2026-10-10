@@ -492,6 +492,24 @@ func (r *Registry) CloseForLease(leaseID, reason string) int {
 	return n
 }
 
+// CloseForGrant revokes the sessions minted against grantID in leaseID — one
+// grant of a lease revoked while its other grants keep working (Task 20403) —
+// and reports how many it closed.
+func (r *Registry) CloseForGrant(leaseID, grantID, reason string) int {
+	leaseID, grantID = strings.TrimSpace(leaseID), strings.TrimSpace(grantID)
+	if leaseID == "" || grantID == "" {
+		return 0
+	}
+	n := 0
+	for _, s := range r.Sessions() {
+		if s.LeaseID == leaseID && strings.TrimSpace(s.GrantID) == grantID && !s.Closed() {
+			r.Close(s.ID, reason)
+			n++
+		}
+	}
+	return n
+}
+
 // ReapExpired drops lapsed and closed sessions, and returns how many it
 // removed.
 //

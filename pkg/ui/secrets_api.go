@@ -249,6 +249,18 @@ type leaseMaterialView struct {
 	SecretName string `json:"secret_name"`
 	Kind       string `json:"kind"`
 	Summary    string `json:"summary,omitempty"`
+	// EnvKeys names the environment variables the grant put into the
+	// workload — names only, the values never leave the broker — and Files
+	// counts the credential files it delivered (Task 20403). A variable is
+	// the part of a grant no revocation can take out of a running process,
+	// which is what the revoke confirmation has to say before an operator
+	// confirms it. Unknown, and so empty, for a lease taken over from a hub
+	// process that stopped: what it delivered went with that process.
+	EnvKeys []string `json:"env_keys,omitempty"`
+	Files   int      `json:"files,omitempty"`
+	// Withdrawn: the grant was taken back from this lease, which kept its
+	// other grants.
+	Withdrawn bool `json:"withdrawn,omitempty"`
 }
 
 // leaseView is one row of GET /api/leases.
@@ -738,13 +750,34 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, r *http.Request) {
 	// DeleteSecretFor re-checks ownership itself: this handler decides the
 	// organisation-level half, the broker decides the personal half, and
 	// neither trusts the other to have done it.
-	if err := bs.secret.DeleteSecretFor(r.Context(), id, viewer); err != nil {
+	//
+	// The grants the deletion revokes are taken back from the workloads
+	// holding them as it returns (Task 20403); the response says from how
+	// many leases, and how each holder fared.
+	grants, _ := bs.secret.ListGrants(secretbroker.GrantFilter{})
+	ctx, cascade := withGrantCascade(r.Context(), s)
+	if err := bs.secret.DeleteSecretFor(ctx, id, viewer); err != nil {
 		writeBrokerError(w, err, "delete secret")
 		return
 	}
 	s.broadcastAuditAppend(string(secretbroker.ActionDeleteSec))
 	s.broadcastSecretsUpdate("secret_deleted", id)
-	jsonOK(w, map[string]any{"ok": true, "id": id, "deleted": true})
+	var res grantRevocationResult
+	for _, g := range grants {
+		if g.SecretID != target.ID {
+			continue
+		}
+		if one, ok := cascade.result(g.ID); ok {
+			res.merge(one)
+		}
+	}
+	res.finish()
+	resp := map[string]any{"ok": true, "id": id, "deleted": true, "state": string(res.State), "leases": res.Leases}
+	if len(res.Leases) > 0 {
+		resp["remote"], resp["local"], resp["wiped_locally"] = res.Remote, res.Local, res.WipedLocally
+		resp["note"] = grantRevokeNote(res)
+	}
+	jsonOK(w, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,21 +1220,235 @@ func (s *Server) handleGrantDelete(w http.ResponseWriter, r *http.Request) {
 		denySharedSecret(w, authz.PermSecretRevoke, "revoking a grant over it")
 		return
 	}
-	if err := bs.secret.Revoke(r.Context(), id, actor); err != nil {
+	// The broker announces the revocation, and this hub takes the grant's
+	// material back from every workload holding it before RevokeGrant returns
+	// (grant_revoke.go, Task 20403). The collector is how this handler reads
+	// what that did.
+	ctx, cascade := withGrantCascade(r.Context(), s)
+	rev, revokedNow, err := bs.secret.RevokeGrant(ctx, secretbroker.RevokeGrantRequest{GrantID: id, Actor: actor})
+	if err != nil {
 		writeBrokerError(w, err, "revoke grant")
 		return
 	}
 	s.broadcastAuditAppend(string(secretbroker.ActionRevoke))
 	s.broadcastSecretsUpdate("grant_revoked", id)
-	// The honest note: revocation lands on the next Lease or Renew, so a
-	// workload already holding materials keeps them until its lease expires.
-	// The lease table below is where an operator takes those away now.
-	jsonOK(w, map[string]any{
-		"ok": true, "id": id, "revoked": true, "source": "secret",
-		"note": "Takes effect on the next lease or renewal. Credentials already " +
-			"materialised into a running workload persist until their lease expires — " +
-			"revoke the lease to remove them now.",
-	})
+
+	resp := map[string]any{"ok": true, "id": id, "revoked": true, "source": "secret"}
+	res, cascaded := cascade.result(id)
+	switch {
+	case !revokedNow:
+		// Revoke is idempotent, and a grant already revoked has already been
+		// taken back: it is not cascaded again.
+		resp["already_revoked"] = true
+		resp["state"] = string(remote.RevokeStateRevoked)
+		resp["note"] = "This grant was already revoked at " + rev.At.UTC().Format(time.RFC3339) +
+			"; its material was taken back then, and nothing was asked of the workloads again."
+	case !cascaded:
+		resp["state"] = string(remote.RevokeStatePending)
+		resp["note"] = "Revoked. No hub process serving this control plane took it back from running " +
+			"workloads, so a lease still carrying it keeps it until the lease lapses — at most " +
+			secretbroker.DefaultMaxLeaseTTL.String() + "."
+	default:
+		resp["state"] = string(res.State)
+		resp["wiped_locally"] = res.WipedLocally
+		resp["remote"] = res.Remote
+		resp["local"] = res.Local
+		resp["leases"] = res.Leases
+		resp["note"] = grantRevokeNote(res)
+	}
+	jsonOK(w, resp)
+}
+
+// grantRevokeNote states, in the operator's terms, what revoking a grant did
+// to the workloads holding it — and what it could not do.
+func grantRevokeNote(res grantRevocationResult) string {
+	if len(res.Leases) == 0 {
+		return "Revoked. No running workload held this grant, so there was nothing to take back; " +
+			"the next lease leaves it out."
+	}
+	var killed, eventual, env, widened int
+	for _, h := range res.holders() {
+		if h.Widened != "" {
+			widened++
+		}
+		if h.Ack == nil {
+			continue
+		}
+		killed += len(h.Ack.Killed)
+		if h.Ack.Eventual {
+			eventual++
+		}
+		if len(h.Ack.EnvScrubbed) > 0 && len(h.Ack.Killed) == 0 {
+			env++
+		}
+	}
+	leases := fmt.Sprintf("%d lease(s)", len(res.Leases))
+	var parts []string
+	switch res.State {
+	case remote.RevokeStateUnreachable:
+		parts = append(parts, "Revoked, and taken back from every holder of "+leases+" this hub reached; at least one "+
+			"holder is offline, and gets the revocation when it reconnects. Until then treat the credential as "+
+			"live, and rotate it at its source if it is compromised.")
+	case remote.RevokeStateFailed:
+		parts = append(parts, "Revoked, but at least one holder of "+leases+" could not complete the scrub. Check "+
+			"the per-holder detail; treat the credential as live until it reports revoked.")
+	case remote.RevokeStatePending:
+		parts = append(parts, "Revoked; waiting for a holder of "+leases+" to acknowledge.")
+	default:
+		parts = append(parts, "Revoked, and taken back from "+leases+": its files are gone and the git proxy and "+
+			"Kubernetes sessions it fed are closed; each lease keeps the grants nobody revoked.")
+	}
+	if killed > 0 {
+		parts = append(parts, fmt.Sprintf("%d running workload(s) were terminated, because the grant was in "+
+			"their environment, which no API can take out of a running container or Pod.", killed))
+	}
+	if eventual > 0 {
+		parts = append(parts, "In a Kubernetes Pod that kept running, the files empty at the kubelet's next sync "+
+			"of its volume, about a minute.")
+	}
+	if env > 0 {
+		parts = append(parts, "A host process or device task that already has a variable of it in its own "+
+			"environment keeps that copy until it exits — revoke its lease with action=kill to stop it.")
+	}
+	if widened > 0 {
+		parts = append(parts, fmt.Sprintf("On %d device(s) whose agent is too old to take back one grant, the "+
+			"whole lease was taken back.", widened))
+	}
+	return strings.Join(parts, " ")
+}
+
+// grantHolderView is one workload holding a grant, for the revoke confirmation.
+type grantHolderView struct {
+	LeaseID     string `json:"lease_id"`
+	ExecutorID  string `json:"executor_id,omitempty"`
+	Kind        string `json:"executor_kind,omitempty"`
+	ProjectPath string `json:"project_path,omitempty"`
+	ProjectName string `json:"project_name,omitempty"`
+	Member      string `json:"member,omitempty"`
+	// GrantID is the grant the lease carries: the one asked about, or a
+	// superseded one standing on it.
+	GrantID string `json:"grant_id"`
+	// EnvKeys names the variables the grant put into the workload's
+	// environment; Files counts the files it delivered.
+	EnvKeys []string `json:"env_keys,omitempty"`
+	Files   int      `json:"files"`
+	// InEnvironment: part of the grant is in the workload's environment,
+	// which no revocation takes out of a running process. Unknown is false.
+	InEnvironment bool `json:"in_environment"`
+	// Known is false for a lease taken over from a hub process that stopped,
+	// whose deliveries went with it: what it put into the environment is not
+	// known here.
+	Known bool `json:"known"`
+	// Terminated: revoking terminates this workload — a container or a Pod,
+	// whose runtime keeps a copy of the environment only removing the
+	// workload destroys.
+	Terminated bool `json:"terminated"`
+}
+
+// grantHoldersResponse is GET /api/grants/{id}/holders.
+type grantHoldersResponse struct {
+	GrantID       string            `json:"grant_id"`
+	Workloads     []grantHolderView `json:"workloads"`
+	InEnvironment int               `json:"in_environment"`
+	Terminated    int               `json:"terminated"`
+}
+
+// handleGrantHolders serves GET /api/grants/{id}/holders: which running
+// workloads hold a grant right now, and which hold it in their environment —
+// what the Secrets panel's revoke confirmation says before the operator
+// confirms (Task 20403). Visibility is the revocation's: a grant this caller
+// may not see is not found.
+func (s *Server) handleGrantHolders(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "grant id is required"))
+		return
+	}
+	resp := grantHoldersResponse{GrantID: id, Workloads: []grantHolderView{}}
+	if strings.HasPrefix(id, "egress_") {
+		// An egress grant is not leased into a workload: its sessions live in
+		// the egress broker and close with the revocation.
+		jsonOK(w, resp)
+		return
+	}
+	bs, ok := s.openBrokersOr(w)
+	if !ok {
+		return
+	}
+	defer bs.close()
+	if !bs.requireSecretBroker(w) {
+		return
+	}
+	viewer := s.secretViewer(r)
+	grants, err := bs.secret.ListGrantsFor(secretbroker.GrantFilter{}, viewer)
+	if err != nil {
+		writeBrokerError(w, err, "list grants")
+		return
+	}
+	visible := false
+	for _, g := range grants {
+		if g.ID == id && g.VisibleTo(viewer) {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such grant"))
+		return
+	}
+
+	names := map[string]string{}
+	for _, entry := range s.allProjectEntries() {
+		names[entry.Path] = entry.Name
+	}
+	// Which executor holds which credential is fleet state, read with
+	// secret.grant (GET /api/leases). The owner of a personal grant may see
+	// how many of their workloads hold it and how — what the confirmation
+	// needs — but not the fleet's identifiers.
+	fleet := s.holdsSharedSecretRead(r)
+	views := append(s.localLeaseViews(names), s.peerLeaseViews(r.Context())...)
+	for _, v := range views {
+		ids := make([]string, 0, len(v.Materials))
+		byGrant := map[string]leaseMaterialView{}
+		for _, m := range v.Materials {
+			if m.Withdrawn {
+				continue
+			}
+			ids = append(ids, m.GrantID)
+			byGrant[m.GrantID] = m
+		}
+		for _, held := range bs.secret.RecordHeldOn(secretbroker.LeaseRecord{GrantIDs: ids}, id) {
+			m := byGrant[held]
+			executorID := v.ExecutorID
+			if len(v.Holders) > 0 {
+				executorID = v.Holders[0]
+			}
+			hv := grantHolderView{
+				LeaseID: v.ID, ExecutorID: executorID, ProjectPath: v.ProjectPath, ProjectName: v.ProjectName,
+				Member: v.Member, GrantID: held, EnvKeys: m.EnvKeys, Files: m.Files,
+				InEnvironment: len(m.EnvKeys) > 0, Known: len(m.EnvKeys) > 0 || m.Files > 0,
+			}
+			if ex, err := executor.Get(executorID); err == nil {
+				hv.Kind = ex.Kind()
+			}
+			// The container and Kubernetes drivers escalate a scrub of
+			// environment-borne material to removing the workload; a host
+			// process and a device's agent drop their own copy and leave the
+			// process running with its.
+			hv.Terminated = hv.InEnvironment && (hv.Kind == executor.KindContainer || hv.Kind == executor.KindKubernetes)
+			if hv.InEnvironment {
+				resp.InEnvironment++
+			}
+			if hv.Terminated {
+				resp.Terminated++
+			}
+			if !fleet {
+				hv.LeaseID, hv.ExecutorID, hv.Member = "", "", ""
+			}
+			resp.Workloads = append(resp.Workloads, hv)
+		}
+	}
+	jsonOK(w, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,18 +1513,29 @@ func (s *Server) localLeaseViews(names map[string]string) []leaseView {
 		var gaps []string
 		view.Holders, view.Revocable, gaps = s.leaseHolders(l.ID)
 		view.RevocableNote = strings.Join(gaps, " ")
+		bound := map[string]secretbroker.LeaseBinding{}
+		for _, b := range sl.leaseBindings() {
+			bound[b.GrantID] = b
+		}
 		for _, m := range l.Materials {
 			// Material.Env and Material.Files carry the plaintext and are
-			// json:"-"; only these five metadata fields are copied, so the
-			// credential has no path into the response even if Material grows
-			// a new serialisable field later.
-			view.Materials = append(view.Materials, leaseMaterialView{
+			// json:"-"; only metadata is copied, so the credential has no
+			// path into the response even if Material grows a new
+			// serialisable field later. The variable names and the file count
+			// come from the binding, which holds names and paths only.
+			mv := leaseMaterialView{
 				GrantID:    m.GrantID,
 				SecretID:   m.SecretID,
 				SecretName: m.SecretName,
 				Kind:       string(m.Kind),
 				Summary:    m.Summary,
-			})
+				Withdrawn:  sl.isWithdrawn(m.GrantID),
+			}
+			if b, ok := bound[m.GrantID]; ok {
+				mv.EnvKeys = append([]string(nil), b.EnvKeys...)
+				mv.Files = len(b.Files)
+			}
+			view.Materials = append(view.Materials, mv)
 		}
 		view.Member = member
 		out = append(out, view)
