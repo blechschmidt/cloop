@@ -440,7 +440,7 @@ func TestBuildPod_WorkspaceInitDoesNotInheritEnv(t *testing.T) {
 	// (Beside its own git's trust in the workspace — see
 	// TestBuildPod_HarnessGitTrustsTheWorkspace.) It gets it from the lease
 	// Secret, so resolve it the way the kubelet does.
-	data, err := leaseSecretData(nil, req.Env)
+	data, err := leaseSecretData(nil, req.Env, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

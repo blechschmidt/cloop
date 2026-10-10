@@ -605,7 +605,9 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: parser-fuzz-corpus
-          path: pkg/*/testdata/fuzz/
+          path: |
+            pkg/*/testdata/fuzz/
+            pkg/*/*/testdata/fuzz/
           retention-days: 30
           if-no-files-found: ignore
 

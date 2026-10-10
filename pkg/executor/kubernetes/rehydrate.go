@@ -54,7 +54,9 @@ package kubernetes
 //     does not know a write-back was *asked for*, so a run that produces no
 //     report after a restart reads as "no write-back" instead of "a failed
 //     one". A report that does arrive is still recorded, because the scanner
-//     re-reads the log from the start.
+//     re-reads the log from the start. Whether the run was sent the project is
+//     the one fact about the Spec a row does keep (metaProjectSeed): without it
+//     an adopted seeded run's project result would be left in its log.
 //   - The workspace provisioning state and the lease Secret's. Their only job
 //     is to delete the per-run Secrets at the right moment, and the previous
 //     process already did whatever was safe on its way down: it deleted a
@@ -88,6 +90,12 @@ import (
 // a row exists, not what its extras mean. The value is a Kubernetes object
 // name and never a secret — Meta is stored verbatim.
 const metaNetworkPolicy = "network_policy"
+
+// metaProjectSeed marks a row whose run was sent the hub's project, so an
+// adopted record knows to read the run's project result back out of the Pod's
+// log (Task 20402). Its value is "1"; a row without it was not seeded, and an
+// adopted record then forwards the log untouched, as Start would have.
+const metaProjectSeed = "project_seed"
 
 // AttachHandleStore installs the durable handle store after construction and
 // rehydrates from it immediately.
@@ -177,12 +185,23 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 		return
 	}
 
+	// A seeded run's frame scanner, rebuilt from the row. The log is re-read
+	// from the start below, so the frame is found whether it was printed
+	// before the restart or after it. A row that cannot tag a frame — which a
+	// handle ID always can — leaves the log untouched rather than refusing the
+	// adoption: the Pod still has to be watched and stopped.
+	result, err := newResultScanner(persisted.Meta[metaProjectSeed] == "1", persisted.HandleID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: executor %q adopting handle %s without its project result: %v\n",
+			e.id, persisted.HandleID, err)
+	}
 	rec := &record{
 		id:                persisted.HandleID,
 		startedAt:         persisted.StartedAt,
 		namespace:         namespace,
 		podName:           podName,
 		networkPolicyName: persisted.Meta[metaNetworkPolicy],
+		result:            result,
 		// Running rather than pending, and the distinction is a claim about
 		// what we know: a row only exists because Start created a Pod, so the
 		// workload is at least dispatched. The first status update the watcher
@@ -398,11 +417,18 @@ func splitExternalID(external string) (namespace, podName string, ok bool) {
 // handleMeta renders the driver extras a row carries. Nil when there is
 // nothing to say, so an executor with no egress filter does not write "{}"
 // worth of metadata for every Pod it starts.
-func handleMeta(networkPolicyName string) map[string]string {
-	if strings.TrimSpace(networkPolicyName) == "" {
-		return nil
+func handleMeta(networkPolicyName string, seeded bool) map[string]string {
+	var m map[string]string
+	if strings.TrimSpace(networkPolicyName) != "" {
+		m = map[string]string{metaNetworkPolicy: networkPolicyName}
 	}
-	return map[string]string{metaNetworkPolicy: networkPolicyName}
+	if seeded {
+		if m == nil {
+			m = map[string]string{}
+		}
+		m[metaProjectSeed] = "1"
+	}
+	return m
 }
 
 // taskIDNumber renders the Spec's task label as HandleRecord's integer field.

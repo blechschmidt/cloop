@@ -72,6 +72,12 @@ const MaxProjectSeedBytes = 4 << 20 // 4 MiB compressed
 // and says what it dropped, rather than sending a frame the hub must refuse.
 const MaxProjectResultBytes = 640 << 10 // 640 KiB compressed
 
+// MaxProjectResultErrBytes bounds ProjectResult.Err as an executor carries it:
+// the reason a run came back without a document. It is the same on every
+// transport — a device's project_result frame, a Pod's log frame — so that no
+// route home lets a workload say more than another would.
+const MaxProjectResultErrBytes = 4 << 10
+
 // ValidateProjectSeed checks what every holder of a Spec can check: that the
 // payload is bounded and, if present, actually compressed.
 //

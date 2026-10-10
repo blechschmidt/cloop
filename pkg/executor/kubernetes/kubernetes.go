@@ -46,6 +46,13 @@
 // bind spec is refused, because honouring it would mean starting the harness in
 // an empty emptyDir and calling it the project's code.
 //
+// The project's own state — `.cloop/`, which a clone of the source repository
+// does not contain — travels beside the tree as Spec.ProjectSeed: a key of the
+// run's lease Secret, placed into the checkout by the init container. What the
+// run records there comes back at the end of the Pod's log, as a framed block
+// the harness's wrapper prints and ProjectResult hands to the hub. See
+// projectresult.go.
+//
 // # What the confinement is, and is not
 //
 // Every Pod is built by buildPod with runAsNonRoot, a read-only root
@@ -93,6 +100,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/executor/resultframe"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
@@ -493,6 +501,11 @@ type Executor struct {
 	// called concurrently with the CLI that records a verdict. Read through
 	// EnforcementState, written through RecordNetworkPolicyVerdict.
 	enforcement NetworkPolicyEnforcement
+
+	// held accounts the seeded runs' project results waiting to be collected,
+	// so the ones nobody collects cannot add up without bound. Guarded by mu.
+	// See projectresult.go.
+	held heldResults
 }
 
 // EnforcementState reports whether this cluster is known to enforce a
@@ -650,6 +663,12 @@ type record struct {
 	// that reads a snapshot, and folding it under rec.mu would put a hot
 	// per-chunk write behind the mutex the watcher holds.
 	writeBack sentinelScanner
+	// result lifts a seeded run's project result frame out of the Pod's log,
+	// and holds it until ProjectResult hands it over. Nil for a run that was
+	// not seeded, whose log is forwarded untouched. Written once, before the
+	// record is shared, and only read afterwards — like wantWriteBack — so it
+	// needs no lock of rec's; the scanner has its own. See projectresult.go.
+	result *resultframe.Scanner
 }
 
 // New returns a Kubernetes executor. It performs no cluster I/O: an
@@ -857,9 +876,20 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// finished Pod is its log stream; buildPod refuses a bundle spec rather
 		// than running one and dropping the bytes.
 		SupportsWriteBack: true,
-		MaxConcurrent:     e.opts.MaxConcurrent,
-		Platform:          "linux",
-		Arch:              e.opts.NodeSelector["kubernetes.io/arch"],
+		// The project travels in, and its outcome travels back (Task 20402).
+		// In: the seed is a key of the run's lease Secret, projected into the
+		// workspace init container alone and placed into the checkout by
+		// `cloop workspace provision --seed`, so a repository with no `.cloop/`
+		// committed runs the hub's project. Out: the harness's wrapper prints
+		// what the run changed as a framed block at the end of the log, and
+		// ProjectResult hands it over once — so a task the Pod finished shows
+		// finished on the dashboard, and the next Start does not run it again.
+		// See projectresult.go.
+		SupportsProjectSeed: true,
+		ReturnsProjectState: true,
+		MaxConcurrent:       e.opts.MaxConcurrent,
+		Platform:            "linux",
+		Arch:                e.opts.NodeSelector["kubernetes.io/arch"],
 	}
 }
 
@@ -1012,6 +1042,15 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	)
 	handleID := newHandleID()
 	namespace := e.namespaceFor(creds)
+	// Before anything exists in the cluster, so the one thing that could make
+	// it fail — a handle ID that cannot tag a frame — refuses a run that has
+	// created nothing yet.
+	resultScanner, err := newResultScanner(len(spec.ProjectSeed) > 0, handleID)
+	if err != nil {
+		cli.close()
+		e.opts.Credentials.Release(creds.LeaseID)
+		return executor.Handle{}, err
+	}
 	release := func() {
 		// Abandon before discard. A pending Secret that was never materialised
 		// still holds the broker lease behind its credential, and the broker
@@ -1160,6 +1199,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		leaseSecret:       leaseSecret,
 
 		wantWriteBack: spec.WriteBack,
+		result:        resultScanner,
 	}
 	// The Pod's log stream is this driver's only view of the workload, and it
 	// is the same stream that reaches the live-log room and the run artifact.
@@ -1215,7 +1255,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		TaskID:      taskIDNumber(spec.Labels),
 		Image:       podImage(created, desired),
 		StartedAt:   rec.startedAt,
-		Meta:        handleMeta(rec.networkPolicyName),
+		Meta:        handleMeta(rec.networkPolicyName, rec.result != nil),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this Pod. Names and paths only — the credential values
@@ -1407,6 +1447,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		WorkspaceSecretName:   workspaceSecret,
 		SecretFiles:           spec.SecretFiles,
 		GitCABundle:           e.opts.GitCABundle,
+		ProjectSeed:           len(spec.ProjectSeed) > 0,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),
@@ -1467,8 +1508,9 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// by the same function on both sides. buildPod references it only for what
 	// the Secret actually carries (leaseSecretData and harnessEnv derive both
 	// from the same plans), so an environment of nothing but GIT_CONFIG_COUNT
-	// names a Secret nothing reads.
-	if len(spec.SecretFiles) > 0 || len(spec.Env) > 0 {
+	// names a Secret nothing reads. A project seed is carried there too
+	// (projectresult.go).
+	if len(spec.SecretFiles) > 0 || len(spec.Env) > 0 || len(spec.ProjectSeed) > 0 {
 		req.LeaseSecretName = leaseSecretName(handleID)
 	}
 
@@ -1575,6 +1617,15 @@ func (e *Executor) pump(ctx context.Context, rec *record) {
 	}
 
 	state, exitCode, msg := e.classifyOutcome(rec, final, watchErr)
+
+	// The project result is final once the log is, and has to be by the time
+	// finish closes the stream: the hub collects it the moment the stream
+	// closes. Not for a workload the hub is merely walking away from (Close):
+	// its log is not over, and a process that adopts the Pod re-reads it from
+	// the start with a scanner of its own.
+	if state.Terminal() {
+		e.settleProjectResult(rec)
+	}
 
 	// Delete before finishing so the Pod is gone by the time the caller sees
 	// a terminal status — otherwise a UI that immediately re-runs would race
@@ -1934,7 +1985,17 @@ func (e *Executor) streamLogs(ctx context.Context, rec *record) {
 				// unwatched run's work product must not depend on someone
 				// having been watching. See writeback.go.
 				rec.writeBack.Observe(chunk)
-				rec.bus.Emit(chunk)
+				// A seeded run's project result frame is lifted out here,
+				// for the same reason and one more: it is protocol, up to a
+				// megabyte of base64, and the live log and the run's
+				// artifact are a transcript. What is left is forwarded
+				// unchanged. See projectresult.go.
+				if rec.result != nil {
+					chunk = rec.result.Feed(chunk)
+				}
+				if chunk != "" {
+					rec.bus.Emit(chunk)
+				}
 			}
 			if readErr != nil {
 				break
@@ -2613,6 +2674,8 @@ func (e *Executor) pruneLocked() {
 			return
 		}
 		delete(e.handles, f.id)
+		// A result nobody collected goes with its handle, and stops counting.
+		e.held.releaseLocked(f.id)
 	}
 }
 

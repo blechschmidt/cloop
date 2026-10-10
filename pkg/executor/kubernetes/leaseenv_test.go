@@ -159,7 +159,7 @@ func TestBuildPod_EnvIsDeliveredByReference(t *testing.T) {
 		}
 	}
 
-	data, err := leaseSecretData(req.SecretFiles, req.Env)
+	data, err := leaseSecretData(req.SecretFiles, req.Env, nil)
 	if err != nil {
 		t.Fatalf("leaseSecretData: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestHarnessEnv_GitConfigCountIsTheDrivers(t *testing.T) {
 // a file and a variable with the same name.
 func TestLeaseSecretData_KeysCannotCollide(t *testing.T) {
 	files := []executor.SecretFile{{Dir: leaseDir, Name: "env.TOKEN", Content: []byte("file")}}
-	data, err := leaseSecretData(files, []string{"TOKEN=variable"})
+	data, err := leaseSecretData(files, []string{"TOKEN=variable"}, nil)
 	if err != nil {
 		t.Fatalf("leaseSecretData: %v", err)
 	}
@@ -344,13 +344,13 @@ func TestLeaseSecretData_KeysCannotCollide(t *testing.T) {
 // created. Refusing first names the run.
 func TestLeaseSecretData_RefusesWhatASecretCannotHold(t *testing.T) {
 	big := "BLOB=" + strings.Repeat("x", maxLeaseSecretBytes+1)
-	if _, err := leaseSecretData(nil, []string{big}); err == nil || !errors.Is(err, executor.ErrInvalidSpec) {
+	if _, err := leaseSecretData(nil, []string{big}, nil); err == nil || !errors.Is(err, executor.ErrInvalidSpec) {
 		t.Errorf("leaseSecretData(%d bytes) = %v, want an ErrInvalidSpec refusal", len(big), err)
 	}
-	if data, err := leaseSecretData(nil, []string{"GIT_CONFIG_COUNT=0"}); err != nil || data != nil {
+	if data, err := leaseSecretData(nil, []string{"GIT_CONFIG_COUNT=0"}, nil); err != nil || data != nil {
 		t.Errorf("an environment of nothing but GIT_CONFIG_COUNT carries %v (%v); want no Secret at all", data, err)
 	}
-	if data, err := leaseSecretData(nil, []string{"EMPTY="}); err != nil || data["env.EMPTY"] == nil {
+	if data, err := leaseSecretData(nil, []string{"EMPTY="}, nil); err != nil || data["env.EMPTY"] == nil {
 		t.Errorf("an empty value = %v (%v); want a present, empty key — a nil one marshals as null", data, err)
 	}
 }

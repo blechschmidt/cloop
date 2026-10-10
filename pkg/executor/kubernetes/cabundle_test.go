@@ -145,7 +145,7 @@ func TestBuildPod_GitCABundleJoinsAnExistingConfigBlock(t *testing.T) {
 	}
 	// The Spec's own entries arrive from the lease Secret, the driver's as
 	// plain values; resolve both the way the kubelet does.
-	data, err := leaseSecretData(nil, req.Env)
+	data, err := leaseSecretData(nil, req.Env, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

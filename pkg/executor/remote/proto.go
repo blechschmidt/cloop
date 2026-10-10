@@ -1513,8 +1513,10 @@ type ProjectResultPayload struct {
 	Err string `json:"error,omitempty"`
 }
 
-// maxProjectResultErrBytes bounds ProjectResultPayload.Err.
-const maxProjectResultErrBytes = 4 << 10
+// maxProjectResultErrBytes bounds ProjectResultPayload.Err. It is the bound
+// every transport applies (executor.MaxProjectResultErrBytes), so a Pod's log
+// frame cannot carry a longer reason than a device's frame.
+const maxProjectResultErrBytes = executor.MaxProjectResultErrBytes
 
 // DecodeProjectResult decodes a project_result frame, refusing one no
 // well-behaved agent could have sent.

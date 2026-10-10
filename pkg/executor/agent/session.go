@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 )
@@ -741,6 +742,25 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 				"the workspace on %s: %v", deviceName(), err),
 		})
 		return
+	}
+	// The placed `.cloop/` is the hub's project, not the repository's code.
+	// Kept out of the checkout's commits the way a shipped branch keeps it out
+	// (gitprovision.HideControlDir), so neither the harness's own `git add -A`
+	// nor the push write-back after it carries the project's state database
+	// onto a branch — and from there into the repository (Task 20402). A
+	// shipped branch was provisioned with it hidden already. Failing the start
+	// rather than continuing: a run that commits the plan into the user's
+	// repository is worse than one that did not start.
+	if len(payload.ProjectSeed) > 0 && spec.Workspace.Kind == executor.WorkspaceGit && spec.Workspace.Branch == nil {
+		if err := gitprovision.HideControlDir(ctx, spec.WorkDir); err != nil {
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error: fmt.Sprintf("could not keep the project state out of the checkout's commits on %s: %v",
+					deviceName(), err),
+			})
+			return
+		}
 	}
 	if len(payload.ProjectSeed) > 0 {
 		// Kept to measure the run's changes against once it exits, and paired

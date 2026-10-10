@@ -844,3 +844,76 @@ func TestProvisionedWorkspaceFlattensExecutorOwned(t *testing.T) {
 		t.Errorf("none became %q, want it left alone", none.Kind)
 	}
 }
+
+// TestAgentKeepsThePlacedProjectOutOfTheCheckoutsCommits (Task 20402): the seed
+// the agent writes into a git checkout is the hub's project, not the
+// repository's code, so `git add --all` — the harness's own or the push
+// write-back's — must not see it. A database the repository commits is
+// superseded by the seed and stays out of the commits too.
+func TestAgentKeepsThePlacedProjectOutOfTheCheckoutsCommits(t *testing.T) {
+	cred := testCredential()
+	gs := startGitServer(t, cred.AuthorizationHeader(), map[string]string{
+		"README.md":       "code\n",
+		".cloop/state.db": "the repository's stale copy of the project\n",
+	})
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git")
+	}
+	seed, _ := seededProject(t)
+
+	dir := t.TempDir()
+	a, conns := newScriptedAgent(t, filepath.Join(dir, "agent.json"), filepath.Join(dir, "work"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+	cp := <-conns
+	cp.handshake(t, "agent-1", nil, "clac1.a.b.c")
+
+	script := "echo 'STATUS['; " + gitBin + " status --porcelain; echo ']STATUS'; " +
+		"test -f .cloop/state.json && echo SEED-PLACED; test -f .cloop/state.db || echo STALE-GONE"
+	start, err := remote.NewFrame(remote.TypeStart, "req-1", "h1", remote.StartPayload{
+		HandleID: "h1",
+		Spec: executor.Spec{
+			WorkDir:   "seeded-checkout",
+			Argv:      []string{"/bin/sh", "-c", script},
+			Workspace: gitWorkspace(gs, "main"),
+		},
+		WorkspaceCredential: &remote.WorkspaceCredential{Username: cred.Username, Password: cred.Password},
+		ProjectSeed:         seed,
+	})
+	if err != nil {
+		t.Fatalf("build start: %v", err)
+	}
+	cp.write(start)
+
+	var log strings.Builder
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(log.String(), "]STATUS") {
+		f, readErr := cp.read(time.Until(deadline))
+		if readErr != nil {
+			break
+		}
+		switch f.Type {
+		case remote.TypeLogChunk:
+			if chunk, decodeErr := remote.DecodeLogChunk(f); decodeErr == nil {
+				log.WriteString(chunk.Text)
+			}
+		case remote.TypeStarted:
+			if p, _ := remote.DecodeStarted(f); p.Error != "" {
+				t.Fatalf("the agent refused the workload: %s", p.Error)
+			}
+		}
+	}
+	out := log.String()
+	if !strings.Contains(out, "]STATUS") || !strings.Contains(out, "SEED-PLACED") {
+		t.Fatalf("the harness did not run against a seeded checkout:\n%s", out)
+	}
+	if !strings.Contains(out, "STALE-GONE") {
+		t.Errorf("the repository's committed state.db survived the seed:\n%s", out)
+	}
+	status := out[strings.Index(out, "STATUS[")+len("STATUS[") : strings.Index(out, "]STATUS")]
+	if strings.Contains(status, ".cloop") {
+		t.Errorf("git sees the placed project as a change, so a write-back would commit it:\n%s", status)
+	}
+}

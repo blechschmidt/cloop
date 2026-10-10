@@ -369,10 +369,10 @@ func projectSeedFor(workDir string) ([]byte, error) {
 // logUnseedableExecutor records that a run went out without its project state,
 // on the journal of the project it concerns.
 //
-// The message has to name the workaround as well as the upgrade, because for
+// The message has to name the workaround as well as the remedy, because for
 // the reader it may already be in place: an installation that commits `.cloop/`
 // into the repository is unaffected by any of this and should not be sent
-// chasing an upgrade it does not need.
+// chasing a change it does not need.
 func logUnseedableExecutor(ex executor.Executor, workDir string) {
 	state.LogEvent(workDir, state.EventRow{
 		Type: state.EventProjectSeed,
@@ -380,21 +380,38 @@ func logUnseedableExecutor(ex executor.Executor, workDir string) {
 		Message: fmt.Sprintf(
 			"executor %q (%s) cannot be sent this project's state, so the sandbox will see only "+
 				"what is committed to the repository; if `.cloop/` is not in the repo the run will "+
-				"exit with \"no cloop project found\". Bind this project to an executor that shares "+
-				"the control plane's filesystem, or upgrade the executor agent. %s",
+				"exit with \"no cloop project found\". %s",
 			ex.ID(), ex.Kind(), projectSeedRemedy(ex)),
 	})
 }
 
-// projectSeedRemedy says how ex comes to accept a project state: the protocol
-// its agent speaks and the one a seed needs when the live session shows it, the
-// hub's general upgrade path otherwise.
+// projectSeedRemedy says how a run on ex comes to carry its project, in the
+// terms of ex's own kind.
+//
+// Only a device's answer is an upgrade, so only a device's names one: the
+// protocol its agent speaks and the one a seed needs when the live session
+// shows it, the hub's general upgrade path otherwise. Every other kind is told
+// what is true of every kind — another executor can take the project — rather
+// than handed an agent-upgrade procedure for a machine that runs no agent
+// (Task 20402: a Kubernetes executor used to be told to upgrade one).
 func projectSeedRemedy(ex executor.Executor) string {
-	if v := sessionProtocolOf(ex); v > 0 && v < remote.MinProjectSeedVersion {
-		return executor.NeedsProtocol("Its agent", v, remote.MinProjectSeedVersion,
-			"to place a project's state in the sandbox", "")
+	const elsewhere = "Bind this project to an executor that shares the control plane's filesystem, " +
+		"or to one that takes the project's state with it."
+	switch ex.Kind() {
+	case executor.KindRemoteAgent, executor.KindVirtual:
+		if v := sessionProtocolOf(ex); v > 0 && v < remote.MinProjectSeedVersion {
+			return elsewhere + " " + executor.NeedsProtocol("Its agent", v, remote.MinProjectSeedVersion,
+				"to place a project's state in the sandbox", "")
+		}
+		return elsewhere + " A remote agent gains that by upgrading. " + executor.AgentUpgradeAdvice()
+	case executor.KindKubernetes:
+		// Unreachable from this hub's own driver, which carries the project in
+		// the run's lease Secret; said plainly for whatever reports the kind
+		// without the capability.
+		return elsewhere + " A Kubernetes executor of this hub's build carries it in the run's lease " +
+			"Secret, so this one is not running this hub's driver."
 	}
-	return "A remote agent gains that by upgrading. " + executor.AgentUpgradeAdvice()
+	return elsewhere
 }
 
 // workspaceGrantFor returns the name of the secret grant that authorises

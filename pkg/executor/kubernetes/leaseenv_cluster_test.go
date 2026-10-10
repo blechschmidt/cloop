@@ -181,7 +181,7 @@ func createE2EPod(t *testing.T, ctxName string, req podRequest) string {
 // Pod, owned by it — optionally keeping only some keys.
 func createE2ELeaseSecret(t *testing.T, ctxName string, req podRequest, podName string, keep []string) {
 	t.Helper()
-	data, err := leaseSecretData(req.SecretFiles, req.Env)
+	data, err := leaseSecretData(req.SecretFiles, req.Env, nil)
 	if err != nil {
 		t.Fatalf("leaseSecretData: %v", err)
 	}

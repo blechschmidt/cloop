@@ -36,6 +36,19 @@
 // downstream trusts it: pkg/writeback re-fetches the named branch, checks the
 // SHA, checks the ancestry, and inspects every path before anything merges.
 //
+// # The run's project state (Task 20402)
+//
+// A seeded run records its outcomes in its own copy of the project, inside the
+// sandbox, and the hub's dashboard renders the hub's copy. With --seed this
+// command reads back what the run changed, measured against the project state
+// it was started with, once the harness has exited. Where it goes depends on
+// the driver: --project-result FILE writes it to a file the container driver
+// collects from its output directory, and --project-result-frame TAG prints it
+// as a resultframe block on stdout, after everything else, for a Pod — whose
+// log is its only way home. With --seed and no --push or --bundle the command
+// returns the project state alone, for a seeded run that asked for no
+// write-back.
+//
 // # The credential
 //
 // Same channel and same handling as provisioning: it arrives in the
@@ -54,6 +67,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -61,6 +75,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitwriteback"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
+	"github.com/blechschmidt/cloop/pkg/executor/resultframe"
 	"github.com/spf13/cobra"
 )
 
@@ -75,6 +90,7 @@ var (
 	workspaceWriteBackMaxB    int64
 	workspaceWriteBackSeed    string
 	workspaceWriteBackResult  string
+	workspaceWriteBackFrame   string
 	workspaceWriteBackPlace   bool
 )
 
@@ -102,7 +118,11 @@ through unchanged. Without one it writes back whatever is in --dir right now.
 is how a feature built from a branch the hub shipped returns its work. With
 --seed and --project-result it also reads back what the run recorded in its
 .cloop/ — measured against the project state it was started with — and writes
-it to the second file, for the driver to hand to the hub.
+it to the second file, for the driver to hand to the hub. --project-result-frame
+TAG prints the same read-back on stdout instead, as the last thing this command
+prints, framed and checksummed, for a sandbox whose output stream is its only
+way home (a Kubernetes Pod). With --seed and neither --push nor --bundle, only
+the project state is returned.
 
 The credential for --push is read from the environment:
 
@@ -130,6 +150,7 @@ and no output of this command can contain either.`,
 			MaxB:    workspaceWriteBackMaxB,
 			Seed:    workspaceWriteBackSeed,
 			Result:  workspaceWriteBackResult,
+			Frame:   workspaceWriteBackFrame,
 			Place:   workspaceWriteBackPlace,
 			Argv:    args,
 		}, cred, cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -153,9 +174,12 @@ type workspaceWriteBackOptions struct {
 	// MaxB caps the bundle; 0 is the write-back default.
 	MaxB int64
 	// Seed and Result name the project state the run started from and the
-	// file its read-back is written to; both or neither.
+	// file its read-back is written to. Frame is Result's alternative: the tag
+	// of a resultframe block printed on stdout. Seed goes with exactly one of
+	// them.
 	Seed   string
 	Result string
+	Frame  string
 	// Place writes Seed into Dir as the project's state before the harness
 	// starts — for a driver that keeps project state off its own host.
 	Place bool
@@ -175,22 +199,48 @@ func (o workspaceWriteBackOptions) plan() (executor.Workspace, executor.WriteBac
 		ws executor.Workspace
 		wb executor.WriteBack
 	)
+	seed, result, frame := strings.TrimSpace(o.Seed), strings.TrimSpace(o.Result), strings.TrimSpace(o.Frame)
+	delivers := o.Push || strings.TrimSpace(o.Bundle) != ""
 	switch {
 	case strings.TrimSpace(o.Dir) == "":
 		return ws, wb, errors.New("--dir is required: name the tree whose changes are written back")
 	case strings.TrimSpace(o.Repo) == "" && o.Push:
 		return ws, wb, errors.New("--repo is required with --push: a push goes to the origin the tree came from")
-	case (strings.TrimSpace(o.Seed) == "") != (strings.TrimSpace(o.Result) == ""):
-		return ws, wb, errors.New("--seed and --project-result go together: the run's changes are measured " +
-			"against the state it was started with")
-	case o.Place && strings.TrimSpace(o.Seed) == "":
+	case result != "" && frame != "":
+		return ws, wb, errors.New("--project-result and --project-result-frame are alternatives: one writes " +
+			"the run's changes to a file, the other prints them on stdout")
+	case (seed == "") != (result == "" && frame == ""):
+		return ws, wb, errors.New("--seed goes with --project-result or --project-result-frame: the run's " +
+			"changes are measured against the state it was started with")
+	case frame != "" && !resultframe.ValidTag(frame):
+		return ws, wb, fmt.Errorf("--project-result-frame %q is not a valid tag: 1-64 letters, digits, "+
+			"'.', '_' or '-'", frame)
+	case o.Place && seed == "":
 		return ws, wb, errors.New("--place-seed needs --seed: it is the seed that is placed")
 	case o.Push && strings.TrimSpace(o.Bundle) != "":
 		return ws, wb, errors.New("--push and --bundle are alternatives: one sends the commits to " +
 			"the origin, the other writes them to a file for a sandbox with no egress")
-	case !o.Push && strings.TrimSpace(o.Bundle) == "":
+	case !delivers && seed == "":
 		return ws, wb, errors.New("choose a delivery: --push to send the branch to the origin, " +
 			"or --bundle FILE to write the commits out for a sandbox with no egress")
+	}
+
+	if !delivers {
+		// The project state alone, for a seeded run that asked for no
+		// write-back. The write-back's own flags would be ignored here, and a
+		// flag that is silently ignored is a delivery somebody believes is
+		// happening.
+		for flag, set := range map[string]bool{
+			"--repo": strings.TrimSpace(o.Repo) != "", "--branch": strings.TrimSpace(o.Branch) != "",
+			"--base": strings.TrimSpace(o.Base) != "", "--message": strings.TrimSpace(o.Message) != "",
+			"--max-bundle-bytes": o.MaxB != 0,
+		} {
+			if set {
+				return ws, wb, fmt.Errorf("%s applies to a write-back, and none was asked for: add --push or "+
+					"--bundle FILE, or leave it out to return only the project state", flag)
+			}
+		}
+		return ws, wb, nil
 	}
 
 	if repo := strings.TrimSpace(o.Repo); repo != "" {
@@ -229,16 +279,23 @@ func runWorkspaceWriteBack(ctx context.Context, o workspaceWriteBackOptions,
 		return err
 	}
 
+	dir, seed, frame := strings.TrimSpace(o.Dir), strings.TrimSpace(o.Seed), strings.TrimSpace(o.Frame)
+
 	// The project the harness is about to run, placed here — inside the
 	// sandbox — by a driver that does not write project state on its own host.
 	// A seed that cannot be placed fails the run before the harness starts: a
 	// `cloop run` with no project exits on its first line blaming the project.
 	if o.Place {
-		if err := placeSeed(strings.TrimSpace(o.Dir), strings.TrimSpace(o.Seed)); err != nil {
-			res := executor.WriteBackResult{Mode: wb.Mode, Branch: wb.Branch,
-				Err: "the project state could not be placed in the workspace, so nothing ran: " + err.Error()}
-			if line, lerr := executor.MarshalWriteBackSentinel(res); lerr == nil {
-				fmt.Fprintln(stdout, line)
+		if err := placeSeed(dir, seed); err != nil {
+			reason := "the project state could not be placed in the workspace, so nothing ran: " + err.Error()
+			if wb.Enabled() {
+				res := executor.WriteBackResult{Mode: wb.Mode, Branch: wb.Branch, Err: reason}
+				if line, lerr := executor.MarshalWriteBackSentinel(res); lerr == nil {
+					fmt.Fprintln(stdout, line)
+				}
+			}
+			if frame != "" {
+				emitProjectResultFrame(stdout, stderr, frame, nil, reason)
 			}
 			return err
 		}
@@ -253,10 +310,48 @@ func runWorkspaceWriteBack(ctx context.Context, o workspaceWriteBackOptions,
 	// The run's own account of what it did, read back in here — inside the
 	// sandbox — because the database it is read from was written by the
 	// workload, and parsing it is a job for something with no more authority
-	// than the workload had.
-	if seed := strings.TrimSpace(o.Seed); seed != "" {
-		harvestProjectResult(strings.TrimSpace(o.Dir), seed, strings.TrimSpace(o.Result), stderr)
+	// than the workload had. Read before the write-back, so it describes the
+	// tree the harness left rather than anything after it; printed after, as
+	// the last thing on stdout.
+	var readBack []byte
+	var readBackErr string
+	if seed != "" {
+		readBack, readBackErr = readBackProjectResult(dir, seed, stderr)
+		if frame == "" {
+			writeProjectResultFile(strings.TrimSpace(o.Result), readBack, readBackErr, stderr)
+		}
 	}
+
+	var wbErr error
+	if wb.Enabled() {
+		wbErr = writeBackAndReport(ctx, o, ws, wb, cred, exitCode, stdout, stderr)
+	}
+
+	// Last, after the sentinel: a driver whose only channel home is this
+	// stream reads the frame from the end of it (resultframe).
+	if frame != "" {
+		emitProjectResultFrame(stdout, stderr, frame, readBack, readBackErr)
+	}
+
+	switch {
+	case harnessErr != nil:
+		// The harness's outcome wins. A write-back failure must not turn a
+		// task that failed into one that failed for a different reason, and a
+		// task that succeeded is still a task that succeeded even if its
+		// output could not be delivered — the sentinel already says so.
+		return harnessErr
+	case wbErr != nil && len(o.Argv) == 0:
+		// Standalone: there is no harness status to preserve, so the
+		// write-back's own failure is this command's failure.
+		return wbErr
+	}
+	return nil
+}
+
+// writeBackAndReport commits and delivers the tree's changes and prints the
+// sentinel line reporting what happened. It returns the write-back's own error.
+func writeBackAndReport(ctx context.Context, o workspaceWriteBackOptions, ws executor.Workspace,
+	wb executor.WriteBack, cred executor.GitCredential, exitCode int, stdout, stderr io.Writer) error {
 
 	res, wbErr := gitwriteback.Produce(ctx, gitwriteback.Request{
 		Dir:        strings.TrimSpace(o.Dir),
@@ -290,20 +385,7 @@ func runWorkspaceWriteBack(ctx context.Context, o workspaceWriteBackOptions,
 	} else {
 		fmt.Fprintf(stderr, "writeback: cannot report the result: %v\n", err)
 	}
-
-	switch {
-	case harnessErr != nil:
-		// The harness's outcome wins. A write-back failure must not turn a
-		// task that failed into one that failed for a different reason, and a
-		// task that succeeded is still a task that succeeded even if its
-		// output could not be delivered — the sentinel already says so.
-		return harnessErr
-	case wbErr != nil && len(o.Argv) == 0:
-		// Standalone: there is no harness status to preserve, so the
-		// write-back's own failure is this command's failure.
-		return wbErr
-	}
-	return nil
+	return wbErr
 }
 
 // placeSeed writes the seed at seedPath into dir as the project's state.
@@ -315,36 +397,81 @@ func placeSeed(dir, seedPath string) error {
 	return projectseed.Write(dir, seed)
 }
 
-// harvestProjectResult reads back what the run changed in dir/.cloop against
-// the seed it started with, and writes the compressed result to out — or, when
-// it cannot, the reason to out+".err", so the driver can tell the hub why the
-// dashboard will not update. Never fatal: the harness's outcome and the
-// write-back stand on their own.
-func harvestProjectResult(dir, seedPath, out string, stderr io.Writer) {
-	report := func(reason string) {
-		if len(reason) > 2000 {
-			reason = reason[:2000]
-		}
-		if err := os.WriteFile(out+".err", []byte(reason), 0o600); err != nil {
-			fmt.Fprintf(stderr, "writeback: cannot record why the run's results were not read back: %v\n", err)
-		}
+// maxReadBackReason bounds the reason sent when there is no result, in bytes:
+// the bound the remote agent applies, well inside what every transport carries
+// (executor.MaxProjectResultErrBytes).
+const maxReadBackReason = 2000
+
+// readBackProjectResult reads back what the run changed in dir/.cloop against
+// the seed it started with. It returns the compressed result, or — when it
+// cannot — the reason, bounded, never both. Never fatal: the harness's outcome
+// and the write-back stand on their own.
+func readBackProjectResult(dir, seedPath string, stderr io.Writer) ([]byte, string) {
+	fail := func(reason string) ([]byte, string) {
+		reason = boundReason(reason)
 		fmt.Fprintf(stderr, "writeback: the run's results could not be read back: %s\n", reason)
+		return nil, reason
 	}
 	seed, err := boundedread.ReadFile(seedPath, int64(executor.MaxProjectSeedBytes))
 	if err != nil {
-		report(fmt.Sprintf("the project state the run started from is unreadable: %v", err))
-		return
+		return fail(fmt.Sprintf("the project state the run started from is unreadable: %v", err))
 	}
 	data, err := projectseed.Harvest(dir, seed, nil)
 	if err != nil {
-		report(err.Error())
-		return
-	}
-	if err := os.WriteFile(out, data, 0o600); err != nil {
-		report(fmt.Sprintf("cannot write the read-back: %v", err))
-		return
+		return fail(err.Error())
 	}
 	fmt.Fprintf(stderr, "writeback: read back the run's results (%d bytes)\n", len(data))
+	return data, ""
+}
+
+// boundReason cuts a reason to maxReadBackReason bytes at a character boundary,
+// so the bound never produces text that is not UTF-8.
+func boundReason(reason string) string {
+	reason = strings.ToValidUTF8(strings.TrimSpace(reason), "\uFFFD")
+	if reason == "" {
+		reason = "no reason was given"
+	}
+	if len(reason) <= maxReadBackReason {
+		return reason
+	}
+	cut := maxReadBackReason
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
+}
+
+// writeProjectResultFile writes a read-back to out — or, when there is none,
+// the reason to out+".err", so the driver can tell the hub why the dashboard
+// will not update.
+func writeProjectResultFile(out string, data []byte, reason string, stderr io.Writer) {
+	if out == "" {
+		return
+	}
+	if reason == "" {
+		err := os.WriteFile(out, data, 0o600)
+		if err == nil {
+			return
+		}
+		reason = boundReason(fmt.Sprintf("cannot write the read-back: %v", err))
+	}
+	if err := os.WriteFile(out+".err", []byte(reason), 0o600); err != nil {
+		fmt.Fprintf(stderr, "writeback: cannot record why the run's results were not read back: %v\n", err)
+	}
+}
+
+// emitProjectResultFrame prints a read-back — or the reason there is none — as
+// a resultframe block on stdout. A failure is reported on stderr: the driver
+// then finds no frame and says so, which is all that can be done about a
+// stdout that cannot be written.
+func emitProjectResultFrame(stdout, stderr io.Writer, tag string, data []byte, reason string) {
+	kind, payload := resultframe.KindResult, data
+	if reason != "" || len(data) == 0 {
+		kind, payload = resultframe.KindError, []byte(boundReason(reason))
+	}
+	if err := resultframe.Write(stdout, tag, kind, payload); err != nil {
+		fmt.Fprintf(stderr, "writeback: cannot print the run's results: %v\n", err)
+	}
 }
 
 // runHarness runs the wrapped command, forwarding its output and signals, and
@@ -430,6 +557,8 @@ func init() {
 	f.Int64Var(&workspaceWriteBackMaxB, "max-bundle-bytes", 0, "refuse a bundle larger than this many bytes (default: the write-back limit)")
 	f.StringVar(&workspaceWriteBackSeed, "seed", "", "the project state the run was started with (with --project-result)")
 	f.StringVar(&workspaceWriteBackResult, "project-result", "", "write what the run changed in .cloop/ to this file")
+	f.StringVar(&workspaceWriteBackFrame, "project-result-frame", "",
+		"print what the run changed in .cloop/ on stdout, last, as a frame tagged with this value (with --seed)")
 	f.BoolVar(&workspaceWriteBackPlace, "place-seed", false, "place --seed into --dir as the project's state before the command runs")
 
 	workspaceCmd.AddCommand(workspaceWriteBackCmd)

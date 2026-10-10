@@ -154,6 +154,8 @@ started crashing again — fails.
 | `pkg/hubdoctor`      | `FuzzRedirectVerdictMatchesStartup` | `ui.oidc.redirect_url`: `cloop hub doctor` says the hub will not start exactly when `oidcauth.New` refuses it. |
 | `pkg/ui`             | `FuzzOIDCCallbackRoutes` | Every redirect URL `oidcauth.New` accepts registers in the real route table and routes the browser's return to the callback. |
 | `pkg/exposure`       | `FuzzDecideNeverOpensAnOpenHub` | `--listen` / `ui.listen`: a hub without sign-in or the acknowledgement binds a loopback IP literal or is refused, and every accepted address is a well-formed `host:port`. |
+| `pkg/executor/resultframe` | `FuzzScanner` | The project result frame a Kubernetes Pod prints into its own log: on any input and any chunking the scanner neither panics nor holds more than one line, decides the same way however the stream was cut, and lets no frame line into the transcript. |
+| `pkg/executor/resultframe` | `FuzzRoundTrip` | Every payload `resultframe.Write` accepts comes back byte for byte through any chunking, past transcript around it. |
 
 ### Adding a new fuzz target
 

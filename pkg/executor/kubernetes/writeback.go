@@ -13,7 +13,9 @@ package kubernetes
 //
 // So the Pod reports through the one channel that survives: its own stdout. The
 // wrapper prints a single executor.WriteBackSentinel line, and this file
-// watches the log stream for it.
+// watches the log stream for it. A seeded run's project state comes home the
+// same way, as a framed block the wrapper prints after the sentinel; see
+// projectresult.go.
 //
 // # The forgery, and why it does not matter
 //

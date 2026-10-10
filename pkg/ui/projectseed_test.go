@@ -228,3 +228,26 @@ func TestSeedCarriesTheProviderTheHubResolved(t *testing.T) {
 		t.Error("the seed must not carry configuration, which can hold API keys")
 	}
 }
+
+// TestProjectSeedRemedyFitsTheExecutorKind: an agent upgrade is a device's
+// remedy and nobody else's (Task 20402). Before, every executor that could not
+// take a seed — a Kubernetes one included — was told to upgrade its agent.
+func TestProjectSeedRemedyFitsTheExecutorKind(t *testing.T) {
+	device := remoteExecutor()
+	if r := projectSeedRemedy(device); !strings.Contains(r, "--upgrade") {
+		t.Errorf("a device's remedy %q names no upgrade", r)
+	}
+	for _, kind := range []string{executor.KindKubernetes, executor.KindContainer, "custom"} {
+		ex := remoteExecutor()
+		ex.kind = kind
+		r := projectSeedRemedy(ex)
+		for _, bad := range []string{"--upgrade", "agent", "protocol"} {
+			if strings.Contains(r, bad) {
+				t.Errorf("%s executor told %q: %q", kind, bad, r)
+			}
+		}
+		if !strings.Contains(r, "shares the control plane's filesystem") {
+			t.Errorf("%s executor's remedy %q does not name the alternative", kind, r)
+		}
+	}
+}

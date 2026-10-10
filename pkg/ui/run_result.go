@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -195,18 +196,14 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 	if !canFetch || !ex.Capabilities().ReturnsProjectState {
 		journal(fmt.Sprintf("Executor %q ran this project from a copy of its plan and cannot send the "+
 			"outcome back, so tasks it ran still show their earlier status here — and will run again "+
-			"if the project is started again. %s", ex.ID(),
-			executor.NeedsProtocol("Its agent", sessionProtocolOf(ex), remote.MinProjectResultVersion,
-				"to have a seeded run's outcome sent back", "")), nil)
+			"if the project is started again. %s", ex.ID(), projectResultRemedy(ex)), nil)
 		return
 	}
 
 	res, err := fetcher.ProjectResult(handleID)
 	if err != nil {
 		if errors.Is(err, executor.ErrProjectResultUnavailable) {
-			journal(fmt.Sprintf("The run on executor %q ended without sending its results back — "+
-				"typically because the connection dropped before it finished — so tasks it ran still "+
-				"show their earlier status here. Check the run's log for how far it got.", ex.ID()), nil)
+			journal(missingProjectResultMessage(ex, err), map[string]any{"reason": err.Error()})
 		} else {
 			journal(fmt.Sprintf("The run's results could not be collected from executor %q: %v", ex.ID(), err), nil)
 		}
@@ -257,4 +254,51 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		s.refreshProjectStatuses()
 		s.broadcastProjectsUpdate()
 	}
+}
+
+// projectResultRemedy says how ex comes to send a seeded run's outcome back, in
+// the terms of ex's own kind. Only a device's answer is an agent upgrade.
+func projectResultRemedy(ex executor.Executor) string {
+	switch ex.Kind() {
+	case executor.KindRemoteAgent, executor.KindVirtual:
+		return executor.NeedsProtocol("Its agent", sessionProtocolOf(ex), remote.MinProjectResultVersion,
+			"to have a seeded run's outcome sent back", "")
+	case executor.KindKubernetes:
+		// Unreachable from this hub's own driver, which reads the outcome back
+		// out of the Pod's log; said plainly for whatever reports the kind
+		// without the capability.
+		return "A Kubernetes executor of this hub's build reads the outcome back out of the Pod's log, " +
+			"so this one is not running this hub's driver."
+	}
+	return "Bind the project to an executor that shares the control plane's filesystem, or to one that " +
+		"returns a run's project state."
+}
+
+// missingProjectResultMessage is the journal row for a seeded run whose executor
+// can return its outcome and did not, naming what is most likely for ex's kind
+// and the driver's own account of what it saw.
+func missingProjectResultMessage(ex executor.Executor, err error) string {
+	why := strings.TrimSpace(strings.TrimPrefix(err.Error(), executor.ErrProjectResultUnavailable.Error()))
+	why = strings.TrimSpace(strings.TrimPrefix(why, ":"))
+	var likely string
+	switch ex.Kind() {
+	case executor.KindKubernetes:
+		// The Pod's log is the only way home (pkg/executor/kubernetes/
+		// projectresult.go), so what can go wrong is what can go wrong with
+		// that log.
+		likely = "The Pod's log ended without a complete project result in it: the harness image's " +
+			"cloop may predate `cloop workspace writeback --project-result-frame`, the Pod may have been " +
+			"evicted or stopped before its wrapper finished, or the workload printed a result frame of " +
+			"its own, which makes the real one a duplicate and neither is believed"
+	case executor.KindRemoteAgent, executor.KindVirtual:
+		likely = "Typically the connection dropped before the run finished"
+	default:
+		likely = "The executor reported no result for the run"
+	}
+	msg := fmt.Sprintf("The run on executor %q ended without sending its results back, so tasks it ran "+
+		"still show their earlier status here. %s.", ex.ID(), likely)
+	if why != "" {
+		msg += " What the executor saw: " + why + "."
+	}
+	return msg + " Check the run's log for how far it got."
 }

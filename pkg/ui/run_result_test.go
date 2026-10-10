@@ -22,14 +22,20 @@ import (
 type resultExecutor struct {
 	stubExecutor
 	id      string
+	kind    string // executor.KindRemoteAgent when empty
 	returns bool
 	result  executor.ProjectResult
 	err     error
 	fetched atomic.Int32
 }
 
-func (r *resultExecutor) ID() string   { return r.id }
-func (r *resultExecutor) Kind() string { return executor.KindRemoteAgent }
+func (r *resultExecutor) ID() string { return r.id }
+func (r *resultExecutor) Kind() string {
+	if r.kind != "" {
+		return r.kind
+	}
+	return executor.KindRemoteAgent
+}
 func (r *resultExecutor) Capabilities() executor.Capabilities {
 	return executor.Capabilities{Isolation: executor.IsolationRemote, ReturnsProjectState: r.returns}
 }
@@ -179,6 +185,63 @@ func TestRunEndedExplainsWhyNothingCameBack(t *testing.T) {
 			st, _ := state.Load(dir)
 			if st.Plan.TaskByID(1).Status != pm.TaskPending {
 				t.Errorf("task changed without a result: %q", st.Plan.TaskByID(1).Status)
+			}
+		})
+	}
+}
+
+// TestRunEndedSpeaksTheExecutorsLanguage pins the Task 20402 wording: a
+// journal row about a missing result names what goes wrong on *that* kind of
+// executor and the driver's own account, and an agent upgrade is offered only
+// to a device. A Kubernetes run used to be told its connection dropped and to
+// upgrade an agent it does not have.
+func TestRunEndedSpeaksTheExecutorsLanguage(t *testing.T) {
+	cases := []struct {
+		name    string
+		ex      *resultExecutor
+		want    []string
+		notWant []string
+	}{
+		{"a Pod whose frame was cut off",
+			&resultExecutor{id: "k8s", kind: executor.KindKubernetes, returns: true,
+				err: fmt.Errorf("%w: pod cloop/p: the project result frame was cut off: the stream ended after 10 of 99 bytes",
+					executor.ErrProjectResultUnavailable)},
+			[]string{"Pod's log", "--project-result-frame", "the stream ended after 10 of 99 bytes"},
+			[]string{"connection dropped", "agent", "protocol"}},
+		{"a Kubernetes executor that cannot report",
+			&resultExecutor{id: "k8s-old", kind: executor.KindKubernetes, returns: false},
+			[]string{"Kubernetes executor of this hub's build", "will run again"},
+			[]string{"Its agent", "protocol", "--upgrade"}},
+		{"a device whose connection dropped",
+			&resultExecutor{id: "edge", returns: true,
+				err: fmt.Errorf("%w: handle h1 on agent edge", executor.ErrProjectResultUnavailable)},
+			[]string{"connection dropped"},
+			[]string{"Pod"}},
+		{"a container executor that cannot report",
+			&resultExecutor{id: "box", kind: executor.KindContainer, returns: false},
+			[]string{"shares the control plane's filesystem"},
+			[]string{"Its agent", "protocol", "--upgrade"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := remoteProject(t)
+			tc.ex.stubExecutor = stubExecutor{status: executor.Status{State: executor.StateExited}}
+			rememberSeededDispatch(tc.ex, "h1", projectseed.Provenance{ExecutorID: tc.ex.id})
+			(&Server{WorkDir: dir}).runEnded(dir, tc.ex, "h1")
+			events := projectResultEvents(t, dir)
+			if len(events) != 1 {
+				t.Fatalf("journal = %+v, want one project_result row", events)
+			}
+			msg := events[0].Message
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("row %q lacks %q", msg, w)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(msg, w) {
+					t.Errorf("row %q says %q, which is not this executor's remedy", msg, w)
+				}
 			}
 		})
 	}

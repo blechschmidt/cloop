@@ -680,9 +680,18 @@ type podRequest struct {
 	// String and GoString redact the content. Env is not — it holds the values
 	// themselves — so a podRequest is never formatted with %v.
 	SecretFiles []executor.SecretFile
-	// LeaseSecretName is the per-run Secret holding those files' bytes and
-	// every value of Env. Empty when there are neither.
+	// LeaseSecretName is the per-run Secret holding those files' bytes, every
+	// value of Env and the project seed. Empty when there is none of them.
 	LeaseSecretName string
+
+	// ProjectSeed reports that the run carries the hub's project state
+	// (Spec.ProjectSeed). Only its presence is read here: the bytes travel in
+	// the lease Secret under projectSeedKey, which the caller creates. When it
+	// is set the workspace init container places the seed after its checkout,
+	// and the harness is wrapped so the run's changes come back as a
+	// resultframe block at the end of the log, tagged with HandleID. See
+	// projectresult.go.
+	ProjectSeed bool
 
 	// GitCABundle is the CA bundle both containers' git verifies particular
 	// URLs against — the hub's git proxy, typically. See cabundle.go.
@@ -770,14 +779,25 @@ func buildPod(req podRequest) (*pod, error) {
 		// The promise this kind makes is that the directory survives between
 		// dispatches, so a repository the harness cloned for one task is still
 		// there for the next. A Pod's working tree is an emptyDir that dies with
-		// the Pod, and this driver has no seed path to re-establish the project
-		// inside a fresh one either. Both halves fail quietly — the next run
-		// finds an empty directory, or no project in it at all — so this is
-		// refused rather than approximated.
+		// the Pod. The project itself could be re-established in a fresh one —
+		// a seed now travels with every run (projectresult.go) — but everything
+		// else the previous run left there could not, and the next run would
+		// find it gone without being told. So this is refused rather than
+		// approximated.
 		return nil, fmt.Errorf("%w: workspace kind %q keeps the working directory on the "+
 			"executor between runs, and a Pod's is an emptyDir that does not outlive it — "+
 			"give the project a git remote so its tree can be fetched per run, or bind it to "+
 			"a remote agent, which does keep one", executor.ErrInvalidSpec, req.Workspace.Kind)
+	}
+
+	// The seed is placed by the workspace init container, which exists only
+	// for a fetched tree, and read from the lease Secret, which the caller has
+	// to have created for it. Either missing is a Pod whose harness would start
+	// in a directory with no project — refused here, before it exists.
+	if req.ProjectSeed {
+		if err := checkSeedDelivery(req); err != nil {
+			return nil, err
+		}
 	}
 
 	labels := map[string]string{
@@ -918,9 +938,22 @@ func buildPod(req podRequest) (*pod, error) {
 			return nil, fmt.Errorf("%w: secret lease directory %q would shadow the %s volume",
 				executor.ErrInvalidSpec, m.MountPath, m.MountPath)
 		}
+		if req.ProjectSeed && (m.MountPath == seedMountDir || m.MountPath == dispatchMountDir) {
+			return nil, fmt.Errorf("%w: secret lease directory %q would shadow the directory the "+
+				"project seed is delivered through", executor.ErrInvalidSpec, m.MountPath)
+		}
 	}
 	spec.Volumes = append(spec.Volumes, secretVolumes...)
 	mounts = append(mounts, secretMounts...)
+
+	// The project seed's two volumes. The Secret volume carrying it is mounted
+	// in the init container alone (buildWorkspaceInitContainer); the harness
+	// gets the copy the init container leaves, read-only, which is what the
+	// wrapper measures the run's changes against.
+	if req.ProjectSeed {
+		spec.Volumes = append(spec.Volumes, seedVolumes(req.LeaseSecretName)...)
+		mounts = append(mounts, volumeMount{Name: dispatchVolume, MountPath: dispatchMountDir, ReadOnly: true})
+	}
 
 	// The CA bundle, in both containers: the provisioner fetches through the
 	// proxy and the harness pushes through it. Scoped per URL in the
@@ -931,9 +964,10 @@ func buildPod(req podRequest) (*pod, error) {
 		mounts = append(mounts, req.GitCABundle.mount())
 	}
 
-	// The harness argv, possibly wrapped so the work it produces survives the
-	// Pod. See buildWriteBackArgv for why a wrapper is the only place a
-	// Kubernetes Pod can run anything after its main container.
+	// The harness argv, possibly wrapped so the work it produces — the files it
+	// changed, the project state it recorded — survives the Pod. See
+	// buildWriteBackArgv for why a wrapper is the only place a Kubernetes Pod
+	// can run anything after its main container.
 	harnessArgv, err := buildWriteBackArgv(req, workDir)
 	if err != nil {
 		return nil, err
@@ -1063,6 +1097,14 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		// a Pod that vanishes mid-run.
 		argv = append(argv, "--size-limit-mb", strconv.Itoa(w.SizeLimitMB))
 	}
+	if req.ProjectSeed {
+		// The project, placed into the checkout once it exists, and a copy of
+		// it left where the harness's wrapper reads the run's changes back
+		// against. Paths, never the bytes: an argv is readable by everyone who
+		// can `get pods`.
+		argv = append(argv, "--seed", seedMountDir+"/"+seedFileName,
+			"--seed-copy", dispatchMountDir+"/"+seedFileName)
+	}
 
 	env, err := workspaceCredentialEnv(req)
 	if err != nil {
@@ -1074,6 +1116,14 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		// filesystem is read-only for this container exactly as it is for
 		// the harness.
 		{Name: tmpVolume, MountPath: "/tmp"},
+	}
+	if req.ProjectSeed {
+		// The seed from the lease Secret, read-only and in this container
+		// only; and the dispatch volume, writable here so the copy can be
+		// left in it, and read-only in the harness.
+		mounts = append(mounts,
+			volumeMount{Name: seedVolume, MountPath: seedMountDir, ReadOnly: true},
+			volumeMount{Name: dispatchVolume, MountPath: dispatchMountDir})
 	}
 	// The fetch is the first thing to reach the git proxy, so it needs the
 	// bundle as much as the harness does. Plain values: a CA path and the URLs
@@ -1199,11 +1249,22 @@ func workspaceCredentialEnv(req podRequest) ([]envVar, error) {
 // The wrapper's own binary comes from the same image and the same argv[0]
 // inference the init container uses, so nothing extra has to be installed or
 // configured — see workspaceCommand.
+//
+// A seeded run is wrapped too, write-back or not (Task 20402): the project state
+// it records in its copy of the project is the other half of its work product,
+// and the wrapper reads it back after the harness and prints it as the last
+// thing in the log, which is the one channel home a Pod has.
 func buildWriteBackArgv(req podRequest, workDir string) ([]string, error) {
 	original := append([]string(nil), req.Argv...)
 	wb := req.WriteBack
 	if !wb.Enabled() {
-		return original, nil
+		if !req.ProjectSeed {
+			return original, nil
+		}
+		argv := append([]string{workspaceCommand(req.Argv), "workspace", "writeback", "--dir", workDir},
+			projectResultFlags(req)...)
+		argv = append(argv, "--")
+		return append(argv, original...), nil
 	}
 	if err := wb.Validate(); err != nil {
 		return nil, err
@@ -1243,6 +1304,9 @@ func buildWriteBackArgv(req podRequest, workDir string) ([]string, error) {
 	}
 	if msg := strings.TrimSpace(wb.Message); msg != "" {
 		argv = append(argv, "--message", msg)
+	}
+	if req.ProjectSeed {
+		argv = append(argv, projectResultFlags(req)...)
 	}
 	// "--" so nothing in the harness's own command line can be read as a flag
 	// of the wrapper. Without it a harness invoked as `claude --push …` would

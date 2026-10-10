@@ -94,8 +94,9 @@ const secretFileMode int32 = 0o400
 // one that answers for repositories the grant excluded.
 const secretExecFileMode int32 = 0o550
 
-// maxLeaseSecretBytes is the API server's cap on a Secret's data, summed over
-// its values.
+// maxLeaseSecretBytes is the API server's cap on a Secret's data. The API
+// server sums the values; leaseSecretData sums keys and values, which is a few
+// bytes stricter and never looser.
 const maxLeaseSecretBytes = 1 << 20
 
 // leaseSecretState is one run's lease-Secret bookkeeping.
@@ -252,14 +253,18 @@ func planSecretFiles(files []executor.SecretFile) (*secretFilePlan, error) {
 }
 
 // leaseSecretData renders the whole lease Secret: one entry per credential
-// file, keyed d<N>.<name> by planSecretFiles, and one per environment variable,
-// keyed env.<NAME> by planLeaseEnv. Nil when there is nothing to carry, which is
-// also exactly when buildPod references no Secret.
+// file, keyed d<N>.<name> by planSecretFiles, one per environment variable,
+// keyed env.<NAME> by planLeaseEnv, and the project seed under projectSeedKey
+// (Task 20402). Nil when there is nothing to carry, which is also exactly when
+// buildPod references no Secret.
 //
 // The total is checked against the API server's 1 MiB here, because the
 // server's refusal names a field rather than the run, and arrives after the Pod
-// has been created.
-func leaseSecretData(files []executor.SecretFile, env []string) (map[string][]byte, error) {
+// has been created. A seed has its own ceiling of 4 MiB everywhere else
+// (executor.MaxProjectSeedBytes); on this executor it is whatever the Secret
+// has room for once the files and the environment are in it, and a run whose
+// seed does not fit is refused naming the seed.
+func leaseSecretData(files []executor.SecretFile, env []string, seed []byte) (map[string][]byte, error) {
 	fileData, err := secretFileData(files)
 	if err != nil {
 		return nil, err
@@ -268,11 +273,11 @@ func leaseSecretData(files []executor.SecretFile, env []string) (map[string][]by
 	if err != nil {
 		return nil, err
 	}
-	if len(fileData)+len(envData) == 0 {
+	if len(fileData)+len(envData) == 0 && len(seed) == 0 {
 		return nil, nil
 	}
-	data := make(map[string][]byte, len(fileData)+len(envData))
-	total := 0
+	data := make(map[string][]byte, len(fileData)+len(envData)+1)
+	credentials := 0
 	for _, part := range []map[string][]byte{fileData, envData} {
 		for k, v := range part {
 			if _, clash := data[k]; clash {
@@ -287,14 +292,34 @@ func leaseSecretData(files []executor.SecretFile, env []string) (map[string][]by
 				v = []byte{}
 			}
 			data[k] = v
-			total += len(v)
+			credentials += len(k) + len(v)
 		}
 	}
-	if total > maxLeaseSecretBytes {
+	total := credentials
+	if len(seed) > 0 {
+		if _, clash := data[projectSeedKey]; clash {
+			return nil, fmt.Errorf("%w: lease Secret key %q would carry two values", executor.ErrInvalidSpec, projectSeedKey)
+		}
+		data[projectSeedKey] = seed
+		total += len(projectSeedKey) + len(seed)
+	}
+	if total <= maxLeaseSecretBytes {
+		return data, nil
+	}
+	if len(seed) == 0 {
 		return nil, fmt.Errorf("%w: this run's credential files and environment total %d bytes, more "+
 			"than the %d a Kubernetes Secret can hold", executor.ErrInvalidSpec, total, maxLeaseSecretBytes)
 	}
-	return data, nil
+	room := maxLeaseSecretBytes - credentials - len(projectSeedKey)
+	if room < 0 {
+		room = 0
+	}
+	return nil, fmt.Errorf("%w: this project's state is %d bytes compressed, and a Kubernetes executor "+
+		"carries it in the run's lease Secret, which holds at most %d bytes — %d of them already taken by "+
+		"the run's credential files and environment, leaving room for a project state of %d bytes. "+
+		"Archive finished tasks (`cloop task archive`) to shrink the plan, or bind the project to an "+
+		"executor that takes a larger one: a remote agent accepts up to %d bytes",
+		executor.ErrInvalidSpec, len(seed), maxLeaseSecretBytes, credentials, room, executor.MaxProjectSeedBytes)
 }
 
 // secretFileData renders the file half of the Secret's data map: one entry per
@@ -381,11 +406,13 @@ func secretFileVolumes(secretName string, files []executor.SecretFile) ([]volume
 }
 
 // provisionLeaseSecret prepares the per-run Secret that carries a lease's
-// credential files and the workload's environment into the Pod.
+// credential files, the workload's environment and the project seed into the
+// Pod.
 //
-// It returns nil state and nil error when the Spec carries neither, which is a
-// run that leases nothing and sets no environment. A non-nil state means there
-// is something to clean up, whether or not the create succeeded.
+// It returns nil state and nil error when the Spec carries none of them, which
+// is a run that leases nothing, sets no environment and is not seeded. A
+// non-nil state means there is something to clean up, whether or not the
+// create succeeded.
 //
 // As with the workspace Secret the object is built here and created by the
 // returned pendingSecret, once the Pod that will own it exists. See the
@@ -393,7 +420,7 @@ func secretFileVolumes(secretName string, files []executor.SecretFile) ([]volume
 func (e *Executor) provisionLeaseSecret(ctx context.Context, spec executor.Spec, cli *client,
 	handleID, namespace string) (*leaseSecretState, *pendingSecret, error) {
 
-	data, err := leaseSecretData(spec.SecretFiles, spec.Env)
+	data, err := leaseSecretData(spec.SecretFiles, spec.Env, spec.ProjectSeed)
 	if err != nil || len(data) == 0 {
 		return nil, nil, err
 	}
