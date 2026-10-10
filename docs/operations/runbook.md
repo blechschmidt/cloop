@@ -612,6 +612,59 @@ A run killed while it waited (an OOM kill, a host reboot) leaves the waiting
 pause behind; the hub settles it as *previous run ended unexpectedly* when it
 notices, exactly as for a stale "running".
 
+## A run stopped at its disk limit
+
+A container executor holds a workload's workspace to its disk limit —
+`.cloop/sandbox.yaml` `resources.disk`, or an operator's disk ceiling — by
+measuring it while the workload runs (Task 20405). This is a different thing
+from the free-space floor above: the floor protects the volume, the limit bounds
+one project's share of it.
+
+**What you see.** The project reads *Paused: the workspace grew to 21.3 GB, over
+its disk limit of 20 GB (from .cloop/sandbox.yaml resources.disk); free space in
+the workspace, or raise resources.disk …, then press Run*, with a **Start**
+button: the run was stopped (SIGKILL) and is not retried. The task it was
+running is back to pending with a note from cloop naming both sizes; the event
+history has a `disk_limit` row with `disk_used_mb`, `disk_limit_mb` and the
+workspace path in its details; the task's `task.finish` audit row carries
+`stop: disk_limit`; and the workload's own output ends with
+`[cloop] disk limit: … stopping the workload`.
+`cloop_executor_task_failures_total{reason="disk_limit"}` counts them.
+
+**What to do.** Decide which is wrong, the tree or the limit:
+
+```console
+$ du -sh --exclude=.cloop /srv/projects/api   # what the limit counts (allocated size)
+$ du -h --max-depth=2 --exclude=.cloop /srv/projects/api | sort -h | tail
+```
+
+Then either free space in the workspace (build output, caches, a dataset the
+task should not have downloaded there), or raise the limit — `resources.disk`
+in the project's `.cloop/sandbox.yaml`, or, when the message says *an operator's
+disk ceiling*, the executor's **Limits** in the Executors panel, the project's
+ceiling (`cloop hub limits set <project> --disk …`), or
+`executors.limits.max_disk`. Then press Run. A workspace still over the limit is
+refused at the start with both sizes named, so pressing Run without doing
+either does not start a run that would only be stopped again.
+
+**A `disk limit: could not measure the workspace … unknown` line** in a
+workload's output means a sample missed its one-minute deadline or met a
+directory the walk's user cannot read. It is not counted as under the
+limit, and the next attempt waits ten times as long as the failed one took. A
+tree that routinely takes that long to walk is one to split or exclude (move
+caches out of the workspace); an unreadable directory, where the walk does not run
+as root (a device's agent, a hub on rootless podman), is one the workload made
+unreadable, and its contents are not counted.
+
+**An executor that cannot hold it** — the host-process driver, a device running
+payloads on its host, a device whose agent predates protocol v20 — shows
+`disk: not supported` on its card. A project stating `resources.disk` is
+refused there at placement — constraint `disk_limit` for an agent older than
+v20, `resource_limits` for an executor that enforces no limits at all — and a
+disk ceiling covering it is reported on the project's journal on every dispatch
+as not bounding the run. Upgrade the agent, or run the device's payloads in a
+container.
+
 ## Audit chain verification
 
 `audit_events` is hash-chained: each row's `row_hash` covers its content and the

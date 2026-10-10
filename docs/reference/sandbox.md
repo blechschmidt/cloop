@@ -49,7 +49,7 @@ resources:
   cpu: 2          # cores; 0 or absent means no limit of your own
   memory: 4g      # 512m, 2g, 1024k, or a bare integer read as megabytes
   pids: 512       # process/thread cap
-  disk: 2g        # workspace + scratch ceiling; also bounds a fetched tree
+  disk: 2g        # the workspace, and what a run adds to .cloop/; also bounds a fetched tree
 
 capabilities:
   git: true       # the sandbox needs a working git
@@ -123,28 +123,120 @@ image.
 
 ### `resources.disk` and the workspace
 
-`disk` is the one resource key that also bounds something the project does not
-choose the size of. When an executor has to *fetch* the source tree — a
-Kubernetes Pod, a remote agent; anything that does not share the hub's
-filesystem — the tree arrives from a remote repository whose contents are known
-only after downloading them. So the same number is applied twice:
+`disk` bounds the **workspace**: the tree the workload works in, which is where
+a sandbox's work lands on the host's own disk. The image's root filesystem is
+mounted read-only and `/tmp` is a size-capped `tmpfs`; the workspace is the
+project directory bind-mounted at `/workspace`, a device's workspace directory,
+or — for a feature — the staged checkout and the output directory its results
+come back through. The project's own `.cloop/` as it stood when the workload
+started is not counted — that is the hub's bookkeeping — but what the run adds
+to it is: the sandbox can write there through the same bind mount, and a
+directory excluded outright would be one no measurement ever counts.
 
-- as the volume's own ceiling (`ResourceLimits.DiskMB`, which becomes a
-  Kubernetes `emptyDir` `sizeLimit`), enforced by the platform;
-- as the provisioner's post-fetch check (`Workspace.SizeLimitMB`), which turns
-  "this repository is larger than the allowance" into a refusal naming the limit
-  rather than a Pod the kubelet evicts mid-run.
+It does not bound an anonymous volume the engine creates for an image's
+`VOLUME` declaration, or a read-write repository mount from a `local_repo`
+grant; neither is part of the workspace.
 
-What it does **not** do is ask for a workspace. Nothing in this schema names a
-repository, and nothing in it adds a workspace placement requirement — a
+The same number is applied twice, by two mechanisms that do not cover each
+other:
+
+- **After a fetch** (`Workspace.SizeLimitMB`). When an executor has to fetch the
+  source tree — a Kubernetes Pod, a remote agent; anything that does not share
+  the hub's filesystem — the provisioner measures what it fetched and refuses a
+  tree larger than the allowance, naming the limit, rather than starting a run
+  that fails mid-way on a message about the repository.
+- **While the workload runs** (`ResourceLimits.DiskMB`). Each executor holds it
+  its own way, and says which on its card in the Executors panel:
+
+| Executor | Card | How |
+| --- | --- | --- |
+| `kubernetes` | `disk: enforced (eviction)` | the Pod's ephemeral-storage limit and the workspace `emptyDir`'s `sizeLimit`; the kubelet evicts a Pod that outgrows them |
+| `container`, and a `remote` device or virtual executor running payloads in a container | `disk: enforced (sampled)` | the driver measures the workspace and stops the workload once it is over (below) |
+| `localprocess`, a device running payloads on its host, a device whose agent predates protocol v20 | `disk: not supported` | nothing; a spec that states `resources.disk` is refused there at placement — constraint `resource_limits` where the executor enforces no limits at all, `disk_limit` where it enforces the others (an agent older than v20) |
+
+#### How the container driver holds it
+
+`--storage-opt size=` bounds a container's writable layer, which is read-only
+here and is not where the work goes, so the driver bounds the workspace by
+**measuring** it:
+
+- **At the start**, before anything is provisioned, it measures the tree. A tree
+  already over the limit is refused, naming both sizes and how to raise the
+  limit — the meaning the post-fetch check gives a fetched tree, applied to a
+  tree that was already there:
+
+  ```
+  executor container: refusing to start: the workspace /srv/projects/api already
+  holds 73 MB, over this workload's disk limit of 64 MB (from .cloop/sandbox.yaml
+  resources.disk); free space in the workspace, or raise resources.disk in
+  .cloop/sandbox.yaml (an operator's disk ceiling still caps it)
+  ```
+
+  The refusal is on the project's journal as a `disk_limit` row. A tree that
+  cannot be measured within 30 seconds starts anyway, with its usage unknown
+  until the first sample.
+- **While it runs**, it samples on an adaptive interval: 15 seconds after the
+  start measurement, then between 5 seconds and 2 minutes — sooner the closer
+  the tree is to the limit at the rate it is growing — and never sooner than ten
+  times the cost of the last walk, so a tree that is expensive to measure is
+  measured less often rather than continuously. A walk runs on a thread of its
+  own at the lowest CPU priority and in the idle I/O class, one per workload at
+  a time, and is abandoned after a minute. The limit and any stop in flight are
+  kept with the workload's handle, so a hub that restarts goes on measuring the
+  containers it adopts.
+- **Past the limit**, the workload is stopped (SIGKILL — every second of grace
+  is more of the disk) and its status records outcome `disk_limit` with the
+  measured and allowed sizes. The hub then pauses the run with reason
+  `disk_limit` instead of retrying it, returns the task it was running to
+  pending with a note from cloop naming both sizes, and journals a `disk_limit`
+  row; the task's `task.finish` audit row carries `stop: disk_limit`,
+  `disk_used_mb` and `disk_limit_mb`. To go on, free space in the workspace or
+  raise the limit, then press Run. A workspace still over the limit is refused at
+  the start, so pressing Run without either does not loop.
+
+What a measurement counts is allocated size, the way `du` counts it: the blocks
+files occupy (a sparse file costs what it occupies, not what it claims), each
+hard-linked file once, symlinks as themselves and never followed, and nothing
+below a mount point — a directory the mount table lists, so a btrfs subvolume,
+which has a device number of its own and needs no privilege to create, is
+counted. The walk goes through directory descriptors rather than paths, so no
+depth of nesting puts part of the tree out of its reach. A walk that misses its
+deadline, or meets a directory the walk's user cannot read, is logged in the
+workload's output as **unknown** — never as under the limit. Its count is a
+lower bound, so it still stops a workload whose visible tree is already over.
+Kata and gVisor sandboxes write the same bind mount, so a walk from the host
+stays correct under them.
+
+For a feature, the output directory counts: the project state the hub seeded,
+and the bundle the run's work comes back in, written at the very end. A
+feature that ends close to its limit can be stopped while writing that bundle,
+and its work does not come back; give it room for its own diff.
+
+**This is enforcement by measurement, not a quota.** A burst can overshoot the
+limit by the write rate times the sampling interval before the next sample sees
+it — on a fast disk, gigabytes. That is why the free-space floor
+(`orchestrator.min_free_disk_mb`, see
+[configuration](configuration.md#free-space-floor)) still matters: it is what keeps
+a burst from filling the volume under everything else.
+
+#### The operator's disk ceiling
+
+An operator's disk ceiling — the fleet's `executors.limits.max_disk`, an
+executor's Limits in the Executors panel, or a project's — is applied exactly as
+the memory ceiling is: a `resources.disk` above it is lowered to it, and a
+project that states none is **given** it. The ceiling is what bounds the project
+that asked for nothing. A device cannot read the hub's ceilings, so the hub fills
+them into the spec it dispatches — the disk one only to an agent at protocol
+v20 or later, which holds it; an older agent would refuse the run. Wherever a
+disk ceiling is in force and the executor cannot hold a workload to it, every
+dispatch says so on the project's journal (`resource_ceiling`), and the
+executor's Limits dialog warns when the ceiling is set.
+
+What `disk` does **not** do is ask for a workspace. Nothing in this schema names
+a repository, and nothing in it adds a workspace placement requirement — a
 repo-committed file that could arrange its own clone would be arranging it from
 a URL in the same pull request. The workspace *kind* is the hub's decision; a
 spec may only bound a fetch the hub already decided to perform.
-
-Executors that share the host filesystem — the container and host-process
-drivers — cannot enforce a writable-layer quota, so they refuse a spec that asks
-for one rather than accepting a limit they would ignore. Bind-mounted projects
-should bound disk on the host filesystem instead.
 
 ## Image trust policy
 
@@ -314,6 +406,7 @@ is never partially applied.
 | `setup` | ✅ | ❌ | ❌ | ❌ |
 | `mounts` | ✅ (bind) | ✅ (`subPath`) | ❌ | ❌ |
 | `resources` | ✅ | ✅ (no `pids`) | ❌ | ❌ |
+| `resources.disk` | ✅ sampled | ✅ eviction | ✅ sampled, in container mode on agent ≥ v20 | ❌ |
 | `capabilities.network` off | ✅ enforced | ⚠️ label only | ❌ | ❌ |
 | `capabilities.virtualized` | ✅ with `oci_runtime` | ✅ with `runtime_class` | ❌ | ❌ |
 | `capabilities.kernel_isolated` | ✅ with `oci_runtime` (`runsc` or kata) | ✅ with `runtime_class` | ❌ | ❌ |

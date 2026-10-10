@@ -447,6 +447,21 @@ executor config, so a repository cannot request 4096 cores. Clamps are reported
 as warnings, and the clamped value is what gets hashed and recorded — the
 artifact never claims a limit the sandbox did not have.
 
+`disk: 20g` bounds the workspace — the bind-mounted project directory, its
+`.cloop/` counted by what the run adds to it — and the container executor holds
+it by measuring the tree: a
+workspace already over 20 GB is refused at the start with both sizes named, and
+a workload that grows past it is stopped and its run paused with reason
+`disk_limit` rather than retried. Free the space or raise the limit, then press
+Run. It is sampled — every 5 seconds to 2 minutes, at idle priority, and less
+often for a tree that is costly to walk — not a quota, so a burst can overshoot
+by what the workload writes between two samples: keep `orchestrator.min_free_disk_mb` on, because the free-space floor is
+what stops that burst from filling the host's volume. A disk ceiling you set on
+the executor (its **Limits** in the Executors panel, or
+`executors.limits.max_disk`) applies the same way, and also bounds every project
+that states no `disk:` at all. The executor's card shows `disk: enforced
+(sampled)`; see [`resources.disk` and the workspace](../reference/sandbox.md#resourcesdisk-and-the-workspace).
+
 Pin what may run with an image trust policy (`sandbox.image_policy`:
 `allowed_registries`, `require_digest`, signature verification) so a repo cannot
 name an arbitrary image. It sits at the top level rather than under an executor

@@ -217,7 +217,12 @@ runtime present. Forced on every invocation:
 
 Only the project directory is mounted. `--pull=never` means a cold image fails
 immediately and loudly rather than pulling something unexpected at task time —
-pre-pulling is the operator's job. Secrets are forwarded as bare `--env NAME`,
+pre-pulling is the operator's job. The project directory is also where the
+work lands on the host's disk, so it is what a disk limit bounds: no flag can
+(`--storage-opt size=` bounds the writable layer, which `--read-only` already
+closes), so the driver measures the workspace at the start and on a cost-bounded
+interval while the workload runs, refuses a tree already over and stops one that
+grows past it (`disklimit.go`, `pkg/executor/internal/diskwatch`). Secrets are forwarded as bare `--env NAME`,
 so the runtime reads the value from its own environment and it never appears in
 the host process table. A denylist (`deniedExtraArgs` in `argv.go`) rejects operator-supplied
 `ExtraArgs` that would undo any of this.
@@ -818,6 +823,26 @@ project left unset: doing so would convert "stated nothing" into "explicitly
 requested the ceiling", which the drivers treat as more specific than their own
 configured default — so the ceiling could *raise* an allowance.
 
+The drivers fill it in instead, after resolving their own default: the container
+driver bounds `--cpus`, `--memory`, `--pids-limit` and the workspace's disk limit
+by `CeilingFor` in `buildRequest`, and the Kubernetes driver fills an unset Pod
+limit. A device reads no ceiling of its own, so the remote driver fills the
+device's (or virtual executor's) ceiling into the spec it dispatches when the
+device runs payloads in a container — the disk one only to an agent at protocol
+v20 or later, since an older one's container driver refuses any disk limit
+(`MinDiskLimitVersion`, Task 20405).
+
+**Disk** is the resource a driver can enforce, or not, independently of the
+others, so it has a capability of its own: `Capabilities.DiskEnforcement` is
+`sampled` (the container driver, on the hub or on a v20 device, which measures
+the workspace and stops a workload that outgrows it), `eviction` (Kubernetes),
+or empty. A spec stating `resources.disk` requires it at placement
+(`RequireDiskLimit`, constraint `disk_limit`), and a disk ceiling in force on an
+executor without it is reported by `CeilingUnenforceable` on every dispatch,
+clamp or no clamp — it exists for the project that asked for nothing. How the
+container driver measures, and what a stop records, is in
+[`resources.disk` and the workspace](../reference/sandbox.md#resourcesdisk-and-the-workspace).
+
 ---
 
 ## Placement
@@ -1050,8 +1075,8 @@ Ranking, applied as a stable sort:
 `Rejection` list, and how many candidates were considered. Constraints are
 named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `virtualization`, `kernel_isolation`, `labels`, `platform`, `arch`,
-`harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
-`signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
+`harness`, `container_runtime`, `network_egress`, `resource_limits`,
+`disk_limit`, `stream`, `signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
 `sandbox_mounts`, `host_mounts`, `devices`, `interfaces`, `egress_scope`, `workspace`,
 `write_back`, `secret_files`, `revocation`, `agent_build`. An operator asking
 "why did nothing schedule?" gets a per-node answer, not a shrug.

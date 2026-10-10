@@ -104,7 +104,7 @@ record and the derived agent credential revoked, and the hub sends `bye` with
 `reconnect=false` so the agent stops rather than backing off and retrying.
 
 **Protocol versioning.** Frames carry a version; the hub accepts
-`[MinProtocolVersion, ProtocolVersion]` = `[1, 19]` and stamps every outbound
+`[MinProtocolVersion, ProtocolVersion]` = `[1, 20]` and stamps every outbound
 frame with the version the session negotiated, not with its own maximum — a v1
 agent rejects a v2 envelope as out of range, so stamping the maximum would make
 negotiation decorative (`TestSessionStampsNegotiatedVersionOnOutboundFrames`).

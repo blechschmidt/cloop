@@ -1379,7 +1379,7 @@ executors:
   limits:
     max_cpu: 4        # cores
     max_memory: 8g    # 512m, 2g, or a bare integer read as megabytes
-    max_disk: 20g     # workspace + scratch
+    max_disk: 20g     # the workspace; see "Disk" below
     max_pids: 2048    # processes/threads
 ```
 
@@ -1416,6 +1416,30 @@ Loosening means restarting with the looser config.
 A malformed section is not refused at boot — that would turn a typo into an
 outage — but it installs *nothing*, and raises a banner saying no ceiling is
 being enforced. `cloop config set` refuses one outright.
+
+**Disk** (`max_disk`, and the Disk field of an executor's Limits) bounds the
+workspace — the tree the workload works in, its `.cloop/` counted by what the
+run adds to it — and is applied
+like memory: a larger `resources.disk` is lowered to it and a project that
+states none is given it (Task 20405). A Kubernetes executor holds it by
+eviction; a container executor, on the hub or on a device whose agent speaks
+protocol v20 or later, by measuring the workspace while the workload runs and
+stopping it once it is over, which pauses the run with reason `disk_limit`. That
+is enforcement by sampling, not a quota: a burst can overshoot by the write rate
+times the sampling interval, which is why the
+[free-space floor](#free-space-floor) still matters. Where nothing holds a disk
+ceiling — the host-process driver, a device running payloads on its host, an
+agent older than v20 — every dispatch says so on the project's journal, and the
+executor card shows `disk: not supported`. See
+[`resources.disk` and the workspace](sandbox.md#resourcesdisk-and-the-workspace).
+
+**Upgrading takes these ceilings from inert to enforced.** A `max_disk`, or a
+Disk set in an executor's Limits, recorded no limit on a container executor
+before Task 20405; from it, runs there are refused over it and stopped past it.
+And a remote device running payloads in a container now receives its own
+ceiling — CPU, memory and processes as well as disk — filled into the spec for
+a project that asked for nothing, where before only the project's stated
+requests were bounded there. Check the ceilings you have set before upgrading.
 
 ### Per-project resource ceilings
 
@@ -1716,6 +1740,11 @@ What a `disk_low` pause looks like:
   the reserve out.
 - **A run on another machine measures its own disk.** A container or device
   run applies the project's own setting against the volume it writes to.
+- **A disk limit does not replace it.** A container executor holds a
+  workload's `resources.disk` or disk ceiling by sampling its workspace (Task
+  20405), and a burst can overshoot by the write rate times the sampling
+  interval before the next sample stops it. The floor is what keeps that burst
+  from filling the volume everything else writes to.
 
 The hub holds its own state volume to the same number: `cloop hub doctor`
 reports `storage.free_space` (a warning below twice the floor, a failure

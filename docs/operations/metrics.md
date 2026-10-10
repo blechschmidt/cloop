@@ -200,9 +200,11 @@ more: as a completion if its workload exited zero, or as a failure with a
 | `start` | it never began: the executor could not receive what the run needed (a grant, a sandbox, the source tree) or refused to launch it |
 | `run` | it launched and failed — a non-zero exit, a kill nobody in cloop asked for (usually the OOM killer), an executor failure — or ended in a way its executor could not account for |
 | `cancelled` | the control plane stopped it: Stop pressed, a daily budget spent, or a kill cloop requested. A run that pauses and exits zero after being told to stop is cancelled, not completed |
+| `disk_limit` | its executor stopped it because the workspace grew past its disk limit — `.cloop/sandbox.yaml` `resources.disk` or an operator's disk ceiling. The project is paused `disk_limit`; see [the sandbox reference](../reference/sandbox.md#resourcesdisk-and-the-workspace) |
 
 The distinction matters: `start` is an infrastructure or configuration fault,
-`run` is usually the task's own doing, and `cancelled` is nobody's fault.
+`run` is usually the task's own doing, `cancelled` is nobody's fault, and
+`disk_limit` is a limit doing its job.
 Every run the hub settles is counted exactly once more, so starts minus
 completions minus failures is the runs dispatched and not yet settled: the ones
 in flight, plus the rare one whose output the hub lost hold of at dispatch and
