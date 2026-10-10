@@ -61,6 +61,16 @@ type handleState struct {
 	// rather than silently showing a truncated run.
 	gapped bool
 	closed bool
+	// closedAt is when this hub saw the handle reach its final state, in the
+	// control plane's clock: what an uncollected result's retention is
+	// measured from (Task 20399). Zero while the handle is open.
+	closedAt time.Time
+	// returns is what this workload may send back — a bundle up to its
+	// spec's cap, a result frame, a project-state document — fixed at
+	// dispatch and persisted with the handle's row so a rehydrated handle
+	// keeps it (Task 20399). Written before the handle is published and
+	// read-only thereafter; see returns.go.
+	returns resultAllowance
 	// writeBack is the in-flight assembly of this workload's work product.
 	// Nil until the device sends its first result frame; see writeback.go.
 	writeBack *writeBackState
@@ -203,6 +213,12 @@ type Options struct {
 	// do not want a vendor script run on a critical host turn it off here, and
 	// get the Task 20332 refusal back unchanged.
 	AutoInstallHarness func() bool
+	// ResultBudget bounds the returned work — write-back bundles and project
+	// state documents — this executor may have the hub hold in memory while
+	// it waits to be collected (Task 20399). Nil draws on the process-wide
+	// DefaultResultBudget, which is what a hub wants: the limit that keeps
+	// it alive is one for the whole process. Tests inject their own.
+	ResultBudget *ResultBudget
 	// Now overrides the clock for tests.
 	Now func() time.Time
 }
@@ -268,6 +284,12 @@ type Executor struct {
 	// back, retained across disconnects so they can be replayed. See
 	// revoke.go.
 	revocations *executor.RevocationLog
+
+	// budget counts the returned work this executor's handles hold. It
+	// belongs to the executor, never to a session: the bytes outlive the
+	// link they arrived on, and a budget that came back with each reconnect
+	// would be no budget at all. See resultbudget.go.
+	budget *ResultBudget
 }
 
 // NewExecutor builds a remote executor for an enrolled agent. It starts
@@ -284,6 +306,10 @@ func NewExecutor(opts Options) (*Executor, error) {
 	if opts.ID == "" {
 		return nil, fmt.Errorf("%w: remote executor ID is blank", executor.ErrInvalidSpec)
 	}
+	budget := opts.ResultBudget
+	if budget == nil {
+		budget = DefaultResultBudget()
+	}
 	e := &Executor{
 		id:          opts.ID,
 		name:        opts.Name,
@@ -294,6 +320,7 @@ func NewExecutor(opts Options) (*Executor, error) {
 		revocations: executor.NewRevocationLog(),
 		status:      StatusOffline,
 		store:       opts.HandleStore,
+		budget:      budget,
 	}
 	e.rehydrate()
 	return e, nil
@@ -769,6 +796,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		id:        handleID,
 		startedAt: now,
 		virtualID: virtualIDOf(virtual),
+		// What the device may send back, from the spec it is about to be
+		// given — set before the handle is published, because a hostile
+		// agent's first chunk can arrive before the started reply does.
+		returns: allowanceFor(spec),
 		// Output arrives from a device the hub does not control, so the hub
 		// redacts what it sent there rather than trusting the agent to have
 		// done it. The agent scrubs too — this is the half that holds when
@@ -839,6 +870,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		// material, so a crash between the two loses nothing a revocation needs.
 		Secrets:         spec.Secrets,
 		SecretsRecorded: true,
+		// What the workload may send back (Task 20399), so a hub that
+		// restarts — or another member that adopts the run — holds the
+		// device to the cap this spec asked for, not to the hard ceiling.
+		Meta: hs.returns.meta(),
 	})
 
 	payload := StartPayload{Spec: spec, HandleID: handleID, Sandbox: sandbox}
@@ -1096,6 +1131,10 @@ func (e *Executor) Abandon(ctx context.Context, handleID, reason string) error {
 		FinishedAt: e.opts.now(),
 		Error:      "abandoned by the control plane: " + reason,
 	}})
+	// Including a verified result, which a terminal status alone keeps for
+	// collection: the run moved elsewhere, and nothing should land what this
+	// copy of it sent back.
+	e.releaseResults(hs, "the control plane abandoned this workload: "+reason)
 	return signalErr
 }
 
@@ -1189,6 +1228,9 @@ const maxRetainedHandles = 256
 // pruneLocked evicts the oldest finished handles once the map exceeds the
 // ceiling. Running handles are never evicted: dropping one would orphan a live
 // workload the control plane can no longer address. Callers must hold e.mu.
+//
+// An evicted handle's returned work goes with it, and back to the budget: an
+// unreachable handle is bytes nothing can collect (Task 20399).
 func (e *Executor) pruneLocked() {
 	if len(e.handles) <= maxRetainedHandles {
 		return
@@ -1212,6 +1254,11 @@ func (e *Executor) pruneLocked() {
 		if len(e.handles) <= maxRetainedHandles {
 			return
 		}
+		if hs := e.handles[f.id]; hs != nil {
+			hs.mu.Lock()
+			e.dropResultsLocked(hs, "the hub evicted this finished handle")
+			hs.mu.Unlock()
+		}
 		delete(e.handles, f.id)
 	}
 }
@@ -1232,6 +1279,14 @@ func (e *Executor) dropHandle(handleID string) {
 	e.mu.Unlock()
 	executor.ForgetHandle(store, handleID)
 	if hs != nil {
+		// Closed before its returned work is dropped, under the same lock:
+		// a frame that looked the handle up before it left the map is then
+		// refused rather than counted against a handle nothing can reach.
+		hs.mu.Lock()
+		hs.closed = true
+		hs.closedAt = e.opts.now()
+		e.dropResultsLocked(hs, "the workload never started")
+		hs.mu.Unlock()
 		hs.bus.Close()
 		hs.finishWorkspaceRelease()
 	}
@@ -1519,19 +1574,51 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 	} else if st.StartedAt.IsZero() {
 		st.StartedAt = hs.status.StartedAt
 	}
+	shouldClose := st.State.Terminal() && !hs.closed
+	if shouldClose {
+		// A bundle whose result frame never came will never be completed: the
+		// agent sends the result before the final status and nothing after
+		// it. Its bytes are let go of now rather than when the handle is
+		// evicted (Task 20399), and why is recorded, so the status below and a
+		// collector arriving later say the same thing.
+		if wb := hs.writeBack; wb != nil && wb.result == nil {
+			if wb.size > 0 && wb.failed == "" {
+				wb.failed = fmt.Sprintf("the workload ended with %d bytes of its bundle received and "+
+					"no result frame to close it", wb.size)
+			}
+			e.dropBundleLocked(wb)
+		}
+	}
 	// The write-back is attached to the status rather than reported alongside
 	// it because this is the status a consumer reads the instant the log stream
 	// closes, and the agent's frame order — chunks, result, then status —
 	// guarantees the result has already arrived. A terminal status carrying
 	// nothing while a result frame sits on the same handle would make the
 	// delivery invisible to executor.Run.
-	if hs.writeBack != nil && hs.writeBack.result != nil {
-		st.WriteBack = hs.writeBack.result
+	//
+	// Only what this hub received through the write-back frames is reported.
+	// A WriteBack the device put in the status frame itself would claim a
+	// delivery no result frame was verified for; an honest agent never sends
+	// one (pkg/executor/agent strips the write-back from the spec its inner
+	// driver runs, and reports the result in its own frame).
+	st.WriteBack = nil
+	if wb := hs.writeBack; wb != nil {
+		switch {
+		case wb.result != nil:
+			st.WriteBack = wb.result
+		case wb.failed != "" && st.State.Terminal():
+			// Chunks were refused, and no result frame followed to say so.
+			// Without this the run would read as one that returned nothing,
+			// rather than one whose work the hub turned away and why.
+			st.WriteBack = &executor.WriteBackResult{Mode: executor.WriteBackBundle, Err: wb.failed}
+		}
 	}
+	// The device's prose, kept for as long as the handle is.
+	st.Error = clipText(st.Error, maxReturnedTextBytes)
 	hs.status = st
-	shouldClose := st.State.Terminal() && !hs.closed
 	if shouldClose {
 		hs.closed = true
+		hs.closedAt = e.opts.now()
 		// The agent reports the total bytes the workload produced. Receiving
 		// fewer means output was lost on the way — the stream is about to be
 		// closed, so anything still outstanding will never arrive. Record it
@@ -1587,6 +1674,11 @@ func (e *Executor) LogGapped(handleID string) bool {
 // their outcome, and leaving subscribers blocked on a channel that will never
 // close would hang every caller of executor.Run.
 //
+// Every handle's returned work goes too, finished handles' included, and back
+// to the budget (Task 20399). A revoked device is one the operator no longer
+// trusts, so nothing it sent is landed afterwards, and a deregistered
+// executor's handles are unreachable by any consumer.
+//
 // It deliberately does not drop the durable rows, even though the states it
 // writes are terminal. The distinction is who ended the workload: applyStatus
 // forgets a row because the device said the process is gone, while this marks
@@ -1605,6 +1697,7 @@ func (e *Executor) failAllHandles(reason string) {
 
 	for _, hs := range tracked {
 		hs.mu.Lock()
+		e.dropResultsLocked(hs, reason)
 		if hs.closed {
 			hs.mu.Unlock()
 			continue
@@ -1615,6 +1708,7 @@ func (e *Executor) failAllHandles(reason string) {
 			hs.status.FinishedAt = e.opts.now()
 		}
 		hs.closed = true
+		hs.closedAt = e.opts.now()
 		hs.mu.Unlock()
 		hs.bus.Close()
 		hs.finishWorkspaceRelease()

@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
@@ -64,6 +65,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			executorHubErr = err
 			return
 		}
+		// How much returned work devices may make this process hold (Task
+		// 20399), from this hub's own configuration with its overlay merged
+		// in. Read once, here, before any agent can connect: the budget is the
+		// process's, and every executor below draws on it.
+		configureResultBudget(s.loadHubConfig())
 		hub, err := remote.NewHub(remote.HubOptions{
 			Store:    store,
 			Registry: executor.DefaultRegistry,
@@ -169,6 +175,21 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		executorHubLive.Store(hub)
 	})
 	return executorHub, executorHubErr
+}
+
+// configureResultBudget applies executors.remote to the process-wide budget
+// for returned work. A configuration that will not load states no limits, and
+// the budget keeps its defaults — which are limits, not their absence.
+func configureResultBudget(cfg *config.Config, err error) {
+	if err != nil || cfg == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ui: read executors.remote: %v; returned work is held to the default "+
+				"budgets\n", err)
+		}
+		return
+	}
+	per, total := cfg.Executors.Remote.PinnedWriteBackLimits()
+	remote.DefaultResultBudget().SetLimits(per, total)
 }
 
 // executorHubLive is the agent hub once remoteHub has built it, for callers

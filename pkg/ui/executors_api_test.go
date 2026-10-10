@@ -21,12 +21,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -898,5 +901,51 @@ func assertHostDeniedBody(t *testing.T, resp *http.Response) {
 	rem, _ := body["remediation"].(string)
 	if rem == "" {
 		t.Error("409 body carries no remediation — the operator is told what broke but not what to do")
+	}
+}
+
+// TestRevokedAgentLeavesTheRevokingMembersHub (Task 20399): a dashboard revoke
+// takes the executor out of the hub on the member serving it, not only its
+// session. Other members drop it when the deletion reaches them over the
+// cluster bus, which never delivers a member's own events to it — so before
+// this the member that revoked a device was the one that kept it, along with
+// everything its handles held.
+func TestRevokedAgentLeavesTheRevokingMembersHub(t *testing.T) {
+	db, err := statedb.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open state db: %v", err)
+	}
+	defer db.Close()
+	store, err := executorstore.New(db)
+	if err != nil {
+		t.Fatalf("executor store: %v", err)
+	}
+	const agentID = "edge-revoked-1"
+	if err := store.PutAgent(remote.AgentRecord{
+		AgentID: agentID, Name: "edge", CreatedAt: time.Now(),
+		// Any well-formed hash: no credential is presented in this test.
+		SecretHash: strings.Repeat("0", 64),
+	}); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	hub, err := remote.NewHub(remote.HubOptions{Store: store, Registry: executor.NewRegistry()})
+	if err != nil {
+		t.Fatalf("NewHub: %v", err)
+	}
+	if err := hub.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, ok := hub.Executor(agentID); !ok {
+		t.Fatal("the enrolled agent has no executor to revoke")
+	}
+
+	tearDownRevokedAgent(hub, agentID)
+
+	if _, ok := hub.Executor(agentID); ok {
+		t.Error("the revoked agent's executor is still in the hub that revoked it")
+	}
+	rec, err := store.GetAgent(agentID)
+	if err != nil || !rec.Revoked() {
+		t.Errorf("the agent's credential = %+v, %v; want it revoked", rec, err)
 	}
 }

@@ -320,6 +320,37 @@ var (
 	})
 )
 
+// The transport half of write-back (Task 20399): what a remote executor's
+// returned work holds in hub memory before anyone collects it, and the frames
+// refused before their bytes were kept. reason is one of the WriteBackRefused*
+// constants below.
+//
+// Both gauges are per process — a member holds what reached it — and neither
+// is labelled by executor: the catalog's rule, and a fleet of edge devices is
+// exactly the unbounded set it exists for. The largest single executor is what
+// an alert on one device approaching its budget needs, and a max answers it in
+// one series.
+var (
+	WriteBackFrameRefusals = Default.MustRegister(Definition{
+		Name:   "cloop_writeback_frame_refusals_total",
+		Help:   "Result frames from remote executors the hub refused before keeping their bytes, by reason (late: after the handle's final status or its result; not_requested: for a handle dispatched with no such write-back or no project seed; over_cap: past the bundle cap the handle's spec asked for; executor_budget, process_budget: holding it would cross executors.remote.max_pinned_writeback_bytes or max_pinned_writeback_total_bytes). An honest agent sends none of the first three.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+
+	WriteBackPinnedBytes = Default.MustRegister(Definition{
+		Name: "cloop_writeback_pinned_bytes",
+		Help: "Returned work this hub process holds in memory waiting to be collected: bundles remote executors are sending or have sent, and seeded runs' project-state documents. Bounded by executors.remote.max_pinned_writeback_total_bytes. Each cluster member reports its own.",
+		Type: TypeGauge,
+	})
+
+	WriteBackPinnedBytesMax = Default.MustRegister(Definition{
+		Name: "cloop_writeback_pinned_bytes_max",
+		Help: "The most returned work any single remote executor has this hub process hold, against its executors.remote.max_pinned_writeback_bytes budget. Each cluster member reports its own.",
+		Type: TypeGauge,
+	})
+)
+
 // Merge queue.
 var (
 	MergeQueueDepth = Default.MustRegister(Definition{
@@ -609,6 +640,13 @@ const (
 	WriteBackAccepted    = "accepted"
 	WriteBackRejected    = "rejected"
 	WriteBackUnavailable = "unavailable"
+
+	// Write-back frame refusals (Task 20399).
+	WriteBackRefusedLate           = "late"
+	WriteBackRefusedNotRequested   = "not_requested"
+	WriteBackRefusedOverCap        = "over_cap"
+	WriteBackRefusedExecutorBudget = "executor_budget"
+	WriteBackRefusedProcessBudget  = "process_budget"
 
 	// Merge outcomes.
 	MergeClean        = "clean"

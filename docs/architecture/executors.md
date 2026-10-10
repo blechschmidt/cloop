@@ -415,6 +415,75 @@ the fix. The hardened service unit `cloop executor agent install` writes already
 runs the agent as a dedicated unprivileged user, so a device onboarded that way
 satisfies this without anyone thinking about it.
 
+#### What a device's returned work may hold on the hub (Task 20399)
+
+A device sends a run's work back as a write-back bundle, streamed as result
+chunks and closed by a result frame, and a seeded run's project state as one
+`project_result` document. The hub holds both in memory until whoever settles
+the run collects them. A device is the least trusted party in the system, so
+how much it can make the hub hold is bounded at three levels, and every byte is
+counted when it is kept and given back when it is dropped:
+
+| Bound | Size | Set by |
+| --- | --- | --- |
+| One handle's bundle | the cap its spec asked for (`WriteBack.BundleCap`, 32 MiB unless the dispatch named one, at most 128 MiB); none for a push or no write-back | the dispatch, persisted with the handle's row |
+| One handle's project state | 640 KiB, and only for a run that was seeded | the protocol |
+| One executor, across all its handles | 256 MiB | `executors.remote.max_pinned_writeback_bytes` |
+| The hub process, across all executors | 1 GiB | `executors.remote.max_pinned_writeback_total_bytes` |
+
+Before this, each handle took the hard 128 MiB ceiling whatever it had asked
+for, chunks were accepted for a handle that had already finished, a collected
+bundle could be refilled from offset 0, nothing counted the total, and revoking
+the device freed nothing — 128 MiB on each of the 256 finished handles the hub
+retains per device, plus the running ones: 32 GiB per device per hub process.
+
+**A handle accepts only what its spec asked for, and nothing late.** The hub
+writes what a run may send back into the handle's durable row (`Meta`:
+`writeback_mode`, `writeback_cap`, `project_seeded`), so a hub that restarted —
+or another member that adopted the run — holds the device to the same cap when
+it resends its bundle from offset 0. A row written by an older hub carries none
+of this, and its handle gets the hard ceilings rather than a refusal, so a run
+in flight across the upgrade still lands. Once a handle has reported its final
+status, or its write-back has closed with a result frame, every further chunk or
+result is refused before anything is allocated for it. An honest agent sends
+chunks, then the result, then the status, and nothing after; a restart from
+offset 0 is legal only before the result. None of this is gated on a protocol
+version, because it asks nothing of the agent that every agent does not already
+do.
+
+**Past a budget, that run's write-back fails** with `ErrWriteBackBudget`, and the
+reason — which limit, how much was already held — is recorded on the run, so the
+journal says why its work did not come back. What is held for other runs is
+untouched. The bundle is kept as one exactly-sized copy per chunk rather than
+one growing buffer, and each chunk is counted with 64 bytes
+(`ResultChunkOverhead`) for the memory that holds it as well as its own bytes —
+so the memory held stays within the allocator's rounding of what is counted,
+however a device cuts its bundle up. A device sending one-byte chunks is charged
+for one-byte chunks. The copy matters as much as the count: a chunk's bytes
+arrive as base64 the JSON decoder reads past newlines in, so a frame padded to
+the 1 MiB limit decodes a one-byte chunk over three quarters of a megabyte, and
+keeping the decoded slice would keep all of it. A sandbox terminal's inbox, the
+one other place the hub queues bytes a device sent, copies for the same reason.
+
+**What is held is let go of** when it is collected; when its run ends without
+the result frame that would make it collectable (the run's write-back then says
+how much had arrived); when the run is abandoned to a failover, its handle
+evicted, or its device revoked or deregistered — finished runs' uncollected
+work included, because nothing a revoked device sent is landed afterwards; and,
+for work nobody collects, 15 minutes after its run ended, checked on each
+heartbeat. Never when a session detaches: the handle outlives the link, and in a
+hub cluster other members still track the run. The budget belongs to the
+executor rather than to a session, so a device that reconnects — rehydration runs
+on every handshake — finds the bytes it left still counted.
+
+A revoke from the dashboard also removes the executor from the hub member that
+served it. Other members drop it when the deletion reaches them over the cluster
+bus, which does not deliver a member's own events back to it.
+
+The level is in `cloop_writeback_pinned_bytes` and `cloop_writeback_pinned_bytes_max`,
+refusals in `cloop_writeback_frame_refusals_total`; see
+[the metrics](../operations/metrics.md#returned-work-held-in-memory).
+
 ### `kubernetes` — Kind `kubernetes`, isolation `remote`
 
 One ephemeral Pod per workload: `generateName`, `restartPolicy: Never`, no

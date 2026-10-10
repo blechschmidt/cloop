@@ -48,10 +48,14 @@ package remote
 //
 // The Spec is gone too (see pkg/executor/handles.go: it carries brokered secret
 // values in Env). For this driver that costs less than for the others, because
-// the Spec was never executed here — the device holds its own copy. What is
-// lost is Spec.WriteBack: an adopted handle does not know a work product was
-// asked for. The device does, and sends it anyway; writeback.go accepts result
-// frames on any tracked handle, so the bundle still lands.
+// the Spec was never executed here — the device holds its own copy. The one
+// part of it this side enforces, what the workload may send back — the bundle
+// cap, whether a result or a project-state document may arrive at all — is
+// persisted in the row's Meta (Task 20399), so an adopted handle holds the
+// device to what its spec asked for. A device that resends its whole bundle
+// from offset 0 after a restart is answered from that, which is the case the
+// cap has to survive. A row an older hub wrote carries none of it, and its
+// handle is held to the hard ceilings instead of refused.
 
 import (
 	"fmt"
@@ -170,9 +174,16 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 				"which is what agent %s offers on reconnect\n", persisted.HandleID, ext, e.id)
 	}
 
+	returns, err := allowanceFromMeta(persisted.Meta)
+	if err != nil {
+		// Held to the hard ceilings rather than refused: see allowanceFromMeta.
+		fmt.Fprintf(os.Stderr, "remote: handle %s on agent %s: %v; holding what it sends back to "+
+			"the hard ceilings\n", persisted.HandleID, e.id, err)
+	}
 	hs := &handleState{
 		id:        persisted.HandleID,
 		startedAt: persisted.StartedAt,
+		returns:   returns,
 		bus:       logbus.New(persisted.HandleID, executor.StreamCombined, logbus.Options{Now: e.opts.now}),
 		status: executor.Status{
 			HandleID:   persisted.HandleID,

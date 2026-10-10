@@ -1123,9 +1123,7 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if hub, hubErr := s.remoteHub(); hubErr == nil && hub != nil {
-		if err := hub.Revoke(id); err != nil {
-			fmt.Fprintf(os.Stderr, "ui: revoke agent session %s: %v\n", id, err)
-		}
+		tearDownRevokedAgent(hub, id)
 	}
 	// DeleteExecutor also drops every project binding that pointed here, so
 	// a project pinned to a revoked device fails Resolve with "no executor"
@@ -1162,6 +1160,29 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 	s.broadcastAuditAppend("revoke")
 	s.broadcastExecutorUpdate("revoked", id)
 	jsonOK(w, map[string]any{"ok": true, "id": id, "revoked": true})
+}
+
+// agentTeardown is the part of the agent hub a dashboard revoke needs.
+type agentTeardown interface {
+	Revoke(agentID string) error
+	Deregister(agentID string)
+}
+
+// tearDownRevokedAgent ends a revoked agent on the hub member serving the
+// request: its session is dropped with a "do not reconnect" goodbye, its
+// handles are failed, and its executor leaves this member's hub — with
+// everything its handles were holding for collection (Task 20399).
+//
+// Every other member does the same from applyAgentInvalidation when the
+// deletion reaches it over the cluster bus. The bus does not deliver a member's
+// own events back to it, so this member has to do it here or nobody does —
+// and before Task 20399 nobody did: the revoked executor stayed in the hub that
+// revoked it, still holding whatever its device had sent.
+func tearDownRevokedAgent(hub agentTeardown, id string) {
+	if err := hub.Revoke(id); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: revoke agent session %s: %v\n", id, err)
+	}
+	hub.Deregister(id)
 }
 
 // -------------------------------------------------- scheduling state (20162)

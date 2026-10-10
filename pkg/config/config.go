@@ -639,6 +639,11 @@ type ExecutorsConfig struct {
 	// stopped answering onto another one (Task 20391). See FailoverConfig.
 	Failover FailoverConfig `yaml:"failover,omitempty"`
 
+	// Remote bounds the memory enrolled remote executors' returned work may
+	// occupy on this hub while it waits to be collected (Task 20399). See
+	// RemoteExecutorsConfig.
+	Remote RemoteExecutorsConfig `yaml:"remote,omitempty"`
+
 	// FeatureBundleMB caps the git bundles a feature run on an isolating
 	// executor moves (Task 20367): the feature's branch shipped to the
 	// sandbox, and the work the run returns. 0 uses the default of 32; the
@@ -3258,6 +3263,13 @@ func (c *Config) validateAndClamp(path string) {
 		warn("executors.failover.max_attempts", fmt.Sprintf("value %d outside [%d, %d]",
 			*v, FailoverMaxAttemptsLower, FailoverMaxAttemptsUpper))
 		c.Executors.Failover.MaxAttempts = nil
+	}
+	// executors.remote: a byte budget out of band goes back to its default,
+	// never to "unbounded" — an unbounded budget is the defect it closes
+	// (Task 20399).
+	for _, msg := range clampRemoteExecutors(&c.Executors.Remote) {
+		field, detail, _ := strings.Cut(msg, ": ")
+		warn(field, detail)
 	}
 	// The executor sections below are clamped by their own functions, which
 	// report a repair as "field: detail". Some repairs switch a section off

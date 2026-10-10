@@ -223,6 +223,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 		return fmt.Errorf("executors.feature_bundle_mb: %d is outside 0..%d (0 uses the default of 32)",
 			e.FeatureBundleMB, MaxFeatureBundleMB)
 	}
+	if err := ValidateRemoteExecutors(e.Remote); err != nil {
+		return err
+	}
 	if err := validateHarnessCredentialExempt(e.HarnessCredentialExempt); err != nil {
 		return err
 	}
@@ -277,6 +280,16 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 	// An unparseable ceiling is silently no ceiling — the same failure shape as
 	// an unparseable build floor, and the same treatment.
 	out = append(out, ExecutorLimitWarnings(e.Limits)...)
+
+	// A budget smaller than the bundles this hub asks for refuses them on
+	// arrival — after the run did the work (Task 20399). Load leaves such a
+	// value alone, since it is in band and may be deliberate, so it is said here.
+	if per, _ := e.Remote.PinnedWriteBackLimits(); per < e.FeatureBundleBytes() {
+		out = append(out, fmt.Sprintf("executors.remote.max_pinned_writeback_bytes (%d) is below "+
+			"executors.feature_bundle_mb (%d MB), so a feature run on a remote executor whose work "+
+			"comes back near that size is refused when it arrives; raise the budget or lower the cap.",
+			per, e.FeatureBundleBytes()>>20))
+	}
 
 	isolated := e.Container.Enabled || e.Kubernetes.Enabled
 	if !e.HostProcessAllowed() && !isolated {

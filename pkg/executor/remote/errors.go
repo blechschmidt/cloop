@@ -125,6 +125,19 @@ var (
 	// actually provide.
 	ErrVirtualizationUnavailable = errors.New("remote: device cannot start a virtual machine")
 
+	// ErrWriteBackBudget: holding what a device sent back would take this hub
+	// past the memory it allows returned work to occupy — the executor's own
+	// budget (executors.remote.max_pinned_writeback_bytes) or the ceiling for
+	// every executor together (max_pinned_writeback_total_bytes). The handle's
+	// write-back fails with the reason recorded on it, so the run's journal
+	// says which limit and how much was held (Task 20399).
+	//
+	// It wraps executor.ErrWriteBackUnavailable: nothing about the work itself
+	// is implicated, and the remedy — collect, revoke, or raise the limit — is
+	// an operator's.
+	ErrWriteBackBudget = fmt.Errorf("remote: returned work would exceed the hub's memory budget: %w",
+		executor.ErrWriteBackUnavailable)
+
 	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
 	// holding. It is reported, not raised — "the material is not here" is
 	// the end state a revocation wants — so callers treat it as success

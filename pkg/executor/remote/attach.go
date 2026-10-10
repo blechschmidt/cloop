@@ -233,7 +233,12 @@ func (a *attachSession) deliver(data []byte) {
 		return
 	}
 	select {
-	case a.inbox <- data:
+	// A copy the size of the chunk rather than the decoded slice, whose
+	// backing array is sized from the frame's base64 text: a device can pad
+	// that text with newlines the decoder skips, and a 1 KiB chunk then holds
+	// most of a megabyte — which would make attachInboxDepth's 1 MiB ceiling
+	// two dozen (Task 20399; see appendResultChunk).
+	case a.inbox <- append([]byte(nil), data...):
 	case <-a.closed:
 	default:
 		// The buffer is full, so this terminal's consumer has fallen a megabyte

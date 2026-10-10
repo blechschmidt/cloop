@@ -163,8 +163,10 @@ of a minute or more.
 **Gauges of per-process state are exported by every member**, and each
 member's value is its own share: `cloop_secret_leases_live` (the leases that
 member materialised and still holds), `cloop_egress_sessions_live` (the
-sessions its broker issued) and `cloop_mergequeue_depth` (its own queue).
-`sum()` is again the cluster's. `cloop_hub_disk_free_bytes` is exported by
+sessions its broker issued), `cloop_mergequeue_depth` (its own queue) and
+`cloop_writeback_pinned_bytes` (the returned work held in its memory).
+`sum()` is again the cluster's; `cloop_writeback_pinned_bytes_max` is the
+largest one executor holds *on that member*, so aggregate it with `max()`. `cloop_hub_disk_free_bytes` is exported by
 every member too, but it is a reading rather than a share: members on one
 volume each report the same number, so aggregate it with `min()` by
 `volume`, never `sum()` (see [Disk](#disk)).
@@ -498,6 +500,57 @@ second is broken infrastructure.
 `reason` is an `executor.WriteBackReason*` code. The prose refusal is in the
 audit trail rather than here, because it interpolates branch names and commit
 SHAs.
+
+### Returned work held in memory
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_writeback_pinned_bytes` | gauge | — |
+| `cloop_writeback_pinned_bytes_max` | gauge | — |
+| `cloop_writeback_frame_refusals_total` | counter | `reason` |
+
+A remote executor returns two things the hub holds in memory until it collects
+them: a write-back bundle, assembled from result chunks, and a seeded run's
+project-state document. `cloop_writeback_pinned_bytes` is everything this hub
+process holds, bounded by
+[`executors.remote.max_pinned_writeback_total_bytes`](../reference/configuration.md#returned-work-held-in-memory);
+`cloop_writeback_pinned_bytes_max` is the most any single executor holds,
+against its own `max_pinned_writeback_bytes` budget. Both count what the budget
+counts: the bytes held, plus 64 for each bundle chunk that holds them, so a
+256 KiB-chunked bundle reads a fortieth of a percent above its size. Neither is
+labelled by executor — a fleet of devices is the unbounded set the catalog's rule exists
+for — so the max is what tells you one device is close to its budget. Both are
+per process: in a hub cluster each member holds what reached it.
+
+Collected work leaves at once, so on a healthy hub both sit near zero between
+runs and rise only while a bundle is in flight. A level that stays up is work
+nobody is collecting — it is let go of 15 minutes after its run ended — or a
+device holding transfers open:
+
+```promql
+max(cloop_writeback_pinned_bytes_max) > 0.8 * 268435456   # 80% of the default budget
+```
+
+`cloop_writeback_frame_refusals_total` counts result frames refused before
+their bytes were kept (Task 20399):
+
+| `reason` | Meaning |
+| --- | --- |
+| `late` | a chunk, result or project-state document for a handle that had already reported its final status, or a chunk or result after the write-back closed with its result frame |
+| `not_requested` | a chunk for a handle whose spec asked for no bundle, a result for one that asked for no write-back, or a project-state document for a run that was not seeded |
+| `over_cap` | a chunk that took the bundle past the cap the handle's spec asked for |
+| `executor_budget` | holding it would take the executor past `max_pinned_writeback_bytes` |
+| `process_budget` | holding it would take the hub process past `max_pinned_writeback_total_bytes` |
+
+An honest agent sends chunks, then the result, then the final status, and
+nothing after, so **any** `late` or `not_requested` is a device that is broken
+or compromised; alert on it and look at which executor in the hub's log. The
+two budget reasons are capacity: the refused run's journal names the limit and
+how much was held.
+
+```promql
+sum by (reason) (rate(cloop_writeback_frame_refusals_total{reason=~"late|not_requested|over_cap"}[5m])) > 0
+```
 
 ## Merge queue
 

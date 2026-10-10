@@ -1197,6 +1197,47 @@ refuses a value outside `0..10`; one written into the file by hand is reset to
 the default when the configuration is loaded, with a warning — never to "no
 cap". See [the failover cap](../architecture/executors.md#the-failover-cap-and-the-node-killer-quarantine-task-20391).
 
+### Returned work held in memory
+
+A remote executor sends a run's work back as a write-back bundle, streamed in
+chunks, and a seeded run's project state as one document; the hub holds both in
+memory until it collects them. Each is capped per run — a bundle at the cap its
+dispatch asked for, a document at 640 KiB — and these two cap what all of it
+may add up to (Task 20399):
+
+```yaml
+executors:
+  remote:
+    max_pinned_writeback_bytes: 268435456          # per executor; the default, 256 MiB
+    max_pinned_writeback_total_bytes: 1073741824   # every executor together; the default, 1 GiB
+```
+
+Both are **byte counts**, not megabytes: values outside 1 MiB to 64 GiB are
+refused by `cloop config set` and `cloop config validate`, and one written into
+the file by hand is reset to its default when the configuration is loaded, with
+a warning — never to "unbounded". A per-executor budget above the ceiling is
+refused too, and lowered to it at load.
+
+The first is what one device may make the hub hold, across every run it is
+returning work for; the second is what the whole fleet may, and is the one that
+keeps the hub serving everybody else when several devices misbehave at once. A
+frame that would cross either fails that run's write-back: nothing of it is
+kept, the run's journal names the limit and how much was already held, and what
+is held for other runs is untouched. Work is let go of as soon as it is
+collected, when its run ends without the result that would make it collectable,
+when the device is revoked or removed, and fifteen minutes after its run ended
+if nothing has collected it. `cloop_writeback_pinned_bytes` and
+`cloop_writeback_pinned_bytes_max` report the level; see
+[the metrics](../operations/metrics.md#returned-work-held-in-memory).
+
+`executors.remote.max_pinned_writeback_bytes` should stay at least
+`executors.feature_bundle_mb`, or a feature run's work is refused when it
+arrives; the Executors panel warns when it is not. A hub-scope key, read when
+the hub starts its agent endpoint, so a per-instance overlay may set it for one
+hub alone and a change takes effect at the next restart. In a hub cluster each
+member applies it to the memory it holds itself. See
+[what a device's returned work may hold](../architecture/executors.md#what-a-devices-returned-work-may-hold-on-the-hub-task-20399).
+
 ### Pushing a run's work back
 
 A run on an executor that does not share the hub's filesystem — a remote
@@ -2030,6 +2071,7 @@ ui:
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |
 | `executors.failover` | `max_attempts`, the cap on re-dispatching a run whose executor went unreachable. Read at every failover. |
+| `executors.remote` | The memory remote executors' returned work may occupy on this hub: one executor's budget and every executor's ceiling. Read at startup. |
 | `executors.write_back` | Whether a run on an executor that does not share this hub's filesystem pushes its work back to the project's origin. Read on each dispatch. |
 | `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |

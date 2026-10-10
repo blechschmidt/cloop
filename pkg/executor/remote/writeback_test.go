@@ -110,6 +110,30 @@ func (s *wbScene) produce(t *testing.T) (executor.WriteBackResult, []byte) {
 	return res.WriteBackResult, raw
 }
 
+// spec is the dispatch a device returning this scene's work was started with:
+// a bundle write-back of the scene's branch, measured from its base commit.
+func (s *wbScene) spec() executor.Spec { return bundleSpec(s.base, 0) }
+
+// bundleSpec is a dispatch that asks for a bundle write-back of at most
+// maxBytes (0 for the default cap), from a tree pinned at base.
+//
+// A handle accepts only the write-back its spec asked for (Task 20399), so a
+// test that wants result frames to land has to dispatch one that asks.
+func bundleSpec(base string, maxBytes int64) executor.Spec {
+	return executor.Spec{
+		Argv:    []string{"true"},
+		WorkDir: "/tmp/project",
+		Workspace: executor.Workspace{
+			Kind: executor.WorkspaceGit,
+			Repo: "https://example.invalid/acme/widgets.git",
+			Ref:  base,
+		},
+		WriteBack: executor.WriteBack{
+			Mode: executor.WriteBackBundle, Branch: wbBranch, MaxBundleBytes: maxBytes,
+		},
+	}
+}
+
 // --- driving the protocol ---------------------------------------------------
 
 // startedHandle brings a handle into existence on the hub the way a start does,
@@ -119,7 +143,7 @@ func (s *wbScene) produce(t *testing.T) (executor.WriteBackResult, []byte) {
 // because a handle the hub does not believe in is precisely the case
 // TestWriteBackForAnUnknownHandleIsRefused covers, and a helper that fabricated
 // one would make that test vacuous.
-func startedHandle(t *testing.T, ex *remote.Executor, p *peer) string {
+func startedHandle(t *testing.T, ex *remote.Executor, p *peer, spec executor.Spec) string {
 	t.Helper()
 	type started struct {
 		h   executor.Handle
@@ -127,11 +151,7 @@ func startedHandle(t *testing.T, ex *remote.Executor, p *peer) string {
 	}
 	ch := make(chan started, 1)
 	go func() {
-		h, err := ex.Start(context.Background(), executor.Spec{
-			Argv:      []string{"true"},
-			WorkDir:   "/tmp/project",
-			Workspace: executor.Workspace{Kind: executor.WorkspaceNone},
-		})
+		h, err := ex.Start(context.Background(), spec)
 		ch <- started{h, err}
 	}()
 
@@ -241,7 +261,7 @@ func TestWriteBackRoundTripLandsRemoteWorkOnTheHub(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	// Deliberately smaller than the bundle so the reassembly path is exercised
 	// rather than the single-chunk shortcut.
@@ -289,7 +309,7 @@ func TestWriteBackBundleIsReleasedOnce(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	sendChunks(t, p, handle, bundle, 1024)
 	sendResult(t, p, handle, reported)
@@ -319,7 +339,7 @@ func TestWriteBackRefusesAGapInTheStream(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	first, err := remote.NewFrame(remote.TypeResultChunk, "", handle,
 		remote.ResultChunkPayload{Offset: 0, Data: bundle[:64]})
@@ -357,7 +377,7 @@ func TestWriteBackRefusesATamperedBundle(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	// Same length, different bytes: the length check alone would pass.
 	altered := append([]byte(nil), bundle...)
@@ -384,7 +404,7 @@ func TestWriteBackRefusesAMissingDigest(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	sendChunks(t, p, handle, bundle, 4096)
 	sendResult(t, p, handle, reported)
@@ -407,7 +427,7 @@ func TestWriteBackRefusesBytesForAPushResult(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	sendChunks(t, p, handle, bundle, 4096)
 	sendResult(t, p, handle, reported)
@@ -428,7 +448,7 @@ func TestWriteBackRestartsCleanlyAtOffsetZero(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	// A truncated first attempt, then the whole thing again from zero.
 	sendChunks(t, p, handle, bundle[:len(bundle)/2], 128)
@@ -460,7 +480,7 @@ func TestWriteBackRefusesAnOverlappingChunk(t *testing.T) {
 
 	ex := newTestExecutor(t, nil)
 	p, _ := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"}, defaultHello(), nil)
-	handle := startedHandle(t, ex, p)
+	handle := startedHandle(t, ex, p, s.spec())
 
 	sendChunks(t, p, handle, bundle[:256], 256)
 	overlap, err := remote.NewFrame(remote.TypeResultChunk, "", handle,

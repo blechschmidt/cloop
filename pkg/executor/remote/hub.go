@@ -109,6 +109,11 @@ type HubOptions struct {
 	//
 	// Nil means enabled. See Options.AutoInstallHarness.
 	AutoInstallHarness func() bool
+	// ResultBudget bounds the returned work every executor this hub builds
+	// may have it hold in memory (Task 20399). Nil uses the process-wide
+	// DefaultResultBudget, whose limits the caller sets from
+	// executors.remote; see Options.ResultBudget.
+	ResultBudget *ResultBudget
 	// ExternalURL is what this deployment calls itself, e.g.
 	// https://cloop.example.com. Its origin is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
@@ -241,6 +246,7 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		// whose losing side terminates the device's work.
 		HandleStore:        h.opts.HandleStore,
 		AutoInstallHarness: h.opts.AutoInstallHarness,
+		ResultBudget:       h.opts.ResultBudget,
 		Now:                h.opts.Now,
 	}
 	if h.opts.WorkspaceSource != nil {
@@ -506,6 +512,11 @@ func errSuffix(msg string) string {
 }
 
 // Deregister removes an agent's executor from the registry entirely.
+//
+// Everything its handles hold for collection is let go of with it, and given
+// back to the budget (Task 20399): nothing can reach those handles once the
+// executor has left this hub, so bytes kept for them would be held until the
+// process exits.
 func (h *Hub) Deregister(agentID string) {
 	h.mu.Lock()
 	ex := h.executors[agentID]

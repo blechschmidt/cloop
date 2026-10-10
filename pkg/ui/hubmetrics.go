@@ -33,6 +33,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -165,6 +166,11 @@ func registerHubCollectors() {
 			Name:     "secret_leases",
 			Families: []*hubmetrics.Metric{hubmetrics.LeasesLive},
 			Collect:  collectLiveLeases,
+		},
+		hubmetrics.CollectorSpec{
+			Name:     "writeback_pinned",
+			Families: []*hubmetrics.Metric{hubmetrics.WriteBackPinnedBytes, hubmetrics.WriteBackPinnedBytesMax},
+			Collect:  collectPinnedWriteBack,
 		},
 		hubmetrics.CollectorSpec{
 			Name:     "kek_rotation",
@@ -401,6 +407,15 @@ func collectLiveLeases() {
 	for k, n := range counts {
 		hubmetrics.LeasesLive.Set(float64(n), string(k))
 	}
+}
+
+// collectPinnedWriteBack publishes the returned work this process holds for
+// remote executors (Task 20399), from the budget that counts it. Per process,
+// like the leases above: a member holds what reached it.
+func collectPinnedWriteBack() {
+	u := remote.DefaultResultBudget().Usage()
+	hubmetrics.WriteBackPinnedBytes.Set(float64(u.Pinned))
+	hubmetrics.WriteBackPinnedBytesMax.Set(float64(u.MaxPerExecutor))
 }
 
 // collectKEKRotation publishes the progress of the most recent key rotation,

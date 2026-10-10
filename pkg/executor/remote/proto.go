@@ -1769,18 +1769,42 @@ func DecodeBranchChunk(f Frame) (BranchChunkPayload, error) {
 	return p, nil
 }
 
-// DecodeResult decodes the frame that closes a write-back.
+// maxResultObjectName bounds the object names a result reports — the commit,
+// its base and the bundle's digest. A SHA-256 object name in hex is 64
+// characters, the longest any of them can honestly be.
+const maxResultObjectName = 64
+
+// DecodeResult decodes the frame that closes a write-back, refusing one that
+// could not have come from a well-behaved agent.
+//
+// The names in it are bounded here, at decode, because the result is kept with
+// its handle for as long as the handle is retained: without these a result was
+// a megabyte of whatever a device chose to call its branch, per handle
+// (Task 20399). They are refused rather than shortened, because a shortened
+// name can become a different valid one — 41 hex characters cut to 40 are an
+// object name. The prose fields are a different matter and are shortened where
+// the result is stored instead (see applyResult).
 func DecodeResult(f Frame) (ResultPayload, error) {
 	var p ResultPayload
 	if err := decodePayload(f, &p); err != nil {
 		return p, err
 	}
-	if p.Result.BundleBytes < 0 {
-		return p, fmt.Errorf("%w: negative bundle length %d", ErrProtocol, p.Result.BundleBytes)
-	}
-	if p.Result.BundleBytes > executor.MaxWriteBackBundleBytes {
+	r := p.Result
+	switch {
+	case r.BundleBytes < 0:
+		return p, fmt.Errorf("%w: negative bundle length %d", ErrProtocol, r.BundleBytes)
+	case r.BundleBytes > executor.MaxWriteBackBundleBytes:
 		return p, fmt.Errorf("%w: reported bundle of %d bytes exceeds the %d-byte ceiling",
-			ErrProtocol, p.Result.BundleBytes, executor.MaxWriteBackBundleBytes)
+			ErrProtocol, r.BundleBytes, executor.MaxWriteBackBundleBytes)
+	case !r.Mode.Valid():
+		return p, fmt.Errorf("%w: write-back mode %.32q is not one of push, bundle", ErrProtocol, string(r.Mode))
+	case len(r.Branch) > executor.MaxWriteBackBranchLen:
+		return p, fmt.Errorf("%w: reported branch is %d bytes, over the %d a write-back branch may be",
+			ErrProtocol, len(r.Branch), executor.MaxWriteBackBranchLen)
+	case len(r.CommitSHA) > maxResultObjectName || len(r.BaseSHA) > maxResultObjectName ||
+		len(r.BundleSHA256) > maxResultObjectName:
+		return p, fmt.Errorf("%w: a reported object name is over %d characters", ErrProtocol,
+			maxResultObjectName)
 	}
 	return p, nil
 }

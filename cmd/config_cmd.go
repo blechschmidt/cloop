@@ -227,6 +227,29 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		}
 		cfg.Executors.Failover.MaxAttempts = &n
 
+	case "executors.remote.max_pinned_writeback_bytes", "executors.remote.max_pinned_writeback_total_bytes":
+		// The memory budget for remote executors' returned work (Task 20399),
+		// in bytes. Refused rather than clamped, like every numeric key here:
+		// ValidateNumeric runs before the save. An empty value or 0 restores
+		// the default.
+		var n int64
+		if v := strings.TrimSpace(value); v != "" {
+			parsed, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s: expected a byte count, got %q", key, value)
+			}
+			n = parsed
+		}
+		if !config.ValidPinnedWriteBackBytes(n) {
+			return fmt.Errorf("%s must be 0 (the default) or between %d and %d bytes (got %d)",
+				key, config.PinnedWriteBackBytesLower, config.PinnedWriteBackBytesUpper, n)
+		}
+		if key == "executors.remote.max_pinned_writeback_bytes" {
+			cfg.Executors.Remote.MaxPinnedWriteBackBytes = n
+		} else {
+			cfg.Executors.Remote.MaxPinnedWriteBackTotalBytes = n
+		}
+
 	case "notify.slack_webhook":
 		cfg.Notify.SlackWebhook = value
 	case "notify.discord_webhook":
@@ -556,7 +579,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		cfg.Executors.Container = next
 
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  orchestrator.min_free_disk_mb\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.allow_host_process, executors.min_agent_build, executors.failover.max_attempts\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.oci_runtime, executors.container.image, executors.container.cpus\n  executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  orchestrator.min_free_disk_mb\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.allow_host_process, executors.min_agent_build, executors.failover.max_attempts\n  executors.remote.max_pinned_writeback_bytes, executors.remote.max_pinned_writeback_total_bytes\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.oci_runtime, executors.container.image, executors.container.cpus\n  executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
 	}
 	return nil
 }

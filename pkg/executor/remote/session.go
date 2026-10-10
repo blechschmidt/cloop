@@ -368,6 +368,10 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		// heartbeat's handle list is the only evidence a control plane gets
 		// that a process died with its machine.
 		s.ex.reconcileActive(hb.ActiveHandles)
+		// And what lets go of returned work nobody collected (Task 20399):
+		// the beat is a clock this executor has whenever its device is
+		// connected, and a device that is not adds nothing new to hold.
+		s.ex.releaseUncollected()
 		s.flushAcks(ctx)
 		ack, err := s.frame(TypeHeartbeatAck, f.ID, "", HeartbeatAckPayload{
 			Seq:        hb.Seq,

@@ -107,6 +107,31 @@ const (
 	MaxWriteBackPathLen = 4096
 )
 
+// How much returned work a hub process holds in memory while it waits to be
+// collected (Task 20399): the write-back bundles devices are sending or have
+// sent, and seeded runs' project-state documents. The per-handle bounds above
+// are not a bound on the process — a hub tracks every running handle and
+// hundreds of finished ones per device, and devices are many — so these two
+// are. pkg/executor/remote enforces them; pkg/config validates the keys that
+// set them (executors.remote.max_pinned_writeback_bytes and
+// max_pinned_writeback_total_bytes).
+const (
+	// DefaultPinnedWriteBackBytes is what one executor may have a hub hold.
+	// Twice MaxWriteBackBundleBytes, so the largest bundle any spec may ask
+	// for always fits with room for a second, and eight default-sized ones.
+	DefaultPinnedWriteBackBytes int64 = 2 * MaxWriteBackBundleBytes
+	// DefaultPinnedWriteBackTotalBytes is what every executor together may
+	// have one hub process hold. It is the number that keeps a hub serving
+	// its other tenants when several devices misbehave at once.
+	DefaultPinnedWriteBackTotalBytes int64 = 1 << 30
+	// MinPinnedWriteBackBytes and MaxPinnedWriteBackBytes bound both
+	// settings. The floor catches a value written in the wrong unit — 256
+	// meant as megabytes is 256 bytes, which no bundle fits — and the
+	// ceiling one with a digit too many.
+	MinPinnedWriteBackBytes int64 = 1 << 20
+	MaxPinnedWriteBackBytes int64 = 64 << 30
+)
+
 // WriteBack describes how a workload's file changes should be returned.
 //
 // Like Workspace it names a grant and never carries material, and for the same

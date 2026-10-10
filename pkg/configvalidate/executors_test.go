@@ -162,3 +162,45 @@ func TestValidateReportsAnOutOfBandFailoverCap(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateReportsAnOutOfBandWriteBackBudget: the third path for
+// executors.remote (Task 20399). Load repairs a byte budget written in the
+// wrong unit back to the default, silently as far as the file is concerned,
+// so the command an operator runs to check their config has to say so.
+func TestValidateReportsAnOutOfBandWriteBackBudget(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"megabytes written as bytes",
+			"executors:\n  remote:\n    max_pinned_writeback_bytes: 256\n", "max_pinned_writeback_bytes"},
+		{"a negative ceiling",
+			"executors:\n  remote:\n    max_pinned_writeback_total_bytes: -5\n", "max_pinned_writeback_total_bytes"},
+		{"a budget above the ceiling",
+			"executors:\n  remote:\n    max_pinned_writeback_bytes: 536870912\n" +
+				"    max_pinned_writeback_total_bytes: 268435456\n", "exceeds"},
+	} {
+		dir := writeConfig(t, tc.body)
+		rep, err := Run(context.Background(), dir, ValidateOptions{})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		var found bool
+		for _, f := range rep.Findings {
+			if f.Field == "config.executors" && strings.Contains(f.Message, tc.want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s was reported clean; findings: %+v", tc.name, rep.Findings)
+		}
+	}
+
+	dir := writeConfig(t, "executors:\n  remote:\n    max_pinned_writeback_bytes: 134217728\n")
+	rep, err := Run(context.Background(), dir, ValidateOptions{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, f := range rep.Findings {
+		if f.Field == "config.executors" {
+			t.Errorf("a budget in the band was reported as a problem: %+v", f)
+		}
+	}
+}

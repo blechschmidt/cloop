@@ -12,7 +12,8 @@ package ui
 //   - Hub-scope settings say what this control plane is: executors.* (the
 //     host-execution policy, min_agent_build, the resource ceiling, the
 //     container and Kubernetes drivers, git_proxy, kube_guard,
-//     auto_install_harness, the failover cap), sandbox.image_policy, ui.*,
+//     auto_install_harness, the failover cap, the budget for remote
+//     executors' returned work), sandbox.image_policy, ui.*,
 //     stt, retention and audit (the janitor), backup, and the hub's own
 //     github.token. They are read through loadHubConfig or
 //     controlPlaneConfig, which merge this hub's overlay over config.yaml.
