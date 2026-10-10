@@ -788,8 +788,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
-		SharesHostFilesystem:   false,
-		NetworkEgress:          e.opts.EgressFilter.AllowsEgress(),
+		// The disk limit becomes the Pod's ephemeral-storage limit and the
+		// workspace emptyDir's sizeLimit, which the kubelet enforces by
+		// evicting the Pod (Task 20405 named the mode; the enforcement is
+		// older).
+		DiskEnforcement:      executor.DiskEnforcementEviction,
+		SharesHostFilesystem: false,
+		NetworkEgress:        e.opts.EgressFilter.AllowsEgress(),
 		// FilteredEgress reports that cloop installs a policy, not that the
 		// cluster honours it. A NetworkPolicy is applied by the CNI, and
 		// flannel does not implement one — which is a fact about the cluster

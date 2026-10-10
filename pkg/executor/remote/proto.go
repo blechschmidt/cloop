@@ -213,7 +213,16 @@ const (
 	// revoked grant's file stayed on the device. Gated on the hub side: to an
 	// older agent the hub sends the revocation for the whole lease, and says
 	// so. See MinGrantRevocationVersion.
-	ProtocolVersion = 19
+	//
+	// v20 adds disk limits (Task 20405): the agent's container driver holds a
+	// workload to ResourceLimits.DiskMB by sampling its workspace, and reports
+	// a workload it stopped at the limit with Status.Outcome "disk_limit" and
+	// the measurement. No frame changes; the status frame carries the new
+	// fields like any other. Gated on the hub side: an older agent's container
+	// driver refuses any disk limit outright, so the hub routes no
+	// disk-limited spec to it, and fills in no ceiling it would refuse. See
+	// MinDiskLimitVersion.
+	ProtocolVersion = 20
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -406,6 +415,23 @@ const MinGrantRevocationVersion = 19
 // SupportsGrantRevocation reports whether an agent speaking this protocol
 // version takes back exactly the grant a revoke frame names.
 func SupportsGrantRevocation(version int) bool { return version >= MinGrantRevocationVersion }
+
+// MinDiskLimitVersion is the first version whose agents hold a container
+// workload to ResourceLimits.DiskMB (Task 20405).
+//
+// A placement rule, and not for the usual reason. An older agent does not
+// ignore the field — its container driver refuses any disk limit with "disk
+// quotas need a storage driver that supports them" — so the failure is loud,
+// but it is a refused run on a device that is otherwise fine, from a limit the
+// hub put there. So below this version the hub advertises no disk enforcement
+// for the device, placement refuses a spec that states one, and a disk ceiling
+// is reported as unenforced there rather than filled in for the device to turn
+// down.
+const MinDiskLimitVersion = 20
+
+// SupportsDiskLimit reports whether an agent speaking this protocol version
+// holds a container workload to a disk limit.
+func SupportsDiskLimit(version int) bool { return version >= MinDiskLimitVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
@@ -1448,6 +1474,11 @@ type StartedPayload struct {
 	// plane surfaces it verbatim so the operator sees the device's reason
 	// (missing binary, workdir outside root) rather than a generic failure.
 	Error string `json:"error,omitempty"`
+	// DiskLimit is set beside Error when the refusal was a workspace already
+	// over its disk limit (protocol v20, Task 20405), so the hub can answer it
+	// as the refusal it is — journalled, and a conflict rather than a fault —
+	// instead of as an opaque device error.
+	DiskLimit *executor.DiskLimitBreach `json:"disk_limit,omitempty"`
 }
 
 // SignalPayload asks the agent to signal a handle.

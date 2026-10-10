@@ -147,7 +147,9 @@ func (v *Virtual) Start(ctx context.Context, spec executor.Spec) (executor.Handl
 		spec.Labels = labels
 	}
 	spec.Labels["virtual_executor"] = v.id
-	spec.ResourceLimits = fillCeiling(spec.ResourceLimits, executor.CeilingFor(projectOf(spec), v.id))
+	// This executor's ceiling is filled into the spec by the parent's start
+	// (applyDeviceCeiling), which knows whether the device will hold a disk
+	// limit.
 
 	h, err := v.parent.start(ctx, spec, &VirtualDispatch{ID: v.id, Name: v.name, Spec: vs})
 	if err != nil {
@@ -155,22 +157,6 @@ func (v *Virtual) Start(ctx context.Context, spec executor.Spec) (executor.Handl
 	}
 	h.ExecutorID = v.id
 	return h, nil
-}
-
-// fillCeiling fills a workload's unset limits from this executor's ceiling.
-//
-// The device-side container driver has no ceiling lookup of its own — the
-// ceilings live in the control plane's database — so a limit the project did
-// not ask for would otherwise be no limit at all on the device. The hub has
-// already lowered every limit the project *did* ask for (executor.BoundSpec);
-// this supplies the rest. Disk is left alone: the container driver refuses a
-// writable-layer quota it cannot enforce, and the workspace bound is carried
-// separately.
-func fillCeiling(rl executor.ResourceLimits, c executor.ResourceCeiling) executor.ResourceLimits {
-	rl.CPUMillis = executor.BoundLimit(rl.CPUMillis, c.CPUMillis)
-	rl.MemoryMB = executor.BoundLimit(rl.MemoryMB, c.MemoryMB)
-	rl.PIDs = executor.BoundLimit(rl.PIDs, c.PIDs)
-	return rl
 }
 
 // Signal implements executor.Executor.

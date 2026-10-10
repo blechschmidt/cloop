@@ -41,6 +41,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
@@ -261,6 +262,28 @@ type runVerdict struct {
 	// run's session, and nothing carried the run on. Detail names the
 	// executor and why the run stopped there.
 	Lost bool
+	// DiskLimit is the measurement its executor stopped the run at, when the
+	// workspace grew past its disk limit (Task 20405). The run is paused, not
+	// retried, and the task it was running goes back to pending saying so.
+	DiskLimit *executor.DiskLimitBreach
+}
+
+// stop is what the verdict tells task recovery about why the run ended, or nil
+// when it was not stopped from outside.
+func (v runVerdict) stop() *taskrecover.Stop {
+	b := v.DiskLimit
+	if b == nil {
+		return nil
+	}
+	return &taskrecover.Stop{
+		Reason: "stopped at its disk limit — " + b.Describe(),
+		Task: pm.TaskStop{
+			Cause:       pm.StopDiskLimit,
+			Detail:      b.Describe(),
+			DiskUsedMB:  b.UsedMB(),
+			DiskLimitMB: b.LimitMB,
+		},
+	}
 }
 
 // deadRunPauseReason turns a verdict about a vanished run into the reason the
@@ -269,6 +292,9 @@ type runVerdict struct {
 func deadRunPauseReason(v runVerdict) pausereason.Reason {
 	if v.Lost {
 		return pausereason.New(pausereason.CodeExecutorLost, v.Detail)
+	}
+	if b := v.DiskLimit; b != nil {
+		return diskLimitPause(*b)
 	}
 	if v.Requested {
 		return pausereason.New(pausereason.CodeOperator, "run stopped")
@@ -281,6 +307,14 @@ func deadRunPauseReason(v runVerdict) pausereason.Reason {
 		detail = "previous run ended unexpectedly: " + v.Detail
 	}
 	return pausereason.New(pausereason.CodeStale, detail)
+}
+
+// diskLimitPause is the pause a run gets when its workspace is over its disk
+// limit (Task 20405). Short, because a badge renders it; the journal row has
+// the remedy in full.
+func diskLimitPause(b executor.DiskLimitBreach) pausereason.Reason {
+	return pausereason.New(pausereason.CodeDiskLimit,
+		b.Describe()+"; free space in the workspace or raise the limit, then press Run")
 }
 
 // runEnded settles a run whose output stream has closed. Every dispatch site
@@ -359,6 +393,17 @@ func workloadVerdict(ex executor.Executor, handleID string) runVerdict {
 func verdictFor(st executor.Status, err error) runVerdict {
 	if err != nil {
 		return runVerdict{Detail: "its executor could not say how it ended"}
+	}
+
+	// Before the signal reading below, which would claim it: a container the
+	// driver stopped at its disk limit was SIGKILLed and exits 137, the very
+	// shape an out-of-memory kill has (Task 20405).
+	if st.Outcome == executor.OutcomeDiskLimit && st.DiskLimit != nil {
+		b := *st.DiskLimit
+		return runVerdict{
+			Detail:    "its executor stopped it at its disk limit: " + b.Describe(),
+			DiskLimit: &b,
+		}
 	}
 
 	switch {
@@ -474,7 +519,9 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 		return false
 	}
 
-	outcomes := taskrecover.Reconcile(workDir, st.Plan)
+	// A run stopped from outside says why to the tasks it leaves behind:
+	// stopped at its disk limit, not "interrupted" (Task 20405).
+	outcomes := taskrecover.ReconcileStopped(workDir, st.Plan, verdict.stop())
 
 	// "paused" is the terminal the orchestrator itself writes on a graceful
 	// interrupt, and it is deliberately used for a killed run too: the field
@@ -497,7 +544,10 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 	// running from the hub's knowledge of the run — and without this its
 	// project would fall back to whatever the run before it left, with no word
 	// that an executor was lost.
-	staleStatus := st.ClaimsLiveRun() || verdict.Lost
+	// So is one stopped at its disk limit (Task 20405), for the same reason:
+	// a device's run works on a copy of the project, and the stop has to be
+	// recorded as the project's pause whatever the hub's copy last said.
+	staleStatus := st.ClaimsLiveRun() || verdict.Lost || verdict.DiskLimit != nil
 	if staleStatus {
 		st.SetPaused(deadRunPauseReason(verdict))
 	}
@@ -521,7 +571,10 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 	for _, oc := range outcomes {
 		taskrecover.LogOutcome(workDir, oc)
 	}
-	if staleStatus {
+	if staleStatus && verdict.DiskLimit != nil {
+		logDiskLimitStop(workDir, *verdict.DiskLimit, outcomes)
+		s.broadcastRunState(workDir, false, true)
+	} else if staleStatus {
 		logDeadRun(workDir, claimed, verdict, len(outcomes))
 		s.broadcastRunState(workDir, false, true)
 	}
@@ -565,6 +618,71 @@ func logDeadRun(workDir, claimed string, verdict runVerdict, repaired int) {
 		Type:    state.EventSessionFailed,
 		Step:    state.NoStep,
 		Message: b.String(),
+	})
+}
+
+// logDiskLimitStop records a run its executor stopped at its disk limit
+// (Task 20405): both sizes, where the limit came from and how to raise it, on
+// a row of its own type so the timeline can show it apart from a crash.
+func logDiskLimitStop(workDir string, b executor.DiskLimitBreach, outcomes []taskrecover.Outcome) {
+	var requeued []string
+	for _, oc := range outcomes {
+		if oc.Action == taskrecover.ActionRequeued {
+			requeued = append(requeued, fmt.Sprintf("#%d", oc.TaskID))
+		}
+	}
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "The run was stopped at its disk limit: %s. The project is paused rather than "+
+		"retried", b.Describe())
+	switch len(requeued) {
+	case 0:
+	case 1:
+		fmt.Fprintf(&msg, ", and task %s, which it was running, went back to pending", requeued[0])
+	default:
+		fmt.Fprintf(&msg, ", and tasks %s, which it was running, went back to pending",
+			strings.Join(requeued, ", "))
+	}
+	fmt.Fprintf(&msg, ". To go on, %s, then press Run; a workspace still over the limit is refused at "+
+		"the start.", b.Remedy())
+	details := map[string]any{
+		"disk_used_mb":  b.UsedMB(),
+		"disk_limit_mb": b.LimitMB,
+		"used_bytes":    b.UsedBytes,
+	}
+	if b.Source != "" {
+		details["limit_source"] = b.Source
+	}
+	if b.Path != "" {
+		details["path"] = b.Path
+	}
+	state.LogEventDetails(workDir, state.EventRow{
+		Type:    state.EventDiskLimit,
+		Step:    state.NoStep,
+		Message: msg.String(),
+	}, details)
+}
+
+// journalDiskLimitRefusal records a start its executor refused because the
+// workspace was already over its disk limit, and does nothing for any other
+// error. The run never started, so this row and the error shown to whoever
+// pressed Run are all there is of it.
+func journalDiskLimitRefusal(workDir string, err error) {
+	var refused *executor.DiskLimitError
+	if workDir == "" || !errors.As(err, &refused) {
+		return
+	}
+	b := refused.Breach
+	state.LogEventDetails(workDir, state.EventRow{
+		Type: state.EventDiskLimit,
+		Step: state.NoStep,
+		Message: fmt.Sprintf("A run was refused at the start: the workspace already holds %s, over its disk "+
+			"limit of %s (%s); %s.", executor.FormatUsedMB(b.UsedMB()), executor.FormatMB(b.LimitMB),
+			executor.DiskLimitSourcePhrase(b.Source), b.Remedy()),
+	}, map[string]any{
+		"refused":       true,
+		"disk_used_mb":  b.UsedMB(),
+		"disk_limit_mb": b.LimitMB,
+		"used_bytes":    b.UsedBytes,
 	})
 }
 

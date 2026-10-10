@@ -852,10 +852,15 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		// Release the reservation: nothing is running, and holding the slot
 		// would leak capacity on every failed start.
 		a.forget(handleID)
-		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
-			HandleID: handleID,
-			Error:    err.Error(),
-		})
+		refusal := remote.StartedPayload{HandleID: handleID, Error: err.Error()}
+		// A workspace already over its disk limit goes back with its
+		// measurement (Task 20405), for the hub to answer as that refusal.
+		var overLimit *executor.DiskLimitError
+		if errors.As(err, &overLimit) {
+			b := overLimit.Breach
+			refusal.DiskLimit = &b
+		}
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, refusal)
 		return
 	}
 

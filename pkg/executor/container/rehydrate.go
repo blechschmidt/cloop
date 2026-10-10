@@ -226,4 +226,21 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	pumpCtx, cancelPump := context.WithCancel(context.Background())
 	rec.cancelPump = cancelPump
 	go e.pump(pumpCtx, rec)
+
+	// Resume the disk watchdog, for the reason the timeout is resumed: an
+	// adopted container is tracked, so nothing else would ever stop it filling
+	// its workspace. It starts with no measurement, so its first sample comes
+	// at the shortest interval.
+	if disk := restoreDiskLimit(saved, rec.feature); disk != nil {
+		// A stop the previous process made and did not live to record: the
+		// container may well have died of it, and finish credits it if so.
+		if b := restoreDiskBreach(saved); b != nil {
+			rec.mu.Lock()
+			rec.diskBreach = b
+			rec.mu.Unlock()
+		}
+		rec.bus.Emit(fmt.Sprintf("[cloop] disk limit: measuring of this workload's workspace (limit %s) "+
+			"resumed after a control-plane restart\n", disk.describe()))
+		go e.watchDisk(pumpCtx, rec, disk, nil)
+	}
 }

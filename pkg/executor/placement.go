@@ -56,6 +56,7 @@ const (
 	ConstraintContainerRuntime Constraint = "container_runtime"
 	ConstraintNetworkEgress    Constraint = "network_egress"
 	ConstraintResourceLimits   Constraint = "resource_limits"
+	ConstraintDiskLimit        Constraint = "disk_limit"
 	ConstraintStream           Constraint = "stream"
 	ConstraintSignal           Constraint = "signal"
 	ConstraintMemory           Constraint = "memory"
@@ -197,6 +198,12 @@ type Requirements struct {
 	// RequireResourceLimits demands a node that actually enforces
 	// Spec.ResourceLimits rather than ignoring them.
 	RequireResourceLimits bool
+	// RequireDiskLimit demands a node that holds a workload to
+	// ResourceLimits.DiskMB (Task 20405). Separate from RequireResourceLimits
+	// because the two come apart: a remote agent below protocol v20 enforces
+	// CPU and memory in its container and refuses a disk limit, so routing a
+	// disk-limited spec there would be a dispatch the device turns down.
+	RequireDiskLimit bool
 	// RequireImageOverride demands a node that honours Spec.Image, i.e. that
 	// a per-project sandbox can choose its own toolchain there.
 	//
@@ -439,8 +446,8 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 		// real remedy.
 		return &PlacementError{Constraint: rej.Constraint, Rejections: []Rejection{rej}, Considered: 1}
 	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
-		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintVirtualization,
-		ConstraintKernelIsolation, ConstraintEgressScope:
+		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintDiskLimit,
+		ConstraintVirtualization, ConstraintKernelIsolation, ConstraintEgressScope:
 		// These are capability gaps, not policy ones — but on an un-isolated
 		// executor the remedy is identical to the policy case ("bind this
 		// project to a sandbox"), and it is the remedy, not the taxonomy, that
@@ -564,6 +571,10 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	}
 	if req.RequireResourceLimits && !caps.SupportsResourceLimits {
 		return no(ConstraintResourceLimits, "does not enforce resource limits")
+	}
+	if req.RequireDiskLimit && !caps.DiskEnforcement.Enforced() {
+		return no(ConstraintDiskLimit, "cannot hold a workload to a disk limit "+
+			"(.cloop/sandbox.yaml sets resources.disk); %s", DiskEnforcementRemedy(c.Executor))
 	}
 	if req.RequireImageOverride && !caps.SupportsImageOverride {
 		return no(ConstraintImageOverride, "cannot run a per-project sandbox image "+

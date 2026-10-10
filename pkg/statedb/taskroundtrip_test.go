@@ -28,6 +28,9 @@ var notPlanTaskColumns = map[string]string{
 	"ChainInput": "derived: a copy of the chained predecessor's output, up to 16 MiB, which the " +
 		"orchestrator reads again when it dispatches the chained task (ensureChainInput) rather " +
 		"than rewriting it into every save",
+	"Stop": "transient: set by whoever settles a run for the one save that records the end (Task 20405), " +
+		"and read by that save's task.finish row; the durable account is the note written beside it, " +
+		"which Annotations keeps",
 	"Quarantine": "task_quarantine, written only by the failover that marks a suspected node killer and " +
 		"deleted only by the explicit reset that releases it (Task 20391); the readers join it in, and " +
 		"neither SaveState nor UpsertTask writes it, so a run saving a copy loaded before the mark can " +

@@ -83,6 +83,18 @@ func EventFor(oc Outcome) (row state.EventRow, details map[string]any, ok bool) 
 			Message:   msg,
 		}, details, true
 	case ActionRequeued:
+		if st := oc.Stop; st != nil && st.Cause != "" {
+			// What stopped the run, as numbers beside the sentence (Task
+			// 20405).
+			if details == nil {
+				details = map[string]any{}
+			}
+			details["stop"] = st.Cause
+			if st.Cause == pm.StopDiskLimit {
+				details["disk_used_mb"] = st.DiskUsedMB
+				details["disk_limit_mb"] = st.DiskLimitMB
+			}
+		}
 		return state.EventRow{
 			Type:      state.EventTaskStatusChange,
 			TaskID:    oc.TaskID,

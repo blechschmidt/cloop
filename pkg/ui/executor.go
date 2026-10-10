@@ -594,6 +594,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		// The executor enforces the image policy too, and it is the layer that
 		// verifies signatures — so a denial can surface here and not above.
 		auditImageDenial(workDir, err)
+		// And a workspace already over its disk limit (Task 20405).
+		journalDiskLimitRefusal(workDir, err)
 		return nil, executor.Handle{}, err
 	}
 	egress.bindHandle(ex, handle.ID)
@@ -891,6 +893,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	res, runErr := executor.Run(ctx, ex, spec)
 	if runErr != nil {
 		auditImageDenial(workDir, runErr)
+		journalDiskLimitRefusal(workDir, runErr)
 	}
 	return res.Output, runErr
 }

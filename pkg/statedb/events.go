@@ -208,6 +208,17 @@ const (
 	// the cap — is the hub's, and the effect, a task that failed or will not
 	// run, is what the developer sees.
 	EventFailover EventType = "failover"
+
+	// EventDiskLimit records a run stopped because its workspace grew past
+	// its disk limit — .cloop/sandbox.yaml resources.disk or an operator's
+	// disk ceiling — or a start refused because the workspace was already
+	// over it (Task 20405). The message names both sizes and how to raise the
+	// limit; the details carry them as numbers.
+	//
+	// On the project's journal because the cause is a number the developer
+	// may never have seen — a ceiling set on the hub — and the effect, a run
+	// that stopped mid-task, is what they see.
+	EventDiskLimit EventType = "disk_limit"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

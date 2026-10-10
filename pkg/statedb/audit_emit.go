@@ -670,6 +670,16 @@ func taskFinishEvent(e taskLifecycleEdge, projectPath string) *AuditEvent {
 	if t.WriteBackCommit != "" {
 		payload["write_back_commit"] = t.WriteBackCommit
 	}
+	// Why the execution was ended from outside the run, when the party that
+	// settled it knew (Task 20405): the cause as a field, so "which tasks were
+	// stopped at their disk limit" is a query rather than a text search.
+	if s := t.Stop; s != nil && s.Cause != "" {
+		payload["stop"] = s.Cause
+		if s.Cause == pm.StopDiskLimit {
+			payload["disk_used_mb"] = s.DiskUsedMB
+			payload["disk_limit_mb"] = s.DiskLimitMB
+		}
+	}
 	return &AuditEvent{
 		Actor:      "system",
 		EventType:  string(auditaction.ActionTaskFinish),
@@ -692,6 +702,11 @@ const maxExitReason = 400
 func taskExitReason(t *pm.Task, outcome string) string {
 	if t.Abort != nil && t.Abort.Reason != "" {
 		return truncateReason("provider abort: " + t.Abort.Reason)
+	}
+	// A stop from outside the run is the reason whatever status it left: the
+	// execution ended because its executor ended it.
+	if s := t.Stop; s != nil && s.Detail != "" {
+		return truncateReason(s.Cause + ": " + s.Detail)
 	}
 	switch outcome {
 	case string(pm.TaskTimedOut):

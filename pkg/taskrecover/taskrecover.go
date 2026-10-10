@@ -104,6 +104,12 @@ type Outcome struct {
 	// 20365), when one was found for this execution; nil when the agent's own
 	// report decided it.
 	Verdict *Verdict
+	// Stop is set on a re-queue caused by a stop from outside the run (Task
+	// 20405).
+	Stop *pm.TaskStop
+
+	// stop is what ended the run, carried to requeue.
+	stop *Stop
 }
 
 // Reconcile repairs every task in the plan left in_progress by a run that no
@@ -115,6 +121,26 @@ type Outcome struct {
 //
 // The caller must have established that no process is executing this project.
 func Reconcile(workDir string, plan *pm.Plan) []Outcome {
+	return ReconcileStopped(workDir, plan, nil)
+}
+
+// Stop names what ended a run from outside it, when the party settling the run
+// knows (Task 20405) — its executor stopped it at its disk limit.
+type Stop struct {
+	// Reason is the clause a re-queued task's note and journal row give in
+	// place of "the agent was interrupted before it reported an outcome".
+	Reason string
+	// Task is set on each task re-queued for it, for the save that records
+	// the re-queue: its task.finish row carries the cause as fields.
+	Task pm.TaskStop
+}
+
+// ReconcileStopped is Reconcile for a run stopped from outside. What the
+// orchestrator decided and what the agent finished stand exactly as Reconcile
+// has them; a task the run had not finished goes back to pending for stop's
+// reason, noted by cloop rather than inferred from its transcript. A nil stop
+// is Reconcile.
+func ReconcileStopped(workDir string, plan *pm.Plan, stop *Stop) []Outcome {
 	if plan == nil {
 		return nil
 	}
@@ -123,14 +149,14 @@ func Reconcile(workDir string, plan *pm.Plan) []Outcome {
 		if t == nil || t.Status != pm.TaskInProgress {
 			continue
 		}
-		outcomes = append(outcomes, reconcileTask(workDir, t))
+		outcomes = append(outcomes, reconcileTask(workDir, t, stop))
 	}
 	return outcomes
 }
 
 // reconcileTask decides the fate of a single stranded task.
-func reconcileTask(workDir string, t *pm.Task) Outcome {
-	out := Outcome{TaskID: t.ID, Title: t.Title}
+func reconcileTask(workDir string, t *pm.Task, stop *Stop) Outcome {
+	out := Outcome{TaskID: t.ID, Title: t.Title, stop: stop}
 
 	// The orchestrator's verdict outranks the agent's report: it is what the
 	// run would have stored had it lived (Task 20365).
@@ -356,6 +382,10 @@ func SettleFromVerdicts(workDir string, plan *pm.Plan) []Outcome {
 }
 
 // requeue resets a genuinely unfinished task so it runs again.
+//
+// A run stopped from outside gives its own reason instead of the transcript's,
+// unless the orchestrator's verdict decided the re-queue: that decision came
+// first and still explains it.
 func requeue(t *pm.Task, out Outcome, reason string) Outcome {
 	t.Status = pm.TaskPending
 	t.StartedAt = nil
@@ -365,6 +395,13 @@ func requeue(t *pm.Task, out Outcome, reason string) Outcome {
 	author := "ai"
 	if out.Verdict != nil {
 		author = "cloop"
+	}
+	if s := out.stop; s != nil && out.Verdict == nil && s.Reason != "" {
+		reason = s.Reason
+		author = "cloop"
+		ts := s.Task
+		t.Stop = &ts
+		out.Stop = &ts
 	}
 	pm.AddAnnotation(t, author, fmt.Sprintf(
 		"Reset to pending after an interrupted run: %s.", reason))

@@ -2,10 +2,12 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -135,6 +137,7 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 	if err := s.startAutoResumeRun(workDir); err != nil {
 		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not restart cap-paused run",
 			map[string]interface{}{"project": workDir, "error": err.Error()})
+		s.repauseIfOverDiskLimit(workDir, err)
 		return false
 	}
 
@@ -150,6 +153,32 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 		})
 	s.auditAutoResume(workDir, reason, resumesAt)
 	return true
+}
+
+// repauseIfOverDiskLimit gives a cap pause whose resume was refused because
+// the workspace is over its disk limit (Task 20405) the pause that actually
+// holds it. Left as a cap pause, every sweep would try again — and be refused,
+// and journal the refusal — while the badge kept saying the subscription was
+// the reason; a disk_limit pause is not auto-resumable, so it waits for the
+// person who frees the space or raises the limit.
+func (s *Server) repauseIfOverDiskLimit(workDir string, err error) {
+	var overLimit *executor.DiskLimitError
+	if !errors.As(err, &overLimit) {
+		return
+	}
+	st, lerr := state.Load(workDir)
+	if lerr != nil || st == nil || st.Status != "paused" || !st.PauseReason.AutoResumable(s.clock()) {
+		return
+	}
+	st.SetPaused(diskLimitPause(overLimit.Breach))
+	if serr := st.SaveDirect(); serr != nil {
+		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not record the disk-limit pause",
+			map[string]interface{}{"project": workDir, "error": serr.Error()})
+		return
+	}
+	s.broadcastStateDiff(workDir, st)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
 }
 
 // auditAutoResume records that a machine, not a person, started this run.

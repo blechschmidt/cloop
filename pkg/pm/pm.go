@@ -294,6 +294,32 @@ type Task struct {
 	// nothing else. A run's save holds a copy of the plan loaded before the
 	// mark existed, and must be able to neither write it back nor away.
 	Quarantine *TaskQuarantine `json:"quarantine,omitempty"`
+	// Stop says why this task's execution was ended from outside its run, set
+	// by whoever settles the run for the one save that records the end — the
+	// hub, for a workload its executor stopped at its disk limit (Task 20405).
+	// It is what that save's task.finish row carries as structured fields.
+	//
+	// Never persisted, and not a plan_tasks column: the durable account is the
+	// note written beside it, which the task keeps; this exists only so the
+	// terminal audit row can say "disk_limit" and both sizes as fields an
+	// auditor can query, rather than as prose.
+	Stop *TaskStop `json:"-"`
+}
+
+// StopDiskLimit is TaskStop.Cause for an execution its executor stopped
+// because the workspace grew past its disk limit.
+const StopDiskLimit = "disk_limit"
+
+// TaskStop is why an execution was ended from outside its run.
+type TaskStop struct {
+	// Cause is the machine-readable reason: StopDiskLimit.
+	Cause string
+	// Detail is the sentence naming it, with its numbers.
+	Detail string
+	// DiskUsedMB and DiskLimitMB are the measured workspace and the limit it
+	// was held to, for a disk-limit stop.
+	DiskUsedMB  int64
+	DiskLimitMB int
 }
 
 // BackgroundWork records processes an agent left running after it reported the

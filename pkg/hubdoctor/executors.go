@@ -169,6 +169,7 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 		"secret_files":    caps.SupportsSecretFiles,
 		"network_egress":  caps.NetworkEgress,
 		"resource_limits": caps.SupportsResourceLimits,
+		"disk_limits":     caps.DiskEnforcement.Describe(),
 	}
 	if caps.MaxConcurrent > 0 {
 		details["max_concurrent"] = caps.MaxConcurrent

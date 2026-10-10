@@ -507,6 +507,10 @@ func countRunSettled(ex executor.Executor, st executor.Status, stErr error, stop
 func settledReason(st executor.Status, stErr error, stopped bool) string {
 	requestedKill := stErr == nil && st.State == executor.StateKilled && !unrequestedKill(st)
 	switch {
+	case stErr == nil && st.Outcome == executor.OutcomeDiskLimit:
+		// Ahead of the kill readings: it is a SIGKILL with exit 137, and
+		// neither an operator's stop nor a crash (Task 20405).
+		return hubmetrics.FailDiskLimit
 	case stopped || requestedKill:
 		return hubmetrics.FailCancelled
 	case stErr == nil && st.State == executor.StateExited && st.ExitCode == 0:

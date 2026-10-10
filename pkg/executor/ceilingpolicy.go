@@ -240,6 +240,14 @@ func BoundSpec(spec *Spec, projectPath, executorID string) []Clamp {
 		spec.ResourceLimits, c = project.applyStated(spec.ResourceLimits, CeilingSourceProject)
 		clamps = append(clamps, c...)
 	}
+	// A disk request a ceiling lowered is the ceiling's limit now, and the
+	// driver that stops the workload at it has to say whom to ask for more.
+	for _, c := range clamps {
+		if c.Resource == "disk" {
+			MarkDiskLimitFromCeiling(spec)
+			break
+		}
+	}
 
 	// The workspace fetch is the one limit no driver applies, because it is
 	// enforced before the workload starts: the provisioner measures the tree it
@@ -256,16 +264,34 @@ func BoundSpec(spec *Spec, projectPath, executorID string) []Clamp {
 	return clamps
 }
 
-// CeilingUnenforceable reports that a ceiling bounded this spec but ex cannot
-// hold it to the result.
+// CeilingUnenforceable reports that a ceiling in force for this workload binds
+// something ex will not hold it to.
 //
-// Remote agents advertise SupportsResourceLimits false — they report the
-// device's capacity for placement and do not confine a workload to a share of
-// it — so a spec dispatched to one carries limits nothing will apply. That is a
-// pre-existing property of the driver, not something a ceiling introduces, but
-// it changes what an operator is entitled to believe: having set a cap, they
-// will assume it holds everywhere. It does not, and this is what lets the
-// caller say so rather than leave them to assume.
-func CeilingUnenforceable(ex Executor, clamps []Clamp) bool {
-	return len(clamps) > 0 && ex != nil && !ex.Capabilities().SupportsResourceLimits
+// Two ways, and they differ in what triggers them. A driver that enforces no
+// limits at all — the host-process driver, a remote agent running payloads on
+// its host — carries whatever a ceiling lowered on the spec and applies none
+// of it; that is reported when a ceiling actually lowered something (clamps).
+// A disk ceiling is reported whenever one is in force on a driver that does
+// not bound disk (Task 20405), clamp or no clamp: the ceiling exists for the
+// workload that asked for nothing, which is the one no clamp is ever recorded
+// for — and before this an executor capped at 20 GB was capped at nothing and
+// told nothing.
+//
+// It changes nothing about the run. Having set a cap, an operator will assume
+// it holds everywhere; this is what lets the caller say where it does not.
+func CeilingUnenforceable(ex Executor, ceiling ResourceCeiling, clamps []Clamp) bool {
+	if ex == nil {
+		return false
+	}
+	caps := ex.Capabilities()
+	if len(clamps) > 0 && !caps.SupportsResourceLimits {
+		return true
+	}
+	return DiskCeilingUnenforceable(caps, ceiling)
+}
+
+// DiskCeilingUnenforceable reports a disk ceiling in force on a driver that
+// does not bound disk.
+func DiskCeilingUnenforceable(caps Capabilities, ceiling ResourceCeiling) bool {
+	return ceiling.DiskMB > 0 && !caps.DiskEnforcement.Enforced()
 }

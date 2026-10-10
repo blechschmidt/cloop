@@ -92,6 +92,13 @@ const (
 	// why the run stopped there. A human decides: bring the executor back or
 	// bind the project to another, then press Run.
 	CodeExecutorLost Code = "executor_lost"
+	// CodeDiskLimit is a run whose executor stopped it because its workspace
+	// grew past its disk limit — .cloop/sandbox.yaml resources.disk, or an
+	// operator's disk ceiling (Task 20405). The detail names both sizes. The
+	// run is not retried: the task it was running goes back to pending, and a
+	// human decides — free space in the workspace or raise the limit, then
+	// press Run. A workspace still over the limit is refused at the next start.
+	CodeDiskLimit Code = "disk_limit"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -120,6 +127,7 @@ var codeLabels = map[Code]string{
 	CodeUncommittedWork:   "work left uncommitted",
 	CodeDiskLow:           "disk space low",
 	CodeExecutorLost:      "executor lost",
+	CodeDiskLimit:         "workspace over its disk limit",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -137,7 +145,7 @@ func Codes() []Code {
 		CodeUsageCap, CodeBudget, CodeTokenBudget, CodeStepLimit,
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
-		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost,
+		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost, CodeDiskLimit,
 	}
 }
 

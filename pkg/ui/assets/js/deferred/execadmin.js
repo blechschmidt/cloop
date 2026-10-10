@@ -866,6 +866,7 @@
       const sub = document.getElementById('execLimitsSub');
       if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
       _execLimitsWarn('');
+      _execLimitsUntouch();
       _execLimitsFill({ceiling: {}, fleet: {}});
       openOverlay('executor-limits-overlay', {dismiss: closeExecutorLimits});
 
@@ -886,6 +887,26 @@
       execLimitsTarget = null;
     }
 
+    // The dialog opens before the stored ceiling arrives, so a field typed
+    // into in between must not be overwritten by it — the stored value, or a
+    // blank, would then be what Save sends.
+    const _execLimitsFields = ['execLimitsCPU', 'execLimitsMemory', 'execLimitsDisk', 'execLimitsPIDs'];
+    function _execLimitsUntouch() {
+      _execLimitsFields.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.dataset.touched = '';
+        if (!el.dataset.watched) {
+          el.dataset.watched = '1';
+          el.addEventListener('input', () => { el.dataset.touched = '1'; });
+        }
+      });
+    }
+    function _execLimitsSet(id, value) {
+      const el = document.getElementById(id);
+      if (el && el.dataset.touched !== '1') el.value = value;
+    }
+
     function _execLimitsWarn(text) {
       const el = document.getElementById('execLimitsWarn');
       if (!el) return;
@@ -896,14 +917,10 @@
 
     function _execLimitsFill(d) {
       const c = (d && d.ceiling) || {};
-      const cpu = document.getElementById('execLimitsCPU');
-      if (cpu) cpu.value = c.cpu_millis ? (c.cpu_millis / 1000) : '';
-      const mem = document.getElementById('execLimitsMemory');
-      if (mem) mem.value = _execFmtMB(c.memory_mb);
-      const disk = document.getElementById('execLimitsDisk');
-      if (disk) disk.value = _execFmtMB(c.disk_mb);
-      const pids = document.getElementById('execLimitsPIDs');
-      if (pids) pids.value = c.pids || '';
+      _execLimitsSet('execLimitsCPU', c.cpu_millis ? (c.cpu_millis / 1000) : '');
+      _execLimitsSet('execLimitsMemory', _execFmtMB(c.memory_mb));
+      _execLimitsSet('execLimitsDisk', _execFmtMB(c.disk_mb));
+      _execLimitsSet('execLimitsPIDs', c.pids || '');
 
       const hint = document.getElementById('execLimitsHint');
       if (hint) {
@@ -936,6 +953,12 @@
         _execLimitsWarn('This executor does not enforce resource limits: the ceiling will be recorded '
           + 'on each run’s spec but nothing will hold the workload to it. Bind projects to a container '
           + 'or Kubernetes executor for an enforced cap.');
+      } else if (d && ((d.effective || {}).disk_mb || 0) > 0 && !d.disk_enforcement) {
+        // Task 20405: limits enforced, disk not — a device on an agent older
+        // than protocol v20, or one running payloads on its host.
+        _execLimitsWarn('This executor does not hold a workload to a disk limit, so the disk ceiling '
+          + 'will not bound runs here; each run’s journal says so. Upgrade the device’s agent, or run '
+          + 'its payloads in a container.');
       }
     }
 
@@ -1480,7 +1503,7 @@
             <div class="form-group" style="flex:1">
               <label class="form-label" for="execLimitsDisk">Disk</label>
               <input class="form-input" id="execLimitsDisk" placeholder="uncapped" spellcheck="false">
-              <div class="form-hint">Bounds the workspace clone as well as scratch space.</div>
+              <div class="form-hint">Bounds the workspace. A container executor measures it while the workload runs and stops one that outgrows it, so a burst can overshoot by the time between samples.</div>
             </div>
             <div class="form-group" style="flex:1">
               <label class="form-label" for="execLimitsPIDs">Processes</label>

@@ -99,6 +99,7 @@ func (s *Server) handleClusterAutoResume(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.startAutoResumeRun(req.Project); err != nil {
+		s.repauseIfOverDiskLimit(req.Project, err)
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}

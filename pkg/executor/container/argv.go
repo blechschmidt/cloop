@@ -62,6 +62,10 @@ const (
 	// which is otherwise invisible: the network name alone does not say
 	// whether the workload was cut off from private address space.
 	LabelEgressScope = "cloop.egress_scope"
+	// LabelDiskLimit records the workspace's disk limit in MiB (Task 20405).
+	// No flag carries it — the limit is held by sampling the workspace — so
+	// without the label `inspect` could not say a sandbox has one.
+	LabelDiskLimit = "cloop.disk_limit_mb"
 )
 
 // Network modes.
@@ -172,6 +176,16 @@ type runRequest struct {
 	MemoryMB int
 	// PIDsLimit caps processes/threads; 0 = unset, -1 = explicitly unlimited.
 	PIDsLimit int
+	// DiskMB is the workspace's disk limit in MiB; 0 = unset. Nothing renders
+	// it into argv: no runtime flag bounds a bind mount, and --storage-opt
+	// size= bounds the writable layer, which is read-only here and is not
+	// where the work goes. The driver holds the workload to it by measuring
+	// the workspace (disklimit.go), and records it as LabelDiskLimit.
+	DiskMB int
+	// DiskLimitSource is where DiskMB came from: executor.DiskLimitFromSpec
+	// or executor.DiskLimitFromCeiling. It decides which remedy a refusal or
+	// a stop names.
+	DiskLimitSource string
 
 	// EnvNames are the variables to forward by name. Their values must be
 	// present in Env and are never rendered into argv.

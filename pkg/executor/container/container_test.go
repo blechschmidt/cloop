@@ -231,19 +231,38 @@ func TestBuildRequest_FallsBackToExecutorDefaults(t *testing.T) {
 	}
 }
 
-func TestBuildRequest_RejectsDiskQuota(t *testing.T) {
-	// Accepting a limit the driver cannot enforce is worse than refusing it:
-	// the caller would believe a guarantee it does not have.
+func TestBuildRequest_AcceptsADiskLimit(t *testing.T) {
+	// It used to be refused outright, because --storage-opt size= bounds the
+	// writable layer, which is read-only here and not where the work goes.
+	// The limit is now held by sampling the workspace (Task 20405), so it is
+	// carried on the request and recorded on the container, and nothing about
+	// it reaches argv.
+	executor.ResetResourceCeiling()
+	t.Cleanup(executor.ResetResourceCeiling)
 	ex := fakeExecutor(t, Options{})
-	_, err := ex.buildRequest(executor.Spec{
+	req, err := ex.buildRequest(executor.Spec{
 		Argv:           []string{"x"},
 		ResourceLimits: executor.ResourceLimits{DiskMB: 100},
 	}, "/srv/proj", nil)
-	if err == nil {
-		t.Fatal("expected a disk quota request to be rejected")
+	if err != nil {
+		t.Fatalf("a disk limit was refused: %v", err)
 	}
-	if !errors.Is(err, executor.ErrUnsupported) {
-		t.Fatalf("error should wrap ErrUnsupported so callers can branch on it, got %v", err)
+	if req.DiskMB != 100 || req.DiskLimitSource != executor.DiskLimitFromSpec {
+		t.Fatalf("DiskMB = %d from %q, want 100 from the spec", req.DiskMB, req.DiskLimitSource)
+	}
+	if req.Labels[LabelDiskLimit] != "100" {
+		t.Fatalf("label %s = %q, want 100", LabelDiskLimit, req.Labels[LabelDiskLimit])
+	}
+	// /srv/proj does not exist here, so no owner was read for --user.
+	req.User = "1000:1000"
+	built, err := buildRunArgs(req)
+	if err != nil {
+		t.Fatalf("buildRunArgs: %v", err)
+	}
+	for _, a := range built.Args {
+		if strings.Contains(a, "storage-opt") {
+			t.Fatalf("argv carries %q: the writable layer is not where the work goes", a)
+		}
 	}
 }
 

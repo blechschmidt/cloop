@@ -107,19 +107,42 @@ func logResourceClamps(workDir string, clamps []executor.Clamp) {
 // applies them. Silence here would be the failure mode `min_agent_build`'s
 // banner exists to prevent — an operator believing a policy is in force
 // everywhere because they set it once.
+//
+// A disk ceiling gets its own line (Task 20405), and on every dispatch it is in
+// force for rather than only when it lowered a stated request: its whole job is
+// the workload that stated nothing, and a driver that bounds CPU and memory can
+// still leave disk unbounded — the host-process driver, or a device whose agent
+// predates protocol v20.
 func logUnenforceableCeiling(ex executor.Executor, workDir string, clamps []executor.Clamp) {
-	if !executor.CeilingUnenforceable(ex, clamps) {
+	if ex == nil {
 		return
 	}
-	state.LogEvent(workDir, state.EventRow{
-		Type: state.EventResourceCeiling,
-		Step: state.NoStep,
-		Message: fmt.Sprintf(
-			"executor %q (%s) does not enforce resource limits, so the ceiling was applied to "+
-				"the spec but will not bound this run; bind the project to a container or "+
-				"Kubernetes executor for an enforced cap",
-			ex.ID(), ex.Kind()),
-	})
+	ceiling := executor.CeilingFor(workDir, ex.ID())
+	if !executor.CeilingUnenforceable(ex, ceiling, clamps) {
+		return
+	}
+	caps := ex.Capabilities()
+	if len(clamps) > 0 && !caps.SupportsResourceLimits {
+		state.LogEvent(workDir, state.EventRow{
+			Type: state.EventResourceCeiling,
+			Step: state.NoStep,
+			Message: fmt.Sprintf(
+				"executor %q (%s) does not enforce resource limits, so the ceiling was applied to "+
+					"the spec but will not bound this run; bind the project to a container or "+
+					"Kubernetes executor for an enforced cap",
+				ex.ID(), ex.Kind()),
+		})
+	}
+	if executor.DiskCeilingUnenforceable(caps, ceiling) {
+		state.LogEvent(workDir, state.EventRow{
+			Type: state.EventResourceCeiling,
+			Step: state.NoStep,
+			Message: fmt.Sprintf(
+				"executor %q (%s) does not hold a workload to a disk limit, so the disk ceiling of "+
+					"%s will not bound this run; %s",
+				ex.ID(), ex.Kind(), executor.FormatMB(ceiling.DiskMB), executor.DiskEnforcementRemedy(ex)),
+		})
+	}
 }
 
 // lookupProjectResourceCeiling reads the per-project ceiling from the control

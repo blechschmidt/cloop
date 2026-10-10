@@ -196,6 +196,13 @@ func (r *Resolved) Requirements() executor.Requirements {
 	if s.Resources.CPU > 0 || s.Resources.Memory != "" || s.Resources.PIDs > 0 || s.Resources.Disk != "" {
 		req.RequireResourceLimits = true
 	}
+	if mb, err := config.ParseDiskMB(s.Resources.Disk); err == nil && mb > 0 {
+		// Its own requirement, because enforcing the other limits does not
+		// imply enforcing this one: a device whose agent predates protocol
+		// v20 bounds CPU and memory and refuses a disk limit (Task 20405).
+		// `disk: 0` sets no limit, so it asks for no enforcement.
+		req.RequireDiskLimit = true
+	}
 	if s.Capabilities.Network != "" {
 		// The grant says the project is *allowed* egress. The executor still
 		// has to have some. Requiring it here is what turns "your grant exists
@@ -323,11 +330,13 @@ func (r *Resolved) ApplyTo(spec *executor.Spec, projectPath string, grants Grant
 		spec.ResourceLimits.DiskMB = mb
 		// The same number in two places, because two different mechanisms
 		// enforce it and neither covers the other. ResourceLimits.DiskMB
-		// becomes the volume's own ceiling — a Kubernetes emptyDir sizeLimit,
-		// which the kubelet enforces by evicting the Pod. Workspace.SizeLimitMB
-		// is checked by the provisioner right after the fetch, which is what
-		// turns "the repository is bigger than the allowance" into a legible
-		// refusal instead of a Pod that vanishes mid-run.
+		// bounds the workspace while the workload runs — a Kubernetes emptyDir
+		// sizeLimit, which the kubelet enforces by evicting the Pod, or the
+		// container driver's sampling of the workspace, which stops the
+		// workload (Task 20405). Workspace.SizeLimitMB is checked by the
+		// provisioner right after the fetch, which is what turns "the
+		// repository is bigger than the allowance" into a legible refusal
+		// instead of a workload that is stopped mid-run.
 		//
 		// Only this field is written. The caller sets spec.Workspace itself —
 		// the kind, the repo, the ref and the grant are all the hub's decisions

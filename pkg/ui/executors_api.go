@@ -1781,6 +1781,16 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		return
 	}
 
+	// The workspace is already over its disk limit (Task 20405): a 409, for
+	// the reason the policy refusals above are one — the request is well
+	// formed, and what conflicts is the tree with the limit. Its remedy says
+	// whether to free space or whom to ask for more.
+	var overLimit *executor.DiskLimitError
+	if errors.As(err, &overLimit) {
+		writeSandboxDenied(w, "workspace_over_disk_limit", overLimit.Error(), overLimit.Breach.Remedy(), nil)
+		return
+	}
+
 	var grantMissing *executor.WorkspaceGrantError
 	if errors.As(err, &grantMissing) {
 		writeSandboxDenied(w, "workspace_grant_missing", grantMissing.Error(),

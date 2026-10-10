@@ -123,8 +123,9 @@ type Resources struct {
 	Memory string `yaml:"memory"`
 	// PIDs caps processes/threads; 0 = executor default.
 	PIDs int `yaml:"pids"`
-	// Disk is a size string bounding the workspace and scratch space; empty =
-	// executor default.
+	// Disk is a size string bounding the workspace — the tree the workload
+	// works in, its .cloop/ as it stood at the start excluded; empty = no limit
+	// of the project's own (an operator's disk ceiling may still set one).
 	//
 	// It is the one resource key that also bounds something the project does
 	// not control: the size of the tree an executor fetches for it. A git

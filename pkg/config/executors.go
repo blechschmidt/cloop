@@ -162,8 +162,8 @@ func ClampMemoryMB(s string) (mb int, clamped bool, err error) {
 	return clampSizeMB(ParseMemoryMB, s, ContainerMemoryMBUpper)
 }
 
-// ClampDiskMB is ClampMemoryMB for the disk ceiling: the workspace/scratch
-// budget a project's .cloop/sandbox.yaml asks for.
+// ClampDiskMB is ClampMemoryMB for the disk ceiling: the workspace budget a
+// project's .cloop/sandbox.yaml asks for.
 //
 // It clamps for exactly the same reason. The author of a repo-committed file
 // does not know the hub's ceiling, and a run that will not start until they

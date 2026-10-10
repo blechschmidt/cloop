@@ -91,6 +91,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/internal/diskwatch"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
@@ -362,6 +363,9 @@ type Executor struct {
 	// revocations is the log of leases this executor has been told to give
 	// back, for the Secrets panel.
 	revocations *executor.RevocationLog
+	// diskPolicy is the disk watchdog's sampling schedule; the zero value is
+	// diskwatch.DefaultPolicy. A field so a test can sample in milliseconds.
+	diskPolicy diskwatch.Policy
 }
 
 // now is the driver's clock. A method rather than a direct time.Now() call so
@@ -418,6 +422,10 @@ type record struct {
 	// live container reported as killed. So intent and outcome are two fields.
 	killRequested bool
 	killReason    string
+	// diskBreach is the measurement the disk watchdog stopped this workload
+	// at (Task 20405), recorded with the kill intent and withdrawn with it.
+	// Status reports it as OutcomeDiskLimit once the workload is killed.
+	diskBreach *executor.DiskLimitBreach
 }
 
 // New returns a container executor, detecting the runtime described by opts.
@@ -542,7 +550,11 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
-		SharesHostFilesystem:   true,
+		// The workspace's disk limit is held by measuring it while the
+		// workload runs (disklimit.go): enforcement by sampling, with an
+		// overshoot of up to the write rate times the interval.
+		DiskEnforcement:      executor.DiskEnforcementSampled,
+		SharesHostFilesystem: true,
 		// NetworkEgress reports reachability, not permission: a filtered
 		// sandbox still has an interface and still reaches whatever the
 		// policy allows, so claiming false would misroute placement away
@@ -726,6 +738,20 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	if feature != nil {
 		req.ExtraMounts = append(req.ExtraMounts, feature.outMount(e.opts.SELinuxLabel))
 		req.Argv = feature.wrap(spec)
+	}
+
+	// The disk limit (Task 20405), measured before anything is provisioned
+	// for a workload that may not start: a tree already over it is refused
+	// naming both sizes and how to raise the limit. See disklimit.go.
+	disk := newDiskLimit(req, tree, feature)
+	var diskStart *diskwatch.Sample
+	if disk != nil {
+		var line string
+		diskStart, line, err = e.checkDiskAtStart(ctx, disk)
+		if err != nil {
+			return executor.Handle{}, err
+		}
+		prelude.WriteString(line)
 	}
 
 	// Provision and filter the network before anything can run on it. The
@@ -985,7 +1011,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		Image:     req.Image,
 		StartedAt: rec.startedAt,
 		Deadline:  deadline,
-		Meta:      handleMeta(e.rt.Name, feature),
+		// The disk limit rides with the handle, so a restarted hub resumes
+		// sampling the workload it adopts.
+		Meta: withDiskMeta(handleMeta(e.rt.Name, feature), disk),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this sandbox. Names and paths only — the credential
@@ -1000,6 +1028,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	pumpCtx, cancelPump := context.WithCancel(context.WithoutCancel(ctx))
 	rec.cancelPump = cancelPump
 	go e.pump(pumpCtx, rec)
+	// The disk watchdog shares the pump's lifetime: finish cancels both.
+	if disk != nil {
+		go e.watchDisk(pumpCtx, rec, disk, diskStart)
+	}
 
 	return executor.Handle{
 		ID:         rec.id,
@@ -1196,15 +1228,6 @@ func (e *Executor) buildRequestFor(spec executor.Spec, workDir, tree string, ext
 				"executor, which provision into a volume of their own",
 			executor.ErrUnsupported, executor.KindContainer, workDir)
 	}
-	if spec.ResourceLimits.DiskMB > 0 {
-		// --storage-opt size= only works on a minority of storage-driver
-		// configurations (overlay2 on xfs with pquota). Accepting the limit
-		// and not enforcing it would be worse than refusing it.
-		return runRequest{}, fmt.Errorf(
-			"%w: writable-layer disk quotas need a storage driver that supports them; "+
-				"bound disk usage on the host filesystem instead", executor.ErrUnsupported)
-	}
-
 	handleID := newHandleID()
 	name := ContainerName(workDir, handleID)
 
@@ -1317,6 +1340,12 @@ func (e *Executor) buildRequestFor(spec executor.Spec, workDir, tree string, ext
 	if spec.ResourceLimits.PIDs > 0 {
 		req.PIDsLimit = spec.ResourceLimits.PIDs
 	}
+	// The workspace's disk limit (Task 20405). There is no executor-level
+	// default to resolve it against, so the request is the starting point.
+	// It is held by sampling the workspace rather than by a runtime flag:
+	// --storage-opt size= bounds the writable layer, which is read-only here
+	// and is not where the work goes. See disklimit.go.
+	req.DiskMB = spec.ResourceLimits.DiskMB
 
 	// Then the operator's ceiling, which is not a default and so gets the last
 	// word over both of the lines above (Task 20301).
@@ -1332,7 +1361,8 @@ func (e *Executor) buildRequestFor(spec executor.Spec, workDir, tree string, ext
 	// A resolved value of zero is the case the ceiling exists for: no request
 	// and no configured default is an unbounded container, which is precisely
 	// what a fleet-wide cap is meant to stop. BoundLimit fills those in.
-	if ceiling := executor.CeilingFor(spec.WorkDir, e.id); !ceiling.IsZero() {
+	ceiling := executor.CeilingFor(spec.WorkDir, e.id)
+	if !ceiling.IsZero() {
 		req.CPUs = executor.BoundCPUs(req.CPUs, ceiling.CPUMillis)
 		req.MemoryMB = executor.BoundLimit(req.MemoryMB, ceiling.MemoryMB)
 		// A negative PIDsLimit is the runtimes' "unlimited" sentinel, which an
@@ -1340,6 +1370,14 @@ func (e *Executor) buildRequestFor(spec executor.Spec, workDir, tree string, ext
 		// BoundLimit reads it as "nothing has bounded this yet" and returns the
 		// cap, which is the intended reading.
 		req.PIDsLimit = executor.BoundLimit(req.PIDsLimit, ceiling.PIDs)
+		// Disk exactly as memory: a stated request is lowered to the cap and
+		// an unstated one is given it. Before this, the Executors panel's Disk
+		// field capped an executor at nothing, and said nothing.
+		req.DiskMB = executor.BoundLimit(req.DiskMB, ceiling.DiskMB)
+	}
+	if req.DiskMB > 0 {
+		req.DiskLimitSource = executor.DiskLimitSourceOf(spec, req.DiskMB, ceiling)
+		req.Labels[LabelDiskLimit] = strconv.Itoa(req.DiskMB)
 	}
 
 	// User mapping. Rootless podman maps the invoking user with keep-id, so
@@ -1521,6 +1559,10 @@ func (e *Executor) inspectState(ctx context.Context, name string) inspectDetail 
 	return inspectDetail{OOMKilled: st.OOMKilled, ExitCode: st.ExitCode, Found: true}
 }
 
+// oomKilledMessage is classifyExit's account of a container the kernel's OOM
+// killer took, which a disk-limit stop racing it must not claim.
+const oomKilledMessage = "the workload exceeded its memory limit and was killed by the kernel OOM killer"
+
 // classifyExit maps a container exit code onto an executor state plus a
 // human explanation.
 //
@@ -1531,7 +1573,7 @@ func (e *Executor) inspectState(ctx context.Context, name string) inspectDetail 
 func classifyExit(code int, detail inspectDetail) (executor.State, string) {
 	switch {
 	case detail.OOMKilled:
-		return executor.StateKilled, "the workload exceeded its memory limit and was killed by the kernel OOM killer"
+		return executor.StateKilled, oomKilledMessage
 	case code == 0:
 		return executor.StateExited, ""
 	case code == 125:
@@ -1711,6 +1753,7 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 	if rec.feature != nil && rec.state.Terminal() {
 		st.WriteBack = rec.feature.writeBack()
 	}
+	rec.applyDiskOutcome(&st)
 	return st, nil
 }
 
@@ -1737,7 +1780,7 @@ func (e *Executor) HandleStatuses(ctx context.Context) ([]executor.Status, error
 	out := make([]executor.Status, 0, len(recs))
 	for _, rec := range recs {
 		rec.mu.Lock()
-		out = append(out, executor.Status{
+		st := executor.Status{
 			HandleID:   rec.id,
 			ExecutorID: e.id,
 			State:      rec.state,
@@ -1745,7 +1788,9 @@ func (e *Executor) HandleStatuses(ctx context.Context) ([]executor.Status, error
 			StartedAt:  rec.startedAt,
 			FinishedAt: rec.finishedAt,
 			Error:      rec.errMsg,
-		})
+		}
+		rec.applyDiskOutcome(&st)
+		out = append(out, st)
 		rec.mu.Unlock()
 	}
 	return out, nil
@@ -2273,6 +2318,20 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 			errMsg = rec.killReason
 		case rec.errMsg != "":
 			errMsg = rec.errMsg
+		}
+		// Another of this driver's stops — a timeout, a Stop, a revocation —
+		// is the cause on record, whatever the disk watchdog also wanted.
+		rec.diskBreach = nil
+	} else if rec.diskBreach != nil {
+		// The disk stop is credited only for the death it causes: a SIGKILL
+		// (exit 137) the OOM killer did not claim. A workload that ended on
+		// its own before the stop landed keeps its own outcome — a clean exit
+		// must not read as stopped at its limit.
+		if exitCode == 137 && errMsg != oomKilledMessage {
+			state = executor.StateKilled
+			errMsg = diskStopReason(*rec.diskBreach)
+		} else {
+			rec.diskBreach = nil
 		}
 	}
 	rec.state = state

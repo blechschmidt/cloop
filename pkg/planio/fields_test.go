@@ -43,6 +43,8 @@ var notInterchanged = map[string]string{
 	"Quarantine": "the exporting hub's failover evidence about its own executors, which only that hub's " +
 		"explicit reset clears; a plan file must not be able to hold a task back on the importing hub, or release one",
 	"ChainInput": "derived at dispatch from the chained predecessor's output",
+	"Stop": "never stored: it carries one execution's stop into the save that records it (Task 20405); " +
+		"the note written beside it travels as an annotation",
 }
 
 // TestEveryTaskFieldIsInterchangedOrExcused round-trips a task with every

@@ -150,7 +150,7 @@ func TestCodesOrder(t *testing.T) {
 		"usage_cap", "budget", "token_budget", "step_limit",
 		"approval", "abort", "cancelled", "plan_only",
 		"idle", "operator", "stale", "state_not_persisted",
-		"uncommitted_work", "disk_low", "executor_lost",
+		"uncommitted_work", "disk_low", "executor_lost", "disk_limit",
 	}
 	got := Codes()
 	if len(got) != len(want) {
@@ -189,6 +189,25 @@ func TestExecutorLostIsNotAutoResumable(t *testing.T) {
 	}
 	if got := (&Reason{Code: CodeExecutorLost}).Label(); got != "executor lost" {
 		t.Errorf("Label() = %q, want %q", got, "executor lost")
+	}
+}
+
+// TestDiskLimitWaitsForAHuman: a run stopped at its disk limit is not retried
+// — not by a timer, and not by a run still alive and waiting. Someone has to
+// free the space or raise the limit first, or the next start is refused.
+func TestDiskLimitWaitsForAHuman(t *testing.T) {
+	r := New(CodeDiskLimit, "the workspace grew to 70 MB, over its disk limit of 64 MB")
+	if r.AutoResumable(time.Now().Add(24 * time.Hour)) {
+		t.Error("a disk_limit pause resumes on its own")
+	}
+	if r.RunWaits() {
+		t.Error("a disk_limit pause claims a waiting run")
+	}
+	if got := r.Summary(time.UTC); got != r.Detail {
+		t.Errorf("Summary() = %q, want the detail %q", got, r.Detail)
+	}
+	if got := (&Reason{Code: CodeDiskLimit}).Label(); got != "workspace over its disk limit" {
+		t.Errorf("Label() = %q", got)
 	}
 }
 

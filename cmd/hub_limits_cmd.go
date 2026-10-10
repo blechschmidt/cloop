@@ -307,7 +307,7 @@ func init() {
 	}
 	hubLimitsSetCmd.Flags().Float64("cpu", 0, "core allowance ceiling (2 = two cores; 0 uncaps)")
 	hubLimitsSetCmd.Flags().String("memory", "", `memory ceiling ("2g", "512m"; 0 uncaps)`)
-	hubLimitsSetCmd.Flags().String("disk", "", `workspace and scratch ceiling ("10g"; 0 uncaps)`)
+	hubLimitsSetCmd.Flags().String("disk", "", `workspace ceiling ("10g"; 0 uncaps)`)
 	hubLimitsSetCmd.Flags().Int("pids", 0, "process/thread ceiling (0 uncaps)")
 
 	hubLimitsCmd.AddCommand(hubLimitsListCmd)

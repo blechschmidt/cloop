@@ -164,6 +164,10 @@ function _execCapChips(ex) {
     chips.push('<span class="exec-chip ' + (f[1] ? 'pos' : 'neg') + '">'
       + (f[1] ? '' : 'no ') + esc(f[0]) + '</span>');
   });
+  // How resources.disk is held here (Task 20405).
+  const de = caps.disk_enforcement;
+  chips.push('<span class="exec-chip ' + (de ? 'pos' : 'neg') + '">disk: '
+    + (de ? 'enforced (' + esc(de) + ')' : 'not supported') + '</span>');
   if (caps.shares_host_filesystem) {
     chips.push('<span class="exec-chip neg">host fs</span>');
   }

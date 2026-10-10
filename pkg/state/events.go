@@ -65,6 +65,7 @@ const (
 	EventCredentialRefused = statedb.EventCredentialRefused
 	EventEgress            = statedb.EventEgress
 	EventFailover          = statedb.EventFailover
+	EventDiskLimit         = statedb.EventDiskLimit
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
 )

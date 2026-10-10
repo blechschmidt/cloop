@@ -935,6 +935,7 @@ const pauseReasonLabels = {
   uncommitted_work: 'work left uncommitted',
   disk_low: 'disk space low',
   executor_lost: 'executor lost',
+  disk_limit: 'workspace over its disk limit',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

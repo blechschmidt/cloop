@@ -13,8 +13,10 @@ import (
 
 // seedDerived are the task fields a seed does not carry, because the device
 // derives them itself. ChainInput is json:"-" and rebuilt from the chained
-// predecessor's output when the orchestrator dispatches the task.
-var seedDerived = []string{"ChainInput"}
+// predecessor's output when the orchestrator dispatches the task. Stop is
+// json:"-" and stored nowhere: the hub sets it for the one save that records
+// a stopped execution (Task 20405).
+var seedDerived = []string{"ChainInput", "Stop"}
 
 // TestSeedCarriesEveryTaskField: a task arrives on the device as the hub holds
 // it, every field — an assignment, a sprint, a branch, a retry budget — and

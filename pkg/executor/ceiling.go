@@ -77,7 +77,7 @@ type ResourceCeiling struct {
 	CPUMillis int `json:"cpu_millis,omitempty"`
 	// MemoryMB caps resident memory in megabytes.
 	MemoryMB int `json:"memory_mb,omitempty"`
-	// DiskMB caps the writable-layer / scratch ceiling in megabytes.
+	// DiskMB caps the workspace's disk use in megabytes (Task 20405).
 	DiskMB int `json:"disk_mb,omitempty"`
 	// PIDs caps the number of processes/threads.
 	PIDs int `json:"pids,omitempty"`

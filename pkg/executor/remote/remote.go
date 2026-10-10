@@ -398,6 +398,9 @@ func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr 
 			caps.SupportsImageOverride = true
 			caps.SupportsSandboxBuild = true
 			caps.SupportsResourceLimits = true
+			// And the workspace's disk limit, which the device's container
+			// driver samples (Task 20405) — from protocol v20; see below.
+			caps.DiskEnforcement = executor.DiskEnforcementSampled
 		}
 	}
 	if sess := e.currentSession(); sess != nil {
@@ -468,6 +471,11 @@ func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr 
 		// nothing came back.
 		if !SupportsProjectResult(sess.Version()) {
 			caps.ReturnsProjectState = false
+		}
+		// An older agent's container driver refuses a disk limit outright,
+		// so placement must not route one there (MinDiskLimitVersion).
+		if !SupportsDiskLimit(sess.Version()) {
+			caps.DiskEnforcement = executor.DiskEnforcementNone
 		}
 	}
 	return caps
@@ -700,6 +708,14 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			"to run payloads in a container on the device, as this executor is configured to",
 			"Or set this executor's sandbox mode back to host, if running on the device's host is acceptable."))
 	}
+
+	// The disk limit (Task 20405): a stated one the device cannot hold is
+	// refused, and the ceilings the device cannot read are filled in — the
+	// disk one only where the device will hold it. See disklimit.go.
+	if err := e.checkDiskLimit(sess, spec, sandbox); err != nil {
+		return executor.Handle{}, err
+	}
+	e.applyDeviceCeiling(&spec, sess, sandbox, virtual)
 
 	// A hypervisor the device does not have. Refused here for the same reason
 	// the check above exists — the cheapest refusal is the earliest one — but
@@ -954,6 +970,17 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	}
 	if started.Error != "" {
 		e.dropHandle(handleID)
+		// A workspace already over its disk limit, which the device names
+		// with the measurement (Task 20405): the refusal is the hub's to
+		// answer as one, so it comes back typed — bounded first, because it
+		// is the device's word.
+		if _, b := executor.SanitizeDiskOutcome(executor.OutcomeDiskLimit, started.DiskLimit); b != nil {
+			id := e.id
+			if virtual != nil {
+				id = virtual.ID
+			}
+			return executor.Handle{}, &executor.DiskLimitError{Executor: id, Breach: *b}
+		}
 		// The workspace is named in the refusal because the most common reason
 		// a device rejects a start is now that it could not materialise the
 		// tree, and "agent edge-1 refused the workload" alone sends the
@@ -1557,6 +1584,9 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 	st := p.Status
 	st.HandleID = handleID
 	st.ExecutorID = e.id
+	// A disk-limit stop as the device tells it (Task 20405): bounded before it
+	// reaches the project's journal and pause, because it is the device's word.
+	st.Outcome, st.DiskLimit = executor.SanitizeDiskOutcome(st.Outcome, st.DiskLimit)
 
 	hs.mu.Lock()
 	if hs.closed && !st.State.Terminal() {

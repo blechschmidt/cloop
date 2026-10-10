@@ -94,6 +94,12 @@ type executorLimitsView struct {
 	// confining it. Saying so in the panel is the difference between a cap an
 	// admin has and one they believe they have.
 	Enforced bool `json:"enforced"`
+	// DiskEnforcement is how this executor holds a workload to a disk limit,
+	// empty where it does not (Task 20405) — the host-process driver, a device
+	// running payloads on its host, or one whose agent predates protocol v20.
+	// A driver can enforce the other limits and not this one, so the panel
+	// needs it apart from Enforced to say that a disk ceiling here is not one.
+	DiskEnforcement executor.DiskEnforcement `json:"disk_enforcement"`
 }
 
 // handleExecutorLimits serves GET and PUT /api/executors/{id}/limits.
@@ -144,6 +150,7 @@ func (s *Server) renderExecutorLimits(w http.ResponseWriter, db *statedb.DB, id 
 		Effective:  fleet.Tighten(c),
 		Enforced:   executorEnforcesLimits(id),
 	}
+	view.DiskEnforcement = executorDiskEnforcement(id)
 	// Provenance comes from the list rather than a second point read: the table
 	// is one row per executor and an admin panel reads it whole anyway.
 	if rows, err := db.ListExecutorResourceLimits(); err == nil {
@@ -170,6 +177,18 @@ func executorEnforcesLimits(id string) bool {
 		return false
 	}
 	return ex.Capabilities().SupportsResourceLimits
+}
+
+// executorDiskEnforcement reports how the registered executor holds a workload
+// to a disk limit; empty for an unregistered id, for the reason
+// executorEnforcesLimits gives.
+func executorDiskEnforcement(id string) executor.DiskEnforcement {
+	registerBuiltinExecutors()
+	ex, err := executor.Get(id)
+	if err != nil || ex == nil {
+		return executor.DiskEnforcementNone
+	}
+	return ex.Capabilities().DiskEnforcement
 }
 
 func (s *Server) serveExecutorLimitsPut(w http.ResponseWriter, r *http.Request, id string) {

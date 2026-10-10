@@ -37,7 +37,9 @@ type ExecutorLimitsConfig struct {
 	MaxCPU float64 `yaml:"max_cpu,omitempty"`
 	// MaxMemory caps resident memory, as a size string ("2g", "512m").
 	MaxMemory string `yaml:"max_memory,omitempty"`
-	// MaxDisk caps the workspace and scratch space, as a size string.
+	// MaxDisk caps the workspace — the tree a workload works in, not its
+	// .cloop/ as it stood at the start — as a size string. Held by eviction on
+	// Kubernetes and by sampling on a container executor (Task 20405).
 	MaxDisk string `yaml:"max_disk,omitempty"`
 	// MaxPIDs caps processes/threads in one workload.
 	MaxPIDs int `yaml:"max_pids,omitempty"`

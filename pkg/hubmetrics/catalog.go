@@ -80,7 +80,7 @@ var (
 
 	TaskFailures = Default.MustRegister(Definition{
 		Name:   "cloop_executor_task_failures_total",
-		Help:   "Dispatched runs that did not complete successfully. reason is one of start (it never began: the executor refused it or could not launch it), run (it launched and failed, or ended in a way its executor could not account for), cancelled (the control plane stopped it).",
+		Help:   "Dispatched runs that did not complete successfully. reason is one of start (it never began: the executor refused it or could not launch it), run (it launched and failed, or ended in a way its executor could not account for), cancelled (the control plane stopped it), disk_limit (its executor stopped it because its workspace grew past its disk limit).",
 		Type:   TypeCounter,
 		Labels: []string{"executor_kind", "isolation", "reason"},
 	})
@@ -641,10 +641,12 @@ const (
 // the call site is what keeps the label a closed set: a typo becomes a compile
 // error instead of a new series.
 const (
-	// Task failure reasons.
+	// Task failure reasons. disk_limit is a run its executor stopped because
+	// the workspace grew past its disk limit (Task 20405).
 	FailStart     = "start"
 	FailRun       = "run"
 	FailCancelled = "cancelled"
+	FailDiskLimit = "disk_limit"
 
 	// Lease lifecycle events.
 	LeaseIssued  = "issued"

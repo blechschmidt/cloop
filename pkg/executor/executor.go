@@ -123,6 +123,12 @@ type Capabilities struct {
 	// SupportsResourceLimits reports whether Spec.ResourceLimits is
 	// enforced. When false, limits in a Spec are ignored, not an error.
 	SupportsResourceLimits bool `json:"supports_resource_limits"`
+	// DiskEnforcement says how ResourceLimits.DiskMB is held, and is empty
+	// where it is not (Task 20405). It is separate from SupportsResourceLimits
+	// because a driver can enforce the other three and not this one: a remote
+	// agent older than protocol v20 runs a container that bounds CPU and
+	// memory and refuses a disk limit outright.
+	DiskEnforcement DiskEnforcement `json:"disk_enforcement,omitempty"`
 	// SharesHostFilesystem reports whether Spec.WorkDir refers to a path on
 	// the control-plane host. False for remote and for containers with a
 	// copied (rather than bind-mounted) workspace.
@@ -325,7 +331,8 @@ type ResourceLimits struct {
 	CPUMillis int `json:"cpu_millis,omitempty"`
 	// MemoryMB is the resident memory ceiling in megabytes.
 	MemoryMB int `json:"memory_mb,omitempty"`
-	// DiskMB is the writable-layer / scratch-space ceiling in megabytes.
+	// DiskMB bounds the workspace — the tree the workload works in — in
+	// megabytes. Held where Capabilities.DiskEnforcement says how (Task 20405).
 	DiskMB int `json:"disk_mb,omitempty"`
 	// PIDs is the maximum number of processes/threads.
 	PIDs int `json:"pids,omitempty"`
@@ -828,6 +835,9 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireEgressScope:    s.EgressScope.NeedsFilter(),
 		RequireNetworkEgress:  s.EgressScope.NeedsFilter(),
 		RequireResourceLimits: !s.ResourceLimits.IsZero(),
+		// A disk limit is its own requirement because a driver can enforce
+		// the other limits and not this one (see DiskEnforcement).
+		RequireDiskLimit: s.ResourceLimits.DiskMB > 0,
 		// Fetching is the capability a git workspace needs; a bundle
 		// workspace is built from bytes the hub ships, which is
 		// RequireBranchBundle's question, not this one's.
@@ -936,6 +946,13 @@ type Status struct {
 	// still running. It is metadata only; the bundle bytes, when there are
 	// any, are collected through WriteBackFetcher.
 	WriteBack *WriteBackResult `json:"write_back,omitempty"`
+	// Outcome classifies an ending State alone does not: OutcomeDiskLimit for
+	// a workload its driver stopped at its disk limit, with DiskLimit holding
+	// the measurement (Task 20405). Both cross the remote boundary in the
+	// status frame, so a device's stop reads the same on the hub as one on
+	// the hub's own host.
+	Outcome   Outcome          `json:"outcome,omitempty"`
+	DiskLimit *DiskLimitBreach `json:"disk_limit,omitempty"`
 }
 
 // StreamName identifies which output stream a LogLine came from.

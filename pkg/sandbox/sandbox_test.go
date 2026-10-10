@@ -276,6 +276,32 @@ func TestRequirements(t *testing.T) {
 				}
 			},
 		},
+		"a disk limit demands disk enforcement": {
+			"resources:\n  disk: 1g\n",
+			func(t *testing.T, r executor.Requirements) {
+				if !r.RequireDiskLimit || !r.RequireResourceLimits {
+					t.Errorf("RequireDiskLimit = %v, RequireResourceLimits = %v — a limit the executor "+
+						"cannot hold would be refused at dispatch instead of at placement",
+						r.RequireDiskLimit, r.RequireResourceLimits)
+				}
+			},
+		},
+		"disk: 0 sets no limit and demands no disk enforcement": {
+			"resources:\n  disk: \"0\"\n",
+			func(t *testing.T, r executor.Requirements) {
+				if r.RequireDiskLimit {
+					t.Error("RequireDiskLimit set for a disk key that sets no limit")
+				}
+			},
+		},
+		"other resources demand no disk enforcement": {
+			"resources:\n  memory: 1g\n",
+			func(t *testing.T, r executor.Requirements) {
+				if r.RequireDiskLimit {
+					t.Error("RequireDiskLimit set for a spec with no disk limit")
+				}
+			},
+		},
 		"network capability demands egress": {
 			"capabilities:\n  network: g\n",
 			func(t *testing.T, r executor.Requirements) {
