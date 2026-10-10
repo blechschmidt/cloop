@@ -779,6 +779,15 @@ func TestEgressSessionIsRenewedWhileItsRunLives(t *testing.T) {
 	}
 
 	// Revoked in the dashboard: the hosted broker closes it on the spot.
+	//
+	// This run's keepalive must not tick while that happens. Revoke stamps the
+	// grant revoked in the store and only then closes its sessions, and a
+	// keepalive tick landing in between re-reads the grant, finds it revoked
+	// and closes the session itself — "its egress grant was revoked" instead
+	// of the hosted broker's "grant revoked", which is what this half proves.
+	// It happened on a loaded CI runner. The keepalive reads the tick once,
+	// when it starts, so the first run above keeps its 20 ms.
+	egressKeepaliveTick = time.Hour
 	project2 := statedbtest.Dir(t)
 	egr2, spec2 := run(project2)
 	tunnel2 := openEgressTunnel(t, spec2.Env, echoPort)
