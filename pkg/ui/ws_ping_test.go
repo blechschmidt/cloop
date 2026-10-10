@@ -42,6 +42,23 @@ func setWSPingTiming(t *testing.T, interval, timeout time.Duration) {
 	})
 }
 
+// setSSEKeepaliveInterval is setWSPingTiming for the SSE keepalive tick, which
+// the SSE handlers also re-check their authority on, and for the same reason
+// goes through the atomic.
+func setSSEKeepaliveInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	prev := sseKeepaliveIntervalNS.Swap(int64(interval))
+	t.Cleanup(func() { sseKeepaliveIntervalNS.Store(prev) })
+}
+
+// setAttachRecheckInterval is setWSPingTiming for an open sandbox terminal's
+// re-check of its credential and authority.
+func setAttachRecheckInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	prev := attachRecheckIntervalNS.Swap(int64(interval))
+	t.Cleanup(func() { attachRecheckIntervalNS.Store(prev) })
+}
+
 // TestWSPing_UnresponsivePeerDroppedViaPingTimeout verifies that a peer
 // that keeps the TCP connection open but never processes inbound frames
 // (so it never sends pongs) is dropped within roughly wsPingInterval +

@@ -150,12 +150,15 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if s.Token != "" {
+		// Marked as the static token's on admission: a stream opened this
+		// way records it, and is never re-authorized as the static token for
+		// any other reason (Task 20398).
 		supplied := false
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			supplied = true
 			if !s.authLockoutActive(s.clientIP(r)) &&
 				subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, admitStaticToken(r))
 				return
 			}
 		}
@@ -163,7 +166,7 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 			supplied = true
 			if !s.authLockoutActive(s.clientIP(r)) &&
 				subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, admitStaticToken(r))
 				return
 			}
 		}

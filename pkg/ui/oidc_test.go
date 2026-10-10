@@ -241,14 +241,17 @@ func newOIDCTestServer(t *testing.T, idp *uiFakeIdP, token string, adminEmails [
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	auth, err := oidcauth.New(oidcauth.Config{
+	cfg := oidcauth.Config{
 		Enabled:      true,
 		Issuer:       idp.server.URL, // http, but loopback is allowed for dev IdPs
 		ClientID:     "cloop-dashboard",
 		ClientSecret: "test-secret",
 		RedirectURL:  ts.URL + "/auth/callback",
 		AdminEmails:  adminEmails,
-	})
+	}
+	// As `cloop ui` wires it: a session that ends closes what it opened.
+	srv.InstallOIDCHooks(&cfg)
+	auth, err := oidcauth.New(cfg)
 	if err != nil {
 		t.Fatalf("oidcauth.New: %v", err)
 	}

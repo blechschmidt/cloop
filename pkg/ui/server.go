@@ -94,10 +94,15 @@ type sseClient struct {
 	// every project's events to every listener (Task 20189).
 	workDir string
 
-	// kick ends the stream: its identity can no longer read workDir (Task
-	// 20366). Buffered (cap 1). Whoever sends it has already removed the
-	// client from s.clients, so nothing new is queued for it.
-	kick chan struct{}
+	// cred is the credential that opened the stream, re-checked on every
+	// keepalive and whenever it is announced to have changed (Task 20398).
+	cred streamCredential
+
+	// kick ends the stream, with why: its identity can no longer read
+	// workDir (Task 20366), or its credential ended (Task 20398). Buffered
+	// (cap 1). Whoever sends it has already removed the client from
+	// s.clients, so nothing new is queued for it.
+	kick chan streamEnd
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -132,9 +137,15 @@ var sseWriteTimeout = 10 * time.Second
 // kernel TCP keepalive (default ~2 hours on Linux). 30s mirrors
 // wsPingInterval to keep the symmetry between the SSE and WebSocket paths.
 //
-// Declared as var (not const) so regression tests can shrink it; production
-// callers should treat it as immutable.
-var sseKeepaliveInterval = 30 * time.Second
+// The same tick re-checks the stream's authority: runtime denies (Task 20248)
+// and the credential the stream was opened with (Task 20398).
+//
+// Tunable so regression tests can shrink it — through setSSEKeepaliveInterval,
+// and atomic for the reason wsPingIntervalNS is: a test restoring it races
+// every SSE handler other tests still have open.
+func sseKeepaliveInterval() time.Duration { return time.Duration(sseKeepaliveIntervalNS.Load()) }
+
+var sseKeepaliveIntervalNS atomic.Int64
 
 // writeSSE writes a single SSE frame and flushes, with a per-write deadline
 // armed via http.ResponseController. Returns the first error encountered;
@@ -218,11 +229,16 @@ type hubClient struct {
 	// sseClient (Task 20175).
 	token *apitoken.Token
 
+	// cred is the credential that opened the socket, as on sseClient (Task
+	// 20398).
+	cred streamCredential
+
 	// kick closes the socket with the reason it carries: its identity can no
-	// longer read the project it is attached to (Task 20366). Buffered (cap
-	// 1). Whoever sends it has already taken the client out of its room, and
-	// the writer checks it ahead of anything still queued.
-	kick chan string
+	// longer read the project it is attached to (Task 20366), or the
+	// credential it was opened with ended (Task 20398). Buffered (cap 1).
+	// Whoever sends it has already taken the client out of its room, and the
+	// writer checks it ahead of anything still queued.
+	kick chan streamEnd
 
 	// limited marks a projects-page socket whose identity reads projects only
 	// where they were shared with it, not hub-wide (Task 20366). Who else is
@@ -321,6 +337,7 @@ var (
 func init() {
 	wsPingIntervalNS.Store(int64(30 * time.Second))
 	wsPingTimeoutNS.Store(int64(10 * time.Second))
+	sseKeepaliveIntervalNS.Store(int64(30 * time.Second))
 }
 
 // wsWrite sends a single WebSocket text frame with a per-call deadline
@@ -590,6 +607,13 @@ type Server struct {
 	// Key is the resolved workDir path.
 	hubMu      sync.Mutex
 	hubClients map[string]map[*hubClient]struct{}
+
+	// credRechecks queues the re-checks a changed session or a revoked
+	// token asks of the streams it opened, and attachStreams is the open
+	// sandbox terminals they reach too (Task 20398). Zero values are ready;
+	// see stream_credentials.go.
+	credRechecks  credentialRechecks
+	attachStreams attachStreamSet
 
 	// WebSocket connection accounting for the upgrade-time caps
 	// (MaxWebSocketConns, MaxWebSocketConnsPerIP). Lock order: wsConnMu
@@ -1830,16 +1854,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Check Authorization: Bearer <token> header. Constant-time compare
 		// so response timing leaks nothing about how many token bytes match.
+		//
+		// Admitted requests are marked as the static token's, which is what a
+		// long-lived stream records as the credential it was opened with
+		// (Task 20398).
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, admitStaticToken(r))
 				return
 			}
 		}
 		// Fallback: ?token=<token> query param (needed for EventSource which
 		// cannot send custom headers).
 		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(s.Token)) == 1 {
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, admitStaticToken(r))
 			return
 		}
 
@@ -2768,6 +2796,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+	cred := s.streamCredentialFor(r)
+	if s.streamUnauthenticated(cred) {
+		refuseUnauthenticatedStream(w)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2779,7 +2812,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
 		workDir: streamWorkDir,
-		kick:    make(chan struct{}, 1),
+		cred:    cred,
+		kick:    make(chan streamEnd, 1),
 	}
 	if s.streamJoinHook != nil {
 		s.streamJoinHook(c.workDir)
@@ -2796,6 +2830,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// As on the WebSocket path: a revocation between the gate and now was
 	// evicted before this stream was registered to be found (Task 20366).
 	if projectScoped && s.streamWithdrawn(c.user, c.token, c.workDir) {
+		return
+	}
+	// The same for the credential (Task 20398): a session or token that
+	// ended after it was read above was re-checked across streams this one
+	// was not yet among.
+	if end, gone := s.credentialEnded(c.cred); gone {
+		endSSE(w, flusher, end)
 		return
 	}
 
@@ -2843,12 +2884,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	keepalive := time.NewTicker(sseKeepaliveInterval)
+	keepalive := time.NewTicker(sseKeepaliveInterval())
 	defer keepalive.Stop()
 	for {
 		// A withdrawn stream ends before anything still queued is written.
 		select {
-		case <-c.kick:
+		case end := <-c.kick:
+			endSSE(w, flusher, end)
 			return
 		default:
 		}
@@ -2866,7 +2908,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.kick:
+		case end := <-c.kick:
+			endSSE(w, flusher, end)
 			return
 		case <-c.resync:
 			drainSSE(c.ch)
@@ -2874,6 +2917,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-keepalive.C:
+			// The credential this stream was opened with, asked again
+			// without counting as use (Task 20398). The fallback for a
+			// revocation nobody announced; an announced one has usually
+			// closed the stream already.
+			if end, gone := s.credentialEnded(c.cred); gone {
+				s.logCredentialEnded("SSE stream", c.cred, end)
+				endSSE(w, flusher, end)
+				return
+			}
 			// The SSE half of the runtime-deny teardown (Task 20248). This
 			// is the transport a browser falls back to when the WebSocket
 			// upgrade fails, so leaving it unchecked would mean a demoted
@@ -3024,6 +3076,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.refuseUpgrade(w, r)
 		return
 	}
+	// Which credential opened this socket, recorded now so that every later
+	// re-check asks about it and nothing else (Task 20398).
+	cred := s.streamCredentialFor(r)
+	if s.streamUnauthenticated(cred) {
+		refuseUnauthenticatedStream(w)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // origin already validated by wsOriginAllowed
 		// The connect burst carries a full state snapshot — 731 KB for the
@@ -3110,7 +3169,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		conn:    conn,
 		user:    user,
 		token:   tokenFromRequest(r),
-		kick:    make(chan string, 1),
+		cred:    cred,
+		kick:    make(chan streamEnd, 1),
 		limited: limited,
 	}
 	if s.hubClients[workDir] == nil {
@@ -3139,6 +3199,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		delete(s.hubClients[workDir], hc)
 		s.hubMu.Unlock()
 		closeWithdrawn(ctx, conn, "access to this project was withdrawn")
+		return
+	}
+	// The same for the credential (Task 20398), which a re-check across the
+	// rooms has just as easily missed.
+	if end, gone := s.credentialEnded(cred); gone {
+		s.hubMu.Lock()
+		delete(s.hubClients[workDir], hc)
+		s.hubMu.Unlock()
+		closeCredentialEnded(ctx, conn, end)
 		return
 	}
 
@@ -3289,11 +3358,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer pingTicker.Stop()
 
 	for {
-		// A withdrawn socket closes before anything still queued for it is
-		// written (Task 20366).
+		// A withdrawn socket, or one whose credential ended, closes before
+		// anything still queued for it is written (Tasks 20366, 20398).
 		select {
-		case reason := <-hc.kick:
-			closeWithdrawn(ctx, conn, reason)
+		case end := <-hc.kick:
+			closeStream(ctx, conn, end)
 			return
 		default:
 		}
@@ -3321,10 +3390,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// in which case the drain has already kicked off the
 			// status-coded close frame asynchronously.)
 			return
-		case reason := <-hc.kick:
-			closeWithdrawn(ctx, conn, reason)
+		case end := <-hc.kick:
+			closeStream(ctx, conn, end)
 			return
 		case <-pingTicker.C:
+			// The credential this socket was opened with, asked again
+			// without counting as use (Task 20398): a session revoked,
+			// signed out, expired or idle, or a token revoked or expired,
+			// closes it. The fallback for a change nobody announced.
+			if end, gone := s.credentialEnded(hc.cred); gone {
+				s.logCredentialEnded("WebSocket stream", hc.cred, end)
+				closeCredentialEnded(ctx, conn, end)
+				return
+			}
 			// Authorization for this connection was decided once, at
 			// upgrade. That is fine for a policy that only changes on
 			// redeploy, and not fine for a runtime deny binding, whose
@@ -6500,6 +6578,11 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+	cred := s.streamCredentialFor(r)
+	if s.streamUnauthenticated(cred) {
+		refuseUnauthenticatedStream(w)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -6516,7 +6599,8 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
 		workDir: hubRoomGlobal,
-		kick:    make(chan struct{}, 1),
+		cred:    cred,
+		kick:    make(chan streamEnd, 1),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -6526,6 +6610,12 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		delete(s.clients, c)
 		s.mu.Unlock()
 	}()
+	// As on the project stream: a credential that ended after it was read
+	// above was re-checked across streams this one was not yet among.
+	if end, gone := s.credentialEnded(c.cred); gone {
+		endSSE(w, flusher, end)
+		return
+	}
 
 	// Send current snapshot immediately, scoped to the session user when
 	// OIDC is enabled and flagged with this viewer's hidden projects.
@@ -6538,9 +6628,20 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	keepalive := time.NewTicker(sseKeepaliveInterval)
+	keepalive := time.NewTicker(sseKeepaliveInterval())
 	defer keepalive.Stop()
 	for {
+		// Ended before anything still queued is written. Nothing kicked this
+		// stream before Task 20398 — a removed project and a withdrawn
+		// membership both pass over the global room — so it had no case for
+		// one. A credential eviction does kick it, and a kick left unread
+		// would take it out of s.clients and leave it open, delivered nothing.
+		select {
+		case end := <-c.kick:
+			endSSE(w, flusher, end)
+			return
+		default:
+		}
 		select {
 		case <-c.resync:
 			drainSSE(c.ch)
@@ -6553,12 +6654,21 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case end := <-c.kick:
+			endSSE(w, flusher, end)
+			return
 		case <-c.resync:
 			drainSSE(c.ch)
 			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
 				return
 			}
 		case <-keepalive.C:
+			// The credential, as on the project stream (Task 20398).
+			if end, gone := s.credentialEnded(c.cred); gone {
+				s.logCredentialEnded("SSE stream", c.cred, end)
+				endSSE(w, flusher, end)
+				return
+			}
 			// Same teardown as the project stream above. This one carries
 			// the cross-project roster, so a denied identity left on it
 			// keeps watching the whole fleet's health.

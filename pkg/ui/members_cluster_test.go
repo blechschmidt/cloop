@@ -38,7 +38,7 @@ func TestClusterMembershipChangesReachEveryMember(t *testing.T) {
 
 	// Bob's stream on B, registered the way handleWS registers one.
 	hc := &hubClient{ch: make(chan wsMessage, 64), resync: make(chan struct{}, 1),
-		kick: make(chan string, 1), id: "bob-on-b", user: &oidcauth.Identity{Sub: "sub-bob", Email: bobEmail}}
+		kick: make(chan streamEnd, 1), id: "bob-on-b", user: &oidcauth.Identity{Sub: "sub-bob", Email: bobEmail}}
 	b.srv.hubMu.Lock()
 	b.srv.hubClients[project] = map[*hubClient]struct{}{hc: {}}
 	b.srv.hubMu.Unlock()
@@ -53,8 +53,8 @@ func TestClusterMembershipChangesReachEveryMember(t *testing.T) {
 		return ok
 	})
 	select {
-	case reason := <-hc.kick:
-		t.Fatalf("B closed a member's stream on a grant: %s", reason)
+	case end := <-hc.kick:
+		t.Fatalf("B closed a member's stream on a grant: %s", end.message)
 	default:
 	}
 

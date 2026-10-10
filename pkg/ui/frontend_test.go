@@ -242,6 +242,13 @@ var diskFloorSource string
 //go:embed adopt_api.go
 var adoptAPISource string
 
+// streamCredentialsSource is pkg/ui/stream_credentials.go (Task 20398): the
+// credential_ended message a stream is closed with when the session or token
+// that opened it ends.
+//
+//go:embed stream_credentials.go
+var streamCredentialsSource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -273,7 +280,8 @@ func allUISources() string {
 		"\n" + suggestAPISource +
 		"\n" + membersSource +
 		"\n" + diskFloorSource +
-		"\n" + adoptAPISource
+		"\n" + adoptAPISource +
+		"\n" + streamCredentialsSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

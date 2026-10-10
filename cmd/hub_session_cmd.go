@@ -9,11 +9,14 @@ package cmd
 // reads and writes pkg/sessionstore directly for that reason, and takes no
 // lease — see the lease rule in hub_admin.go.
 //
-// Revocation is not instantaneous and this file does not pretend otherwise. A
-// running hub serves sessions from a 30-second cache (pkg/oidcauth), so a row
-// deleted here stops being honoured within that window, which is the same
-// bound the hub already accepts between replicas. Commands say so rather than
-// printing an unqualified success.
+// A running hub serves sessions from a 30-second cache (pkg/oidcauth), so a
+// row deleted here would go on being honoured for up to that window, and the
+// dashboards and sandbox terminals it had opened would go on streaming. So a
+// revocation is announced on the hub bus as well (Task 20398): every hub
+// reading it drops the sessions from its cache and closes what they opened
+// within a bus poll. A hub that reads no bus (ui.cluster.exclusive) is bounded
+// by the cache and the streams' own 30-second re-check instead. Commands say
+// which applies rather than printing an unqualified success.
 
 import (
 	"encoding/json"
@@ -30,13 +33,20 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/sessionstore"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
-// sessionRevocationWindow is how long a running hub may keep honouring a
-// session this command deleted. It mirrors pkg/oidcauth's session cache TTL;
-// it is stated to the operator rather than assumed, because "I revoked it and
-// they were still in" is otherwise indistinguishable from a failure.
+// sessionRevocationWindow is how long a running hub that missed the
+// announcement may keep honouring a session this command deleted. It mirrors
+// pkg/oidcauth's session cache TTL; it is stated to the operator rather than
+// assumed, because "I revoked it and they were still in" is otherwise
+// indistinguishable from a failure.
 const sessionRevocationWindow = 30 * time.Second
+
+// streamRecheckWindow is how often an open dashboard stream or sandbox
+// terminal re-checks the credential that opened it, which bounds how long one
+// outlives that credential on a hub the announcement did not reach.
+const streamRecheckWindow = 30 * time.Second
 
 var hubSessionCmd = &cobra.Command{
 	Use:   "session",
@@ -53,10 +63,13 @@ that tends to produce the need for it.
   cloop hub session revoke --identity alice@x.io --reason "..."
   cloop hub session revoke --all --reason "..." end every session
 
-A revoked session stops working within ` + sessionRevocationWindow.String() + ` on a running hub, which is how
-long it may still be served from that process's session cache. Revoking does
-not invalidate API tokens: a compromised account usually holds both, and
-` + "`cloop hub token revoke`" + ` is the other half.`,
+A revocation is announced to running hubs, which stop honouring the session and
+close the dashboard streams and sandbox terminals it opened within about a
+second. A hub that reads no announcements (ui.cluster.exclusive) stops honouring
+it within ` + sessionRevocationWindow.String() + ` (its session cache) and closes what it opened at the
+next ` + streamRecheckWindow.String() + ` re-check after that. Revoking does not invalidate API tokens: a
+compromised account usually holds both, and ` + "`cloop hub token revoke`" + ` is the
+other half.`,
 }
 
 var hubSessionListCmd = &cobra.Command{
@@ -237,14 +250,26 @@ Examples:
 			return fmt.Errorf("every matching session had already ended — nothing to revoke")
 		}
 
+		// Tell running hubs, so they drop the sessions now and close the
+		// dashboards and terminals they opened, rather than honouring them
+		// until their caches age out (Task 20398). The rows are already
+		// gone, so a failure here is reported, not fatal.
+		ids := make([]string, 0, len(revoked))
+		for _, rec := range revoked {
+			ids = append(ids, rec.ID)
+		}
+		announced := true
+		if err := ui.AnnounceSessionsEnded(db, cliOrigin(), ids, all); err != nil {
+			announced = false
+			fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the revocation: %v\n", err)
+		}
+
 		color.New(color.FgGreen).Printf("Revoked %d session(s).\n", len(revoked))
 		for _, rec := range revoked {
 			fmt.Printf("  %s  %s\n", truncateField(rec.ID, 16), sessionIdentityLabel(rec))
 		}
-		color.New(color.Faint).Printf(
-			"\nA running hub may still honour these for up to %s (its session cache).\n"+
-				"API tokens are a separate credential — see `cloop hub token list`.\n",
-			sessionRevocationWindow)
+		printSessionRevocationBound(announced)
+		color.New(color.Faint).Printf("API tokens are a separate credential — see `cloop hub token list`.\n")
 		return nil
 	},
 }
@@ -252,6 +277,27 @@ Examples:
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// cliOrigin names this process on the hub bus, as a writer that is no member.
+func cliOrigin() string { return fmt.Sprintf("cli-%d", os.Getpid()) }
+
+// printSessionRevocationBound says how soon running hubs act on a revocation:
+// within a bus poll when the announcement was written, and within the cache
+// and the streams' re-check when it was not — or for a hub that reads no bus.
+func printSessionRevocationBound(announced bool) {
+	faint := color.New(color.Faint)
+	if announced {
+		faint.Printf("\nRunning hubs were told: they stop honouring these sessions and close the\n"+
+			"dashboards and sandbox terminals they opened within about a second. A hub\n"+
+			"started with ui.cluster.exclusive reads no announcements: it stops honouring\n"+
+			"them within %s (its session cache) and closes their streams at the next\n"+
+			"%s re-check after that.\n", sessionRevocationWindow, streamRecheckWindow)
+		return
+	}
+	faint.Printf("\nA running hub may still honour these for up to %s (its session cache), and\n"+
+		"closes the streams they opened at the next %s re-check after that.\n",
+		sessionRevocationWindow, streamRecheckWindow)
+}
 
 // filterSessions narrows records to one identity, matched against email or
 // subject.

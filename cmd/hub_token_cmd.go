@@ -33,6 +33,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
 var hubTokenCmd = &cobra.Command{
@@ -191,7 +192,8 @@ var hubTokenListCmd = &cobra.Command{
 var hubTokenRevokeCmd = &cobra.Command{
 	Use:   "revoke <id>",
 	Short: "Revoke an API token immediately",
-	Long: `Revoke a token. The next request presenting it is rejected.
+	Long: `Revoke a token. The next request presenting it is rejected, and running hubs
+are told to close the dashboard streams and sandbox terminals it opened.
 
 The row is kept rather than deleted, so the audit trail can still answer what
 this credential could reach and when it was withdrawn. Revoking an
@@ -262,6 +264,15 @@ func openHubTokenManager(workdir string) (*apitoken.Manager, func(), error) {
 		_ = db.Close()
 		return nil, nil, err
 	}
+	// A revocation is announced to running hubs, which close the streams and
+	// terminals the token opened within a bus poll rather than at their next
+	// 30-second re-check (Task 20398). The row is already revoked, so a
+	// failure is a warning.
+	mgr.SetRevokeHook(func(id string) {
+		if err := ui.AnnounceTokensRevoked(db, cliOrigin(), []string{id}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the revocation: %v\n", err)
+		}
+	})
 	return mgr, func() { _ = db.Close() }, nil
 }
 

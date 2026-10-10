@@ -716,3 +716,80 @@ func flipFirstHexDigit(s string) string {
 	}
 	return "0" + s[1:]
 }
+
+// ---------------------------------------------------------------------------
+// recheck (Task 20398)
+// ---------------------------------------------------------------------------
+
+// TestRecheckFollowsTheRow: a connection holds the token Verify returned, and
+// that copy never changes. Recheck is how it learns the row did — revoked,
+// expired, or gone — and it records no use, since staying open is not the
+// token being presented again.
+func TestRecheckFollowsTheRow(t *testing.T) {
+	mgr, store := newTestManager(t)
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	mgr.SetClock(func() time.Time { return base })
+
+	expiring, err := mgr.Mint(MintOptions{Name: "ci", Roles: []string{"viewer"},
+		ExpiresAt: base.Add(time.Hour), Now: base})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	revoked, err := mgr.Mint(MintOptions{Name: "deploy", Roles: []string{"operator"}, Now: base})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	for _, m := range []Minted{expiring, revoked} {
+		tok, err := mgr.Recheck(m.Token.ID)
+		if err != nil || tok == nil || tok.ID != m.Token.ID {
+			t.Fatalf("a live token rechecks as %v, %v", tok, err)
+		}
+	}
+	if _, ok := store.touchedAt(revoked.Token.ID); ok {
+		t.Error("Recheck recorded a use; a connection staying open is not the token being used")
+	}
+
+	if err := mgr.Revoke(revoked.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Recheck(revoked.Token.ID); !errors.Is(err, ErrRevoked) {
+		t.Errorf("after revocation: %v, want ErrRevoked", err)
+	}
+
+	mgr.SetClock(func() time.Time { return base.Add(time.Hour) })
+	if _, err := mgr.Recheck(expiring.Token.ID); !errors.Is(err, ErrExpired) {
+		t.Errorf("at its expiry: %v, want ErrExpired", err)
+	}
+	if _, err := mgr.Recheck("no-such-id"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an unknown id: %v, want ErrNotFound", err)
+	}
+}
+
+// TestRevokeHookHearsEveryRevocation: the hub closes the connections a token
+// opened when it is told of the revocation, so it must be told — once the row
+// is written, and not for an id that does not exist.
+func TestRevokeHookHearsEveryRevocation(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	var heard []string
+	mgr.SetRevokeHook(func(id string) {
+		// The row is already revoked when the hook runs: a listener that
+		// rechecks on the notice must find it so.
+		if _, err := mgr.Recheck(id); !errors.Is(err, ErrRevoked) {
+			t.Errorf("the hook ran before the revocation was stored: recheck = %v", err)
+		}
+		heard = append(heard, id)
+	})
+	minted, err := mgr.Mint(MintOptions{Name: "ci", Roles: []string{"viewer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Revoke(" " + minted.Token.ID + " "); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Revoke("does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoking an unknown id = %v, want ErrNotFound", err)
+	}
+	if len(heard) != 1 || heard[0] != minted.Token.ID {
+		t.Fatalf("the hook heard %q, want exactly the revoked token's id", heard)
+	}
+}

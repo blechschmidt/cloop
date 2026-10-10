@@ -266,12 +266,14 @@ but not for anything reachable from a network.`,
 				// srv.Authz, which is assigned just below — a method value, so
 				// the nil resolver here is never read.
 				authCfg.EffectiveRole = srv.EffectiveRoleFor
-				// On a control plane several hub processes serve (Task
-				// 20354): a login's callback is routed to the process that
-				// began it, a session ended on one stops working on all of
-				// them at once, and two of them never redeem one refresh
-				// token together. A no-op for a standalone hub.
-				srv.ClusterOIDCConfig(&authCfg)
+				// A session that ends — revoked, signed out, expired — closes
+				// the dashboard streams and sandbox terminals it opened (Task
+				// 20398). And on a control plane several hub processes serve
+				// (Task 20354): a login's callback is routed to the process
+				// that began it, a session ended on one stops working on all
+				// of them at once, and two of them never redeem one refresh
+				// token together.
+				srv.InstallOIDCHooks(&authCfg)
 				// Counts the silent renewals a dashboard runs to keep its
 				// claims current (Task 20359). The renewal completes inside
 				// oidcauth, where hubmetrics is not reachable.

@@ -88,6 +88,9 @@ const (
 	// bindings, which the executor registry consults before the database, so
 	// the database every member reads answers.
 	invalidateBinding = "binding"
+	// invalidateToken: an API token or glasses link was revoked (Task
+	// 20398); each member re-checks the streams it opened there.
+	invalidateToken = "token"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -503,6 +506,10 @@ func (s *Server) onBusGap() {
 		}
 	}
 	s.hubMu.Unlock()
+	// Among the lost events may be a session or a token that ended: ask
+	// every stream now rather than at its keepalive (Task 20398).
+	s.evictSessionCache("", true)
+	s.recheckAllCredentialStreams()
 }
 
 // onMembershipChange forgets what dead members told us: runs they were
@@ -577,6 +584,24 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		}
 		if err := ev.Decode(&p); err == nil {
 			s.evictSessionCache(p.SessionHash, p.All)
+			// And re-check what the session opened here — dashboards and
+			// terminals — now that the cache will not answer for it (Task
+			// 20398). Also sent by the CLI, which is no member.
+			if p.All {
+				s.recheckAllCredentialStreams()
+			} else {
+				s.recheckSessionStreams(p.SessionHash)
+			}
+		}
+	case invalidateToken:
+		// An API token revoked on another member or by the CLI (Task
+		// 20398). Tokens are not cached, so there is nothing to drop: only
+		// the streams the token opened here to re-check.
+		var p struct {
+			TokenID string `json:"token_id"`
+		}
+		if err := ev.Decode(&p); err == nil {
+			s.recheckTokenStreams(p.TokenID)
 		}
 	case invalidateAgent:
 		var p agentInvalidation

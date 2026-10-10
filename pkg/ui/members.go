@@ -491,7 +491,7 @@ func (s *Server) evictWithdrawnStreams() {
 				delete(s.hubClients, k.workDir)
 			}
 			select {
-			case k.hc.kick <- "access to this project was withdrawn":
+			case k.hc.kick <- streamEnd{message: "access to this project was withdrawn"}:
 			default:
 			}
 		}
@@ -505,7 +505,7 @@ func (s *Server) evictWithdrawnStreams() {
 			}
 			delete(s.clients, c)
 			select {
-			case c.kick <- struct{}{}:
+			case c.kick <- streamEnd{}:
 			default:
 			}
 		}
@@ -593,7 +593,7 @@ func (s *Server) closeProjectStreams(path, reason string) {
 		}
 		for hc := range clients {
 			select {
-			case hc.kick <- reason:
+			case hc.kick <- streamEnd{message: reason}:
 			default:
 			}
 		}
@@ -606,7 +606,7 @@ func (s *Server) closeProjectStreams(path, reason string) {
 		if c.workDir != "" && under(c.workDir) {
 			delete(s.clients, c)
 			select {
-			case c.kick <- struct{}{}:
+			case c.kick <- streamEnd{message: reason}:
 			default:
 			}
 		}

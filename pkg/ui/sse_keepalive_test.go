@@ -76,9 +76,7 @@ func drainHTTPHeaders(r *bufio.Reader, conn net.Conn) error {
 // Without the keepalive ticker, the read would time out; with it, the
 // frame must arrive within roughly sseKeepaliveInterval+jitter.
 func TestSSE_HandleEvents_KeepaliveOnQuietStream(t *testing.T) {
-	prev := sseKeepaliveInterval
-	sseKeepaliveInterval = 100 * time.Millisecond
-	t.Cleanup(func() { sseKeepaliveInterval = prev })
+	setSSEKeepaliveInterval(t, 100*time.Millisecond)
 
 	dir := setupProjectDir(t, cloopGoal, nil)
 	srv := New(dir, 0, "")
@@ -104,11 +102,11 @@ func TestSSE_HandleEvents_KeepaliveOnQuietStream(t *testing.T) {
 	// Generous deadline (20x the test interval) to absorb scheduling jitter
 	// and to skip past the initial state snapshot frame the handler sends
 	// on connect.
-	deadline := time.Now().Add(20 * sseKeepaliveInterval)
+	deadline := time.Now().Add(20 * sseKeepaliveInterval())
 	line, err := readUntilKeepalive(br, deadline, conn)
 	if err != nil {
 		t.Fatalf("waiting for SSE keep-alive frame (sseKeepaliveInterval=%v): %v",
-			sseKeepaliveInterval, err)
+			sseKeepaliveInterval(), err)
 	}
 	if !strings.HasPrefix(line, ": keepalive") {
 		t.Fatalf("expected keep-alive comment frame; got %q", line)
@@ -119,9 +117,7 @@ func TestSSE_HandleEvents_KeepaliveOnQuietStream(t *testing.T) {
 // SSE analogue of the test above. Same contract: a quiet stream must emit
 // the periodic comment frame.
 func TestSSE_HandleProjectsEvents_KeepaliveOnQuietStream(t *testing.T) {
-	prev := sseKeepaliveInterval
-	sseKeepaliveInterval = 100 * time.Millisecond
-	t.Cleanup(func() { sseKeepaliveInterval = prev })
+	setSSEKeepaliveInterval(t, 100*time.Millisecond)
 
 	dir := setupProjectDir(t, cloopGoal, nil)
 	srv := New(dir, 0, "")
@@ -144,11 +140,11 @@ func TestSSE_HandleProjectsEvents_KeepaliveOnQuietStream(t *testing.T) {
 		t.Fatalf("drain headers: %v", err)
 	}
 
-	deadline := time.Now().Add(20 * sseKeepaliveInterval)
+	deadline := time.Now().Add(20 * sseKeepaliveInterval())
 	line, err := readUntilKeepalive(br, deadline, conn)
 	if err != nil {
 		t.Fatalf("waiting for SSE keep-alive frame (sseKeepaliveInterval=%v): %v",
-			sseKeepaliveInterval, err)
+			sseKeepaliveInterval(), err)
 	}
 	if !strings.HasPrefix(line, ": keepalive") {
 		t.Fatalf("expected keep-alive comment frame; got %q", line)

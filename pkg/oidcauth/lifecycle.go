@@ -199,22 +199,65 @@ func (a *Authenticator) peekSession(r *http.Request) (SessionRecord, bool) {
 	if err != nil || c.Value == "" {
 		return SessionRecord{}, false
 	}
-	hash := HashSessionID(c.Value)
-	now := a.now()
+	rec, state := a.resolve(HashSessionID(c.Value))
+	return rec, state == SessionLive
+}
 
+// SessionState is what CheckSession found: whether a session would still
+// authenticate a request, and if not, why.
+type SessionState string
+
+const (
+	// SessionLive: the session would authenticate a request now.
+	SessionLive SessionState = "live"
+	// SessionGone: there is no such session — signed out, revoked, swept,
+	// never issued, or unreadable. The cases are deliberately one value, for
+	// the reason SessionFromRequest does not distinguish them.
+	SessionGone SessionState = "gone"
+	// SessionExpired: the session reached its absolute lifetime.
+	SessionExpired SessionState = "expired"
+	// SessionIdle: the session went unused for longer than the idle timeout.
+	SessionIdle SessionState = "idle"
+)
+
+// CheckSession reports whether the session with hashed id would authenticate
+// a request now, without counting the question as the user being active.
+//
+// For a caller that holds a session past the request that presented it — a
+// WebSocket or SSE stream, an open sandbox terminal — and has to ask again on
+// a timer whether it still may (Task 20398). SessionFromRequest is the wrong
+// call there: it advances the idle clock, so a stream that re-checked through
+// it every thirty seconds would keep an unattended tab's session alive for
+// ever, which is the one thing the idle clock exists to prevent.
+//
+// It is the request path's verdict otherwise — the same cache, the same two
+// clocks — so a stream is closed exactly when a request carrying its cookie
+// would be refused. Like the request path it ends a session it finds past
+// either clock, so the expiry is audited at the moment it is noticed.
+func (a *Authenticator) CheckSession(id string) (SessionRecord, SessionState) {
+	if !a.Enabled() || strings.TrimSpace(id) == "" {
+		return SessionRecord{}, SessionGone
+	}
+	return a.resolve(id)
+}
+
+// resolve is the read path's verdict on one session id: looked up, both clocks
+// enforced, and a session past either one terminated.
+func (a *Authenticator) resolve(hash string) (SessionRecord, SessionState) {
+	now := a.now()
 	rec, ok := a.lookup(hash, now)
 	if !ok {
-		return SessionRecord{}, false
+		return SessionRecord{}, SessionGone
 	}
 	if rec.Expired(now) {
 		a.terminate(rec, AuditSessionExpired, ReasonAbsoluteTTL, "system")
-		return SessionRecord{}, false
+		return SessionRecord{}, SessionExpired
 	}
 	if rec.Idle(now, a.cfg.IdleTimeout) {
 		a.terminate(rec, AuditSessionExpired, ReasonIdleTimeout, "system")
-		return SessionRecord{}, false
+		return SessionRecord{}, SessionIdle
 	}
-	return rec, true
+	return rec, SessionLive
 }
 
 // lookup returns a session from the read-through cache, falling back to the
@@ -309,13 +352,19 @@ func (a *Authenticator) touch(hash string, now time.Time) {
 // The store's report of whether a row existed is the arbiter: whoever actually
 // deleted it writes the event. Everyone else — a concurrent request that saw
 // the same expired session, a janitor pass racing a sign-out — stays silent.
+//
+// The notice goes out after the delete, whatever the delete found. Whoever
+// hears it re-reads the session — another hub process refilling its cache, a
+// stream asking whether it may stay open (Task 20398) — and a notice sent
+// first let them find the row still there, cache it again for thirty seconds
+// and keep the stream it was meant to close.
 func (a *Authenticator) terminate(rec SessionRecord, event auditaction.Action, reason, actor string) {
 	a.mu.Lock()
 	delete(a.cache, rec.ID)
 	a.mu.Unlock()
-	a.notifyInvalidated(rec.ID)
 
 	existed, err := a.store.Delete(rec.ID)
+	a.notifyInvalidated(rec.ID)
 	if err != nil || !existed {
 		return
 	}
@@ -405,9 +454,11 @@ func (a *Authenticator) RevokeSession(id, actor, reason string) (bool, error) {
 	a.mu.Lock()
 	delete(a.cache, id)
 	a.mu.Unlock()
-	a.notifyInvalidated(id)
 
 	existed, err := a.store.Delete(id)
+	// After the delete, as in terminate: whoever re-reads on this notice must
+	// find the row gone.
+	a.notifyInvalidated(id)
 	if err != nil {
 		return false, fmt.Errorf("oidcauth: delete session: %w", err)
 	}

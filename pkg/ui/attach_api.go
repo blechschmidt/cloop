@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -72,6 +73,30 @@ const (
 	// attachOutputChunk is the read size from the sandbox.
 	attachOutputChunk = 16 << 10
 )
+
+// attachRecheckInterval is how often an open terminal asks again whether the
+// credential that opened it still stands and still carries sandbox.attach. A
+// revocation the hub hears of closes it at once (stream_credentials.go); this
+// is the fallback for one it does not.
+//
+// Tunable for tests through setAttachRecheckInterval, atomic for the reason
+// wsPingIntervalNS is.
+func attachRecheckInterval() time.Duration { return time.Duration(attachRecheckIntervalNS.Load()) }
+
+var attachRecheckIntervalNS atomic.Int64
+
+func init() { attachRecheckIntervalNS.Store(int64(30 * time.Second)) }
+
+// attachOpen is what a terminal was authorized with, fixed when it opened: the
+// credential, and the project its task belongs to. The re-check reads these
+// and never the request again — re-reading the request would advance the
+// session's idle clock every tick, re-resolve ?project_idx against whatever
+// list the caller can see by then, and, once the session row was gone, find a
+// request with no session on it and take it for the static token (Task 20398).
+type attachOpen struct {
+	cred    streamCredential
+	workDir string
+}
 
 // attachClientMsg is what the browser or CLI sends.
 type attachClientMsg struct {
@@ -235,6 +260,13 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The credential this terminal stands on, recorded before anything is
+	// opened: it is what every later re-check asks about (Task 20398).
+	open := attachOpen{cred: s.streamCredentialFor(r), workDir: workDir}
+	if s.streamUnauthenticated(open.cred) {
+		refuseUnauthenticatedStream(w)
+		return
+	}
 
 	target, err := s.resolveAttachTarget(workDir, taskID)
 	if err != nil {
@@ -289,16 +321,25 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.CloseNow()
 
-	reason := s.pumpAttachSession(r, ws, conn, target, writable, wantTTY)
+	reason := s.pumpAttachSession(open, ws, conn, target, writable, wantTTY)
 	s.auditAttach(r, auditaction.ActionSandboxAttachClose, target, sessionID, command, writable, reason)
 }
 
 // pumpAttachSession runs the session until either end hangs up, returning why.
-func (s *Server) pumpAttachSession(r *http.Request, ws *websocket.Conn, conn executor.AttachConn,
+func (s *Server) pumpAttachSession(open attachOpen, ws *websocket.Conn, conn executor.AttachConn,
 	target attachTarget, writable, tty bool) string {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Registered so that a revocation this hub hears of reaches the terminal
+	// at once, as it reaches a dashboard stream (Task 20398) — and checked
+	// once more now that it can be found, for one heard while it opened.
+	stream := s.registerAttachStream(open.cred)
+	defer s.unregisterAttachStream(stream)
+	if end, gone := s.credentialEnded(open.cred); gone {
+		return closeAttachEnded(ctx, ws, end)
+	}
 
 	_ = attachSend(ctx, ws, attachServerMsg{
 		Type: "ready", Writable: writable, TTY: tty,
@@ -377,7 +418,7 @@ func (s *Server) pumpAttachSession(r *http.Request, ws *websocket.Conn, conn exe
 	// Runtime withdrawal: the same re-check the dashboard socket performs, so
 	// revoking someone's access ends the terminal they already have open
 	// rather than only the next one they try to open.
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(attachRecheckInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -385,14 +426,31 @@ func (s *Server) pumpAttachSession(r *http.Request, ws *websocket.Conn, conn exe
 			_ = attachSend(ctx, ws, attachServerMsg{Type: "closed", Message: reason})
 			_ = ws.Close(websocket.StatusNormalClosure, reason)
 			return reason
+		case end := <-stream.kick:
+			return closeAttachEnded(ctx, ws, end)
 		case <-ticker.C:
-			if !s.attachStillAuthorized(r) {
-				_ = attachSend(ctx, ws, attachServerMsg{Type: "closed", Message: "authorization withdrawn"})
-				_ = ws.Close(websocket.StatusPolicyViolation, "authorization withdrawn")
-				return "authorization withdrawn"
+			end, ok := s.attachRecheck(open)
+			if ok {
+				continue
 			}
+			if end.code != "" {
+				s.logCredentialEnded("sandbox terminal", open.cred, end)
+				return closeAttachEnded(ctx, ws, end)
+			}
+			_ = attachSend(ctx, ws, attachServerMsg{Type: "closed", Message: "authorization withdrawn"})
+			_ = ws.Close(websocket.StatusPolicyViolation, "authorization withdrawn")
+			return "authorization withdrawn"
 		}
 	}
+}
+
+// closeAttachEnded ends a terminal whose credential ended: the reason in a
+// closed frame, which the terminal shows, then a 1008 carrying the reason
+// code. Returns the reason the close audit event records.
+func closeAttachEnded(ctx context.Context, ws *websocket.Conn, end streamEnd) string {
+	_ = attachSend(ctx, ws, attachServerMsg{Type: "closed", Message: end.message})
+	_ = ws.Close(websocket.StatusPolicyViolation, end.code)
+	return end.code + " (" + end.cause + ")"
 }
 
 // attachSend marshals and writes one server message.
@@ -539,26 +597,46 @@ func sameProjectPath(a, b string) bool {
 // terminal that can stay open for half an hour it makes the re-check a no-op
 // that looks like a control.
 //
-// newGrant re-reads the token, re-resolves the session identity, and re-decides
-// against the policy as it stands now, which is what makes revoking someone's
-// access close the shell they already have rather than only the next one they
-// try to open. That costs a session lookup every 30 seconds per open terminal —
-// affordable precisely because the concurrency ceiling is four.
-func (s *Server) attachStillAuthorized(r *http.Request) bool {
-	if !s.newGrant(r).decide(s.projectScope(r)).Allows(authz.PermSandboxAttach) {
-		return false
+// Nor does it re-run newGrant on the original request, which it once did
+// (Task 20398). That re-read the session from the cookie — advancing its idle
+// clock every tick — and once the session row was gone found a request with no
+// session on it, which newGrant reads as the static token: a revoked session's
+// terminal re-authorized itself as the deployment's allow-all, immune to deny
+// bindings, membership removal and offboarding. The authority is resolved
+// instead from the credential the terminal recorded at open, as that
+// credential's row stands now, against the policy as it stands now. A session
+// or token that has ended resolves to nothing, and so does a terminal that
+// recorded no credential on a hub with sign-on: it fails closed unless it was
+// opened with the static token itself. That costs a session or token read
+// every 30 seconds per open terminal — affordable precisely because the
+// concurrency ceiling is four.
+func (s *Server) attachStillAuthorized(open attachOpen) bool {
+	_, ok := s.attachRecheck(open)
+	return ok
+}
+
+// attachRecheck is attachStillAuthorized saying why not: end carries a reason
+// when the credential itself ended, and none when the credential stands but
+// its authority over this sandbox was withdrawn.
+func (s *Server) attachRecheck(open attachOpen) (streamEnd, bool) {
+	user, tok, end, ok := s.credentialAuthority(open.cred)
+	if !ok {
+		return end, false
+	}
+	g := s.credentialGrant(open.cred, user, tok)
+	if !g.decide(s.workDirScope(open.workDir)).Allows(authz.PermSandboxAttach) {
+		return streamEnd{}, false
 	}
 	// And the project is still one the caller can see. On a hub without role
 	// mappings that is the only thing a revoked membership changes (Task
 	// 20366): the decision above falls back to the allow-all, and visibility
 	// is what the membership was granting.
-	if user := s.recipientIdentity(r); user != nil {
-		dir := s.resolveWorkDir(r)
+	if user != nil {
 		for _, e := range s.allProjectEntries() {
-			if e.Path == dir {
-				return s.identityCanSeeEntry(user, e)
+			if e.Path == open.workDir {
+				return streamEnd{}, s.identityCanSeeEntry(user, e)
 			}
 		}
 	}
-	return true
+	return streamEnd{}, true
 }

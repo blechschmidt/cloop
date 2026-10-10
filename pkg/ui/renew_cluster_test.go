@@ -68,9 +68,9 @@ func withClusterOIDC(t *testing.T, m *clusterMember, idp *uiFakeIdP, callbackBas
 		Store:           store,
 		Clock:           clk.now,
 	}
-	m.srv.ClusterOIDCConfig(&cfg)
+	m.srv.InstallOIDCHooks(&cfg)
 	if cfg.StatePrefix != m.node.ID() || cfg.RefreshLock == nil || cfg.OnCacheInvalidate == nil {
-		t.Fatalf("ClusterOIDCConfig did not install the cluster hooks: %+v", cfg)
+		t.Fatalf("InstallOIDCHooks did not install the cluster hooks: %+v", cfg)
 	}
 	auth, err := oidcauth.New(cfg)
 	if err != nil {

@@ -389,6 +389,11 @@ function handleRealtimeMsg(type, data, scope) {
       toast((data && data.reason) || 'Your access to this project was withdrawn', 'error');
       if (selectedProjectIdx !== null) clearProjectSelection();
       break;
+    case 'credential_ended':
+      // The session or token that opened this stream ended (Task 20398). The
+      // close that follows probes /api/state, whose 401 signs in again.
+      toast((data && data.message) || 'Your sign-in has ended', 'error');
+      break;
     case 'error':
       console.warn('cloop ws error:', data);
       break;
@@ -563,7 +568,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

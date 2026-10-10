@@ -492,20 +492,14 @@ func TestAttachStillAuthorized_SeesAPolicyChange(t *testing.T) {
 	}
 
 	// Build one request carrying that identity, and take a memoized reading.
-	req, err := http.NewRequest(http.MethodGet, base+"/api/tasks/1/attach", nil)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	if u, perr := url.Parse(base); perr == nil {
-		for _, c := range clients["admin"].Jar.Cookies(u) {
-			req.AddCookie(c)
-		}
-	}
+	req := attachRequestAs(t, base, clients["admin"])
 	memoized := srv.grantFor(req)
 	if !memoized.decide(srv.projectScope(req)).Allows(authz.PermSandboxAttach) {
 		t.Fatal("admin must start out able to attach")
 	}
-	if !srv.attachStillAuthorized(req) {
+	// What the terminal records when it opens.
+	open := attachOpen{cred: srv.streamCredentialFor(req), workDir: srv.resolveWorkDir(req)}
+	if !srv.attachStillAuthorized(open) {
 		t.Fatal("attachStillAuthorized must agree before the policy changes")
 	}
 
@@ -524,8 +518,69 @@ func TestAttachStillAuthorized_SeesAPolicyChange(t *testing.T) {
 		t.Log("the memoized grant still reports access, as designed — " +
 			"which is exactly why the re-check must not use it")
 	}
-	if srv.attachStillAuthorized(req) {
+	if srv.attachStillAuthorized(open) {
 		t.Error("attachStillAuthorized must observe a withdrawn binding; " +
 			"a re-check that cannot see a revocation is not a control")
+	}
+}
+
+// attachRequestAs builds the terminal's upgrade request as c would send it.
+func attachRequestAs(t *testing.T, base string, c *http.Client) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/api/tasks/1/attach", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if u, perr := url.Parse(base); perr == nil {
+		for _, ck := range c.Jar.Cookies(u) {
+			req.AddCookie(ck)
+		}
+	}
+	return req
+}
+
+// TestAttachStillAuthorized_SeesASessionRevocation is the session sibling of
+// the test above, and the defect Task 20398 names.
+//
+// The re-check used to re-run newGrant on the request the terminal was opened
+// with. Once an administrator revoked the session, that request carried a
+// cookie no session answered to; newGrant found no identity on it, which it
+// reads as a request admitted on the static token, and returned the
+// deployment's allow-all, and the visibility check, finding no identity
+// either, waved it through. A stolen session's shell outlived the session —
+// and outlived every control that works through an identity: a deny binding,
+// a membership removal, offboarding.
+func TestAttachStillAuthorized_SeesASessionRevocation(t *testing.T) {
+	srv, base, clients := newAttachFixture(t)
+	req := attachRequestAs(t, base, clients["admin"])
+	open := attachOpen{cred: srv.streamCredentialFor(req), workDir: srv.resolveWorkDir(req)}
+	if open.cred.sessionHash == "" || open.cred.static {
+		t.Fatalf("the terminal recorded %+v, want the admin's session", open.cred)
+	}
+	if !srv.attachStillAuthorized(open) {
+		t.Fatal("admin must start out able to attach")
+	}
+
+	if ok, err := srv.OIDC.RevokeSession(open.cred.sessionHash, "root", ""); err != nil || !ok {
+		t.Fatalf("RevokeSession = %v, %v", ok, err)
+	}
+	if g := srv.newGrant(req); g.bypass == authz.SourceStaticToken {
+		t.Log("the request, read again, now resolves to the static token's allow-all — " +
+			"which is exactly why the re-check must not read it again")
+	}
+	if srv.attachStillAuthorized(open) {
+		t.Fatal("a revoked session's terminal is still authorized: the re-check must " +
+			"fail closed on the session it recorded, never fall back to the static token")
+	}
+
+	// A terminal that recorded no credential, on a hub with sign-on, cannot
+	// be answered for, and fails closed rather than as anybody.
+	if srv.attachStillAuthorized(attachOpen{workDir: open.workDir}) {
+		t.Error("a terminal that recorded no credential was authorized on a hub with sign-on")
+	}
+	// One opened with the static token is the static token's, and nothing a
+	// session does reaches it.
+	if !srv.attachStillAuthorized(attachOpen{cred: streamCredential{static: true}, workDir: open.workDir}) {
+		t.Error("a terminal opened with the static token lost its authority")
 	}
 }

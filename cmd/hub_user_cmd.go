@@ -84,8 +84,11 @@ than rolled back over a severing that already succeeded.
 Run --dry-run first. It prints the same set the write would act on, because it
 is the set the write acts on.
 
-A revoked session stops working within ` + sessionRevocationWindow.String() + ` on a running hub, which is
-how long it may still be served from that process's session cache.
+The revoked sessions, tokens and glasses links are announced to running hubs,
+which stop honouring them and close the dashboard streams and sandbox terminals
+they opened within about a second. A hub that reads no announcements
+(ui.cluster.exclusive) stops honouring a revoked session within ` + sessionRevocationWindow.String() + ` (its
+session cache) and closes what it opened at the next ` + streamRecheckWindow.String() + ` re-check.
 
 Examples:
 
@@ -159,10 +162,23 @@ Examples:
 		// running hubs, so they apply it — and close this person's open
 		// dashboards on those projects — now rather than at their next refresh.
 		for _, m := range rep.MembershipsRevoked {
-			if err := ui.AnnounceMembershipChange(db, fmt.Sprintf("cli-%d", os.Getpid()), m.Path); err != nil {
+			if err := ui.AnnounceMembershipChange(db, cliOrigin(), m.Path); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the removed memberships: %v\n", err)
 				break
 			}
+		}
+		// So did the sessions, tokens and glasses links: tell running hubs
+		// to drop them and close every stream and terminal they opened
+		// (Task 20398), as `cloop hub session revoke` does.
+		announced := true
+		if err := ui.AnnounceSessionsEnded(db, cliOrigin(), rep.SessionsRevoked, false); err != nil {
+			announced = false
+			fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the ended sessions: %v\n", err)
+		}
+		if err := ui.AnnounceTokensRevoked(db, cliOrigin(),
+			append(append([]string(nil), rep.TokensRevoked...), rep.GlassesRevoked...)); err != nil {
+			announced = false
+			fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the revoked tokens: %v\n", err)
 		}
 
 		if asJSON {
@@ -172,7 +188,7 @@ Examples:
 				return err
 			}
 		} else {
-			printOffboardReport(rep)
+			printOffboardReport(rep, announced)
 		}
 
 		// A partial run is an error even though most of it worked: the operator
@@ -188,7 +204,8 @@ Examples:
 }
 
 // printOffboardReport renders the plan, and for a real run what came of it.
-func printOffboardReport(rep offboard.Report) {
+// announced says whether running hubs were told of the revocations.
+func printOffboardReport(rep offboard.Report, announced bool) {
 	bold := color.New(color.Bold)
 	faint := color.New(color.Faint)
 
@@ -293,8 +310,7 @@ func printOffboardReport(rep offboard.Report) {
 	if rep.OK() {
 		color.New(color.FgGreen).Printf("\nOffboarded %s.\n", rep.Target.Label())
 	}
-	faint.Printf("A running hub may keep honouring revoked sessions for up to %s "+
-		"(its session cache).\n", sessionRevocationWindow)
+	printSessionRevocationBound(announced)
 }
 
 func init() {

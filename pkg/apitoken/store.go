@@ -234,6 +234,9 @@ type Manager struct {
 	// swallowed. nil discards.
 	onTouchErr func(error)
 
+	// onRevoke is told the id of every token Revoke withdraws. nil discards.
+	onRevoke func(id string)
+
 	mu          sync.Mutex
 	lastTouched map[string]time.Time
 	touchSem    chan struct{}
@@ -262,6 +265,16 @@ func (m *Manager) SetClock(now func() time.Time) {
 // SetTouchErrorHandler installs a sink for asynchronous last-used write
 // failures.
 func (m *Manager) SetTouchErrorHandler(fn func(error)) { m.onTouchErr = fn }
+
+// SetRevokeHook installs fn to be told the id of every token Revoke
+// withdraws, once the revocation is stored. Set it before the manager is
+// shared; fn must not block.
+//
+// A request presenting a revoked token is refused on its own, because Verify
+// reads the row. A connection that a request opened earlier is not a request:
+// it holds the token Verify returned, and this is how the hub hears that it
+// must ask again (Task 20398).
+func (m *Manager) SetRevokeHook(fn func(id string)) { m.onRevoke = fn }
 
 // Verify authenticates a token string.
 //
@@ -337,7 +350,47 @@ func (m *Manager) Get(id string) (Token, error) {
 
 // Revoke withdraws a token. Idempotent; wraps ErrNotFound for an unknown id.
 func (m *Manager) Revoke(id string) error {
-	return m.store.Revoke(strings.TrimSpace(id), m.now())
+	id = strings.TrimSpace(id)
+	if err := m.store.Revoke(id, m.now()); err != nil {
+		return err
+	}
+	if m.onRevoke != nil {
+		m.onRevoke(id)
+	}
+	return nil
+}
+
+// Recheck re-reads a token that Verify accepted earlier and reports whether
+// Verify would still accept it: nil, or ErrRevoked, ErrExpired, ErrNotFound,
+// ErrNoRoles, or the storage error that stopped it reading the row.
+//
+// For a caller that holds a verified token past the request that presented it
+// — a WebSocket or SSE stream, a sandbox terminal — and has to ask again
+// whether it may go on (Task 20398). Such a caller keeps the copy Verify
+// returned, and that copy never learns that the row was revoked.
+//
+// The secret is not compared: the holder proved possession when it opened,
+// and holds the id, not the plaintext. Nor is a use recorded: a connection
+// staying open is not the token being presented again. A row that cannot be
+// read fails closed, as it does in Verify.
+func (m *Manager) Recheck(id string) (*Token, error) {
+	tok, err := m.store.Get(strings.TrimSpace(id))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("apitoken: recheck: %w", err)
+	}
+	if tok.Revoked() {
+		return nil, ErrRevoked
+	}
+	if tok.Expired(m.now()) {
+		return nil, ErrExpired
+	}
+	if len(tok.ParsedRoles()) == 0 {
+		return nil, ErrNoRoles
+	}
+	return &tok, nil
 }
 
 // scheduleTouch records a use, coalesced to at most one write per token per

@@ -146,9 +146,7 @@ func TestSSEConnectionLifecycle_NoGoroutineLeak(t *testing.T) {
 	// quickly via its next writeSSE attempt. Without this, a quiet stream
 	// would only emit on the default 30s tick, and the test's
 	// waitForSSEClients would have to wait that long for cleanup.
-	prev := sseKeepaliveInterval
-	sseKeepaliveInterval = 100 * time.Millisecond
-	t.Cleanup(func() { sseKeepaliveInterval = prev })
+	setSSEKeepaliveInterval(t, 100*time.Millisecond)
 
 	// Warm up.
 	if err := openAndCloseSSE(addr); err != nil {

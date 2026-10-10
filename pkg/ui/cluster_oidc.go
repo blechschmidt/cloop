@@ -13,7 +13,8 @@ package ui
 //     forwarded there.
 //   - A revoked session. Each member caches sessions for sessionCacheTTL, so a
 //     sign-out on one left the session honoured on the others until their copy
-//     aged out. Invalidations now go over the bus.
+//     aged out. Invalidations now go over the bus, and since Task 20398 each
+//     member that hears one also closes the streams the session opened there.
 //   - A refresh. Two members redeeming one refresh token at once is, for a
 //     provider that rotates refresh tokens, a sign-out. Redemptions of one
 //     session now take a cluster-wide lock.
@@ -34,17 +35,23 @@ const ownerSessionRefresh = "session_refresh"
 // again. A redemption is one HTTPS round trip; this is a small fraction of it.
 const refreshLockPoll = 100 * time.Millisecond
 
-// ClusterOIDCConfig adds this hub's cluster hooks to an authenticator config.
-// A standalone hub leaves cfg unchanged.
-func (s *Server) ClusterOIDCConfig(cfg *oidcauth.Config) {
+// InstallOIDCHooks adds this hub's hooks to an authenticator config.
+//
+// On every hub, a session that changes — revoked, signed out, expired, its
+// claims refreshed — re-checks the streams and terminals this hub holds open
+// with it, and closes them if it ended (Task 20398). On a cluster member the
+// same notice also goes on the bus, and logins and refreshes get the cluster
+// hooks described at the top of this file.
+func (s *Server) InstallOIDCHooks(cfg *oidcauth.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.OnCacheInvalidate = s.onSessionChanged
 	n := s.clusterNode()
-	if n == nil || cfg == nil {
+	if n == nil {
 		return
 	}
 	cfg.StatePrefix = n.ID()
-	cfg.OnCacheInvalidate = func(sessionID string) {
-		s.publishInvalidate(invalidateSession, map[string]string{"session_hash": sessionID})
-	}
 	cfg.RefreshLock = s.sessionRefreshLock
 }
 

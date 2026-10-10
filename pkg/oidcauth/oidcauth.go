@@ -276,6 +276,13 @@ type Config struct {
 	// session store keep their own caches, and without this they would go on
 	// honouring a revoked session until their copy aged out. It must not
 	// block.
+	//
+	// It is called once the change is in the store, so a listener that
+	// re-reads the session on the strength of it — CheckSession, to decide
+	// whether a stream opened with it may stay open (Task 20398) — reads the
+	// new row, or its absence. It names the session, not the change: a claim
+	// refresh is announced exactly as a revocation is, so a listener must
+	// re-check rather than conclude.
 	OnCacheInvalidate func(sessionID string)
 
 	// RefreshLock, when set, serialises refresh-token redemptions for one

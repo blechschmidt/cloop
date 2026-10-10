@@ -110,6 +110,11 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 			s.announceMembershipChange(m.Path)
 		}
 	}
+	// Tokens and glasses links went in the same transaction, also behind the
+	// token manager's back, so nothing has yet told this hub or the others to
+	// close the streams they opened (Task 20398). Sessions need no such word:
+	// they were ended through the authenticator, which announces each one.
+	s.announceTokensRevoked(append(append([]string(nil), rep.TokensRevoked...), rep.GlassesRevoked...))
 
 	// A partial run is reported with 200 and failures attached rather than as
 	// an error status. The caller needs the report either way — it names what

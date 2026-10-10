@@ -135,6 +135,11 @@ func (s *Server) tokenManager() (*apitoken.Manager, error) {
 		s.log().Warn(logger.EventAuthz, 0, "api token: record last use",
 			map[string]interface{}{"error": terr.Error()})
 	})
+	// Every revocation made through this hub — the tokens panel, a glasses
+	// link rotated or revoked — closes the streams the token opened, here
+	// and on the other members (Task 20398). A request presenting it is
+	// refused regardless; a stream already open is not a request.
+	mgr.SetRevokeHook(s.onTokenRevoked)
 	s.tokenDB = db
 	s.tokens = mgr
 	return mgr, nil
