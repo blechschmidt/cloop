@@ -16,32 +16,40 @@ package kubernetes
 //
 // Two objects hold brokered material for a run, and both are deleted:
 //
-//   - cloop-lease-<handle>, the Secret behind spec.SecretFiles, projected into
-//     the workload as read-only volumes.
-//   - cloop-ws-<handle>, the workspace git credential, referenced as an
-//     environment variable through secretKeyRef.
+//   - cloop-lease-<handle>, the lease Secret: spec.SecretFiles, projected into
+//     the workload as read-only volumes, and since Task 20401 every value of
+//     the workload's environment, each read into the container through a
+//     secretKeyRef when the kubelet created it.
+//   - cloop-ws-<handle>, the workspace git credential, likewise referenced as
+//     an environment variable through secretKeyRef.
 //
 // Deleting them is necessary and not sufficient, which is the part worth being
 // precise about. The kubelet does not re-derive a projected volume from a
 // Secret that no longer exists — it keeps serving the last content it
-// synchronised, and a container that read the value into its own environment at
+// synchronised, and a container that read a value into its own environment at
 // start has a copy the API server cannot reach at all. So a Pod that is still
 // running is deleted too. The task's own framing is the right one: evict the
 // Pod when the material is already projected into a running container's volume
 // or env.
 //
-// That escalation applies even to RevokeScrub. There is no weaker operation
-// this backend can offer for material already inside a container, and reporting
-// a scrub that did not happen is the failure this file exists to remove. The
-// kill is reported, so the escalation is visible rather than surprising.
+// That escalation applies even to RevokeScrub, and moving the environment into
+// the lease Secret changed none of it: an environment variable is still in the
+// running process the moment the container exists, so env-borne material is
+// kill-only exactly as it was when the value sat in the Pod spec. There is no
+// weaker operation this backend can offer for material already inside a
+// container, and reporting a scrub that did not happen is the failure this file
+// exists to remove. The kill is reported, so the escalation is visible rather
+// than surprising.
 //
 // # Why delete rather than patch
 //
-// client.go grants itself three verbs — create, delete, list — and the shipped
-// RBAC matches. Emptying a Secret by PATCH would leave the volume projected and
-// the Pod running, so it would buy nothing over deleting it, in exchange for a
-// permission the hub does not currently need. Deleting the Secret and the Pod
-// is the operation that actually takes the material back.
+// The Role grants patch on Secrets (see rbac.go), but for one purpose: replacing
+// a GitHub App token in a running Pod's files before it expires, which the
+// kubelet syncs into the projected volume. Emptying the Secret by patch would
+// reach the volume the same way and nothing else — the environment, and any
+// copy the workload already made, stay — so it would buy nothing over deleting
+// it. Deleting the Secret and the Pod is the operation that actually takes the
+// material back.
 
 import (
 	"context"
@@ -186,7 +194,7 @@ func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRe
 		if err != nil || rec.finished() {
 			continue
 		}
-		st := rec.leaseFilesState()
+		st := rec.leaseSecretState()
 		if st == nil {
 			errs = append(errs, fmt.Errorf("pod for %s was adopted from a row written before this hub "+
 				"process started, which does not record its lease Secret's keys", handleID))
@@ -212,7 +220,7 @@ func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRe
 		if rec.bus != nil {
 			rec.bus.AddRedactions(values...)
 		}
-		name := secretFilesSecretName(handleID)
+		name := leaseSecretName(handleID)
 		if err := cli.patchSecretData(ctx, rec.namespace, name, data); err != nil {
 			if ae, ok := asAPIError(err); ok && ae.Code == http.StatusForbidden {
 				// The Role will refuse every later patch too: this executor
@@ -236,8 +244,8 @@ func explainSecretFilePatchFailure(namespace, name string, err error) error {
 	if ae, ok := asAPIError(err); ok && ae.Code == http.StatusForbidden {
 		return fmt.Errorf("kubernetes: not allowed to patch Secret %s/%s, which replacing a GitHub App "+
 			"token before it expires needs: %w — add \"patch\" to the secrets rule of the executor's Role "+
-			"(verbs: [\"create\", \"patch\", \"delete\"]); until then the Pod keeps the token it was "+
-			"given, which GitHub stops honouring an hour after dispatch", namespace, name, err)
+			"(%s); until then the Pod keeps the token it was given, which GitHub stops honouring an hour "+
+			"after dispatch", namespace, name, err, roleRuleFor("secrets").inline())
 	}
 	return fmt.Errorf("kubernetes: patch secret lease files %s/%s: %w", namespace, name, err)
 }
@@ -277,7 +285,7 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	}
 
 	// A record adopted after a hub restart has no *workspaceState and no
-	// *secretFilesState — rehydrate rebuilds neither — but both Secret names
+	// *leaseSecretState — rehydrate rebuilds neither — but both Secret names
 	// are pure functions of the handle ID, so they are derived rather than
 	// read. That is what makes this function correct for an adopted record,
 	// and it is why closing the restart gap (Task 20231) needed no change
@@ -305,9 +313,9 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	// Understating is the safe direction: Known is still true, and the
 	// operator is not told a credential was destroyed on this evidence.
 	existed := map[string]bool{}
-	if st := rec.leaseFilesState(); st != nil {
+	if st := rec.leaseSecretState(); st != nil {
 		st.mu.Lock()
-		existed[secretFilesSecretName(handleID)] = st.secretName != "" && !st.deleted
+		existed[leaseSecretName(handleID)] = st.secretName != "" && !st.deleted
 		st.mu.Unlock()
 	}
 	if st := rec.workspace(); st != nil {
@@ -317,7 +325,7 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	}
 
 	var errs []error
-	for _, name := range []string{secretFilesSecretName(handleID), workspaceSecretName(handleID)} {
+	for _, name := range []string{leaseSecretName(handleID), workspaceSecretName(handleID)} {
 		if err := cli.deleteSecret(ctx, rec.namespace, name); err != nil {
 			errs = append(errs, fmt.Errorf("delete secret %s/%s: %w", rec.namespace, name, err))
 			continue
@@ -329,7 +337,7 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	// Mark the driver's own bookkeeping deleted so the cleanup paths do not
 	// issue a second delete and log a spurious 404. Both are nil for an
 	// adopted record, and both tolerate that.
-	markSecretFilesDeleted(rec.leaseFilesState())
+	markLeaseSecretDeleted(rec.leaseSecretState())
 	markWorkspaceSecretDeleted(rec.workspace())
 
 	// The Pod is the part the API server cannot reach into. A running
@@ -384,9 +392,9 @@ func (e *Executor) terminateForRevocation(ctx context.Context, rec *record,
 	return nil
 }
 
-// markSecretFilesDeleted records that the credential-file Secret is gone, so
-// the cleanup paths skip it. Nil-safe: an adopted record has no state.
-func markSecretFilesDeleted(st *secretFilesState) {
+// markLeaseSecretDeleted records that the lease Secret is gone, so the cleanup
+// paths skip it. Nil-safe: an adopted record has no state.
+func markLeaseSecretDeleted(st *leaseSecretState) {
 	if st == nil {
 		return
 	}

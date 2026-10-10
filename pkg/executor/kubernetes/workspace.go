@@ -40,6 +40,11 @@ package kubernetes
 // after the work is done, so a successful fetch leaves it (and its lease) for
 // the workload's end.
 //
+// A hub that stops following a run that is still alive (Close) deletes it only
+// once every container that reads it has started. Before that, deleting it
+// would hold the next reader in CreateContainerConfigError for good, so it is
+// left for the Pod — see finish and leaveWorkspaceSecret.
+//
 // # Who deletes it when this process does not
 //
 // That used to be an honest gap: a control plane killed between creating the
@@ -541,6 +546,37 @@ func (e *Executor) discardWorkspaceSecret(st *workspaceState, cli *client, errMs
 	}
 }
 
+// leaveWorkspaceSecret is what finish does instead of discardWorkspaceSecret
+// when the hub stops following a run whose workspace Secret has not been read
+// yet — the provisioner has not started, or a push write-back's harness has
+// not. Deleting it would hold that container in CreateContainerConfigError for
+// good; see finish.
+//
+// The lease is not released either. Releasing a GitHub App lease destroys its
+// installation token at GitHub, which is the token the Secret holds for the
+// container that has not read it yet. It lapses on the broker's own TTL, and
+// the ownerReference reaps the Secret with its Pod.
+//
+// The provisioning span is closed here, saying so, because nothing in this
+// process will see the fetch end.
+func (e *Executor) leaveWorkspaceSecret(st *workspaceState, podName string) {
+	if st == nil {
+		return
+	}
+	e.auditWorkspace(st, executor.WorkspaceProvisionEnd,
+		"the control plane stopped following the Pod before every container that reads the "+
+			"workspace credential had started; the credential is left for the Pod")
+	st.mu.Lock()
+	name, namespace, deleted := st.secretName, st.namespace, st.deleted
+	st.mu.Unlock()
+	if name == "" || deleted {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "kubernetes: leaving workspace secret %s/%s in place: pod %s has not "+
+		"started every container that reads it, and deleting it would strand the Pod; it is "+
+		"deleted with the Pod\n", namespace, name, podName)
+}
+
 // observeWorkspace reacts to a Pod status update by dropping the credential as
 // soon as it is no longer needed.
 //
@@ -612,9 +648,11 @@ func workspaceFailureMessage(t *stateTerminated) string {
 //
 // It is a sibling of explainCreateFailure rather than a branch inside it,
 // because the remedies do not overlap: the interesting failure here is a 403,
-// and what an operator needs is the two verbs to add — plus the reassurance
-// that they are not being asked for read access, which is the objection anyone
-// reviewing an RBAC change to Secrets will raise first.
+// and what an operator needs is the rule to add — the whole secrets rule, the
+// same one the chart grants, so adding it once covers every Secret this driver
+// writes — plus the reassurance that they are not being asked for read access,
+// which is the objection anyone reviewing an RBAC change to Secrets will raise
+// first.
 func explainSecretFailure(namespace, name string, err error) error {
 	ae, ok := asAPIError(err)
 	if !ok {
@@ -624,13 +662,8 @@ func explainSecretFailure(namespace, name string, err error) error {
 	switch {
 	case ae.Code == http.StatusForbidden:
 		return fmt.Errorf("%w: not allowed to create Secrets in %q, which a git workspace needs: %w — "+
-			"add this rule to the executor's Role:\n"+
-			"  - apiGroups: [\"\"]\n"+
-			"    resources: [\"secrets\"]\n"+
-			"    verbs: [\"create\", \"delete\"]\n"+
-			"create and delete only: the driver writes the credential and removes it again, and never "+
-			"reads a Secret back",
-			executor.ErrWorkspaceUnavailable, namespace, err)
+			"add this rule to the executor's Role:\n%s\n%s",
+			executor.ErrWorkspaceUnavailable, namespace, err, secretsRuleYAML(), secretsRuleRationale)
 	case ae.Code == http.StatusNotFound:
 		return fmt.Errorf("%w: namespace %q does not exist (or the kubeconfig cannot see it): %w",
 			executor.ErrWorkspaceUnavailable, namespace, err)

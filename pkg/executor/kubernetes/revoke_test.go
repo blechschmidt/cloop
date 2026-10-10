@@ -118,7 +118,7 @@ func TestRevokeLease_DeletesTheLeasedSecrets(t *testing.T) {
 	// removes the need to know which credential shapes a run was given — which
 	// a record adopted after a hub restart no longer remembers.
 	deleted := api.secretDeleteNames()
-	for _, want := range []string{secretFilesSecretName(handle.ID), workspaceSecretName(handle.ID)} {
+	for _, want := range []string{leaseSecretName(handle.ID), workspaceSecretName(handle.ID)} {
 		if !containsString(deleted, want) {
 			t.Errorf("Secret %q was never deleted; the deletes were %v", want, deleted)
 		}
@@ -282,5 +282,57 @@ func TestRevokeLease_BlankLeaseIDIsRefused(t *testing.T) {
 	if got := ex.Revocations(); len(got) != 0 {
 		t.Errorf("the refused request was logged as %+v; being non-terminal it would be replayed "+
 			"forever against a lease that does not exist", got)
+	}
+}
+
+// TestRevokeLease_EnvOnlyMaterialIsStillKillOnly: the lease Secret now carries
+// the environment too (Task 20401), which makes deleting it look like it might
+// be enough for a lease that delivered nothing but variables. It is not. The
+// kubelet copied each value into the container's environment when it created
+// the container, and no API reaches into a running process to take it back — so
+// a scrub still escalates to deleting the Pod, and says so.
+func TestRevokeLease_EnvOnlyMaterialIsStillKillOnly(t *testing.T) {
+	ex, api, _ := newTestExecutor(t, nil)
+	spec := testSpec()
+	spec.Env = []string{
+		"ANTHROPIC_API_KEY=sk-ant-api03-LEASED-API-KEY-444555666777",
+		"CLOOP_REDACT_ENV=ANTHROPIC_API_KEY",
+	}
+	spec.Secrets = []executor.SecretBinding{{
+		LeaseID:    revokedLeaseID,
+		GrantID:    "grant-harness",
+		SecretName: "harness-login",
+		Kind:       "env",
+		EnvKeys:    []string{"ANTHROPIC_API_KEY"},
+	}}
+	handle, err := ex.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	podName := api.onlyPodName(t)
+	if !api.kubeletCreate(t, podName, ContainerName) {
+		t.Fatal("the harness could not be created although its Secret exists")
+	}
+
+	out := ex.RevokeLease(context.Background(), executor.RevokeRequest{
+		LeaseID: revokedLeaseID,
+		Reason:  "the API key was pasted into a ticket",
+		Action:  executor.RevokeScrub,
+	})
+	if out.State != executor.RevokeStateRevoked || out.Ack == nil {
+		t.Fatalf("outcome = %+v, want revoked with a report", out)
+	}
+	if !containsString(api.secretDeleteNames(), leaseSecretName(handle.ID)) {
+		t.Errorf("the lease Secret holding the variable was not deleted (deletes: %v)", api.secretDeleteNames())
+	}
+	if out.Ack.FilesRemoved != 1 {
+		t.Errorf("FilesRemoved = %d, want 1: the lease Secret existed and was destroyed", out.Ack.FilesRemoved)
+	}
+	if !containsString(out.Ack.Killed, handle.ID) {
+		t.Errorf("Killed = %v: a scrub of env-borne material must escalate to the Pod, because the "+
+			"value is already in the running process's environment", out.Ack.Killed)
+	}
+	if st := waitStatus(t, ex, handle.ID, 5*time.Second); st.State != executor.StateKilled {
+		t.Errorf("state = %q (%s), want killed", st.State, st.Error)
 	}
 }

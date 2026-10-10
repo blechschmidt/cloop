@@ -424,6 +424,7 @@ func TestBuildPod_WorkspaceTokenIsNotInThePodObject(t *testing.T) {
 func TestBuildPod_WorkspaceInitDoesNotInheritEnv(t *testing.T) {
 	req := workspaceRequest()
 	req.Env = []string{"ANTHROPIC_API_KEY=sk-secret-value", "PATH=/usr/bin"}
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 	p, err := buildPod(req)
 	if err != nil {
 		t.Fatalf("buildPod: %v", err)
@@ -437,11 +438,16 @@ func TestBuildPod_WorkspaceInitDoesNotInheritEnv(t *testing.T) {
 	}
 	// The harness still gets it: this is about scope, not about dropping it.
 	// (Beside its own git's trust in the workspace — see
-	// TestBuildPod_HarnessGitTrustsTheWorkspace.)
+	// TestBuildPod_HarnessGitTrustsTheWorkspace.) It gets it from the lease
+	// Secret, so resolve it the way the kubelet does.
+	data, err := leaseSecretData(nil, req.Env)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := map[string]string{}
-	for _, ev := range p.Spec.Containers[0].Env {
-		if !strings.HasPrefix(ev.Name, "GIT_CONFIG_") {
-			got[ev.Name] = ev.Value
+	for name, v := range resolveEnv(t, p.Spec.Containers[0], map[string]map[string][]byte{req.LeaseSecretName: data}) {
+		if !strings.HasPrefix(name, "GIT_CONFIG_") {
+			got[name] = v
 		}
 	}
 	if len(got) != 2 || got["ANTHROPIC_API_KEY"] != "sk-secret-value" || got["PATH"] != "/usr/bin" {
@@ -1214,7 +1220,9 @@ func TestPreflight_WorkspaceFinding(t *testing.T) {
 
 // TestExplainSecretFailure: a 403 on Secrets is the failure an operator hits
 // when upgrading a hub whose Role predates workspace provisioning, and the
-// message has to be the rule, not a reminder that RBAC exists.
+// message has to be the rule, not a reminder that RBAC exists — the whole
+// secrets rule the chart grants, so adding it once covers every Secret the
+// driver writes, the lease Secret's patch included.
 func TestExplainSecretFailure(t *testing.T) {
 	err := explainSecretFailure("cloop", "cloop-ws-k-1",
 		&APIError{Code: http.StatusForbidden, Verb: "POST", Path: "/api/v1/namespaces/cloop/secrets",
@@ -1222,7 +1230,7 @@ func TestExplainSecretFailure(t *testing.T) {
 	if !errors.Is(err, executor.ErrWorkspaceUnavailable) {
 		t.Errorf("error %v does not wrap ErrWorkspaceUnavailable", err)
 	}
-	for _, want := range []string{`resources: ["secrets"]`, `verbs: ["create", "delete"]`, "never"} {
+	for _, want := range []string{`resources: ["secrets"]`, `verbs: ["create", "patch", "delete"]`, "never"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}

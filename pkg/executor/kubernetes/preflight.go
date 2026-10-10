@@ -241,14 +241,13 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 				fmt.Sprintf("the egress filter is enabled but the leased identity may not manage "+
 					"NetworkPolicies in %q: %s — every Start will be refused rather than run a Pod "+
 					"with unfiltered egress", namespace, ae.Message),
-				"add `- apiGroups: [\"networking.k8s.io\"] resources: [\"networkpolicies\"] "+
-					"verbs: [\"create\", \"delete\", \"list\"]` to the executor's Role")
+				"add `"+roleRuleFor("networkpolicies").inline()+"` to the executor's Role")
 		default:
 			add("egress", LevelFail,
 				fmt.Sprintf("the egress filter is enabled but its NetworkPolicies cannot be listed in %q: %v",
 					namespace, nperr),
 				"check that the cluster serves networking.k8s.io/v1 and that the executor's Role covers "+
-					"networkpolicies: [create delete list]")
+					roleRuleFor("networkpolicies").brief())
 		}
 
 	}
@@ -335,17 +334,22 @@ func addEnforcementFinding(e *Executor, add func(name, level, msg, fix string)) 
 
 // rbacFix is the Role the executor's identity needs, as something an operator
 // can paste. Naming the exact verbs is the difference between a two-minute
-// fix and an afternoon.
+// fix and an afternoon, and rendering them from executorRole is what keeps
+// them the verbs the chart grants.
 //
 // egress adds the networkpolicies rule. It is conditional because the rule is:
 // an executor that does not filter egress creates no NetworkPolicies and should
 // not be told to grant itself authority over them.
 func rbacFix(namespace string, egress bool) string {
-	rules := "pods: [create get list watch delete], pods/log: [get] and secrets: [create delete]"
-	if egress {
-		rules = "pods: [create get list watch delete], pods/log: [get], secrets: [create delete] and " +
-			"networking.k8s.io networkpolicies: [create delete list]"
+	var rules []string
+	for _, r := range executorRole {
+		if r.Resource == "networkpolicies" && !egress {
+			continue
+		}
+		rules = append(rules, r.brief())
 	}
+	last := len(rules) - 1
+	list := strings.Join(rules[:last], ", ") + " and " + rules[last]
 	return fmt.Sprintf("grant a Role in %q with %s, then bind it to the ServiceAccount whose token "+
-		"the kubeconfig carries", namespace, rules)
+		"the kubeconfig carries", namespace, list)
 }

@@ -66,11 +66,15 @@
 // server accepts the object either way. Preflight reports that as a warning
 // because it is a fact about the cluster, not about the driver.
 //
-// Nor does it hide the workload's environment. Spec.Env lands in the Pod
-// object, readable by anyone with `get pods` in the namespace. That is why a
-// nil Spec.Env forwards *nothing* here (unlike os/exec, which would inherit
-// the control plane's whole environment) and why the namespace should be one
-// only the control plane can read.
+// The workload's environment is not in the Pod object. Every Spec.Env value
+// travels in the run's lease Secret and reaches the container through a
+// secretKeyRef (leaseenv.go), so `get pods` in the namespace shows the names
+// and the reference, never a credential. A nil Spec.Env still forwards
+// *nothing* (unlike os/exec, which would inherit the control plane's whole
+// environment). What the Secret does not change is the namespace boundary: an
+// identity that may read Secrets there — or create Pods that mount them — can
+// read the run's credentials, so the namespace should still be one only the
+// control plane can write to.
 package kubernetes
 
 import (
@@ -325,6 +329,9 @@ type Options struct {
 
 	// now overrides the clock for tests.
 	now func() time.Time
+	// configErrorGraceOverride shortens defaultConfigErrorGrace for tests,
+	// which would otherwise wait out the real kubelet's backoff.
+	configErrorGraceOverride time.Duration
 }
 
 // Normalize fills defaults and validates. It returns a copy so a caller's
@@ -607,12 +614,32 @@ type record struct {
 	// tree. It is what lets the watcher drop the credential Secret the moment
 	// the init container finishes. See workspace.go.
 	ws *workspaceState
-	// leaseFiles is the secret-lease credential-file state, nil when the Spec
-	// carried none. Unlike ws it has no early drop: the files are read by the
-	// harness for the whole of the run — a credential helper is invoked every
-	// time git talks to a remote — so the Secret lives until the workload does
-	// not. See secretfiles.go.
-	leaseFiles *secretFilesState
+	// leaseSecret is the lease Secret's state — the run's credential files and
+	// its whole environment — nil when the Spec carried neither. Unlike ws it
+	// has no early drop: the files are read by the harness for the whole of the
+	// run — a credential helper is invoked every time git talks to a remote —
+	// so the Secret lives until the workload does not. See secretfiles.go and
+	// leaseenv.go.
+	leaseSecret *leaseSecretState
+	// initStarted and harnessStarted record that the kubelet has started the
+	// workspace provisioner and the harness, as far as this process has seen.
+	//
+	// They decide whether a per-run Secret may go when the hub walks away from
+	// a run that is still alive (finish, on Close). A container's environment
+	// is resolved from its secretKeyRefs when the kubelet creates it, and the
+	// Pod's Secret volumes are mounted before any container starts — so once
+	// the container that reads a Secret has started, deleting the Secret takes
+	// nothing from the workload. Before then it takes everything: the kubelet
+	// cannot create the container and holds it in CreateContainerConfigError
+	// for good. Both only ever become true.
+	initStarted    bool
+	harnessStarted bool
+	// configErr is set once a container has sat in CreateContainerConfigError
+	// past the grace period, and is what the watcher returns to fail the run.
+	// recheck is the timer that looks again when the error was first seen
+	// inside the grace period. See configerror.go.
+	configErr *containerConfigError
+	recheck   *time.Timer
 	// wantWriteBack is the write-back this workload was dispatched with, so a
 	// Pod that produced no report can be told apart from one that was never
 	// asked for anything. Outside the mutex because it is written once, before
@@ -968,20 +995,20 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}
 
 	// From here every failure path must release the lease, drop any workspace
-	// credential already written into the cluster, drop any leased credential
-	// files likewise, remove any NetworkPolicy it created, and close the client
-	// — or a refused Start leaks a credential the broker still thinks is held, a
+	// credential already written into the cluster, drop the lease Secret
+	// likewise, remove any NetworkPolicy it created, and close the client — or
+	// a refused Start leaks a credential the broker still thinks is held, a
 	// Secret nothing will ever consume, or a policy no Pod will ever be governed
-	// by. ws, leaseFiles and policyName are assigned below and read through the
+	// by. ws, leaseSecret and policyName are assigned below and read through the
 	// closure, so the same release() is correct before and after any of them
 	// exists.
 	var (
-		ws           *workspaceState
-		leaseFiles   *secretFilesState
-		provisionWS  *pendingSecret
-		provisionFil *pendingSecret
-		policyName   string
-		podName      string
+		ws             *workspaceState
+		leaseSecret    *leaseSecretState
+		provisionWS    *pendingSecret
+		provisionLease *pendingSecret
+		policyName     string
+		podName        string
 	)
 	handleID := newHandleID()
 	namespace := e.namespaceFor(creds)
@@ -991,10 +1018,10 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// would otherwise believe it is out on loan for the rest of this hub's
 		// life. Both are no-ops once the create has run.
 		provisionWS.abandon()
-		provisionFil.abandon()
+		provisionLease.abandon()
 		e.discardWorkspaceSecret(ws, cli,
 			"the workload was never started, so the tree was never fetched")
-		e.discardSecretFiles(leaseFiles, cli)
+		e.discardLeaseSecret(leaseSecret, cli)
 		e.deleteNetworkPolicyDetached(cli, namespace, policyName)
 		// The Pod is deleted last, and only on the paths that got far enough to
 		// create one. Deleting it also cascades to any Secret above whose own
@@ -1032,8 +1059,10 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		spec.Workspace = ws.routed
 	}
 
-	// Prepared here, created after the Pod, for the reason above.
-	leaseFiles, provisionFil, err = e.provisionSecretFiles(ctx, spec, cli, handleID, namespace)
+	// Prepared here, created after the Pod, for the reason above. It carries
+	// the lease's credential files and every value of the environment, which
+	// the Pod reads by reference rather than holding (leaseenv.go).
+	leaseSecret, provisionLease, err = e.provisionLeaseSecret(ctx, spec, cli, handleID, namespace)
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -1112,7 +1141,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		release()
 		return executor.Handle{}, err
 	}
-	if err := provisionFil.materialise(ctx, owner, owned); err != nil {
+	if err := provisionLease.materialise(ctx, owner, owned); err != nil {
 		release()
 		return executor.Handle{}, err
 	}
@@ -1128,7 +1157,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		leaseID:           creds.LeaseID,
 		leaseExp:          creds.ExpiresAt,
 		ws:                ws,
-		leaseFiles:        leaseFiles,
+		leaseSecret:       leaseSecret,
 
 		wantWriteBack: spec.WriteBack,
 	}
@@ -1433,11 +1462,14 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// workspace can legitimately need no Secret at all — a public repository is
 	// fetched unauthenticated — so only the create path knows whether one
 	// exists, and an empty name is how it says so. Here the Spec itself is the
-	// discriminator: files present means a Secret was created for them, under a
-	// name that is a pure function of the handle ID, computed by the same
-	// function on both sides.
-	if len(spec.SecretFiles) > 0 {
-		req.SecretFilesSecretName = secretFilesSecretName(handleID)
+	// discriminator: files or environment present means a Secret was created
+	// for them, under a name that is a pure function of the handle ID, computed
+	// by the same function on both sides. buildPod references it only for what
+	// the Secret actually carries (leaseSecretData and harnessEnv derive both
+	// from the same plans), so an environment of nothing but GIT_CONFIG_COUNT
+	// names a Secret nothing reads.
+	if len(spec.SecretFiles) > 0 || len(spec.Env) > 0 {
+		req.LeaseSecretName = leaseSecretName(handleID)
 	}
 
 	return req, nil
@@ -1557,7 +1589,15 @@ func (e *Executor) pump(ctx context.Context, rec *record) {
 	// persisted handle exists so the next boot can reattach to. A restart for
 	// an upgrade would have killed every run on the way down and then
 	// rehydrated a set of handles whose Pods it had just removed.
-	if state.Terminal() && !e.opts.KeepCompletedPods {
+	//
+	// A Pod failed for a container the kubelet cannot create goes even when
+	// KeepCompletedPods asks to keep finished ones, because it is not finished:
+	// it is Pending, and would start the moment its missing Secret reappeared —
+	// with finish below having removed its egress NetworkPolicy and nobody
+	// following it. Its status already says why it failed; there are no logs to
+	// keep.
+	var stuck *containerConfigError
+	if state.Terminal() && (!e.opts.KeepCompletedPods || errors.As(watchErr, &stuck)) {
 		e.deletePodDetached(rec, e.opts.KillGracePeriod)
 	}
 	e.finish(rec, state, exitCode, msg)
@@ -1613,6 +1653,12 @@ func (e *Executor) watchToTerminal(ctx context.Context, rec *record, onPhase fun
 		if terminalPhase(cur.Status.Phase) {
 			return cur, nil
 		}
+		// A container the kubelet will never create ends the watch here: the
+		// Pod stays Pending for as long as it exists, so waiting for a
+		// terminal phase would wait forever. See configerror.go.
+		if err := rec.configFailure(); err != nil {
+			return cur, err
+		}
 
 		terminal, err := e.watchOnce(ctx, rec, cur.Metadata.ResourceVersion, observe)
 		if terminal != nil {
@@ -1621,6 +1667,10 @@ func (e *Executor) watchToTerminal(ctx context.Context, rec *record, onPhase fun
 		if err != nil {
 			if errors.Is(err, errPodDeleted) {
 				return last, errPodDeleted
+			}
+			var stuck *containerConfigError
+			if errors.As(err, &stuck) {
+				return last, err
 			}
 			if ctx.Err() != nil {
 				return last, ctx.Err()
@@ -1711,6 +1761,9 @@ func (e *Executor) watchOnce(ctx context.Context, rec *record, resourceVersion s
 			if terminalPhase(p.Status.Phase) {
 				return &p, nil
 			}
+			if err := rec.configFailure(); err != nil {
+				return nil, err
+			}
 		case "DELETED":
 			return nil, errPodDeleted
 		case "ERROR":
@@ -1743,6 +1796,9 @@ func (e *Executor) observePhase(rec *record, p *pod) {
 	if p == nil {
 		return
 	}
+	// First, because what it records decides whether finish may delete a
+	// per-run Secret, and a terminal Pod is the last chance to record it.
+	rec.noteContainerStarts(p)
 	// Before the terminal-phase early return below, because a Pod that failed
 	// *because* provisioning failed goes straight from Pending to Failed and
 	// its credential Secret must still be dropped on the way past.
@@ -1756,6 +1812,7 @@ func (e *Executor) observePhase(rec *record, p *pod) {
 	if terminalPhase(p.Status.Phase) {
 		return
 	}
+	e.observeConfigError(rec, p)
 	state := executor.StatePending
 	if p.Status.Phase == phaseRunning {
 		state = executor.StateRunning
@@ -2605,7 +2662,10 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	leaseID := rec.leaseID
 	rec.leaseID = ""
 	ws := rec.ws
-	leaseFiles := rec.leaseFiles
+	leaseSecret := rec.leaseSecret
+	initStarted, harnessStarted := rec.initStarted, rec.harnessStarted
+	recheck := rec.recheck
+	rec.recheck = nil
 	// The egress policy is dropped only when the workload actually stopped.
 	// Close finishes every live handle with StateUnknown and deliberately
 	// leaves its Pods running, so a hub restarting for an upgrade would
@@ -2619,20 +2679,45 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	}
 	rec.mu.Unlock()
 
+	if recheck != nil {
+		recheck.Stop()
+	}
+
 	// Before cli.close(): the deletes need the client this record owns.
-	e.discardWorkspaceSecret(ws, cli, "")
-	// Unconditional, not gated on a terminal state the way the egress policy
-	// is, and the asymmetry is deliberate. Removing a policy from a Pod that is
-	// still running *widens* what it can reach, which is the one thing cleanup
-	// must never do. Removing this Secret narrows: the kubelet has already
-	// projected the files into the Pod's tmpfs and does not clear them when the
-	// source disappears, so a workload the hub is walking away from keeps the
-	// credentials it is using while the durable copy in etcd — which nothing
-	// will renew or revoke once this process is gone — stops existing. The
-	// honest cost is a Pod that had not yet mounted the volume, which will stay
-	// in ContainerCreating; the material is short-lived on the broker's own TTL
-	// anyway, so that run was going to fail regardless.
-	e.discardSecretFiles(leaseFiles, cli)
+	//
+	// The per-run Secrets go when the workload is over, and — when the hub is
+	// walking away from one still alive, which is Close — as soon as every
+	// container that reads them has started, never before. Removing them then
+	// narrows exposure without taking anything from the workload: the kubelet
+	// resolved the containers' environment when it created them and projected
+	// the files before any of them started, and clears neither when the
+	// source disappears, while the durable copy in etcd — which nothing in
+	// this process will renew or revoke once it is gone — stops existing.
+	//
+	// Removing one *before* its consumer starts takes everything instead. The
+	// harness's whole environment is a secretKeyRef into the lease Secret, and
+	// a harness behind a workspace fetch is created minutes after its Pod: a
+	// hub that restarted mid-fetch used to delete the Secret on its way down
+	// and leave the harness in CreateContainerConfigError for good. Such a
+	// Secret is left for the Pod — the ownerReference reaps it with the Pod,
+	// and a hub that adopts the run after the restart finds the Pod able to
+	// start.
+	keepWorkspace := ws != nil && !state.Terminal() &&
+		(!initStarted || (ws.harnessNeedsSecret() && !harnessStarted))
+	if keepWorkspace {
+		e.leaveWorkspaceSecret(ws, rec.podName)
+	} else {
+		e.discardWorkspaceSecret(ws, cli, "")
+	}
+	// Not gated on a terminal state the way the egress policy is, and the
+	// asymmetry is deliberate. Removing a policy from a Pod that is still
+	// running *widens* what it can reach, which is the one thing cleanup must
+	// never do. Removing this Secret once the harness has read it narrows.
+	if leaseSecret != nil && !state.Terminal() && !harnessStarted {
+		leaveLeaseSecret(leaseSecret, rec.podName)
+	} else {
+		e.discardLeaseSecret(leaseSecret, cli)
+	}
 	// The lease attribution is dropped only for a workload that is actually
 	// over, and the gate is the point rather than a formality — it is the same
 	// one ForgetHandle below carries, for the same reason. Close() finishes
@@ -2686,13 +2771,13 @@ func (r *record) finished() bool {
 	return r.done
 }
 
-// leaseFilesState returns the credential-file bookkeeping, or nil when this run
+// leaseSecretState returns the lease Secret's bookkeeping, or nil when this run
 // had none — which is also the case for a record adopted after a restart, whose
 // Secret names revoke.go re-derives from the handle ID instead.
-func (r *record) leaseFilesState() *secretFilesState {
+func (r *record) leaseSecretState() *leaseSecretState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.leaseFiles
+	return r.leaseSecret
 }
 
 // workspace returns the provisioning state, or nil when this run had none.

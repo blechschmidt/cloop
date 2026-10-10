@@ -1814,46 +1814,85 @@ jobs:
           kubectl -n cloop exec deploy/cloop-cloop-hub -- \
             /usr/local/bin/cloop hub healthcheck --endpoint readyz
 
-      - name: Assert the executor Role grants exactly the Pod verbs
+      - name: Assert the executor Role grants exactly what the driver calls
         # The Role is the boundary the in-cluster executor runs inside, so
-        # widening it is a security change. Asserting both directions means a
-        # copy-pasted `"*"` fails here instead of shipping.
+        # widening it is a security change. Every verb on every resource the
+        # driver touches is decided one way or the other, against the API
+        # server's own authorizer: what executorRole in
+        # pkg/executor/kubernetes/rbac.go lists is granted and every other verb
+        # is denied. A copy-pasted `"*"` fails here, and so does a `patch` on
+        # networkpolicies — the authority to widen a running sandbox's
+        # firewall — which the Pod-only version of this check let through.
         run: |
           set -euo pipefail
           SA=system:serviceaccount:cloop:cloop-cloop-hub
+          WL=cloop-workloads
 
           # `kubectl auth can-i` exits 1 when the answer is "no", which under
           # `set -e` would abort on the very checks that are supposed to see a
           # denial. Read the word, ignore the status.
-          can() {
-            kubectl auth can-i "$1" "$2" -n "$3" --as "$SA" 2>/dev/null || true
+          #
+          # A subresource goes through --subresource, never as "pods/log":
+          # can-i reads TYPE/NAME, so "pods/log" asks about the Pod *named*
+          # log, which `get pods` answers — the check would pass without ever
+          # consulting the pods/log rule.
+          can() { # verb resource namespace [subresource]
+            if [ -n "${4:-}" ]; then
+              kubectl auth can-i "$1" "$2" -n "$3" --subresource "$4" --as "$SA" 2>/dev/null || true
+            else
+              kubectl auth can-i "$1" "$2" -n "$3" --as "$SA" 2>/dev/null || true
+            fi
           }
+          what() { echo "$1 $2${4:+/$4} in $3"; }
           grants() {
-            [ "$(can "$1" "$2" "$3")" = yes ] \
-              || { echo "executor cannot $1 $2 in $3 — the driver needs it"; exit 1; }
-            echo "  grants: $1 $2 in $3"
+            [ "$(can "$@")" = yes ] \
+              || { echo "executor cannot $(what "$@") — the driver needs it"; exit 1; }
+            echo "  grants: $(what "$@")"
           }
           denies() {
-            [ "$(can "$1" "$2" "$3")" = no ] \
-              || { echo "executor Role is too wide: it grants $1 $2 in $3"; exit 1; }
-            echo "  denies: $1 $2 in $3"
+            [ "$(can "$@")" = no ] \
+              || { echo "executor Role is too wide: it grants $(what "$@")"; exit 1; }
+            echo "  denies: $(what "$@")"
+          }
+          # exactly RESOURCE SUBRESOURCE VERB...: those verbs granted, every
+          # other verb denied.
+          exactly() {
+            r=$1 sub=$2
+            shift 2
+            for v in get list watch create update patch delete deletecollection; do
+              case " $* " in
+                *" $v "*) grants "$v" "$r" "$WL" "$sub" ;;
+                *)        denies "$v" "$r" "$WL" "$sub" ;;
+              esac
+            done
           }
 
-          for v in create get list watch delete; do grants "$v" pods cloop-workloads; done
-          grants get pods/log cloop-workloads
+          exactly pods ""                              create get list watch delete
+          exactly pods log                             get
+          # Write-only: a run's credentials and environment, a fetch's token,
+          # and the GitHub App token refresh. Never read back.
+          exactly secrets ""                           create patch delete
+          # No update or patch: a policy is written once, before its Pod.
+          exactly networkpolicies.networking.k8s.io "" create delete list
 
-          # And nothing else. The driver never mutates a Pod after creating
-          # it, and an executor that could read Secrets would make the secret
-          # broker decorative.
-          denies update pods    cloop-workloads
-          denies patch  pods    cloop-workloads
-          denies get    secrets cloop-workloads
-          denies list   secrets cloop-workloads
+          # Nothing else. A shell into a sandbox is an operator's opt-in,
+          # granted in their own Role, never by the chart.
+          for sub in exec attach portforward ephemeralcontainers; do
+            denies create pods "$WL" "$sub"
+            denies get    pods "$WL" "$sub"
+          done
+          for r in configmaps serviceaccounts roles.rbac.authorization.k8s.io \
+                   rolebindings.rbac.authorization.k8s.io; do
+            denies create "$r" "$WL"
+          done
+          denies get configmaps "$WL"
 
           # The hub's own namespace holds its Secrets and its ServiceAccount
           # token; the Role is bound in the workload namespace only.
           denies create pods    cloop
           denies get    secrets cloop
+          denies create secrets cloop
+          denies create networkpolicies.networking.k8s.io cloop
 
       - name: Run a workload through the in-cluster executor
         # End-to-end: the Pod's own ServiceAccount token is read from its
@@ -1870,6 +1909,26 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: The chart's executor Role is exactly what the driver calls
+        # rbac_test.go renders the chart with `helm template` and compares its
+        # Role with executorRole in both directions, for each value set that
+        # changes it. Build and Test runs it as well, but skips it on a runner
+        # without helm; here helm is installed above, CLOOP_REQUIRE_HELM turns
+        # a skip into a failure, and the PASS line is asserted rather than the
+        # exit status.
+        env:
+          CLOOP_REQUIRE_HELM: "1"
+        run: |
+          set -euo pipefail
+          go test ./pkg/executor/kubernetes/ -count=1 -v \
+            -run '^(TestHelmChartExecutorRoleIsExactlyWhatTheDriverCalls|TestExecutorRoleNeverReadsSecretsOrMutatesWhatItCreated)$' \
+            2>&1 | tee /tmp/rbac-test.log
+          grep -qE '^--- PASS: TestHelmChartExecutorRoleIsExactlyWhatTheDriverCalls \(' /tmp/rbac-test.log || {
+            echo "::error::go test succeeded but TestHelmChartExecutorRoleIsExactlyWhatTheDriverCalls" \
+                 "did not pass — it was skipped, so the chart's Role was never compared with the driver"
+            exit 1
+          }
+
       - name: Prepare the Kubernetes end-to-end test
         # What both runs of tests/kube below take: the cluster's kubeconfig, and
         # the cloop the hub image carries — the build under test, statically
@@ -1881,6 +1940,37 @@ jobs:
           id=$(docker create cloop-hub:ci)
           docker cp "$id:/usr/local/bin/cloop" "$RUNNER_TEMP/cloop"
           docker rm "$id" >/dev/null
+
+      - name: The driver's Secrets on a real kubelet
+        # The package's unit tests model the kubelet against a fake API server;
+        # these run one. Opt-in tests in pkg/executor/kubernetes, each in a
+        # namespace of its own: a per-run Secret's ownerReference makes the
+        # cluster collect it with its Pod (Task 20281); the workload's
+        # environment resolves from the lease Secret and is never a value in
+        # the Pod object; the kubelet's wording for a missing Secret or key is
+        # the one the driver parses to name it; and the real driver fails a
+        # harness whose Secret is gone instead of leaving it pending (Task
+        # 20401). The PASS lines are asserted: without the opt-in they skip.
+        timeout-minutes: 10
+        env:
+          CLOOP_K8S_GC_E2E: "1"
+          # Tagged locally and loaded into kind, so IfNotPresent never pulls.
+          CLOOP_K8S_ENV_E2E_IMAGE: cloop-e2e-shell:local
+        run: |
+          set -euo pipefail
+          docker pull -q alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+          docker tag alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc "$CLOOP_K8S_ENV_E2E_IMAGE"
+          kind load docker-image "$CLOOP_K8S_ENV_E2E_IMAGE" --name cloop-ci
+          go test ./pkg/executor/kubernetes/ -run RealCluster -count=1 -v -timeout 8m 2>&1 | tee /tmp/realcluster.log
+          for t in TestOwnerReference_RealClusterGarbageCollection \
+                   TestLeaseEnv_RealClusterResolvesTheEnvironmentFromTheSecret \
+                   TestLeaseEnv_RealClusterNamesTheMissingSecret \
+                   TestStart_RealClusterDeliversTheEnvironmentAndFailsAStrandedHarness; do
+            grep -qE "^--- PASS: $t \(" /tmp/realcluster.log || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped"
+              exit 1
+            }
+          done
 
       - name: Git proxy and kube guard end to end on kind
         id: kube-e2e

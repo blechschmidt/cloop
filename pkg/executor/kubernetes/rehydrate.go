@@ -55,11 +55,17 @@ package kubernetes
 //     report after a restart reads as "no write-back" instead of "a failed
 //     one". A report that does arrive is still recorded, because the scanner
 //     re-reads the log from the start.
-//   - The workspace provisioning state. Its only job is to delete the
-//     credential Secret once the init container has finished, and by the time
-//     a hub has restarted the init container has either finished — in which
-//     case the previous process deleted the Secret, or ReconcileOrphans will —
-//     or the Pod is still Pending and the Secret is still needed.
+//   - The workspace provisioning state and the lease Secret's. Their only job
+//     is to delete the per-run Secrets at the right moment, and the previous
+//     process already did whatever was safe on its way down: it deleted a
+//     Secret whose readers had all started and left one whose reader had not
+//     (finish, Task 20401) — a harness behind a workspace fetch reads its whole
+//     environment from the lease Secret when the kubelet creates it, so a
+//     Secret deleted then strands it. What it left is reaped with the Pod, by
+//     the ownerReference, when this process deletes the Pod at the end of the
+//     run. A harness that is stranded anyway — its Secret deleted by an
+//     operator, or by a hub from before that fix — fails on the first look
+//     instead of reading as pending forever (configerror.go).
 
 import (
 	"context"

@@ -20,7 +20,7 @@ import (
 
 func TestRefreshPatchesTheLeaseSecretsTokenKey(t *testing.T) {
 	ex, api, handle, _ := startLeasedPod(t)
-	name := secretFilesSecretName(handle.ID)
+	name := leaseSecretName(handle.ID)
 	before := api.secretObject(name)
 	if before == nil {
 		t.Fatal("no lease Secret was created")

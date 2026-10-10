@@ -30,8 +30,9 @@
 //     kubeconfig for a test namespace, and a harness credential;
 //  6. dispatches its one task, which runs probe.sh in the Pod; and asserts the
 //     probe's results, the forge's refs, the gitproxy.push_denied and
-//     kubeguard audit rows, and that the run's Pod, Secrets and NetworkPolicy
-//     are gone afterwards.
+//     kubeguard audit rows, that the granted harness login is in the
+//     container's environment but nowhere in the Pod object (Task 20401), and
+//     that the run's Pod, Secrets and NetworkPolicy are gone afterwards.
 //
 // It changes the release it is pointed at and leaves the monitors on. Point it
 // only at a throwaway cluster.
@@ -40,9 +41,11 @@ package kube_test
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -158,6 +161,10 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	allowed, denied := "cloop/e2e-allowed-"+stamp, "cloop/e2e-other-"+stamp
 	branchRule := "cloop/e2e-allowed-*"
 	pat := "ghp_" + randomAlnum(t, 36)
+	// The harness login the run is granted. Fresh per run, so finding it in
+	// the Pod object is unambiguous (Task 20401).
+	harnessKey := "kube-e2e-harness-key-" + randomAlnum(t, 32)
+	harnessKeySum := sha256.Sum256([]byte(harnessKey))
 
 	// ── 1. Images ──────────────────────────────────────────────────────────
 	buildImages(ctx, t, x)
@@ -216,6 +223,9 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		"REPO": grantedRepo, "OTHER_REPO": otherRepo, "STAMP": stamp,
 		"ALLOWED": allowed, "DENIED": denied, "BRANCH_RULE": branchRule, "K8S_NS": targetNS,
 		"FORGE_URL": "https://" + forgeHost, "EXPECT_EGRESS_BLOCKED": boolDigit(enforced),
+		// A digest, not the key: the probe compares what its environment holds
+		// against it without the value ever being written anywhere.
+		"HARNESS_KEY_SHA256": hex.EncodeToString(harnessKeySum[:]),
 	}
 	seedForgeProject(ctx, t, x, forgePod, params)
 
@@ -251,7 +261,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	// dispatch to an isolating executor without one (Task 20379).
 	hub.must("POST", "/api/secrets", map[string]any{
 		"name": "kube-e2e-harness-" + stamp, "kind": "env",
-		"payload": `{"ANTHROPIC_API_KEY":"kube-e2e-not-a-real-key"}`, "personal": false,
+		"payload": fmt.Sprintf(`{"ANTHROPIC_API_KEY":%q}`, harnessKey), "personal": false,
 	}, nil)
 	hub.must("POST", fmt.Sprintf("/api/projects/%d/harness-credential", idx), map[string]any{
 		"secret": "kube-e2e-harness-" + stamp, "env_keys": []string{"ANTHROPIC_API_KEY"}, "ttl_minutes": 120,
@@ -264,7 +274,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	results := parseResults(lines)
 
 	// ── 9. What the Pod saw ────────────────────────────────────────────────
-	for _, id := range append([]string{"H1", "T1", "C1", "WS1", "WS2", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
+	for _, id := range append([]string{"A1", "H1", "T1", "C1", "WS1", "WS2", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
 		conditional(enforced, "E1")...) {
 		r, ok := results[id]
 		switch {
@@ -288,6 +298,17 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	}
 	if strings.Contains(podJSON, clusterToken) {
 		t.Error("the workload Pod's object contains the cluster's ServiceAccount token")
+	}
+	// Nor the harness login (Task 20401). A1 above proved the container's
+	// environment holds it; the Pod object — readable by every identity with
+	// `get pods` in the namespace — must hold only the reference to the run's
+	// lease Secret it was read from.
+	if strings.Contains(podJSON, harnessKey) ||
+		strings.Contains(podJSON, base64.StdEncoding.EncodeToString([]byte(harnessKey))) {
+		t.Error("the workload Pod's object contains the granted ANTHROPIC_API_KEY")
+	}
+	if !regexp.MustCompile(`"key":\s*"env\.ANTHROPIC_API_KEY"`).MatchString(podJSON) {
+		t.Error("the workload Pod does not read ANTHROPIC_API_KEY from its lease Secret by reference")
 	}
 	// The refused write did not happen behind the refusal: the credential the
 	// monitor holds may edit this namespace, so only the monitor stood between.

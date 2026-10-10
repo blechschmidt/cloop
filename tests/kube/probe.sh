@@ -14,6 +14,7 @@
 #   K8S_NS            the namespace the kubeconfig grant covers, read-only
 #   FORGE_URL         the forge's own in-cluster URL, for the egress check
 #   EXPECT_EGRESS_BLOCKED  1 when the hub proved the CNI enforces NetworkPolicy
+#   HARNESS_KEY_SHA256  sha256 of the ANTHROPIC_API_KEY the run was granted
 #
 # Every check prints "RESULT <id> PASS|FAIL <detail>"; the run ends with
 # SUMMARY. Nothing here prints a credential: a token check reports where a
@@ -47,6 +48,19 @@ O=$W/out.txt
 export GIT_TERMINAL_PROMPT=0
 GITC="git -c user.name=cloop-e2e -c user.email=cloop-e2e@example.invalid -c commit.gpgsign=false"
 TOKRE='(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_.]{20,}|github_pat_[A-Za-z0-9_]{20,}'
+
+# ── The harness login: in the environment, read from the run's Secret ─────
+# The Pod object holds only a reference (kube_test.go checks that side); this
+# is the other half — the kubelet resolved it into the container. Compared by
+# digest, so the value is never printed.
+keysum=$(printf %s "${ANTHROPIC_API_KEY:-}" | sha256sum | cut -d' ' -f1)
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+	res A1 FAIL "ANTHROPIC_API_KEY is not set in the harness's environment"
+elif [ "$keysum" = "${HARNESS_KEY_SHA256:-}" ]; then
+	res A1 PASS "the granted ANTHROPIC_API_KEY is in the harness's environment (sha256 $(printf %s "$keysum" | cut -c1-12)…)"
+else
+	res A1 FAIL "ANTHROPIC_API_KEY is set, but is not the value the run was granted"
+fi
 
 # ── The credential helper and the token ───────────────────────────────────
 HELPER=${CLOOP_LEASE_DIR:-/nonexistent}/git-credential-cloop

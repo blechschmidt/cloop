@@ -34,15 +34,19 @@ package kubernetes
 // A Pod may carry a second container: the workspace provisioner, which runs as
 // an initContainer when Spec.Workspace asks for a git tree. It is confined by
 // the same confinedSecurityContext the harness gets — one function, so the two
-// cannot drift — and it is the only place a credential enters a Pod. That
-// credential arrives exclusively through valueFrom.secretKeyRef; the token
-// itself never appears in the object this file builds, which is a property
-// asserted directly against the marshalled JSON in workspace_test.go.
+// cannot drift.
+//
+// No credential is ever a value in the object this file builds. The workspace
+// token reaches the provisioner through valueFrom.secretKeyRef; a lease's files
+// are a projected Secret volume; and every variable of Spec.Env — which is
+// where a lease puts the credentials it delivers as environment — is a
+// secretKeyRef into the run's lease Secret (leaseenv.go). Each property is
+// asserted against the marshalled JSON: workspace_test.go for the token,
+// secretfiles_test.go for the files, leaseenv_test.go for the environment.
 
 import (
 	"fmt"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -357,13 +361,18 @@ type envVar struct {
 	Value string `json:"value,omitempty"`
 	// ValueFrom sources the value from elsewhere in the cluster instead of
 	// spelling it out in the Pod. It is the only way a credential is allowed
-	// into a container here; see EnvWorkspaceToken.
+	// into a container here: the workspace token (EnvWorkspaceToken) and every
+	// variable of Spec.Env (leaseenv.go) arrive this way.
 	ValueFrom *envVarSource `json:"valueFrom,omitempty"`
 }
 
 // envVarSource is the indirection. Only the Secret case is modelled: a
 // ConfigMap or a field reference would be a value the driver could just as
 // well have written inline, so neither has a caller.
+//
+// It is deliberately not envFrom, which would import every key of a Secret —
+// the lease Secret's credential *files* among them — as environment variables.
+// Each variable names its own key.
 type envVarSource struct {
 	SecretKeyRef *secretKeySelector `json:"secretKeyRef,omitempty"`
 }
@@ -371,6 +380,13 @@ type envVarSource struct {
 type secretKeySelector struct {
 	Name string `json:"name"`
 	Key  string `json:"key"`
+	// Optional is set explicitly false on every reference to the lease
+	// Secret. It is the server's default either way, but the decision is
+	// load-bearing — an optional reference to a missing key starts the
+	// container without the variable, and a harness missing its credential
+	// fails for a reason nothing names — so the object states it rather than
+	// leaving an operator to know the default.
+	Optional *bool `json:"optional,omitempty"`
 }
 
 type resourceList map[string]string
@@ -587,7 +603,11 @@ type podRequest struct {
 	// the cluster default. A Kata class here is what makes the Pod a VM.
 	RuntimeClass string
 
-	Argv    []string
+	Argv []string
+	// Env is the Spec's environment. None of it is written into the Pod:
+	// every variable becomes a secretKeyRef into the Secret named by
+	// LeaseSecretName, which the caller creates from the same list. See
+	// leaseenv.go.
 	Env     []string
 	WorkDir string
 	Labels  map[string]string
@@ -652,17 +672,17 @@ type podRequest struct {
 	// SecretFiles are the credential files a secret lease produced, which the
 	// workload's environment already points at by absolute path. Only their
 	// Dirs and Names are read here — the content goes into the Secret named by
-	// SecretFilesSecretName, which the caller creates before the Pod — but the
+	// LeaseSecretName, which the caller creates right after the Pod — but the
 	// whole slice travels so that one derivation decides both the Secret's keys
 	// and the volume items that map them back. See secretfiles.go.
 	//
-	// Anything printed from a podRequest is safe: SecretFile's String and
-	// GoString redact the content, so a %v on this struct cannot put a live
-	// credential into a log line.
+	// Anything printed from a podRequest is safe from SecretFiles: their
+	// String and GoString redact the content. Env is not — it holds the values
+	// themselves — so a podRequest is never formatted with %v.
 	SecretFiles []executor.SecretFile
-	// SecretFilesSecretName is the per-run Secret holding those files' bytes.
-	// Empty when there are none.
-	SecretFilesSecretName string
+	// LeaseSecretName is the per-run Secret holding those files' bytes and
+	// every value of Env. Empty when there are neither.
+	LeaseSecretName string
 
 	// GitCABundle is the CA bundle both containers' git verifies particular
 	// URLs against — the hub's git proxy, typically. See cabundle.go.
@@ -695,12 +715,12 @@ func buildPod(req podRequest) (*pod, error) {
 	// harness's own git trusts exactly that path. Root is the one owner that
 	// check protects nothing against (gitprovision.RootOwnedTrust, which cloop's
 	// own git applies by itself). Then the CA bundle, scoped per URL.
+	//
+	// Those two are the only plain values in the harness's environment. Every
+	// variable of the Spec's own is a reference into the lease Secret, so no
+	// credential it carries is in the object anyone with `get pods` can read.
 	harnessGit := append([][2]string{{"safe.directory", PodWorkspace}}, req.GitCABundle.gitConfigPairs()...)
-	harnessEnv, err := withGitConfig(req.Env, harnessGit)
-	if err != nil {
-		return nil, err
-	}
-	env, err := buildEnv(harnessEnv)
+	env, err := harnessEnv(req.LeaseSecretName, req.Env, harnessGit)
 	if err != nil {
 		return nil, err
 	}
@@ -884,7 +904,7 @@ func buildPod(req podRequest) (*pod, error) {
 	// created before this Pod. They go to the harness container and to nothing
 	// else — the workspace provisioner below builds its own mount list and has
 	// no business holding a credential its git fetch does not use.
-	secretVolumes, secretMounts, err := secretFileVolumes(req.SecretFilesSecretName, req.SecretFiles)
+	secretVolumes, secretMounts, err := secretFileVolumes(req.LeaseSecretName, req.SecretFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -1243,42 +1263,6 @@ func (r *resourceRequirements) ensureLimits() resourceList {
 		r.Limits = resourceList{}
 	}
 	return r.Limits
-}
-
-// buildEnv converts K=V strings into the API's env list.
-//
-// Values land in the Pod object, which anyone with `get pods` in the
-// namespace can read. That is a real exposure and the reason the driver
-// refuses to forward the control plane's own environment implicitly (a nil
-// Spec.Env yields nothing here, unlike os/exec). Callers pass what the
-// workload needs; the README says so, and `cloop executor test` repeats it.
-func buildEnv(kvs []string) ([]envVar, error) {
-	if len(kvs) == 0 {
-		return nil, nil
-	}
-	out := make([]envVar, 0, len(kvs))
-	seen := make(map[string]struct{}, len(kvs))
-	for _, kv := range kvs {
-		i := strings.IndexByte(kv, '=')
-		if i <= 0 {
-			return nil, fmt.Errorf("%w: env %q is not in K=V form", executor.ErrInvalidSpec, kv)
-		}
-		name := kv[:i]
-		if !validEnvName(name) {
-			return nil, fmt.Errorf("%w: env name %q is not a valid Kubernetes env var name", executor.ErrInvalidSpec, name)
-		}
-		if _, dup := seen[name]; dup {
-			// The API server rejects duplicates with a validation error that
-			// does not name the variable; say which one here.
-			return nil, fmt.Errorf("%w: env %q is set more than once", executor.ErrInvalidSpec, name)
-		}
-		seen[name] = struct{}{}
-		out = append(out, envVar{Name: name, Value: kv[i+1:]})
-	}
-	// Deterministic order so two identical Specs produce identical Pods,
-	// which is what makes buildPod testable by golden comparison.
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
 }
 
 // validEnvName mirrors Kubernetes' C_IDENTIFIER-ish check for env var names.

@@ -386,6 +386,7 @@ func TestBuildPod_Rejects(t *testing.T) {
 func TestBuildPod_EnvIsDeterministic(t *testing.T) {
 	req := baseRequest()
 	req.Env = []string{"ZED=1", "ALPHA=2", "MIKE=3"}
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 	first, err := buildPod(req)
 	if err != nil {
 		t.Fatalf("buildPod: %v", err)

@@ -262,20 +262,18 @@ func (e *APIError) hint() string {
 		return "the brokered kubeconfig's credential was rejected. If it is a ServiceAccount token, " +
 			"it may have expired; re-mint it and update the secret with `cloop secret mint --kind kubeconfig`"
 	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/secrets"):
-		return "the kubeconfig's identity may not manage Secrets in the target namespace, which a git " +
-			"workspace and a lease's credential files need: add `- apiGroups: [\"\"] resources: [\"secrets\"] " +
-			"verbs: [\"create\", \"patch\", \"delete\"]` to its Role. create, patch and delete only — the " +
-			"driver never reads a Secret back, and patches one only to replace a GitHub App token before it expires"
+		return "the kubeconfig's identity may not manage Secrets in the target namespace, which a run's " +
+			"environment, a lease's credential files and a git workspace need: add `" +
+			roleRuleFor("secrets").inline() + "` to its Role. " + secretsRuleRationale
 	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/networkpolicies"):
 		return "the kubeconfig's identity may not manage NetworkPolicies in the target namespace, which " +
-			"the egress filter needs: add `- apiGroups: [\"networking.k8s.io\"] resources: " +
-			"[\"networkpolicies\"] verbs: [\"create\", \"delete\", \"list\"]` to its Role. Without it the " +
-			"driver cannot enforce the egress allowlist, so it refuses to start the Pod rather than " +
-			"running it unfiltered"
+			"the egress filter needs: add `" + roleRuleFor("networkpolicies").inline() + "` to its Role. " +
+			"Without it the driver cannot enforce the egress allowlist, so it refuses to start the Pod " +
+			"rather than running it unfiltered"
 	case e.Code == http.StatusForbidden:
 		return "the kubeconfig's identity lacks RBAC for this call. It needs a Role in the target " +
-			"namespace granting pods: create, get, list, watch, delete; pods/log: get; and " +
-			"secrets: create, patch, delete"
+			"namespace granting " + roleRuleFor("pods").plain() + "; " + roleRuleFor("pods/log").plain() +
+			"; and " + roleRuleFor("secrets").plain()
 	case e.Code == http.StatusNotFound && strings.Contains(e.Path, "/namespaces/"):
 		return "check that executors.kubernetes.namespace names an existing namespace"
 	case e.Code == http.StatusConflict:
@@ -442,18 +440,20 @@ func (c *client) deletePod(ctx context.Context, namespace, name string, gracePer
 
 // --- secrets ----------------------------------------------------------
 //
-// The driver creates exactly one kind of Secret — a workspace credential for
-// one run — and deletes it as soon as the init container that consumes it has
-// finished. There is deliberately no getSecret and no listSecrets, and the
-// shipped RBAC grants create, patch and delete only: this driver never reads a
+// The driver creates two kinds of Secret, both per run and both owned by the
+// run's Pod: the workspace credential, deleted as soon as the init container
+// that consumes it has finished, and the lease Secret — a lease's credential
+// files and the workload's whole environment — deleted when the workload ends.
+// There is deliberately no getSecret and no listSecrets, and the shipped RBAC
+// grants create, patch and delete only (rbac.go): this driver never reads a
 // Secret back, so the ability to do so would be authority nothing here needs.
 // patch replaces a GitHub App token in a running Pod's lease Secret before
 // GitHub's hour ends (Task 20375).
 
 // secret models the fields this driver sets.
 //
-// Both value maps are here because the two kinds of material this driver puts
-// in a Secret have different requirements. The workspace token is a string, so
+// Both value maps are here because the kinds of material this driver puts in a
+// Secret have different requirements. The workspace token is a string, so
 // StringData carries it and the API server does the base64 — one fewer place a
 // credential passes through. A lease's credential *files* are bytes: a
 // gitconfig is text today, but nothing in executor.SecretFile promises that,
@@ -461,7 +461,8 @@ func (c *client) deletePod(ctx context.Context, namespace, name string, gracePer
 // sequence that is not valid UTF-8 reaches the workload silently mangled.
 // Data is the `data` field of the Secret wire format, which is base64 by
 // definition, and encoding/json base64-encodes a []byte for free — so using it
-// is both the binary-safe choice and no extra code.
+// is both the binary-safe choice and no extra code. The workload's environment
+// shares the lease Secret, so it rides Data too, under env.<NAME> keys.
 type secret struct {
 	APIVersion string            `json:"apiVersion,omitempty"`
 	Kind       string            `json:"kind,omitempty"`

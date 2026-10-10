@@ -78,7 +78,7 @@ func TestOwnerReference_BothSecretsNameTheOwningPod(t *testing.T) {
 		t.Fatal("the fake created a Pod with no UID; the rest of this test would be vacuous")
 	}
 
-	for _, name := range []string{workspaceSecretName(handle.ID), secretFilesSecretName(handle.ID)} {
+	for _, name := range []string{workspaceSecretName(handle.ID), leaseSecretName(handle.ID)} {
 		sec := api.secretObject(name)
 		if sec == nil {
 			t.Fatalf("Secret %q was never created", name)
@@ -169,7 +169,7 @@ func TestOwnerReference_PodIsCreatedBeforeItsSecrets(t *testing.T) {
 func TestOwnerReference_DeletingThePodCollectsBothSecrets(t *testing.T) {
 	_, api, handle, podName := startOwnedRun(t)
 
-	want := []string{workspaceSecretName(handle.ID), secretFilesSecretName(handle.ID)}
+	want := []string{workspaceSecretName(handle.ID), leaseSecretName(handle.ID)}
 	sort.Strings(want)
 	got := api.secretNames()
 	sort.Strings(got)
@@ -257,7 +257,7 @@ func TestOwnerReference_HubKilledMidProvisionLeavesNothing(t *testing.T) {
 	// The credentials went with the Pod, collected by the cluster rather than by
 	// anything in this process.
 	want := []string{
-		"secret/" + secretFilesSecretName(handle.ID),
+		"secret/" + leaseSecretName(handle.ID),
 		"secret/" + workspaceSecretName(handle.ID),
 	}
 	sort.Strings(want)

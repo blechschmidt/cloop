@@ -1,6 +1,9 @@
 package kubernetes
 
-// secretfiles.go delivers a secret lease's credential *files* into a Pod.
+// secretfiles.go delivers a secret lease's credential *files* into a Pod, and
+// owns the per-run Secret they travel in — the lease Secret, cloop-lease-<handle>,
+// which since Task 20401 also carries every value of the workload's environment
+// (see leaseenv.go).
 //
 // # Why a Secret and not something simpler
 //
@@ -25,13 +28,17 @@ package kubernetes
 //     files would publish the credential to everyone with `get pods`, which is
 //     the exact property buildPod exists to preserve.
 //
-// So: one Secret per run, created before the Pod, projected read-only at the
-// directory the environment already names, and deleted on every path the Pod is
-// cleaned up on.
+// So: one Secret per run, created right after the Pod that owns it, projected
+// read-only at the directory the environment already names, and deleted on
+// every path the Pod is cleaned up on — but never before the harness container
+// has started, because its environment is read from the same object when the
+// kubelet creates it.
 //
-//	spec.SecretFiles ──► Secret created ──► Pod created ──► kubelet projects
-//	                            │                            (tmpfs, 0440)
-//	                            └──────► Secret deleted ◄──── workload terminal
+//	spec.SecretFiles ─┐
+//	spec.Env ─────────┴─► Pod created ──► Secret created ──► kubelet projects the files
+//	                                            │            (tmpfs, 0440), and resolves the
+//	                                            │            env when it creates the harness
+//	                                            └──► Secret deleted ◄── workload terminal
 //
 // # What is not relocated
 //
@@ -87,12 +94,16 @@ const secretFileMode int32 = 0o400
 // one that answers for repositories the grant excluded.
 const secretExecFileMode int32 = 0o550
 
-// secretFilesState is one run's credential-file bookkeeping.
+// maxLeaseSecretBytes is the API server's cap on a Secret's data, summed over
+// its values.
+const maxLeaseSecretBytes = 1 << 20
+
+// leaseSecretState is one run's lease-Secret bookkeeping.
 //
 // Like workspaceState it holds no credential — only the name of the Secret that
 // does — which is what keeps "where could this leak" a question with a short
 // answer.
-type secretFilesState struct {
+type leaseSecretState struct {
 	namespace string
 
 	mu sync.Mutex
@@ -110,7 +121,7 @@ type secretFilesState struct {
 }
 
 // keyFor returns the Secret key a delivered file is stored under.
-func (st *secretFilesState) keyFor(path string) (string, bool) {
+func (st *leaseSecretState) keyFor(path string) (string, bool) {
 	if st == nil {
 		return "", false
 	}
@@ -120,14 +131,15 @@ func (st *secretFilesState) keyFor(path string) (string, bool) {
 	return k, ok
 }
 
-// secretFilesSecretName derives the Secret's name from the handle ID.
+// leaseSecretName derives the lease Secret's name from the handle ID.
 //
 // Deterministic rather than generateName, for the reason workspaceSecretName is:
 // the Pod that references it is built from a request that does not carry a name
 // the API server chose. Being a pure function of the handle ID also means
 // buildPod can wire the reference without the create path threading anything
-// back to it.
-func secretFilesSecretName(handleID string) string {
+// back to it, and a revocation after a hub restart can find it with nothing but
+// the handle.
+func leaseSecretName(handleID string) string {
 	slug := sanitizeDNSLabel(handleID)
 	if slug == "" {
 		slug = "none"
@@ -239,8 +251,54 @@ func planSecretFiles(files []executor.SecretFile) (*secretFilePlan, error) {
 	return plan, nil
 }
 
-// secretFileData renders the Secret's data map: one entry per file, keyed by
-// the plan.
+// leaseSecretData renders the whole lease Secret: one entry per credential
+// file, keyed d<N>.<name> by planSecretFiles, and one per environment variable,
+// keyed env.<NAME> by planLeaseEnv. Nil when there is nothing to carry, which is
+// also exactly when buildPod references no Secret.
+//
+// The total is checked against the API server's 1 MiB here, because the
+// server's refusal names a field rather than the run, and arrives after the Pod
+// has been created.
+func leaseSecretData(files []executor.SecretFile, env []string) (map[string][]byte, error) {
+	fileData, err := secretFileData(files)
+	if err != nil {
+		return nil, err
+	}
+	envData, err := leaseEnvData(env)
+	if err != nil {
+		return nil, err
+	}
+	if len(fileData)+len(envData) == 0 {
+		return nil, nil
+	}
+	data := make(map[string][]byte, len(fileData)+len(envData))
+	total := 0
+	for _, part := range []map[string][]byte{fileData, envData} {
+		for k, v := range part {
+			if _, clash := data[k]; clash {
+				// Unreachable while file keys start with "d<digit>" and env
+				// keys with "env." — checked so a future key scheme that broke
+				// that cannot make one value silently replace another.
+				return nil, fmt.Errorf("%w: lease Secret key %q would carry two values", executor.ErrInvalidSpec, k)
+			}
+			if v == nil {
+				// encoding/json renders a nil []byte as null; an empty
+				// file or variable is a present, empty key.
+				v = []byte{}
+			}
+			data[k] = v
+			total += len(v)
+		}
+	}
+	if total > maxLeaseSecretBytes {
+		return nil, fmt.Errorf("%w: this run's credential files and environment total %d bytes, more "+
+			"than the %d a Kubernetes Secret can hold", executor.ErrInvalidSpec, total, maxLeaseSecretBytes)
+	}
+	return data, nil
+}
+
+// secretFileData renders the file half of the Secret's data map: one entry per
+// file, keyed by the plan.
 //
 // []byte and not a string, so content that is not valid UTF-8 survives the trip
 // intact; encoding/json base64-encodes it, which is exactly the `data` field's
@@ -322,26 +380,21 @@ func secretFileVolumes(secretName string, files []executor.SecretFile) ([]volume
 	return vols, mounts, nil
 }
 
-// provisionSecretFiles prepares the per-run Secret that projects a lease's
-// credential files into the Pod.
+// provisionLeaseSecret prepares the per-run Secret that carries a lease's
+// credential files and the workload's environment into the Pod.
 //
-// It returns nil state and nil error when the Spec carries no files, which is
-// every run that leases nothing and every run whose grants deliver only
-// environment variables. A non-nil state means there is something to clean up,
-// whether or not the create succeeded.
+// It returns nil state and nil error when the Spec carries neither, which is a
+// run that leases nothing and sets no environment. A non-nil state means there
+// is something to clean up, whether or not the create succeeded.
 //
 // As with the workspace Secret the object is built here and created by the
 // returned pendingSecret, once the Pod that will own it exists. See the
 // ownerReference note in pod.go for why the create cannot come first.
-func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec, cli *client,
-	handleID, namespace string) (*secretFilesState, *pendingSecret, error) {
+func (e *Executor) provisionLeaseSecret(ctx context.Context, spec executor.Spec, cli *client,
+	handleID, namespace string) (*leaseSecretState, *pendingSecret, error) {
 
-	if len(spec.SecretFiles) == 0 {
-		return nil, nil, nil
-	}
-
-	data, err := secretFileData(spec.SecretFiles)
-	if err != nil {
+	data, err := leaseSecretData(spec.SecretFiles, spec.Env)
+	if err != nil || len(data) == 0 {
 		return nil, nil, err
 	}
 	plan, err := planSecretFiles(spec.SecretFiles)
@@ -353,7 +406,7 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 		keys[f.Path()] = plan.keys[i]
 	}
 
-	name := secretFilesSecretName(handleID)
+	name := leaseSecretName(handleID)
 	obj := &secret{
 		APIVersion: "v1",
 		Kind:       "Secret",
@@ -378,7 +431,7 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 		Data: data,
 	}
 
-	st := &secretFilesState{namespace: namespace, keys: keys}
+	st := &leaseSecretState{namespace: namespace, keys: keys}
 
 	create := func(ctx context.Context, owner ownerReference, owned bool) error {
 		if owned {
@@ -403,7 +456,7 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 				st.secretName = name
 				st.mu.Unlock()
 			}
-			return explainSecretFileFailure(namespace, name, err)
+			return explainLeaseSecretFailure(namespace, name, err)
 		}
 
 		st.mu.Lock()
@@ -414,16 +467,19 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 	return st, &pendingSecret{create: create}, nil
 }
 
-// discardSecretFiles deletes the credential-file Secret. It is safe to call with
-// a nil state, with a state whose create failed, and repeatedly — every cleanup
-// path calls it without first checking which of those it is looking at.
+// discardLeaseSecret deletes the lease Secret. It is safe to call with a nil
+// state, with a state whose create failed, and repeatedly — every cleanup path
+// calls it without first checking which of those it is looking at.
+//
+// Callers decide *whether* it may go; see finish for why that is not always
+// the moment the hub stops following the run.
 //
 // Failure goes to stderr and is not propagated, for the reason
 // discardWorkspaceSecret's does: by the time this runs the caller is either
 // returning an error it already has or finishing a workload whose result is
 // collected, and replacing either with "could not delete a Secret" would lose
 // what the operator actually needs to know.
-func (e *Executor) discardSecretFiles(st *secretFilesState, cli *client) {
+func (e *Executor) discardLeaseSecret(st *leaseSecretState, cli *client) {
 	if st == nil {
 		return
 	}
@@ -445,12 +501,33 @@ func (e *Executor) discardSecretFiles(st *secretFilesState, cli *client) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	if err := cli.deleteSecret(ctx, namespace, name); err != nil {
-		fmt.Fprintf(os.Stderr, "kubernetes: could not delete secret lease files %s/%s: %v — "+
+		fmt.Fprintf(os.Stderr, "kubernetes: could not delete lease secret %s/%s: %v — "+
 			"delete it by hand; it holds brokered credentials\n", namespace, name, err)
 	}
 }
 
-// explainSecretFileFailure turns a rejected Secret create into an actionable
+// leaveLeaseSecret is what finish does instead of discardLeaseSecret when the
+// hub stops following a run whose harness container has not started: the
+// kubelet resolves the harness's environment from this Secret when it creates
+// the container, so deleting it now would hold the harness in
+// CreateContainerConfigError for good. The ownerReference reaps it with its
+// Pod, and a hub that adopts the run finds it still startable.
+func leaveLeaseSecret(st *leaseSecretState, podName string) {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	name, namespace, deleted := st.secretName, st.namespace, st.deleted
+	st.mu.Unlock()
+	if name == "" || deleted {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "kubernetes: leaving lease secret %s/%s in place: the harness container "+
+		"of pod %s has not started, and its environment is read from it; it is deleted with the Pod\n",
+		namespace, name, podName)
+}
+
+// explainLeaseSecretFailure turns a rejected Secret create into an actionable
 // error.
 //
 // A sibling of explainSecretFailure rather than a branch inside it: that one
@@ -459,29 +536,25 @@ func (e *Executor) discardSecretFiles(st *secretFilesState, cli *client) {
 // did not configure. The RBAC remedy is the same rule, which is worth saying
 // explicitly — an operator who already added it for workspaces needs to add
 // nothing.
-func explainSecretFileFailure(namespace, name string, err error) error {
+func explainLeaseSecretFailure(namespace, name string, err error) error {
 	ae, ok := asAPIError(err)
 	if !ok {
-		return fmt.Errorf("kubernetes: deliver secret lease files as %s/%s: %w", namespace, name, err)
+		return fmt.Errorf("kubernetes: deliver the run's credentials and environment as %s/%s: %w", namespace, name, err)
 	}
 	switch ae.Code {
 	case http.StatusForbidden:
 		return fmt.Errorf("kubernetes: not allowed to create Secrets in %q, which delivering a "+
-			"secret lease's credential files needs: %w — add this rule to the executor's Role:\n"+
-			"  - apiGroups: [\"\"]\n"+
-			"    resources: [\"secrets\"]\n"+
-			"    verbs: [\"create\", \"patch\", \"delete\"]\n"+
-			"create, patch and delete only: the driver writes the credentials, replaces a GitHub App "+
-			"token in them before it expires, and removes them again, and never reads a Secret back",
-			namespace, err)
+			"workload's environment and a lease's credential files needs: %w — add this rule to the "+
+			"executor's Role:\n%s\n%s",
+			namespace, err, secretsRuleYAML(), secretsRuleRationale)
 	case http.StatusConflict:
 		// The name is derived from the handle ID, so a conflict means a Secret
 		// from a previous run of this exact handle survived — which only happens
 		// if a control plane died between creating it and deleting it.
-		return fmt.Errorf("kubernetes: a secret lease Secret named %s already exists in %q, left "+
+		return fmt.Errorf("kubernetes: a lease Secret named %s already exists in %q, left "+
 			"behind by an interrupted run: %w — delete it with `kubectl -n %s delete secret %s`",
 			name, namespace, err, namespace, name)
 	default:
-		return fmt.Errorf("kubernetes: deliver secret lease files as %s/%s: %w", namespace, name, err)
+		return fmt.Errorf("kubernetes: deliver the run's credentials and environment as %s/%s: %w", namespace, name, err)
 	}
 }

@@ -133,6 +133,7 @@ func TestBuildPod_GitCABundleJoinsAnExistingConfigBlock(t *testing.T) {
 	}
 	req := baseRequest()
 	req.GitCABundle = bundle
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 	req.Env = []string{
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=url.cloop-review::https://.pushInsteadOf",
@@ -142,10 +143,13 @@ func TestBuildPod_GitCABundleJoinsAnExistingConfigBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPod: %v", err)
 	}
-	env := map[string]string{}
-	for _, e := range p.Spec.Containers[0].Env {
-		env[e.Name] = e.Value
+	// The Spec's own entries arrive from the lease Secret, the driver's as
+	// plain values; resolve both the way the kubelet does.
+	data, err := leaseSecretData(nil, req.Env)
+	if err != nil {
+		t.Fatal(err)
 	}
+	env := resolveEnv(t, p.Spec.Containers[0], map[string]map[string][]byte{req.LeaseSecretName: data})
 	if env["GIT_CONFIG_COUNT"] != "3" || env["GIT_CONFIG_KEY_0"] != "url.cloop-review::https://.pushInsteadOf" ||
 		env["GIT_CONFIG_KEY_1"] != "safe.directory" ||
 		env["GIT_CONFIG_KEY_2"] != "http.https://cloop-cloop-hub.cloop.svc:8443/.sslCAInfo" {

@@ -561,12 +561,9 @@ func explainNetworkPolicyFailure(namespace, name string, err error) error {
 	switch {
 	case ae.Code == 403:
 		return fmt.Errorf("kubernetes: not allowed to create NetworkPolicies in %q, which the egress "+
-			"filter needs: %w — add this rule to the executor's Role:\n"+
-			"  - apiGroups: [\"networking.k8s.io\"]\n"+
-			"    resources: [\"networkpolicies\"]\n"+
-			"    verbs: [\"create\", \"delete\", \"list\"]\n"+
+			"filter needs: %w — add this rule to the executor's Role:\n%s\n"+
 			"or set executors.kubernetes.egress_filter.enabled to false and accept unfiltered egress "+
-			"deliberately, rather than by RBAC accident", namespace, err)
+			"deliberately, rather than by RBAC accident", namespace, err, roleRuleFor("networkpolicies").yaml())
 	case ae.Code == 404:
 		return fmt.Errorf("kubernetes: namespace %q does not exist (or the kubeconfig cannot see it): %w",
 			namespace, err)

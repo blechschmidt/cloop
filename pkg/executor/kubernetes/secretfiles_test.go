@@ -70,7 +70,7 @@ func secretFileSpec() executor.Spec {
 func TestBuildPod_SecretFilesProjectOnlyIntoTheHarness(t *testing.T) {
 	req := workspaceRequest()
 	req.SecretFiles = secretFileSpec().SecretFiles
-	req.SecretFilesSecretName = "cloop-lease-k-abc123"
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 
 	p, err := buildPod(req)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestBuildPod_SecretFilesProjectOnlyIntoTheHarness(t *testing.T) {
 func TestBuildPod_SecretFilesKeepDirectoriesApart(t *testing.T) {
 	second := "/run/cloop/cloop-lease-000011112222"
 	req := baseRequest()
-	req.SecretFilesSecretName = "cloop-lease-k-abc123"
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 	req.SecretFiles = []executor.SecretFile{
 		{Dir: leaseDir, Name: "gitconfig", Content: []byte("first")},
 		{Dir: second, Name: "gitconfig", Content: []byte("second")},
@@ -152,7 +152,7 @@ func TestBuildPod_SecretFilesKeepDirectoriesApart(t *testing.T) {
 // writable, or the helper could be rewritten to answer for other repositories.
 func TestBuildPod_CredentialHelperIsExecutable(t *testing.T) {
 	req := baseRequest()
-	req.SecretFilesSecretName = "cloop-lease-k-abc123"
+	req.LeaseSecretName = "cloop-lease-k-abc123"
 	req.SecretFiles = []executor.SecretFile{
 		{Dir: leaseDir, Name: "gitconfig", Mode: 0o600, Content: []byte("[credential]\n")},
 		{Dir: leaseDir, Name: "git-credential-cloop", Mode: 0o700, Content: []byte("#!/bin/sh\n")},
@@ -220,7 +220,7 @@ func TestStart_SecretFilesTravelInASecretAndAreProjected(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	wantName := secretFilesSecretName(handle.ID)
+	wantName := leaseSecretName(handle.ID)
 	api.mu.Lock()
 	sec := api.secrets[wantName]
 	requests := append([]string(nil), api.requests...)
@@ -343,7 +343,7 @@ func TestStart_SecretFilesAreDeletedWhenTheWorkloadFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	wantName := secretFilesSecretName(handle.ID)
+	wantName := leaseSecretName(handle.ID)
 	if got := api.secretNames(); len(got) != 1 || got[0] != wantName {
 		t.Fatalf("secrets while the run is live = %v, want exactly %q", got, wantName)
 	}

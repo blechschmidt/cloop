@@ -18,30 +18,41 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 ---
 # The authority the hub runs workloads with, in the workload namespace only.
 #
-# These eleven rules are not a starting point to be widened — they are the exact
-# set of calls pkg/executor/kubernetes issues, enumerated from the call sites:
+# These twelve verbs, in four rules, are not a starting point to be widened —
+# they are the exact set of calls pkg/executor/kubernetes issues, enumerated
+# from the call sites:
 #
 #   pods            create client.go createPod           — start a run
 #   pods            get    client.go getPod              — poll one workload
-#   pods            list   client.go listPods            — orphan reconciliation on startup
+#   pods            list   client.go listPods            — the orphan sweep
 #   pods            watch  client.go watchPod            — stream phase transitions
 #   pods            delete client.go deletePod           — stop, kill, and cleanup
 #   pods/log        get    client.go followLogs          — stream task output
-#   secrets         create client.go createSecret        — hand one workspace fetch its credential
-#   secrets         delete client.go deleteSecret        — take it back when the fetch is done
+#   secrets         create client.go createSecret        — a run's credentials and environment, a fetch's token
+#   secrets         patch  client.go patchSecretData     — replace a GitHub App token before its hour ends
+#   secrets         delete client.go deleteSecret        — take them back
 #   networkpolicies create client.go createNetworkPolicy — the Pod's egress allowlist, before the Pod
 #   networkpolicies delete client.go deleteNetworkPolicy — remove it when the Pod is gone
 #   networkpolicies list   client.go listNetworkPolicies — orphan sweep, and the preflight check
 #
+# The same table is executorRole in pkg/executor/kubernetes/rbac.go, and two
+# checks hold this Role to it in both directions — nothing the driver calls
+# missing, nothing it does not call granted: a Go test that renders this chart
+# with `helm template` (rbac_test.go), and `kubectl auth can-i` against the
+# installed release on CI's kind cluster. Widening a rule here fails both.
+#
 # ## The secrets rule
 #
-# It is create and delete, and deliberately not get, list or watch. This
-# driver never reads a Secret back: it writes one containing the brokered
-# credential a git workspace fetch needs, points the Pod's init container at it
-# with a secretKeyRef, and deletes it as soon as that container terminates. The
-# whole read side of the Secret API is authority nothing here would use, so
-# nothing here has it — and a compromised hub cannot enumerate what else lives
-# in the namespace.
+# It is create, patch and delete, and deliberately not get, list or watch. This
+# driver never reads a Secret back. It writes two kinds, both owned by the run's
+# Pod: one holding the brokered credential a git workspace fetch needs, which
+# the init container reads through a secretKeyRef and which is deleted as soon
+# as that container terminates; and the lease Secret, holding a lease's
+# credential files — projected read-only — and every value of the workload's
+# environment, each read into the harness through its own secretKeyRef, so no
+# credential is ever a value in the Pod spec. The whole read side of the Secret
+# API is authority nothing here would use, so nothing here has it — and a
+# compromised hub cannot enumerate what else lives in the namespace.
 #
 # It also does not widen the blast radius the way it first appears to, and it
 # is worth being precise about why rather than asserting it. With `pods:
@@ -53,12 +64,12 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # would move it is a ClusterRole, or a rule in the *release* namespace where
 # the hub's own credentials live — and neither exists here.
 #
-# What it buys is that the workspace credential never appears in a Pod spec.
-# Without it the only ways to get a token to the init container are an `env`
-# value or an argv element, and both put the credential in an object readable
-# by anyone with `get pods`, in every `kubectl describe`, and in the API
-# server's audit log. With it, the Pod carries a reference and the material
-# lives for the length of one git fetch.
+# What it buys is that no credential appears in a Pod spec. Without it the only
+# ways to get a token or an API key to a container are an `env` value or an argv
+# element, and both put the credential in an object readable by anyone with
+# `get pods`, in every `kubectl describe`, and in the API server's audit log.
+# With it, the Pod carries references: the workspace token lives for the length
+# of one git fetch, and the lease Secret for the length of the run.
 #
 # ### How the Secrets get collected without a read verb
 #
