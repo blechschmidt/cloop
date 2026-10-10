@@ -1873,14 +1873,29 @@ Revoked 2 session(s).
   3f9c1e7a2b5d48c0  alice@example.com
   a1d4f80b6c2e93aa  alice@example.com
 
-A running hub may still honour these for up to 30s (its session cache).
+Running hubs were told: they stop honouring these sessions and close the
+dashboards and sandbox terminals they opened within about a second. A hub
+started with ui.cluster.exclusive reads no announcements: it stops honouring
+them within 30s (its session cache) and closes their streams at the next
+30s re-check after that.
 API tokens are a separate credential — see `cloop hub token list`.
 ```
 
-**The 30 seconds are real.** A running hub serves sessions from a per-process
-cache with that TTL, which is the same bound it already accepts between
-replicas. "I revoked it and they were still in" for a few seconds is this, not a
-failure. If you need the window closed to zero, stop the hub.
+**Revocation reaches what the session already opened.** The command announces
+each session it ended on the hub bus, and every hub reading it — every `cloop
+ui` that joined the control plane, which is the default — drops the session from
+its cache and closes the dashboard WebSockets, SSE streams and
+[sandbox terminals](attach.md) it opened, within a bus poll. The person sees
+"Your session was ended" and is sent back to sign in; their terminal into a
+sandbox shows the same and closes. So does an `api_token` revoked with `cloop
+hub token revoke`, and everything `cloop hub user offboard` ends. Revoking from
+the Sessions or Tokens panel does the same without the bus round trip.
+
+**Two bounds remain.** A hub started with `ui.cluster.exclusive` reads no bus:
+it serves the session from its 30-second cache, and closes the session's streams
+at their next 30-second re-check once the cache has let go — up to a minute in
+all. And if the command warns that it *could not notify running hubs*, every hub
+is in that position. If you need either window closed to zero, stop the hub.
 
 This command reads and writes the session table directly and takes no
 control-plane lease, which is deliberate: the case it exists for is a hub whose
@@ -2019,8 +2034,12 @@ CLI does. It refuses to offboard the identity making the request — that would
 revoke the session issuing it and deny the account that must undo it; use the
 CLI if that is really what you want.
 
-> A running hub may keep honouring a revoked session for up to 30 seconds (its
-> session cache). Tokens and deny bindings take effect immediately.
+> Running hubs are told of every session, token and glasses link this ends,
+> and close the dashboards and sandbox terminals they opened within about a
+> second. A hub started with `ui.cluster.exclusive` reads no announcements: it
+> may honour a revoked session for up to 30 seconds (its session cache) and
+> closes what it opened at the next 30-second re-check. Deny bindings take
+> effect within ten seconds.
 
 #### An admin is compromised
 
@@ -2094,11 +2113,13 @@ worst case:
 |---|---|---|
 | REST and page loads | 10s | the binding TTL — bindings are re-read from the database on that interval |
 | Open WebSocket or SSE stream | +30s | the writer loop re-checks the deny on its keepalive tick and closes the connection |
-| Revoked session | 30s | the hub's per-process session cache |
+| Revoked session | ~1s | announced on the hub bus, which drops it from every member's cache and closes the streams and terminals it opened; 30s for a request and up to 60s for a stream on a `ui.cluster.exclusive` hub, which reads no bus |
 
 So a demoted account stops being able to *act* within about ten seconds and
-stops *receiving* within about forty. If you need both at zero, stop the hub —
-which is also what you would do if you suspected the process itself.
+stops *receiving* within about forty — or within about a second, once step 3 has
+revoked its sessions and tokens, which closes every stream and sandbox terminal
+they opened. If you need both at zero, stop the hub — which is also what you
+would do if you suspected the process itself.
 
 **Precedence, in full.** Two rules, and nothing else:
 

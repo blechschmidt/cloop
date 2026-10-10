@@ -216,7 +216,11 @@ database.
 - **CI token replay protection**: a token's `jti` presented to one member is
   spent on all of them.
 - **Session revocation** evicts the session from every member's cache, not
-  only the one that revoked it.
+  only the one that revoked it, and every member closes the dashboard streams
+  and sandbox terminals the session opened there (Task 20398). A revoked API
+  token is announced the same way; so is what `cloop hub session revoke`,
+  `cloop hub token revoke` and `cloop hub user offboard` end, from outside the
+  cluster.
 - **Refreshing an OIDC session** takes a cluster-wide lock, so a refresh token
   that the provider rotates is redeemed once.
 - **`config.yaml` and `projects.json`** are written under a file lock.

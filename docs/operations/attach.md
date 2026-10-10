@@ -172,6 +172,23 @@ lease that governs the original, and readable by anyone with `audit.read`. The
 event is the accountability; the transcript would be an exfiltration route
 wearing accountability's clothes.
 
+## When access ends
+
+An open terminal is re-authorized for as long as it stays open, not only when it
+is opened. Withdrawing `sandbox.attach` — a deny binding, a changed role, a
+removed project membership — closes it at its next 30-second re-check.
+
+It also ends with the credential that opened it. A revoked, signed-out, expired
+or idle session, or a revoked or expired API token, closes the terminal with a
+`closed` frame saying why and a `1008` naming `session_ended` or
+`token_revoked`, which the `sandbox.attach.close` event records. A revocation the
+hub hears of — from the Sessions or Tokens panel, another hub member, or `cloop
+hub session revoke`, `token revoke` or `user offboard` — closes it at once; any
+other ending, at the next re-check. The authority a terminal is re-checked
+against is the one its own credential holds as it stands now: a terminal whose
+session has ended is not re-authorized as anybody else, the static token
+included.
+
 ## Limits
 
 | Limit | Default | Where |

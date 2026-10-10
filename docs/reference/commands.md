@@ -1070,8 +1070,12 @@ cloop hub session revoke --all --reason "rotating IdP client secret"
 
 `revoke` requires exactly one selector — an id, `--identity`, or `--all` — with
 no default, because the three differ by two orders of magnitude in blast radius.
-A revoked session stops working within 30 seconds on a running hub, which is how
-long it may still be served from that process's session cache.
+A revocation is announced to running hubs, which stop honouring the session and
+close the dashboard streams and sandbox terminals it opened within about a
+second. A hub started with `ui.cluster.exclusive` reads no announcements: it may
+serve a revoked session from its cache for up to 30 seconds, and closes what it
+opened at the next 30-second re-check after that. `cloop hub token revoke` and
+`cloop hub user offboard` announce what they revoke the same way.
 
 ### `cloop hub quota`
 

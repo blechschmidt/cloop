@@ -1538,6 +1538,50 @@ refreshed by authenticated requests but persisted at most once per session per
 minute, so an open dashboard does not turn every read into a write; a lost
 write shortens the idle window by up to a minute, which is the safe direction.
 
+**A session that ends takes its streams with it.** A request is authenticated
+once and is over; a dashboard WebSocket, an SSE stream and a
+[sandbox terminal](../operations/attach.md) are authenticated once and stay open
+for hours. Each records, when it opens, which credential admitted it — the
+session by its hash, an [API token](#api-tokens-for-non-interactive-callers) by
+its id, or the static token, which only the authentication middleware can mark,
+at the moment it matched — and from then on asks about that credential and no
+other:
+
+- **At once, when the hub is told.** Every way a session ends here — an
+  operator's revocation, `logout-all`, sign-out, either clock found on the read
+  path, the janitor's sweep, a refusal from the identity provider — announces
+  the session once its row is gone, and the hub re-checks every stream and
+  terminal opened with it. So does a token revoked through the hub. Other hub
+  members hear both on the [cluster bus](../architecture/hub-cluster.md#events)
+  within a quarter of a second, and so do they when `cloop hub session revoke`,
+  `cloop hub token revoke` or `cloop hub user offboard` writes the tables
+  directly from a shell.
+- **On its 30-second keepalive otherwise**, beside the runtime-deny check: the
+  fallback for an ending nobody announces, such as an expiry.
+
+The re-check is the request path's own verdict — the same session cache, the
+same two clocks, the token row re-read — so a stream ends exactly when a request
+carrying its credential would be refused. It does not count as use: an
+unattended tab's open stream does not keep its session from going idle. A
+WebSocket is sent `credential_ended`, naming `session_ended` or `token_revoked`,
+and closed with `1008` and the same reason; an SSE stream gets a terminal
+`credential_ended` event; a terminal gets a closed frame and a `1008`, and the
+reason is in its `sandbox.attach.close` audit event. The client is taken out of
+its room first, so nothing broadcast after the ending reaches it. A claim
+refresh is announced exactly as a revocation is, which is why the announcement
+triggers a re-check rather than a close: the session is found alive and the
+stream stays.
+
+Nothing concludes "static token" from a session that is missing. A terminal used
+to: its re-check re-ran the authorization of its original request, which once
+the session row was gone carried no session — read as a request admitted on
+the static token — and so re-authorized a revoked session's shell as the
+deployment's allow-all, beyond the reach of deny bindings, membership removal
+and offboarding. It now resolves its authority from the credential it recorded,
+as that credential stands now, and fails closed when it has ended. A stream
+opened with the static token is the static token's, and nothing that ends a
+session or a token reaches it.
+
 **IdP-side revocation.** Disabling a user at the identity provider changes
 nothing the hub can observe on its own: the cookie is still valid and the
 claims in it were valid when issued. cloop closes that gap by keeping the
@@ -1866,6 +1910,13 @@ one write per token per minute, so an authenticated read never waits on a
 write. Creation, revocation, and every failed authentication are appended to
 the hash-chained trail; failures record *why* (expired, revoked, bad secret)
 while the caller receives an identical `401` in every case.
+
+Revocation and expiry reach a token's open connections too: a WebSocket, SSE
+stream or sandbox terminal it opened re-reads the token's row and closes with
+`token_revoked` — at once when the revocation is made through a hub or
+announced by `cloop hub token revoke` or `cloop hub user offboard`, and within
+30 seconds otherwise, as
+[for a session](#session-lifecycle-and-revocation).
 
 ### Delegated links: display glasses
 
@@ -3151,6 +3202,7 @@ plaintext simply accumulates on a disk.
 | A project-scoped token holds nothing on an out-of-scope project, at every role | `TestScopedTokenIsDeniedOutOfScopeProjectsRegardlessOfRole` |
 | A revoked or expired token resolves to an empty permission set, not just a failed login | `TestRevokedOrExpiredTokenHoldsNothing` |
 | `token.admin` is held by `admin` alone | `TestTokenAdminIsAdminOnly` |
+| A connection holding a token re-reads its row and learns of a revocation, an expiry or a deletion, without recording a use; every revocation through the manager is announced once stored | `pkg/apitoken: TestRecheckFollowsTheRow`, `TestRevokeHookHearsEveryRevocation` |
 
 ### Network exposure — `exposure_test.go` and the package suites
 
@@ -3233,6 +3285,13 @@ a reconstruction, so this row set spans three packages.
 | The post-sign-in return path cannot leave this origin | `pkg/oidcauth: TestSafeReturnPath`, `TestLoginRefusesAnOffSiteReturn`, `TestLoginLandingEscapesDestination` |
 | On a hub cluster a renewal is completed by the member holding its PKCE verifier, waits for the session's refresh lock, and evicts the other member's cached copy | `pkg/ui: TestClusterRenewalCompletesOnTheMemberThatBeganIt` |
 | An SSO session's 401 leads to the provider and back to the same view, never to the token prompt, and does not loop | `pkg/ui: TestDashboard_UnauthorizedPicksTheRightSignIn`, `TestSilentRenewalInBrowser` |
+| Every WebSocket and SSE channel — a project's socket, the landing page's, `/api/events`, `/api/projects/events` — closes when the session or token that opened it ends: an operator's revocation, `logout-all`, sign-out, idle and absolute expiry, a token revoked or expired. It is told `credential_ended` with `session_ended` or `token_revoked`, a WebSocket closes `1008` with the same reason, and the hub lets the client go | `pkg/ui: TestStreamCredentials_EveryEndingClosesEveryChannel` |
+| A sandbox terminal closes on its session's revocation at once, and on a token revoked behind the hub's back at its own re-check | `pkg/ui: TestAttach_ARevokedSessionClosesItsTerminal`, `TestAttach_ARevokedTokenClosesItsTerminalOnTheRecheck` |
+| A revoked session's terminal is never re-authorized as the static token: its authority comes from the credential it recorded, and fails closed once that ends | `pkg/ui: TestAttachStillAuthorized_SeesASessionRevocation` |
+| A claim refresh does not close a stream; nothing that ends a session or a token closes one opened with the static token; a stream with no credential is refused under sign-on | `pkg/ui: TestStreamCredentials_AClaimRefreshDoesNotCloseAStream`, `TestStreamCredentials_StaticTokenStreamsAreUnaffected`, `TestStreamCredentials_NoCredentialIsRefusedUnderSignOn` |
+| A stream's re-check is not use, so an unattended tab's session still goes idle | `pkg/oidcauth: TestCheckSessionLeavesTheIdleClockAlone`, `TestCheckSessionNamesEachEnding` |
+| A session's change is announced only once it can be read back, so a listener re-checking on the notice finds it ended | `pkg/oidcauth: TestSessionChangeIsAnnouncedAfterTheRowIsGone` |
+| A revocation made on one hub member or from a shell closes the streams another member holds within a bus poll | `pkg/ui: TestClusterCredentialEndingsCloseStreamsOnEveryMember`; `cmd: TestSessionRevokeAnnouncesWhatItEnded`, `TestTokenRevokeAnnouncesTheToken`, `TestOffboardAnnouncesTheSessionsAndTokensItEnded` |
 
 ### Container sandbox — `container_test.go`
 
