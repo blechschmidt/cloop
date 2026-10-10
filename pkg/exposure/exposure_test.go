@@ -156,6 +156,9 @@ func TestParseHostRefusesWhatIsNotAHost(t *testing.T) {
 	for _, bad := range []string{
 		"http://0.0.0.0", "0.0.0.0:8080", "[::1]:8080", "localhost:80", "a b",
 		"hub_internal", "-hub", "hub-.example", "hub/x", strings.Repeat("a", 64) + ".example",
+		// A zone that is not an interface name: joined with the port it makes
+		// a host:port net.Listen cannot split (found by the fuzzer).
+		"::0000%00000000]", "fe80::1%eth0]", "fe80::1%a:b",
 	} {
 		_, err := Decide(Request{Listen: bad, Port: 8080, StaticToken: true})
 		if !errors.Is(err, ErrInvalidListen) {
@@ -164,6 +167,10 @@ func TestParseHostRefusesWhatIsNotAHost(t *testing.T) {
 	}
 	if _, err := Decide(Request{Port: 70000}); err == nil {
 		t.Error("port 70000 accepted")
+	}
+	// An interface name is still a zone.
+	if p, err := Decide(Request{Listen: "fe80::1%eth0", Port: 8080, StaticToken: true}); err != nil || p.Addr() != "[fe80::1%eth0]:8080" {
+		t.Errorf("a link-local address with its interface: %+v %v", p, err)
 	}
 }
 

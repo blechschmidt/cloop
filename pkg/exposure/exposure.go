@@ -341,6 +341,12 @@ func ParseHost(s string) (host string, scope Scope, err error) {
 	}
 	if addr, perr := netip.ParseAddr(h); perr == nil {
 		addr = addr.Unmap()
+		// netip takes any text after a % as an IPv6 zone. A zone is an
+		// interface name; one holding a bracket or a colon makes a host:port
+		// net.Listen cannot split back apart.
+		if !validZone(addr.Zone()) {
+			return "", 0, fmt.Errorf("%w: %q is not an interface name", ErrInvalidListen, addr.Zone())
+		}
 		switch {
 		case addr.IsUnspecified():
 			return "", ScopeEvery, nil
@@ -358,6 +364,20 @@ func ParseHost(s string) (host string, scope Scope, err error) {
 		return "", 0, fmt.Errorf("%w: neither an IP address nor a host name", ErrInvalidListen)
 	}
 	return name, ScopeAddress, nil
+}
+
+// validZone reports an IPv6 zone a listener can be given: empty, or an
+// interface name — letters, digits, '.', '_' and '-'.
+func validZone(z string) bool {
+	if len(z) > 64 {
+		return false
+	}
+	for _, c := range z {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // validHostname reports an RFC 1123 host name: dot-separated labels of
