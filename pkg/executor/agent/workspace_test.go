@@ -887,9 +887,14 @@ func TestAgentKeepsThePlacedProjectOutOfTheCheckoutsCommits(t *testing.T) {
 	}
 	cp.write(start)
 
+	// Read to the workload's terminal status, not to the first marker: the
+	// lines after "]STATUS" may arrive in a later chunk, and the agent goes on
+	// reading the run's project back — logging as it does — until it sends
+	// the status, which it writes behind the log tail.
 	var log strings.Builder
 	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(log.String(), "]STATUS") {
+	finished := false
+	for time.Now().Before(deadline) && !finished {
 		f, readErr := cp.read(time.Until(deadline))
 		if readErr != nil {
 			break
@@ -903,9 +908,16 @@ func TestAgentKeepsThePlacedProjectOutOfTheCheckoutsCommits(t *testing.T) {
 			if p, _ := remote.DecodeStarted(f); p.Error != "" {
 				t.Fatalf("the agent refused the workload: %s", p.Error)
 			}
+		case remote.TypeStatus:
+			if st, decodeErr := remote.DecodeStatus(f); decodeErr == nil && st.Status.State.Terminal() {
+				finished = true
+			}
 		}
 	}
 	out := log.String()
+	if !finished {
+		t.Fatalf("the workload never reported a terminal status:\n%s", out)
+	}
 	if !strings.Contains(out, "]STATUS") || !strings.Contains(out, "SEED-PLACED") {
 		t.Fatalf("the harness did not run against a seeded checkout:\n%s", out)
 	}
