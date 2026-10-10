@@ -1531,6 +1531,16 @@ executor: pruned 2 leaked task worktree(s) in /srv/app: worktree gc: removed 2 w
 **"reattached" is the good line.** Those runs survived the restart: their output
 continues in the dashboard and their exit codes are still collected.
 
+**A Kubernetes run that fails with *"the per-run Secret … no longer exists"*** had
+its harness container held by the kubelet in `CreateContainerConfigError`: the
+harness reads its whole environment from the run's `cloop-lease-<handle>` Secret
+when the kubelet creates it, and that Secret was gone. A hub does not delete it
+before the harness has started (Task 20401), so the usual cause is outside cloop
+— an operator or a cleanup job deleting Secrets in the workload namespace — or a
+hub from before that fix restarting mid-fetch. The run is failed rather than
+left pending and its Pod deleted; dispatch the task again. The same failure one
+container earlier names `cloop-ws-<handle>`, the workspace credential.
+
 **An edge device's run is adopted when its agent dials back in** (Task 20382).
 The sweep runs before any agent has reconnected, so it leaves a device's session
 open rather than closing it as failed. When the agent reconnects, the process it

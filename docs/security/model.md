@@ -165,21 +165,50 @@ capabilities dropped, `seccompProfile: RuntimeDefault`, and
 `automountServiceAccountToken: false`, so a workload Pod holds no cluster
 credential of its own.
 
-The chart's executor Role is deliberately narrow, and CI asserts it in both
-directions: it **grants** `create/get/list/watch/delete` on Pods, `get` on
-`pods/log`, and `create`/`delete` on Secrets in the workload namespace, and
-**denies** `update`/`patch` on anything, *reading* Secrets, and anything at all
-in the hub's own namespace.
+No credential is a value in the Pod object. A Pod object is readable by every
+identity with `get pods` in the namespace, so the [workspace
+fetch](#workspace-provisioning)'s token reaches the init container through a
+`secretKeyRef`, a lease's credential files are a projected Secret volume, and
+**every value of the workload's environment** — an `env` grant's keys including
+the harness login, a `GITHUB_TOKEN` for a `*` grant, egress proxy URLs and the
+egress session's credentialed proxy variables — travels in the run's
+`cloop-lease-<handle>` Secret under `env.<NAME>`, each read into the harness
+through its own `secretKeyRef` (Task 20401). Not `envFrom`: that would import the
+lease Secret's credential *files* as variables too. The Pod carries the names
+and the reference; the kubelet resolves the values when it creates the
+container.
 
-The Secret rule is write-only on purpose. The driver creates one Secret holding
-the credential a [workspace fetch](#workspace-provisioning) needs, points the
-Pod's init container at it by reference, and deletes it when that container
-terminates; it never reads a Secret back, so an executor that could enumerate
-what else lives in the namespace — which is what would make the secret broker
-decorative — still cannot. Nor does it widen the namespace's blast radius:
-`pods: create` plus `pods/log: get`, which this identity already held, is enough
-to read any Secret in the namespace by mounting it into a Pod and printing it.
-The namespace has always been the boundary. Run workloads in one of their own.
+That Secret has to exist when the harness is *created*, which behind a workspace
+fetch is minutes after its Pod — so a hub that stops following a live run
+deletes a per-run Secret only once every container that reads it has started,
+and leaves the rest to be reaped with the Pod. A container the kubelet cannot
+create anyway (`CreateContainerConfigError` — a Secret an operator deleted, say)
+fails the run with an error naming the missing Secret instead of leaving it
+pending; within 45 seconds of the start that is presumed to be the kubelet racing
+the Secret's creation, which follows the Pod's, and looked at again once.
+
+The chart's executor Role is deliberately narrow, and asserted **exactly**, in
+both directions — nothing the driver calls missing, nothing it does not call
+granted: it grants `create/get/list/watch/delete` on Pods, `get` on `pods/log`,
+`create/patch/delete` on Secrets and `create/delete/list` on `networkpolicies`
+in the workload namespace, and denies every other verb on those resources —
+`update`/`patch` on Pods and NetworkPolicies and every read verb on Secrets
+included — `pods/exec`, and anything at all in the hub's own namespace. A Go test
+renders the chart with `helm template` and compares its Role with the driver's
+own table (`pkg/executor/kubernetes/rbac.go`, from which every RBAC remedy the
+driver prints is rendered too), and CI's kind job checks every verb with
+`kubectl auth can-i` against the installed release.
+
+The Secret rule is write-only on purpose. The driver writes the per-run Secrets,
+points the Pod at them by reference, patches one only to replace a GitHub App
+token before GitHub's hour ends, and deletes them; it never reads a Secret back,
+so an executor that could enumerate what else lives in the namespace — which is
+what would make the secret broker decorative — still cannot. Nor does it widen
+the namespace's blast radius: `pods: create` plus `pods/log: get`, which this
+identity already held, is enough to read any Secret in the namespace by mounting
+it into a Pod and printing it. The namespace has always been the boundary, and
+the lease Secret does not move it: whoever may read Secrets there, or create Pods
+there, can read a run's credentials. Run workloads in a namespace of their own.
 
 ### Between hub members
 
@@ -3289,6 +3318,7 @@ scanners to one registry and one corpus — see
 | Staged files carry lease attribution, so a revocation can take one lease without taking the workload's others | `TestStagedFilesAreAttributedToTheirLease` (`pkg/executor/container`) |
 | A Kubernetes revocation deletes both backing Secrets and reports what it removed | `TestRevokeLease_DeletesTheLeasedSecrets` (`pkg/executor/kubernetes`) |
 | It also evicts the Pod, because a projected volume and a started container's env are copies the API server cannot reach | `TestRevokeLease_EvictsThePodBecauseTheMaterialIsAlreadyInside` (`pkg/executor/kubernetes`) |
+| Env-borne material stays kill-only although it now travels in the lease Secret: a scrub of a lease that delivered nothing but variables still deletes the Pod, and says so | `TestRevokeLease_EnvOnlyMaterialIsStillKillOnly` (`pkg/executor/kubernetes`) |
 | A lease an executor never held is reported as not-held rather than as a failure, and deletes nothing | `TestRevokeLease_LeaseThisExecutorNeverHadIsNotAFailure` (`pkg/executor/kubernetes`) |
 | A lease binding is tracked while the workload can use it and released once it finishes | `TestHoldsLease_TracksTheBindingForAsLongAsThePodCanUseIt` (`pkg/executor/kubernetes`) |
 | The hub-side wipe is not an arbitrary-unlink primitive either: a binding naming a path outside a `cloop-lease-*` directory is refused and reported | `TestWipeBindingFilesRefusesPathsOutsideALeaseDirectory` (`pkg/executor/localprocess`) |
@@ -3608,6 +3638,9 @@ where `git` or `git-http-backend` is not installed.
 | `executor.Workspace` has no field a credential could be assigned to, and a marshalled `Spec` carries the grant's *name* and nothing more | `TestWorkspaceStructurallyCannotCarryACredential` |
 | The provisioning audit event — the artifact designed to outlive every credential in it — emits a closed, reviewed set of fields | `TestWorkspaceAuditEventCarriesNoCredential` |
 | The Pod object contains neither the token nor its base64 form, and the credential reaches the init container by `secretKeyRef` rather than by value | `TestWorkspaceTokenIsNotInThePodSpec` |
+| No value of the workload's environment is in the Pod object either: every variable is read from the run's lease Secret through its own `secretKeyRef`, never `envFrom`; on a real kubelet the container sees every value and the stored Pod none | `TestKubernetesPodCarriesNoEnvironmentValue`; `pkg/executor/kubernetes: TestBuildPod_NoLeasedEnvValueInThePodObject`, `TestStart_EnvTravelsInTheLeaseSecret`, `TestLeaseEnv_RealClusterResolvesTheEnvironmentFromTheSecret` |
+| A hub that stops following a live run deletes a per-run Secret only once the containers reading it have started, and a container the kubelet cannot create fails the run naming the missing Secret — on a real kubelet too | `pkg/executor/kubernetes: TestClose_MidFetchLeavesTheLeaseSecretForTheHarness`, `TestConfigError_MissingLeaseSecretFailsTheRunByName`, `TestLeaseEnv_RealClusterNamesTheMissingSecret`, `TestStart_RealClusterDeliversTheEnvironmentAndFailsAStrandedHarness` |
+| The chart's executor Role grants exactly the verbs the driver calls, compared in both directions against the rendered chart | `pkg/executor/kubernetes: TestHelmChartExecutorRoleIsExactlyWhatTheDriverCalls` |
 | The workspace init container is confined *identically* to the harness — it runs untrusted repository input in the same Pod | `TestWorkspaceInitContainerIsAsConfinedAsTheHarness` |
 | No step's argv holds the credential; exactly one step is authenticated; the `extraHeader` is scoped to the repository's own origin, so a redirect cannot carry it away | `TestWorkspaceTokenReachesNoCommandLine` |
 | A successful fetch against a real authenticating remote leaves nothing on disk — including in the checkout's own git metadata — and nothing in the transcript, while the tree genuinely arrives | `TestWorkspaceProvisioningLeaksNothingOnSuccess` |
@@ -3977,20 +4010,23 @@ not. Use `action=kill`, and prefer credential delivery that lands in a file.
 reconnect, and reported as `unreachable` in the meantime — but the material is
 on that machine until it returns. Rotate at the source when it matters.
 
-**Pod environment is readable in-namespace.** `Spec.Env` lands in the Pod object,
-so anyone with `get pods` in the workload namespace can read it. Run workloads in
-a dedicated namespace with its own RBAC. The
-[workspace credential](#workspace-provisioning) is the exception, and it is an
-exception by construction rather than by care: it reaches the Pod as a
-`secretKeyRef`, never as a value.
+**A Pod's credentials are readable by whoever may read Secrets in its
+namespace.** Since Task 20401 no environment value is in the Pod object — `get
+pods` shows each variable's name and the `cloop-lease-<handle>` key it is read
+from — but the values are in that Secret for the run, so an identity that may
+read Secrets in the workload namespace, or create a Pod there that mounts one,
+can read them. The node's container runtime also holds the resolved environment
+in the container's config. Run workloads in a dedicated namespace with its own
+RBAC.
 
-**A workspace Secret can be orphaned by a hub that dies mid-dispatch.** A control
-plane killed between creating `cloop-ws-<handle>` and observing the init
-container finish leaves it behind. Nothing sweeps it, because sweeping needs
-`list secrets` and the executor Role deliberately has no read access to Secrets
-at all. The window is seconds and the material inside expires on the broker's own
-TTL regardless; `kubectl -n <ns> delete secret cloop-ws-<handle>` clears one by
-hand.
+**A per-run Secret outlives a hub that dies mid-dispatch until its Pod goes.** A
+control plane killed after creating `cloop-ws-<handle>` or `cloop-lease-<handle>`
+leaves them behind. Nothing sweeps a Secret — sweeping needs `list secrets`, and
+the executor Role deliberately has no read access to Secrets at all — but each
+names its Pod in an `ownerReference`, so the cluster's garbage collector deletes
+it when the Pod is deleted: by the hub that adopts the run, by the orphan sweep,
+or by an operator. The material inside is short-lived on the broker's own TTL
+regardless.
 
 **A workspace credential is scoped by the grant, not by GitHub.** The broker
 refuses to lease a PAT whose repository allowlist excludes the repository being

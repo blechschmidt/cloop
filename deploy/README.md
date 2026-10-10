@@ -658,10 +658,19 @@ So it boots the things:
    release from an older chart, which lacks every key added since.
 5. Spins up kind, runs `helm template | kubectl apply --dry-run` both
    client- and server-side, installs the chart, and waits for readiness.
-6. Asserts the executor Role grants the five `pods` verbs plus `pods/log: get`,
-   and that it denies `update`/`patch` on Pods and `get`/`list` on Secrets, in
-   the workload namespace only.
-7. Runs a real workload through the in-cluster executor.
+6. Asserts the executor Role grants exactly the verbs the driver calls and
+   denies every other one, with `kubectl auth can-i` against the installed
+   release: `create get list watch delete` on `pods`, `get` on `pods/log`,
+   `create patch delete` on `secrets` and `create delete list` on
+   `networkpolicies`, in the workload namespace only — so a `patch` on
+   `networkpolicies`, the authority to widen a running sandbox's firewall,
+   fails the job. The same comparison runs in Go against the rendered chart
+   (`pkg/executor/kubernetes/rbac_test.go`), from the table the driver's own
+   RBAC remedies are printed from.
+7. Runs a real workload through the in-cluster executor, then the driver's
+   opt-in real-cluster tests: a per-run Secret is collected with its Pod, the
+   workload's environment resolves from the run's lease Secret and is never a
+   value in the Pod object, and a harness whose Secret is gone fails by name.
 8. Renders the credential monitors and asserts the hub's config, the Service
    ports, the certificate's names and the workload namespace's CA; then runs
    [`tests/kube`](../tests/kube/README.md): a Pod clones and pushes through the
