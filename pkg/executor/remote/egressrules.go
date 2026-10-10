@@ -118,3 +118,18 @@ func (e *Executor) checkEgressRules(sess *Session, spec executor.Spec, sandbox e
 	}
 	return nil
 }
+
+// shippedFirewall is a virtual executor's firewall as its device receives it:
+// with every cloud metadata service its allowlist contains without naming
+// written into its denylist (Task 20397). A firewall saved since that rule
+// names or denies them already; one saved before it does not, and an agent
+// that predates the rule would compile the containing range as an open door.
+// A deny is honoured by every agent there is, so the device closes them
+// whatever it runs.
+func shippedFirewall(fw *executor.FirewallRules) *executor.FirewallRules {
+	if fw == nil {
+		return nil
+	}
+	out := fwpolicy.CloseMetadata(*fw)
+	return &out
+}

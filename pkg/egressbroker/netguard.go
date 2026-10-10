@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 )
 
 // netguard.go holds the address policy: which destinations are refused
@@ -20,10 +22,15 @@ import (
 // address literal that was itself checked — there is no second lookup to
 // poison.
 
-// MetadataIPv4 is the cloud instance metadata endpoint. It is inside
-// link-local and would be blocked by that rule alone; it is named separately
-// so the denial says "metadata service" rather than "link-local", because
-// that is the sentence an operator needs to see in an audit log.
+// MetadataIPv4 is the cloud instance metadata endpoint most clouds share. It
+// is inside link-local and would be blocked by that rule alone; it is named
+// separately so the denial says "metadata service" rather than "link-local",
+// because that is the sentence an operator needs to see in an audit log.
+//
+// It is one entry of pkg/cloudmeta's table, which BlockReason consults whole
+// (Task 20397): AWS's IPv6 endpoint, Alibaba Cloud's, Azure's WireServer and
+// the rest are refused with the same sentence, from the same table the packet
+// filter compiles its drops from.
 var MetadataIPv4 = netip.MustParseAddr("169.254.169.254")
 
 // The IPv6 ranges that carry an IPv4 address inside them.
@@ -109,9 +116,10 @@ func BlockReason(addr netip.Addr) string {
 	}
 	a := normalizeAddr(addr)
 
+	if svc, ok := cloudmeta.Lookup(a); ok {
+		return svc.Reason()
+	}
 	switch {
-	case a == MetadataIPv4:
-		return "cloud metadata service (169.254.169.254)"
 	case a.IsUnspecified():
 		return "unspecified address"
 	case a.IsLoopback():

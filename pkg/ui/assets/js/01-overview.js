@@ -37,7 +37,7 @@ function panelHelpers() {
     mount: mountPanel, panel: deferredPanel, fmtBytes: _duFmtBytes,
     execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
     fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
-    fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal},
+    fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta},
     quota: {label: _quotaLabel, labels: _quotaLabels, fmt: _quotaFmt, saturation: _quotaSaturation},
   });
 }

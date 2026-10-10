@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
@@ -559,6 +560,12 @@ func ValidateContainerExecutor(c ContainerExecutorConfig) error {
 	if _, err := c.EgressFilter.driverFilter().Compile(); err != nil {
 		return fmt.Errorf("executors.container.egress_filter: %w", err)
 	}
+	// An allowlist entry that contains a cloud metadata service compiles —
+	// the filter keeps the service closed — and is refused here all the same
+	// (Task 20397), switched on or not, for the reason the line above gives.
+	if err := metadataRefusal(containerAllowKey, c.EgressFilter.driverFilter().MetadataFindings()); err != nil {
+		return err
+	}
 
 	// Delegated to the driver so the sandbox-critical checks (network name,
 	// image reference, denied flags) have a single definition.
@@ -675,6 +682,9 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 	if _, err := k.EgressFilter.driverFilter().Compile(); err != nil {
 		return fmt.Errorf("executors.kubernetes.egress_filter: %w", err)
 	}
+	if err := metadataRefusal(kubernetesAllowKey, k.EgressFilter.driverFilter().MetadataFindings()); err != nil {
+		return err
+	}
 
 	// An assertion about a cluster this executor never contacts is not an
 	// assertion, it is a line that reads like one. Both directions are refused
@@ -695,6 +705,61 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 		return fmt.Errorf("executors.kubernetes: %w", err)
 	}
 	return nil
+}
+
+// The keys an egress_filter allowlist is written under.
+const (
+	containerAllowKey  = "executors.container.egress_filter.allow_cidrs"
+	kubernetesAllowKey = "executors.kubernetes.egress_filter.cidrs"
+)
+
+// MetadataExposure is one allowlist entry in the configuration that contains a
+// cloud metadata service without naming it (Task 20397).
+type MetadataExposure struct {
+	// Key is the list the entry is in, e.g.
+	// executors.container.egress_filter.allow_cidrs.
+	Key string
+	// InForce reports whether the list applies to anything: its filter and its
+	// executor are both switched on. A list that is not in force opens nothing
+	// today and is one line away from doing so.
+	InForce bool
+	// Finding is the entry and the services it contains.
+	Finding cloudmeta.Finding
+}
+
+// Error states the exposure with the key and the explicit alternative.
+func (x MetadataExposure) Error() string {
+	return x.Key + ": " + x.Finding.Explain(x.Key, "")
+}
+
+// MetadataExposures lists every egress_filter allowlist entry that contains a
+// cloud metadata service without naming it: the container section's, then the
+// Kubernetes section's.
+//
+// The compiled filters keep every such service closed, so a hub running with
+// one is not open — but its allowlist no longer means what it says, which is
+// why `cloop config set` refuses one, `cloop ui` refuses to start while one is
+// in force, and `cloop hub doctor` fails it.
+func (e ExecutorsConfig) MetadataExposures() []MetadataExposure {
+	var out []MetadataExposure
+	for _, f := range e.Container.EgressFilter.driverFilter().MetadataFindings() {
+		out = append(out, MetadataExposure{Key: containerAllowKey,
+			InForce: e.Container.Enabled && e.Container.EgressFilter.Enabled, Finding: f})
+	}
+	for _, f := range e.Kubernetes.EgressFilter.driverFilter().MetadataFindings() {
+		out = append(out, MetadataExposure{Key: kubernetesAllowKey,
+			InForce: e.Kubernetes.Enabled && e.Kubernetes.EgressFilter.Enabled, Finding: f})
+	}
+	return out
+}
+
+// metadataRefusal is the first exposure in one list, as the error a validator
+// returns, or nil.
+func metadataRefusal(key string, fs []cloudmeta.Finding) error {
+	if len(fs) == 0 {
+		return nil
+	}
+	return MetadataExposure{Key: key, Finding: fs[0]}
 }
 
 // driverFilter maps the config section onto the driver's own type.

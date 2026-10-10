@@ -849,7 +849,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		payload.Virtual = &VirtualStart{
 			ID:       virtual.ID,
 			Name:     virtual.Name,
-			Firewall: virtual.Spec.Firewall,
+			Firewall: shippedFirewall(virtual.Spec.Firewall),
 			Devices:  virtual.Spec.Devices,
 		}
 	}

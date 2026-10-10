@@ -1561,9 +1561,12 @@ $ cloop egress grant \
 At least one of `--hosts` or `--cidrs` is required.
 
 **Private ranges are blocked unless you name them.** Loopback, RFC1918 and
-link-local — including cloud metadata at `169.254.169.254` — are refused even
-under `--hosts '*'`. Reaching them takes an explicit CIDR, which is a deliberate
-speed bump on the SSRF path:
+link-local are refused even under `--hosts '*'`. Reaching them takes an explicit
+CIDR, which is a deliberate speed bump on the SSRF path. A cloud metadata
+service — `169.254.169.254`, AWS's IPv6 `fd00:ec2::254`, Alibaba Cloud's
+`100.100.100.200`, and the others in `pkg/cloudmeta` — is stricter still:
+reaching one takes a CIDR that names its own address, and a `--cidrs` that only
+*contains* one (say `169.254.0.0/16`) is refused, naming the service:
 
 ```console
 $ cloop egress grant --to label:region=eu --cidrs '10.20.0.0/16' --ports 5432 --session-ttl 30m

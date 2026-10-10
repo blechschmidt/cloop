@@ -27,6 +27,13 @@ With a virtual executor whose firewall allows `1.1.1.1/32` and `1.0.0.1/32` on
 | `PUT /api/executors/<device>/firewall` with a superset of both | 200, nothing narrowed |
 | a virtual executor or project save naming `8.8.8.8/32` | **409** `firewall_exceeds_bound`, naming it |
 | the device tightened to `1.0.0.0/24` | 200, the virtual executor and the project narrowed and listed |
+| a firewall save with `allow_cidrs` a range containing a metadata service — `100.64.0.0/10` on Alibaba's sgx, which holds `100.100.100.200` | **400**, naming the service and the `/32` to write instead (Task 20397) |
+| a sandbox under a firewall allowing that range, probing `100.100.100.200:80` | **blocked**: the service is dropped ahead of the allow (the host reaches it; the sandbox does not) |
+
+The metadata-containment checks run against a real kernel in Go too, behind
+`CLOOP_FIREWALL_CONTAINER_E2E=1` (`pkg/executor/container`) and
+`CLOOP_AGENT_SANDBOX_E2E=1` (`pkg/executor/remote`); both need a host that itself
+reaches a metadata service (a cloud VM).
 
 ## The rig
 

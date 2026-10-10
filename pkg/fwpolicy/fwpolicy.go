@@ -58,6 +58,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
@@ -151,8 +152,22 @@ func Permits(parent *Rules, child Rules) []string {
 		}
 		for _, raw := range c.AllowCIDRs {
 			cp := netip.MustParsePrefix(raw)
-			rest := subtract(subtract(subtract([]netip.Prefix{cp}, mappedV4), cDeny), pTCP)
+			// What this entry reaches by itself: never a metadata service
+			// strictly inside it, which only its own host prefix opens — as a
+			// separate entry, judged on its own below (Task 20397).
+			rest := subtract(subtract(subtract(subtract([]netip.Prefix{cp}, mappedV4), cDeny),
+				hostPrefixes(cloudmeta.Within(cp))), pTCP)
 			if len(rest) == 0 {
+				continue
+			}
+			// A metadata service the child names and the parent does not open.
+			// "Outside the governing rule set" would be a puzzle when the parent
+			// allows a range around it; the rule is what needs saying.
+			if svc, ok := cloudmeta.Lookup(cp.Addr()); ok && cp.Bits() == cp.Addr().BitLen() {
+				reasons = append(reasons, fmt.Sprintf(
+					"%s is the cloud metadata service at %s, which the governing rule set does not open: a "+
+						"metadata service is reached only through its own address, and only where every level "+
+						"above names it", raw, svc.Describe()))
 				continue
 			}
 			// The common case when the parent allows the Internet: the range is
@@ -227,8 +242,11 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 	cDeny := append(prefixes(c.DenyCIDRs), prefixes(p.DenyCIDRs)...)
 	// The parent's allows without its deny list: the child inherits that list
 	// when it is enforced, so cutting the holes out here as well would only
-	// spend the child's prefix budget spelling them twice.
-	pAllow := allowSet(p)
+	// spend the child's prefix budget spelling them twice. pAllow is what the
+	// parent reaches; pRaw is its ranges as written, which a narrowed range is
+	// cut to so it does not fragment around metadata services the narrowed
+	// rule set closes again by itself.
+	pAllow, pRaw := allowSet(p), rawAllowSet(p)
 
 	if len(subtract(subtract(allowSet(c), mappedV4), cDeny)) == 0 {
 		// Its allows reach nothing already; leave them as written.
@@ -254,11 +272,15 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 		}
 
 		if !dropTCP {
-			var cidrs []netip.Prefix
+			var cidrs, named []netip.Prefix
 			if c.AllowPublicInternet {
 				if p.AllowPublicInternet {
 					out.AllowPublicInternet = true
-				} else if pub := intersect(publicSpace, pAllow); len(pub) > 0 {
+				} else if pub := withoutMetadataHosts(intersect(publicOrMetadata, pRaw)); len(pub) > 0 {
+					// Public space with the metadata services put back, so a
+					// range like 168.63.0.0/16 comes out whole rather than cut
+					// around Azure's WireServer — which it then contains without
+					// naming, and closes.
 					cidrs = append(cidrs, pub...)
 					notes = append(notes, "the public Internet was narrowed to the public ranges the governing "+
 						"rule set reaches ("+joinPrefixes(pub, 6)+")")
@@ -268,7 +290,20 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 			}
 			for _, raw := range c.AllowCIDRs {
 				cp := netip.MustParsePrefix(raw)
-				inside := intersect([]netip.Prefix{cp}, pAllow)
+				if svc, ok := cloudmeta.Lookup(cp.Addr()); ok && cp.Bits() == cp.Addr().BitLen() {
+					// A metadata service the child names. It keeps the name only
+					// where the parent opens the service as well (Task 20397).
+					if covered([]netip.Prefix{cp}, pAllow) {
+						named = append(named, cp)
+					} else {
+						notes = append(notes, raw+" was removed: it is the cloud metadata service at "+
+							svc.Describe()+", which the governing rule set does not open")
+					}
+					continue
+				}
+				// A fragment that is a metadata service's own host prefix would
+				// name it, and this range never opened it.
+				inside := withoutMetadataHosts(intersect([]netip.Prefix{cp}, pRaw))
 				switch {
 				case len(inside) == 1 && inside[0] == cp:
 					cidrs = append(cidrs, cp)
@@ -279,7 +314,9 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 					notes = append(notes, raw+" was narrowed to "+joinPrefixes(inside, 6))
 				}
 			}
-			cidrs = aggregate(cidrs)
+			// The names stay out of the aggregation: merged into a wider
+			// prefix, a host prefix would stop naming its service.
+			cidrs = append(aggregate(cidrs), named...)
 			if len(cidrs) > executor.MaxFirewallCIDRs {
 				notes = append(notes, fmt.Sprintf("its allowlist could not be narrowed within %d ranges, so its "+
 					"TCP destinations were removed", executor.MaxFirewallCIDRs))
@@ -302,13 +339,104 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 	}
 
 	n, err := out.Normalize()
-	if err != nil || len(Permits(&p, n)) > 0 {
+	if err == nil {
+		// Say in the rule set what it already does: a range left containing a
+		// metadata service it does not name closes it, and a narrowing must
+		// not write back a rule set its own save would refuse.
+		var closed []cloudmeta.Service
+		if n, closed = closeMetadata(n); len(closed) > 0 {
+			notes = append(notes, "its denylist now names the cloud metadata services its allowlist contains "+
+				"without naming ("+describeServices(closed)+"), which were closed already")
+		}
+	}
+	// Permits against the child as well as the parent: the narrowed rule set
+	// must fit inside both, and checking only one is how a narrowing could
+	// hand a child the parent's reach.
+	if err != nil || len(Permits(&p, n)) > 0 || len(Permits(&c, n)) > 0 {
 		// Unreachable by construction; refusing to guess keeps it fail-closed if
 		// a future change to the model makes it reachable.
 		return Rules{DenyCIDRs: c.DenyCIDRs}, append(notes,
 			"it could not be narrowed automatically, so every destination was removed")
 	}
 	return n, notes
+}
+
+// CloseMetadata returns r with each cloud metadata service its allowlist
+// contains without naming written into its denylist, and the services it
+// wrote (Task 20397).
+//
+// It changes nothing a filter built by this binary does — Compile drops those
+// services ahead of the allows that contain them — and that is the point: the
+// dispatch step ships rule sets through it, so a device whose agent predates
+// the containment rule, and would compile the containing range as an open
+// door, closes them too, because a deny list is something every agent honours.
+//
+// A service that is one of r's own resolvers is left out. A deny closes every
+// port, the resolver's included, and a Google Cloud VM's resolver is its
+// metadata server; Compile carves it from the containing range and keeps its
+// port 53, and an old agent is the one place it stays open on that range's
+// ports.
+func CloseMetadata(r Rules) Rules {
+	n, err := r.Normalize()
+	if err != nil {
+		return r
+	}
+	out, _ := closeMetadata(n)
+	return out
+}
+
+// closeMetadata is CloseMetadata on a normalized rule set, reporting what it
+// added. When the denylist cannot take the entries the rule set is returned as
+// it was: every filter this binary compiles carves them regardless.
+func closeMetadata(n Rules) (Rules, []cloudmeta.Service) {
+	resolverAddr := map[netip.Addr]bool{}
+	for _, raw := range n.Resolvers {
+		if ap, err := netip.ParseAddrPort(raw); err == nil {
+			resolverAddr[ap.Addr().Unmap()] = true
+		}
+	}
+	var add []cloudmeta.Service
+	for _, s := range cloudmeta.Carved(prefixes(n.AllowCIDRs), prefixes(n.DenyCIDRs)) {
+		if !resolverAddr[s.Addr] {
+			add = append(add, s)
+		}
+	}
+	if len(add) == 0 {
+		return n, nil
+	}
+	out := n
+	out.DenyCIDRs = append(append([]string(nil), n.DenyCIDRs...), formatPrefixes(hostPrefixes(add))...)
+	norm, err := out.Normalize()
+	if err != nil {
+		return n, nil
+	}
+	return norm, add
+}
+
+// publicOrMetadata is public space with the metadata services put back: what
+// a narrowing of "the public Internet" may intersect with without cutting a
+// range around a service the narrowed rule set closes by itself.
+var publicOrMetadata = aggregate(append(append([]netip.Prefix(nil), publicSpace...),
+	hostPrefixes(cloudmeta.Services())...))
+
+// withoutMetadataHosts drops every metadata service's own host prefix from ps.
+func withoutMetadataHosts(ps []netip.Prefix) []netip.Prefix {
+	out := ps[:0:0]
+	for _, p := range ps {
+		if _, ok := cloudmeta.Lookup(p.Addr()); ok && p.Bits() == p.Addr().BitLen() {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func describeServices(ss []cloudmeta.Service) string {
+	parts := make([]string, len(ss))
+	for i, s := range ss {
+		parts[i] = s.Describe()
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Fingerprint is a short stable digest of the canonical rule set.
@@ -373,14 +501,46 @@ func Describe(r *Rules) string {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-// allowSet is the address set a normalized rule set's TCP allows name, before
-// its deny list.
+// allowSet is the address set a normalized rule set's TCP allows reach, before
+// its deny list: its CIDRs, and every address outside the block set when it
+// allows the public Internet — less the cloud metadata services its CIDRs
+// contain without naming, which every compiled filter drops ahead of them
+// (Task 20397). Containment is decided against what the filter does, so a
+// parent allowing 169.254.0.0/16 does not contain a child naming
+// 169.254.169.254/32: the child would open what the parent keeps closed.
 func allowSet(r Rules) []netip.Prefix {
 	set := prefixes(r.AllowCIDRs)
 	if r.AllowPublicInternet {
 		set = append(set, publicSpace...)
 	}
+	return aggregate(subtract(aggregate(set), carvedOf(r)))
+}
+
+// rawAllowSet is allowSet before the metadata carves: the ranges as written.
+// Constrain intersects with it so a narrowed range is not cut into fragments
+// around addresses the narrowed rule set would carve again anyway.
+func rawAllowSet(r Rules) []netip.Prefix {
+	set := prefixes(r.AllowCIDRs)
+	if r.AllowPublicInternet {
+		set = append(set, publicSpace...)
+	}
 	return aggregate(set)
+}
+
+// carvedOf is the metadata services r's CIDRs contain without naming, as host
+// prefixes. Its deny list is not consulted: everything it covers is
+// subtracted wherever this is, so a denied service carved as well changes
+// nothing.
+func carvedOf(r Rules) []netip.Prefix {
+	return hostPrefixes(cloudmeta.Carved(prefixes(r.AllowCIDRs), nil))
+}
+
+func hostPrefixes(ss []cloudmeta.Service) []netip.Prefix {
+	out := make([]netip.Prefix, len(ss))
+	for i, s := range ss {
+		out[i] = s.Prefix()
+	}
+	return out
 }
 
 // prefixes parses a normalized CIDR list. Normalize has already refused

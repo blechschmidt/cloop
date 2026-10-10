@@ -224,6 +224,21 @@ func (v VirtualSpec) Validate() error {
 	return err
 }
 
+// CheckMetadata is the save-time rule for the configuration's firewall: see
+// FirewallRules.CheckMetadata, and why neither Normalize nor Validate applies
+// it — a device re-validates every configuration the hub sends it, and one
+// stored before the rule has to keep starting sandboxes, which keep the
+// metadata service closed.
+func (v VirtualSpec) CheckMetadata() error {
+	if v.Firewall == nil {
+		return nil
+	}
+	if err := v.Firewall.CheckMetadata(); err != nil {
+		return fmt.Errorf("firewall: %w", err)
+	}
+	return nil
+}
+
 // Describe renders the configuration for an audit row or a log line.
 func (v VirtualSpec) Describe() string {
 	parts := []string{v.Sandbox.Describe()}

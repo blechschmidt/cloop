@@ -34,6 +34,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
@@ -326,6 +327,25 @@ func parseResolver(s string) (netip.AddrPort, error) {
 		return netip.AddrPort{}, err
 	}
 	return netip.AddrPortFrom(addr, defaultResolverPort), nil
+}
+
+// MetadataFindings reports every cidrs entry that contains a cloud metadata
+// service without naming it (Task 20397). Compile accepts one — the Pod's
+// NetworkPolicy excepts the service from the entry's ipBlock — and pkg/config
+// refuses it, so an allowlist means what it reads as.
+func (f EgressFilter) MetadataFindings() []cloudmeta.Finding {
+	var allow, deny []netip.Prefix
+	for _, raw := range f.CIDRs {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(raw)); err == nil {
+			allow = append(allow, p)
+		}
+	}
+	for _, raw := range f.DenyCIDRs {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(raw)); err == nil {
+			deny = append(deny, p)
+		}
+	}
+	return cloudmeta.Check(allow, deny)
 }
 
 // Compile turns the filter into the ordered policy both backends render from.

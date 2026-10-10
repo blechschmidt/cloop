@@ -184,11 +184,25 @@ func RenderNetworkPolicy(p Policy, opts NetworkPolicyOptions) (*NetworkPolicy, e
 	// disappear, because an ipBlock whose except is its own cidr is invalid.
 	denied := deniedPrefixes(p)
 
+	// The carves (Task 20397): a metadata service an allowed CIDR contains
+	// without naming, and the translation prefixes no allow waives. Ordered
+	// semantics decide what a carve applies to — it takes its range out of
+	// every allow *after* it, and none before, which is what keeps a resolver
+	// that is itself a metadata server reachable on its port — so they are
+	// collected as the rules are walked rather than up front.
+	var carved []netip.Prefix
+
 	for _, r := range p.Rules {
-		if r.Verdict != VerdictAllow || r.Scope != ScopeWire {
+		if r.Scope != ScopeWire {
 			continue
 		}
-		if coveredBy(r.Prefix, denied) {
+		if r.Verdict == VerdictDrop {
+			if r.Carve {
+				carved = append(carved, r.Prefix)
+			}
+			continue
+		}
+		if coveredBy(r.Prefix, denied) || coveredBy(r.Prefix, carved) {
 			continue
 		}
 		block := &IPBlock{CIDR: r.Prefix.String()}
@@ -200,7 +214,7 @@ func RenderNetworkPolicy(p Policy, opts NetworkPolicyOptions) (*NetworkPolicy, e
 				except = append(except, excepts.v6...)
 			}
 		}
-		block.Except = mergeExcepts(except, r.Prefix, denied)
+		block.Except = mergeExcepts(mergeExcepts(except, r.Prefix, denied), r.Prefix, carved)
 		key := portKey(r.Proto, r.Ports)
 		g, ok := index[key]
 		if !ok {
@@ -228,10 +242,29 @@ type exceptSet struct {
 
 // exceptSets computes the block prefixes a wide allow must exclude, dropping
 // any that the policy allows outright.
+//
+// "Outright" means on every port the wide allow opens. A granted CIDR shares
+// the public allow's ports, so leaving the range it names out of the wide
+// peer's except changes nothing — its own peer re-allows exactly that. A
+// resolver does not: it opens one address on port 53, and taking that address
+// out of the wide peer's except would open it on the public ports as well.
+// That was harmless while the only host-sized entries in the block set sat
+// inside wider blocked ranges, and stopped being harmless with Azure's
+// WireServer, a public address whose host is also Azure's DNS resolver
+// (Task 20397).
 func exceptSets(p Policy) exceptSet {
+	wide := map[bool]Rule{}
+	for _, r := range p.Rules {
+		if r.Verdict == VerdictAllow && r.Scope == ScopeWire && r.Prefix.Bits() == 0 {
+			wide[r.Prefix.Addr().Is4()] = r
+		}
+	}
 	allowed := map[netip.Prefix]bool{}
 	for _, r := range p.Rules {
-		if r.Verdict == VerdictAllow && r.Scope == ScopeWire && r.Prefix.Bits() > 0 {
+		if r.Verdict != VerdictAllow || r.Scope != ScopeWire || r.Prefix.Bits() == 0 {
+			continue
+		}
+		if w, ok := wide[r.Prefix.Addr().Is4()]; ok && opensEveryPortOf(r, w) {
 			allowed[r.Prefix] = true
 		}
 	}
@@ -255,6 +288,33 @@ func exceptSets(p Policy) exceptSet {
 	sort.Strings(out.v4)
 	sort.Strings(out.v6)
 	return out
+}
+
+// opensEveryPortOf reports whether allow a reaches its range on every
+// transport and port the allow w does.
+func opensEveryPortOf(a, w Rule) bool {
+	if a.Proto != ProtoAny && a.Proto != w.Proto {
+		return false
+	}
+	if len(a.Ports) == 0 {
+		return true
+	}
+	if len(w.Ports) == 0 {
+		return false
+	}
+	for _, wp := range w.Ports {
+		found := false
+		for _, ap := range a.Ports {
+			if ap == wp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // portKey identifies a port signature for grouping.
@@ -322,16 +382,16 @@ func coveredBy(p netip.Prefix, denied []netip.Prefix) bool {
 	return false
 }
 
-// mergeExcepts adds the denied prefixes that lie strictly inside block to an
-// except list.
+// mergeExcepts adds the holes — denied prefixes, carves — that lie strictly
+// inside block to an except list.
 //
-// A denied prefix already nested inside an existing except is left out: the
-// API server would accept it, but an except list is the part of a
-// NetworkPolicy people read to find out what a sandbox cannot reach, and a
-// reader should not have to work out that 10.5.0.0/16 is already inside
-// 10.0.0.0/8. The existing entries are returned exactly as given, so a policy
-// with no deny list renders byte-for-byte as it did before deny lists existed.
-func mergeExcepts(except []string, block netip.Prefix, denied []netip.Prefix) []string {
+// A hole already nested inside an existing except is left out: the API server
+// would accept it, but an except list is the part of a NetworkPolicy people
+// read to find out what a sandbox cannot reach, and a reader should not have
+// to work out that 10.5.0.0/16 is already inside 10.0.0.0/8. The existing
+// entries are returned exactly as given, so a policy with no deny list and
+// nothing carved renders byte-for-byte as it did before either existed.
+func mergeExcepts(except []string, block netip.Prefix, holes []netip.Prefix) []string {
 	var existing []netip.Prefix
 	for _, s := range except {
 		if p, err := netip.ParsePrefix(s); err == nil {
@@ -347,7 +407,7 @@ func mergeExcepts(except []string, block netip.Prefix, denied []netip.Prefix) []
 		return false
 	}
 	var added []netip.Prefix
-	for _, d := range denied {
+	for _, d := range holes {
 		if d.Addr().Is4() != block.Addr().Is4() || d.Bits() <= block.Bits() || !block.Contains(d.Addr()) {
 			continue
 		}

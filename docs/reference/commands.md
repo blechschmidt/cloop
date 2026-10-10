@@ -1288,12 +1288,21 @@ ruleset and in the audit trail:
 
 ```console
 $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --format rules
-IP-layer egress filter  mode filtered, 22 rules, from flags
+IP-layer egress filter  mode filtered, 35 rules, from flags
 
   allow  127.0.0.0/8                any          sandbox-local loopback [namespace-local]
   allow  ::1/128                    any          sandbox-local loopback [namespace-local]
+  drop   64:ff9b::/96               any          NAT64 translation prefix
+  drop   64:ff9b:1::/48             any          NAT64 translation prefix (RFC 8215)
+  drop   ::ffff:0:0:0/96            any          IPv4-translatable prefix
+  drop   2002::/16                  any          6to4 translation prefix
+  drop   ::/96                      any          IPv4-compatible prefix (deprecated)
   allow  10.8.0.0/24            tcp 6443         granted CIDR (waives private (RFC1918/ULA))
+  drop   100.100.100.200/32         any          cloud metadata service (100.100.100.200)
+  drop   168.63.129.16/32           any          cloud metadata service (168.63.129.16)
   drop   169.254.169.254/32         any          cloud metadata service (169.254.169.254)
+  ...
+  drop   169.254.170.23/32          any          cloud metadata service (169.254.170.23)
   drop   0.0.0.0/32                 any          unspecified address
   drop   127.0.0.0/8                any          loopback
   drop   224.0.0.0/4                any          multicast
@@ -1302,23 +1311,22 @@ IP-layer egress filter  mode filtered, 22 rules, from flags
   drop   172.16.0.0/12              any          private (RFC1918/ULA)
   drop   192.168.0.0/16             any          private (RFC1918/ULA)
   drop   100.64.0.0/10              any          carrier-grade NAT (RFC6598)
+  drop   fd00:ec2::254/128          any          cloud metadata service (fd00:ec2::254)
+  ...
   drop   ::/128                     any          unspecified address
-  drop   ::1/128                    any          loopback
   drop   ff00::/8                   any          multicast
   drop   fe80::/10                  any          link-local
   drop   fc00::/7                   any          private (RFC1918/ULA)
-  drop   64:ff9b::/96               any          NAT64 translation prefix
-  drop   64:ff9b:1::/48             any          NAT64 translation prefix (RFC 8215)
-  drop   ::ffff:0:0:0/96            any          IPv4-translatable prefix
-  drop   2002::/16                  any          6to4 translation prefix
-  drop   ::/96                      any          IPv4-compatible prefix (deprecated)
   drop   everything else                         default deny
 ```
 
 The granted `10.8.0.0/24` is allowed *before* `10.0.0.0/8` is dropped: that
 ordering is the waiver rule, and it is why the grant buys that prefix on that
-port and nothing else. The last five drops are the IPv6 encodings that carry an
-IPv4 address; a packet filter cannot unwrap one, so it drops the prefix whole.
+port and nothing else. Two kinds of drop sit *ahead* of the granted allow, so a
+granted range never opens them: the IPv6 encodings that carry an IPv4 address (a
+packet filter cannot unwrap one, so it drops the prefix whole), and each cloud
+metadata service the range contains — `169.254.0.0/16` would hold six of them —
+which only the service's own `/32` or `/128` in `--cidrs` opens.
 
 **Seeing what a hostname allowlist became.** The warning is the point of the
 command, not decoration — it appears in every format, including the nft
@@ -1383,9 +1391,11 @@ table inet cloop_sbx_container {
 		iifname != "br-8e9671342cdf" return comment "not this sandbox"
 		ct state established,related counter accept
 		ct state invalid counter drop
-		ip daddr 10.8.0.0/24 tcp dport 6443 counter accept comment "granted CIDR (waives private (RFC1918/ULA))"
 		ip daddr 10.88.0.1/32 udp dport 53 counter accept comment "DNS resolver"
 		ip daddr 10.88.0.1/32 tcp dport 53 counter accept comment "DNS resolver (truncated answers retry over TCP)"
+		ip6 daddr 64:ff9b::/96 counter drop comment "NAT64 translation prefix"
+		…
+		ip daddr 10.8.0.0/24 tcp dport 6443 counter accept comment "granted CIDR (waives private (RFC1918/ULA))"
 		ip daddr 169.254.169.254/32 counter drop comment "cloud metadata service (169.254.169.254)"
 		…
 		counter drop comment "default deny"

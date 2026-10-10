@@ -30,9 +30,11 @@
 //     is checked, and the dial goes to the resolved literal — so a name that
 //     answers "93.184.216.34" to the policy check and "127.0.0.1" to the dial
 //     has nowhere to put the second answer. See netguard.go.
-//   - Loopback, RFC1918, CGNAT, link-local (which is where the cloud metadata
-//     service at 169.254.169.254 lives), multicast, and unspecified addresses
-//     are refused unless an allowed CIDR explicitly covers them.
+//   - Loopback, RFC1918, CGNAT, link-local, multicast, unspecified addresses
+//     and the cloud metadata services (pkg/cloudmeta: 169.254.169.254, AWS's
+//     fd00:ec2::254, Alibaba Cloud's 100.100.100.200 and the rest) are refused
+//     unless an allowed CIDR explicitly covers them — and a metadata service
+//     only by its own /32 or /128, never by a prefix that merely contains it.
 //   - Byte quotas are enforced during the copy, so an over-quota transfer is
 //     cut mid-stream rather than noticed afterwards.
 //   - A session's TTL applies to open tunnels, not just to new connections.
@@ -53,6 +55,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -96,7 +99,9 @@ type Grant struct {
 	// prefix here is what waives the SSRF block for that prefix and nothing
 	// else — which is why there is no blanket allow_private flag. "Let this
 	// sandbox reach the metadata service" should be a sentence an operator
-	// has to write out as 169.254.169.254/32, not a checkbox.
+	// has to write out as 169.254.169.254/32, not a checkbox, so a prefix
+	// that merely contains a metadata service is refused unless the list
+	// names the service too (Task 20397).
 	CIDRs []string `json:"cidrs,omitempty"`
 
 	// Ports is the destination port allowlist. Never empty after Normalize.
@@ -245,15 +250,8 @@ func (g *Grant) Validate() error {
 		}
 	}
 
-	for _, c := range g.CIDRs {
-		p, err := netip.ParsePrefix(c)
-		if err != nil {
-			return fmt.Errorf("%w: %q is not a CIDR prefix (want 10.0.0.0/8 or 2001:db8::/32)",
-				ErrInvalidGrant, c)
-		}
-		if err := validateAllowPrefix(p); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidGrant, err)
-		}
+	if err := validateAllowCIDRs(g.CIDRs); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidGrant, err)
 	}
 	for _, m := range g.Methods {
 		if m == "*" {
@@ -269,39 +267,60 @@ func (g *Grant) Validate() error {
 	return nil
 }
 
-// validateAllowPrefix refuses the two CIDR shapes that turn the allow list
-// into a bypass of the hard-block set.
+// validateAllowCIDRs refuses the CIDR shapes that turn the allow list into a
+// bypass of the hard-block set.
 //
 // CheckAddr lets an explicit CIDR waive the block set, and the field's own
 // documentation explains why that is safe: waiving "for that prefix and
 // nothing else" is why there is no blanket allow_private flag, and why
 // reaching the metadata service is meant to be a sentence an operator writes
-// out as 169.254.169.254/32. Two prefixes break that promise:
+// out as 169.254.169.254/32. Two shapes break that promise:
 //
 //   - 0.0.0.0/0 and ::/0 waive every blocked range at once. That is the
-//     blanket flag, spelled differently.
-//   - any prefix that merely *contains* 169.254.169.254 — 169.254.0.0/16,
-//     say — reaches the credentials of the host the hub runs on without ever
-//     naming it. On a cloud instance that is the whole account.
+//     blanket flag, spelled differently — and so is ::ffff:0.0.0.0/96, which
+//     is why each entry is read in its canonical form first.
+//   - any prefix that merely *contains* a cloud metadata service —
+//     169.254.0.0/16, fc00::/7 with AWS's fd00:ec2::254 in it, 100.64.0.0/10
+//     with Alibaba Cloud's 100.100.100.200 — reaches the credentials of the
+//     host the hub runs on without ever naming them. On a cloud instance that
+//     is the whole account.
 //
-// Refusing them here rather than at CheckAddr keeps the rejection where an
-// operator sees it, at grant time, with a message that says what to write
-// instead. pkg/netfilter refuses the same shapes for the same reason, which
-// is what lets the packet filter and the proxy stay in agreement.
-func validateAllowPrefix(p netip.Prefix) error {
-	if p.Bits() == 0 {
-		return fmt.Errorf(
-			"CIDR %s is not an allowlist entry — it waives every blocked range, including the "+
-				"cloud metadata service. Pass --hosts '*' to allow the public Internet, or name "+
-				"the prefixes the sandbox actually needs", p)
+// The second is pkg/cloudmeta's rule, the one every surface that writes an
+// allow list applies (Task 20397): such an entry is refused unless the list
+// also names the service's own /32 or /128. Refusing here rather than at
+// CheckAddr keeps the rejection where an operator sees it, at grant time, with
+// a message that says what to write instead; AllowsAddr keeps a grant stored
+// before the rule from opening the service anyway. The packet filter's
+// surfaces refuse the same shapes with the same rule, which is what lets the
+// two stay in agreement.
+func validateAllowCIDRs(cidrs []string) error {
+	allow := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		raw, err := netip.ParsePrefix(c)
+		if err != nil {
+			return fmt.Errorf("%q is not a CIDR prefix (want 10.0.0.0/8 or 2001:db8::/32)", c)
+		}
+		p, ok := cloudmeta.Canonical(raw)
+		if !ok {
+			return fmt.Errorf("%q mixes IPv4-mapped and native IPv6 space; write the IPv4 prefix it means", c)
+		}
+		if p.Bits() == 0 {
+			return fmt.Errorf(
+				"CIDR %s is not an allowlist entry — it waives every blocked range, including the "+
+					"cloud metadata service. Pass --hosts '*' to allow the public Internet, or name "+
+					"the prefixes the sandbox actually needs", c)
+		}
+		allow = append(allow, p)
 	}
-	if p.Contains(MetadataIPv4) && p.Bits() != p.Addr().BitLen() {
-		return fmt.Errorf(
-			"CIDR %s contains the cloud metadata service (%s) without naming it. Write "+
-				"%s/32 if that is the intent, or choose a prefix that excludes it",
-			p, MetadataIPv4, MetadataIPv4)
+	findings := cloudmeta.Check(allow, nil)
+	if len(findings) == 0 {
+		return nil
 	}
-	return nil
+	msgs := make([]string, len(findings))
+	for i, f := range findings {
+		msgs[i] = f.Explain("--cidrs", "")
+	}
+	return fmt.Errorf("%s", strings.Join(msgs, "; "))
 }
 
 // validMethodToken reports whether s is an RFC 9110 token. Restricting the
@@ -401,24 +420,36 @@ func (g Grant) CheckMethod(method string) error {
 // blocked-range check consults it, so an operator who lists 10.0.0.0/8 gets
 // exactly 10.0.0.0/8 and not the loopback, the metadata service, or their
 // IPv6 equivalents.
+//
+// A cloud metadata service is the one address a containing prefix does not
+// cover: only its own /32 or /128 does (Task 20397). Validate refuses a grant
+// whose CIDRs merely contain one, so for a grant made since, this changes
+// nothing; for one stored before the rule — 169.254.0.0/16 granted for some
+// link-local device — it is what keeps the metadata service closed anyway,
+// the same way the packet filter drops it ahead of the allow.
 func (g Grant) AllowsAddr(addr netip.Addr) bool {
 	if !addr.IsValid() || len(g.CIDRs) == 0 {
 		return false
 	}
 	addr = addr.Unmap()
+	_, metadata := cloudmeta.Lookup(addr)
 	for _, c := range g.CIDRs {
-		pfx, err := netip.ParsePrefix(c)
+		raw, err := netip.ParsePrefix(c)
 		if err != nil {
 			// A prefix that no longer parses is a corrupt or hostile row.
 			// Skipping it denies; honouring it would widen the grant.
 			continue
 		}
-		if pfx.Addr().Unmap().Is4() != addr.Is4() {
+		// Canonical, so ::ffff:10.8.0.0/120 means 10.8.0.0/24 here exactly as
+		// it does to the packet filter compiled from the same grant.
+		pfx, ok := cloudmeta.Canonical(raw)
+		if !ok || pfx.Addr().Is4() != addr.Is4() || !pfx.Contains(addr) {
 			continue
 		}
-		if pfx.Contains(addr) {
-			return true
+		if metadata && pfx.Bits() != addr.BitLen() {
+			continue
 		}
+		return true
 	}
 	return false
 }

@@ -59,14 +59,26 @@ type firewallRequest struct {
 	Clear bool `json:"clear"`
 }
 
+// rules is the request as a rule set, refused (ErrInvalidSpec, so 400) unless
+// it normalizes and every allowlist entry that contains a cloud metadata
+// service names it or denies it (Task 20397). Stored rule sets are read back
+// with Normalize alone, so one saved before the rule keeps loading; this is
+// the only place a new one is written from.
 func (req firewallRequest) rules() (executor.FirewallRules, error) {
-	return executor.FirewallRules{
+	r, err := executor.FirewallRules{
 		AllowPublicInternet: req.AllowPublicInternet,
 		AllowCIDRs:          req.AllowCIDRs,
 		DenyCIDRs:           req.DenyCIDRs,
 		AllowPorts:          req.AllowPorts,
 		Resolvers:           req.Resolvers,
 	}.Normalize()
+	if err != nil {
+		return executor.FirewallRules{}, err
+	}
+	if err := r.CheckMetadata(); err != nil {
+		return executor.FirewallRules{}, err
+	}
+	return r, nil
 }
 
 // firewallChange is one rule set a save narrowed to fit.
@@ -91,6 +103,8 @@ type firewallChild struct {
 	Describe string   `json:"describe"`
 	Fits     bool     `json:"fits"`
 	Reasons  []string `json:"reasons,omitempty"`
+	// Metadata is the child's own metadata findings (Task 20397).
+	Metadata []string `json:"metadata,omitempty"`
 }
 
 // deviceFirewallView is the device card's GET body and the answer to a write.
@@ -114,6 +128,11 @@ type deviceFirewallView struct {
 	Children []firewallChild `json:"children"`
 	// Constrained lists what a save narrowed to fit, on a write's answer.
 	Constrained []firewallChange `json:"constrained,omitempty"`
+	// Metadata says which allowlist entries of the stored rule set contain a
+	// cloud metadata service without naming it (Task 20397): rules saved
+	// before the rule, which keep the service closed and cannot be saved
+	// again unchanged.
+	Metadata []string `json:"metadata,omitempty"`
 }
 
 // projectFirewallView is the project card's GET body and the answer to a write.
@@ -145,6 +164,9 @@ type projectFirewallView struct {
 	Warning  string `json:"warning,omitempty"`
 	SetAt    string `json:"set_at,omitempty"`
 	SetBy    string `json:"set_by,omitempty"`
+	// Metadata is the stored rule set's metadata findings, as on the device's
+	// view.
+	Metadata []string `json:"metadata,omitempty"`
 }
 
 // errFirewallExceeds carries a refused save from inside a transaction to the
@@ -364,6 +386,7 @@ func (s *Server) deviceFirewallView(db *statedb.DB, ex executor.Executor) (devic
 	view.Describe = fwpolicy.Describe(&rec.Rules)
 	if ok {
 		view.SetAt, view.SetBy = formatSetAt(rec.SetAt), rec.SetBy
+		view.Metadata = rec.Rules.MetadataNotes()
 	}
 	if !pos.Enforceable {
 		view.Warning = pos.Reason + ". Its rules still bound its virtual executors; work placed on the " +
@@ -389,6 +412,9 @@ func (s *Server) deviceFirewallView(db *statedb.DB, ex executor.Executor) (devic
 			}
 			child := firewallChild{Kind: "virtual", ID: v.ID, Name: v.Name,
 				Describe: fwpolicy.Describe(fwpolicy.VirtualLevel(v.Spec)), Fits: true}
+			if v.Spec.Firewall != nil {
+				child.Metadata = v.Spec.Firewall.MetadataNotes()
+			}
 			if reasons := virtualExceeds(bound, id, v.Spec); len(reasons) > 0 {
 				child.Fits, child.Reasons = false, reasons
 			}
@@ -404,7 +430,8 @@ func (s *Server) deviceFirewallView(db *statedb.DB, ex executor.Executor) (devic
 		if pex == nil || executor.PostureOf(pex).DeviceID != id {
 			continue
 		}
-		child := firewallChild{Kind: "project", ID: p.Subject, Describe: fwpolicy.Describe(&p.Rules), Fits: true}
+		child := firewallChild{Kind: "project", ID: p.Subject, Describe: fwpolicy.Describe(&p.Rules), Fits: true,
+			Metadata: p.Rules.MetadataNotes()}
 		levels, _, err := governingLevels(db, pex, nil, nil)
 		if err == nil {
 			var gov *executor.FirewallRules
@@ -740,6 +767,7 @@ func (s *Server) projectFirewallView(db *statedb.DB, workDir string) (projectFir
 	view.Describe = fwpolicy.Describe(&rec.Rules)
 	if ok {
 		view.SetAt, view.SetBy = formatSetAt(rec.SetAt), rec.SetBy
+		view.Metadata = rec.Rules.MetadataNotes()
 	}
 
 	ex := projectExecutorFor(policy)

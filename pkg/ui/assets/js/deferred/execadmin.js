@@ -21,7 +21,7 @@
     const {api, apiMethod, esc, toast, relTime} = h;
     const {openOverlay, closeOverlay, loadExecutors, fwSync, openProject, switchTab, openTaskDetails} = window;
     const _execAt = h.execAt, _execKindLabel = h.execKind, _execDetailErrText = h.execErr;
-    const {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal} = h.fw;
+    const {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta} = h.fw;
 
     // ── Executor detail drill-in (Task 20258) ───────────────────────────────────
     //
@@ -541,6 +541,8 @@
         + (v.issue ? '<span class="exec-chip neg" title="' + esc(v.issue) + '">cannot apply</span>' : '')
         + (v.exceeds_device ? '<span class="exec-chip neg" title="' + esc(v.exceeds_device.join('; '))
           + '">exceeds device firewall</span>' : '')
+        + (v.metadata ? '<span class="exec-chip neg" title="' + esc(v.metadata.join('; '))
+          + '">contains a metadata service</span>' : '')
         + '<button class="btn" style="padding:2px 8px;font-size:11px" data-act="editExecutorVirtual" data-arg="' + i + '">Edit</button></div>').join('');
       h += '<h3 style="font-size:13px;margin:12px 0 4px">USB devices on ' + esc(d.name)
         + ' <button class="btn" style="padding:2px 8px;font-size:11px" data-act="refreshExecutorVirtual">Refresh</button></h3>';
@@ -567,6 +569,7 @@
           + '" placeholder="engine default"><datalist id="evxRuntimes">' + _evxOpts(d.oci_runtimes || [], '') + '</datalist>')
         + '</div>';
       h += _evxField('Image', '<input class="form-input" id="evxImage" value="' + esc(sb.image || '') + '" placeholder="the device default">');
+      h += _fwMeta(cur.metadata);
       h += _evxNet(d, sb, fw);
       h += '<div class="modal-footer">'
         + (execVx.edit ? '<button class="btn danger" data-act="deleteExecutorVirtual">Delete</button>'
@@ -610,8 +613,9 @@
           + esc(d.packet_filter_issue || 'not reported') + '. Work sent here is refused, never run unfiltered, until it can.</div>')
         + sub('evxFwRules', 'fw', '<label class="sec-own-opt"><input type="checkbox" id="evxPublic"'
           + (f.allow_public_internet ? ' checked' : '') + ' data-change="evxSync"><span><strong>Allow the public Internet</strong> — '
-          + 'every public address, over TCP. Private (RFC 1918), link-local and cloud metadata, CGNAT, loopback and multicast '
-          + 'addresses stay closed unless the allowlist names them.</span></label>'
+          + 'every public address, over TCP. Private (RFC 1918), link-local, CGNAT, loopback and multicast addresses stay '
+          + 'closed unless the allowlist names them, and a cloud metadata service unless it names its own address — a '
+          + 'range around one is refused until it is named or denied.</span></label>'
           + '<div class="form-row">' + _evxField('Allowlist', '<textarea class="form-input" id="evxAllow" rows="3" placeholder="10.8.0.0/24"'
             + ev + '>' + lines(f.allow_cidrs) + '</textarea>', 'Also reachable, private ranges included.')
           + _evxField('Denylist', '<textarea class="form-input" id="evxDeny" rows="3" placeholder="203.0.113.0/24"' + ev + '>'
@@ -777,12 +781,15 @@
         + (d.configured ? 'Set by ' + esc(d.set_by || 'an admin') + '.' : '<b>No rule set: nothing here bounds it.</b>') + '</div>';
       if (d.config) h += '<div class="form-hint">Its configuration file allows at most: ' + esc(_fwSum(d.config)) + '.</div>';
       if (d.warning) h += '<div class="form-hint" style="color:var(--yellow)">&#9888; ' + esc(d.warning) + '</div>';
+      h += _fwMeta(d.metadata);
       h += note + '<div id="efwWarn"></div>';
       h += _fwForm('efw', d.configured ? d.rules : {allow_public_internet: true, allow_ports: [443], resolvers: ['1.1.1.1']});
       const kids = d.children || [];
       if (kids.length) {
         h += '<div class="form-hint">Bounded by it: ' + kids.map(c => esc(c.kind === 'virtual' ? (c.name || c.id) : c.id)
-          + (c.fits ? '' : ' <b style="color:var(--red)" title="' + esc((c.reasons || []).join('; ')) + '">(exceeds it)</b>'))
+          + (c.fits ? '' : ' <b style="color:var(--red)" title="' + esc((c.reasons || []).join('; ')) + '">(exceeds it)</b>')
+          + (c.metadata ? ' <b style="color:var(--yellow)" title="' + esc(c.metadata.join('; '))
+            + '">(contains a metadata service)</b>' : ''))
           .join(', ') + '</div>';
       }
       h += '<div class="modal-footer">'

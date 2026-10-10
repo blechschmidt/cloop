@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
@@ -343,9 +344,18 @@ var interesting = []string{
 	"10.0.0.0/8", "10.20.0.0/16", "10.20.5.0/24", "172.16.0.0/12", "192.168.1.0/24", "169.254.169.254/32",
 	"1.1.1.0/24", "1.0.0.0/8", "8.8.8.0/24", "203.0.113.0/24", "140.82.112.0/20", "100.64.0.0/10",
 	"0.0.0.0/1", "128.0.0.0/2", "2606:4700::/32", "fc00::/7", "2001:db8::/32",
+	// Ranges that contain cloud metadata services, and the services' own host
+	// prefixes, so the containment rule (Task 20397) is exercised from both
+	// sides: a level that names a service, a level that only contains it, and
+	// a level that contains it and denies it.
+	"169.254.0.0/16", "169.254.169.0/24", "169.254.170.2/32", "168.63.0.0/16", "168.63.129.16/32",
+	"100.100.0.0/16", "fd00::/8", "fd00:ec2::254/128", "64:ff9b::/96",
 }
 
-var interestingResolvers = []string{"1.1.1.1", "8.8.8.8", "10.20.0.53", "1.1.1.1:5353", "[2606:4700::1111]:53"}
+// The last two are metadata servers that are also a VM's resolver: Google
+// Cloud's and Azure's.
+var interestingResolvers = []string{"1.1.1.1", "8.8.8.8", "10.20.0.53", "1.1.1.1:5353", "[2606:4700::1111]:53",
+	"169.254.169.254", "168.63.129.16"}
 
 func randomRules(rng *rand.Rand) Rules {
 	var r Rules
@@ -393,6 +403,9 @@ func probesFor(rng *rand.Rand, rs ...Rules) []probe {
 	}
 	for _, c := range interesting {
 		edge(netip.MustParsePrefix(c))
+	}
+	for _, svc := range cloudmeta.Services() {
+		addrs = append(addrs, svc.Addr, svc.Addr.Prev(), svc.Addr.Next())
 	}
 	for i := 0; i < 64; i++ {
 		var b [4]byte

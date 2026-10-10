@@ -19,9 +19,10 @@ package executor
 // # Semantics, in one paragraph
 //
 // Nothing is reachable unless an allow names it. AllowPublicInternet opens
-// every address outside the hard-block set (RFC1918, link-local and the cloud
-// metadata endpoint, CGNAT, loopback, multicast); AllowCIDRs open specific
-// ranges and are the only thing that reaches into blocked space; Resolvers are
+// every address outside the hard-block set (RFC1918, link-local, the cloud
+// metadata services, CGNAT, loopback, multicast); AllowCIDRs open specific
+// ranges and are the only thing that reaches into blocked space — a metadata
+// service only by its own address, never by a range containing it; Resolvers are
 // opened on UDP and TCP and are also what the sandbox is told to resolve
 // through. DenyCIDRs are dropped before any of that is consulted, so a denied
 // range is unreachable however the allows are written. AllowPorts bounds the
@@ -35,6 +36,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 )
 
 // Firewall list bounds. They mirror pkg/netfilter's, which are the real limit
@@ -137,6 +140,67 @@ func (r FirewallRules) Normalize() (FirewallRules, error) {
 func (r FirewallRules) Validate() error {
 	_, err := r.Normalize()
 	return err
+}
+
+// MetadataFindings reports every allowlist entry that contains a cloud
+// metadata service without naming it — and without the denylist closing it
+// (Task 20397). An entry that does not parse is Normalize's to refuse, and is
+// skipped here.
+func (r FirewallRules) MetadataFindings() []cloudmeta.Finding {
+	return cloudmeta.Check(firewallPrefixes(r.AllowCIDRs), firewallPrefixes(r.DenyCIDRs))
+}
+
+// CheckMetadata is the rule a save applies: ErrInvalidSpec naming each
+// allowlist entry that opens a metadata service it does not name, with both
+// explicit alternatives.
+//
+// Normalize does not apply it, deliberately. Normalize is also how a stored
+// rule set is read back, and one saved before the rule existed has to keep
+// loading — every filter compiled from it keeps the service closed — so that
+// its card and `cloop hub doctor` can say what is wrong with it, rather than
+// every sandbox under it being refused as "unreadable".
+func (r FirewallRules) CheckMetadata() error {
+	fs := r.MetadataFindings()
+	if len(fs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(fs))
+	for i, f := range fs {
+		msgs[i] = f.Explain("the allowlist", "the denylist")
+	}
+	return fmt.Errorf("%w: allow_cidrs: %s", ErrInvalidSpec, strings.Join(msgs, "; "))
+}
+
+// MetadataNotes says, for a rule set that is already stored, what
+// MetadataFindings found and what becomes of it: one sentence per entry, for
+// the rule set's card and for `cloop hub doctor`.
+func (r FirewallRules) MetadataNotes() []string {
+	var out []string
+	for _, f := range r.MetadataFindings() {
+		stays, it := "It stays closed", "it"
+		if len(f.Services) > 1 {
+			stays, it = "They stay closed", "them"
+		}
+		out = append(out, fmt.Sprintf("%s. %s: every filter compiled from these rules drops %s ahead of the "+
+			"allow. Saving the rules again is refused until they say which is meant — %s", f.Sentence(), stays, it,
+			f.Remedy("the allowlist", "the denylist")))
+	}
+	return out
+}
+
+// firewallPrefixes parses a list the way Normalize does, dropping what does
+// not parse.
+func firewallPrefixes(in []string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(in))
+	for _, s := range in {
+		if strings.TrimSpace(s) == "" {
+			continue
+		}
+		if p, err := ParseFirewallPrefix(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // normalizeCIDRList parses one list. allowAll admits a /0, which is a strange

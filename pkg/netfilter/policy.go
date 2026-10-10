@@ -24,18 +24,28 @@
 // # Relationship to the proxy's block set
 //
 // egressbroker.BlockReason refuses loopback, RFC1918, link-local, the cloud
-// metadata endpoint, CGNAT and multicast unless the grant names an explicit
+// metadata services, CGNAT and multicast unless the grant names an explicit
 // CIDR. This package reproduces that set as prefixes and reproduces the
 // waiver rule: an allow for a granted CIDR is emitted *before* the drop that
 // would otherwise cover it, so an explicit CIDR — and nothing else — buys
 // reach into blocked space. agreement_test.go checks the two implementations
 // against each other in both directions.
 //
+// The metadata services are the one part of the block set an explicit CIDR
+// does not waive by containing it (Task 20397). Both sides read them from
+// pkg/cloudmeta, and both apply its rule: a granted 169.254.0.0/16 reaches
+// link-local space and not 169.254.169.254, which only its own /32 opens.
+// Every surface that writes an allow list refuses the containing form; Compile
+// keeps the address closed when it meets one anyway, by dropping it ahead of
+// the allow — so a rule stored before the refusal existed fails closed.
+//
 // The agreement is exact but for one deliberate delta. The proxy normalises
 // IPv6 encodings that carry an IPv4 address (NAT64, 6to4, v4-translated,
 // v4-compatible) and then checks the address inside. A packet filter cannot
 // do arithmetic on an embedded address, so this package drops those transition
-// prefixes wholesale. That is stricter than the proxy — 64:ff9b::8.8.8.8 is a
+// prefixes wholesale, and ahead of every granted CIDR: a CIDR waives nothing in
+// them, exactly as a v6 CIDR in a grant waives nothing for the IPv4 address
+// the proxy unwraps. That is stricter than the proxy — 64:ff9b::8.8.8.8 is a
 // public address the proxy would allow — and strictness is the safe direction.
 // No sandbox reaches the Internet through a translation prefix it addresses
 // itself; that is a gateway's job.
@@ -50,9 +60,9 @@
 // where the only reachable address is the proxy and the host allowlist is
 // enforced where it can be — inside it.
 //
-// The package depends on nothing but the standard library, so the executor
-// drivers can all reach it without dragging the broker's storage and crypto
-// along behind. Compile and the renderers are pure functions; apply.go is the
+// The package depends on nothing but the standard library and the metadata
+// table in pkg/cloudmeta, so the executor drivers can all reach it without
+// dragging the broker's storage and crypto along behind. Compile and the renderers are pure functions; apply.go is the
 // one file that touches the host, and it is separated precisely so that
 // everything deciding what the firewall *means* stays testable without one.
 package netfilter
@@ -62,6 +72,8 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 )
 
 // Verdict is what the filter does with a packet.
@@ -146,6 +158,13 @@ type Rule struct {
 	// must carve every denied range out of every allow that covers it, and
 	// it can only do that for the ranges it can tell apart.
 	Denied bool
+	// Carve marks a drop that exists to take a range out of the allows after
+	// it: a cloud metadata service an allowed CIDR contains without naming, and
+	// the translation prefixes no allow may waive (Task 20397). An ordered
+	// filter needs nothing more, since the drop is ahead of the allow. A
+	// NetworkPolicy has no order, so its renderer turns each carve into an
+	// except on every later allow that contains it.
+	Carve bool
 }
 
 // String renders the rule as a single readable line.
@@ -299,18 +318,37 @@ type Input struct {
 //
 //  1. sandbox-local loopback, so a harness that binds 127.0.0.1 works;
 //  2. drops for the operator's deny list, ahead of every allow below;
-//  3. allows for explicitly granted CIDRs, ahead of the drops they waive;
-//  4. allows for the broker and for resolvers, which are infrastructure;
-//  5. drops for the block set;
-//  6. the public-Internet allow, if the caller asked for one;
-//  7. the implicit final drop.
+//  3. allows for the broker and for resolvers, which are infrastructure;
+//  4. drops for the IPv6 translation prefixes, which no allow below waives;
+//  5. drops for each cloud metadata service an allowed CIDR contains without
+//     naming it;
+//  6. allows for explicitly granted CIDRs, ahead of the drops they waive;
+//  7. drops for the rest of the block set;
+//  8. the public-Internet allow, if the caller asked for one;
+//  9. the implicit final drop.
 //
-// Steps 3 and 5 are the waiver rule from egressbroker.CheckAddr expressed as
+// Steps 6 and 7 are the waiver rule from egressbroker.CheckAddr expressed as
 // ordering: a granted 10.8.0.0/24 is allowed on its ports before 10.0.0.0/8
 // is dropped, so the grant buys that prefix and those ports and nothing else.
-// Putting the Internet allow last rather than first is what keeps step 5
+// Putting the Internet allow last rather than first is what keeps step 7
 // meaningful, and putting the deny list first is what makes a denied range
 // unreachable however an allow below happens to be written.
+//
+// Steps 4 and 5 are what a granted CIDR does not buy (Task 20397). A metadata
+// service is reached through its own /32 or /128 and through nothing that
+// merely contains it — the rule pkg/cloudmeta states and every surface that
+// writes an allow list enforces — so one that slipped past them, a rule saved
+// before the rule existed, is dropped here rather than opened. The translation
+// prefixes carry an IPv4 address the filter cannot judge; the proxy judges the
+// address inside and never lets a v6 CIDR waive it, and a granted 64:ff9b::/96
+// used to waive every private range and the metadata service at once to any
+// sandbox with a NAT64 gateway on its path.
+//
+// Steps 3 to 5 are in that order so that infrastructure keeps working: an
+// allow commutes with an allow, so the broker and resolvers moving ahead of the
+// granted CIDRs changes no verdict, but ahead of the drops it means a resolver
+// that is itself a metadata server — a Google Cloud VM resolves through
+// 169.254.169.254 — keeps its port 53 when a containing allow is carved.
 func Compile(in Input) (Policy, error) {
 	ports, err := normalizePorts(in.AllowPorts)
 	if err != nil {
@@ -376,35 +414,22 @@ func Compile(in Input) (Policy, error) {
 		})
 	}
 
-	// 3. Granted CIDRs, ahead of the drops they waive.
+	// A /0 is not a waiver, it is the removal of the block set: placed ahead
+	// of the drops it would allow the metadata service, and the NetworkPolicy
+	// renderer — which has no ordering and expresses the block set as ipBlock
+	// excepts — could not reproduce that even if it wanted to. Rather than let
+	// the two backends mean different things, refuse it and name the field that
+	// does say "the Internet" and says it with a warning attached.
 	for _, c := range cidrs {
-		// A /0 is not a waiver, it is the removal of the block set: placed
-		// ahead of the drops it would allow the metadata service, and the
-		// NetworkPolicy renderer — which has no ordering and expresses the
-		// block set as ipBlock excepts — could not reproduce that even if
-		// it wanted to. Rather than let the two backends mean different
-		// things, refuse it and name the field that does say "the Internet"
-		// and says it with a warning attached.
 		if c.Bits() == 0 {
 			return Policy{}, fmt.Errorf(
 				"netfilter: CIDR %s is not an allowlist entry — it waives every blocked range, "+
 					"including the cloud metadata service. Use the public-Internet allow if that is "+
 					"the intent, or name the prefixes the sandbox actually needs", c)
 		}
-		reason := "granted CIDR"
-		if blocked := BlockReasonForPrefix(c); blocked != "" {
-			reason = "granted CIDR (waives " + blocked + ")"
-		}
-		p.Rules = append(p.Rules, Rule{
-			Verdict: VerdictAllow,
-			Prefix:  c,
-			Ports:   ports,
-			Proto:   ProtoTCP,
-			Reason:  reason,
-		})
 	}
 
-	// 4. Infrastructure the sandbox cannot function without. Both are
+	// 3. Infrastructure the sandbox cannot function without. Both are
 	// pinned to a single address and port: "the broker" is one endpoint,
 	// not a subnet, and widening either to a prefix would hand back the
 	// lateral movement the filter exists to prevent.
@@ -425,9 +450,56 @@ func Compile(in Input) (Policy, error) {
 		)
 	}
 
-	// 5. The block set. ProtoAny, because an exfiltration channel over
-	// ICMP or SCTP is still an exfiltration channel.
-	for _, b := range BlockedPrefixes() {
+	// 4. The translation prefixes, which no granted CIDR waives. Only the
+	// ones a granted CIDR overlaps need to be here — step 7 drops them all
+	// for everything else — but emitting them always keeps the ruleset the
+	// same shape whatever was granted.
+	for _, b := range blockSet {
+		if b.Translation {
+			p.Rules = append(p.Rules, Rule{
+				Verdict: VerdictDrop,
+				Prefix:  b.Prefix,
+				Proto:   ProtoAny,
+				Reason:  b.Reason,
+				Carve:   true,
+			})
+		}
+	}
+
+	// 5. The metadata services a granted CIDR contains without naming. A
+	// denied one needs no carve: the deny list already dropped it.
+	carved := cloudmeta.Carved(cidrs, denies)
+	for _, s := range carved {
+		p.Rules = append(p.Rules, Rule{
+			Verdict: VerdictDrop,
+			Prefix:  s.Prefix(),
+			Proto:   ProtoAny,
+			Reason:  s.Reason() + ", inside an allowed range that does not name it",
+			Carve:   true,
+		})
+	}
+
+	// 6. Granted CIDRs, ahead of the drops they waive.
+	for _, c := range cidrs {
+		reason := "granted CIDR"
+		if blocked := BlockReasonForPrefix(c); blocked != "" {
+			reason = "granted CIDR (waives " + blocked + ")"
+		}
+		p.Rules = append(p.Rules, Rule{
+			Verdict: VerdictAllow,
+			Prefix:  c,
+			Ports:   ports,
+			Proto:   ProtoTCP,
+			Reason:  reason,
+		})
+	}
+
+	// 7. The rest of the block set. ProtoAny, because an exfiltration
+	// channel over ICMP or SCTP is still an exfiltration channel.
+	for _, b := range blockSet {
+		if b.Translation {
+			continue
+		}
 		p.Rules = append(p.Rules, Rule{
 			Verdict: VerdictDrop,
 			Prefix:  b.Prefix,
@@ -436,7 +508,7 @@ func Compile(in Input) (Policy, error) {
 		})
 	}
 
-	// 6. The public Internet, last, so every drop above still bites.
+	// 8. The public Internet, last, so every drop above still bites.
 	if in.AllowPublicInternet {
 		p.Rules = append(p.Rules,
 			Rule{Verdict: VerdictAllow, Prefix: netip.MustParsePrefix("0.0.0.0/0"), Ports: ports, Proto: ProtoTCP, Reason: "public Internet"},
@@ -452,6 +524,28 @@ func Compile(in Input) (Policy, error) {
 			p.Warnings = append(p.Warnings, fmt.Sprintf(
 				"every public address is reachable on port %s; only the private, loopback, link-local, "+
 					"CGNAT and metadata ranges are filtered", joinPorts(ports)))
+		}
+	}
+
+	// What step 4 and step 5 took away, said where an operator reading the
+	// ruleset or `cloop egress firewall` will see it: an allow that reaches
+	// less than it reads as is the kind of surprise a warning exists for.
+	for _, f := range cloudmeta.Check(cidrs, denies) {
+		it := "it"
+		if len(f.Services) > 1 {
+			it = "them"
+		}
+		p.Warnings = append(p.Warnings, fmt.Sprintf("%s, so this filter keeps %s closed; name %s in the "+
+			"allowlist to open %s", f.Sentence(), it, f.Hosts(), it))
+	}
+	for _, c := range cidrs {
+		for _, b := range blockSet {
+			if b.Translation && b.Prefix.Addr().Is4() == c.Addr().Is4() && b.Prefix.Overlaps(c) {
+				p.Warnings = append(p.Warnings, fmt.Sprintf(
+					"allowed range %s overlaps %s (%s), which this filter drops whatever an allow says: an "+
+						"address there carries an IPv4 address the filter cannot judge, so allow the IPv4 range "+
+						"it stands for instead", c, b.Prefix, b.Reason))
+			}
 		}
 	}
 
@@ -581,41 +675,69 @@ func (r Rule) matches(addr netip.Addr, port uint16, proto Proto) bool {
 type Blocked struct {
 	Prefix netip.Prefix
 	Reason string
+	// Metadata marks a cloud metadata service from pkg/cloudmeta: reachable
+	// through its own host prefix and through nothing that merely contains it.
+	Metadata bool
+	// Translation marks an IPv6 prefix that carries an IPv4 address, which no
+	// granted CIDR waives. See the package comment.
+	Translation bool
 }
 
 // blockSet is the address space a sandbox may not reach unless its
 // authorisation names an explicit CIDR covering it.
 //
 // It mirrors egressbroker.BlockReason prefix-for-reason, and the order is the
-// same specificity-first order for the same purpose: the metadata endpoint is
-// inside link-local, and "cloud metadata service" is the sentence that has to
-// reach the audit log.
+// same specificity-first order for the same purpose: the metadata services are
+// inside link-local, ULA and CGNAT space, and "cloud metadata service" is the
+// sentence that has to reach the audit log. They come from pkg/cloudmeta, the
+// table the proxy reads too, so the two cannot list different services.
 //
-// The four IPv6 transition prefixes at the end have no counterpart in the
-// proxy's block set, which unwraps them and checks the address inside. A
-// packet filter cannot, so it drops them whole. See the package comment.
-var blockSet = []Blocked{
-	{netip.MustParsePrefix("169.254.169.254/32"), "cloud metadata service (169.254.169.254)"},
-	{netip.MustParsePrefix("0.0.0.0/32"), "unspecified address"},
-	{netip.MustParsePrefix("127.0.0.0/8"), "loopback"},
-	{netip.MustParsePrefix("224.0.0.0/4"), "multicast"},
-	{netip.MustParsePrefix("169.254.0.0/16"), "link-local"},
-	{netip.MustParsePrefix("10.0.0.0/8"), "private (RFC1918/ULA)"},
-	{netip.MustParsePrefix("172.16.0.0/12"), "private (RFC1918/ULA)"},
-	{netip.MustParsePrefix("192.168.0.0/16"), "private (RFC1918/ULA)"},
-	{netip.MustParsePrefix("100.64.0.0/10"), "carrier-grade NAT (RFC6598)"},
+// The IPv6 transition prefixes at the end have no counterpart in the proxy's
+// block set, which unwraps them and checks the address inside. A packet filter
+// cannot, so it drops them whole. See the package comment.
+var blockSet = buildBlockSet()
 
-	{netip.MustParsePrefix("::/128"), "unspecified address"},
-	{netip.MustParsePrefix("::1/128"), "loopback"},
-	{netip.MustParsePrefix("ff00::/8"), "multicast"},
-	{netip.MustParsePrefix("fe80::/10"), "link-local"},
-	{netip.MustParsePrefix("fc00::/7"), "private (RFC1918/ULA)"},
+var (
+	baseBlockV4 = []Blocked{
+		{Prefix: netip.MustParsePrefix("0.0.0.0/32"), Reason: "unspecified address"},
+		{Prefix: netip.MustParsePrefix("127.0.0.0/8"), Reason: "loopback"},
+		{Prefix: netip.MustParsePrefix("224.0.0.0/4"), Reason: "multicast"},
+		{Prefix: netip.MustParsePrefix("169.254.0.0/16"), Reason: "link-local"},
+		{Prefix: netip.MustParsePrefix("10.0.0.0/8"), Reason: "private (RFC1918/ULA)"},
+		{Prefix: netip.MustParsePrefix("172.16.0.0/12"), Reason: "private (RFC1918/ULA)"},
+		{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Reason: "private (RFC1918/ULA)"},
+		{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Reason: "carrier-grade NAT (RFC6598)"},
+	}
+	baseBlockV6 = []Blocked{
+		{Prefix: netip.MustParsePrefix("::/128"), Reason: "unspecified address"},
+		{Prefix: netip.MustParsePrefix("::1/128"), Reason: "loopback"},
+		{Prefix: netip.MustParsePrefix("ff00::/8"), Reason: "multicast"},
+		{Prefix: netip.MustParsePrefix("fe80::/10"), Reason: "link-local"},
+		{Prefix: netip.MustParsePrefix("fc00::/7"), Reason: "private (RFC1918/ULA)"},
+	}
+	translationBlock = []Blocked{
+		{Prefix: netip.MustParsePrefix("64:ff9b::/96"), Reason: "NAT64 translation prefix", Translation: true},
+		{Prefix: netip.MustParsePrefix("64:ff9b:1::/48"), Reason: "NAT64 translation prefix (RFC 8215)", Translation: true},
+		{Prefix: netip.MustParsePrefix("::ffff:0:0:0/96"), Reason: "IPv4-translatable prefix", Translation: true},
+		{Prefix: netip.MustParsePrefix("2002::/16"), Reason: "6to4 translation prefix", Translation: true},
+		{Prefix: netip.MustParsePrefix("::/96"), Reason: "IPv4-compatible prefix (deprecated)", Translation: true},
+	}
+)
 
-	{netip.MustParsePrefix("64:ff9b::/96"), "NAT64 translation prefix"},
-	{netip.MustParsePrefix("64:ff9b:1::/48"), "NAT64 translation prefix (RFC 8215)"},
-	{netip.MustParsePrefix("::ffff:0:0:0/96"), "IPv4-translatable prefix"},
-	{netip.MustParsePrefix("2002::/16"), "6to4 translation prefix"},
-	{netip.MustParsePrefix("::/96"), "IPv4-compatible prefix (deprecated)"},
+// buildBlockSet puts each family's metadata services ahead of that family's
+// ranges, so the most specific reason is the one evaluation reports.
+func buildBlockSet() []Blocked {
+	var v4, v6 []Blocked
+	for _, s := range cloudmeta.Services() {
+		b := Blocked{Prefix: s.Prefix(), Reason: s.Reason(), Metadata: true}
+		if s.Addr.Is4() {
+			v4 = append(v4, b)
+		} else {
+			v6 = append(v6, b)
+		}
+	}
+	out := append(append(v4, baseBlockV4...), append(v6, baseBlockV6...)...)
+	return append(out, translationBlock...)
 }
 
 // BlockedPrefixes returns the hard-block set, in evaluation order. The slice
@@ -625,21 +747,37 @@ func BlockedPrefixes() []Blocked {
 	return append([]Blocked(nil), blockSet...)
 }
 
-// BlockReasonForPrefix reports why a prefix is blocked, or "" when it is not.
+// BlockReasonForPrefix reports which blocked range allowing p waives, or ""
+// when it waives none.
 //
-// A prefix is blocked when it is contained in a blocked one — 10.8.0.0/24 is
-// private — and also when it *contains* one, because allowing 0.0.0.0/0 would
-// otherwise be reported as unblocked while covering every blocked range.
+// The narrowest blocked range containing p answers first — 10.8.0.0/24 is
+// private, 169.254.169.254/32 is the metadata service. A prefix no blocked
+// range contains waives the ones it contains, so 0.0.0.0/0 is not reported as
+// unblocked while covering all of them; the metadata services do not count
+// there, because containing one opens nothing (Task 20397) — 169.254.0.0/16
+// waives link-local, and 168.63.0.0/16 waives nothing at all.
 func BlockReasonForPrefix(p netip.Prefix) string {
-	if !p.IsValid() {
+	p, ok := cloudmeta.Canonical(p)
+	if !ok {
 		return ""
 	}
-	p = p.Masked()
-	for _, b := range blockSet {
-		if b.Prefix.Addr().Is4() != p.Addr().Is4() {
+	best := -1
+	for i, b := range blockSet {
+		if b.Prefix.Addr().Is4() != p.Addr().Is4() || b.Prefix.Bits() > p.Bits() || !b.Prefix.Contains(p.Addr()) {
 			continue
 		}
-		if b.Prefix.Overlaps(p) {
+		if best < 0 || b.Prefix.Bits() > blockSet[best].Prefix.Bits() {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return blockSet[best].Reason
+	}
+	for _, b := range blockSet {
+		if b.Metadata || b.Prefix.Addr().Is4() != p.Addr().Is4() {
+			continue
+		}
+		if p.Overlaps(b.Prefix) {
 			return b.Reason
 		}
 	}

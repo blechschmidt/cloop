@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -704,5 +705,77 @@ func TestCapabilitiesReportFilteredEgress(t *testing.T) {
 		if !caps.NetworkEgress {
 			t.Errorf("EgressFilter.Enabled=%t made NetworkEgress false; a filtered Pod still has a network", enabled)
 		}
+	}
+}
+
+// TestBuildNetworkPolicy_AContainingRangeExceptsTheMetadataServices is Task
+// 20397 on this backend: a rule set stored before the containment rule, with a
+// range that holds cloud metadata services and names none, reaches the Pod's
+// policy as an ipBlock that excepts each of them — the NetworkPolicy form of
+// the drop the nftables ruleset puts ahead of the same allow. A service the
+// rules name stays reachable through its own peer.
+func TestBuildNetworkPolicy_AContainingRangeExceptsTheMetadataServices(t *testing.T) {
+	req := testPodRequest()
+	req.EgressRules = &executor.FirewallRules{
+		AllowCIDRs: []string{"169.254.0.0/16", "169.254.170.23/32", "fc00::/7"}, AllowPorts: []int{443}}
+	np, err := buildNetworkPolicy(req, EgressFilter{})
+	if err != nil {
+		t.Fatalf("buildNetworkPolicy: %v", err)
+	}
+	blocks := map[string]*netfilter.IPBlock{}
+	for _, rule := range np.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil {
+				blocks[peer.IPBlock.CIDR] = peer.IPBlock
+			}
+		}
+	}
+	for cidr, want := range map[string][]string{
+		"169.254.0.0/16": {"169.254.0.23/32", "169.254.42.42/32", "169.254.169.252/32", "169.254.169.254/32",
+			"169.254.170.2/32"},
+		"fc00::/7": {"fd00:42::42/128", "fd00:ec2::23/128", "fd00:ec2::254/128", "fd00:a9fe:a9fe::1/128",
+			"fd20:ce::254/128"},
+	} {
+		b := blocks[cidr]
+		if b == nil {
+			t.Fatalf("no peer for %s: %s", cidr, mustJSON(t, np.Spec.Egress))
+		}
+		for _, w := range want {
+			if !containsString(b.Except, w) {
+				t.Errorf("%s does not except %s: %v", cidr, w, b.Except)
+			}
+		}
+		// Every except strictly inside its cidr, or the API server rejects the
+		// object and the Pod gets no policy at all.
+		outer := netip.MustParsePrefix(cidr)
+		for _, e := range b.Except {
+			ep := netip.MustParsePrefix(e)
+			if ep.Bits() <= outer.Bits() || !outer.Contains(ep.Addr()) {
+				t.Errorf("except %s is not strictly inside %s", e, cidr)
+			}
+		}
+	}
+	if containsString(blocks["169.254.0.0/16"].Except, "169.254.170.23/32") {
+		t.Error("a named service was excepted from the range around it")
+	}
+	if blocks["169.254.170.23/32"] == nil {
+		t.Errorf("the named service has no peer of its own: %s", mustJSON(t, np.Spec.Egress))
+	}
+	if w := np.Metadata.Annotations[AnnotationEgressWarnings]; !strings.Contains(w, "169.254.0.0/16 contains 5") {
+		t.Errorf("the warnings annotation does not say what was kept closed: %q", w)
+	}
+}
+
+// TestEgressFilter_MetadataFindings: what pkg/config refuses the cidrs key
+// over, from this driver's own parse of it.
+func TestEgressFilter_MetadataFindings(t *testing.T) {
+	f := EgressFilter{CIDRs: []string{" 100.64.0.0/10 ", "10.8.0.0/24"}, DenyCIDRs: []string{"bogus"}}
+	got := f.MetadataFindings()
+	if len(got) != 1 || got[0].Allow.String() != "100.64.0.0/10" {
+		t.Errorf("MetadataFindings = %v", got)
+	}
+	f.DenyCIDRs = []string{"100.100.100.200/32"}
+	if got := f.MetadataFindings(); len(got) != 0 {
+		t.Errorf("a denied service is still reported: %v", got)
 	}
 }

@@ -227,7 +227,10 @@ func Resolve(spec *executor.Spec, ex executor.Executor, projectPath string) (Res
 		spec.DisableNetwork = true
 	}
 
-	eff := *cur
+	// Closed before it travels (Task 20397): a device whose agent predates
+	// the containment rule would compile a range containing a metadata
+	// service as an open door, and a deny it honours whatever its version.
+	eff := CloseMetadata(*cur)
 	spec.EgressRules = &eff
 	spec.EgressBound = nil
 	if device != nil {

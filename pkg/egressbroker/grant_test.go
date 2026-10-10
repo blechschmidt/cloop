@@ -270,44 +270,93 @@ func TestParseBytesRoundTrip(t *testing.T) {
 
 // TestWideCIDRsCannotBypassTheBlockSet: CheckAddr lets an explicit CIDR waive
 // the hard-block set, so an entry broad enough to cover everything — or to
-// cover the metadata endpoint without naming it — would be the blanket
+// cover a metadata service without naming it — would be the blanket
 // allow_private flag the field's documentation says does not exist.
 //
-// pkg/netfilter refuses the same shapes; agreement between the packet filter
-// and the proxy depends on both refusing them.
+// The packet filter's surfaces refuse the same shapes with the same rule
+// (pkg/cloudmeta); agreement between the packet filter and the proxy depends
+// on both refusing them, and pkg/netfilter's agreement test checks they do.
 func TestWideCIDRsCannotBypassTheBlockSet(t *testing.T) {
 	cases := []struct {
-		cidr   string
+		cidrs  []string
 		reject bool
 		why    string
 	}{
-		{"0.0.0.0/0", true, "waives every blocked v4 range at once"},
-		{"::/0", true, "waives every blocked v6 range at once"},
-		{"169.254.0.0/16", true, "contains the metadata service without naming it"},
-		{"169.254.128.0/17", true, "still contains the metadata service"},
-		{"169.254.169.254/32", false, "names the metadata service explicitly"},
-		{"169.254.0.0/17", false, "link-local below the metadata address"},
-		{"10.0.0.0/8", false, "one named private range, which is the supported shape"},
-		{"10.8.0.0/24", false, "a narrow private range"},
-		{"2001:db8::/32", false, "an ordinary v6 prefix"},
+		{[]string{"0.0.0.0/0"}, true, "waives every blocked v4 range at once"},
+		{[]string{"::/0"}, true, "waives every blocked v6 range at once"},
+		{[]string{"::ffff:0.0.0.0/96"}, true, "is 0.0.0.0/0 spelled as a mapped prefix"},
+		{[]string{"169.254.0.0/16"}, true, "contains the metadata service without naming it"},
+		{[]string{"169.254.128.0/17"}, true, "still contains the metadata service"},
+		{[]string{"169.254.0.0/17"}, true, "contains Tencent Cloud's and Scaleway's metadata services"},
+		{[]string{"fc00::/7"}, true, "contains AWS's IPv6 metadata service, fd00:ec2::254"},
+		{[]string{"100.64.0.0/10"}, true, "contains Alibaba Cloud's metadata service, 100.100.100.200"},
+		{[]string{"168.63.0.0/16"}, true, "contains Azure's WireServer, a public address"},
+		{[]string{"::ffff:169.254.0.0/112"}, true, "is 169.254.0.0/16 spelled as a mapped prefix"},
+		{[]string{"169.254.169.254/32"}, false, "names the metadata service explicitly"},
+		{[]string{"169.254.169.0/24", "169.254.169.254/32", "169.254.169.252/32"}, false,
+			"names every metadata service it contains"},
+		{[]string{"169.254.169.0/24", "169.254.169.254/32"}, true, "still leaves 169.254.169.252 unnamed"},
+		{[]string{"169.254.100.0/24"}, false, "link-local with no metadata service in it"},
+		{[]string{"10.0.0.0/8"}, false, "one named private range, which is the supported shape"},
+		{[]string{"10.8.0.0/24"}, false, "a narrow private range"},
+		{[]string{"2001:db8::/32"}, false, "an ordinary v6 prefix"},
 	}
 	for _, c := range cases {
 		g := Grant{
 			ID:      "egress_test",
 			Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "p"},
-			CIDRs:   []string{c.cidr},
+			CIDRs:   c.cidrs,
 			Ports:   []int{443},
 		}
 		err := g.Validate()
 		if c.reject && err == nil {
-			t.Errorf("Validate accepted --cidrs %s — it %s", c.cidr, c.why)
+			t.Errorf("Validate accepted --cidrs %v — it %s", c.cidrs, c.why)
 		}
 		if !c.reject && err != nil {
-			t.Errorf("Validate rejected --cidrs %s (%s): %v", c.cidr, c.why, err)
+			t.Errorf("Validate rejected --cidrs %v (%s): %v", c.cidrs, c.why, err)
 		}
 		if c.reject && err != nil && !errors.Is(err, ErrInvalidGrant) {
-			t.Errorf("--cidrs %s: error is not ErrInvalidGrant: %v", c.cidr, err)
+			t.Errorf("--cidrs %v: error is not ErrInvalidGrant: %v", c.cidrs, err)
 		}
+	}
+
+	// The refusal names the service and the explicit alternative, because the
+	// operator reading it has to know what to type next.
+	g := Grant{ID: "egress_test", Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "p"},
+		CIDRs: []string{"fc00::/7", "fd00:ec2::23/128", "fd20:ce::254/128", "fd00:42::42/128",
+			"fd00:a9fe:a9fe::1/128"}, Ports: []int{443}}
+	err := g.Validate()
+	for _, want := range []string{"fc00::/7 contains the cloud metadata service at fd00:ec2::254 (AWS instance metadata over IPv6)",
+		"Add fd00:ec2::254/128 to --cidrs if a sandbox should reach it, or allow a range that leaves it out"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %v does not say %q", err, want)
+		}
+	}
+}
+
+// TestAStoredContainingGrantKeepsTheServiceClosed is the fail-safe half of
+// the rule: a grant stored before Validate refused containing prefixes is
+// never re-validated on read, so the decision function itself must not let
+// the prefix open the service — while it still opens the rest of the range.
+func TestAStoredContainingGrantKeepsTheServiceClosed(t *testing.T) {
+	stored := Grant{ID: "egress_old", CIDRs: []string{"169.254.0.0/16", "fc00::/7", "::ffff:100.64.0.0/106"},
+		Ports: []int{80, 443}}
+	for _, a := range []string{"169.254.169.254", "169.254.0.23", "fd00:ec2::254", "100.100.100.200",
+		"::ffff:169.254.169.254"} {
+		if err := stored.CheckAddr(netip.MustParseAddr(a), true); !errors.Is(err, ErrDestinationBlocked) {
+			t.Errorf("a stored grant containing %s reached it: %v", a, err)
+		}
+	}
+	for _, a := range []string{"169.254.10.1", "fd12:3456::1", "100.100.100.201"} {
+		if err := stored.CheckAddr(netip.MustParseAddr(a), false); err != nil {
+			t.Errorf("the rest of the stored range stopped working: %s: %v", a, err)
+		}
+	}
+	// Naming the service is what opens it, in every spelling.
+	named := Grant{ID: "egress_named", CIDRs: []string{"169.254.0.0/16", "::ffff:169.254.169.254/128"},
+		Ports: []int{80}}
+	if err := named.CheckAddr(MetadataIPv4, false); err != nil {
+		t.Errorf("a grant naming the metadata service was refused it: %v", err)
 	}
 }
 

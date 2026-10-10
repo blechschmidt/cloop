@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -113,6 +114,16 @@ but not for anything reachable from a network.`,
 			// every browser behind it judged as plaintext from the proxy's
 			// own address (Task 20394).
 			if _, err := sameorigin.ParseProxies(cfg.UI.TrustedProxies); err != nil {
+				return err
+			}
+			// Fatal while in force (Task 20397): an egress_filter allowlist
+			// that contains a cloud metadata service without naming it is
+			// compiled with the service closed, so it reads as reaching a range
+			// it does not wholly reach — and a reader of the file, or of the
+			// next change to it, cannot tell which part. A section that is
+			// switched off is only warned about, like every other problem in
+			// one: it confines nothing either way.
+			if err := refuseMetadataExposures(cfg, os.Stderr); err != nil {
 				return err
 			}
 		}
@@ -391,6 +402,30 @@ func unusableOriginEntries(u config.UIConfig) []string {
 		}
 	}
 	return out
+}
+
+// refuseMetadataExposures stops a start while an egress_filter allowlist in
+// force contains a cloud metadata service without naming it (Task 20397), and
+// writes a warning to warn for each one in a section that is switched off.
+//
+// Every exposure in force is named, not the first: an operator fixing one line
+// should not learn about the next by restarting again.
+func refuseMetadataExposures(cfg *config.Config, warn io.Writer) error {
+	var fatal []string
+	for _, x := range cfg.Executors.MetadataExposures() {
+		if x.InForce {
+			fatal = append(fatal, x.Error())
+			continue
+		}
+		fmt.Fprintf(warn, "warning: %s — the section is switched off, so it opens nothing today; "+
+			"`cloop ui` will refuse to start once it is switched on\n", x.Error())
+	}
+	if len(fatal) == 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: an egress_filter allowlist opens a cloud metadata service it does "+
+		"not name. The compiled filter would keep the service closed, but the allowlist would not mean what it "+
+		"says:\n  %s", strings.Join(fatal, "\n  "))
 }
 
 // uiListenRequest gathers what pkg/exposure decides the dashboard's address

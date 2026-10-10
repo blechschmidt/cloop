@@ -183,6 +183,15 @@ async function main(cdp) {
   await cdp.eval(`window.loadProjectFirewall()`);
   out.project_refusal = await cdp.eval(text('pfwWarn'));
   await shot(cdp, 'project-card-refused');
+  // A range around a cloud metadata service (Task 20397): the hub answers 400
+  // with its sentence, which lands on the form in place of the last refusal.
+  await act(cdp, type('pfwAllow', '169.254.169.0/24'));
+  await act(cdp, type('pfwPorts', '443'));
+  await act(cdp, click('#projectFirewallBody .modal-footer .btn.primary'));
+  await waitFor(cdp, `${text('pfwWarn')}.includes('cloud metadata service')`, 'the metadata refusal on the form');
+  out.project_metadata_refusal = await cdp.eval(text('pfwWarn'));
+  out.project_metadata_typed = await cdp.eval(`document.getElementById('pfwAllow').value`);
+  await shot(cdp, 'project-card-metadata-refused');
   await act(cdp, type('pfwAllow', '140.82.112.0/24'));
   await act(cdp, type('pfwPorts', '443'));
   await act(cdp, click('#projectFirewallBody .modal-footer .btn.primary'));

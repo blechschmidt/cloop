@@ -433,6 +433,9 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// needs a driver in the registry holding a live cluster credential, and
 	// reconciliation is what puts one there.
 	checkNetworkPolicyEnforcement(ctx, dir, cfg, opts, add)
+	// Beside the other egress-confinement checks: an allowlist that contains
+	// a cloud metadata service without naming it (Task 20397).
+	checkMetadataExposure(dir, cfg, add)
 	checkGitProxy(ctx, dir, cfg, opts, add)
 	checkBranchRestrictedGrants(dir, cfg, add)
 	checkKubeGuard(ctx, dir, cfg, opts, add)

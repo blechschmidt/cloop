@@ -247,8 +247,9 @@ forward proxy, and everything in the
 [egress lease](../guides/secrets.md#egress-leases) is checked there: hosts,
 ports, HTTP methods, per-session byte quotas, TTL mid-tunnel, resolve-once DNS
 pinning, and an SSRF block set that refuses loopback, RFC1918, CGNAT,
-link-local — where the cloud metadata service lives — multicast and the
-unspecified address *even under `--hosts '*'`*. Every one of those checks is
+link-local, the cloud metadata services (`pkg/cloudmeta` — `169.254.169.254`,
+AWS's IPv6 `fd00:ec2::254`, Alibaba Cloud's `100.100.100.200` and the rest),
+multicast and the unspecified address *even under `--hosts '*'`*. Every one of those checks is
 real. Every one of them applies only to traffic the workload chose to hand the
 proxy. `$HTTP_PROXY` is a convention, not a boundary: a harness that opens a
 raw socket, runs `curl --noproxy '*'`, resolves over DoH, or speaks SSH, QUIC
@@ -361,6 +362,29 @@ gateway's job. The agreement test permits exactly this class of disagreement
 and fails on any other, in either direction. (The v4-*mapped* form,
 `::ffff:127.0.0.1`, is a different thing: both layers unwrap it and judge
 `127.0.0.1`.)
+
+**One address a containing range never buys: a cloud metadata service.** The
+services are one table (`pkg/cloudmeta`) that the proxy, the packet filter and
+the `NetworkPolicy` compiler all read — `169.254.169.254`, AWS's IPv6
+`fd00:ec2::254` inside `fc00::/7`, Alibaba Cloud's `100.100.100.200` inside
+`100.64.0.0/10`, and the others each cloud publishes. An explicit CIDR waives
+the block set for the range it names, but a metadata service is reached only
+through its own `/32` or `/128`: a prefix that merely contains one opens
+everything in the range *except* the service. Every surface that writes an
+allowlist refuses the containing form — config load (`cloop ui` will not start,
+`cloop hub doctor` fails), the dashboard's device, virtual-executor and project
+firewalls (`400`, naming the service and both explicit alternatives), and
+egress grants — so the compiler never sees one from a live configuration. When
+it does, from a rule set stored before the rule, it fails safe: `Compile` drops
+the service ahead of the allow that contains it, the `NetworkPolicy` carries a
+matching `except`, and the hub ships a device's firewall with the service in its
+denylist, so an agent too old to know the rule closes it too. Azure's WireServer
+(`168.63.129.16`) is in the table because it is a *public* address, reached by
+`allow_public_internet`; a deny for it is the only thing that closes it, and
+`except` keeps it out of the `0.0.0.0/0` peer in a `NetworkPolicy`. One resolver
+exception: a metadata address that is also the VM's DNS server (Google Cloud,
+Azure) stays reachable on port 53, because a resolver allow opens one port and
+the carve sits after it.
 
 Two limits of the layer-3 filter, stated rather than discovered:
 
@@ -3246,6 +3270,8 @@ describes both.
 | The host-side ruleset filters the `forward` **and** the `input` hook, with the same rules on both | `pkg/netfilter: TestBridgeFormFiltersBothHooks` |
 | A wide CIDR cannot bypass the block set at grant time | `pkg/egressbroker: TestWideCIDRsCannotBypassTheBlockSet` |
 | The metadata endpoint stays blocked under every grant the broker *does* accept | `pkg/egressbroker: TestMetadataStaysBlockedUnderAnAcceptedGrant` |
+| No allowlist reaches a cloud metadata service by containing it — over the whole `pkg/cloudmeta` table, every family and every spelling, refused at every surface and dropped by a filter compiled from a stored rule | `TestNoAllowlistReachesAMetadataServiceByContainingIt` |
+| The packet filter and the broker reach the same verdict on a prefix corpus of containing, naming and ordinary allowlists | `pkg/netfilter: TestAllowListVerdictAgreesAcrossFilterAndBroker` |
 | A rule comment built from operator input cannot escape the string and inject a rule into the host's firewall | `pkg/netfilter: TestCommentInjectionCannotEscapeTheString` |
 
 What none of this checks is whether the kernel or the CNI honours what was
@@ -3271,6 +3297,8 @@ and a project's rule set may only narrow it ([firewall rules](../guides/firewall
 | Tightening a device narrows its virtual executors (an unfiltered one becomes firewalled) and the project rule sets under it, and audits each | `pkg/ui: TestFirewall_DeviceRulesBoundVirtualExecutorsAndProjects`, `TestFirewall_TighteningReplacesAnUnfilteredVirtualNetwork` |
 | Kubernetes installs rules only on a cluster whose NetworkPolicy enforcement is proven or asserted | `pkg/executor/kubernetes: TestRulesNeedAClusterThatEnforcesNetworkPolicy` |
 | A device agent too old to check the rules itself is never handed them | `pkg/executor/remote: TestEgressRulesNeedAProtocolV15Agent` |
+| A rule set naming a metadata service its parent only contains is refused, and tightening a device never names one by accident | `pkg/fwpolicy: TestPermitsRefusesNamingWhatTheParentOnlyContains`, `TestConstrainNeverNamesAServiceByAccident` |
+| The firewall shipped to a device closes the metadata services its allowlist contains, so an agent that predates the rule drops them too | `pkg/fwpolicy: TestCloseMetadataWritesTheCarvesIntoTheDenylist` |
 
 ### Per-project sandbox specs — `sandbox_test.go`
 

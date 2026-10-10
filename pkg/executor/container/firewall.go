@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
@@ -204,6 +205,28 @@ func (f EgressFilter) input() (netfilter.Input, error) {
 		in.Resolvers = append(in.Resolvers, ap)
 	}
 	return in, nil
+}
+
+// MetadataFindings reports every allow_cidrs entry that contains a cloud
+// metadata service without naming it — and without deny_cidrs closing it
+// (Task 20397). Compile accepts such an entry and keeps the service closed;
+// this is what pkg/config refuses it with, because an allowlist that reads as
+// opening a range and silently does not open part of it is an operator's
+// mistake to be told about, not a filter's to paper over.
+func (f EgressFilter) MetadataFindings() []cloudmeta.Finding {
+	return cloudmeta.Check(parsedPrefixes(f.AllowCIDRs), parsedPrefixes(f.DenyCIDRs))
+}
+
+// parsedPrefixes parses a CIDR list, dropping what does not parse: Compile
+// reports that, naming the key.
+func parsedPrefixes(in []string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(in))
+	for _, c := range in {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // parseEndpoint accepts "addr:port" or, when defaultPort is non-zero, a bare

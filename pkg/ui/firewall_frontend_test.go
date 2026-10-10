@@ -120,6 +120,31 @@ func TestDashboard_FirewallPanels(t *testing.T) {
 	if got := res["project_card_viewer"].HTML; got != "none" {
 		t.Errorf("project_card_viewer: the card must be hidden without config.write, display = %q", got)
 	}
+
+	// Task 20397: the hub's 400 for an allowlist that contains a metadata
+	// service is on the form, in both cards, and the typing survives it.
+	refused := strings.Split(res["metadata_refused"].HTML, "\n----\n")
+	if len(refused) != 3 {
+		t.Fatalf("metadata_refused: %d parts:\n%s", len(refused), res["metadata_refused"].HTML)
+	}
+	for i, card := range []string{"the device dialog", "the project card"} {
+		need("metadata_refused", card, refused[i],
+			"169.254.0.0/16 contains the cloud metadata service at 169.254.169.254",
+			"Add 169.254.169.254/32 to the allowlist if a sandbox should reach it, or to the denylist so it stays closed")
+	}
+	if refused[2] != "169.254.0.0/16" {
+		t.Errorf("metadata_refused: the project card lost what was typed: %q", refused[2])
+	}
+	stored := strings.Split(res["metadata_stored"].HTML, "\n----\n")
+	if len(stored) != 3 {
+		t.Fatalf("metadata_stored: %d parts:\n%s", len(stored), res["metadata_stored"].HTML)
+	}
+	for i, card := range []string{"the device dialog", "the project card", "the virtual-executor dialog"} {
+		need("metadata_stored", card, stored[i], "100.64.0.0/10 contains the cloud metadata service at 100.100.100.200",
+			"It stays closed")
+	}
+	need("metadata_stored", "the device dialog's children", stored[0], "(contains a metadata service)")
+	need("metadata_stored", "the virtual executor's chip", stored[2], ">contains a metadata service</span>")
 }
 
 // fwJoin renders a decoded JSON list as "a,b,c".

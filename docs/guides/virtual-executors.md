@@ -151,7 +151,7 @@ Nothing is reachable unless an allow names it:
 
 | field | meaning |
 |---|---|
-| **Allow the public Internet** | every address outside the block set, over TCP: RFC1918, link-local and the cloud metadata endpoint, CGNAT, loopback and multicast stay dropped |
+| **Allow the public Internet** | every address outside the block set, over TCP: RFC1918, link-local, the cloud metadata services, CGNAT, loopback and multicast stay dropped |
 | **Allowlist** | ranges the sandbox may reach directly over TCP, private ones included — the only thing that reaches into blocked space |
 | **Denylist** | ranges the sandbox may never reach, over any protocol, whatever is allowed. Checked before every allow, the resolvers included |
 | **Ports** | bounds the two allows above to these TCP ports; empty means every port |
@@ -165,7 +165,11 @@ opens the Internet with no resolver, under which no host name resolves.
 
 A single address is read as a host (`198.51.100.7` means `/32`). An allow of
 `0.0.0.0/0` is refused, because it would waive the metadata service along with
-the rest of the block set; use **Allow the public Internet** instead.
+the rest of the block set; use **Allow the public Internet** instead. An allow
+of a range that *contains* a cloud metadata service but does not name it — say
+`100.64.0.0/10`, which holds Alibaba Cloud's `100.100.100.200` — is refused the
+same way, naming the service: add its `/32` or `/128` to the allowlist to reach
+it, or to the denylist to keep it closed while allowing the range around it.
 
 The resolvers matter more than they look. A firewall that drops private address
 space also drops the resolver the container engine hands a sandbox by default —

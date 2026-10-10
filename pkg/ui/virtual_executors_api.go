@@ -93,6 +93,11 @@ type virtualExecutorView struct {
 	// ExceedsDevice says why this configuration no longer fits inside its
 	// device's firewall, when it does not; dispatch refuses it until it does.
 	ExceedsDevice []string `json:"exceeds_device,omitempty"`
+	// Metadata says which of its firewall's allowlist entries contain a cloud
+	// metadata service without naming it (Task 20397): a configuration saved
+	// before the rule, which keeps the service closed and cannot be saved
+	// again unchanged.
+	Metadata []string `json:"metadata,omitempty"`
 	// Constrained lists the project rule sets a save narrowed to fit, on an
 	// update's answer.
 	Constrained []firewallChange `json:"constrained,omitempty"`
@@ -216,6 +221,9 @@ func viewVirtualExecutor(v statedb.VirtualExecutor, projects []string) virtualEx
 	if !v.UpdatedAt.IsZero() {
 		out.UpdatedAt = v.UpdatedAt.UTC().Format(time.RFC3339)
 	}
+	if v.Spec.Firewall != nil {
+		out.Metadata = v.Spec.Firewall.MetadataNotes()
+	}
 	if ex, err := executor.Get(v.ID); err == nil {
 		if vx, ok := ex.(*remote.Virtual); ok {
 			out.Registered = true
@@ -237,6 +245,9 @@ func (s *Server) createVirtualExecutor(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 	spec, err := req.Spec.Normalize()
+	if err == nil {
+		err = spec.CheckMetadata()
+	}
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
@@ -322,6 +333,12 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 			name = cur.Name
 		}
 		spec, err := req.Spec.Normalize()
+		if err == nil {
+			// Every save, not only one that changes the firewall: a
+			// configuration stored before the rule (Task 20397) is said once,
+			// on the card, and then has to say what it means to be saved.
+			err = spec.CheckMetadata()
+		}
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return

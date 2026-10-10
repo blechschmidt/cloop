@@ -25,11 +25,14 @@ package security
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -147,9 +150,12 @@ func TestOnlyAnExplicitCIDRWaivesTheBlockSet(t *testing.T) {
 // A /0 was that checkbox, spelled differently. So was 169.254.0.0/16.
 //
 // Both layers refuse them now, and both have to: the broker because it issues
-// the grant, the compiler because it renders the filter.
+// the grant, the compiler because it renders the filter. The containing forms
+// reach beyond 169.254.169.254 since Task 20397: AWS's IPv6 endpoint inside
+// ULA space, Alibaba Cloud's inside CGNAT space.
 func TestGrantsThatWouldRemoveTheBlockSetAreRefused(t *testing.T) {
-	for _, cidr := range []string{"0.0.0.0/0", "::/0", "169.254.0.0/16", "169.254.128.0/17"} {
+	for _, cidr := range []string{"0.0.0.0/0", "::/0", "169.254.0.0/16", "169.254.128.0/17", "fc00::/7",
+		"100.64.0.0/10"} {
 		t.Run(cidr, func(t *testing.T) {
 			g := egressbroker.Grant{
 				ID:      "egress_conformance",
@@ -161,9 +167,24 @@ func TestGrantsThatWouldRemoveTheBlockSetAreRefused(t *testing.T) {
 				t.Errorf("the broker accepted --cidrs %s, which waives the block set wholesale", cidr)
 			}
 
-			// The compiler refuses the /0 forms outright. The
-			// metadata-containing prefixes it does compile, but only into a
-			// filter the broker will never be able to hand it.
+			// The compiler refuses the /0 forms outright. A
+			// metadata-containing prefix it compiles — a rule set stored
+			// before the rule has to keep loading — with every service inside
+			// it dropped ahead of the allow (Task 20397).
+			if !strings.HasSuffix(cidr, "/0") {
+				p, err := netfilter.Compile(netfilter.Input{
+					AllowCIDRs: []netip.Prefix{netip.MustParsePrefix(cidr)},
+					AllowPorts: []uint16{443},
+				})
+				if err != nil {
+					t.Fatalf("Compile: %v", err)
+				}
+				for _, svc := range cloudmeta.Within(netip.MustParsePrefix(cidr)) {
+					if v, why := p.WireOnly().Evaluate(svc.Addr, 443, netfilter.ProtoTCP); v != netfilter.VerdictDrop {
+						t.Errorf("%s compiled into a filter that reaches %s (%s)", cidr, svc.Describe(), why)
+					}
+				}
+			}
 			if strings.HasSuffix(cidr, "/0") {
 				_, err := netfilter.Compile(netfilter.Input{
 					AllowCIDRs: []netip.Prefix{netip.MustParsePrefix(cidr)},
@@ -175,6 +196,98 @@ func TestGrantsThatWouldRemoveTheBlockSetAreRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNoAllowlistReachesAMetadataServiceByContainingIt is Task 20397's
+// guarantee, over the whole metadata table: whatever range around a service an
+// allowlist holds — and however it is spelled — the surfaces that write one
+// refuse it, and a filter compiled from one anyway (a rule set stored before
+// the refusal) drops the service on every port, in the ordered form and in the
+// NetworkPolicy. Only the service's own host prefix opens it.
+//
+// This was the gap: the broker refused a grant whose CIDRs merely contained
+// 169.254.169.254, while every allowlist the packet filter is compiled from —
+// egress_filter.allow_cidrs, the dashboard's device, virtual-executor and
+// project firewalls — refused only a /0, and compiled 169.254.0.0/16 ahead of
+// the metadata drop.
+func TestNoAllowlistReachesAMetadataServiceByContainingIt(t *testing.T) {
+	for _, svc := range cloudmeta.Services() {
+		bits := []int{24, 16, 10, 8}
+		if !svc.Addr.Is4() {
+			bits = []int{64, 48, 32, 16, 7}
+		}
+		for _, b := range bits {
+			around, _ := svc.Addr.Prefix(b)
+			spellings := []string{around.String()}
+			if svc.Addr.Is4() {
+				spellings = append(spellings, fmt.Sprintf("::ffff:%s/%d", around.Addr(), b+96))
+			}
+			for _, cidr := range spellings {
+				rules := executor.FirewallRules{AllowCIDRs: []string{cidr}, AllowPorts: []int{80, 443}}
+				if n, err := rules.Normalize(); err != nil || n.CheckMetadata() == nil {
+					t.Errorf("the dashboard firewall accepts %s around %s (%v)", cidr, svc.Describe(), err)
+				}
+				grant := egressbroker.Grant{ID: "egress_md",
+					Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "/srv/app"},
+					CIDRs:   []string{cidr}, Ports: []int{443}}
+				if err := grant.Validate(); err == nil {
+					t.Errorf("the broker accepts --cidrs %s around %s", cidr, svc.Describe())
+				}
+
+				p, err := netfilter.Compile(netfilter.Input{AllowCIDRs: []netip.Prefix{netip.MustParsePrefix(cidr)},
+					AllowPorts: []uint16{80, 443}, AllowPublicInternet: true})
+				if err != nil {
+					t.Fatalf("Compile(%s): %v", cidr, err)
+				}
+				for _, port := range []uint16{80, 443, 8080} {
+					if v, why := p.WireOnly().Evaluate(svc.Addr, port, netfilter.ProtoTCP); v != netfilter.VerdictDrop {
+						t.Errorf("a stored %s reaches %s:%d (%s)", cidr, svc.Describe(), port, why)
+					}
+				}
+				np, err := netfilter.RenderNetworkPolicy(p, netfilter.NetworkPolicyOptions{Name: "cloop-md",
+					Namespace: "cloop", PodSelector: map[string]string{"cloop.dev/handle-id": "h1"}})
+				if err != nil {
+					t.Fatalf("RenderNetworkPolicy(%s): %v", cidr, err)
+				}
+				if peer := openingPeer(np, svc.Addr); peer != "" {
+					t.Errorf("the NetworkPolicy for a stored %s opens %s through %s", cidr, svc.Describe(), peer)
+				}
+			}
+		}
+		// Named, it is open: the rule has one explicit way in.
+		p, err := netfilter.Compile(netfilter.Input{AllowCIDRs: []netip.Prefix{svc.Prefix()}, AllowPorts: []uint16{80}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, why := p.WireOnly().Evaluate(svc.Addr, 80, netfilter.ProtoTCP); v != netfilter.VerdictAllow {
+			t.Errorf("naming %s does not open it (%s)", svc.Describe(), why)
+		}
+	}
+}
+
+// openingPeer names an ipBlock peer of np that admits addr, or "".
+func openingPeer(np *netfilter.NetworkPolicy, addr netip.Addr) string {
+	for _, rule := range np.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock == nil {
+				continue
+			}
+			cidr := netip.MustParsePrefix(peer.IPBlock.CIDR)
+			if cidr.Addr().Is4() != addr.Is4() || !cidr.Contains(addr) {
+				continue
+			}
+			excepted := false
+			for _, e := range peer.IPBlock.Except {
+				if netip.MustParsePrefix(e).Contains(addr) {
+					excepted = true
+				}
+			}
+			if !excepted {
+				return peer.IPBlock.CIDR
+			}
+		}
+	}
+	return ""
 }
 
 // TestHostSideFilterCoversHostBoundServices is a regression test for the

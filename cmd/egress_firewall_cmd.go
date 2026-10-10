@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 	"github.com/fatih/color"
@@ -178,6 +179,18 @@ func egressFirewallInput() (netfilter.Input, string, error) {
 			in.AllowPorts = append(in.AllowPorts, uint16(p))
 		}
 		in.AllowPublicInternet = egressFirewallInternetFlag
+		// A preview is of a configuration about to be written, so it gets the
+		// refusal writing it would (Task 20397). A stored grant, above, is
+		// rendered as the filter compiles it instead: with the service closed,
+		// and a warning saying so.
+		if fs := cloudmeta.Check(in.AllowCIDRs, nil); len(fs) > 0 {
+			msgs := make([]string, len(fs))
+			for i, f := range fs {
+				msgs[i] = f.Explain("--cidrs", "")
+			}
+			return in, "", fmt.Errorf("refusing to preview an allowlist that opens a cloud metadata service it "+
+				"does not name — every surface that writes one refuses it: %s", strings.Join(msgs, "; "))
+		}
 	}
 
 	if egressFirewallBrokerFlag != "" {

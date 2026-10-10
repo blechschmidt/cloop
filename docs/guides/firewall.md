@@ -38,6 +38,34 @@ the governing rules, so narrowing is a matter of deleting what is not needed.
 An empty rule set is not the same as none. **Remove rules** hands the level back
 to the ones above it; saving with every field empty means *reach nothing*.
 
+## Cloud metadata services
+
+An allowlist opens exactly the ranges it names — except a cloud metadata
+service, which only its own address opens. A metadata service hands whatever
+runs on a machine that machine's cloud identity: instance credentials, user
+data, a pod's role. So a prefix that merely *contains* one — `169.254.0.0/16`
+around `169.254.169.254`, `fc00::/7` around AWS's IPv6 `fd00:ec2::254`,
+`100.64.0.0/10` around Alibaba Cloud's `100.100.100.200` — opens everything in
+the range **except** the service, and a save that names such a range and not the
+service is refused with the service named and both ways out:
+
+```
+400 Bad Request
+{"error": "allow_cidrs: 169.254.0.0/16 contains 2 cloud metadata services without
+  naming them: 169.254.169.252 (GKE metadata server for Workload Identity),
+  169.254.169.254 (instance metadata on AWS, Azure, Google Cloud, Oracle Cloud and
+  most other clouds). Add their addresses (169.254.169.252/32, 169.254.169.254/32)
+  to the allowlist if a sandbox should reach them, or to the denylist so they stay
+  closed"}
+```
+
+To let a sandbox reach one, add its `/32` or `/128` to the **Allowlist**; to
+keep it closed while allowing the range around it, add the address to the
+**Denylist** (or just allow a narrower range). A rule set saved before this rule
+existed keeps the service closed regardless — the compiled filter drops it ahead
+of the allow — and its card says so; saving it again asks you to resolve it. The
+full table of services cloop knows is in `pkg/cloudmeta`.
+
 ## Containment, and where it is checked
 
 "Fits inside" is decided by exact set arithmetic over what the rules compile

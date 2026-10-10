@@ -13,6 +13,7 @@ package remote_test
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -265,5 +266,109 @@ func runVirtualSandbox(t *testing.T, engine string) {
 	if !denied {
 		t.Errorf("the deny rule counted no packets from the sandbox, so the ruleset is not on its "+
 			"bridge:\n%s", ruleset)
+	}
+}
+
+// TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed is Task 20397
+// on the device path, end to end on a real engine and kernel: a virtual
+// executor whose firewall was stored before an allowlist containing a cloud
+// metadata service was refused — 169.254.0.0/16, nothing named — starts a
+// sandbox that cannot reach the service. The hub ships the firewall with the
+// service closed in its denylist (shippedFirewall), which is what keeps a
+// device whose agent predates the rule safe too; the control names the
+// address and must reach it.
+//
+// Opt-in like the test above, and it needs a host that reaches a metadata
+// service itself — a cloud VM:
+//
+//	CLOOP_AGENT_SANDBOX_E2E=1 go test ./pkg/executor/remote -run TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed -v
+func TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed(t *testing.T) {
+	if os.Getenv("CLOOP_AGENT_SANDBOX_E2E") != "1" {
+		t.Skip("set CLOOP_AGENT_SANDBOX_E2E=1 to start a real sandbox")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("installing the bridge firewall needs root")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft is not installed")
+	}
+	conn, err := net.DialTimeout("tcp", "169.254.169.254:80", 3*time.Second)
+	if err != nil {
+		t.Skipf("this host reaches no metadata service at 169.254.169.254:80 (%v)", err)
+	}
+	_ = conn.Close()
+	engine, image := "", ""
+	for _, e := range []string{"docker", "podman"} {
+		if _, err := exec.LookPath(e); err != nil {
+			continue
+		}
+		for _, img := range []string{"alpine:3.20", "alpine:latest"} {
+			if exec.Command(e, "image", "inspect", img).Run() == nil {
+				engine, image = e, img
+				break
+			}
+		}
+		if engine != "" {
+			break
+		}
+	}
+	if engine == "" {
+		t.Skip("no engine with an alpine image in its local store")
+	}
+
+	lb := newLoopback(t, withSysfs(t.TempDir()), func(c *agent.Config) { c.HostProbes = true })
+	parent := lb.executor(t)
+	if !parent.AgentCapabilities().PacketFilter {
+		t.Fatalf("the agent reports no packet filter: %s", parent.AgentCapabilities().PacketFilterIssue)
+	}
+	run := func(id string, allow []string) (string, string) {
+		t.Helper()
+		table := "cloop_sbx_" + strings.ReplaceAll(id, "-", "_")
+		v := virtualOver(t, parent, id, executor.VirtualSpec{
+			Sandbox:  executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: engine, Image: image},
+			Firewall: &executor.FirewallRules{AllowCIDRs: allow, AllowPorts: []int{80}, Resolvers: []string{"1.1.1.1"}},
+		})
+		t.Cleanup(func() {
+			_ = exec.Command("nft", "delete", "table", "inet", table).Run()
+			_ = exec.Command(engine, "network", "rm", "cloop-sbx-"+id).Run()
+		})
+		work := filepath.Join(lb.root, id)
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(work, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		res, err := executor.Run(ctx, v, executor.Spec{WorkDir: work,
+			// A zero-I/O connect: reachability, without a request or a byte of
+			// what the service would answer.
+			Argv: []string{"/bin/sh", "-c", "nc -z -w 5 169.254.169.254 80; echo rc=$?"}})
+		if err != nil {
+			t.Fatalf("%s: Run: %v (output %q)", id, err, res.Output)
+		}
+		ruleset, err := exec.Command("nft", "list", "table", "inet", table).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: no ruleset installed: %v %s", id, err, ruleset)
+		}
+		return string(res.Output), string(ruleset)
+	}
+	reached := func(out string) bool { return strings.Contains(out, "rc=0") }
+
+	out, ruleset := run("vx-md-contained", []string{"169.254.0.0/16"})
+	if reached(out) {
+		t.Errorf("a sandbox under a stored 169.254.0.0/16 reached the metadata service:\n%s\n%s", out, ruleset)
+	}
+	// Shipped closed: the service is in the denylist the device installed.
+	if !strings.Contains(ruleset, "ip daddr 169.254.169.254 counter packets") ||
+		!strings.Contains(ruleset, "operator deny list") {
+		t.Errorf("the device's ruleset does not drop the service:\n%s", ruleset)
+	}
+
+	out, ruleset = run("vx-md-named", []string{"169.254.0.0/16", "169.254.169.254/32"})
+	if !reached(out) {
+		t.Errorf("with the address named the sandbox could not reach the service, so the check above proves nothing:\n%s\n%s",
+			out, ruleset)
 	}
 }

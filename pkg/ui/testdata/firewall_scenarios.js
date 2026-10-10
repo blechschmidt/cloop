@@ -194,6 +194,54 @@ const scenarios = {
     return {html: out.join('\n----\n')};
   },
 
+  // A save the hub refuses with 400 because an allowlist entry contains a
+  // cloud metadata service it does not name (Task 20397): the sentence lands
+  // on the form, in both cards, and the form keeps what was typed.
+  async metadata_refused() {
+    const h = await boot();
+    const refusal = {error: 'allow_cidrs: 169.254.0.0/16 contains the cloud metadata service at 169.254.169.254 '
+      + '(instance metadata on AWS, Azure, Google Cloud, Oracle Cloud and most other clouds) without naming it. Add '
+      + '169.254.169.254/32 to the allowlist if a sandbox should reach it, or to the denylist so it stays closed'};
+    XA.openExecutorFirewall(0);
+    await globalThis.__settle(4);
+    el('efwAllow').value = '169.254.0.0/16';
+    h.routes['/api/executors/sgx-dev/firewall'] = refusal;
+    h.routeStatus['/api/executors/sgx-dev/firewall'] = 400;
+    XA.saveExecutorFirewall();
+    await globalThis.__settle(4);
+    const device = el('efwWarn').innerHTML;
+    await window.loadProjectFirewall();
+    await globalThis.__settle(3);
+    el('pfwAllow').value = '169.254.0.0/16';
+    h.routes['/api/firewall'] = refusal;
+    h.routeStatus['/api/firewall'] = 400;
+    window.saveProjectFirewall();
+    await globalThis.__settle(4);
+    return {html: device + '\n----\n' + el('pfwWarn').innerHTML + '\n----\n' + el('pfwAllow').value};
+  },
+
+  // A rule set stored before the rule: each card lists what the hub says about
+  // it, and the device's dialog marks its children that carry one.
+  async metadata_stored() {
+    const note = '100.64.0.0/10 contains the cloud metadata service at 100.100.100.200 (Alibaba Cloud instance '
+      + 'metadata) without naming it. It stays closed: every filter compiled from these rules drops it ahead of the allow.';
+    const deviceView = Object.assign({}, DEVICE_VIEW, {metadata: [note], children: [
+      {kind: 'virtual', id: 'vx-abcdefghij', name: 'Lab', describe: 'x', fits: true, metadata: ['vx note']}]});
+    const h = await boot({deviceView: deviceView, projectView: Object.assign({}, PROJECT_VIEW, {metadata: [note]})});
+    XA.openExecutorFirewall(0);
+    await globalThis.__settle(4);
+    const device = el('efwBody').innerHTML;
+    await window.loadProjectFirewall();
+    await globalThis.__settle(3);
+    const project = el('projectFirewallBody').innerHTML;
+    h.routes['/api/executors/sgx-dev/virtuals'].virtual_executors[0].metadata = [note];
+    XA.openExecutorVirtual(0);
+    await globalThis.__settle(4);
+    XA.editExecutorVirtual(0);
+    await globalThis.__settle(2);
+    return {html: device + '\n----\n' + project + '\n----\n' + el('evxBody').innerHTML};
+  },
+
   // Someone who may not change the project's configuration is not shown it.
   // The hub answers anyone below config.write with visible:false; the card
   // then stays hidden without a word, and no error is raised for it.

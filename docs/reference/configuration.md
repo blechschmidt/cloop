@@ -366,7 +366,15 @@ guesses:
 - **`allow_cidrs` opens exactly what it names.** Listing `10.8.0.0/24` does not
   lift the block on the rest of `10.0.0.0/8`. A `/0` is refused outright — it is
   not an allowlist entry, it is the removal of the block set — and so is any
-  prefix that covers `169.254.169.254` without naming the address exactly.
+  prefix that covers a cloud metadata service without naming the address
+  exactly. The services are one table (`pkg/cloudmeta`): `169.254.169.254`,
+  AWS's IPv6 `fd00:ec2::254` inside `fc00::/7`, Alibaba Cloud's
+  `100.100.100.200` inside `100.64.0.0/10`, and the others each cloud publishes.
+  `cloop ui` refuses to start while an `allow_cidrs`/`cidrs` entry contains one
+  unnamed, naming the service and the explicit alternative (add its `/32` to the
+  allowlist, or allow a range that leaves it out); `cloop hub doctor` fails the
+  same (`firewall.metadata`). A filter compiled from a stored rule keeps the
+  service closed regardless — it is dropped ahead of the allow.
 - **Destinations without ports are an error.** An allow rule with no port
   restriction is a hole, and "they probably meant 80 and 443" is not a decision
   a firewall compiler makes on an operator's behalf.

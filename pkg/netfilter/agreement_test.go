@@ -1,13 +1,21 @@
 package netfilter_test
 
 import (
+	"errors"
+	"fmt"
 	"math/rand"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/container"
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
 // agreement_test.go checks pkg/netfilter against pkg/egressbroker.
@@ -286,6 +294,158 @@ func TestBrokeredPolicyIsNarrowerThanAnyGrant(t *testing.T) {
 		}
 		if v, why := p.Evaluate(a, 443, netfilter.ProtoTCP); v != netfilter.VerdictDrop {
 			t.Fatalf("brokered filter allowed %s (%s) though the grant is %v", a, why, g.Hosts)
+		}
+	}
+}
+
+// metadataCorpus is the prefix corpus Task 20397's agreement is checked over:
+// allowlists that contain a cloud metadata service, name one, name one beside
+// a range containing it, spell one as an IPv4-mapped prefix, and contain none.
+// refuse is the verdict every surface must reach.
+var metadataCorpus = []struct {
+	cidrs  []string
+	refuse bool
+}{
+	{[]string{"169.254.0.0/16"}, true},
+	{[]string{"169.254.128.0/17"}, true},
+	{[]string{"169.254.0.0/17"}, true},
+	{[]string{"169.254.169.0/24", "169.254.169.254/32"}, true},
+	{[]string{"169.254.169.0/24", "169.254.169.254/32", "169.254.169.252/32"}, false},
+	{[]string{"169.254.169.254/32"}, false},
+	{[]string{"169.254.100.0/24"}, false},
+	{[]string{"fc00::/7"}, true},
+	{[]string{"fd00:ec2::/32"}, true},
+	{[]string{"fd00:ec2::254/128", "fd00:ec2::23/128"}, false},
+	{[]string{"fd12:3456::/32"}, false},
+	{[]string{"fe80::/10"}, true},
+	{[]string{"100.64.0.0/10"}, true},
+	{[]string{"100.100.100.0/24"}, true},
+	{[]string{"100.100.100.200/32"}, false},
+	{[]string{"100.64.0.0/16"}, false},
+	{[]string{"168.63.0.0/16"}, true},
+	{[]string{"168.63.129.16/32"}, false},
+	{[]string{"0.0.0.0/1"}, true},
+	{[]string{"128.0.0.0/1"}, true},
+	{[]string{"0.0.0.0/0"}, true},
+	{[]string{"::/0"}, true},
+	{[]string{"::ffff:0.0.0.0/96"}, true},
+	{[]string{"::ffff:169.254.0.0/112"}, true},
+	{[]string{"::ffff:169.254.169.254/128"}, false},
+	{[]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}, false},
+	{[]string{"140.82.112.0/20", "2001:db8::/32"}, false},
+	{[]string{"64:ff9b::/96"}, false},
+	{[]string{"2000::/3"}, false},
+}
+
+// TestAllowListVerdictAgreesAcrossFilterAndBroker: the containment rule has
+// one implementation, in pkg/cloudmeta, and four surfaces that apply it — the
+// dashboard's device, virtual-executor and project firewalls, the container
+// and Kubernetes egress_filter sections, and egress grants. This proves each
+// surface reaches the same verdict on the same allowlist, through its own
+// parsing: a surface that skipped the rule, or canonicalised a mapped prefix
+// differently, is what the two used to disagree by.
+func TestAllowListVerdictAgreesAcrossFilterAndBroker(t *testing.T) {
+	for _, c := range metadataCorpus {
+		t.Run(strings.Join(c.cidrs, ","), func(t *testing.T) {
+			verdicts := map[string]error{}
+
+			g := egressbroker.Grant{ID: "egress_corpus",
+				Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "/srv/app"},
+				CIDRs:   c.cidrs, Ports: []int{443}}
+			verdicts["egress grant"] = g.Validate()
+
+			rules, err := executor.FirewallRules{AllowCIDRs: c.cidrs, AllowPorts: []int{443}}.Normalize()
+			if err == nil {
+				err = rules.CheckMetadata()
+			}
+			verdicts["dashboard firewall"] = err
+
+			cf := container.EgressFilter{Enabled: true, AllowCIDRs: c.cidrs, AllowPorts: []int{443}}
+			_, err = cf.Compile()
+			if err == nil && len(cf.MetadataFindings()) > 0 {
+				err = errors.New(cf.MetadataFindings()[0].Sentence())
+			}
+			verdicts["container egress_filter"] = err
+
+			kf := kubernetes.EgressFilter{Enabled: true, CIDRs: c.cidrs, Ports: []int{443}}
+			_, err = kf.Compile()
+			if err == nil && len(kf.MetadataFindings()) > 0 {
+				err = errors.New(kf.MetadataFindings()[0].Sentence())
+			}
+			verdicts["kubernetes egress_filter"] = err
+
+			for surface, err := range verdicts {
+				if (err != nil) != c.refuse {
+					t.Errorf("%s: refused=%t (%v), want refused=%t", surface, err != nil, err, c.refuse)
+				}
+			}
+		})
+	}
+}
+
+// TestStoredAllowListsReachTheSameMetadata is the fail-safe half: rule sets
+// and grants stored before the rule are never re-validated, so the compiled
+// filter and the proxy must each keep a contained service closed on their own
+// — and agree, address by address, on every service, its neighbours and its
+// IPv6 disguises.
+func TestStoredAllowListsReachTheSameMetadata(t *testing.T) {
+	var probes []netip.Addr
+	for _, s := range cloudmeta.Services() {
+		probes = append(probes, s.Addr, s.Addr.Next(), s.Addr.Prev())
+		if s.Addr.Is4() {
+			b := s.Addr.As4()
+			for _, wrap := range []string{"64:ff9b::%d.%d.%d.%d", "::ffff:%d.%d.%d.%d", "::%d.%d.%d.%d"} {
+				probes = append(probes, netip.MustParseAddr(fmt.Sprintf(wrap, b[0], b[1], b[2], b[3])))
+			}
+		}
+	}
+	for _, c := range metadataCorpus {
+		var in netfilter.Input
+		for _, s := range c.cidrs {
+			in.AllowCIDRs = append(in.AllowCIDRs, netip.MustParsePrefix(s))
+		}
+		in.AllowPorts = []uint16{443}
+		p, err := netfilter.Compile(in)
+		if err != nil {
+			continue // a /0: refused by the compiler too, so it is never stored as a filter
+		}
+		wire := p.WireOnly()
+		g := egressbroker.Grant{CIDRs: c.cidrs, Ports: []int{443}, ExpiresAt: time.Now().Add(time.Hour)}
+		g.Normalize()
+		for _, a := range probes {
+			brokerRefused := g.CheckAddr(a, false) != nil
+			verdict, why := wire.Evaluate(a, 443, netfilter.ProtoTCP)
+			filterDropped := verdict == netfilter.VerdictDrop
+			switch {
+			case brokerRefused && !filterDropped:
+				t.Errorf("HOLE under %v: %s is refused by the broker but allowed by the filter (%s)", c.cidrs, a, why)
+			case !brokerRefused && filterDropped && !inTranslationPrefix(a):
+				t.Errorf("OVER-BLOCK under %v: %s is allowed by the broker but dropped by the filter (%s)",
+					c.cidrs, a, why)
+			}
+			if svc, ok := cloudmeta.Lookup(a); ok && !filterDropped {
+				named := false
+				for _, s := range c.cidrs {
+					if pfx, ok := cloudmeta.Canonical(netip.MustParsePrefix(s)); ok && pfx == svc.Prefix() {
+						named = true
+					}
+				}
+				if !named {
+					t.Errorf("under %v the filter reaches %s, which no entry names", c.cidrs, svc.Describe())
+				}
+			}
+		}
+	}
+}
+
+// TestBlockReasonsAgreeOnEveryService: one table, so the sentence an audit row
+// carries for a refused service is the same at both layers.
+func TestBlockReasonsAgreeOnEveryService(t *testing.T) {
+	p := widePolicy(t)
+	for _, s := range cloudmeta.Services() {
+		_, why := p.Evaluate(s.Addr, 443, netfilter.ProtoTCP)
+		if br := egressbroker.BlockReason(s.Addr); br != why || br != s.Reason() {
+			t.Errorf("%s: filter says %q, broker says %q, table says %q", s.Addr, why, br, s.Reason())
 		}
 	}
 }

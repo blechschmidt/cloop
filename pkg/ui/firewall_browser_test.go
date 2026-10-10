@@ -78,6 +78,8 @@ func TestFirewallPanels_InBrowser(t *testing.T) {
 		ProjectCard         string              `json:"project_card"`
 		ProjectAllow        string              `json:"project_allow"`
 		ProjectRefusal      string              `json:"project_refusal"`
+		MetadataRefusal     string              `json:"project_metadata_refusal"`
+		MetadataTyped       string              `json:"project_metadata_typed"`
 		ProjectStored       projectFirewallView `json:"project_stored"`
 		VirtualDialog       string              `json:"virtual_dialog"`
 		UnfilteredDisabled  bool                `json:"unfiltered_disabled"`
@@ -120,6 +122,15 @@ func TestFirewallPanels_InBrowser(t *testing.T) {
 	if !strings.Contains(got.ProjectRefusal, "port 22") {
 		t.Errorf("a widening was not refused on the form, or a fleet event took the refusal away: %q",
 			got.ProjectRefusal)
+	}
+	for _, want := range []string{"169.254.169.0/24 contains 2 cloud metadata services without naming them",
+		"169.254.169.254 (instance metadata on AWS", "or to the denylist so they stay closed"} {
+		if !strings.Contains(got.MetadataRefusal, want) {
+			t.Errorf("the card does not show the hub's metadata refusal %q: %q", want, got.MetadataRefusal)
+		}
+	}
+	if got.MetadataTyped != "169.254.169.0/24" {
+		t.Errorf("the refused range was taken off the form: %q", got.MetadataTyped)
 	}
 	if r := got.ProjectStored.Rules; strings.Join(r.AllowCIDRs, ",") != "140.82.112.0/24" || !got.ProjectStored.Fits {
 		t.Errorf("the narrowing typed on the card was stored as %+v", r)

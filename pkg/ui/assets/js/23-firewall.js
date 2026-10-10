@@ -45,7 +45,8 @@ function _fwForm(p, r) {
     + '<div class="form-hint">' + hint + '</div></div>';
   return '<label class="sec-own-opt"><input type="checkbox" id="' + p + 'Pub"' + (r.allow_public_internet ? ' checked' : '')
     + ' onchange="fwSync(\'' + p + '\')"><span><strong>Allow the public Internet</strong> — every public address; '
-    + 'private, link-local and metadata ranges stay closed unless the allowlist names them.</span></label>'
+    + 'private and link-local ranges stay closed unless the allowlist names them, a cloud metadata service unless '
+    + 'it names its own address.</span></label>'
     + '<div class="form-row">' + field('Allow', 'Allowlist', (r.allow_cidrs || []).join('\n'), 'Also reachable.', 2)
     + field('Deny', 'Denylist', (r.deny_cidrs || []).join('\n'), 'Never reachable, over any protocol.', 2) + '</div>'
     + '<div class="form-row">' + field('Ports', 'Ports', (r.allow_ports || []).join(', '), 'TCP ports; empty means every port.')
@@ -67,6 +68,14 @@ window.fwSync = function(p) {
   const s = document.getElementById(p + 'Sum');
   if (s) s.textContent = 'In effect: ' + _fwSum(_fwRead(p)) + '. Everything else is dropped.';
 };
+
+// _fwMeta renders the hub's notes on a stored rule set whose allowlist holds a
+// range containing a cloud metadata service it does not name (Task 20397):
+// saved before that was refused, it keeps the service closed, and is said here
+// before the next save is refused for it.
+function _fwMeta(notes) {
+  return (notes || []).map(n => '<div class="form-hint" style="color:var(--yellow)">&#9888; ' + esc(n) + '</div>').join('');
+}
 
 // _fwRefusal renders a refused save: the hub's sentence, or its reasons.
 function _fwRefusal(d) {
@@ -146,7 +155,7 @@ function _pfwState(d) {
   if (!d.fits) h += '<div class="form-hint" style="color:var(--red)">These reach further than the governing rules, '
     + 'so runs are refused: ' + esc((d.reasons || []).join('; ')) + '</div>';
   if (d.warning) h += '<div class="form-hint" style="color:var(--yellow)">&#9888; ' + esc(d.warning) + '</div>';
-  return h;
+  return h + _fwMeta(d.metadata);
 }
 
 function _pfwRender(d, note) {

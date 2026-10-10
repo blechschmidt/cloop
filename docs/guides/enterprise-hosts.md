@@ -204,7 +204,7 @@ answer to "blacklist non-public IP addresses":
 
 | dropped | why |
 |---|---|
-| `169.254.169.254/32` | cloud metadata service — hands out instance credentials |
+| `169.254.169.254/32`, AWS's `fd00:ec2::254`, Alibaba's `100.100.100.200`, … | cloud metadata services (`pkg/cloudmeta`) — each hands out instance credentials, and is reached only by naming its own address, never by a range containing it |
 | `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` | RFC1918 / ULA private space |
 | `100.64/10` | carrier-grade NAT |
 | `169.254/16`, `fe80::/10` | link-local |
@@ -220,7 +220,7 @@ compiler the driver uses, so this is the ruleset, not an approximation of it:
 
 ```console
 $ cloop egress firewall --internet --ports 443 --resolver 9.9.9.9:53
-IP-layer egress filter  mode filtered, 25 rules, from flags
+IP-layer egress filter  mode filtered, 38 rules, from flags
 
 warning: every public address is reachable on port 443; only the private,
 loopback, link-local, CGNAT and metadata ranges are filtered
@@ -228,12 +228,15 @@ loopback, link-local, CGNAT and metadata ranges are filtered
   allow  127.0.0.0/8                any          sandbox-local loopback [namespace-local]
   allow  9.9.9.9/32             udp 53           DNS resolver
   allow  9.9.9.9/32             tcp 53           DNS resolver (truncated answers retry over TCP)
+  drop   100.100.100.200/32         any          cloud metadata service (100.100.100.200)
+  drop   168.63.129.16/32           any          cloud metadata service (168.63.129.16)
   drop   169.254.169.254/32         any          cloud metadata service (169.254.169.254)
+  ...
+  drop   fd00:ec2::254/128          any          cloud metadata service (fd00:ec2::254)
+  ...
   drop   127.0.0.0/8                any          loopback
   drop   169.254.0.0/16             any          link-local
   drop   10.0.0.0/8                 any          private (RFC1918/ULA)
-  drop   172.16.0.0/12              any          private (RFC1918/ULA)
-  drop   192.168.0.0/16             any          private (RFC1918/ULA)
   drop   100.64.0.0/10              any          carrier-grade NAT (RFC6598)
   ...
   allow  0.0.0.0/0              tcp 443          public Internet
