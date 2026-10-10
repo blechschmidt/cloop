@@ -115,6 +115,21 @@ because it has no frame with which to give it back. The hub refuses that
 command, rather than refusing the device
 (`TestOldAgentIsRefusedRevocableWorkload`).
 
+**What a device sends back is bounded on the hub (Task 20399).** A run's
+write-back bundle and a seeded run's project state are held in hub memory until
+collected, and a device decides how much of either it sends. So a handle accepts
+only the bundle its own dispatch asked for, up to that dispatch's cap — persisted
+with the handle, so a restarted or adopting hub enforces it too — and a project
+document only from a seeded run; nothing after the handle's final status or its
+result frame; and everything an executor's handles hold counts against its own
+budget (`executors.remote.max_pinned_writeback_bytes`, 256 MiB) under a ceiling
+for the whole process (`max_pinned_writeback_total_bytes`, 1 GiB). Revoking or
+removing a device lets go of everything its handles hold. See
+[returned work held in hub memory](#returned-work-held-in-hub-memory--writeback_pinning_testgo-and-the-package-suites)
+for the tests and
+[what a device's returned work may hold](../architecture/executors.md#what-a-devices-returned-work-may-hold-on-the-hub-task-20399)
+for the mechanism.
+
 ### ③ Hub ↔ container runtime
 
 The hub talks to a local Docker/Podman socket, which is **unauthenticated by
@@ -3535,6 +3550,39 @@ refusal used to arrive as `ErrWriteBackUnavailable`, so a caller that retried on
 that sentinel would have retried a hostile write-back on a loop, and whether it
 did so depended on the git version installed on the hub.
 
+### Returned work held in hub memory — `writeback_pinning_test.go` and the package suites
+
+The return leg's other risk is not what the work contains but how much of it
+the hub holds while it waits to be collected. A device decides how many bytes
+it sends; before Task 20399 one compromised agent could pin the hard 128 MiB
+bundle ceiling on every handle the hub tracked for it — running ones and 256
+finished ones — because a finished handle still took chunks, a collected bundle
+could be refilled from offset 0, a handle that asked for no write-back took the
+ceiling anyway, nothing counted the total, and revoking the device freed
+nothing. 32 GiB per device per hub process.
+
+| Guarantee | Test |
+| --- | --- |
+| End to end, against a real hub executor and a hand-written hostile agent: a handle that asked for no write-back takes no bundle, a bundle past its spec's cap is refused, handles share their executor's budget, nothing is taken after the final status, and revoking the device lets go of all of it | `TestHostileAgentCannotPinHubMemoryThroughWriteBack` |
+| A chunk, result or project-state document after the handle's final status is refused before anything is allocated, and nothing of it is kept or collectable | `pkg/executor/remote: TestWriteBackChunkAfterTheFinalStatusIsRefused` |
+| A restart from offset 0 is legal before the result frame and refused after it, as is a second result; a collected bundle cannot be refilled | `pkg/executor/remote: TestWriteBackChunkAfterTheResultIsRefused` |
+| A handle accepts only what its spec asked for: no bundle without a bundle write-back, no result without any write-back, no project state without a seed — and a push's byte-less result still lands | `pkg/executor/remote: TestWriteBackFramesForAHandleThatAskedForNoneAreRefused` |
+| A bundle is capped at what its spec asked for, not the hard ceiling — exactly the cap still lands | `pkg/executor/remote: TestWriteBackBundleCapIsTheSpecs` |
+| The cap survives a hub restart, so a device resending its bundle from offset 0 meets it; a row an older hub wrote gets the hard ceiling rather than a refusal | `pkg/executor/remote: TestRehydratedHandleKeepsItsCap` |
+| An executor's handles share one budget, and the refused run's write-back names the limit and what was held; collecting gives the bytes back | `pkg/executor/remote: TestWriteBackExecutorBudgetSpansItsHandles` |
+| A bundle cut into one-byte chunks is charged for the memory each chunk holds, not only its byte, so it cannot hold fifty times what the budget counts | `pkg/executor/remote: TestTinyChunksAreChargedForTheMemoryTheyHold` |
+| A chunk whose frame pads its base64 with newlines the decoder skips is kept as a copy of what it carries, not over the megabyte buffer it decoded into — and so is a sandbox terminal's chunk | `pkg/executor/remote: TestKeptChunkHoldsOnlyWhatArrived`, `TestAttachInboxHoldsOnlyWhatArrived` |
+| The process ceiling binds across executors each inside its own budget | `pkg/executor/remote: TestWriteBackProcessCeilingSpansExecutors` |
+| A device that reconnects, or hops to another hub member and back, gets no fresh budget, and detaching frees nothing; the bytes go when the run ends | `pkg/executor/remote: TestAHubMemberHopDoesNotRefillTheBudget` |
+| What is held is let go of on revocation and deregistration (finished runs' uncollected work included), eviction, abandonment, a run ending without its result, and retention past an uncollected run's end | `pkg/executor/remote: TestRevokeAndDeregisterGiveTheBytesBack`, `TestEvictionGivesTheBytesBack`, `TestAbandonReleasesEvenAVerifiedBundle`, `TestTerminalStatusWithoutAResultReleasesThePartialBundle`, `TestUncollectedResultIsReleasedAfterRetention` |
+| A seeded run's project state counts against the same budget, and one it cannot hold is refused with the reason recorded; a resend that no longer fits leaves the earlier reading in place | `pkg/executor/remote: TestProjectResultCountsAgainstTheBudget` |
+| A status frame cannot claim a write-back no result frame delivered, and a device's prose and a result's names are bounded | `pkg/executor/remote: TestStatusFrameCannotCarryAWriteBack`, `TestResultFrameNamesAndProseAreBounded` |
+| A dashboard revoke removes the executor from the hub member serving it, which the cluster bus never tells about its own events | `pkg/ui: TestRevokedAgentLeavesTheRevokingMembersHub` |
+| `executors.remote.max_pinned_writeback_bytes` and `max_pinned_writeback_total_bytes` are bounded on all three configuration paths — repaired toward the default at load, never toward unbounded; refused by `config set` and `config validate` | `pkg/config: TestPinnedWriteBack_Load`, `TestPinnedWriteBack_ValidateRefusesOutOfBand`; `pkg/configvalidate: TestValidateReportsAnOutOfBandWriteBackBudget` |
+
+None of these is gated on a protocol version: they ask nothing of an agent that
+an honest one does not already do.
+
 ### Features on isolating executors — the package suites
 
 | Guarantee | Test |
@@ -3644,6 +3692,17 @@ not of the secret the key comes from. Someone who has read `hub.env` can still
 derive every non-retired KEK. Changing the passphrase remains a re-mint, and the
 [runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says so
 plainly rather than letting the new command imply otherwise.
+
+**A compromised device can fill its own budget, and enough of them the
+hub's.** Returned work is bounded per handle, per executor and per process
+(Task 20399), but within its budget — 256 MiB by default — a device can hold
+transfers open for as long as it keeps its runs open, and devices that do so
+together can fill the process ceiling. Past it every device's write-backs are
+refused, journaled with the limit, until work is collected or the devices are
+revoked: a denial of delivery rather than an out-of-memory. Revoking a device
+frees what it holds at once; cordoning it does not, because the frames of runs
+already out are still accepted. `cloop_writeback_pinned_bytes_max` shows which
+side of its budget the busiest device is on.
 
 **Draining an executor revokes only the leases it can name.** Cordon and drain
 enumerate `Leases()` and revoke each one, and `Leases()` deliberately lists only
