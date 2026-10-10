@@ -83,6 +83,11 @@ func (b *Broker) EnvOffers(r Requester) ([]EnvOffer, error) {
 			sec, gerr := b.store.GetSecret(g.SecretID)
 			switch {
 			case gerr != nil:
+				if _, why, gone := b.deletedSecretRefusal(g); gone {
+					sk = secretKeys{err: fmt.Errorf("%w: grant %s spent a secret that no longer exists: %s",
+						ErrSecretDeleted, g.ID, why)}
+					break
+				}
 				sk = secretKeys{err: fmt.Errorf("%w: grant %s points at missing secret %s", ErrSecretNotFound, g.ID, g.SecretID)}
 			case sec.Kind != KindEnv:
 				sk = secretKeys{sec: sec}

@@ -453,6 +453,21 @@ const (
 	ActionUserOffboardTask Action = "user.offboard_task"
 	// ActionUserOffboardProject records projects reported as needing a new owner.
 	ActionUserOffboardProject Action = "user.offboard_project"
+	// ActionUserOffboardGrant records grants over the identity's personal
+	// secrets revoked during offboarding (Task 20400).
+	ActionUserOffboardGrant Action = "user.offboard_grant"
+	// ActionUserOffboardSecret records the identity's personal secrets
+	// destroyed during offboarding.
+	ActionUserOffboardSecret Action = "user.offboard_secret"
+	// ActionUserOffboardRequest records the identity's pending grant requests
+	// withdrawn during offboarding.
+	ActionUserOffboardRequest Action = "user.offboard_request"
+	// ActionUserOffboardClaude records the identity's Claude Code logins
+	// cancelled, logged out and removed — or kept — on every hub member.
+	ActionUserOffboardClaude Action = "user.offboard_claude"
+	// ActionUserOffboardHold records an offboarding run under a legal hold,
+	// and what it kept.
+	ActionUserOffboardHold Action = "user.offboard_hold"
 
 	// ── project ────────────────────────────────────────────────────────────
 

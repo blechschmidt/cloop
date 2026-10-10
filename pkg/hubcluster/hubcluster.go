@@ -139,7 +139,9 @@ type Options struct {
 	AdvertiseURL string
 	// Version is this build's identifier.
 	Version string
-	// Endpoints are further named URLs recorded in the member row's meta.
+	// Endpoints are further named endpoints recorded in the member row's
+	// meta: URLs a peer dials, or — for a reader on the same machine, like
+	// the Claude home root an offboarding compares (Task 20400) — a path.
 	Endpoints map[string]string
 
 	Heartbeat    time.Duration

@@ -1077,6 +1077,38 @@ serve a revoked session from its cache for up to 30 seconds, and closes what it
 opened at the next 30-second re-check after that. `cloop hub token revoke` and
 `cloop hub user offboard` announce what they revoke the same way.
 
+### `cloop hub user offboard`
+
+Everything one identity can still do on the hub, ended in one operation, and
+everything they keep here destroyed. Resolves an email or an IdP subject to
+every identifier of the same person first; `--dry-run` prints exactly the set
+the write acts on.
+
+```bash
+cloop hub user offboard alice@example.com --dry-run
+cloop hub user offboard alice@example.com --reason "left the company, HR-882"
+cloop hub user offboard alice@example.com --keep-credentials --reason "legal hold LH-17"
+cloop hub user offboard 'sub:8f14e45fce' --reason "contract ended" --json
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--reason` | Required unless `--dry-run`; written on every audit row |
+| `--dry-run` | Resolve and print, change nothing |
+| `--keep-credentials` | Legal hold: sever access as usual, keep their personal secrets and Claude Code homes |
+| `--json` | The report, for scripting |
+| `--workdir` | The hub directory, when not the current one |
+
+Severed in one transaction: sessions, API tokens, glasses links, project
+memberships, and a deny binding. Then, in order, each reporting its own failure:
+secret leases on their projects, the grants over their personal secrets
+(revoked), the secrets themselves (deleted through the broker, sealed bytes
+overwritten), pending grant requests (withdrawn), their running tasks (stopped),
+and their Claude Code login on every hub member (cancelled, logged out,
+removed). Projects they own are reported, never deleted. Needs no
+`CLOOP_SECRET_KEY`. A partial run exits non-zero. See the
+[runbook](../operations/runbook.md#somebody-leaves).
+
 ### `cloop hub quota`
 
 Per-identity quota overrides: the one-off cap applied to a single tenant. Most

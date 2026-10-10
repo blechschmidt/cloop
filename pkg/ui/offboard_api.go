@@ -36,6 +36,9 @@ type offboardRequest struct {
 	Reason string `json:"reason"`
 	// DryRun resolves and reports without changing anything.
 	DryRun bool `json:"dry_run"`
+	// KeepCredentials is a legal hold (Task 20400): access is severed as
+	// always, and the person's personal secrets and Claude homes are kept.
+	KeepCredentials bool `json:"keep_credentials"`
 }
 
 // handleUserOffboard serves POST /api/users/offboard.
@@ -82,21 +85,38 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closer()
 
+	// The secret store holds the person's personal secrets, the grants over
+	// them and the requests they filed (Task 20400). Opened without a key:
+	// destroying them reads no payload, so a hub whose CLOOP_SECRET_KEY is
+	// unset still offboards them. A store that cannot be opened at all is a
+	// warning in the plan, not a refusal to sever everything else.
+	secrets, serr := offboard.StoreSecrets(db)
+	if serr != nil {
+		secrets = nil
+	}
+
 	rep, err := offboard.Run(offboard.Options{
-		DB:       db,
-		Identity: identity,
-		Reason:   reason,
-		Actor:    actor,
-		Via:      "ui",
-		DryRun:   req.DryRun,
-		Projects: offboard.RegistryProjects(s.allProjectEntries()),
-		Tasks:    offboard.LocalTasks(),
-		Leases:   hubLeases{},
-		Sessions: s.offboardSessions(),
+		DB:              db,
+		Identity:        identity,
+		Reason:          reason,
+		Actor:           actor,
+		Via:             "ui",
+		DryRun:          req.DryRun,
+		Projects:        offboard.RegistryProjects(s.allProjectEntries()),
+		Tasks:           offboard.LocalTasks(),
+		Leases:          hubLeases{},
+		Sessions:        s.offboardSessions(),
+		Secrets:         secrets,
+		Claude:          s.offboardClaude(),
+		KeepCredentials: req.KeepCredentials,
 	})
 	if err != nil {
 		apierror.WriteFromError(w, err)
 		return
+	}
+	if serr != nil {
+		rep.Warnings = append(rep.Warnings, "the secret store could not be opened, so personal secrets, "+
+			"their grants and pending requests were not checked: "+serr.Error())
 	}
 	// Memberships went in the credential transaction, behind the store's
 	// back: bring this hub's cache up to date now — which also closes the
@@ -115,6 +135,14 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 	// close the streams they opened (Task 20398). Sessions need no such word:
 	// they were ended through the authenticator, which announces each one.
 	s.announceTokensRevoked(append(append([]string(nil), rep.TokensRevoked...), rep.GlassesRevoked...))
+	// The personal secrets, grants and requests went through the broker,
+	// behind any open Secrets panel's back: tell it to re-read. No id — the
+	// update reaches every signed-in dashboard, and who was offboarded is not
+	// theirs to learn from it.
+	if len(rep.SecretsDeleted) > 0 || len(rep.GrantsRevoked) > 0 || len(rep.RequestsWithdrawn) > 0 {
+		s.broadcastAuditAppend(string(secretbroker.ActionDeleteSec))
+		s.broadcastSecretsUpdate("offboarded", "")
+	}
 
 	// A partial run is reported with 200 and failures attached rather than as
 	// an error status. The caller needs the report either way — it names what
@@ -237,12 +265,17 @@ func (hubLeases) LiveLeases() []offboard.LeaseRef {
 		if sl == nil || sl.lease == nil {
 			continue
 		}
+		grants := make([]string, 0, len(sl.lease.Materials))
+		for _, m := range sl.lease.Materials {
+			grants = append(grants, m.GrantID)
+		}
 		out = append(out, offboard.LeaseRef{
 			ID:         sl.lease.ID,
 			ExecutorID: sl.lease.ExecutorID,
 			ProjectID:  sl.lease.ProjectID,
 			Kinds:      leaseKindNames(sl.lease.Kinds()),
 			ExpiresAt:  sl.ExpiresAt(),
+			GrantIDs:   grants,
 		})
 	}
 	return out

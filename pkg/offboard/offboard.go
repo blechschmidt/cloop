@@ -19,6 +19,11 @@
 // The documented remedy was a hand-written deny binding, which stops the
 // account *acting* but ends nothing it already holds.
 //
+// Those are what a person can use. What they keep here — personal broker
+// secrets and the grants spending them, grant requests still open, a Claude
+// Code login home on every hub member — is credentials.go (Task 20400):
+// destroyed by default, kept under a legal hold.
+//
 // # Why one package
 //
 // The CLI and the dashboard both need this, and they need it to mean exactly
@@ -33,10 +38,13 @@
 // notices its lease vanishing and retries cannot re-authenticate; stopping the
 // task first would leave a window where its still-valid session could start
 // another one. The durable credentials go in a single transaction (see
-// statedb.OffboardIdentity) so there is no partially-offboarded state; leases
-// and tasks cannot join that transaction — they are process memory and other
-// databases — and so are applied after it, each reporting its own failures
-// rather than rolling back a severing that already succeeded.
+// statedb.OffboardIdentity) so there is no partially-offboarded state; leases,
+// the stored credentials, tasks and Claude logins cannot join that transaction
+// — they are process memory, the broker, other databases and other hub
+// members' filesystems — and so are applied after it, in that order, each
+// reporting its own failures rather than rolling back a severing that already
+// succeeded. Claude logins come last so a task of theirs is already told to
+// stop before the directory it writes to is removed.
 //
 // # What it will not do
 //
@@ -160,6 +168,10 @@ type LeaseRef struct {
 	ProjectID  string    `json:"project_id,omitempty"`
 	Kinds      []string  `json:"kinds,omitempty"`
 	ExpiresAt  time.Time `json:"expires_at,omitempty"`
+	// GrantIDs are the grants whose material the lease carries, so a lease on
+	// somebody else's project holding this identity's personal credential can
+	// be named in the plan (Task 20400).
+	GrantIDs []string `json:"grant_ids,omitempty"`
 }
 
 // TaskRef is one in-flight task running in a project this identity owns.
@@ -224,6 +236,11 @@ type Plan struct {
 	// transaction.
 	Memberships []MembershipRef `json:"memberships"`
 
+	// Credentials is what the identity keeps on the hub — personal secrets,
+	// the grants over them, pending requests, Claude logins (Task 20400).
+	// Destroyed after the transaction, or kept under a legal hold.
+	Credentials Credentials `json:"credentials"`
+
 	// Warnings name things the run cannot be sure about — most importantly
 	// tokens whose owner binding did not decode, which cannot be proven *not*
 	// to belong to this person.
@@ -236,7 +253,7 @@ type Plan struct {
 func (p Plan) Empty() bool {
 	return len(p.Sessions) == 0 && len(p.Tokens) == 0 && len(p.Glasses) == 0 &&
 		len(p.Denies) == 0 && len(p.Leases) == 0 && len(p.Tasks) == 0 &&
-		len(p.Memberships) == 0
+		len(p.Memberships) == 0 && p.Credentials.Empty()
 }
 
 // Report is the outcome of a run. A dry run returns the Plan with DryRun set
@@ -258,6 +275,14 @@ type Report struct {
 	// MembershipsRevoked are the project memberships actually removed, in
 	// the same transaction as the credentials (Task 20366).
 	MembershipsRevoked []MembershipRef `json:"memberships_revoked,omitempty"`
+
+	// What became of the stored credentials (Task 20400). Under a legal hold
+	// SecretsKept replaces SecretsDeleted, and each Claude copy reports Kept.
+	GrantsRevoked     []PersonalGrantRef  `json:"grants_revoked,omitempty"`
+	SecretsDeleted    []PersonalSecretRef `json:"secrets_deleted,omitempty"`
+	SecretsKept       []PersonalSecretRef `json:"secrets_kept,omitempty"`
+	RequestsWithdrawn []GrantRequestRef   `json:"requests_withdrawn,omitempty"`
+	ClaudeResults     []ClaudeHomeResult  `json:"claude_results,omitempty"`
 
 	// Failures is non-empty when a surface could not be severed. The run does
 	// not abort on one: a lease that will not release is not a reason to leave
@@ -351,6 +376,18 @@ type Options struct {
 	// Sessions is the live session authority. Strongly preferred where one
 	// exists — see the interface doc.
 	Sessions Sessions
+
+	// Secrets and Claude reach what the identity keeps on the hub (Task
+	// 20400). Optional like the others: nil means that part is not checked,
+	// and the plan says so.
+	Secrets Secrets
+	Claude  ClaudeHomes
+
+	// KeepCredentials is a legal hold. Access is severed exactly as without
+	// it — grants revoked, requests withdrawn, logins in flight cancelled —
+	// but the personal secrets and the Claude homes are kept as they are, and
+	// the plan and the trail say what was kept.
+	KeepCredentials bool
 
 	// Now is the clock, swappable in tests.
 	Now func() time.Time
@@ -482,7 +519,15 @@ func Run(o Options) (Report, error) {
 		}
 	}
 
-	// 3. Tasks.
+	// 3. What they keep in the broker (Task 20400): the grants over their
+	//    personal secrets, the secrets, their open requests. After the
+	//    transaction and the leases, so nothing that could still authenticate
+	//    as them is left to notice and re-acquire any of it, and before their
+	//    tasks are stopped, for the reason the leases are. Each piece reports
+	//    its own failure; none undoes the severing.
+	severStoredCredentials(o, plan, &rep)
+
+	// 4. Tasks.
 	if o.Tasks != nil && len(plan.Tasks) > 0 {
 		for _, t := range plan.Tasks {
 			if err := o.Tasks.Stop(t, o.Actor, o.Reason); err != nil {
@@ -502,7 +547,18 @@ func Run(o Options) (Report, error) {
 		}
 	}
 
-	// 4. Projects: reported only. The event records that a human still owes a
+	// 5. Their Claude Code logins, on every hub member — after the tasks are
+	//    told to stop, because a run of theirs still writing to its
+	//    CLAUDE_CONFIG_DIR would recreate the directory behind the removal.
+	//    The stop is asynchronous, so a run winding down can still write
+	//    there; the logout before the removal is what makes the session it
+	//    holds worthless at Anthropic.
+	severClaude(o, plan, &rep)
+
+	// 6. A legal hold says what it kept.
+	auditHold(o, plan, &rep)
+
+	// 7. Projects: reported only. The event records that a human still owes a
 	//    reassignment, which is the whole reason not to delete them.
 	if len(plan.Projects) > 0 {
 		if err := auditSurface(o, plan, auditaction.ActionUserOffboardProject, map[string]any{
@@ -551,7 +607,14 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 		"tasks":       len(plan.Tasks),
 		"projects":    len(plan.Projects),
 		"memberships": len(a.Members),
-		"warnings":    plan.Warnings,
+		// The stored footprint, as planned: it is destroyed after this
+		// transaction commits, and each piece has its own row then.
+		"personal_secrets": len(plan.Credentials.Secrets),
+		"personal_grants":  len(plan.Credentials.Grants),
+		"grant_requests":   len(plan.Credentials.Requests),
+		"claude_homes":     plan.Credentials.ClaudeCopies(),
+		"legal_hold":       plan.Credentials.Keep,
+		"warnings":         plan.Warnings,
 	}); err != nil {
 		return nil, err
 	}

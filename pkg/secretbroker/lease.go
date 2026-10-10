@@ -160,6 +160,12 @@ type Lease struct {
 	// Materials carries the credentials. json:"-" on the sensitive fields
 	// of Material keeps a marshalled Lease audit-safe.
 	Materials []Material `json:"materials"`
+	// Refused names the grants this lease was aimed at whose secret no longer
+	// exists (Task 20400), each with the reason its audit row records. Metadata
+	// only. The dispatcher shows them to the project, which cannot otherwise
+	// see that a credential it was granted — often a departed colleague's —
+	// was destroyed.
+	Refused []RefusedCredential `json:"refused,omitempty"`
 }
 
 // Kinds returns the distinct credential kinds the lease carries, sorted.

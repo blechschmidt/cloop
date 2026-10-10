@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/projectmember"
@@ -130,6 +131,10 @@ func BuildPlan(o Options) (Plan, error) {
 		}
 	}
 
+	// What the identity keeps here (Task 20400): personal secrets and the
+	// grants over them, requests it filed, Claude logins.
+	plan.Credentials = planCredentials(o, target, tokens, &plan.Warnings)
+
 	// Projects — reported, never deleted.
 	ownerKeys := target.OwnerKeys()
 	if o.Projects != nil {
@@ -170,9 +175,29 @@ func BuildPlan(o Options) (Plan, error) {
 		for _, p := range plan.Projects {
 			owned[p.Path] = struct{}{}
 		}
+		personal := map[string]PersonalGrantRef{}
+		for _, g := range plan.Credentials.Grants {
+			personal[g.ID] = g
+		}
 		for _, l := range o.Leases.LiveLeases() {
 			if _, ok := owned[l.ProjectID]; ok {
 				plan.Leases = append(plan.Leases, l)
+				continue
+			}
+			// A lease on somebody else's project can still hold this person's
+			// credential, through a grant over one of their personal secrets.
+			// It is not released — the rest of what it carries belongs to the
+			// colleague's run — but it is named: the grant is revoked below,
+			// so the lease is not extended, and it lapses within its period.
+			for _, id := range l.GrantIDs {
+				if g, ok := personal[id]; ok {
+					plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+						"lease %s on %s (executor %s) holds %s, a personal credential of this identity: "+
+							"its grant is revoked by this run, so the lease is not extended and lapses by %s — "+
+							"revoke the lease under Secrets → Leases to end it sooner",
+						l.ID, l.ProjectID, l.ExecutorID, g.SecretName, l.ExpiresAt.UTC().Format(time.RFC3339)))
+					break
+				}
 			}
 		}
 	} else {

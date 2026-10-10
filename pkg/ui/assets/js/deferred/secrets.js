@@ -2101,7 +2101,9 @@
           <p class="sec-hint">
             Severs every credential surface one identity holds &mdash; sessions, API tokens,
             glasses links, secret leases and running tasks &mdash; and writes a deny binding so a
-            fresh sign-in gets nothing either. Projects they own are reported, never deleted.
+            fresh sign-in gets nothing either. What they keep here is destroyed: personal secrets
+            and the grants over them, pending grant requests, and their Claude Code login on every
+            hub member. Projects they own are reported, never deleted.
             Preview first: nothing is changed until you confirm.
           </p>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -2109,6 +2111,10 @@
                    style="flex:1;min-width:220px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text)">
             <button class="btn" id="offboardPreviewBtn" data-global-perm="user.manage" data-act="offboardPreview">Preview</button>
           </div>
+          <label class="sec-hint" style="display:flex;gap:6px;align-items:center;margin-top:8px">
+            <input type="checkbox" id="offboardKeep">
+            Legal hold &mdash; keep their personal secrets and Claude Code logins (access is still severed)
+          </label>
           <div id="offboardResult" style="display:none;margin-top:12px"></div>
         </div>
       </div>`, `

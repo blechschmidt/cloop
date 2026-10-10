@@ -42,6 +42,9 @@ type memStore struct {
 	// slotErr, when set, fails TakeAppSlots and ListAppSlots as a busy
 	// database would.
 	slotErr error
+
+	// tombstones back the TombstoneStore half (tombstone_test.go, Task 20400).
+	tombstones map[string]Tombstone
 }
 
 func newMemStore() *memStore {
@@ -53,6 +56,8 @@ func newMemStore() *memStore {
 		uses:     make(map[string][]RequestUse),
 		leases:   make(map[string]LeaseRecord),
 		appSlots: make(map[[2]string]AppSlotRecord),
+
+		tombstones: make(map[string]Tombstone),
 	}
 }
 

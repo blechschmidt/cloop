@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -750,6 +751,10 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 		closeDB()
 		return nil
 	}
+	// A credential the project was granted and whose secret is gone — often
+	// a colleague's, destroyed when they were offboarded — is refused by
+	// name; say so where the people running the project will look.
+	journalRefusedCredentials(workDir, lease.Refused)
 	if lease.Empty() {
 		broker.Release(lease.ID)
 		closeDB()
@@ -1352,4 +1357,58 @@ func repoEnvKey(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// refusalsJournaled remembers the refused credentials this process has
+// already put in front of a project (Task 20400).
+//
+// A destroyed secret leaves revoked grants behind for good — revocation is a
+// stamp — so every later lease refuses them again. The audit trail records
+// each refusal; the project's journal is told once per hub process, on the
+// first run after the loss, because a row per run naming a credential nobody
+// on the project can bring back would bury every other row. Bounded: past the
+// cap the set starts again, which costs one repeated row per refused grant.
+var refusalsJournaled = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+const refusalsJournaledMax = 4096
+
+// journalRefusedCredentials writes one credential_refused row per refused
+// credential this process has not yet reported for workDir.
+func journalRefusedCredentials(workDir string, refused []secretbroker.RefusedCredential) {
+	if workDir == "" || len(refused) == 0 {
+		return
+	}
+	for _, rc := range refused {
+		key := workDir + "\x00" + rc.GrantID
+		refusalsJournaled.Lock()
+		if refusalsJournaled.seen[key] {
+			refusalsJournaled.Unlock()
+			continue
+		}
+		if len(refusalsJournaled.seen) >= refusalsJournaledMax {
+			refusalsJournaled.seen = map[string]bool{}
+		}
+		refusalsJournaled.seen[key] = true
+		refusalsJournaled.Unlock()
+
+		what := "a credential"
+		if rc.SecretName != "" {
+			what = strings.TrimSpace(string(rc.Kind) + " " + strconv.Quote(rc.SecretName))
+		}
+		state.LogEventDetails(workDir, state.EventRow{
+			Type:    state.EventCredentialRefused,
+			Step:    state.NoStep,
+			Message: "This run goes without " + what + ", which the project was granted: " + rc.Reason,
+		}, map[string]any{
+			"grant_id":    rc.GrantID,
+			"secret_id":   rc.SecretID,
+			"secret_name": rc.SecretName,
+			"kind":        string(rc.Kind),
+			"owner":       rc.Owner,
+			"deleted_at":  rc.DeletedAt,
+		})
+	}
 }

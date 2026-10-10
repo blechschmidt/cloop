@@ -206,6 +206,10 @@ func Logout(ctx context.Context, configDir string) error {
 	}
 	cmd := exec.CommandContext(ctx, findClaude(), "auth", "logout")
 	cmd.Env = cliEnv(configDir)
+	// The context kills the CLI; WaitDelay bounds the wait for its output
+	// pipes, which a child of the CLI that inherited them would otherwise
+	// hold open past the kill — and an offboarding waits on this call.
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("claude auth logout: %w: %s", err, strings.TrimSpace(string(out)))

@@ -61,9 +61,24 @@ seven are severed here:
   tasks      those tasks, stopped
   members    every project shared with them by name, removed
 
-and an eighth is reported but never touched:
+Four more are what they keep here rather than hold open, and are destroyed:
+
+  secrets    their personal secrets — GitHub PATs, kubeconfigs — deleted
+             through the broker: sealed material overwritten, audited
+  grants     every grant over those secrets, revoked, including grants to
+             projects other people own, which lose the credential
+  requests   self-service grant requests they left pending, withdrawn
+  claude     their Claude Code login on every hub member: a login in flight
+             cancelled, each home logged out and its directory removed
+
+and one is reported but never touched:
 
   projects   the projects they own, listed so an operator can reassign them
+
+--keep-credentials is a legal hold: access is severed exactly as without it —
+grants revoked, requests withdrawn, logins cancelled — but the personal secrets
+and the Claude homes are kept as they are, and the report and the audit trail
+say what was kept.
 
 Projects are not deleted, on purpose. A departing user's projects usually hold
 the team's work, and a command that quietly removed them would be a data-loss
@@ -76,10 +91,17 @@ an email, a token's owner may carry only a subject, and matching literally on
 what you typed would leave that token live.
 
 Sessions, tokens, glasses links, memberships and the deny binding are written
-in ONE transaction: either the person is out of all five or nothing changed. Leases
-and tasks cannot join that transaction — they are broker memory and other
-databases — so they are applied after it, and any failure is reported rather
+in ONE transaction: either the person is out of all five or nothing changed. Leases,
+the stored credentials, tasks and Claude logins cannot join that transaction —
+they are broker memory, other databases and other hub members' filesystems — so
+they are applied after it, in that order, and any failure is reported rather
 than rolled back over a severing that already succeeded.
+
+Claude Code homes live under each hub process's own config directory, not in
+the database. This command removes the copy under its own, and asks every
+running hub member, over the bus, to remove theirs; a member that does not
+answer is named as a failure, because a copy nobody reached may still hold a
+live refresh token.
 
 Run --dry-run first. It prints the same set the write would act on, because it
 is the set the write acts on.
@@ -99,13 +121,17 @@ Examples:
   cloop hub user offboard alice@example.com --reason "left the company, HR-882"
 
   # Someone whose IdP supplies no email claim
-  cloop hub user offboard 'sub:8f14e45fce' --reason "contract ended, HR-901"`,
+  cloop hub user offboard 'sub:8f14e45fce' --reason "contract ended, HR-901"
+
+  # Under a legal hold: sever access, keep their stored credentials
+  cloop hub user offboard alice@example.com --keep-credentials --reason "left, legal hold LH-17"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := cmd.Flags().GetString("workdir")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		asJSON, _ := cmd.Flags().GetBool("json")
 		rawReason, _ := cmd.Flags().GetString("reason")
+		keep, _ := cmd.Flags().GetBool("keep-credentials")
 
 		identity := strings.TrimSpace(args[0])
 		if identity == "" {
@@ -140,20 +166,40 @@ Examples:
 			projects = offboard.RegistryProjects(entries)
 		}
 
-		// No broker here on purpose. Building one needs CLOOP_SECRET_KEY, and
-		// an offboarding that refused to run because a shell lacked the sealing
-		// key would fail in exactly the emergency it exists for. Leases are
-		// bounded by their own TTL and are released by the hub; the report says
-		// they were not checked rather than implying they were clean.
+		// No lease broker here on purpose: leases are process memory in the
+		// hub that issued them, bounded by their own TTL and released by that
+		// hub; the report says they were not checked rather than implying
+		// they were clean.
+		//
+		// The secret store is another matter (Task 20400). Destroying a
+		// departed person's personal secrets removes rows and reads none, so
+		// it is opened without a key: an offboarding that refused to run
+		// because a shell lacked CLOOP_SECRET_KEY would fail in exactly the
+		// emergency it exists for.
+		secrets, serr := offboard.StoreSecrets(db)
+		if serr != nil {
+			secrets = nil
+			fmt.Fprintf(os.Stderr, "warning: the secret store could not be opened, so personal secrets, "+
+				"their grants and pending requests are not part of this run: %v\n", serr)
+		}
+		// Claude Code homes: this process's own tree, and every running
+		// member's, asked over the bus. An operator's shell logs a home out
+		// whatever the host-execution policy, which governs what a hub runs
+		// on a request's behalf; the members apply their own.
+		claude := ui.ClaudeHomesOnMembers(db, cliOrigin(), offboard.LocalClaude{OperatorShell: true})
+
 		rep, err := offboard.Run(offboard.Options{
-			DB:       db,
-			Identity: identity,
-			Reason:   reason,
-			Actor:    operatorActor(),
-			Via:      "cli",
-			DryRun:   dryRun,
-			Projects: projects,
-			Tasks:    offboard.LocalTasks(),
+			DB:              db,
+			Identity:        identity,
+			Reason:          reason,
+			Actor:           operatorActor(),
+			Via:             "cli",
+			DryRun:          dryRun,
+			Projects:        projects,
+			Tasks:           offboard.LocalTasks(),
+			Secrets:         secrets,
+			Claude:          claude,
+			KeepCredentials: keep,
 		})
 		if err != nil {
 			return err
@@ -238,6 +284,30 @@ func printOffboardReport(rep offboard.Report, announced bool) {
 	row("secret leases", len(rep.Leases), done(len(rep.LeasesReleased)))
 	row("running tasks", len(rep.Tasks), done(len(rep.TasksStopped)))
 	row("project memberships", len(rep.Memberships), done(len(rep.MembershipsRevoked)))
+	// The stored footprint says what happened to it in its own verbs: a
+	// secret is destroyed or kept, not "severed".
+	doneAs := func(n int, verb string) string {
+		if rep.DryRun {
+			return "-"
+		}
+		return fmt.Sprintf("%d %s", n, verb)
+	}
+	creds := rep.Credentials
+	row("personal grants", len(creds.Grants), doneAs(len(rep.GrantsRevoked), "revoked"))
+	switch {
+	case creds.Keep && rep.DryRun:
+		row("personal secrets", len(creds.Secrets), "kept (legal hold)")
+	case creds.Keep:
+		row("personal secrets", len(creds.Secrets), fmt.Sprintf("%d kept (legal hold)", len(rep.SecretsKept)))
+	default:
+		row("personal secrets", len(creds.Secrets), doneAs(len(rep.SecretsDeleted), "destroyed"))
+	}
+	row("grant requests", len(creds.Requests), doneAs(len(rep.RequestsWithdrawn), "withdrawn"))
+	claudeResult := doneAs(claudeRemoved(rep), "removed")
+	if creds.Keep {
+		claudeResult = "kept (legal hold)"
+	}
+	row("claude logins", creds.ClaudeCopies(), claudeResult)
 	fmt.Fprintf(w, "projects\t%d\t%s\n", len(rep.Projects), "reported only (never deleted)")
 	_ = w.Flush()
 
@@ -279,6 +349,62 @@ func printOffboardReport(rep offboard.Report, announced bool) {
 	}
 	detail("Running tasks:", tasks)
 
+	var secrets []string
+	for _, sec := range creds.Secrets {
+		secrets = append(secrets, fmt.Sprintf("%-24s %-12s created %s", sec.Name, sec.Kind,
+			sec.CreatedAt.UTC().Format("2006-01-02")))
+	}
+	if creds.Keep {
+		detail("Personal secrets (KEPT under the legal hold):", secrets)
+	} else {
+		detail("Personal secrets (destroyed):", secrets)
+	}
+
+	var grants []string
+	for _, g := range creds.Grants {
+		grants = append(grants, fmt.Sprintf("%s  %s -> %s", truncateField(g.ID, 16), g.SecretName, g.Subject))
+	}
+	detail("Grants over them (revoked — a project listed here loses the credential):", grants)
+
+	var requests []string
+	for _, rq := range creds.Requests {
+		requests = append(requests, fmt.Sprintf("%s  %s for %s", truncateField(rq.ID, 16), rq.SecretName, rq.Subject))
+	}
+	detail("Pending grant requests (withdrawn):", requests)
+
+	var homes []string
+	for _, h := range creds.Claude {
+		where := "this process"
+		if h.Member != "" {
+			where = "member " + h.Member
+		}
+		var found []string
+		if h.Credential {
+			found = append(found, "credential")
+		} else if h.Exists {
+			found = append(found, "no credential")
+		}
+		if h.Login {
+			found = append(found, "login in flight")
+		}
+		homes = append(homes, fmt.Sprintf("%s: %s [%s]", where, h.Dir, strings.Join(found, ", ")))
+	}
+	for _, u := range creds.ClaudeUnreached {
+		homes = append(homes, fmt.Sprintf("member %s: NOT REACHED — %s", u.Member, u.Detail))
+	}
+	if creds.Keep {
+		detail("Claude Code logins (logins in flight cancelled, homes KEPT under the legal hold):", homes)
+	} else {
+		detail("Claude Code logins (cancelled, logged out and removed):", homes)
+	}
+	var outcomes []string
+	for _, r := range rep.ClaudeResults {
+		if r.Logout != "" {
+			outcomes = append(outcomes, fmt.Sprintf("%s: logout %s", r.Dir, r.Logout))
+		}
+	}
+	detail("Claude logout notes:", outcomes)
+
 	if len(rep.Projects) > 0 {
 		fmt.Printf("\n")
 		color.New(color.FgYellow).Printf("Projects owned by this identity — REASSIGN THESE:\n")
@@ -313,12 +439,25 @@ func printOffboardReport(rep offboard.Report, announced bool) {
 	printSessionRevocationBound(announced)
 }
 
+// claudeRemoved counts the Claude homes the run removed.
+func claudeRemoved(rep offboard.Report) int {
+	n := 0
+	for _, r := range rep.ClaudeResults {
+		if r.Removed {
+			n++
+		}
+	}
+	return n
+}
+
 func init() {
 	c := hubUserOffboardCmd
 	c.Flags().String("workdir", "", "hub directory holding .cloop/state.db (default: current directory)")
 	c.Flags().Bool("dry-run", false, "print the blast radius and change nothing")
 	c.Flags().Bool("json", false, "emit JSON for scripting")
 	c.Flags().String("reason", "", "why (required unless --dry-run; recorded in the audit trail)")
+	c.Flags().Bool("keep-credentials", false,
+		"legal hold: sever access as usual but keep the person's personal secrets and Claude homes")
 
 	hubUserCmd.AddCommand(hubUserOffboardCmd)
 	hubCmd.AddCommand(hubUserCmd)

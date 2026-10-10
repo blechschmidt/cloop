@@ -28,6 +28,9 @@ const (
 	clusterAPILeases      = clusterAPIPrefix + "leases"
 	clusterAPIRevokeLease = clusterAPIPrefix + "leases/revoke"
 	clusterAPIAgentOp     = clusterAPIPrefix + "agent"
+	// clusterAPIOffboardClaude: a departed identity's Claude logins on the
+	// member asked (Task 20400). See offboard_claude.go.
+	clusterAPIOffboardClaude = clusterAPIPrefix + "offboard/claude"
 )
 
 // clusterInternalBypass serves the member-to-member endpoints. Anything under
@@ -54,6 +57,8 @@ func (s *Server) clusterInternalBypass(next http.Handler) http.Handler {
 			s.handleClusterRevokeLease(w, r)
 		case r.URL.Path == clusterAPIAgentOp && r.Method == http.MethodPost:
 			s.handleClusterAgentOp(w, r)
+		case r.URL.Path == clusterAPIOffboardClaude && r.Method == http.MethodPost:
+			s.handleClusterOffboardClaude(w, r)
 		default:
 			jsonErr(w, "unknown cluster endpoint", http.StatusNotFound)
 		}

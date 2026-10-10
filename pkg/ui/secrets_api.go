@@ -1159,9 +1159,11 @@ func (s *Server) handleGrantDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Revocation follows the grant's secret: a personal grant is its owner's to
-	// pull (and an admin's, for offboarding), a shared one still needs
-	// secret.revoke. Resolved from the stored row rather than from the request,
-	// so the ID is the only thing the caller gets to choose.
+	// pull (and an admin's — offboarding revokes every one of a departed
+	// owner's itself since Task 20400, so this is for the cases in between), a
+	// shared one still needs secret.revoke. Resolved from the stored row rather
+	// than from the request, so the ID is the only thing the caller gets to
+	// choose.
 	viewer := s.secretViewer(r)
 	existing, gerr := bs.secret.ListGrantsFor(secretbroker.GrantFilter{}, viewer)
 	if gerr != nil {

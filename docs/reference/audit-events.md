@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 142 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 147 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 123 |
+| `control-plane` | the hub's own state.db | 128 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-142 actions in 38 families. Every action is listed: this section is the whole
+147 actions in 38 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
 
 ### task.*
 
@@ -645,28 +645,43 @@ Payload keys, on every action above: `scope`
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
 | `user.offboard` | `user` | control-plane | stable | An identity is offboarded, summarising every surface the operation touched. |
+| `user.offboard_claude` | `user` | control-plane | stable | Offboarding ends the identity's Claude Code logins on every hub member: cancels one in flight, logs each home out and removes it. |
 | `user.offboard_deny` | `user` | control-plane | stable | Offboarding writes deny bindings so a stale IdP mapping cannot re-admit the identity. |
 | `user.offboard_glasses` | `user` | control-plane | stable | Offboarding revokes the identity's display-glasses links. |
+| `user.offboard_grant` | `user` | control-plane | stable | Offboarding revokes every live grant over the identity's personal secrets, under a legal hold too. |
+| `user.offboard_hold` | `user` | control-plane | stable | An offboarding runs under a legal hold (`--keep-credentials`): access is severed and the stored credentials are kept. |
 | `user.offboard_lease` | `user` | control-plane | stable | Offboarding releases secret leases held on the identity's behalf. |
 | `user.offboard_membership` | `user` | control-plane | stable | Offboarding drops the identity's project memberships. |
 | `user.offboard_project` | `user` | control-plane | stable | Offboarding reports projects that need a new owner; it does not reassign them. |
+| `user.offboard_request` | `user` | control-plane | stable | Offboarding withdraws the self-service grant requests the identity left pending. |
+| `user.offboard_secret` | `user` | control-plane | stable | Offboarding destroys the identity's personal secrets through the broker. |
 | `user.offboard_session` | `user` | control-plane | stable | Offboarding revokes the identity's live sessions. |
 | `user.offboard_task` | `user` | control-plane | stable | Offboarding stops tasks the identity had running. |
 | `user.offboard_token` | `user` | control-plane | stable | Offboarding revokes the identity's API tokens. |
 
 Payload keys:
 
-- `user.offboard` — `sessions`, `tokens`, `glasses`, `denies`, `leases`, `tasks`, `projects`, `memberships`, `warnings`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard` — `sessions`, `tokens`, `glasses`, `denies`, `leases`, `tasks`, `projects`, `memberships`, `personal_secrets`, `personal_grants`, `grant_requests`, `claude_homes`, `legal_hold`, `warnings`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_claude` — `copies`, `removed`, `logged_out`, `logins_cancelled`, `unreached`, `kept`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_deny` — `count`, `bindings`, `claims`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_glasses` — `count`, `links`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_grant` — `count`, `grants`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_hold` — `secrets`, `claude_homes`, `grants_revoked`, `requests_withdrawn`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_lease` — `count`, `leases`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_membership` — `count`, `projects`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_project` — `count`, `projects`, `action`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_request` — `count`, `requests`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_secret` — `count`, `secrets`, `action`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_session` — `count`, `sessions`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_task` — `count`, `tasks`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_token` — `count`, `tokens`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 
+- `user.offboard_claude` — `copies` names each home by member and directory with what became of it. `unreached` lists hub members that could not be asked — a copy there may still hold a refresh token.
+- `user.offboard_grant` — Each grant also has its own `secret.revoke` row from the broker, naming the reason. `grants` names each one with its secret and subject, which is where a shared project that loses the credential shows up.
+- `user.offboard_hold` — Written whether or not anything was found to keep, so whether a hold was in force does not depend on what the person had stored.
 - `user.offboard_project` — Deliberately a report rather than a mutation — picking a project's next owner is not a decision an offboarding script should make.
+- `user.offboard_request` — Each request also has a `secret.request_withdraw` row whose reason says it was withdrawn at offboarding rather than by its requester.
+- `user.offboard_secret` — Each secret also has its own `secret.delete` row. The sealed columns are overwritten before the row is deleted, and a tombstone keeps the name so a later lease can say which credential a project lost. Not written under a legal hold — `user.offboard_hold` says what was kept instead.
 
 ### project.*
 

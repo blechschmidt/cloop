@@ -425,6 +425,7 @@ func (s *Server) startClusterBus() {
 	n.Subscribe(busTopicPresence, s.onBusPresence)
 	n.Subscribe(busTopicEdit, s.onBusEdit)
 	n.Subscribe(busTopicInvalidate, s.onBusInvalidate)
+	n.Subscribe(busTopicOffboard, s.onBusOffboard)
 	n.OnBusGap(s.onBusGap)
 	n.OnMembership(s.onMembershipChange)
 }

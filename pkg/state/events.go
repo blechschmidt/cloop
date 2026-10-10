@@ -62,6 +62,7 @@ const (
 	EventWriteBack         = statedb.EventWriteBack
 	EventFirewall          = statedb.EventFirewall
 	EventCredentialRefresh = statedb.EventCredentialRefresh
+	EventCredentialRefused = statedb.EventCredentialRefused
 	EventEgress            = statedb.EventEgress
 	EventFailover          = statedb.EventFailover
 	EventRunReexecuted     = statedb.EventRunReexecuted

@@ -86,6 +86,47 @@ func (s *Store) DeleteSecret(id string) error {
 	return translateErr(s.db.DeleteBrokerSecret(id))
 }
 
+// Compile-time proof that deletions here leave a tombstone (Task 20400).
+// Without it a renamed method would quietly turn every refusal of a deleted
+// secret back into "points at missing secret".
+var _ secretbroker.TombstoneStore = (*Store)(nil)
+
+// DeleteSecretTombstoned removes a secret and records what it was, in one
+// transaction.
+func (s *Store) DeleteSecretTombstoned(id string, t secretbroker.Tombstone) error {
+	return translateErr(s.db.DeleteBrokerSecretTombstoned(id, statedb.BrokerSecretTombstoneRow{
+		Name:      t.Name,
+		Kind:      string(t.Kind),
+		Owner:     t.Owner,
+		DeletedAt: formatTime(t.DeletedAt),
+		DeletedBy: t.DeletedBy,
+		Cause:     string(t.Cause),
+		Reason:    t.Reason,
+	}))
+}
+
+// GetTombstone returns what a deleted secret was.
+func (s *Store) GetTombstone(secretID string) (secretbroker.Tombstone, error) {
+	row, err := s.db.GetBrokerSecretTombstone(secretID)
+	if err != nil {
+		return secretbroker.Tombstone{}, translateErr(err)
+	}
+	cause := secretbroker.DeletionCause(row.Cause)
+	if cause == "" {
+		cause = secretbroker.CauseDeleted
+	}
+	return secretbroker.Tombstone{
+		SecretID:  row.SecretID,
+		Name:      row.Name,
+		Kind:      secretbroker.Kind(row.Kind),
+		Owner:     row.Owner,
+		DeletedAt: parseTime(row.DeletedAt),
+		DeletedBy: row.DeletedBy,
+		Cause:     cause,
+		Reason:    row.Reason,
+	}, nil
+}
+
 // PutGrant persists a grant.
 func (s *Store) PutGrant(g secretbroker.Grant) error {
 	constraints, err := json.Marshal(g.Constraints)
@@ -104,6 +145,7 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 		CreatedBy:       g.CreatedBy,
 		RevokedAt:       formatTime(g.RevokedAt),
 		Owner:           g.Owner,
+		RevokedCause:    string(g.RevokedCause),
 	})
 }
 
@@ -141,6 +183,14 @@ func (s *Store) ListGrants() ([]secretbroker.Grant, error) {
 // RevokeGrant stamps a grant revoked.
 func (s *Store) RevokeGrant(id string, at time.Time) error {
 	return translateErr(s.db.RevokeBrokerGrant(id, at))
+}
+
+// Compile-time proof that a revocation here keeps its cause (Task 20400).
+var _ secretbroker.CausedRevoker = (*Store)(nil)
+
+// RevokeGrantWithCause stamps a grant revoked and records why.
+func (s *Store) RevokeGrantWithCause(id string, at time.Time, cause secretbroker.RevocationCause) error {
+	return translateErr(s.db.RevokeBrokerGrantWithCause(id, at, string(cause)))
 }
 
 // Meta reads a broker-scoped metadata value.
@@ -189,16 +239,17 @@ func toGrant(row statedb.BrokerGrantRow) (secretbroker.Grant, error) {
 		return secretbroker.Grant{}, err
 	}
 	return secretbroker.Grant{
-		ID:          row.ID,
-		SecretID:    row.SecretID,
-		Scope:       row.Scope,
-		Subject:     subject,
-		Constraints: c,
-		ExpiresAt:   parseTime(row.ExpiresAt),
-		CreatedAt:   parseTime(row.CreatedAt),
-		CreatedBy:   row.CreatedBy,
-		RevokedAt:   parseTime(row.RevokedAt),
-		Owner:       row.Owner,
+		ID:           row.ID,
+		SecretID:     row.SecretID,
+		Scope:        row.Scope,
+		Subject:      subject,
+		Constraints:  c,
+		ExpiresAt:    parseTime(row.ExpiresAt),
+		CreatedAt:    parseTime(row.CreatedAt),
+		CreatedBy:    row.CreatedBy,
+		RevokedAt:    parseTime(row.RevokedAt),
+		Owner:        row.Owner,
+		RevokedCause: secretbroker.RevocationCause(row.RevokedCause),
 	}, nil
 }
 

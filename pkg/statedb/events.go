@@ -172,6 +172,19 @@ const (
 	// they cannot see it.
 	EventCredentialRefresh EventType = "credential_refresh"
 
+	// EventCredentialRefused records that a run went without a credential the
+	// project was granted, because the secret behind the grant no longer
+	// exists (Task 20400) — most often a colleague's personal credential,
+	// destroyed when they were offboarded.
+	//
+	// On the project's journal for the reason the refresh row is: the symptom
+	// — git refusing to authenticate, a cluster answering 401 — lands on the
+	// people running the project, and the cause is a deletion on the hub they
+	// may not even be able to see, since a grant over a personal secret is
+	// visible to its owner and to admins alone. Written on the first run after
+	// the loss on each hub process, not on every run.
+	EventCredentialRefused EventType = "credential_refused"
+
 	// EventEgress records what became of a run's access to the hub's egress
 	// proxy (Task 20378): the session it was issued and the route to it, why
 	// a project holding an egress grant got none, and when a session ended —

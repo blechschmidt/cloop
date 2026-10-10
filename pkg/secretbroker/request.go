@@ -518,6 +518,62 @@ func (b *Broker) WithdrawRequest(ctx context.Context, id, actor string) (AccessR
 	return req, nil
 }
 
+// WithdrawRequestOnOffboard withdraws a pending request because the person who
+// filed it has been offboarded (Task 20400).
+//
+// The one withdrawal the requester does not make, and the exception is narrow
+// on purpose. WithdrawRequest refuses everyone but the requester so that an
+// approver who does not want a request says no on the record — a rule about
+// people who are still here. A departed requester cannot withdraw anything,
+// and leaving the ask open would let a later approval mint a grant for a
+// person the hub no longer admits. So the offboarding withdraws it, under the
+// offboarding actor's name, with the reason in the decision note — a different
+// act from a denial, because nobody judged the request.
+//
+// A request that is no longer pending reports ErrRequestNotPending, which the
+// offboarding treats as already settled.
+func (b *Broker) WithdrawRequestOnOffboard(ctx context.Context, id, actor, reason string) (AccessRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return AccessRequest{}, err
+	}
+	ev := Event{Action: ActionRequestWithdraw, Actor: actor, RequestID: id}
+
+	store, err := b.requests()
+	if err != nil {
+		return AccessRequest{}, b.denyErr(ev, err)
+	}
+	req, err := store.GetAccessRequest(strings.TrimSpace(id))
+	if err != nil {
+		return AccessRequest{}, b.denyf(ev, ErrRequestNotFound, "request %q: %v", id, err)
+	}
+	ev.SecretID, ev.SecretName, ev.Kind = req.SecretID, req.SecretName, req.Kind
+	ev.Subject = req.Subject.String()
+
+	if req.State != RequestPending {
+		return AccessRequest{}, b.denyf(ev, ErrRequestNotPending, "request is already %s", req.State)
+	}
+
+	// The note is fixed and the reason is not in it: a request's decision note
+	// is shown to everyone who reviews requests, and why somebody left is not
+	// theirs to read. The reason goes on the audit row, which only admins read.
+	note := "withdrawn when " + req.RequestedBy + " was offboarded"
+	req.State = RequestWithdrawn
+	req.DecidedBy = strings.TrimSpace(actor)
+	req.DecidedAt = b.now()
+	req.DecisionNote = clipUTF8(note, MaxJustificationBytes)
+	if err := store.PutAccessRequest(req); err != nil {
+		return AccessRequest{}, b.denyf(ev, ErrInvalidRequest, "store request: %v", err)
+	}
+
+	ev.Decision = DecisionAllow
+	ev.Reason = note
+	if reason = strings.TrimSpace(reason); reason != "" {
+		ev.Reason += ": " + reason
+	}
+	b.emit(ev)
+	return req, nil
+}
+
 // DecideInput is what an approver supplies. Shared by ApproveRequest and
 // DenyRequest so the two cannot drift apart on identity or note handling.
 type DecideInput struct {

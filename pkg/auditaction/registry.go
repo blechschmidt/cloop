@@ -1465,11 +1465,12 @@ var registry = []Entry{
 	// single row could only report the aggregate, which is the one shape that
 	// cannot answer "what is still live".
 	{
-		Action:    ActionUserOffboard,
-		Home:      HomeControlPlane,
-		Entity:    "user",
-		Trigger:   "An identity is offboarded, summarising every surface the operation touched.",
-		Payload:   append([]string{"sessions", "tokens", "glasses", "denies", "leases", "tasks", "projects", "memberships", "warnings"}, offboardPayload...),
+		Action:  ActionUserOffboard,
+		Home:    HomeControlPlane,
+		Entity:  "user",
+		Trigger: "An identity is offboarded, summarising every surface the operation touched.",
+		Payload: append([]string{"sessions", "tokens", "glasses", "denies", "leases", "tasks", "projects", "memberships",
+			"personal_secrets", "personal_grants", "grant_requests", "claude_homes", "legal_hold", "warnings"}, offboardPayload...),
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 	},
@@ -1545,6 +1546,64 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note:      "Deliberately a report rather than a mutation — picking a project's next owner is not a decision an offboarding script should make.",
+	},
+	// The stored footprint (Task 20400): what the identity keeps on the hub
+	// rather than holds open. Written after the credential transaction, one
+	// row per part that changed, so a partial run says which part survived.
+	{
+		Action:    ActionUserOffboardGrant,
+		Home:      HomeControlPlane,
+		Entity:    "user",
+		Trigger:   "Offboarding revokes every live grant over the identity's personal secrets, under a legal hold too.",
+		Payload:   append([]string{"count", "grants"}, offboardPayload...),
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Each grant also has its own `secret.revoke` row from the broker, naming the reason. `grants` names each " +
+			"one with its secret and subject, which is where a shared project that loses the credential shows up.",
+	},
+	{
+		Action:    ActionUserOffboardSecret,
+		Home:      HomeControlPlane,
+		Entity:    "user",
+		Trigger:   "Offboarding destroys the identity's personal secrets through the broker.",
+		Payload:   append([]string{"count", "secrets", "action"}, offboardPayload...),
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Each secret also has its own `secret.delete` row. The sealed columns are overwritten before the row is " +
+			"deleted, and a tombstone keeps the name so a later lease can say which credential a project lost. " +
+			"Not written under a legal hold — `user.offboard_hold` says what was kept instead.",
+	},
+	{
+		Action:    ActionUserOffboardRequest,
+		Home:      HomeControlPlane,
+		Entity:    "user",
+		Trigger:   "Offboarding withdraws the self-service grant requests the identity left pending.",
+		Payload:   append([]string{"count", "requests"}, offboardPayload...),
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "Each request also has a `secret.request_withdraw` row whose reason says it was withdrawn at offboarding rather than by its requester.",
+	},
+	{
+		Action:  ActionUserOffboardClaude,
+		Home:    HomeControlPlane,
+		Entity:  "user",
+		Trigger: "Offboarding ends the identity's Claude Code logins on every hub member: cancels one in flight, logs each home out and removes it.",
+		Payload: append([]string{"copies", "removed", "logged_out", "logins_cancelled", "unreached", "kept"},
+			offboardPayload...),
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`copies` names each home by member and directory with what became of it. `unreached` lists hub members " +
+			"that could not be asked — a copy there may still hold a refresh token.",
+	},
+	{
+		Action:    ActionUserOffboardHold,
+		Home:      HomeControlPlane,
+		Entity:    "user",
+		Trigger:   "An offboarding runs under a legal hold (`--keep-credentials`): access is severed and the stored credentials are kept.",
+		Payload:   append([]string{"secrets", "claude_homes", "grants_revoked", "requests_withdrawn"}, offboardPayload...),
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "Written whether or not anything was found to keep, so whether a hold was in force does not depend on what the person had stored.",
 	},
 
 	// ── project ────────────────────────────────────────────────────────────

@@ -221,6 +221,18 @@ database.
   token is announced the same way; so is what `cloop hub session revoke`,
   `cloop hub token revoke` and `cloop hub user offboard` end, from outside the
   cluster.
+- **Offboarding reaches every member's Claude Code homes** (Task 20400). A
+  per-user login lives under the config directory of the process that made
+  it, not in the database, so members under different users or container
+  filesystems keep one copy each. The member serving a dashboard offboarding
+  removes its own and calls `/api/internal/cluster/offboard/claude` on every
+  live peer; `cloop hub user offboard`, which is no member, puts the request on
+  the bus (topic `offboard`) and reads each member's answer back, addressed to
+  it. Each member advertises its root in its member row (`claude_homes`), so a
+  stopped member's tree on a host that is still up is named rather than
+  forgotten. A member acts on another process's word only for an identity the
+  control plane denies, and a member that does not answer is reported — see
+  [offboarding](../security/model.md#offboarding-what-a-departed-identity-keeps).
 - **Refreshing an OIDC session** takes a cluster-wide lock, so a refresh token
   that the provider rotates is redeemed once.
 - **`config.yaml` and `projects.json`** are written under a file lock.

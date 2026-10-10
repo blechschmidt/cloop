@@ -19,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
 // envClusterAdvertiseURL sets the advertise URL per process, which is what a
@@ -43,11 +44,18 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*
 	if err != nil {
 		return nil, err
 	}
+	// Where this process keeps per-user Claude homes, so an offboarding can
+	// tell a stopped member's tree from the ones it reached (Task 20400).
+	var endpoints map[string]string
+	if root := ui.ClaudeHomesRoot(); root != "" {
+		endpoints = map[string]string{"claude_homes": root}
+	}
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),
 		Address:      listen.String(),
 		AdvertiseURL: advertise,
 		Version:      Version(),
+		Endpoints:    endpoints,
 		Peer:         peer,
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "cluster: "+format+"\n", args...)

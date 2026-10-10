@@ -1,6 +1,9 @@
 package secretbroker
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors. Callers match with errors.Is; every constructor in this
 // package wraps one of these with %w and adds detail.
@@ -24,6 +27,12 @@ var (
 
 	// ErrSecretNotFound: no secret with that ID or name exists.
 	ErrSecretNotFound = errors.New("secretbroker: secret not found")
+	// ErrSecretDeleted: the secret a grant points at existed and was
+	// destroyed, and its tombstone says what it was (Task 20400). It wraps
+	// ErrSecretNotFound, so every caller that treats a missing secret as final
+	// treats a deleted one the same way; the difference is that the denial
+	// carrying it can name the credential instead of quoting an id.
+	ErrSecretDeleted = fmt.Errorf("%w: deleted", ErrSecretNotFound)
 	// ErrGrantNotFound: no grant with that ID exists.
 	ErrGrantNotFound = errors.New("secretbroker: grant not found")
 	// ErrLeaseNotFound: the lease ID is unknown or already released.

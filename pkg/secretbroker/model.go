@@ -671,6 +671,11 @@ type Grant struct {
 	// revoked grants it leaves behind still say whose credential they spent,
 	// which is exactly the question an offboarding or incident review asks.
 	Owner string `json:"owner,omitempty"`
+	// RevokedCause is why a revoked grant was revoked, when a revocation said
+	// (Task 20400): its owner was offboarded, or its secret was deleted. Empty
+	// for a grant revoked by hand. It decides whether a lease that meets the
+	// grant hands the refusal back for the project to be told.
+	RevokedCause RevocationCause `json:"revoked_cause,omitempty"`
 }
 
 // Personal reports whether this grant hands out a personally-owned credential.

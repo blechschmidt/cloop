@@ -177,6 +177,31 @@ func WithCipher(c *Cipher) Option {
 	}
 }
 
+// WithoutKey builds a broker that can administer the store — list, revoke,
+// delete, withdraw — and can neither seal nor open a payload (Task 20400).
+//
+// It exists for offboarding from a shell. Destroying a departed user's
+// personal secrets needs no key: it removes rows, it never reads them. A
+// broker that insisted on CLOOP_SECRET_KEY anyway would make the command fail
+// in exactly the emergency it is for, on a host whose operator shell does not
+// carry the hub's sealing passphrase. Every operation that would touch
+// material — Mint, Lease, anything that opens a payload — fails with ErrNoKey,
+// so a keyless broker cannot be mistaken for a working one.
+func WithoutKey() Option {
+	return func(b *Broker) { b.seal = lockedSealer{} }
+}
+
+// lockedSealer is the sealer of a WithoutKey broker.
+type lockedSealer struct{}
+
+func (lockedSealer) SealFor(string, []byte) (Envelope, error) {
+	return Envelope{}, fmt.Errorf("%w: this broker administers the store and holds no key to seal with", ErrNoKey)
+}
+
+func (lockedSealer) OpenEnvelope(string, Envelope) ([]byte, error) {
+	return nil, fmt.Errorf("%w: this broker administers the store and holds no key to open payloads with", ErrNoKey)
+}
+
 // WithKeyring supplies a pre-opened Keyring, so a caller that already built
 // one (the hub, which shares it with the session store) does not pay the KDF
 // cost a second time.
@@ -399,6 +424,17 @@ func (b *Broker) ListSecrets() ([]Secret, error) {
 // Leaving grants behind would leave rows that resolve to nothing and read,
 // in a grant listing, as still-live access.
 func (b *Broker) DeleteSecret(ctx context.Context, ref, actor string) error {
+	return b.DeleteSecretBecause(ctx, ref, actor, CauseDeleted, "")
+}
+
+// DeleteSecretBecause is DeleteSecret with a cause and a reason (Task 20400).
+//
+// The reason lands on the secret.delete audit row and on the tombstone; the
+// cause is what a later refusal tells the project that lost the credential —
+// "deleted", or "destroyed when its owner was offboarded". The store scrubs
+// the sealed columns before it deletes the row (statedb.deleteBrokerSecret),
+// so the material is overwritten rather than merely unlinked.
+func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cause DeletionCause, reason string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -408,15 +444,31 @@ func (b *Broker) DeleteSecret(ctx context.Context, ref, actor string) error {
 		return b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", SafeRef(ref), err)
 	}
 	ev.SecretID, ev.SecretName, ev.Kind = s.ID, s.Name, s.Kind
+	if cause == "" {
+		cause = CauseDeleted
+	}
 
 	grants, err := b.store.ListGrants()
 	if err != nil {
 		return b.denyf(ev, ErrGrantNotFound, "list grants: %v", err)
 	}
 	now := b.now()
+	revokedFor := "secret " + s.Name + " deleted"
+	grantCause := RevokedSecretDeleted
+	if cause == CauseOffboarded {
+		revokedFor = "secret " + s.Name + " destroyed when its owner was offboarded"
+		grantCause = RevokedOwnerOffboarded
+	}
 	for _, g := range grants {
 		if g.SecretID == s.ID && g.RevokedAt.IsZero() {
-			if rerr := b.store.RevokeGrant(g.ID, now); rerr != nil {
+			// A grant that had already lapsed lost nothing to this deletion:
+			// it is stamped, so no listing reads it as live, but with no
+			// cause, so no project is told it lost something it no longer had.
+			cause := grantCause
+			if !g.Active(now) {
+				cause = ""
+			}
+			if rerr := b.revokeStored(g.ID, now, cause); rerr != nil {
 				return b.denyf(ev, ErrInvalidGrant, "revoke dependent grant %s: %v", g.ID, rerr)
 			}
 			// Deleting the App credential does not reach the tokens already
@@ -425,16 +477,41 @@ func (b *Broker) DeleteSecret(ctx context.Context, ref, actor string) error {
 			// a secret would be the one withdrawal that leaves live credentials
 			// behind, which is the opposite of what an operator deleting a
 			// credential during an incident is asking for.
-			b.destroyGrantTokens(ctx, g.ID, "secret "+s.Name+" deleted")
+			b.destroyGrantTokens(ctx, g.ID, revokedFor)
 		}
 	}
-	if err := b.store.DeleteSecret(s.ID); err != nil {
+	if ts, ok := b.store.(TombstoneStore); ok {
+		err = ts.DeleteSecretTombstoned(s.ID, Tombstone{
+			SecretID: s.ID, Name: s.Name, Kind: s.Kind, Owner: s.Owner,
+			DeletedAt: now, DeletedBy: actor, Cause: cause,
+			Reason: RedactString(strings.TrimSpace(reason)),
+		})
+	} else {
+		err = b.store.DeleteSecret(s.ID)
+	}
+	if err != nil {
 		return b.denyf(ev, ErrSecretNotFound, "delete: %v", err)
 	}
 
 	ev.Decision = DecisionAllow
+	ev.Reason = deletionReason(cause, reason)
 	b.emit(ev)
 	return nil
+}
+
+// deletionReason is the secret.delete row's reason: empty for an ordinary
+// delete that gave none, as before, and otherwise the cause and what the
+// deleter wrote.
+func deletionReason(cause DeletionCause, reason string) string {
+	reason = strings.TrimSpace(reason)
+	switch {
+	case cause == CauseOffboarded && reason != "":
+		return "owner offboarded: " + reason
+	case cause == CauseOffboarded:
+		return "owner offboarded"
+	default:
+		return reason
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +665,21 @@ func (b *Broker) ListGrants(f GrantFilter) ([]Grant, error) {
 // there until that lease expires, which is exactly the window the short
 // lease TTL exists to bound.
 func (b *Broker) Revoke(ctx context.Context, grantID, actor string) error {
+	return b.RevokeBecause(ctx, grantID, actor, "")
+}
+
+// RevokeBecause is Revoke with a reason on its secret.revoke row (Task
+// 20400): an offboarding revokes the grants over the departed person's
+// secrets, and "revoked" alone does not say that is why.
+func (b *Broker) RevokeBecause(ctx context.Context, grantID, actor, reason string) error {
+	return b.RevokeWithCause(ctx, grantID, actor, "", reason)
+}
+
+// RevokeWithCause is RevokeBecause recording on the grant why it was revoked
+// (Task 20400). Offboarding revokes with RevokedOwnerOffboarded, which is what
+// lets the project's next lease tell it the grant went with its owner — even
+// when the secret is kept under a legal hold, or destroyed days later.
+func (b *Broker) RevokeWithCause(ctx context.Context, grantID, actor string, cause RevocationCause, reason string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -611,7 +703,7 @@ func (b *Broker) Revoke(ctx context.Context, grantID, actor string) error {
 		b.emit(ev)
 		return nil
 	}
-	if err := b.store.RevokeGrant(grantID, b.now()); err != nil {
+	if err := b.revokeStored(grantID, b.now(), cause); err != nil {
 		return b.denyf(ev, ErrInvalidGrant, "revoke: %v", err)
 	}
 	// For a github_app grant the hub minted the credential, so it can end it
@@ -621,8 +713,18 @@ func (b *Broker) Revoke(ctx context.Context, grantID, actor string) error {
 	b.destroyGrantTokens(ctx, grantID, "grant "+grantID+" revoked")
 
 	ev.Decision = DecisionAllow
+	ev.Reason = strings.TrimSpace(reason)
 	b.emit(ev)
 	return nil
+}
+
+// revokeStored stamps a grant revoked, with its cause where the store keeps
+// one.
+func (b *Broker) revokeStored(grantID string, at time.Time, cause RevocationCause) error {
+	if cr, ok := b.store.(CausedRevoker); ok {
+		return cr.RevokeGrantWithCause(grantID, at, cause)
+	}
+	return b.store.RevokeGrant(grantID, at)
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +787,25 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		materials []Material
 		earliest  time.Time
 		rec       mints
+		refused   []RefusedCredential
 	)
+	// refuse records a grant the project lost to something done elsewhere —
+	// its secret destroyed, or its owner offboarded — on the audit row, by
+	// name rather than by id, and, when tell is set, on the lease, for the
+	// dispatcher to show the project (Task 20400). A shared project granted a
+	// colleague's personal credential finds out this way, on its next run,
+	// that the colleague was offboarded.
+	refuse := func(ev Event, g Grant, sentinel error, reason, name string, kind Kind, owner string,
+		deletedAt time.Time, tell bool) {
+		ev.SecretName, ev.Kind = name, kind
+		_ = b.denyf(ev, sentinel, "%s", reason)
+		if tell {
+			refused = append(refused, RefusedCredential{
+				GrantID: g.ID, SecretID: g.SecretID, SecretName: name, Kind: kind,
+				Owner: owner, DeletedAt: deletedAt, Reason: reason,
+			})
+		}
+	}
 	for _, g := range grants {
 		if !g.Subject.Matches(r) {
 			continue
@@ -703,8 +823,28 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 
 		if reason := g.DenyReason(now); reason != "" {
 			sentinel := ErrGrantExpired
-			if !g.RevokedAt.IsZero() {
+			revoked := !g.RevokedAt.IsZero()
+			if revoked {
 				sentinel = ErrGrantRevoked
+			}
+			// Told only when the cause on the grant says the project lost it
+			// to an offboarding or a deletion. One somebody revoked by hand,
+			// or one that had simply expired, its owner already knows about,
+			// and naming it on every run would bury the grants that matter.
+			tell := revoked && g.RevokedCause.tellsTheProject()
+			if t, why, gone := b.deletedSecretRefusal(g); gone {
+				// Deleting a secret revokes every grant over it, so a revoked
+				// grant is the usual shape a destroyed credential takes here.
+				refuse(ev, g, sentinel, reason+": "+why, t.Name, t.Kind, t.Owner, t.DeletedAt, tell)
+				continue
+			}
+			if tell && g.RevokedCause == RevokedOwnerOffboarded {
+				// Its owner left and the secret was kept under a legal hold.
+				if s, serr := b.store.GetSecret(g.SecretID); serr == nil {
+					refuse(ev, g, sentinel, reason+": "+withdrawnDescription(s, g), s.Name, s.Kind, s.Owner,
+						time.Time{}, true)
+					continue
+				}
 			}
 			_ = b.denyf(ev, sentinel, "%s", reason)
 			continue
@@ -712,7 +852,13 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 
 		s, serr := b.store.GetSecret(g.SecretID)
 		if serr != nil {
-			_ = b.denyf(ev, ErrSecretNotFound, "grant %s points at missing secret %s", g.ID, g.SecretID)
+			if t, why, gone := b.deletedSecretRefusal(g); gone {
+				refuse(ev, g, ErrSecretDeleted, "grant "+g.ID+" spent a secret that no longer exists: "+why,
+					t.Name, t.Kind, t.Owner, t.DeletedAt, true)
+				continue
+			}
+			reason := fmt.Sprintf("grant %s points at missing secret %s", g.ID, g.SecretID)
+			refuse(ev, g, ErrSecretNotFound, reason, "", "", g.Owner, time.Time{}, true)
 			continue
 		}
 		ev.SecretName, ev.Kind = s.Name, s.Kind
@@ -748,6 +894,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		IssuedAt:   now,
 		ExpiresAt:  b.leaseDeadline(now, earliest),
 		Materials:  materials,
+		Refused:    refused,
 	}
 
 	// Now that the lease has an ID, record which approved requests it redeemed

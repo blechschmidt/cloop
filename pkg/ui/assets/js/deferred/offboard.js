@@ -21,14 +21,22 @@
   'use strict';
 
   window.cloopOffboardPanel = function (h) {
-    const offbState = {plan: null, identity: ''};
+    const offbState = {plan: null, identity: '', keep: false};
 
     // _offbRun posts to the one route. dryRun chooses preview or write; both go
     // through the same gate, because enumerating somebody's credential footprint
-    // is the read a stolen operator cookie would want.
-    function _offbRun(identity, reason, dryRun) {
+    // is the read a stolen operator cookie would want. keep is the legal hold
+    // (Task 20400): the preview is asked with it too, so what it lists as kept
+    // is what the server will keep.
+    function _offbRun(identity, reason, dryRun, keep) {
       return h.apiMethod('POST', '/api/users/offboard',
-        {identity: identity, reason: reason || '', dry_run: !!dryRun});
+        {identity: identity, reason: reason || '', dry_run: !!dryRun, keep_credentials: !!keep});
+    }
+
+    // _offbKeep reads the legal-hold box under the form.
+    function _offbKeep() {
+      const box = document.getElementById('offboardKeep');
+      return !!(box && box.checked);
     }
 
     function offboardPreview() {
@@ -39,9 +47,11 @@
       const box = document.getElementById('offboardResult');
       if (box) { box.style.display = ''; box.innerHTML = '<p class="sec-hint">Resolving&hellip;</p>'; }
 
-      _offbRun(identity, '', true).then(rep => {
+      const keep = _offbKeep();
+      _offbRun(identity, '', true, keep).then(rep => {
         offbState.plan = rep;
         offbState.identity = identity;
+        offbState.keep = keep;
         _offbRenderPreview(rep);
       }).catch(err => {
         offbState.plan = null;
@@ -61,6 +71,10 @@
       if (!box) return;
       const t = (rep && rep.target) || {};
       const n = k => ((rep && rep[k]) || []).length;
+      const creds = (rep && rep.credentials) || {};
+      const c = k => (creds[k] || []).length;
+      const keep = !!creds.keep;
+      const copies = (creds.claude || []).filter(x => x.exists || x.login).length;
 
       const rows = [
         ['Sessions',      n('sessions'), 'ended'],
@@ -70,6 +84,10 @@
         ['Secret leases', n('leases'),   'released'],
         ['Running tasks', n('tasks'),    'stopped'],
         ['Project memberships', n('memberships'), 'removed'],
+        ['Grants over personal secrets', c('grants'), 'revoked'],
+        ['Personal secrets', c('secrets'), keep ? 'kept (legal hold)' : 'destroyed'],
+        ['Pending grant requests', c('requests'), 'withdrawn'],
+        ['Claude Code logins', copies, keep ? 'kept (legal hold)' : 'logged out and removed'],
       ].map(r =>
         '<tr><td>' + h.esc(r[0]) + '</td><td style="text-align:right"><strong>' + r[1] +
         '</strong></td><td class="sec-count">' + h.esc(r[2]) + '</td></tr>').join('');
@@ -90,13 +108,14 @@
           '</strong> &mdash; reassign them: ' +
           projects.map(p => '<code>' + h.esc(p.name || p.path) + '</code>').join(', ') + '</p>';
       }
+      html += _offbCredentialDetail(creds);
       ((rep && rep.warnings) || []).forEach(w => {
         html += '<div class="sec-banner" style="margin-top:8px">' + h.esc(w) + '</div>';
       });
 
       html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
         '<button class="btn danger" id="offboardConfirmBtn" data-global-perm="user.manage">' +
-          'Offboard ' + h.esc(t.key || offbState.identity) + '</button>' +
+          'Offboard ' + h.esc(t.key || offbState.identity) + (keep ? ' under a legal hold' : '') + '</button>' +
         '<button class="btn" id="offboardCancelBtn">Cancel</button></div>';
 
       box.innerHTML = html;
@@ -108,7 +127,44 @@
         box.style.display = 'none';
         box.innerHTML = '';
       });
+      // Flipping the hold after previewing asks again: the confirmation must
+      // name what the server will do, not what the box said a moment ago.
+      const keepBox = document.getElementById('offboardKeep');
+      if (keepBox && !keepBox.dataset.offbWired) {
+        keepBox.dataset.offbWired = '1';
+        keepBox.addEventListener('change', () => { if (offbState.plan) offboardPreview(); });
+      }
       h.gate();
+    }
+
+    // _offbCredentialDetail lists what the identity keeps here — by name, so an
+    // operator sees which shared project loses which credential before it does.
+    function _offbCredentialDetail(creds) {
+      const keep = !!creds.keep;
+      const list = (title, items) => items.length
+        ? '<p class="sec-hint" style="margin-top:10px"><strong>' + h.esc(title) + '</strong></p><ul class="sec-hint">' +
+          items.map(i => '<li>' + i + '</li>').join('') + '</ul>'
+        : '';
+      let html = '';
+      html += list(keep ? 'Personal secrets — kept under the legal hold' : 'Personal secrets — destroyed',
+        (creds.secrets || []).map(x => '<code>' + h.esc(x.name) + '</code> ' + h.esc(x.kind || '') +
+          (x.created_at ? ', created ' + h.esc(String(x.created_at).slice(0, 10)) : '')));
+      html += list('Grants over them — revoked; a project listed here loses the credential',
+        (creds.grants || []).map(g => '<code>' + h.esc(g.secret_name || g.secret_id) + '</code> &rarr; <code>' +
+          h.esc(g.subject) + '</code>'));
+      html += list('Pending grant requests — withdrawn',
+        (creds.requests || []).map(r => '<code>' + h.esc(r.secret_name || '') + '</code> for <code>' +
+          h.esc(r.subject) + '</code>'));
+      html += list(keep ? 'Claude Code logins — kept under the legal hold (a login in flight is still cancelled)'
+                        : 'Claude Code logins — logged out and removed',
+        (creds.claude || []).filter(x => x.exists || x.login).map(x =>
+          h.esc(x.member ? 'member ' + x.member : 'this hub') + ': <code>' + h.esc(x.dir) + '</code>' +
+          h.esc((x.credential ? ' — credential' : '') + (x.login ? ' — login in flight' : ''))));
+      (creds.claude_unreached || []).forEach(u => {
+        html += '<div class="sec-banner" style="margin-top:8px">' +
+          h.esc('Hub member ' + u.member + ' cannot be reached: ' + u.detail) + '</div>';
+      });
+      return html;
     }
 
     function offboardConfirm() {
@@ -124,13 +180,19 @@
       if (reason === null) return;
       if (reason.trim().length < 4) { h.toast('A reason is required', 'err'); return; }
 
+      const keep = offbState.keep;
       if (!confirm(
           'Sever every credential ' + who + ' holds?\n\n' +
           'Their sessions, API tokens and glasses links stop working immediately, ' +
           'their running tasks are stopped, and a deny binding blocks a fresh sign-in.\n\n' +
+          (keep
+            ? 'LEGAL HOLD: their personal secrets and Claude Code logins are kept; the grants over ' +
+              'the secrets are still revoked and pending requests withdrawn.\n\n'
+            : 'Their personal secrets are destroyed, the grants over them revoked, pending requests ' +
+              'withdrawn, and their Claude Code login removed from every hub member.\n\n') +
           'Projects they own are kept and reported for reassignment.')) return;
 
-      _offbRun(offbState.identity, reason, false).then(rep => {
+      _offbRun(offbState.identity, reason, false, keep).then(rep => {
         _offbRenderResult(rep);
         h.sessions();
       }).catch(err => h.toast('Offboard failed: ' + ((err && err.message) || String(err)), 'err'));
@@ -146,6 +208,8 @@
       const n = k => ((rep && rep[k]) || []).length;
       const failures = (rep && rep.failures) || [];
 
+      const claude = (rep && rep.claude_results) || [];
+      const keep = !!(rep && rep.credentials && rep.credentials.keep);
       const rows = [
         ['Sessions ended',      n('sessions_revoked')],
         ['API tokens revoked',  n('tokens_revoked')],
@@ -154,6 +218,12 @@
         ['Secret leases released', n('leases_released')],
         ['Running tasks stopped', n('tasks_stopped')],
         ['Project memberships removed', n('memberships_revoked')],
+        ['Grants over personal secrets revoked', n('grants_revoked')],
+        keep ? ['Personal secrets kept (legal hold)', n('secrets_kept')]
+             : ['Personal secrets destroyed', n('secrets_deleted')],
+        ['Pending grant requests withdrawn', n('requests_withdrawn')],
+        keep ? ['Claude Code logins kept (legal hold)', claude.filter(x => x.kept).length]
+             : ['Claude Code logins removed', claude.filter(x => x.removed).length],
       ].map(r => '<tr><td>' + h.esc(r[0]) + '</td><td style="text-align:right"><strong>' +
         r[1] + '</strong></td></tr>').join('');
 

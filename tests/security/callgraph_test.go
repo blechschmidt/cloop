@@ -55,6 +55,31 @@ var gatedHostExecution = map[string]string{
 		"the comparison into a sandbox of its own would lift this",
 }
 
+// gatedHostSteps enumerates handlers that run one program on the control-plane
+// host as a *step* of an operation that must not itself be refused under strict
+// mode, with the reason each cannot refuse.
+//
+// gatedHostExecution's members refuse the whole request when host execution is
+// off; that is right for an endpoint whose only job is the program. It is wrong
+// for an operation whose program is one best-effort step among several that
+// must happen on every hub — offboarding has to destroy a departed person's
+// credentials on a strict hub too. So for these the policy is checked inside
+// the step, which is skipped and reported when host execution is off, and
+// TestGatedStepsRunNothingUnderStrictMode proves, through the real handler,
+// that nothing is spawned then — and that the same request does spawn it
+// otherwise, so the proof cannot pass because the step never ran at all.
+//
+// The dashboard's own offboarding (handleUserOffboard) reaches the same step
+// through an interface this reference graph does not follow, and is covered by
+// the same check because the check lives in the step rather than in a caller.
+var gatedHostSteps = map[string]string{
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleClusterOffboardClaude": "a hub member's half of an " +
+		"offboarding (Task 20400): it removes the departed identity's Claude Code homes in its own tree and, as " +
+		"a best-effort step before that, runs `claude auth logout` scoped to each home so the session is revoked " +
+		"at Anthropic as well. offboard.LocalClaude skips the logout when executor.HostExecutionAllowed() is " +
+		"false and still removes the home — refusing the request would leave the refresh token on disk",
+}
+
 // minExpectedHandlers guards against the analysis silently finding nothing.
 // If a refactor renames Server methods or changes the handler signature, the
 // count collapses and this test must fail loudly rather than pass vacuously —
@@ -88,6 +113,9 @@ func TestNoHandlerReachesProcessExecution(t *testing.T) {
 		if _, allowed := gatedHostExecution[key]; allowed {
 			continue
 		}
+		if _, gatedStep := gatedHostSteps[key]; gatedStep {
+			continue
+		}
 		t.Errorf("host execution reachable from an HTTP handler:\n%s\n"+
 			"Route this through executor.Resolve(projectPath).Start(...) — see "+
 			"pkg/ui/executor.go (startWorkload/runWorkload) or "+
@@ -106,10 +134,15 @@ func TestNoHandlerReachesProcessExecution(t *testing.T) {
 			stale = append(stale, key)
 		}
 	}
+	for key := range gatedHostSteps {
+		if !seen[key] {
+			stale = append(stale, key)
+		}
+	}
 	sort.Strings(stale)
 	for _, key := range stale {
-		t.Errorf("gatedHostExecution lists %s, but it no longer reaches process "+
-			"execution. Remove the entry — the exemption list must only shrink.", key)
+		t.Errorf("%s is exempted (gatedHostExecution or gatedHostSteps), but it no longer "+
+			"reaches process execution. Remove the entry — the exemption lists must only shrink.", key)
 	}
 }
 

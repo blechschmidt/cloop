@@ -72,14 +72,29 @@ func IdentitySlug(ownerKey string) string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
-// HomeRoot returns the directory holding every identity's Claude config
-// directory, creating it 0700 if absent.
-func HomeRoot() (string, error) {
+// HomeRootPath returns where this process keeps every identity's Claude
+// config directory, without creating anything.
+//
+// Each hub process resolves it from its own environment, so two processes
+// serving one control plane under different users, XDG_CONFIG_HOME values or
+// container filesystems keep two different trees — which is why offboarding
+// asks every hub member to forget a home rather than forgetting one copy
+// (Task 20400).
+func HomeRootPath() (string, error) {
 	root, err := configRoot()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(root, homesDirName)
+	return filepath.Join(root, homesDirName), nil
+}
+
+// HomeRoot returns the directory holding every identity's Claude config
+// directory, creating it 0700 if absent.
+func HomeRoot() (string, error) {
+	dir, err := HomeRootPath()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create claude identity root %s: %w", dir, err)
 	}
@@ -118,22 +133,56 @@ func HomeFor(ownerKey string) (string, error) {
 	return dir, nil
 }
 
+// HomePath returns where an identity's Claude config directory is, or would
+// be, without creating it. Used where looking must not leave a trace: an
+// offboarding's dry run, and the destruction that follows it, which must not
+// first create the directory it is about to remove (Task 20400).
+func HomePath(ownerKey string) (string, error) {
+	root, err := HomeRootPath()
+	if err != nil {
+		return "", err
+	}
+	return HomePathIn(root, ownerKey)
+}
+
+// HomePathIn is HomePath under an explicit root rather than this process's —
+// another member's tree, as offboarding names it.
+func HomePathIn(root, ownerKey string) (string, error) {
+	if strings.TrimSpace(ownerKey) == "" {
+		return "", ErrNoIdentity
+	}
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("claudecodeauth: no identity root to resolve %s under", ownerKey)
+	}
+	return filepath.Join(root, IdentitySlug(ownerKey)), nil
+}
+
 // ForgetHome removes an identity's Claude configuration directory entirely,
 // destroying the stored credential along with the CLI's cached session
 // transcripts.
 //
 // This is the deprovisioning path: `claude auth logout` revokes the session
 // but leaves the directory populated, and a hub that keeps an ex-employee's
-// refresh token on disk has not really removed them.
+// refresh token on disk has not really removed them. pkg/offboard calls it for
+// every spelling of a departed identity, on every hub member (Task 20400).
+//
+// It creates nothing on the way: a hub that never kept a per-user home —
+// including one whose config directory is read-only — has nothing to forget,
+// and reports so as success rather than as a failure to create the root.
 func ForgetHome(ownerKey string) error {
-	if strings.TrimSpace(ownerKey) == "" {
-		return ErrNoIdentity
-	}
-	root, err := HomeRoot()
+	root, err := HomeRootPath()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(root, IdentitySlug(ownerKey))
+	return ForgetHomeIn(root, ownerKey)
+}
+
+// ForgetHomeIn is ForgetHome under an explicit root.
+func ForgetHomeIn(root, ownerKey string) error {
+	dir, err := HomePathIn(root, ownerKey)
+	if err != nil {
+		return err
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove claude identity home %s: %w", dir, err)
 	}

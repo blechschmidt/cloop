@@ -740,6 +740,12 @@ type Server struct {
 	// /api/claudecode/auth/* call.
 	ccAuthMu sync.Mutex
 	ccAuth   *claudecodeauth.Manager
+	// claudeHomesRoot overrides where an offboarding finds this member's
+	// per-user Claude homes (Task 20400). Empty — production — resolves them
+	// from the process environment. A test seam: two members in one test
+	// process share one environment, and this is what gives each its own
+	// tree, as two processes would have.
+	claudeHomesRoot string
 
 	// diffCache holds the last ProjectState broadcast per workDir. The
 	// state_diff event ships only the delta against this snapshot — Task
