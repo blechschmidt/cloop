@@ -1578,6 +1578,21 @@ cloop workspace provision --dir /workspace/project --repo https://github.com/acm
 | `--ref` | the remote's default branch | Branch, tag or commit to check out |
 | `--depth` | `0` | Shallow-fetch depth; `0` fetches full history |
 | `--size-limit-mb` | `0` | Refuse a provisioned tree larger than this many megabytes; `0` means no limit |
+| `--seed` | | Place the project state in this file into the checkout as `.cloop/state.json` once it is fetched |
+| `--seed-copy` | | Also leave the project state at this path, for `cloop workspace writeback --seed` (needs `--seed`) |
+
+**The project comes with the tree** (Task 20402). A clone of a source
+repository is not a cloop project, so for a seeded run the Kubernetes driver
+projects the hub's project state into this container — and this container only —
+and passes `--seed`. After the fetch the command writes it into the checkout,
+exactly as a remote agent does after its own, and keeps `.cloop/` out of the
+tree's commits (an `info/exclude` entry, and skip-worktree on anything the
+repository tracks under it), so neither the harness nor the push write-back can
+commit the hub's project into the repository. A `.cloop/` the repository commits
+is superseded: its database is removed from the working tree first, and the run
+sees the hub's project. `--seed-copy` leaves the bytes where the harness's
+wrapper reads the run's changes back against them. See
+[Kubernetes: the seed in a Secret, the outcome in the log](../architecture/executors.md#kubernetes-the-seed-in-a-secret-the-outcome-in-the-log-task-20402).
 
 `--dir` must be absolute: a relative path would resolve against whatever working
 directory the process happens to have, which inside a Pod is the image author's
@@ -1615,4 +1630,44 @@ CLOOP_WORKSPACE_TOKEN=ghp_… cloop workspace provision \
 
 A non-zero exit means the tree is not there. The message names the machine, the
 repository and the directory, and is safe to paste into a bug report.
+
+### `cloop workspace writeback`
+
+Run a harness, then return what it produced from a sandbox that will not
+outlive it: the files it changed, as a commit on a `cloop/` branch, and — for a
+seeded run — the project state it recorded. It is the harness container's
+command on Kubernetes and in a container executor's feature mode, with the
+harness's own argv after `--`; it forwards the harness's output and signals and
+exits with its status. Like `provision`, its flags are a wire format the driver
+renders.
+
+```bash
+cloop workspace writeback --dir /workspace --repo https://github.com/acme/app.git \
+    --branch cloop/task-42-add-retry --base <sha> --push -- claude --print "…"
+cloop workspace writeback --dir /workspace --seed /run/cloop/dispatch/seed.gz \
+    --project-result-frame k-0123456789ab -- cloop run
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir` | | Absolute path of the tree (**required**) |
+| `--repo` | | `https://` clone URL the tree came from; required with `--push` |
+| `--branch` | | Branch to commit to; must start with `cloop/` |
+| `--base` | | Full commit SHA the workspace was provisioned at |
+| `--message` | | Commit message |
+| `--push` | `false` | Push the branch to the origin, with the credential in `CLOOP_WORKSPACE_TOKEN` |
+| `--bundle` | | Write the commits to this file instead (a sandbox with no egress) |
+| `--max-bundle-bytes` | write-back limit | Refuse a bundle larger than this |
+| `--seed` | | The project state the run was started with, to read its changes back against |
+| `--project-result` | | Write what the run changed in `.cloop/` to this file (container feature mode) |
+| `--project-result-frame` | | Print it on stdout instead, as the last thing this command prints, as a framed and checksummed block tagged with this value (Kubernetes) |
+| `--place-seed` | `false` | Place `--seed` into `--dir` before the harness starts |
+
+A delivery (`--push` or `--bundle`) is required unless the command is returning
+only a seeded run's project state; then `--repo`, `--branch`, `--base`,
+`--message` and `--max-bundle-bytes` are refused rather than ignored. The
+write-back's report is one `##cloop-writeback-v1##` line on stdout, printed
+whatever happened. The project-result frame follows it — a Pod's log is its only
+way home — and the driver lifts it out of the log before the live log and the
+run's artifact see it, so it only shows in `kubectl logs`.
 

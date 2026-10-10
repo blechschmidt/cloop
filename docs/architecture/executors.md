@@ -509,6 +509,13 @@ arrives by way of a `workspace` init container — see
 container status by name must therefore keep selecting `harness` rather than
 "the only one".
 
+The project itself — `.cloop/`, which a clone of the source repository does not
+contain — comes with the run, and its outcome goes back: the hub's seed rides
+the run's lease Secret into the init container, and what the run recorded comes
+home as a framed block at the end of the Pod's log. A repository needs no
+`.cloop/` committed, and a task a Pod finished shows finished on the dashboard.
+See [Kubernetes: the seed in a Secret, the outcome in the log](#kubernetes-the-seed-in-a-secret-the-outcome-in-the-log-task-20402).
+
 `executors.kubernetes.runtime_class` sets `runtimeClassName` on every Pod, and
 is how a **remote Kata sandbox** is requested: kube-scheduler places the Pod on
 a node advertising that handler and the workload boots in a VM with a kernel of
@@ -1255,7 +1262,10 @@ workspace would silently leave behind on the hub. Only the total absence of
 `.git` takes this branch.
 
 Kubernetes refuses `executor` outright. A Pod's working tree is an `emptyDir`
-that dies with the Pod, so it cannot keep the promise the kind makes.
+that dies with the Pod, so it cannot keep the promise the kind makes. It can be
+seeded (Task 20402), so the refusal comes from the driver rather than from the
+seed gate, and says so: give the project a git remote, or bind it to a remote
+agent, which keeps a working directory.
 
 The zero value is `""` — *unspecified* — and leaves a driver's pre-existing
 behaviour alone. It exists so a caller with no workspace concern (`cloop
@@ -1640,12 +1650,15 @@ one behaves exactly as it does today and the project's journal gets a
 so a *future* caller that attaches a seed without checking the capability is
 refused rather than silently dropped.
 
-**Not yet seeded: Kubernetes.** The Pod driver reports `supports_project_seed`
-false, so it takes the degraded path above. A Pod's workspace is provisioned by
-a `cloop workspace provision` init container, and delivering the seed to it
-needs a projected volume that does not exist yet — so for now a Kubernetes
-executor still requires `.cloop/` committed to the repository, and says so on
-the project's journal rather than failing mutely.
+**Kubernetes is seeded too (Task 20402).** Until then the Pod driver reported
+`supports_project_seed` false and took the degraded path above, so a Kubernetes
+executor needed `.cloop/` committed to the repository. The seed now travels as a
+key of the run's lease Secret, projected into the `workspace` init container
+alone, and `cloop workspace provision --seed` places it after the checkout —
+see [Kubernetes: the seed in a Secret, the outcome in the
+log](#kubernetes-the-seed-in-a-secret-the-outcome-in-the-log-task-20402). The
+`project_seed` journal row's remedy now fits the executor's kind: only a device
+is told to upgrade an agent.
 
 ---
 
@@ -1791,6 +1804,160 @@ session after the restart. Helper subcommands dispatched to a device (`cloop res
 dashboard) are still not merged: they are not runs, and a reset expressed as a
 diff would not reset anything the diff cannot name.
 
+### Kubernetes: the seed in a Secret, the outcome in the log (Task 20402)
+
+A Pod shares nothing with the hub and talks to nobody: its ServiceAccount token
+is not mounted, and its `/workspace` is an `emptyDir` that dies with it. So
+until Task 20402 the Kubernetes driver reported neither `supports_project_seed`
+nor `returns_project_state`, and the hub dispatched anyway. A repository with
+no `.cloop/` committed produced a run that exited on its first line with *no
+cloop project found*; a repository *with* it produced a run whose finished
+tasks were recorded only in the Pod's copy, so the dashboard still showed them
+pending and the next Start ran them again. Both capabilities are now true, and
+`pkg/executor/kubernetes/projectresult.go` is the code.
+
+**In: a key of the lease Secret, read by the init container alone.**
+
+| | |
+| --- | --- |
+| Carried in | the run's lease Secret, `cloop-lease-<handle>`, under the key `project-seed`, beside the run's credential files and environment |
+| Projected into | the `workspace` init container only, read-only, at `/run/cloop/seed/seed.gz` (a Secret volume naming that one key) |
+| Placed by | `cloop workspace provision --seed /run/cloop/seed/seed.gz --seed-copy /run/cloop/dispatch/seed.gz`, after the checkout: `projectseed.Write`, as the remote agent does, then `gitprovision.HideControlDir` |
+| Baseline copy | `/run/cloop/dispatch/seed.gz`, a 2 MiB `emptyDir` the init container writes and the harness mounts read-only — what the run's changes are measured against afterwards |
+| Ceiling | the Secret's whole data — keys and values of the credential files, the environment and the seed — at most 1 MiB, the API server's limit for a Secret |
+
+The three channels that look simpler are each refused. An argv or a value in
+`env` is readable by every identity with `get pods` in the namespace, printed
+by every `kubectl describe` and written to the API server's audit log, and a
+project's instructions and plan are the operator's, not the namespace's. A
+ConfigMap is the same object without the handling a Secret gets — the kubelet
+does not keep it on tmpfs — and the executor's Role has no `configmaps` rule at
+all, by design.
+
+**The 1 MiB ceiling is Kubernetes-specific.** `projectseed` itself allows 4 MiB
+compressed; a Pod can carry whatever room is left in its lease Secret once the
+credential files and the environment are in it. A run whose seed does not fit
+is refused by `Start` before anything is created in the cluster, and the
+refusal names the project's state, its size and the room it had, and the two
+ways out: archive finished tasks (`cloop task archive`), which shrinks the plan
+and therefore the seed, or bind the project to a remote agent, which takes the
+full 4 MiB. A plan big enough to reach it has hundreds of finished tasks in it.
+
+**A placed `.cloop/` is never committed.** The push write-back runs `git add
+--all` (`pkg/executor/gitwriteback`), and so may the harness. The init container
+therefore excludes `/.cloop/` in the checkout's `.git/info/exclude` and marks
+every file the repository tracks under it skip-worktree — the treatment a
+shipped feature branch gets (`gitprovision.HideControlDir`) — so the project's
+state database cannot reach the `cloop/` branch and, from there, the
+repository. The remote agent applies the same exclusion to a seed it places into
+a `git` checkout, which it had not done either.
+
+**A seed supersedes a committed `.cloop/`.** This is a behaviour change for an
+installation that worked around the gap by committing `.cloop/` into its
+repository. Placing the seed removes the committed `state.db` from the working
+tree before writing the hub's project, exactly as it does on a device, and the
+skip-worktree mark keeps both the removal and the seed out of the commits. The
+run therefore sees the hub's project, not the repository's copy of it: a task
+edited, reset or added on the hub is what runs, and a plan committed to the
+repository is ignored. The committed copy can be deleted from the repository;
+nothing reads it any more.
+
+**Out: a frame at the end of the log.** The harness container's command is
+`cloop workspace writeback --dir /workspace --seed /run/cloop/dispatch/seed.gz
+--project-result-frame <handle> -- <argv>` — the push write-back's flags too,
+when one was asked for. Once the harness has exited the wrapper reads back what
+the run changed (`projectseed.Harvest`) and prints it as the **last** thing on
+stdout, after the write-back's own report, as a
+[`pkg/executor/resultframe`](https://github.com/blechschmidt/cloop/blob/main/pkg/executor/resultframe/resultframe.go)
+block:
+
+```
+##cloop-project-result-v1## <handle> begin result <length> <sha256>
+##cloop-project-result-v1## <handle> data <base64, 3072 characters a line>
+…
+##cloop-project-result-v1## <handle> end
+```
+
+Each line is one `write(2)` of under 4 KiB — below `PIPE_BUF`, so a line can be
+preceded or followed by another process's line in the container log but never
+cut by one. The frame is preceded by an empty line, which ends anything the
+workload left unfinished on the same stream. A run whose state cannot be read
+back gets a frame of kind `error` carrying the reason instead, so the hub can
+say why rather than that nothing came.
+
+**The driver lifts the frame out before anybody reads the log.** Every chunk the
+log follower reads goes through the record's frame scanner before the log bus:
+the frame's lines never reach the live log or the run's artifact — they are
+protocol, up to a megabyte of base64 — and everything else is forwarded
+unchanged, a line held back only while it could still turn out to be a frame
+line. A line closing the log says what came back: *read the run's project state
+back from pod …* or *no project result came back from pod …* with the reason.
+
+**What the hub accepts from a Pod is what it would accept from a device.**
+
+| | |
+| --- | --- |
+| Result ceiling | 640 KiB (`executor.MaxProjectResultBytes`), refused on the frame's declaration before a byte is kept |
+| Reason ceiling | 4 KiB (`executor.MaxProjectResultErrBytes`), the bound a device's `project_result` frame has |
+| Accepted for | a seeded run only — a frame in an unseeded run's log is somebody's text and passes through untouched |
+| Accepted when | whole: the declared length, the SHA-256 and an end line all match, and nothing else bearing the handle's tag was seen before or after |
+| Otherwise | `executor.ErrProjectResultUnavailable` and no bytes — truncated (the log ended inside the frame), interleaved (a second begin inside the first), duplicated (a second frame, or a line of one, after the first ended), unframed (data or end with no begin) |
+| Handed over | once, by `ProjectResult`; a second call is unavailable, because merging a run twice books its spend twice |
+| Scrubbed | the result by the hub with the run's redaction set, as for a device; a refusal's reason by the driver before it reaches the journal, since it can quote a line the workload printed |
+
+Lines that are not the frame's may sit between the frame's own — the runtime
+merges stdout and stderr line by line, and the wrapper writes progress to
+stderr — and leave it intact. Lines tagged with another handle (a fixture
+printed by a run working on cloop itself, a nested run's frame) are transcript.
+
+**The workload shares that stream, and it does not matter.** It can print a
+frame bearing the right tag, but the wrapper's real frame always follows the
+harness's exit, so a forged one makes the pair a duplicate and neither is
+believed: a workload can deny itself its own result, which corrupting its own
+database would do as well. And the content of a result is the workload's to
+shape on every transport — a device reads it out of the database the workload
+wrote — which is why [the merge](#the-project-comes-back-task-20339) treats every
+result as the least trusted party's account and takes the run's word only for
+outcomes.
+
+**Memory.** A result is held from the end of the Pod's log until the hub
+collects it, which for a run is the same moment: `runEnded` settles a run the
+instant its stream closes. A result nobody collects — a helper subcommand's,
+whose outcome the hub does not merge — is bounded: past 32 MiB per executor the
+oldest uncollected one is dropped, and a collector that turns up after all is
+told so.
+
+**A hub restarted mid-run.** The handle's durable row records `project_seed`,
+and an adopted Pod's log is re-read from its start, so the frame is found
+whether it was printed before the restart or after it; the run's owner row
+carries the provenance the merge needs, as for a device.
+
+**The harness image must carry this release's cloop or later.** The init
+container and the wrapper run the image's own `cloop` (the path the harness's
+argv names, else `cloop` on `PATH`). An older one fails the init container with
+`unknown flag: --seed`, and the run fails as *the workspace could not be
+provisioned, so the harness never ran*. The Helm chart's
+`executor.kubernetes.image` defaults to the hub's own image, which carries the
+same cloop; an image built for real tasks has to be rebuilt on the hub's
+release.
+
+**What it changes on the journal.** A `project_result` row about a run that
+sent nothing back now names what goes wrong for that kind of executor and the
+driver's own account — for a Pod, a log that ended without a complete frame and
+why — instead of a device's dropped connection; and no row tells a Kubernetes
+executor to upgrade an agent it does not run. **Features stay refused** on
+Kubernetes: shipping a feature's branch needs a channel from the hub into the
+Pod that holds a bundle, and a 1 MiB Secret is not one; nor can a log carry a
+bundle back.
+
+`pkg/executor/kubernetes/projectresult_test.go` covers the Pod's shape, the
+Secret ceiling and the round trip against the fake API server, including every
+malformed frame; `pkg/executor/resultframe` has unit tests and two fuzz targets
+(`FuzzScanner`, `FuzzRoundTrip`, in `make fuzz`); and
+[`tests/kube`](../../tests/kube/README.md) runs a project whose repository has
+no `.cloop/` on CI's kind cluster and checks that the hub's plan shows its task
+done afterwards and that a second Start does not run it again.
+
 ---
 
 ## Features: shipping a branch (Task 20367)
@@ -1822,7 +1989,7 @@ Instead a feature travels as its branch.
 | --- | --- |
 | `container` | Stages a standalone checkout in a directory of its own (never the hub's worktree) and mounts it at `/workspace`, with an output directory at `/cloop-out`. The harness runs inside `cloop workspace writeback --place-seed …`, so the seed is placed, the run's state is read back and its work is committed and bundled *inside the container*; the host only reads two files out of `/cloop-out`, as bytes, refusing links, FIFOs and anything over the cap. The sandbox runs as the *parent* project's owner. Staging is removed when the hub has collected the result, or an hour after the workload ended. |
 | `remote` (incl. virtual executors) | Protocol v16 and git on the device. An overlay is cloned with the project's grant like any `git` workspace; the agent commits and bundles after the harness exits, in an environment that switches off whatever the workload configured in the tree (`gitprovision.SandboxedRepoEnv`). |
-| `kubernetes` | Not supported: a Pod has no channel from the hub to receive the bundle through. Refused at dispatch. |
+| `kubernetes` | Not supported: a Pod has no channel from the hub to receive the bundle through — the lease Secret that carries its project state holds 1 MiB — and its log cannot carry a bundle back. Refused at dispatch. |
 | `localprocess` | Not involved: on a hub that runs projects itself a feature runs in its worktree, as before. |
 
 **The hub runs git for this.** Only something that can read the hub's

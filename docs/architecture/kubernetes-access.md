@@ -660,7 +660,13 @@ its session and are forwarded:
 - the trail holds a `kubeguard.request_allowed` row for the list and a
   `kubeguard.request_denied` row for the create, both naming the run's project;
 - no configmap was created, and the cluster credential reached no part of the
-  Pod.
+  Pod;
+- and the project the Pod runs is not in the repository at all: `acme/granted`
+  holds no `.cloop/`, the goal and the task exist only on the hub, and they reach
+  the Pod as the project seed in its lease Secret. Afterwards the hub's own plan
+  shows the task done — the run's outcome came back as a frame at the end of the
+  Pod's log — and a second Start does not run it again (Task 20402; see
+  [the seed in a Secret, the outcome in the log](executors.md#kubernetes-the-seed-in-a-secret-the-outcome-in-the-log-task-20402)).
 
 What it does not cover: watches and the subresource refusals (`exec`, `attach`,
 `portforward`, `proxy`), which unit tests pin against the fake API server; a
