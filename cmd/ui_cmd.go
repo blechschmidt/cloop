@@ -365,6 +365,15 @@ but not for anything reachable from a network.`,
 		// evaluated against reconciled numbers rather than racing them.
 		srv.ReconcileQuotas()
 
+		// Where `cloop hub doctor` reads the audit appends this process
+		// failed and has not yet recorded; and the losses a hub that died
+		// here left behind, adopted to be recorded in their chains (Task
+		// 20404).
+		if n := ui.StartAuditFailureStatus(workdir); n > 0 {
+			fmt.Fprintf(os.Stderr, "audit: adopted %d audit event(s) an exited process lost without recording; "+
+				"they are recorded as audit.gap rows in their chains\n", n)
+		}
+
 		if uiTLSCert != "" || uiTLSKey != "" {
 			srv.TLSCertFile, srv.TLSKeyFile = uiTLSCert, uiTLSKey
 		}

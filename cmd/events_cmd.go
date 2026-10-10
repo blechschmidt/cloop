@@ -241,6 +241,13 @@ else (task list, plan goal, config blob, step metadata) is faithful.`,
 					report.TruncatedThroughID)
 				fmt.Printf("           archived at %s\n", report.ArchivePath)
 			}
+			if report.Gaps > 0 {
+				// The trail itself says events are missing, so the rebuild
+				// is missing them too.
+				color.New(color.FgYellow, color.Bold).Printf(
+					"  GAPS: %d audit.gap row(s) record %d event(s) that were never appended; "+
+						"any mutation among them is not in this rebuild\n", report.Gaps, report.GapEvents)
+			}
 			if report.BreakAtID > 0 {
 				color.New(color.FgRed, color.Bold).Printf("  break at id=%d: %s\n", report.BreakAtID, report.BreakReason)
 			}
@@ -252,6 +259,13 @@ else (task list, plan goal, config blob, step metadata) is faithful.`,
 var eventsVerifyCmd = &cobra.Command{
 	Use:   "verify",
 	Short: "Validate the SHA-256 hash chain (tamper detection)",
+	Long: `Recompute every row hash and compare it to what is stored.
+
+Exit codes:
+  0  chain intact (with --allow-gaps: or intact with recorded gaps)
+  2  chain broken
+  3  chain intact, holding audit.gap rows that record events which could not
+     be appended`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		log, err := eventlog.Open(workdir)
@@ -264,16 +278,14 @@ var eventsVerifyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if report.OK {
-			color.New(color.FgGreen, color.Bold).Printf("OK — %d events verified\n", report.Total)
-			return nil
-		}
-		color.New(color.FgRed, color.Bold).Printf("CHAIN BROKEN at id=%d after %d verified events\n", report.BreakAtID, report.Total-1)
-		fmt.Printf("  reason: %s\n", report.Reason)
-		os.Exit(2)
+		code := printSingleChainVerdict(os.Stdout, report, eventsVerifyAllowGaps)
+		log.Close() //nolint:errcheck
+		exitAuditVerify(code)
 		return nil
 	},
 }
+
+var eventsVerifyAllowGaps bool
 
 // parseTimeFlag accepts RFC3339 ("2026-05-10T12:00:00Z"), date-only
 // ("2026-05-10"), or a relative duration ("1h", "30m", "2d").
@@ -384,6 +396,7 @@ func init() {
 	eventsReplayCmd.Flags().BoolVar(&eventsReplayTrunc, "allow-truncated", false,
 		"Rebuild only the surviving tail when retention has pruned the earlier history")
 
+	eventsVerifyCmd.Flags().BoolVar(&eventsVerifyAllowGaps, "allow-gaps", false, "Exit 0 rather than 3 when the chain is intact but holds recorded gaps")
 	eventsCmd.AddCommand(eventsTailCmd, eventsListCmd, eventsReplayCmd, eventsVerifyCmd)
 	rootCmd.AddCommand(eventsCmd)
 }

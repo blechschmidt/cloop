@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 
 	_ "modernc.org/sqlite"
 )
@@ -428,5 +430,74 @@ func TestAuditEndpointsRejectNonGET(t *testing.T) {
 					method, path, string(body))
 			}
 		}
+	}
+}
+
+// TestAuditVerifyReportsGapsAndUnrecordedLosses: a chain holding audit.gap
+// rows is OK — every row present verifies — but its status says it is not
+// complete, and losses this hub process has not recorded yet are reported
+// with it, because they are in no chain (Task 20404).
+func TestAuditVerifyReportsGapsAndUnrecordedLosses(t *testing.T) {
+	srv, base, clients := newAuditFixture(t)
+	seedAudit(t, srv.WorkDir)
+
+	// Lose two events through a handle closed under its emitter, then let
+	// the next append record them.
+	dbPath := state.DBPath(srv.WorkDir)
+	gone, err := statedb.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = gone.Close()
+	for i := 0; i < 2; i++ {
+		_ = gone.AppendAuditEvent(&statedb.AuditEvent{EventType: "executor.cordon", EntityType: "executor"})
+	}
+	seedAudit(t, srv.WorkDir)
+
+	// And one more loss, on another database, that nothing records.
+	other := t.TempDir() + "/elsewhere.db"
+	lost, err := statedb.Open(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lost.Close()
+	_ = lost.AppendAuditEvent(&statedb.AuditEvent{EventType: "executor.drain", EntityType: "executor"})
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := getFull(t, clients["admin"], base+"/api/audit/verify")
+	if code != http.StatusOK {
+		t.Fatalf("= %d\nbody: %s", code, body)
+	}
+	var resp auditVerifyResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode: %v\nbody: %s", err, body)
+	}
+	if !resp.OK || resp.Status != statedb.AuditChainGaps || resp.Gaps != 1 || resp.GapEvents != 2 || len(resp.GapIDs) != 1 {
+		t.Errorf("verify = ok %v, status %q, %d gaps covering %d (ids %v); want ok, gaps, 1 covering 2",
+			resp.OK, resp.Status, resp.Gaps, resp.GapEvents, resp.GapIDs)
+	}
+	var found bool
+	for _, u := range resp.Unrecorded {
+		if strings.HasSuffix(u.Path, "elsewhere.db") && u.Unrecorded.Events == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the unrecorded loss is not reported: %+v", resp.Unrecorded)
+	}
+
+	// Merged, each chain says the same.
+	code, body = getFull(t, clients["admin"], base+"/api/audit/verify?source=all")
+	if code != http.StatusOK {
+		t.Fatalf("merged = %d\nbody: %s", code, body)
+	}
+	resp = auditVerifyResponse{}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Chains) == 0 || resp.Chains[0].Status != statedb.AuditChainGaps || resp.Chains[0].GapEvents != 2 {
+		t.Errorf("merged chains = %+v", resp.Chains)
 	}
 }

@@ -69,7 +69,7 @@ Examples:
 
 		// Propagate exit code via os.Exit so the shell sees it.
 		if exitCode != 0 {
-			os.Exit(exitCode)
+			exitProcess(exitCode)
 		}
 		return nil
 	},

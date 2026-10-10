@@ -118,6 +118,11 @@ type auditChainVerdictJSON struct {
 	BreakAtID int64  `json:"break_at_id"`
 	Reason    string `json:"reason,omitempty"`
 	Error     string `json:"error,omitempty"`
+
+	// Status, Gaps and GapEvents are as on auditVerifyResponse.
+	Status    string `json:"status"`
+	Gaps      int    `json:"gaps"`
+	GapEvents int64  `json:"gap_events"`
 }
 
 // auditListResponse is what GET /api/audit returns.
@@ -171,6 +176,32 @@ type auditVerifyResponse struct {
 	// single boolean would let an intact project chain vouch for a broken hub
 	// one. Clients that understand this array must fail if any entry does.
 	Chains []auditChainVerdictJSON `json:"chains,omitempty"`
+
+	// Status is "intact", "gaps" or "broken" (Task 20404). OK stays true for
+	// a chain with gaps — every row present verified — so Status is what
+	// says the chain is not complete: Gaps audit.gap rows record GapEvents
+	// events that could not be appended. GapIDs lists the first few rows.
+	Status    string  `json:"status"`
+	Gaps      int     `json:"gaps"`
+	GapEvents int64   `json:"gap_events"`
+	GapIDs    []int64 `json:"gap_ids,omitempty"`
+
+	// Unrecorded is this hub process's account of the audit appends it failed
+	// and has not recorded yet, one entry per database. They become a gap
+	// row once the database takes writes; until then this is the only place
+	// the dashboard can see them.
+	Unrecorded []statedb.AuditChainFailures `json:"unrecorded,omitempty"`
+}
+
+// auditUnrecorded is this process's unrecorded losses, for the panel.
+func auditUnrecorded() []statedb.AuditChainFailures {
+	var out []statedb.AuditChainFailures
+	for _, c := range statedb.AuditFailures() {
+		if !c.Unrecorded.Empty() {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // handleAuditList serves GET /api/audit.
@@ -435,6 +466,12 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		PrunedCount:    report.PrunedCount,
 		ArchivePath:    report.ExportPath,
 		ArchiveSHA256:  report.ExportSHA256,
+
+		Status:     report.Status(),
+		Gaps:       report.Gaps,
+		GapEvents:  report.GapEvents,
+		GapIDs:     report.GapIDs,
+		Unrecorded: auditUnrecorded(),
 	})
 }
 
@@ -459,9 +496,11 @@ func (s *Server) serveMergedAuditVerify(w http.ResponseWriter, r *http.Request) 
 	// An uninitialised workdir has no chain to check, and reports an empty
 	// trail rather than a failure — the same answer openAuditLog gives.
 	resp := auditVerifyResponse{
-		OK:        true,
-		CheckedAt: time.Now().UTC().Format(time.RFC3339),
-		Chains:    make([]auditChainVerdictJSON, 0, len(verdicts)),
+		OK:         true,
+		Status:     statedb.AuditChainIntact,
+		CheckedAt:  time.Now().UTC().Format(time.RFC3339),
+		Chains:     make([]auditChainVerdictJSON, 0, len(verdicts)),
+		Unrecorded: auditUnrecorded(),
 	}
 	for _, v := range verdicts {
 		entry := auditChainVerdictJSON{
@@ -471,9 +510,13 @@ func (s *Server) serveMergedAuditVerify(w http.ResponseWriter, r *http.Request) 
 			Total:     v.Report.Total,
 			BreakAtID: v.Report.BreakAtID,
 			Reason:    v.Report.Reason,
+			Status:    v.Report.Status(),
+			Gaps:      v.Report.Gaps,
+			GapEvents: v.Report.GapEvents,
 		}
 		if v.Err != nil {
 			entry.Error = v.Err.Error()
+			entry.Status = statedb.AuditChainBroken
 		}
 		resp.Chains = append(resp.Chains, entry)
 	}
@@ -490,8 +533,15 @@ func (s *Server) serveMergedAuditVerify(w http.ResponseWriter, r *http.Request) 
 		resp.PrunedCount = primary.Report.PrunedCount
 		resp.ArchivePath = primary.Report.ExportPath
 		resp.ArchiveSHA256 = primary.Report.ExportSHA256
-		if primary.Err != nil && resp.Reason == "" {
-			resp.Reason = primary.Err.Error()
+		resp.Status = primary.Report.Status()
+		resp.Gaps = primary.Report.Gaps
+		resp.GapEvents = primary.Report.GapEvents
+		resp.GapIDs = primary.Report.GapIDs
+		if primary.Err != nil {
+			resp.Status = statedb.AuditChainBroken
+			if resp.Reason == "" {
+				resp.Reason = primary.Err.Error()
+			}
 		}
 	}
 	jsonOK(w, resp)
@@ -548,9 +598,11 @@ func (s *Server) openAuditLog(w http.ResponseWriter, r *http.Request) (*eventlog
 	if err == eventlog.ErrNoProject {
 		if strings.HasSuffix(r.URL.Path, "/verify") {
 			jsonOK(w, auditVerifyResponse{
-				OK:        true,
-				Total:     0,
-				CheckedAt: time.Now().UTC().Format(time.RFC3339),
+				OK:         true,
+				Total:      0,
+				Status:     statedb.AuditChainIntact,
+				CheckedAt:  time.Now().UTC().Format(time.RFC3339),
+				Unrecorded: auditUnrecorded(),
 			})
 		} else {
 			jsonOK(w, auditListResponse{Events: []auditEventJSON{}, Limit: auditPageDefault})

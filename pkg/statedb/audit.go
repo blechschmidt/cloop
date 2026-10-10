@@ -10,8 +10,12 @@
 // of an Append so the hash chain stays consistent under concurrent calls.
 //
 // Best-effort write semantics: callers in mutation hot paths swallow errors
-// (audit failures must not block user work). The verify command surfaces
-// lost-row gaps as a hash break; that's the explicit cost of best-effort.
+// (audit failures must not block user work). A row that is never appended
+// cannot break the chain — the next append links to the last one that
+// succeeded — so the append path counts every failure itself and records the
+// loss in the chain as an audit.gap row once it can (Task 20404, see
+// audit_failures.go). The verifier reports such a chain as intact with gaps,
+// not as intact.
 //
 // ── What belongs in this table (Task 20218) ────────────────────────────────
 //
@@ -54,6 +58,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 )
 
 // AuditEvent is one row in the audit_events table.
@@ -68,6 +74,9 @@ type AuditEvent struct {
 	PrevHash   string    // 64-hex SHA-256 of prior row, or 64 zeros for the first row
 	RowHash    string    // 64-hex SHA-256 of this row
 }
+
+// auditGapEventType is the event_type of a row recording lost events.
+var auditGapEventType = string(auditaction.ActionAuditGap)
 
 // genesisHash is the prev_hash of the very first row in the chain. Using a
 // constant string of 64 zeros makes "no predecessor" explicit and visually
@@ -180,6 +189,14 @@ func auditRetryDelay(n int) time.Duration {
 // git proxy session_closed row. Running the whole transaction again reads a
 // fresh tip, which is the only correct recovery: the new row must link to the
 // row that is actually last.
+//
+// Every failure is counted here, on the way out, before the caller sees it
+// (Task 20404): the caller may log the error, return it or drop it, and the
+// loss is on record either way — see audit_failures.go. And when this chain
+// owes the trail a record of earlier losses, it is paid with this append: one
+// audit.gap row ahead of the caller's events, in the same transaction, so the
+// record of the loss costs no commit of its own and lands exactly where the
+// lost rows would have been.
 func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 	// Before the lock, and deliberately not fatal: a mis-routed event still
 	// gets written. See assertAuditHome for why recording it in the wrong
@@ -189,8 +206,36 @@ func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	gap := auditFailures.claim(d.chainKey())
+	batch := evs
+	if gap != nil {
+		batch = make([]*AuditEvent, 0, len(evs)+1)
+		batch = append(batch, gapEvent(gap.loss, GapRecordedOnRecovery))
+		batch = append(batch, evs...)
+	}
+	if err := d.appendAuditBatchLocked(batch); err != nil {
+		// The gap row going down with the batch is not a loss of its own:
+		// the claim is owed again, and only the caller's events are counted.
+		auditFailures.release(gap, err, false)
+		auditFailures.record(d, evs, err)
+		return err
+	}
+	if gap != nil {
+		auditFailures.settle(gap, batch[0], d.path)
+	}
+	return nil
+}
+
+// appendAuditBatchLocked runs appendAuditEventsOnce, retrying a transaction
+// SQLite refused as locked. Callers hold d.mu.
+func (d *DB) appendAuditBatchLocked(evs []*AuditEvent) error {
+	return d.appendAuditBatchN(evs, auditAppendAttempts)
+}
+
+// appendAuditBatchN is appendAuditBatchLocked with at most attempts tries.
+func (d *DB) appendAuditBatchN(evs []*AuditEvent, attempts int) error {
 	var err error
-	for attempt := 0; attempt < auditAppendAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(auditRetryDelay(attempt))
 		}
@@ -508,6 +553,55 @@ type AuditVerifyReport struct {
 	// VerifiedFromID is the id of the first row the walk checked, or 0 when
 	// the table is empty.
 	VerifiedFromID int64
+
+	// Gaps counts the audit.gap rows the walk passed (Task 20404): records,
+	// written into the chain itself, of events that could not be appended.
+	// GapEvents is how many lost events they cover, GapIDs the first few of
+	// their ids and LastGapAt when the newest was written. A chain with gaps
+	// is intact — every row present hashes correctly — but it is not
+	// complete, and Status says so.
+	Gaps      int
+	GapEvents int64
+	GapIDs    []int64
+	LastGapAt time.Time
+}
+
+// Verdicts a chain verification can reach, from AuditVerifyReport.Status.
+const (
+	// AuditChainIntact: every row verified and none records a loss.
+	AuditChainIntact = "intact"
+	// AuditChainGaps: every row verified, and some are audit.gap rows
+	// recording events that could not be appended.
+	AuditChainGaps = "gaps"
+	// AuditChainBroken: a row failed verification.
+	AuditChainBroken = "broken"
+)
+
+// Status names the verdict: AuditChainIntact, AuditChainGaps or
+// AuditChainBroken.
+func (r AuditVerifyReport) Status() string {
+	switch {
+	case !r.OK:
+		return AuditChainBroken
+	case r.Gaps > 0:
+		return AuditChainGaps
+	}
+	return AuditChainIntact
+}
+
+// maxReportedGapIDs bounds AuditVerifyReport.GapIDs.
+const maxReportedGapIDs = 20
+
+// noteGap folds one audit.gap row into the report.
+func (r *AuditVerifyReport) noteGap(ev AuditEvent) {
+	r.Gaps++
+	r.GapEvents += AuditGapLostEvents(ev.Payload)
+	if len(r.GapIDs) < maxReportedGapIDs {
+		r.GapIDs = append(r.GapIDs, ev.ID)
+	}
+	if ev.Timestamp.After(r.LastGapAt) {
+		r.LastGapAt = ev.Timestamp
+	}
 }
 
 // VerifyAuditChain walks audit_events in id order and recomputes each row's
@@ -633,6 +727,9 @@ func (d *DB) VerifyAuditChain() (AuditVerifyReport, error) {
 				want, ev.RowHash)
 		}
 		expectedPrev = ev.RowHash
+		if ev.EventType == auditGapEventType {
+			report.noteGap(ev)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return AuditVerifyReport{}, fmt.Errorf("statedb audit: verify rows: %w", classifyDriverErr(err))

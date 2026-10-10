@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 147 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 148 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -78,20 +78,20 @@ whichever one happened to be opened.
 | --- | --- | --- |
 | `control-plane` | the hub's own state.db | 128 |
 | `project` | the project's .cloop/state.db | 17 |
-| `either` | whichever chain the decision was scoped to | 2 |
+| `either` | whichever chain the decision was scoped to | 3 |
 
 Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
 
-Recorded in whichever chain the decision was scoped to: `authz.denied`, `authz.granted`.
+Recorded in whichever chain the decision was scoped to: `audit.gap`, `authz.denied`, `authz.granted`.
 
 Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-147 actions in 38 families. Every action is listed: this section is the whole
+148 actions in 39 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (1)
 
 ### task.*
 
@@ -708,4 +708,14 @@ Payload keys, on every action above: `project`, `project_path`, `identity`, `rol
 - `project.member.grant` — `via` is "api" or "cli". A membership only adds access: the hub unions its role with whatever the identity already holds.
 - `project.member.leave` — Separate from project.member.revoke so "was this person removed or did they leave" stays answerable.
 - `project.member.revoke` — `role` is the role the member held. A project removed from the hub drops its whole roster, one row per member, with `reason` saying so.
+
+### audit.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `audit.gap` | `audit` | either | stable | A process could not append audit events to this chain, and records what was lost: with the next append that succeeds, at a periodic flush, at shutdown, or when a later process adopts the losses a crashed one left behind. |
+
+Payload keys, on every action above: `lost_events`, `failed_appends`, `first_failed_at`, `last_failed_at`, `first_error`, `last_error`, `actions`, `reasons`, `recorded`, `host`, `pids`, `adopted_from`
+
+- `audit.gap` — Home is whichever chain lost the events: a failed write to the hub's control-plane database is recorded there, a failed write to a project's database in that project's chain — the gap has to sit in the chain it is a gap in. `actions` counts the lost events by action name and `reasons` by cause (locked, readonly, full, io, closed, other), each a list of {name, events} so redaction cannot withhold a count. `recorded` says what wrote the row (recovery, flush, shutdown, exit) and `adopted_from` names processes that exited owing it. `cloop hub audit verify` reports a chain holding gap rows as intact with gaps and exits 3.
 

@@ -1665,6 +1665,34 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note:      "Separate from project.member.revoke so \"was this person removed or did they leave\" stays answerable.",
 	},
+
+	// ── audit ──────────────────────────────────────────────────────────────
+	// The trail's record of itself. A row that could not be appended leaves
+	// no trace in a hash chain — the next append links to the last one that
+	// succeeded — so the loss is written down instead, as a row of its own.
+	{
+		Action: ActionAuditGap,
+		Home:   HomeEither,
+		Entity: "audit",
+		Trigger: "A process could not append audit events to this chain, and records what was lost: " +
+			"with the next append that succeeds, at a periodic flush, at shutdown, or when a later " +
+			"process adopts the losses a crashed one left behind.",
+		Payload: []string{
+			"lost_events", "failed_appends", "first_failed_at", "last_failed_at",
+			"first_error", "last_error", "actions", "reasons", "recorded", "host", "pids",
+			"adopted_from",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Home is whichever chain lost the events: a failed write to the hub's control-plane " +
+			"database is recorded there, a failed write to a project's database in that project's " +
+			"chain — the gap has to sit in the chain it is a gap in. `actions` counts the lost " +
+			"events by action name and `reasons` by cause (locked, readonly, full, io, closed, " +
+			"other), each a list of {name, events} so redaction cannot withhold a count. " +
+			"`recorded` says what wrote the row (recovery, flush, shutdown, exit) and " +
+			"`adopted_from` names processes that exited owing it. `cloop hub audit verify` " +
+			"reports a chain holding gap rows as intact with gaps and exits 3.",
+	},
 }
 
 // Shared payload shapes. These are families whose members all go through one

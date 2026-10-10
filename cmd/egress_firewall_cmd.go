@@ -261,7 +261,7 @@ func egressFirewallCheck(p netfilter.Policy, target string) error {
 		return nil
 	}
 	fmt.Printf("%s %s %s/%s — %s\n", color.RedString("DROP "), ap.Addr(), ap.String(), proto, reason)
-	os.Exit(1)
+	exitProcess(1)
 	return nil
 }
 

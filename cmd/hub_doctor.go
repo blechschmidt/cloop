@@ -55,6 +55,9 @@ worst possible moment when they are wrong:
   executors    strict mode has something isolating to dispatch to, and every
                registered executor answers a liveness probe
   storage      state.db passes quick_check and its schema matches this binary
+  audit        the trail records no lost events, no hub process still owes it
+               any, and head checkpoints are written off the database, sealed,
+               fresh, and still agree with the chain
   admission    quotas and budget bound what one tenant can consume
 
 Every verdict is asked of the code the hub runs — its constructors, its
@@ -415,7 +418,7 @@ func exitFor(rep *hubdoctor.Report, strict bool) error {
 		}
 	}
 	if code != 0 {
-		os.Exit(code)
+		exitProcess(code)
 	}
 	return nil
 }

@@ -292,3 +292,44 @@ func TestApplyConfigKey_FailoverMaxAttempts(t *testing.T) {
 		t.Errorf("an empty value left the cap at %v, want it cleared to the default", cfg.Executors.Failover.MaxAttempts)
 	}
 }
+
+// TestApplyConfigKey_AuditCheckpoints: the audit head checkpoint keys (Task
+// 20404) are refused before the save — an interval out of range, and a file
+// that is relative or inside a .cloop/ directory, where the database's
+// attacker could delete it — while Load only drops them with a warning.
+func TestApplyConfigKey_AuditCheckpoints(t *testing.T) {
+	ok := []struct{ key, value string }{
+		{"audit.checkpoints.interval", "10m"},
+		{"audit.checkpoints.interval", ""},
+		{"audit.checkpoints.file", "/var/log/cloop/audit-checkpoints.jsonl"},
+		{"audit.checkpoints.file", ""},
+		{"audit.checkpoints.stderr", "false"},
+		{"audit.checkpoints.stderr", "true"},
+	}
+	for _, c := range ok {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, c.key, c.value); err != nil {
+			t.Fatalf("%s=%q: %v", c.key, c.value, err)
+		}
+		if err := cfg.ValidateNumeric(); err != nil {
+			t.Errorf("%s=%q refused: %v", c.key, c.value, err)
+		}
+	}
+	bad := []struct{ key, value string }{
+		{"audit.checkpoints.interval", "30s"},
+		{"audit.checkpoints.interval", "48h"},
+		{"audit.checkpoints.interval", "often"},
+		{"audit.checkpoints.file", "relative/checkpoints.jsonl"},
+		{"audit.checkpoints.file", "/srv/project/.cloop/checkpoints.jsonl"},
+		{"audit.checkpoints.stderr", "sometimes"},
+	}
+	for _, c := range bad {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, c.key, c.value); err != nil {
+			continue
+		}
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("%s=%q was accepted", c.key, c.value)
+		}
+	}
+}

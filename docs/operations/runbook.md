@@ -147,6 +147,7 @@ What it checks, and what each one catches that nothing else does:
 | `egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); how each kind of sandbox this hub runs reaches the proxy, by the hub's own routing rules — containers by the bind address (`egress.listen_addr`), Pods and devices by `advertise_addr` (`egress.advertise_addr`) — and a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
 | `firewall` | whether any egress allowlist opens a cloud metadata service by containing it (`firewall.metadata`): an `egress_filter` allowlist in `config.yaml` in force is a **fail** (`cloop ui` refuses to start on it) and one in a switched-off section a warning; and every stored rule set or egress grant that was saved before the rule, which keeps the service closed but should name or deny it — the device, virtual-executor and project firewalls and the active grants, each by where it is and what it contains |
 | `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema, and failing only where the hub's guard refuses the database (one ahead by additive migrations opens) — whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard, and free space on the volume holding `.cloop` against `orchestrator.min_free_disk_mb`: a warning below twice the floor, a failure below it (`storage.free_space`; see [Disk space low](#disk-space-low)); and the write-ahead log beside `state.db`, a warning once it is larger than 64 MiB and a quarter of the database both (`statedb.wal`, measured before any other check opens the database; see [The write-ahead log](#the-write-ahead-log)) |
+| `audit` | whether the control-plane chain records lost events (`audit.gaps`: its `audit.gap` rows and how many events they cover); whether a hub process here still holds losses it has not recorded, or exited holding some (`audit.unrecorded`, read from the status files under `.cloop/audit-failures/`); and the head checkpoints — whether they are written at all, to stderr only or to a file outside `.cloop/` (`audit.checkpoints`, a **fail** for a file that may not hold them, a warning when the newest control-plane record is more than three intervals old), whether they are sealed or unsigned (`audit.checkpoints.signed`), and whether the newest 50 still agree with the chain (`audit.checkpoints.chain`, a **fail** naming a truncated tail or a restored backup). See [Audit chain verification](#audit-chain-verification) |
 | `config` | every value loading had to repair (`config.repaired`): a value reset to its default is a warning, and a section switched off because it could not start as written is a failure — reported under the section's own check for the git proxy, the Kubernetes monitor and the egress proxy, which would otherwise read as "disabled"; and drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited — except `max_sessions`, where it is no cap), all judged as `quota.New` holds them (a negative ceiling is unlimited); and unbounded spend on a multi-tenant hub, by the daily caps `budget.Enforce` holds a run to — the project's own, read from `config.yaml`, which is where runs read a budget; the host-wide caps in the doctor's `~/.config/cloop` are reported beside them, since they hold back only runs on the host's own driver (an isolated run is not given them); and never counting `monthly_usd`, which nothing enforces |
 
@@ -615,20 +616,144 @@ notices, exactly as for a stale "running".
 
 `audit_events` is hash-chained: each row's `row_hash` covers its content and the
 previous row's hash. Editing or deleting a row breaks the chain from that point.
+There are two chains — the hub's control-plane `state.db` and each project's
+`.cloop/state.db` — so verify both:
 
 ```console
-$ cloop audit-log verify
-OK — 8 events verified
+$ cloop hub audit verify --hub /srv/cloop --project /srv/projects/api
+OK            control-plane /srv/cloop/.cloop/state.db — 18213 events verified
+GAPS          project       /srv/projects/api/.cloop/state.db — 912 events verified
+  1 recorded gap covering 37 lost event(s): audit.gap rows #640
 ```
 
-Exit 0 intact, 2 broken — and on a break it names the row id and the reason.
-**Run this on a schedule and alert on exit 2**; a chain break is either
-corruption or tampering, and both want a human.
+`cloop audit-log verify` checks the one chain the working directory resolves
+to. Both exit **0** when the chains are intact, **2** when one is broken (it
+names the row id and the reason), and **3** when they are intact and hold
+recorded gaps. Run `cloop hub audit verify --checkpoints <file>` on a schedule
+and alert on anything but 0: a break is corruption or tampering, and a gap is
+evidence that was lost.
 
-What the chain does and does not prove: it detects modification and insertion
-anywhere in the history, and deletion anywhere except the tail. Truncating the
-newest rows leaves a shorter, still-valid chain. Regular export off-box is what
-closes that gap.
+### Gaps: events that could not be appended
+
+An audit append can fail — the database locked past its retries, read-only, or
+on a full disk. A failed append leaves no hole in a hash chain (the next append
+links to the last one that succeeded), so cloop does not leave it to the caller:
+the append path counts every failure, by chain, action and cause, and reports
+it on stderr — the first at once, then a summary at most once a minute:
+
+```
+[audit] could not append to the audit trail at /srv/cloop/.cloop/state.db: statedb audit: begin: database or disk is full (13) — counting every failure from here on; they are recorded as an audit.gap row once the database takes writes again (3 event(s) so far: executor.cordon ×2, session.revoked ×1)
+```
+
+When the database takes writes again — with the next append that succeeds, at a
+flush every 30 seconds, or when the hub shuts down — it writes one `audit.gap`
+row into the same chain saying how many events were lost, of which actions,
+between when, and why. The gap row is hash-chained like any other, so the
+record of the loss is as tamper-evident as the events would have been. Read
+them with:
+
+```console
+$ cloop hub audit list --type audit.gap
+```
+
+Until a loss is recorded it exists only in the process that suffered it, and
+there are two places to see it: the Audit tab of that hub (a banner above the
+trail) and `cloop hub doctor` (`audit.unrecorded`), which reads the status
+file the hub keeps under `.cloop/audit-failures/`. A hub that dies owing the
+trail leaves that file behind; the next hub started in the directory adopts
+it and records the loss, naming the process it came from (`adopted_from`).
+`cloop_audit_append_failures_total` and `cloop_audit_gap_events_total` count
+both halves ([metrics](metrics.md#audit-trail)).
+
+Once the cause is fixed and the gaps are accounted for, `--allow-gaps` lets
+verification exit 0 again; it still reports them.
+
+### Checkpoints: catching a shortened trail
+
+The chain detects modification and insertion anywhere in the history, and
+deletion anywhere except the newest end: truncating the newest rows leaves a
+shorter chain that verifies, and nothing inside the database can tell it from
+a quiet one. **Head checkpoints** are the record that can. Every
+`audit.checkpoints.interval` (5 minutes) the cluster leader — a lone hub leads
+itself — writes one record per chain: the newest row's id and hash, the row
+count, the latest prune anchor, the time and the member. It writes one more at
+clean shutdown.
+
+```yaml
+audit:
+  checkpoints:
+    interval: 5m
+    file: /var/log/cloop/audit-checkpoints.jsonl   # must lie outside .cloop/
+    stderr: true                                   # the default
+```
+
+Each record is sealed (HMAC-SHA256) under a key derived from `CLOOP_SECRET_KEY`
+with a label of its own, so nothing in `state.db` can forge one, and carries
+that key's fingerprint. Records are appended to the file with an fsync, and
+printed as one JSON line on stderr for a container platform's log pipeline to
+ship off the box. **Put the file on storage the database does not share** — a
+record the attacker who rewrote the database can also delete pins nothing. On
+by default to stderr only; `cloop hub doctor` warns until a file is set or you
+know stderr leaves the machine. A hub without `CLOOP_SECRET_KEY` writes
+unsigned records, which still pin each head against anyone who cannot write
+where they are kept, and the doctor says they are unsigned.
+
+Check the chains against them:
+
+```console
+$ cloop hub audit verify --hub /srv/cloop --project /srv/projects/api \
+    --checkpoints /var/log/cloop/audit-checkpoints.jsonl
+…
+Checkpoints   /var/log/cloop/audit-checkpoints.jsonl — 4211 record(s)
+  checking seals under key 9cfc998abbd68ba4 (from CLOOP_SECRET_KEY)
+OK            control-plane /srv/cloop/.cloop/state.db
+  3925 checkpoint(s) agree with the chain; the newest, at 2026-10-10T18:05:00.133126574Z, saw id 18213
+TRUNCATED     project       /srv/projects/api/.cloop/state.db
+  finding:  tail truncated after id 790 although a checkpoint at 2026-10-10T18:05:00.4Z saw id 812
+  or:       the database was restored from a backup taken before then, and nothing has been written since
+  1 of 286 checkpoint(s) disagree; the first is on line 4207
+    line 4207   truncated        the chain ends at id 790, before the id 812 the checkpoint at 2026-10-10T18:05:00.4Z saw
+```
+
+`--checkpoints` also reads a log export of the stderr copies —
+`journalctl -u cloop-ui -o cat`, `-o json`, or a container runtime's JSON log
+file — so the copy that left the box is checkable as it arrived. The findings,
+each an exit 2:
+
+| Finding | Means |
+| --- | --- |
+| `truncated` | The chain ends before an id a checkpoint saw, and nothing was written since. Its tail was deleted — or a backup older than that checkpoint was restored and the hub has not run since. |
+| `restored` | The chain no longer agrees with a checkpoint and has been written to since: a database restored from a backup older than that checkpoint (the report names the last checkpoint it still agrees with), or a tail deleted while the hub kept writing. |
+| `rewritten` | The chain holds a different row under an id a checkpoint saw — history was edited and every later hash recomputed, which is the one rewrite the chain alone cannot catch. |
+| `deleted` | A row a checkpoint saw is missing from inside the chain. |
+| `anchor-missing`, `anchor-rewritten` | A prune anchor a checkpoint saw is gone or altered. |
+| `archive-mismatch` | A checkpointed row was pruned, and the archive its anchor sealed no longer matches the anchor's digest, or is not the intact chain the anchor's boundary ends in — every archived row is re-hashed and linked, so a file holding only the right hash on the right id does not pass. |
+| `prune-unproven` | A checkpointed row is covered by a prune anchor whose archive cannot be read here, and no trusted checkpoint records the hub verifying that archive. Whoever can delete rows can also write an anchor over the hole, so until the archive is checked this is indistinguishable from a deletion. Run the command where the archive is. |
+| `refused` | A record's seal does not verify under the key it claims: the file was edited or the record forged. It is not used as evidence. |
+
+A prune is not truncation. A checkpoint below a prune anchor is checked against
+the archive the anchor sealed — its digest, as `verify-seals` would, and then
+every row in it re-hashed into the chain the anchor's boundary ends in — and
+must hold the row with the hash the checkpoint saw. An archive moved to cold
+storage is reported as unverified rather than failed when a checkpoint sealed
+under the hub's key records that the hub verified that anchor's archive itself
+— it reads each new anchor's archive once, the first window it sees the
+anchor, and says loudly on stderr when one does not verify. Otherwise nothing
+outside the database vouches for the prune, and it fails as `prune-unproven`
+until the command runs where the archive is. An archive the hub verified and
+somebody deleted afterwards still reads as unverified, not failed: the
+archives are the copy of what a prune removed, so keep `audit.export_dir`
+where whoever can rewrite the database cannot delete from.
+Records sealed under another key — `CLOOP_SECRET_KEY` was rotated since — are
+reported and still checked for what they say; without `CLOOP_SECRET_KEY` the
+seals are not checked at all, and the output says so.
+
+What checkpoints cannot do is stop someone deleting records from the file.
+That is what off-box storage is for, and why the doctor warns when the newest
+control-plane checkpoint is more than three intervals old.
+
+Regular export off-box remains the way to keep the *content* of the trail, not
+just its length:
 
 ```console
 $ cloop audit-log list --entity secret --since 7d
@@ -2293,6 +2418,22 @@ leased to it is disclosed and rotate accordingly.
 Do not vacuum or maintain — that rewrites pages. Snapshot the file, `cloop db
 verify` to separate corruption from tampering, and compare against your last
 off-box export to find where the histories diverge.
+
+**`cloop hub audit verify` exits 3.**
+The chains are intact and record events that could not be appended.
+`cloop hub audit list --type audit.gap` shows, per gap, how many were lost,
+of which actions, when, and why (`reasons`: `full`, `readonly`, `locked`, …).
+Fix the cause — free the disk first, it is the usual one — and treat the
+actions listed as the part of that window the trail cannot answer for. Then
+`--allow-gaps` in the scheduled check, until the next gap.
+
+**`--checkpoints` names a truncated tail or a restored backup.**
+Stop the hub before anything else writes, snapshot `state.db`, and keep the
+checkpoint file and its off-box copies as they are. A restore that was
+deliberate explains itself — check backups taken or restored around the time
+the finding names; one nobody ran, or a truncation, is an incident: the rows
+after the last checkpoint the chain agrees with are the ones to recover from an
+export, and the window in which they went is the one to investigate.
 
 **`/readyz` fails but `/healthz` passes.**
 Read the `check` field first — it names which gate failed.

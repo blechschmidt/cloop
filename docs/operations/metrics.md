@@ -825,6 +825,54 @@ with a `for:` of half an hour, which no single burst outlasts. It is a gauge of
 the shared database's directory, so the cluster leader alone exports it; a hub
 with no database yet exports nothing.
 
+## Audit trail
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_audit_append_failures_total` | counter | `chain`, `reason` |
+| `cloop_audit_gap_events_total` | counter | `chain` |
+| `cloop_audit_checkpoints_total` | counter | `outcome` |
+
+An audit append that fails leaves no trace in a hash chain: the next append
+links to the last one that succeeded, and verification reports an intact
+chain over a trail with holes in it. So the append path counts every failure
+itself, whatever its caller does with the error (Task 20404).
+`cloop_audit_append_failures_total` is events lost, by the role of the
+database handle — `control-plane`, `project`, or `unclassified` — and the
+failure class: `locked`, `readonly`, `full`, `io`, `closed` or `other`.
+`cloop_audit_gap_events_total` is how many of them have since been written
+into their chain as part of an `audit.gap` row, which happens with the next
+append there that succeeds, at a flush every 30 seconds, or at shutdown. The
+difference is what a process still owes the trail:
+
+```promql
+sum(increase(cloop_audit_append_failures_total[10m])) > 0
+sum(cloop_audit_append_failures_total) - sum(cloop_audit_gap_events_total) > 0
+```
+
+The first pages on any loss; the second, with a `for:` of ten minutes, says the
+database still is not taking writes. Losses a hub adopts from a process that
+exited owing them are counted in both, as it adopts and as it records them, so
+the difference stays what is owed. Both are per member and sum across a
+cluster; a project's losses are counted by the `cloop run` process that writes
+its chain, which a scrape of the hub does not see — the gap row in the
+project's chain is the record of those. `reason="full"` usually travels with
+[`cloop_hub_disk_free_bytes`](#disk) near zero.
+
+`cloop_audit_checkpoints_total` counts the head checkpoints the cluster leader
+writes off the database, one per chain per `audit.checkpoints.interval`:
+`outcome="signed"` under the key derived from `CLOOP_SECRET_KEY`, `unsigned` on
+a hub without one, `failed` when the configured file could not be written.
+
+```promql
+increase(cloop_audit_checkpoints_total{outcome="failed"}[15m]) > 0
+sum(increase(cloop_audit_checkpoints_total[30m])) == 0
+```
+
+The second catches checkpoints stopping altogether — no leader, or a window
+marker that will not advance. See the
+[runbook](runbook.md#audit-chain-verification).
+
 ## Registry self-monitoring
 
 | Metric | Type | Labels |

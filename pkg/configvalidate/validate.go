@@ -239,6 +239,11 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// fails to parse must not degrade into "no limit".
 		checkExecutors(rawCfg, add)
 
+		// 2e'''. Audit checkpoints (Task 20404): Load drops a file that may
+		// not hold them and runs a bad interval at the default, so this is
+		// where the operator's own text is judged.
+		checkAuditCheckpoints(rawCfg, add)
+
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
 
@@ -487,6 +492,18 @@ func checkExecutors(cfg *config.Config, add func(Finding)) {
 		add(Finding{
 			Severity: SeverityError,
 			Field:    "config.executors",
+			Message:  err.Error(),
+		})
+	}
+}
+
+// checkAuditCheckpoints runs the strict audit.checkpoints validator `cloop
+// config set` uses, against what the file says rather than what Load kept.
+func checkAuditCheckpoints(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateAuditCheckpoints(cfg.Audit.Checkpoints); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.audit.checkpoints",
 			Message:  err.Error(),
 		})
 	}

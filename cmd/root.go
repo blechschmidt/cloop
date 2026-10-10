@@ -7,6 +7,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/janitor"
 	"github.com/blechschmidt/cloop/pkg/migrate"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
@@ -86,13 +87,29 @@ func loadCommandConfig(cmd *cobra.Command, dir string) (*config.Config, error) {
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	// Before exiting either way: a command that failed to append an audit
+	// event has its loss recorded in the chain if the database takes writes
+	// now, and said plainly on stderr if it does not (Task 20404). A no-op
+	// for the commands that never failed one, which is nearly all of them.
+	statedb.SettleAuditFailuresAtExit()
+	if err != nil {
 		// The one place a command error is rendered. "Error:" matches the
 		// prefix cobra used, so the line itself is unchanged — only the
 		// duplicate is gone.
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitProcess ends the process with code. Every exit in this package goes
+// through it rather than os.Exit, which skips Execute's tail: a command that
+// failed to append an audit event — a doctor run whose smoke test leased a
+// secret on a database that stopped taking writes — has the loss recorded, or
+// said, before it goes (Task 20404).
+func exitProcess(code int) {
+	statedb.SettleAuditFailuresAtExit()
+	os.Exit(code)
 }
 
 func init() {

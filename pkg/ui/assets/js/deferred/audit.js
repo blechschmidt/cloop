@@ -307,10 +307,37 @@
       }
     }
 
+    // A chain with audit.gap rows verifies but is not complete; amber, not green.
+    function _auditBadgeClass(badge, cls) {
+      badge.className = cls === 'gaps' ? 'audit-integrity' : 'audit-integrity ' + cls;
+      badge.style.cssText = cls === 'gaps'
+        ? 'border-color:var(--yellow);background:rgba(210,153,34,.12);color:var(--yellow)' : '';
+    }
+
+    function _auditGapText(gaps, events) {
+      return gaps + ' recorded gap' + (gaps === 1 ? '' : 's') + ' covering ' +
+        (events || 0) + ' lost event' + (events === 1 ? '' : 's');
+    }
+
+    // Failed appends this hub has not recorded yet: in no chain, so only here.
+    function _auditRenderUnrecorded(list) {
+      const el = document.getElementById('auditUnrecorded');
+      if (!el) return;
+      list = Array.isArray(list) ? list : [];
+      el.style.display = list.length ? '' : 'none';
+      el.textContent = list.map(c => {
+        const u = c.unrecorded || {};
+        return 'This hub could not append ' + (u.events || 0) + ' audit event' + (u.events === 1 ? '' : 's') +
+          ' to ' + (c.path || '?') + ' since ' + (u.first_at || '?') + ' and has not recorded them yet' +
+          (u.last_error ? ' (last error: ' + u.last_error + ')' : '') +
+          '. They are written as an audit.gap row once the database takes writes.';
+      }).join('\n');
+    }
+
     function verifyAuditChain() {
       const badge = document.getElementById('auditIntegrity');
       const text  = document.getElementById('auditIntegrityText');
-      if (badge) { badge.className = 'audit-integrity unknown'; }
+      if (badge) { _auditBadgeClass(badge, 'unknown'); }
       if (text)  { text.textContent = 'verifying…'; }
 
       const vBase = pUrl('/api/audit/verify');
@@ -320,17 +347,26 @@
 
       return api(vUrl).then(d => {
         d = d || {};
+        _auditRenderUnrecorded(d.unrecorded);
         if (!badge || !text) return d;
         // A merged verification carries one verdict per chain, and the top-level
         // fields describe only the project's. Branching on the array rather than on
         // the toggle keeps the badge honest against a server that ignored ?source=.
         if (Array.isArray(d.chains) && d.chains.length) {
           _auditRenderMergedVerdict(badge, text, d);
+        } else if (d.ok && d.gaps) {
+          _auditBadgeClass(badge, 'gaps');
+          text.textContent = 'Chain intact — ' + (d.total || 0) + ' events verified, ' +
+            _auditGapText(d.gaps, d.gap_events);
+          badge.title = 'Every row hash matched, and audit.gap rows record events that could not be ' +
+            'appended (the database was locked, read-only or full).\n' +
+            (d.gap_ids && d.gap_ids.length ? 'gap rows: #' + d.gap_ids.join(', #') + '\n' : '') +
+            'Checked at ' + (d.checked_at || '');
         } else if (d.ok && d.anchored) {
           // A pruned chain verifies, but not from the beginning. Saying only
           // "intact" over a trail whose early history has been archived elsewhere
           // is true and misleading; the badge has to name the boundary.
-          badge.className = 'audit-integrity ok';
+          _auditBadgeClass(badge, 'ok');
           text.textContent = 'Chain intact from #' + (d.verified_from_id || '?') +
             ' — ' + (d.total || 0) + ' event' + (d.total === 1 ? '' : 's') + ' verified, ' +
             (d.pruned_count || 0) + ' archived';
@@ -340,11 +376,11 @@
             (d.archive_sha256 ? 'sha256:  ' + d.archive_sha256 + '\n' : '') +
             'Checked at ' + (d.checked_at || '');
         } else if (d.ok) {
-          badge.className = 'audit-integrity ok';
+          _auditBadgeClass(badge, 'ok');
           text.textContent = 'Chain intact — ' + (d.total || 0) + ' event' + (d.total === 1 ? '' : 's') + ' verified';
           badge.title = 'Every row hash was recomputed from the genesis row and matched. Checked at ' + (d.checked_at || '');
         } else {
-          badge.className = 'audit-integrity broken';
+          _auditBadgeClass(badge, 'broken');
           text.textContent = 'CHAIN BROKEN at #' + (d.break_at_id || '?');
           // The full hashes go in the tooltip: they are the evidence, and
           // truncating them would leave an operator unable to act on the finding.
@@ -354,7 +390,7 @@
         }
         return d;
       }).catch(err => {
-        if (badge) badge.className = 'audit-integrity unknown';
+        if (badge) _auditBadgeClass(badge, 'unknown');
         if (text)  text.textContent = 'integrity unknown';
         if (badge) badge.title = 'Could not verify: ' + ((err && err.message) || String(err));
       });
@@ -372,22 +408,26 @@
       const bad = chains.filter(c => !c.ok);
       const total = chains.reduce((n, c) => n + (c.total || 0), 0);
       const detail = chains.map(c =>
-        (c.ok ? 'OK   ' : 'FAIL ') + (c.source || '?') + ' — ' + (c.dir || '?') +
+        (c.ok ? (c.gaps ? 'GAPS ' : 'OK   ') : 'FAIL ') + (c.source || '?') + ' — ' + (c.dir || '?') +
         ' (' + (c.total || 0) + ' event' + (c.total === 1 ? '' : 's') + ')' +
+        (c.gaps ? ', ' + _auditGapText(c.gaps, c.gap_events) : '') +
         (c.break_at_id ? ', break at #' + c.break_at_id : '') +
         (c.error ? ', unreadable: ' + c.error : '') +
         (!c.ok && c.reason ? ', ' + c.reason : '')
       ).join('\n');
+      const gaps = chains.reduce((n, c) => n + (c.ok && c.gaps ? c.gaps : 0), 0);
+      const gapEvents = chains.reduce((n, c) => n + (c.ok && c.gaps ? (c.gap_events || 0) : 0), 0);
 
       if (!bad.length) {
-        badge.className = 'audit-integrity ok';
+        _auditBadgeClass(badge, gaps ? 'gaps' : 'ok');
         text.textContent = chains.length + ' chain' + (chains.length === 1 ? '' : 's') +
-          ' intact — ' + total + ' event' + (total === 1 ? '' : 's') + ' verified';
+          ' intact — ' + total + ' event' + (total === 1 ? '' : 's') + ' verified' +
+          (gaps ? ', ' + _auditGapText(gaps, gapEvents) : '');
         badge.title = 'Every row hash matched in each chain read.\n' + detail +
           '\nChecked at ' + (d.checked_at || '');
         return;
       }
-      badge.className = 'audit-integrity broken';
+      _auditBadgeClass(badge, 'broken');
       text.textContent = bad.length + ' of ' + chains.length + ' chain' +
         (chains.length === 1 ? '' : 's') + ' FAILED — ' + (bad[0].source || '?') +
         (bad[0].break_at_id ? ' at #' + bad[0].break_at_id : '');
@@ -481,6 +521,7 @@
           </div>
         </div>
 
+        <div id="auditUnrecorded" class="exec-banner warn" role="status" style="display:none;white-space:pre-line;margin-bottom:10px"></div>
         <div id="auditSummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
         <div id="auditEmpty" class="audit-empty" style="display:none">No audit events match these filters.</div>
         <div style="overflow-x:auto">

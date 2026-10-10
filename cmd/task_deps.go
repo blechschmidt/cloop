@@ -67,7 +67,7 @@ Examples:
 		if depsCheck {
 			if depseditor.PlanHasCycle(s.Plan) {
 				color.New(color.FgRed).Fprintf(os.Stderr, "FAIL: circular dependency detected in plan\n")
-				os.Exit(1)
+				exitProcess(1)
 			}
 			color.New(color.FgGreen).Printf("OK: no circular dependencies\n")
 			return nil

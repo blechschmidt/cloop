@@ -118,7 +118,7 @@ first.`,
 		}
 
 		if rep.HasErrors() {
-			os.Exit(1)
+			exitProcess(1)
 		}
 		return nil
 	},

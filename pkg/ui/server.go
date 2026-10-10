@@ -862,6 +862,10 @@ type Server struct {
 	// walCheck is the leader's record of its attempts to truncate the
 	// control plane's write-ahead log (Task 20392). See statedb_wal.go.
 	walCheck walCheckState
+
+	// auditCheckpoints is the leader's record of the audit heads it last
+	// wrote off the database (Task 20404). See audit_checkpoints.go.
+	auditCheckpoints auditCheckpointState
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1413,6 +1417,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// same reason: it acts on every registered project, so it belongs to
 	// whichever hub holds the instance lease. See autoresume.go.
 	s.runLeaderDuty(watcherCtx, "autoresume", s.watchAutoResume)
+	// Pins the head of every audit chain off the database, so deleting the
+	// newest rows is detectable (Task 20404). A leader duty because the
+	// records are one per chain per window, cluster-wide; the window marker
+	// keeps a leader change from skipping or doubling one. See
+	// audit_checkpoints.go.
+	s.runLeaderDuty(watcherCtx, "audit-checkpoints", s.watchAuditCheckpoints)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential
@@ -1591,6 +1601,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		ccAuth.Shutdown()
 	}
 	err := srv.Shutdown(ctx)
+	// With requests drained and leadership still held: record what the audit
+	// trail is owed, and pin every chain's head one last time (Task 20404).
+	s.shutdownAuditTrail()
 	// Leave the cluster once requests have drained (Task 20354): leadership
 	// is released, and the member row is marked left so the others adopt
 	// what this member owned now rather than after the membership TTL.

@@ -364,6 +364,13 @@ func AuditChainLink(ev AuditEvent) (want string, ok bool) {
 	return want, want == ev.RowHash
 }
 
+// AuditAnchorLink recomputes one anchor's hash and reports whether it matches,
+// so a verifier outside this package can walk the anchor chain.
+func AuditAnchorLink(a AuditAnchor) (want string, ok bool) {
+	want = computeAnchorHash(a)
+	return want, want == a.AnchorHash
+}
+
 // AuditGenesisHash is the prev_hash of a chain that has never been pruned.
 // Exported so the sealer can start its own verification from the same place
 // the verifier does.

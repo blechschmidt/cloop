@@ -444,6 +444,10 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkFreeSpace(dir, cfg, opts, add)
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)
+	// Beside retention, which is the other half of what the trail keeps:
+	// whether it is complete, and whether shortening it would be noticed
+	// (Task 20404).
+	checkAuditTrail(dir, cfg, opts, add)
 	checkAdmission(dir, cfg, opts, add)
 	// Last, and after checkExecutors for the same reason the NetworkPolicy
 	// probe is: it dispatches to the registry reconciliation builds. Running

@@ -183,7 +183,7 @@ Examples:
 			}
 		}
 		if hasErrors {
-			os.Exit(1)
+			exitProcess(1)
 		}
 		return nil
 	},

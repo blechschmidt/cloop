@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
@@ -111,6 +112,16 @@ type DB struct {
 
 	// path is the file the handle was opened over, as given to Open.
 	path string
+
+	// auditKey names the database this handle's audit chain lives in, for
+	// the failure accounting in audit_failures.go: the path made absolute
+	// and resolved, so two handles opened over one file — the hub opens the
+	// control plane dozens of times — share one account (Task 20404).
+	auditKey string
+
+	// closed is set by Close, so the failure accounting does not try to
+	// record a gap through a handle nothing can write through any more.
+	closed atomic.Bool
 }
 
 // Path returns the database file this handle was opened over, as the caller
@@ -186,7 +197,9 @@ func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 		}
 		return nil, fmt.Errorf("statedb migrate: %w", err)
 	}
-	return &DB{conn: conn, path: dbPath}, nil
+	d := &DB{conn: conn, path: dbPath}
+	d.auditKey = auditChainKey(dbPath)
+	return d, nil
 }
 
 // connString is dbPath plus the settings the driver applies to every
@@ -263,6 +276,7 @@ func applyPragmas(conn *sql.DB) error {
 
 // Close releases the database connection.
 func (d *DB) Close() error {
+	d.closed.Store(true)
 	return d.conn.Close()
 }
 

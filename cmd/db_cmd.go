@@ -63,7 +63,7 @@ Exit codes:
 		if err != nil {
 			fail.Printf("Verification could not run: %v\n", err)
 			// Distinguish "could not run" from "found issues" with a separate exit code.
-			os.Exit(2)
+			exitProcess(2)
 		}
 
 		if rep.OK() {
@@ -95,7 +95,7 @@ Exit codes:
 		dim.Println("Hint: corruption is rarely repairable in place. Restore from a recent")
 		dim.Println("      'cloop snapshot' or 'cloop migrate' the project after backing it up.")
 
-		os.Exit(1)
+		exitProcess(1)
 		return nil
 	},
 }
@@ -199,9 +199,9 @@ Exit codes:
 			// Distinguish "could not run at all" (missing file) from "started
 			// but failed midway through" so cron jobs can react appropriately.
 			if rep == nil {
-				os.Exit(2)
+				exitProcess(2)
 			}
-			os.Exit(1)
+			exitProcess(1)
 		}
 
 		fmt.Printf("  size before:    %s (%d pages, %d bytes/page, %d freelist)\n",
@@ -348,13 +348,13 @@ Exit codes:
 
 		if _, err := os.Stat(dbPath); err != nil {
 			fail.Printf("Backup could not run: %v\n", err)
-			os.Exit(2)
+			exitProcess(2)
 		}
 
 		report, err := dbbackup.Backup(dbPath, out)
 		if err != nil {
 			fail.Printf("Backup failed: %v\n", err)
-			os.Exit(1)
+			exitProcess(1)
 		}
 
 		fmt.Printf("  WAL checkpoint:  %s\n", report.WALCheckpoint)
@@ -407,7 +407,7 @@ Exit codes:
 
 		if _, err := os.Stat(backupPath); err != nil {
 			fail.Printf("Restore could not run: %v\n", err)
-			os.Exit(2)
+			exitProcess(2)
 		}
 
 		// Surface metadata up front so the operator sees what they are
@@ -430,7 +430,7 @@ Exit codes:
 		})
 		if err != nil {
 			fail.Printf("Restore failed: %v\n", err)
-			os.Exit(1)
+			exitProcess(1)
 		}
 
 		fmt.Printf("  size:        %s\n", humanBytes(report.SizeBytes))

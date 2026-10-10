@@ -84,6 +84,13 @@ const (
 	AuditRetentionDaysLower = 1
 	AuditRetentionDaysUpper = 3650
 
+	// Audit head checkpoint interval bounds (Task 20404). A minute is the
+	// shortest window worth one record per chain; a day is the longest a
+	// truncation should go unpinned.
+	AuditCheckpointIntervalDefault = 5 * time.Minute
+	AuditCheckpointIntervalLower   = time.Minute
+	AuditCheckpointIntervalUpper   = 24 * time.Hour
+
 	// Retention janitor bounds (Task 20229). Zero in YAML means "use the
 	// package default" for every one of these — see RetentionConfig for why
 	// this section defaults on where audit retention defaults off. Values
@@ -542,6 +549,105 @@ type AuditConfig struct {
 	// Without it, retention is only applied by an explicit
 	// `cloop hub audit prune`.
 	PruneOnMaintain bool `yaml:"prune_on_maintain,omitempty"`
+
+	// Checkpoints configures the signed head checkpoints the cluster leader
+	// writes off the database (Task 20404).
+	Checkpoints AuditCheckpointsConfig `yaml:"checkpoints,omitempty"`
+}
+
+// AuditCheckpointsConfig is where and how often the hub writes the head of
+// every audit chain somewhere the database cannot reach (Task 20404).
+//
+// Deleting the newest audit rows leaves a shorter chain that verifies; a
+// checkpoint is what remembers how long it was. On by default, to stderr only,
+// because a container platform ships stderr off the box without being asked —
+// and a checkpoint kept beside the database it guards is worth nothing.
+type AuditCheckpointsConfig struct {
+	// Interval is how often a checkpoint is written, as a Go duration ("5m",
+	// "1h"). Empty means AuditCheckpointIntervalDefault; anything else must
+	// lie in [AuditCheckpointIntervalLower, AuditCheckpointIntervalUpper].
+	Interval string `yaml:"interval,omitempty"`
+
+	// File is an absolute path the records are appended to, fsynced, one
+	// JSON object per line. It must lie outside every .cloop/ directory:
+	// a record the database's attacker can also delete pins nothing.
+	File string `yaml:"file,omitempty"`
+
+	// Stderr prints each record as one JSON line on the hub's stderr. Absent
+	// means true.
+	Stderr *bool `yaml:"stderr,omitempty"`
+}
+
+// EffectiveInterval is the interval in force: the configured one when it
+// parses and lies in bounds, the default otherwise.
+func (c AuditCheckpointsConfig) EffectiveInterval() time.Duration {
+	d, err := parseAuditCheckpointInterval(c.Interval)
+	if err != nil || d == 0 {
+		return AuditCheckpointIntervalDefault
+	}
+	return d
+}
+
+// StderrEnabled reports whether records go to stderr.
+func (c AuditCheckpointsConfig) StderrEnabled() bool { return c.Stderr == nil || *c.Stderr }
+
+// Enabled reports whether checkpoints are written anywhere.
+func (c AuditCheckpointsConfig) Enabled() bool { return c.File != "" || c.StderrEnabled() }
+
+// parseAuditCheckpointInterval parses and bounds an interval; "" is 0.
+func parseAuditCheckpointInterval(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration (e.g. 5m, 1h)", s)
+	}
+	if d < AuditCheckpointIntervalLower || d > AuditCheckpointIntervalUpper {
+		return 0, fmt.Errorf("%s is outside [%s, %s]", d, AuditCheckpointIntervalLower, AuditCheckpointIntervalUpper)
+	}
+	return d, nil
+}
+
+// ValidateAuditCheckpointFile reports why path cannot hold audit checkpoints:
+// it must be absolute and must not lie inside any .cloop/ directory. Empty is
+// valid (no file). Symlinks are resolved where the records are written, not
+// here, because the file need not exist yet.
+func ValidateAuditCheckpointFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%q must be an absolute path", path)
+	}
+	if PathInsideCloopDir(path) {
+		return fmt.Errorf("%q lies inside a .cloop/ directory; checkpoints must be kept outside it, "+
+			"where whoever can rewrite the database cannot also rewrite them", path)
+	}
+	return nil
+}
+
+// PathInsideCloopDir reports whether any component of path is ".cloop".
+func PathInsideCloopDir(path string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(path)), "/") {
+		if part == ".cloop" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateAuditCheckpoints is the strict check of the audit.checkpoints
+// section, shared by `cloop config set` and `cloop config validate`.
+func ValidateAuditCheckpoints(c AuditCheckpointsConfig) error {
+	if _, err := parseAuditCheckpointInterval(c.Interval); err != nil {
+		return fmt.Errorf("audit.checkpoints.interval: %w", err)
+	}
+	if err := ValidateAuditCheckpointFile(c.File); err != nil {
+		return fmt.Errorf("audit.checkpoints.file: %w", err)
+	}
+	return nil
 }
 
 // ExecutorsConfig groups the execution backends a control plane offers.
@@ -3179,6 +3285,19 @@ func (c *Config) validateAndClamp(path string) {
 		warn("audit.retention_days", fmt.Sprintf("value %d outside [%d, %d]", c.Audit.RetentionDays, AuditRetentionDaysLower, AuditRetentionDaysUpper))
 		c.Audit.RetentionDays = 0
 	}
+	// Audit checkpoints (Task 20404): an interval that will not parse runs
+	// at the default rather than not at all, and a file that may not hold
+	// checkpoints is dropped — the records still reach stderr unless that
+	// was turned off too, and `cloop hub doctor` reports both the repair and
+	// what is left.
+	if _, err := parseAuditCheckpointInterval(c.Audit.Checkpoints.Interval); err != nil {
+		warn("audit.checkpoints.interval", err.Error())
+		c.Audit.Checkpoints.Interval = ""
+	}
+	if err := ValidateAuditCheckpointFile(c.Audit.Checkpoints.File); err != nil {
+		warn("audit.checkpoints.file", err.Error()+"; the checkpoint file is disabled")
+		c.Audit.Checkpoints.File = ""
+	}
 	// Retention janitor: zero means "use the package default" for every
 	// field, so an out-of-range value falls back to zero and the hub runs the
 	// default policy. That is the conservative reading here — the opposite of
@@ -3446,6 +3565,9 @@ func (c *Config) ValidateNumeric() error {
 	if c.Audit.RetentionDays != 0 && (c.Audit.RetentionDays < AuditRetentionDaysLower || c.Audit.RetentionDays > AuditRetentionDaysUpper) {
 		return fmt.Errorf("audit.retention_days must be between %d and %d (or 0 to keep everything) (got %d)",
 			AuditRetentionDaysLower, AuditRetentionDaysUpper, c.Audit.RetentionDays)
+	}
+	if err := ValidateAuditCheckpoints(c.Audit.Checkpoints); err != nil {
+		return err
 	}
 	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {
 		return fmt.Errorf("retention.interval_hours must be between %d and %d (or 0 for the default) (got %d)",

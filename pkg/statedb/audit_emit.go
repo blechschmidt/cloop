@@ -2,16 +2,17 @@
 //
 // These wrap AppendAuditEvent with payload construction for each mutation
 // type. They MUST NOT block the caller on failure: a stuck audit log must
-// never abort user work. Errors are written to stderr — surfaced once
-// per process via sync.Once to avoid log spam under sustained failure.
+// never abort user work. A failed append is counted, reported and later
+// recorded in the chain by the append path itself (audit_failures.go), so
+// there is nothing left for these helpers to do with the error. They used to
+// print the first one through a sync.Once and let every later one vanish for
+// the life of the process (Task 20404).
 
 package statedb
 
 import (
 	"fmt"
-	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
@@ -29,25 +30,13 @@ var auditEnabled = true
 // is not desired (e.g. one-shot CLI commands that read state).
 func SetAuditEnabled(on bool) { auditEnabled = on }
 
-var auditWarnOnce sync.Once
-
-// auditWarn reports a single audit-emission failure via stderr. We swallow
-// every subsequent failure to keep the audit log's "best-effort" contract
-// from drowning logs when the database is read-only or full.
-func auditWarn(format string, args ...any) {
-	auditWarnOnce.Do(func() {
-		fmt.Fprintf(os.Stderr, "[audit] "+format+" (further audit-log warnings will be suppressed)\n", args...)
-	})
-}
-
-// emit is the single internal helper every public auditXxx helper calls.
+// emit is the single internal helper every public auditXxx helper calls. The
+// error is the append path's to account for; see the file comment.
 func emit(d *DB, ev *AuditEvent) {
 	if !auditEnabled || d == nil {
 		return
 	}
-	if err := d.AppendAuditEvent(ev); err != nil {
-		auditWarn("emit %s/%s: %v", ev.EventType, ev.EntityID, err)
-	}
+	_ = d.AppendAuditEvent(ev)
 }
 
 func auditTaskUpsert(d *DB, t *pm.Task, actor string) {
@@ -632,9 +621,8 @@ func auditTaskLifecycle(d *DB, edges []taskLifecycleEdge, projectPath string) {
 	if len(evs) == 0 {
 		return
 	}
-	if err := d.AppendAuditEvents(evs); err != nil {
-		auditWarn("emit %d task lifecycle events: %v", len(evs), err)
-	}
+	// Counted and recorded by the append path on failure; see the file comment.
+	_ = d.AppendAuditEvents(evs)
 }
 
 // taskFinishEvent renders the terminal row: outcome, duration and reason.
@@ -905,7 +893,6 @@ func auditPlanTasks(d *DB, changed []taskAuditChange, deleted []int) {
 	if len(evs) == 0 {
 		return
 	}
-	if err := d.AppendAuditEvents(evs); err != nil {
-		auditWarn("emit %d plan task events: %v", len(evs), err)
-	}
+	// Counted and recorded by the append path on failure; see the file comment.
+	_ = d.AppendAuditEvents(evs)
 }

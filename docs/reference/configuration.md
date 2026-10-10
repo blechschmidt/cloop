@@ -1547,6 +1547,39 @@ audit:
 The procedure, what an anchor is, and why a pruned chain still verifies are in
 [the runbook](../operations/runbook.md#retention-keeping-the-trail-bounded).
 
+### Audit head checkpoints
+
+A hash chain shows editing anywhere and deletion anywhere but at the newest
+end: delete the newest rows and the survivors still verify. `audit.checkpoints`
+is where the hub writes down how long each chain was, somewhere the database
+cannot reach (Task 20404). It is **on by default**, to stderr.
+
+```yaml
+audit:
+  checkpoints:
+    interval: 5m                                  # default 5m
+    file: /var/log/cloop/audit-checkpoints.jsonl  # optional; outside .cloop/
+    stderr: true                                  # default true
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `interval` | `5m` | `1m`–`24h` | How often the cluster leader writes one record per chain — the control plane's every time, a project's when its head has moved (and daily regardless). Windows are numbered from the clock and claimed in a marker the control plane holds, so a leader change never writes a window twice, and a window whose writer died between claiming and writing it is written by the next leader — late, if the window has ended by then — rather than skipped. A value that does not parse, or lies outside the range, runs at the default. |
+| `file` | — | absolute path | Appended to and fsynced, one JSON record per line, mode 0600. Must lie outside every `.cloop/` directory, symlinks resolved, and its directory must exist — cloop does not create it, so a missing mount fails loudly instead of writing to the root disk. A path that breaks the rule is dropped at load with a warning; `cloop config set` and `cloop config validate` refuse it. Put it on storage the database does not share. |
+| `stderr` | `true` | — | Prints each record as one JSON line on the hub's stderr, for a container platform's log pipeline to ship off the box. With `false` and no `file`, no checkpoints are written and `cloop hub doctor` warns. |
+
+Each record holds the chain (`control-plane` or `project`), the database path,
+the newest row's id and hash, the row count, the newest prune anchor and whether
+the hub verified that anchor's archive (it reads each new anchor's archive once),
+the time and the hub member that wrote it, and is sealed with HMAC-SHA256 under a key
+derived from `CLOOP_SECRET_KEY` with a label of its own, stamped with the key's
+fingerprint. Without `CLOOP_SECRET_KEY` the records are unsigned. A leading hub
+also writes every chain at clean shutdown. Check the chains against the records
+with `cloop hub audit verify --checkpoints <file>` — the
+[runbook](../operations/runbook.md#checkpoints-catching-a-shortened-trail) lists
+what it can find. Like the rest of `audit`, the section is read from the hub's
+effective configuration, overlay included, at every window.
+
 ### Disk retention
 
 `retention:` governs the janitor the hub runs on a timer to keep `.cloop`
@@ -2077,7 +2110,7 @@ ui:
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
 | `ui.*` | Where it listens (`listen`, `allow_unauthenticated_network`, read at startup), sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
 | `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |
-| `retention`, `audit` | The janitor's policy for the hub's own directory. Every other project keeps its own. |
+| `retention`, `audit` | The janitor's policy for the hub's own directory. Every other project keeps its own. `audit.checkpoints` is the hub's alone, read at every checkpoint window. |
 | `backup` | Auto-backup of the hub's own directory. |
 | `github.token` | The token the hub hands a pull request that runs on its own host. |
 

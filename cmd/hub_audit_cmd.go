@@ -54,6 +54,7 @@ else operates on one database, because a chain is truncated where it lives.
 
   cloop hub audit list --since 24h      merged, timestamp-ordered, labelled
   cloop hub audit verify                check both chains, not just one
+  cloop hub audit verify --checkpoints F  …and against the heads the hub sealed off the database
   cloop hub audit prune --before 90d    seal and remove rows older than 90 days
   cloop hub audit anchors               list previous truncations
   cloop hub audit verify-seals          re-hash each archive against its anchor
@@ -381,8 +382,10 @@ Examples:
 }
 
 var (
-	hubAuditVerifyProject string
-	hubAuditVerifyHub     string
+	hubAuditVerifyProject     string
+	hubAuditVerifyHub         string
+	hubAuditVerifyAllowGaps   bool
+	hubAuditVerifyCheckpoints string
 )
 
 var hubAuditVerifyCmd = &cobra.Command{
@@ -395,6 +398,24 @@ are reported as two verdicts rather than one boolean: a single "OK" would let
 an intact control-plane chain vouch for a project chain nobody checked. There
 is deliberately no --source filter here for the same reason.
 
+A chain can be intact and still be missing events. An audit append that fails
+— the database locked, read-only or full — leaves no hole in a hash chain; the
+next append simply links to the last one that succeeded. cloop counts every
+such failure and, once the database takes writes again, records it as an
+audit.gap row saying how many events were lost, of which actions, when and why.
+A chain holding gap rows is reported as GAPS and exits 3.
+
+--checkpoints checks the chains against the signed head checkpoints the hub
+writes off the database (audit.checkpoints): each recorded head must still be
+in its chain with the hash it had, or be covered by a prune anchor whose sealed
+archive holds it. That is the check that catches deleting the newest rows,
+which leaves a shorter chain that verifies. The finding is named: a tail
+truncated after an id a checkpoint saw, a database restored from a backup
+older than a checkpoint, a row rewritten under one, or a checkpoint whose seal
+does not verify — which is refused. Seals are checked under the key derived
+from CLOOP_SECRET_KEY; without it they are not checked. The file may be the
+checkpoint file itself or a log export holding the stderr copies.
+
 Also reports misrouted rows — events found in the chain their action does not
 belong in — over a bounded window of recent events. That is advisory, not a
 chain break: such a row is correctly hashed into the chain it was written to,
@@ -402,70 +423,27 @@ so both chains verify and the row is still in the wrong database. It usually
 means an older build, or an emission site holding an unclassified handle.
 
 Exit codes:
-  0  both chains intact
-  2  a chain is broken, unverifiable, or no audit database was found`,
+  0  both chains intact (with --allow-gaps: or intact with recorded gaps)
+  2  a chain is broken or unverifiable, no audit database was found, or a
+     checkpoint disagrees with its chain or is refused
+  3  both chains intact, and at least one holds recorded gaps
+
+Examples:
+  cloop hub audit verify
+  cloop hub audit verify --checkpoints /var/log/cloop/audit-checkpoints.jsonl
+  journalctl -u cloop-ui -o cat > cps.log && cloop hub audit verify --checkpoints cps.log
+  cloop hub audit verify --allow-gaps      # gaps already reviewed`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		requested, err := hubAuditChains(hubAuditVerifyHub, hubAuditVerifyProject, "all")
+		code, err := runHubAuditVerify(os.Stdout, hubAuditVerifyOptions{
+			Hub:             hubAuditVerifyHub,
+			Project:         hubAuditVerifyProject,
+			AllowGaps:       hubAuditVerifyAllowGaps,
+			CheckpointsFile: hubAuditVerifyCheckpoints,
+		})
 		if err != nil {
 			return err
 		}
-		reader, err := auditmerge.Open(requested)
-		if err != nil {
-			return err
-		}
-		defer reader.Close()
-
-		red := color.New(color.FgRed, color.Bold)
-		dim := color.New(color.Faint)
-
-		if len(reader.Chains()) == 0 {
-			// Not exit 0. "Opened nothing" and "verified everything" must not
-			// produce the same exit status, or a scheduled integrity check
-			// keeps passing after the databases move.
-			red.Println("NOTHING VERIFIED — no audit database found")
-			for _, line := range hubAuditChainLines(requested, nil) {
-				fmt.Printf("  %s\n", line)
-			}
-			fmt.Println("  pass --hub/--project, or run 'cloop init' here")
-			os.Exit(2)
-		}
-
-		var bad int
-		for _, v := range reader.Verify() {
-			switch {
-			case v.Err != nil:
-				bad++
-				red.Printf("UNVERIFIABLE  %-13s %s\n", v.Source, v.Path)
-				fmt.Printf("  reason:   %v\n", v.Err)
-			case v.Report.OK:
-				color.New(color.FgGreen, color.Bold).Printf("OK            %-13s %s — %d events verified\n",
-					v.Source, v.Path, v.Report.Total)
-				if v.Report.Anchored {
-					// Explains a row count that looks short: the prefix is not
-					// missing, it is sealed in a file the anchor names.
-					dim.Printf("  verified from id %d; %d earlier rows sealed in %s (sha256 %s)\n",
-						v.Report.VerifiedFromID, v.Report.PrunedCount, v.Report.ExportPath, shortHex(v.Report.ExportSHA256))
-				}
-			default:
-				bad++
-				red.Printf("CHAIN BROKEN  %-13s %s\n", v.Source, v.Path)
-				fmt.Printf("  break at  id=%d after %d verified events\n", v.Report.BreakAtID, v.Report.Total-1)
-				fmt.Printf("  reason:   %s\n", v.Report.Reason)
-				if v.Report.ExpectedHash != "" || v.Report.ActualHash != "" {
-					fmt.Printf("  expected: %s\n", v.Report.ExpectedHash)
-					fmt.Printf("  actual:   %s\n", v.Report.ActualHash)
-				}
-			}
-		}
-
-		hubAuditReportMisrouted(reader, requested)
-
-		if bad > 0 {
-			// Exit 2 rather than returning an error, matching
-			// `cloop audit-log verify`: a broken chain is a successful
-			// detection, and cobra would print usage text over the finding.
-			os.Exit(2)
-		}
+		exitAuditVerify(code)
 		return nil
 	},
 }
@@ -488,7 +466,7 @@ const hubAuditMisroutedExamples = 10
 // Failure to run the sweep is reported but does not fail the command: it is a
 // secondary check, and letting it mask the chain verdicts that did complete
 // would trade a real answer for a partial one.
-func hubAuditReportMisrouted(reader *auditmerge.Reader, requested []auditmerge.Chain) {
+func hubAuditReportMisrouted(w io.Writer, reader *auditmerge.Reader, requested []auditmerge.Chain) {
 	dim := color.New(color.Faint)
 
 	// The check compares a row's declared home against the role of the chain it
@@ -499,9 +477,9 @@ func hubAuditReportMisrouted(reader *auditmerge.Reader, requested []auditmerge.C
 	// positive on the most common command anyone runs here, which is how a
 	// warning gets trained out of an operator.
 	if hubAuditOneDatabase(requested) {
-		dim.Println("\nMisrouted-row check skipped: --hub and --project are one database, " +
+		dim.Fprintln(w, "\nMisrouted-row check skipped: --hub and --project are one database, "+
 			"so no row in it can be in the wrong chain.")
-		dim.Println("  Point them at different directories to compare two chains.")
+		dim.Fprintln(w, "  Point them at different directories to compare two chains.")
 		return
 	}
 
@@ -509,12 +487,12 @@ func hubAuditReportMisrouted(reader *auditmerge.Reader, requested []auditmerge.C
 	if err != nil {
 		// stdout with the verdicts: a redirect that captures the report must
 		// capture the fact that part of it did not run.
-		dim.Printf("\nMisrouted-row check skipped: %v\n", err)
+		dim.Fprintf(w, "\nMisrouted-row check skipped: %v\n", err)
 		return
 	}
 	bad := auditmerge.Misrouted(rows)
 	if len(bad) == 0 {
-		dim.Printf("\nNo misrouted rows among the %d most recent events.\n", len(rows))
+		dim.Fprintf(w, "\nNo misrouted rows among the %d most recent events.\n", len(rows))
 		return
 	}
 
@@ -522,7 +500,7 @@ func hubAuditReportMisrouted(reader *auditmerge.Reader, requested []auditmerge.C
 	if len(bad) == 1 {
 		noun = "event is"
 	}
-	color.New(color.FgYellow, color.Bold).Printf(
+	color.New(color.FgYellow, color.Bold).Fprintf(w,
 		"\n! %d of the %d most recent %s in the wrong chain (advisory, not a chain break)\n",
 		len(bad), len(rows), noun)
 	shown := bad
@@ -533,18 +511,18 @@ func hubAuditReportMisrouted(reader *auditmerge.Reader, requested []auditmerge.C
 		// Only two homes exist, so naming where it was found names where it
 		// belongs; printing the registry's answer as well would say the same
 		// thing twice.
-		fmt.Printf("  %-22s %s  found in %s, belongs in %s\n",
+		fmt.Fprintf(w, "  %-22s %s  found in %s, belongs in %s\n",
 			r.Ref(), r.EventType, r.Source, hubAuditOtherSource(r.Source))
 	}
 	if len(bad) > len(shown) {
-		dim.Printf("  … and %d more\n", len(bad)-len(shown))
+		dim.Fprintf(w, "  … and %d more\n", len(bad)-len(shown))
 	}
-	dim.Println("  These rows hash correctly where they are, so verification cannot see them.")
+	dim.Fprintln(w, "  These rows hash correctly where they are, so verification cannot see them.")
 	// Only the unambiguous direction is reported — a fleet fact in a project's
 	// chain. The reverse is not listed at all, because a hub runs from a
 	// directory that is itself a project and its control-plane database
 	// legitimately holds that project's own rows; see auditmerge.Misrouted.
-	dim.Println("  A fleet event in a project's journal was written through the wrong database handle.")
+	dim.Fprintln(w, "  A fleet event in a project's journal was written through the wrong database handle.")
 }
 
 // hubAuditOneDatabase reports whether two roles were requested but resolve to a
@@ -794,6 +772,8 @@ func init() {
 
 	hubAuditVerifyCmd.Flags().StringVar(&hubAuditVerifyProject, "project", "", "Project directory holding .cloop/state.db (default: current directory)")
 	hubAuditVerifyCmd.Flags().StringVar(&hubAuditVerifyHub, "hub", "", "Control-plane directory holding .cloop/state.db (default: current directory)")
+	hubAuditVerifyCmd.Flags().BoolVar(&hubAuditVerifyAllowGaps, "allow-gaps", false, "Exit 0 rather than 3 when the chains are intact but hold recorded gaps")
+	hubAuditVerifyCmd.Flags().StringVar(&hubAuditVerifyCheckpoints, "checkpoints", "", "Check the chains against the signed head checkpoints in this file (audit.checkpoints.file, or a log export of the stderr copies)")
 
 	hubAuditCmd.AddCommand(hubAuditListCmd)
 	hubAuditCmd.AddCommand(hubAuditVerifyCmd)

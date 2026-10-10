@@ -146,7 +146,7 @@ func runHubHealthcheck(cmd *cobra.Command, _ []string) error {
 // usage banner there is noise that hides the one line that matters.
 func probeFailure(msg string) error {
 	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
+	exitProcess(1)
 	return nil // unreachable
 }
 

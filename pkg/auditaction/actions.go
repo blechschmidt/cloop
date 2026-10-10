@@ -487,4 +487,11 @@ const (
 	ActionProjectMemberRevoke Action = "project.member.revoke"
 	// ActionProjectMemberLeave records a member removing themselves.
 	ActionProjectMemberLeave Action = "project.member.leave"
+
+	// ── audit ──────────────────────────────────────────────────────────────
+
+	// ActionAuditGap records audit events that could not be appended to the
+	// chain it is written in: how many, of which actions, when and why
+	// (Task 20404).
+	ActionAuditGap Action = "audit.gap"
 )

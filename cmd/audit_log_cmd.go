@@ -138,6 +138,8 @@ var auditLogListCmd = &cobra.Command{
 
 // ── verify ──────────────────────────────────────────────────────────────────
 
+var auditLogVerifyAllowGaps bool
+
 var auditLogVerifyCmd = &cobra.Command{
 	Use:   "verify",
 	Short: "Validate the SHA-256 hash chain (tamper detection)",
@@ -145,9 +147,16 @@ var auditLogVerifyCmd = &cobra.Command{
 what is stored. Any edit, deletion, or insertion made behind cloop's back
 breaks the chain at the first affected row.
 
+An audit append that failed — the database locked, read-only or full — leaves
+no break: it is recorded afterwards as an audit.gap row, and the chain is then
+reported intact with gaps. To check the newest rows were not deleted, and to
+check both the hub's and a project's chain, use 'cloop hub audit verify
+--checkpoints'.
+
 Exit codes:
-  0  chain intact
-  2  chain broken (the break is described on stdout)`,
+  0  chain intact (with --allow-gaps: or intact with recorded gaps)
+  2  chain broken (the break is described on stdout)
+  3  chain intact, holding recorded gaps`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log, err := openAuditLog()
 		if err != nil {
@@ -159,17 +168,12 @@ Exit codes:
 		if err != nil {
 			return err
 		}
-		if report.OK {
-			color.New(color.FgGreen, color.Bold).Printf("OK — %d events verified\n", report.Total)
-			return nil
-		}
-		color.New(color.FgRed, color.Bold).Printf(
-			"CHAIN BROKEN at id=%d after %d verified events\n", report.BreakAtID, report.Total-1)
-		fmt.Printf("  reason: %s\n", report.Reason)
-		// Exit 2 rather than returning an error: a broken chain is a
+		// Exit rather than returning an error: a broken chain is a
 		// successful detection, not a failure to run. Returning an error
 		// would print cobra's usage text over the finding.
-		os.Exit(2)
+		code := printSingleChainVerdict(os.Stdout, report, auditLogVerifyAllowGaps)
+		log.Close() //nolint:errcheck
+		exitAuditVerify(code)
 		return nil
 	},
 }
@@ -389,6 +393,7 @@ func init() {
 
 	auditLogCmd.Flags().IntVar(&auditLogTask, "task", 0, "Reconstruct one task's whole story from the audit trail")
 
+	auditLogVerifyCmd.Flags().BoolVar(&auditLogVerifyAllowGaps, "allow-gaps", false, "Exit 0 rather than 3 when the chain is intact but holds recorded gaps")
 	auditLogCmd.AddCommand(auditLogListCmd, auditLogVerifyCmd, auditLogExportCmd)
 	rootCmd.AddCommand(auditLogCmd)
 }

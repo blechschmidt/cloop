@@ -199,6 +199,24 @@ func (r *Reader) Chains() []Chain {
 	return out
 }
 
+// Opened is one chain the reader holds open: its database path, resolved,
+// and the handle.
+type Opened struct {
+	Chain
+	Path string
+	DB   *statedb.DB
+}
+
+// Opened lists the chains the reader holds open, in the order Chains reports
+// them. The handles stay the reader's: they are closed by Close.
+func (r *Reader) Opened() []Opened {
+	out := make([]Opened, 0, len(r.chains))
+	for _, c := range r.chains {
+		out = append(out, Opened{Chain: c.Chain, Path: c.path, DB: c.db})
+	}
+	return out
+}
+
 // Close releases every handle. Safe to call on a partially-opened Reader.
 func (r *Reader) Close() error {
 	var firstErr error

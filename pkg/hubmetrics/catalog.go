@@ -579,6 +579,63 @@ var (
 	})
 )
 
+// The audit trail's own losses and its off-database checkpoints (Task 20404).
+//
+// An append that fails leaves nothing in a hash chain, so statedb counts it on
+// the way out of its append path, where no caller can skip the counting, and
+// later writes an audit.gap row saying what was lost. The two counters are the
+// two halves of that: events lost, and events since recorded as lost. Their
+// difference is what this process still owes the trail. Counters, so each
+// cluster member counts its own and sum() is the cluster's.
+//
+// `chain` is the role of the database handle (AuditChain*) and `reason` the
+// failure class (AuditFail*): both closed sets, and neither names a database,
+// because a project path in a label is a series per project.
+var (
+	AuditAppendFailures = Default.MustRegister(Definition{
+		Name:   "cloop_audit_append_failures_total",
+		Help:   "Audit events that could not be appended to a hash chain, by the role of the database handle and the failure class. Every one is later recorded in that chain as part of an audit.gap row, or reported on stderr if the process exits first.",
+		Type:   TypeCounter,
+		Labels: []string{"chain", "reason"},
+	})
+
+	AuditGapEvents = Default.MustRegister(Definition{
+		Name:   "cloop_audit_gap_events_total",
+		Help:   "Lost audit events that have been written into their chain as part of an audit.gap row, by the role of the database handle. Trails cloop_audit_append_failures_total by what is still unrecorded.",
+		Type:   TypeCounter,
+		Labels: []string{"chain"},
+	})
+
+	AuditCheckpoints = Default.MustRegister(Definition{
+		Name:   "cloop_audit_checkpoints_total",
+		Help:   "Audit head checkpoints the cluster leader wrote off the database, by outcome: signed under CLOOP_SECRET_KEY, unsigned because the hub has no key, or failed to reach the configured file.",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
+)
+
+// Audit metric label values.
+const (
+	// The role of the database handle an audit append went through
+	// (statedb.Role).
+	AuditChainControlPlane = "control-plane"
+	AuditChainProject      = "project"
+	AuditChainUnclassified = "unclassified"
+
+	// Why an audit append failed.
+	AuditFailLocked   = "locked"
+	AuditFailReadOnly = "readonly"
+	AuditFailFull     = "full"
+	AuditFailIO       = "io"
+	AuditFailClosed   = "closed"
+	AuditFailOther    = "other"
+
+	// What became of one checkpoint record.
+	AuditCheckpointSigned   = "signed"
+	AuditCheckpointUnsigned = "unsigned"
+	AuditCheckpointFailed   = "failed"
+)
+
 // Bounded reason vocabularies used by call sites whose own packages have no
 // enumeration to borrow. Declaring them here rather than as string literals at
 // the call site is what keeps the label a closed set: a typo becomes a compile

@@ -181,13 +181,12 @@ func reportMisroutedAudit(role Role, eventType string, home auditaction.HomeDB) 
 	if testing.Testing() {
 		panic("statedb: " + msg)
 	}
-	// Once per process, and with its own sync.Once rather than auditWarn's.
-	// The high-volume actions are project-homed — task.upsert alone was once
-	// 99.7% of the table — so a mis-routed one would print on every save and
-	// bury whatever else the operator was reading. Sharing auditWarn's Once
-	// would fix the flood but let an unrelated first warning suppress this
-	// message entirely, which for the one warning nothing else can produce is
-	// the wrong trade.
+	// Once per process. The high-volume actions are project-homed —
+	// task.upsert alone was once 99.7% of the table — so a mis-routed one
+	// would print on every save and bury whatever else the operator was
+	// reading. Unlike a failed append, a mis-route loses nothing: the row is
+	// written, so one warning naming the action is the whole of what there is
+	// to say.
 	misrouteWarnOnce.Do(func() {
 		fmt.Fprintf(os.Stderr,
 			"[audit] %s\n    (further mis-routing warnings suppressed)\n", msg)

@@ -87,7 +87,7 @@ Each check reports PASS (green), WARN (yellow), or FAIL (red).`,
 		}
 
 		if fail > 0 {
-			os.Exit(1)
+			exitProcess(1)
 		}
 		return nil
 	},

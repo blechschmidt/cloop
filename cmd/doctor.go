@@ -77,7 +77,7 @@ a suggested fix. Use --providers to also test live provider connectivity.`,
 
 		// Exit non-zero if any checks failed.
 		if fail > 0 {
-			os.Exit(1)
+			exitProcess(1)
 		}
 		return nil
 	},

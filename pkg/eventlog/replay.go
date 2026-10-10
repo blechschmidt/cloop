@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -54,6 +55,12 @@ type ReplayReport struct {
 	BreakReason  string
 	StartedAt    time.Time
 	FinishedAt   time.Time
+
+	// Gaps counts the audit.gap rows replayed past, and GapEvents the events
+	// they record as never appended (Task 20404). Mutations among those are
+	// in no row, so a rebuild across a gap can be missing them.
+	Gaps      int
+	GapEvents int64
 
 	// Truncated reports that a retention prune removed events older than the
 	// replay's starting point, so the rebuild is of the surviving tail rather
@@ -268,6 +275,13 @@ func applyEvent(dst *statedb.DB, ev AuditEvent, report *ReplayReport) error {
 		// state.save is a snapshot summary, not a mutation. We could project
 		// some fields into metadata, but the per-task and per-step events
 		// already carry the authoritative state. Skip on replay.
+		report.Skipped++
+
+	case string(auditaction.ActionAuditGap):
+		// Nothing to apply — the row records events that were never written
+		// — but the rebuild is missing whatever they were, and says so.
+		report.GapEvents += statedb.AuditGapLostEvents(ev.Payload)
+		report.Gaps++
 		report.Skipped++
 
 	default:
