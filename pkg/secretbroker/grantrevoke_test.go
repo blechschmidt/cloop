@@ -403,3 +403,93 @@ func TestASupersededAppGrantsTokenIsHeldToItsSuccessor(t *testing.T) {
 		t.Error("the slot is still due after its token was held to the successor and delivered")
 	}
 }
+
+// TestCoversProvesOnlyWhatItCanSee: a replacement may stand for a running
+// workload's material only if it allows everything the original did. The proof
+// is literal, so a widening that rewrites a pattern reads as a narrowing — the
+// safe mistake — and no narrowing ever reads as covered.
+func TestCoversProvesOnlyWhatItCanSee(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		old, next Constraints
+		covers    bool
+		what      string
+	}{
+		{"the same", Constraints{Repos: []string{"acme/*"}, Permissions: []string{"contents:read"}},
+			Constraints{Repos: []string{"acme/*"}, Permissions: []string{"contents:read"}}, true, ""},
+		{"more repositories", Constraints{Repos: []string{"acme/app"}}, Constraints{Repos: []string{"acme/app", "acme/lib"}}, true, ""},
+		{"repositories match without case", Constraints{Repos: []string{"Acme/App"}}, Constraints{Repos: []string{"acme/app"}}, true, ""},
+		{"fewer repositories", Constraints{Repos: []string{"acme/app", "acme/lib"}}, Constraints{Repos: []string{"acme/app"}}, false, "repos"},
+		{"a rewritten pattern is not proven", Constraints{Repos: []string{"acme/app"}}, Constraints{Repos: []string{"acme/*"}}, false, "repos"},
+		{"a branch list where there was none", Constraints{Repos: []string{"acme/*"}}, Constraints{Repos: []string{"acme/*"}, Branches: []string{"cloop/*"}}, false, "branches"},
+		{"the branch list lifted", Constraints{Branches: []string{"cloop/*"}}, Constraints{}, true, ""},
+		{"a branch dropped", Constraints{Branches: []string{"cloop/*", "release/*"}}, Constraints{Branches: []string{"cloop/*"}}, false, "branches"},
+		{"a bare scope covers its levels", Constraints{Permissions: []string{"contents:read"}}, Constraints{Permissions: []string{"contents"}}, true, ""},
+		{"write can read", Constraints{Permissions: []string{"contents:read"}}, Constraints{Permissions: []string{"contents:write", "pull_requests:write"}}, true, ""},
+		{"read cannot write", Constraints{Permissions: []string{"contents:write", "pull_requests:write"}}, Constraints{Permissions: []string{"contents:read"}}, false, "permissions"},
+		{"a level of another scope", Constraints{Permissions: []string{"contents:read"}}, Constraints{Permissions: []string{"issues:write"}}, false, "permissions"},
+		{"an unranked level covers only itself", Constraints{Permissions: []string{"contents:custom"}}, Constraints{Permissions: []string{"contents:admin"}}, false, "permissions"},
+		{"a level is not its scope", Constraints{Permissions: []string{"contents"}}, Constraints{Permissions: []string{"contents:write"}}, false, "permissions"},
+		{"everything is not a scope", Constraints{Permissions: []string{"*"}}, Constraints{Permissions: []string{"contents"}}, false, "permissions"},
+		{"everything covers a level", Constraints{Permissions: []string{"issues:write"}}, Constraints{Permissions: []string{"*"}}, true, ""},
+		{"permissions where there were none", Constraints{}, Constraints{Permissions: []string{"contents:read"}}, false, "permissions"},
+		{"every key covers one", Constraints{EnvKeys: []string{"A"}}, Constraints{}, true, ""},
+		{"one key does not cover every key", Constraints{}, Constraints{EnvKeys: []string{"A"}}, false, "env_keys"},
+		{"read-only verbs spelled out", Constraints{Namespaces: []string{"ci"}}, Constraints{Namespaces: []string{"ci"}, Verbs: []string{"get", "list", "watch", "create"}}, true, ""},
+		{"writes dropped", Constraints{Namespaces: []string{"ci"}, Verbs: []string{"get", "create"}}, Constraints{Namespaces: []string{"ci"}}, false, "verbs"},
+		{"contexts pinned where every context was allowed", Constraints{Namespaces: []string{"ci"}}, Constraints{Namespaces: []string{"ci"}, Contexts: []string{"prod"}}, false, "contexts"},
+		{"read-write to read-only", Constraints{Writable: true}, Constraints{}, false, "writable"},
+		{"read-only to read-write", Constraints{}, Constraints{Writable: true}, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			covers, what := tc.next.Covers(tc.old)
+			if covers != tc.covers || what != tc.what {
+				t.Errorf("Covers = %v, %q; want %v, %q", covers, what, tc.covers, tc.what)
+			}
+		})
+	}
+}
+
+// TestASupersededGrantGoesWithItsOwnSecret: a grant superseded by one over
+// another secret — a Claude credential granted again — leaves the running
+// lease the old secret's material, standing on the successor. Deleting the old
+// secret takes that material back: it is announced, and the lease finds the
+// grant no longer stands, though the successor is untouched.
+func TestASupersededGrantGoesWithItsOwnSecret(t *testing.T) {
+	ctx := context.Background()
+	setup, store, _, clock := newTestBroker(t)
+	oldSec := mintEnv(t, setup, "claude-old", `{"CLAUDE_CODE_OAUTH_TOKEN":"sk-claude-canary-old-0007"}`)
+	newSec := mintEnv(t, setup, "claude-new", `{"CLAUDE_CODE_OAUTH_TOKEN":"sk-claude-canary-new-0008"}`)
+	keys := Constraints{EnvKeys: []string{"CLAUDE_CODE_OAUTH_TOKEN"}}
+	old := grantTo(t, setup, oldSec.ID, "project:/srv/app", keys, time.Hour)
+	a, _ := holderBroker(t, store, clock, "hub_a")
+	lease, err := a.LeaseFor(ctx, Requester{ExecutorID: "dev1", ProjectID: "/srv/app"}, "ui")
+	if err != nil {
+		t.Fatalf("LeaseFor: %v", err)
+	}
+	next := grantTo(t, setup, newSec.ID, "project:/srv/app", keys, 6*time.Hour)
+	if _, _, err := setup.Supersede(ctx, old.ID, next.ID, "operator"); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+	if got := a.WithdrawnGrants(lease.ID); len(got) != 0 {
+		t.Fatalf("the superseded grant does not stand on its successor: %+v", got)
+	}
+	rec := recordRevocations(t, old.ID, next.ID)
+
+	if err := setup.DeleteSecret(ctx, oldSec.ID, "operator"); err != nil {
+		t.Fatalf("DeleteSecret: %v", err)
+	}
+	if g, _ := store.GetGrant(next.ID); !g.RevokedAt.IsZero() {
+		t.Fatal("deleting the old secret revoked the successor over another one")
+	}
+	if got := rec.all(); len(got) != 1 || got[0].GrantID != old.ID || !got[0].Superseded() {
+		t.Fatalf("announcements = %+v; want the superseded grant, announced as such", got)
+	}
+	got := a.WithdrawnGrants(lease.ID)
+	if len(got) != 1 || got[0].GrantID != old.ID || !strings.Contains(got[0].Reason, oldSec.ID) {
+		t.Fatalf("WithdrawnGrants = %+v; want the superseded grant, naming its deleted secret", got)
+	}
+	if _, err := a.Extend(ctx, lease.ID); !errors.Is(err, ErrSecretNotFound) {
+		t.Errorf("Extend = %v, want ErrSecretNotFound", err)
+	}
+}

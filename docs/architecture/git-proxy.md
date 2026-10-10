@@ -646,11 +646,16 @@ A run's lease is issued at dispatch for at most `secretbroker.DefaultMaxLeaseTTL
 issues carries a keepalive (`secretLease.keepAlive`, `pkg/ui/secrets.go`) that
 checks once a minute and, when the deadline is within five minutes, extends it
 in place with `Broker.Extend`: same lease, same material, a new deadline one lease
-period out. Extending re-reads every grant the lease holds, so a grant revoked or
-expired since dispatch refuses the extension, the lease lapses on its current
-deadline, and the janitor takes the material back — a revocation still lands
-within one lease period. A workload the executor reports finished is not
-extended, and the keepalive stops when its holder closes the lease. Each
+period out. Extending re-reads every grant the lease holds, so a grant expired
+since dispatch refuses the extension and the lease lapses on its current
+deadline. A revoked grant does not wait for that: the revocation is cascaded to
+every lease carrying it at once — the sessions minted for that grant closed, its
+App tokens destroyed, its files taken back — and the lease goes on extending on
+its other grants; the janitor finds any revocation nothing announced within a
+minute (Task 20403; see
+[Revoking a grant](../security/model.md#revoking-a-grant)). A workload the
+executor reports finished is not extended, and the keepalive stops when its
+holder closes the lease. Each
 extension is a `secret.renew` row reading *"extended in place while its run is
 live"*. The keepalive moves with the run: a lease is recorded in `secret_leases`
 under the hub process holding it, and when that process stops mid-run the one
@@ -762,9 +767,11 @@ lease feeds is:
    deadline: a [`gitproxy.session_restored`](../reference/audit-events.md#gitproxy)
    row names the process that held it.
 
-A grant revoked or expired while no process held the lease refuses the lease
-itself, and the lease path closes the lease's sessions with a reason and scrubs
-the device. A failure that may pass — the database busy, GitHub unreachable for
+A grant expired while no process held the lease refuses the lease itself, and
+the lease path closes the lease's sessions with a reason and scrubs the device.
+A revoked one refuses only its own share when the lease carries other grants:
+the adopting process takes that grant back from the workload, does not restore
+its sessions, and keeps the rest. A failure that may pass — the database busy, GitHub unreachable for
 the re-mint — leaves the session held by the new process and unrestored, and the
 lease's keepalive tries again every minute, as does the next request presenting
 it. A retry reads the record again first: a session another process has taken

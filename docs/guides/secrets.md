@@ -523,9 +523,11 @@ branch name that fits. A read-only delivery announces why in
 work and report the push it could not make rather than retry it.
 
 **Editing** an assignment's access or branches from the panel files a new grant
-and revokes the old one, both audited — grants are immutable — and keeps the old
-grant's expiry. A run in progress loses the old access at once and receives the
-new at its next lease renewal.
+and retires the old one, both audited — grants are immutable — and keeps the old
+grant's expiry. An edit that narrows the access or the branches takes the old
+access back from a run in progress at once, and the run's next lease carries the
+new; one that only widens leaves the run working on what it has (see
+[Revoking a grant](#revoking-a-grant)).
 
 **Every hub that leases from the control plane has to understand the list.** A
 branch list is stored in the grant's constraints, and a cloop binary older than
@@ -1704,13 +1706,21 @@ sandbox until it exits (their sections below say why). When the credential
 itself is compromised, rotate it at the source as well, and revoke the run's
 lease with `action=kill`.
 
-**Editing is not revoking.** Changing a project's repository assignment in the
-panel, or granting a Claude credential again for longer, files a new grant and
-retires the old one as *superseded* — the old grant's row names its successor.
-Nothing is taken back from a running task: its lease stands on the new grant,
-extended while that stands and ended with it, and a GitHub App token it holds
-is re-minted at once within the new grant's repositories and permissions. To
-take access away from a running task, revoke the assignment rather than edit it.
+**Editing is not always revoking.** Changing a project's repository assignment
+in the panel, or granting a Claude credential again for longer, files a new
+grant and retires the old one. When the new grant keeps the credential and
+allows everything the old one did — more repositories, read access raised to
+write, a branch list lifted — the old one is retired as *superseded*, and its
+row names its successor. Nothing is taken back from a running task: its lease
+stands on the new grant, extended while that stands and ended with it. An edit
+that narrows anything — a repository, a permission, a branch dropped or a
+branch list added — or that switches the credential is a revocation of the old
+grant: a running task loses the old access at once, as it would to **Revoke**,
+and its next lease carries the new terms. Only literal coverage counts, so
+rewriting `acme/app` as `acme/*` reads as a narrowing too. A Claude credential
+granted again is superseded even over a new secret, and the running task keeps
+the old token until it ends — or until you delete the old secret, which takes
+it back.
 
 Revoking an already-revoked grant succeeds and takes nothing back a second time.
 Every grant, revoke and lease decision is audited with actor, subject,

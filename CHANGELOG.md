@@ -310,6 +310,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Revoking a grant takes it back from the workloads already holding it.**
+  A revoked grant was refused only at the next lease; a running workload kept
+  the credential until its lease lapsed, and a lapsed lease was swept only from
+  the hub's copy and remote agents, so a container's staged files and a Pod's
+  lease Secret kept it until the workload exited. Now every revocation a broker
+  makes is announced (`secretbroker.OnGrantRevoked`) and the hub cascades it to
+  every hub member: each takes the grant back from every live lease carrying it
+  — that grant's files wiped from a host process, a container and a device,
+  its keys emptied in a Pod's lease Secret so the Pod keeps running on the
+  rest, its git-proxy and kube-guard sessions closed, its App tokens destroyed
+  — and the lease keeps its other grants. `cloop secret revoke` and `cloop hub
+  user offboard` announce on the hub bus and print what each member took back,
+  naming a member that did not answer; `--wait` bounds it. The janitor takes
+  back a revocation nothing announced within a minute, and a lapsed lease from
+  the hub's own container and Kubernetes drivers. A member adopting a run takes
+  back a grant revoked while no hub held it. Material in a running process's
+  environment cannot be taken out of it: a container or Pod holding the grant
+  there is removed, and the Secrets panel's confirmation names those workloads
+  first; `DELETE /api/grants/{id}` returns each holder's outcome and the new
+  `GET /api/grants/{id}/holders` previews them. Agents narrow a revocation to
+  one grant from protocol v19; an older one gives back the whole lease, and the
+  outcome says so. An assignment edit that only widens supersedes the old grant
+  — recorded on it (`broker_grants.superseded_by`, migration 0063, additive) —
+  and the running task stands on the successor; an edit that narrows or switches
+  the credential is a revocation, taken back from the running task at once
+  (Task 20403).
+
 - **Offboarding destroys what a departed user kept on the hub, not only what
   they could use.** `cloop hub user offboard` and **Secrets → Offboard a user**
   ended sessions, tokens, glasses links, memberships, leases and tasks, and left

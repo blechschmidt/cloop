@@ -583,12 +583,14 @@ project to a container executor on the GPU host.
 
 A device already in a running sandbox's cgroup and mount namespace cannot be
 taken back from outside it — the same limitation bind mounts have, and for the
-same reason. Revoking a `host_device` grant stops the **next** lease; the
-current workload keeps the device until it exits.
+same reason. Revoking a `host_device` grant takes it out of the run's lease at
+once and out of every later lease; the current workload keeps the device until
+it exits.
 
-`cloop secret revoke <grant-id>` withdraws the grant, and it says so plainly:
-"Credentials already materialised inside a running workload survive until that
-workload's lease expires ... To cut access immediately, revoke and then stop the
+`cloop secret revoke <grant-id>` withdraws the grant, and its help says so
+plainly: "What no revocation reaches is what is already inside a running
+sandbox: … a device or network interface passed through. … To stop the others
+now, revoke their lease with action=kill from the Secrets panel, or stop the
 run." Stop the run from the dashboard's Stop button, or by signalling the task —
 there is no `cloop stop`.
 

@@ -545,12 +545,14 @@ It prints each member's answer, and names any member that did not answer. A
 hub started with ui.cluster.exclusive reads no bus: its lease janitor finds
 the revocation at its next pass, within a minute.
 
-What no revocation reaches is an environment variable already inside a running
-process. A host process or a device's task keeps its copy until it exits; a
-container or a Kubernetes Pod holding the grant in its environment is
-terminated, because its runtime keeps a copy only removing the workload
-destroys. To stop the others now, revoke their lease with action=kill from the
-Secrets panel.`,
+What no revocation reaches is what is already inside a running sandbox: an
+environment variable in a running process, a repository bind-mounted by a
+local_repo grant, a device or network interface passed through. A host process
+or a device's task keeps its variables until it exits; a container or a
+Kubernetes Pod holding the grant in its environment is terminated, because its
+runtime keeps a copy only removing the workload destroys. To stop the others
+now, revoke their lease with action=kill from the Secrets panel, or stop the
+run.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {

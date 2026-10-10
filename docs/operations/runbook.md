@@ -837,7 +837,8 @@ against the longest run the hub is expected to finish, not the median one.
 A session minted for a GitHub **lease** — the one the workload's own git uses —
 ends with its lease or at its own `session_minutes`, whichever is first: when the
 run ends, when the lease is revoked from the Secrets panel or `POST
-/api/leases/{id}/revoke`, and when the lease lapses. A run's lease is issued for
+/api/leases/{id}/revoke`, when the grant it was minted for is revoked, and when
+the lease lapses. A run's lease is issued for
 15 minutes and extended in place while the run is live, so it lapses only when
 the run is gone or a grant it holds was revoked or expired; the janitor then
 sweeps it within a minute, closing the session. Each extension is a
@@ -855,8 +856,9 @@ whose lease is recorded — and the process that adopts its run restores it (see
 record is closed, as `gitproxy.session_closed` with the reason *"the hub is
 shutting down"*. Short of that a session expires on its own TTL, which is
 enforced at authentication whether or not the five-minute reaper has swept it.
-Revoking the underlying grant with `cloop secret revoke` stops the *next*
-dispatch from minting anything; rotate the PAT at the forge as well.
+Revoking the underlying grant — from the Secrets panel or with `cloop secret
+revoke` — closes the sessions it fed at once, on every hub member, and stops the
+next dispatch from minting anything; rotate the PAT at the forge as well.
 
 The lease keepalive does not stretch the GitHub App **token** a session presents
 upstream, which GitHub honours for an hour: the session renews that itself, at
@@ -2269,8 +2271,12 @@ nobody removed is an account somebody thinks still works.
 ---
 
 **A credential leaked.**
-`cloop secret revoke <grant-id>` — then remember that material already
-materialised survives up to 15 minutes, so stop the affected runs too. Rotate the
+`cloop secret revoke <grant-id>` takes the grant back from every running
+workload holding it and prints what each hub member took back; read it. A
+member that did not answer, a device that was unreachable, or a variable already
+in a running process's environment (a host process or a device's task keeps its
+copy until it exits) means the credential may still be out there — stop those
+runs, or revoke their lease with `action=kill` from the Secrets panel. Rotate the
 credential at its source. `cloop audit-log list --entity secret --since 7d` shows
 who granted what and when. For egress, `cloop egress revoke` is immediate: live
 sessions are torn down mid-tunnel — at once when revoked in the dashboard of the

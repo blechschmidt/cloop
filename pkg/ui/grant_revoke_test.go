@@ -294,14 +294,16 @@ func TestALapsedLeaseIsTakenBackFromTheHubLocalDrivers(t *testing.T) {
 
 // TestASupersededGrantLeavesTheRunningWorkloadWorking is the trap: an edit
 // revokes the old grant only after minting its successor, and cutting the run
-// off would break work the successor still authorises. Nothing is taken back,
-// and the lease stands on the successor past the old grant's revocation.
+// off would break work the successor still authorises. When the edit only
+// widens — same credential, everything the old grant allowed and more — nothing
+// is taken back, and the lease stands on the successor past the old grant's
+// revocation.
 func TestASupersededGrantLeavesTheRunningWorkloadWorking(t *testing.T) {
 	f := newGrantRevokeFixture(t, func(dir string) *Server { return New(dir, 0, "") })
 	ctx := context.Background()
 	successor, err := f.broker.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: f.pat.ID, Subject: f.patGrant.Subject, TTL: 2 * time.Hour, Actor: "test",
-		Constraints: secretbroker.Constraints{Repos: []string{"acme/app"}},
+		Constraints: secretbroker.Constraints{Repos: []string{"acme/*", "acme-labs/*"}},
 	})
 	if err != nil {
 		t.Fatalf("Grant successor: %v", err)
@@ -311,8 +313,8 @@ func TestASupersededGrantLeavesTheRunningWorkloadWorking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer bs.close()
-	if err := f.srv.supersedeGrant(ctx, bs, f.patGrant.ID, successor.ID, "operator"); err != nil {
-		t.Fatalf("supersedeGrant: %v", err)
+	if err := f.srv.replaceGrant(ctx, bs, f.patGrant, successor, "operator"); err != nil {
+		t.Fatalf("replaceGrant: %v", err)
 	}
 
 	if asked := f.ex.asked(); len(asked) != 0 {
@@ -340,6 +342,160 @@ func TestASupersededGrantLeavesTheRunningWorkloadWorking(t *testing.T) {
 	asked := f.ex.asked()
 	if len(asked) != 1 || asked[0].GrantID != f.patGrant.ID {
 		t.Fatalf("revoking the successor asked %+v; want the superseded grant the lease held taken back", asked)
+	}
+}
+
+// TestAnEditThatNarrowsAGrantTakesItBackFromTheRunningTask: standing on a
+// narrower successor would leave a running task exactly the access the edit
+// withdrew — its git proxy session keeps the scope and branches it was opened
+// with, and a delivered token cannot be narrowed. So an edit that narrows, or
+// that switches the credential, is a revocation of the old grant, taken back
+// from the running task at once; the lease keeps the grant nobody touched.
+func TestAnEditThatNarrowsAGrantTakesItBackFromTheRunningTask(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		successor func(t *testing.T, f *grantRevokeFixture) secretbroker.GrantRequest
+		reason    string
+	}{
+		{
+			name: "narrower repositories",
+			successor: func(_ *testing.T, f *grantRevokeFixture) secretbroker.GrantRequest {
+				return secretbroker.GrantRequest{SecretRef: f.pat.ID, Constraints: secretbroker.Constraints{Repos: []string{"acme/app"}}}
+			},
+			reason: "allows less (repos)",
+		},
+		{
+			name: "another credential",
+			successor: func(t *testing.T, f *grantRevokeFixture) secretbroker.GrantRequest {
+				other, err := f.broker.Mint(ctx, secretbroker.MintRequest{Name: "deploy-pat-2", Kind: secretbroker.KindGitHubPAT,
+					Payload: []byte("ghp_grantrevokeother0123456789abcdefgh"), Actor: "test"})
+				if err != nil {
+					t.Fatalf("Mint: %v", err)
+				}
+				return secretbroker.GrantRequest{SecretRef: other.ID, Constraints: f.patGrant.Constraints}
+			},
+			reason: "delivers a different credential",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGrantRevokeFixture(t, func(dir string) *Server { return New(dir, 0, "") })
+			req := tc.successor(t, f)
+			req.Subject, req.TTL, req.Actor = f.patGrant.Subject, time.Hour, "test"
+			successor, err := f.broker.Grant(ctx, req)
+			if err != nil {
+				t.Fatalf("Grant successor: %v", err)
+			}
+			bs, err := openBrokersAt(f.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bs.close()
+			cctx, _ := withGrantCascade(ctx, f.srv)
+			if err := f.srv.replaceGrant(cctx, bs, f.patGrant, successor, "operator"); err != nil {
+				t.Fatalf("replaceGrant: %v", err)
+			}
+
+			asked := f.ex.asked()
+			if len(asked) != 1 || asked[0].LeaseID != f.sl.lease.ID || asked[0].GrantID != f.patGrant.ID {
+				t.Fatalf("the executor was asked %+v; want the replaced grant taken back from the running lease", asked)
+			}
+			if !strings.Contains(asked[0].Reason, f.patGrant.ID) {
+				t.Errorf("revocation reason %q does not name the grant", asked[0].Reason)
+			}
+			if files := f.filesOf(f.patGrant.ID); len(files) != 0 {
+				t.Errorf("the hub still holds the replaced grant's files %v", files)
+			}
+			if got := f.sl.broker.HeldGrantIDs(f.sl.lease.ID); !slices.Equal(got, []string{f.envGrant.ID}) {
+				t.Errorf("the lease carries %v, want only the grant the edit did not touch", got)
+			}
+			g, _ := f.broker.LookupGrant(f.patGrant.ID)
+			if g.RevokedAt.IsZero() || g.RevokedCause == secretbroker.RevokedSuperseded || g.SupersededBy != "" {
+				t.Errorf("the replaced grant records revoked=%v cause %q successor %q; want an ordinary revocation",
+					!g.RevokedAt.IsZero(), g.RevokedCause, g.SupersededBy)
+			}
+			if !grantRevocationAudited(t, f.dir, f.patGrant.ID, tc.reason) {
+				t.Errorf("no secret.revoke row for %s says it was replaced by a grant that %s", f.patGrant.ID, tc.reason)
+			}
+		})
+	}
+}
+
+// grantRevocationAudited reports whether an allowed secret.revoke row for
+// grantID carries a reason containing want.
+func grantRevocationAudited(t *testing.T, dir, grantID, want string) bool {
+	t.Helper()
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, _, err := db.ListAuditEvents(statedb.AuditFilter{EventType: string(secretbroker.ActionRevoke)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if strings.Contains(r.Payload, grantID) && strings.Contains(r.Payload, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDeletingASupersededGrantsSecretTakesItsMaterialBack: a Claude credential
+// granted again over a new secret supersedes the old grant, and the run keeps
+// the old credential — until the old secret is deleted. Its material goes with
+// it, whatever the successor still authorises.
+func TestDeletingASupersededGrantsSecretTakesItsMaterialBack(t *testing.T) {
+	f := newGrantRevokeFixture(t, func(dir string) *Server { return New(dir, 0, "") })
+	ctx := context.Background()
+	fresh, err := f.broker.Mint(ctx, secretbroker.MintRequest{Name: "metrics-2", Kind: secretbroker.KindEnv,
+		Payload: []byte(`{"METRICS_TOKEN":"metrics-canary-9876543210"}`), Actor: "test"})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	successor, err := f.broker.Grant(ctx, secretbroker.GrantRequest{
+		SecretRef: fresh.ID, Subject: f.envGrant.Subject, Constraints: f.envGrant.Constraints, TTL: 2 * time.Hour, Actor: "test",
+	})
+	if err != nil {
+		t.Fatalf("Grant successor: %v", err)
+	}
+	bs, err := openBrokersAt(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bs.close()
+	if err := f.srv.supersedeGrant(ctx, bs, f.envGrant.ID, successor.ID, "operator"); err != nil {
+		t.Fatalf("supersedeGrant: %v", err)
+	}
+	if asked := f.ex.asked(); len(asked) != 0 {
+		t.Fatalf("the supersession asked %+v", asked)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/secrets/"+f.env.ID, nil)
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /api/secrets/%s = %d: %s", f.env.ID, rec.Code, rec.Body.String())
+	}
+
+	asked := f.ex.asked()
+	if len(asked) != 1 || asked[0].GrantID != f.envGrant.ID {
+		t.Fatalf("deleting the superseded grant's secret asked %+v; want its material taken back", asked)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if leases, _ := out["leases"].([]any); len(leases) != 1 {
+		t.Errorf("the response reports leases %v; want the one the material was taken back from", out["leases"])
+	}
+	if got := f.sl.broker.HeldGrantIDs(f.sl.lease.ID); !slices.Equal(got, []string{f.patGrant.ID}) {
+		t.Errorf("the lease carries %v, want only the PAT grant", got)
+	}
+	if g, _ := f.broker.LookupGrant(successor.ID); !g.RevokedAt.IsZero() {
+		t.Error("deleting the old secret revoked the successor over another secret")
 	}
 }
 

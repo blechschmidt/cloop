@@ -505,13 +505,14 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 		// is the one git would end up using. So a revocation that fails takes
 		// the new grant back out rather than leave the pair standing.
 		//
-		// Superseded rather than revoked (Task 20403): the new grant still
-		// authorises the work a running task is doing with the old one, so
-		// its lease stands on the new grant instead of losing the credential
-		// — and its App token is re-minted at once, held to the edit. Only
-		// if that cannot be recorded is the old grant withdrawn outright.
+		// Superseded rather than revoked when the edit only widens (Task
+		// 20403): the new grant still authorises the work a running task is
+		// doing with the old one, so its lease stands on the new grant
+		// instead of losing the credential. An edit that narrows, or that
+		// switches the credential, takes the old access back from a running
+		// task at once.
 		ctx, _ := withGrantCascade(r.Context(), s)
-		err := s.supersedeGrant(ctx, bs, replaced.ID, grant.ID, s.auditActor(r))
+		err := s.replaceGrant(ctx, bs, *replaced, grant, s.auditActor(r))
 		if err != nil {
 			if rerr := bs.secret.Revoke(r.Context(), grant.ID, s.auditActor(r)); rerr != nil {
 				apierror.WriteError(w, apierror.New(apierror.CodeInternal, fmt.Sprintf(

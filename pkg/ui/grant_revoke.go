@@ -297,14 +297,34 @@ func (s *Server) grantRevokedHere(ctx context.Context, req clusterGrantRequest) 
 		return res
 	}
 	if req.Superseded {
-		// The leases stand on the successor and keep their material. Only an
-		// App token a lease holds is re-minted, held to the successor.
+		// The leases stand on the successor and keep their material, and an
+		// App token one holds is re-minted, held to the successor — unless the
+		// grant no longer stands for it after all, its own secret deleted
+		// since, say. That lease gives the grant back as the janitor would
+		// take it, from every holder: the agent holding it may be connected
+		// to any member.
 		for _, sl := range s.ownLeases() {
-			if len(sl.broker.HeldOn(sl.lease.ID, req.GrantID)) == 0 {
+			held := sl.broker.HeldOn(sl.lease.ID, req.GrantID)
+			if len(held) == 0 {
 				continue
 			}
-			sl.broker.ReconfirmSupersededSlots()
-			res.KeptLeases++
+			kept := true
+			for _, wg := range sl.broker.WithdrawnGrants(sl.lease.ID) {
+				if !slices.Contains(held, wg.GrantID) || sl.isWithdrawn(wg.GrantID) {
+					continue
+				}
+				kept = false
+				w := leaseWithdrawal{LeaseID: sl.lease.ID, GrantID: wg.GrantID, Member: member,
+					ExecutorID: sl.lease.ExecutorID, ProjectPath: sl.lease.ProjectID}
+				w.leaseRevocation = s.revokeLeaseEverywhere(ctx, sl.lease.ID, wg.GrantID,
+					wg.Reason, remote.RevokeScrub, req.Actor)
+				w.Kept = liveLeases.get(sl.lease.ID) != nil
+				res.Leases = append(res.Leases, w)
+			}
+			if kept {
+				sl.broker.ReconfirmSupersededSlots()
+				res.KeptLeases++
+			}
 		}
 		return res
 	}
@@ -401,6 +421,32 @@ func (s *Server) supersedeGrant(ctx context.Context, bs *brokerSet, grantID, suc
 	s.log().Warn("secret_supersede", 0, "could not record a supersession; withdrawing the grant instead",
 		map[string]interface{}{"grant": grantID, "successor": successorID, "error": err.Error()})
 	return bs.secret.Revoke(ctx, grantID, actor)
+}
+
+// replaceGrant retires old in favour of next, an edit's replacement for it.
+//
+// When next keeps old's credential and allows everything old did, old is
+// superseded: a running task holding it goes on, standing on next. When next
+// narrows anything, or delivers another credential, old is revoked, and what a
+// running task holds under its terms is taken back at once. Standing on a
+// narrower grant would leave the running task exactly the access the edit
+// withdrew — its git proxy session enforces the scope and branches it was
+// opened with, and a token already delivered cannot be narrowed — so an edit
+// that narrows is a revocation, and the task's next lease carries next.
+func (s *Server) replaceGrant(ctx context.Context, bs *brokerSet, old, next secretbroker.Grant, actor string) error {
+	why := ""
+	if old.SecretID != next.SecretID {
+		why = "delivers a different credential"
+	} else if ok, what := next.Constraints.Covers(old.Constraints); !ok {
+		why = "allows less (" + what + ")"
+	}
+	if why == "" {
+		return s.supersedeGrant(ctx, bs, old.ID, next.ID, actor)
+	}
+	_, _, err := bs.secret.RevokeGrant(ctx, secretbroker.RevokeGrantRequest{
+		GrantID: old.ID, Actor: actor, Reason: "replaced by grant " + next.ID + ", which " + why,
+	})
+	return err
 }
 
 // ── one grant of a lease ─────────────────────────────────────────────────────

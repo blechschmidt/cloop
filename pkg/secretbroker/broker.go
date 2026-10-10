@@ -456,7 +456,7 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 		return b.denyf(ev, ErrGrantNotFound, "list grants: %v", err)
 	}
 	now := b.now()
-	var revoked []GrantRevocation
+	var revoked, superseded []GrantRevocation
 	revokedFor := "secret " + s.Name + " deleted"
 	grantCause := RevokedSecretDeleted
 	if cause == CauseOffboarded {
@@ -486,6 +486,17 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 			// behind, which is the opposite of what an operator deleting a
 			// credential during an incident is asking for.
 			b.destroyGrantTokens(ctx, g.ID, revokedFor)
+		} else if g.SecretID == s.ID && g.RevokedCause == RevokedSuperseded {
+			// Revoked already, but a lease that carried it stands on its
+			// successor holding this secret's material, which goes with the
+			// secret (Task 20403). Announced as the supersession it is: each
+			// holder finds the grant no longer stands, and takes it back.
+			superseded = append(superseded, GrantRevocation{
+				GrantID: g.ID, SecretID: s.ID, SecretName: s.Name, Kind: s.Kind, Subject: g.Subject,
+				Actor: actor, Cause: RevokedSuperseded, Reason: revokedFor, At: now,
+				SupersededBy: g.SupersededBy, ControlPlane: b.location(),
+			})
+			b.destroyGrantTokens(ctx, g.ID, revokedFor)
 		}
 	}
 	if ts, ok := b.store.(TombstoneStore); ok {
@@ -506,7 +517,7 @@ func (b *Broker) DeleteSecretBecause(ctx context.Context, ref, actor string, cau
 	b.emit(ev)
 	// The workloads holding the grants this deletion revoked give the material
 	// back now (Task 20403), as they would for a grant revoked on its own.
-	b.announceRevoked(ctx, revoked...)
+	b.announceRevoked(ctx, append(revoked, superseded...)...)
 	return nil
 }
 

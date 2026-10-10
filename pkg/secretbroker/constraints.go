@@ -3,6 +3,8 @@ package secretbroker
 import (
 	"fmt"
 	"path"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -868,4 +870,114 @@ func (c Constraints) Summary() string {
 		return "none"
 	}
 	return strings.Join(parts, " ")
+}
+
+// ---------------------------------------------------------------------------
+// supersession: does a replacement allow everything the original did?
+// ---------------------------------------------------------------------------
+
+// Covers reports whether c allows at least everything old allows and, when it
+// does not, names the first dimension that narrows.
+//
+// It decides whether a grant replacing old may stand for the material a
+// running workload already holds under old (Task 20403). Keeping that material
+// on c's authority is safe only if c would have delivered it too — otherwise
+// an edit that narrows a grant would narrow every run but the ones running.
+// So the proof is literal: every pattern old lists, c lists as well, or c lifts
+// the restriction altogether. It never compares what two different patterns
+// match, which makes it conservative in one direction only: an edit that
+// widens by rewriting a pattern ("cloop/a" into "cloop/*") reads as one that
+// narrows, and the old grant is withdrawn rather than kept. Never the reverse.
+func (c Constraints) Covers(old Constraints) (bool, string) {
+	for _, l := range []struct {
+		name       string
+		old, next  []string
+		emptyIsAll bool // an empty list restricts nothing
+		fold       bool // the dimension matches case-insensitively
+	}{
+		{"repos", old.Repos, c.Repos, false, true},
+		{"branches", old.Branches, c.Branches, true, false},
+		{"namespaces", old.Namespaces, c.Namespaces, false, false},
+		{"contexts", old.Contexts, c.Contexts, false, false},
+		{"verbs", old.KubeVerbs(), c.KubeVerbs(), false, false},
+		{"hosts", old.Hosts, c.Hosts, false, false},
+		{"registries", old.Registries, c.Registries, false, false},
+		{"env_keys", old.EnvKeys, c.EnvKeys, true, false},
+		{"devices", old.Devices, c.Devices, false, false},
+		{"interfaces", old.Interfaces, c.Interfaces, false, false},
+	} {
+		if !listCovers(l.next, l.old, l.emptyIsAll, l.fold) {
+			return false, l.name
+		}
+	}
+	if !permissionsCover(c.Permissions, old.Permissions) {
+		return false, "permissions"
+	}
+	if old.Writable && !c.Writable {
+		return false, "writable"
+	}
+	// A dimension added to Constraints after this was written is compared
+	// whole: the same, or it narrows.
+	a, b := old, c
+	for _, z := range []*Constraints{&a, &b} {
+		z.Repos, z.Permissions, z.Branches, z.Namespaces, z.Contexts, z.Verbs = nil, nil, nil, nil, nil, nil
+		z.Hosts, z.Registries, z.EnvKeys, z.Devices, z.Interfaces, z.Writable = nil, nil, nil, nil, nil, false
+	}
+	if !reflect.DeepEqual(a, b) {
+		return false, "constraints"
+	}
+	return true, ""
+}
+
+// listCovers reports whether the allowlist next admits everything old does, by
+// literal inclusion. emptyIsAll marks a dimension where an empty list restricts
+// nothing; elsewhere an empty list means what the secret's kind makes of it, so
+// only another empty list is known to mean the same.
+func listCovers(next, old []string, emptyIsAll, fold bool) bool {
+	if emptyIsAll && len(next) == 0 {
+		return true
+	}
+	if len(old) == 0 || len(next) == 0 {
+		return len(old) == 0 && len(next) == 0
+	}
+	for _, o := range old {
+		o = strings.TrimSpace(o)
+		if !slices.ContainsFunc(next, func(n string) bool {
+			n = strings.TrimSpace(n)
+			if fold {
+				return strings.EqualFold(n, o)
+			}
+			return n == o
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// permissionsCover reports whether next grants every permission old does: "*"
+// covers everything, a bare scope ("contents") covers its levels, and a level
+// covers itself and the levels GitHub ranks below it — "contents:write" can
+// read, as the token it mints and the git proxy's read-only switch both treat
+// it (permissionRank). An unranked level covers only itself.
+func permissionsCover(next, old []string) bool {
+	if len(old) == 0 || len(next) == 0 {
+		return len(old) == 0 && len(next) == 0
+	}
+	for _, p := range old {
+		p = strings.ToLower(strings.TrimSpace(p))
+		scope, level, leveled := strings.Cut(p, ":")
+		if !slices.ContainsFunc(next, func(n string) bool {
+			n = strings.ToLower(strings.TrimSpace(n))
+			if n == "*" || n == p || (leveled && n == scope) {
+				return true
+			}
+			nScope, nLevel, ok := strings.Cut(n, ":")
+			return leveled && ok && nScope == scope && permissionRank(nLevel) > permissionRank(level) &&
+				permissionRank(level) > 0
+		}) {
+			return false
+		}
+	}
+	return true
 }

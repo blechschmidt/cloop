@@ -640,20 +640,39 @@ the workload and keeps the rest (`TestRestoreWithdrawsOnlyTheRevokedGrant`,
 announcement or a peer's request only for a grant the store says is revoked.
 Revoking a revoked grant is a no-op that cascades nothing.
 
-**Supersession is not revocation.** Editing a project's repository assignment,
-or granting a Claude credential again for longer, creates the successor and then
-revokes the old grant — and the successor still authorises the work a running
-task is doing with the old one. Such a grant is revoked as *superseded*: the
-grant row names its successor (`broker_grants.superseded_by`), nothing is taken
-back, and a lease carrying it stands on the successor — extended while the
-successor stands and bounded by its expiry, withdrawn like any other when the
-successor is revoked in turn (`TestASupersededGrantLeavesTheRunningWorkloadWorking`,
-`TestASupersededGrantsLeaseStandsOnItsSuccessor`). A GitHub App token the lease
-holds is re-minted at once at its original scope held to the successor's
-repositories and permissions — narrowed by an edit that narrowed, never widened
-by one that widened (`TestASupersededAppGrantsTokenIsHeldToItsSuccessor`). The
-rest of the material keeps the terms it was delivered with until the run ends;
-to take it away now, revoke the assignment rather than edit it.
+**Supersession is not revocation — when the successor covers the old grant.**
+Editing a project's repository assignment, or granting a Claude credential
+again for longer, creates the successor and then retires the old grant, and
+cutting a running task off would break work the successor still authorises.
+Such a grant is revoked as *superseded*: the grant row names its successor
+(`broker_grants.superseded_by`), nothing is taken back, and a lease carrying it
+stands on the successor — extended while the successor stands and bounded by
+its expiry, withdrawn like any other when the successor is revoked in turn
+(`TestASupersededGrantLeavesTheRunningWorkloadWorking`,
+`TestASupersededGrantsLeaseStandsOnItsSuccessor`).
+
+An assignment edit supersedes only when the new grant keeps the old one's
+credential and allows everything it did (`Constraints.Covers`). Standing on a
+narrower grant would leave the running task exactly the access the edit
+withdrew: its git proxy session enforces the repositories and branches it was
+opened with, and a delivered token cannot be narrowed. So an edit that narrows
+anything, or switches the credential, is an ordinary revocation and is taken
+back from the running task at once; its next lease carries the new terms
+(`TestAnEditThatNarrowsAGrantTakesItBackFromTheRunningTask`). Coverage is
+proved by literal inclusion — every pattern the old grant lists, the new one
+lists too, or lifts the restriction; a GitHub permission level covers the
+levels below it — so an edit that widens by rewriting a pattern is treated as
+narrowing, never the reverse
+(`TestCoversProvesOnlyWhatItCanSee`). A Claude credential granted again is
+superseded whatever its secret: both are the same owner's credential to the
+same project, and withdrawing one a container holds in its environment would
+remove the container. What a superseded grant's lease holds came from its own
+secret, though, so deleting that secret takes it back even while the successor
+stands (`TestASupersededGrantGoesWithItsOwnSecret`,
+`TestDeletingASupersededGrantsSecretTakesItsMaterialBack`). A GitHub App token
+the lease holds is re-minted at once, at its original scope and held to the
+successor's repositories and permissions — never widened by it
+(`TestASupersededAppGrantsTokenIsHeldToItsSuccessor`).
 
 Revocation is a capability of the *executor*, expressed as the optional
 `executor.Revoker` interface. A driver that does not implement it is refused
@@ -3783,6 +3802,8 @@ not installed.
 | Revoking a grant takes its material back from every workload holding it at once — the hub's copy, a host process's files, a container's staged files, a Pod's lease Secret keys, a device's lease directory — and leaves the lease's other grants working, whoever revoked it: the hub's own routes, the CLI over the bus, another hub member, the janitor for a revocation nothing announced | `tests/security: TestRevokingAGrantReachesEveryHolder`, `pkg/ui: TestRevokingAGrantReachesItsHoldersAndTheLeaseKeepsTheOthers`, `TestACLIRevocationReachesARunningHubThroughTheBus`, `TestAPeerHeldLeaseIsScrubbedThroughTheClusterFanOut`, `TestTheJanitorTakesBackAGrantRevokedBehindTheHubsBack`, `pkg/secretbroker: TestALeaseGivesUpOneGrantAndKeepsTheOthers`, `TestRevocationIsAnnouncedOnceAndOnlyWhenItRevokes` |
 | A lapsed lease is taken back from the hub-local container and Kubernetes drivers too, in one janitor pass | `pkg/ui: TestOneJanitorPassTakesALapsedLeaseFromContainersAndPods`, `TestALapsedLeaseIsTakenBackFromTheHubLocalDrivers` |
 | A superseded grant leaves the running workload working, and its App token is re-minted held to the successor | `pkg/ui: TestASupersededGrantLeavesTheRunningWorkloadWorking`, `pkg/secretbroker: TestASupersededAppGrantsTokenIsHeldToItsSuccessor` |
+| An assignment edit that narrows the grant, or switches its credential, is a revocation taken back from the running task at once — a lease never stands on a successor that allows less; coverage is proved literally, so no narrowing reads as covered | `pkg/ui: TestAnEditThatNarrowsAGrantTakesItBackFromTheRunningTask`, `pkg/secretbroker: TestCoversProvesOnlyWhatItCanSee` |
+| A superseded grant's material goes with its own secret: deleting that secret takes it back from the running workload while the successor stands | `pkg/secretbroker: TestASupersededGrantGoesWithItsOwnSecret`, `pkg/ui: TestDeletingASupersededGrantsSecretTakesItsMaterialBack` |
 | A run's lease outlives the hub process that issued it: the process that adopts the run takes it over (one adopter only), keeps it alive and releases it; one that lapsed or lost its grant meanwhile is scrubbed instead, one nobody took over is swept once it lapses, and the process that lost a lease can neither extend nor release it | `pkg/secretbroker: TestALeaseIsTakenOverWithItsRun`, `TestRestoreRefusesWhatExtendWould`, `pkg/ui: TestAdoptedRunTakesOverItsLease`, `TestAdoptedRunWhoseLeaseLapsedIsScrubbed`, `TestJanitorSweepsALeaseItsHolderLeftBehind`, `tests/e2e: TestE2EDeviceRunSurvivesHubRestart` |
 | A virtual executor's workspace is leased as the virtual executor — never under its device's grants | `pkg/executor/gitcreds: TestVirtualExecutorLeasesItsOwnGrant`, `TestVirtualExecutorDoesNotBorrowTheDevicesGrant`, `pkg/executor/remote: TestVirtualDispatchLeasesAsTheVirtualExecutor` |
 | In a Pod the proxy's CA is trusted for the proxy's URL only, in the provisioner and the harness alike, joining any `GIT_CONFIG_COUNT` block already there — never `GIT_SSL_CAINFO`, which would replace the trust store for every other host; a closed-environment fetch trusts a CA scoped to its own remote and not one scoped elsewhere, and imports nothing else from that block | `pkg/executor/kubernetes: TestBuildPod_GitCABundleReachesBothContainers`, `TestBuildPod_GitCABundleJoinsAnExistingConfigBlock`; `pkg/executor/gitprovision: TestProvisionTrustsACertificateScopedToTheRemote`, `TestTransportConfigImportsOnlyURLScopedCertificateKeys` |

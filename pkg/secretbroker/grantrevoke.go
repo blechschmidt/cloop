@@ -325,6 +325,17 @@ func (b *Broker) standing(id string, requester Requester, now time.Time) (author
 		return Grant{}, ErrSecretNotFound, fmt.Sprintf("%s, whose secret %s is gone", via, g.SecretID),
 			errors.Is(err, ErrSecretNotFound)
 	}
+	if g.ID != id {
+		// What the lease holds came from the superseded grant's own secret,
+		// which a successor over another secret does not keep alive: deleted,
+		// its material goes, whatever the successor still authorises.
+		if orig, err := b.store.GetGrant(id); err == nil && orig.SecretID != g.SecretID {
+			if _, err := b.store.GetSecret(orig.SecretID); err != nil {
+				return Grant{}, ErrSecretNotFound, fmt.Sprintf(", whose secret %s is gone", orig.SecretID),
+					errors.Is(err, ErrSecretNotFound)
+			}
+		}
+	}
 	return g, nil, "", false
 }
 

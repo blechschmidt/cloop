@@ -555,7 +555,11 @@ func (s *Server) supersedeHarnessGrants(ctx context.Context, r *http.Request, bs
 		}
 		// Superseded, not withdrawn (Task 20403): a run holding the old grant
 		// keeps its credential, standing on the new one, rather than being cut
-		// off by the grant meant to let it run longer.
+		// off by the grant meant to let it run longer. Even when the new grant
+		// is over another secret: both are this owner's credential to this
+		// project for the same harness, and withdrawing one a container holds
+		// in its environment removes the container. Deleting the old secret
+		// still takes its material back (Broker.standing).
 		cctx, _ := withGrantCascade(ctx, s)
 		if err := s.supersedeGrant(cctx, bs, g.ID, grant.ID, actor); err != nil {
 			s.log().Warn("secret_supersede", 0, "harness credential: could not revoke a grant the new one replaces",
