@@ -430,6 +430,7 @@ func newTrackRig(t *testing.T, nodes int, tasks []*pm.Task) *trackRig {
 			_, ok := r.srv.trackedRun(r.dir)
 			return !ok
 		})
+		awaitQuietProject(t, r.dir)
 	})
 	return r
 }

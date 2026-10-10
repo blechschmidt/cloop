@@ -360,11 +360,44 @@ func (r *failoverRig) endRuns(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := r.srv.trackedRun(r.dir); !ok {
+			awaitQuietProject(t, r.dir)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Errorf("the hub still follows a run of %s after every workload ended", r.dir)
+}
+
+// awaitQuietProject waits until nothing has written dir's database for a
+// moment. A run's settling goes on after the hub stops following it — the
+// merge, the recovery, the session watchers' closing writes — and a write
+// that lands after the test removed the directory recreates .cloop in /tmp.
+// Both files are watched: in WAL mode a commit changes only the log.
+func awaitQuietProject(t *testing.T, dir string) {
+	t.Helper()
+	db := state.DBPath(dir)
+	stamp := func() string {
+		var b strings.Builder
+		for _, f := range []string{db, db + "-wal"} {
+			if fi, err := os.Stat(f); err == nil {
+				fmt.Fprintf(&b, "%d/%d;", fi.ModTime().UnixNano(), fi.Size())
+			}
+		}
+		return b.String()
+	}
+	const quiet = 300 * time.Millisecond
+	deadline := time.Now().Add(5 * time.Second)
+	last, since := stamp(), time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+		if cur := stamp(); cur != last {
+			last, since = cur, time.Now()
+			continue
+		}
+		if time.Since(since) >= quiet {
+			return
+		}
+	}
 }
 
 // dispatch starts the run on the first node the way the hub dispatches one —

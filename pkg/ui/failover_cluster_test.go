@@ -82,6 +82,7 @@ func TestFailedOverRunIsFollowedByTheMemberHoldingItsReplacement(t *testing.T) {
 			_, onB := b.srv.trackedRun(dir)
 			return !onA && !onB
 		})
+		awaitQuietProject(t, dir)
 	})
 
 	clock := &manualClock{now: time.Now()}
