@@ -47,7 +47,7 @@ project pinned there, and the plan it runs.
 
 ### Requirements
 
-- **Go 1.25+** to build it (`go.mod` pins the toolchain).
+- **Go 1.26+** to build it (`go.mod` pins the toolchain).
 - **A provider.** The default is the [Claude Code](https://claude.com/claude-code)
   CLI, which needs `claude` on your `PATH` and a logged-in session. The
   Anthropic, OpenAI and Ollama backends need only an API key — or nothing at

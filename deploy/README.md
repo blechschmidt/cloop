@@ -274,7 +274,7 @@ The image starts `cloop ui --listen 0.0.0.0 --port 8080 --no-browser`. Without
 `CLOOP_UI_TOKEN` (or `ui.oidc` in a mounted config) it refuses to start, which
 is deliberate — see [Listening on the network](#listening-on-the-network).
 
-Multi-stage build: `golang:1.25` compiles a static `CGO_ENABLED=0` binary onto
+Multi-stage build: `golang:1.26` compiles a static `CGO_ENABLED=0` binary onto
 `gcr.io/distroless/static-debian12:nonroot`. About 31 MB, runs as UID 65532,
 works with a read-only root filesystem and all capabilities dropped.
 

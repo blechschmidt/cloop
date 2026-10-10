@@ -21,8 +21,8 @@ toolchain".
 
 ## Prerequisites
 
-**Go 1.25 or newer.** `go.mod` declares `go 1.25.0` and pins
-`toolchain go1.25.14`. Any Go 1.21 or later toolchain honours that line and
+**Go 1.26 or newer.** `go.mod` declares `go 1.26.0` and pins
+`toolchain go1.26.9`. Any Go 1.21 or later toolchain honours that line and
 downloads the pinned one on its own, so in practice "a recent Go" is enough;
 anything older refuses the module outright.
 

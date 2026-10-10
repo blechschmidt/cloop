@@ -23,7 +23,7 @@
 # and cross-compiles from there. Without it, `buildx --platform linux/arm64`
 # runs the entire Go build under emulation, which is roughly an order of
 # magnitude slower for no benefit — the compiler is a cross-compiler already.
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 
 WORKDIR /src
 

@@ -152,7 +152,7 @@ jobs:
           # setup-go pins GOTOOLCHAIN to the version it installed, so the go
           # command here refuses to build anything declaring a newer one — and
           # the scanner is not this module, it is a tool with its own floor.
-          # x/vuln v1.8.0 raised that floor to go 1.26.0 while go.mod pins the
+          # x/vuln v1.8.0 raised that floor to go 1.26.0 while go.mod pinned the
           # toolchain to 1.25.14, so the install died with "requires go >=
           # 1.26.0" and took the job with it. That reads as a vulnerability
           # finding and is not one: govulncheck exits 3 when it finds something

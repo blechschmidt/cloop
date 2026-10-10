@@ -15,7 +15,7 @@ Or via the Makefile:
 make build
 ```
 
-cloop targets Go 1.25 (see `go.mod`). The binary is self-contained — no CGo,
+cloop targets Go 1.26 (see `go.mod`). The binary is self-contained — no CGo,
 no external state required to run.
 
 ## Testing
