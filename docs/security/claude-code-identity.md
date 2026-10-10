@@ -375,9 +375,35 @@ the refresh token sitting in their directory, and `claude auth logout` revokes
 the session while leaving the directory populated. A hub that keeps a former
 employee's rotating refresh token on disk has not really removed them.
 
-`claudecodeauth.ForgetHome(ownerKey)` deletes the whole directory — credential
-and cached session transcripts together. There is no `cloop` subcommand for it
-yet; the operator-facing equivalent is to recompute the slug and remove the
+Offboarding does it (Task 20400): `cloop hub user offboard` and **Secrets →
+Offboard a user** end the person's Claude Code login for every spelling of
+them — their email, and `sub:<subject>` from any time the IdP withheld it —
+on every hub member:
+
+1. a `claude auth login` they had in flight is cancelled, on the member holding
+   it, and that member gives up its claim on it;
+2. each home with a credential is logged out with `claude auth logout`, scoped
+   to that directory alone, which revokes the session at Anthropic and not only
+   on disk. Best-effort: a failure is reported and the directory goes anyway.
+   A hub with `executors.allow_host_process: false` skips it, because it runs
+   no program on a request's behalf, and says so; the CLI, an operator's shell,
+   runs it for the tree beside it whatever the policy. A home that is a
+   symbolic link is never logged out through — that would sign out whatever the
+   link points at — and is removed without being followed;
+3. the directory is removed with `claudecodeauth.ForgetHome`, credential and
+   transcripts together. The person's tasks were told to stop just before, so
+   a run of theirs is not still writing there.
+
+A home lives under the config directory of the process that created it, so a
+cluster whose members run under different users or container filesystems keeps
+one per member. The member serving a dashboard offboarding asks the others over
+the peer channel; the CLI asks them over the bus. A member that cannot be asked
+is reported, never assumed empty — see
+[offboarding in the security model](model.md#offboarding-what-a-departed-identity-keeps).
+Under a legal hold (`--keep-credentials`) the login in flight is still cancelled
+and the homes are kept as they are.
+
+By hand, on a host the run could not reach, recompute the slug and remove the
 directory:
 
 ```console
@@ -385,11 +411,9 @@ $ slug=$(printf '%s' 'dana@example.com' | sha256sum | cut -c1-32)
 $ rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/cloop/claude-identities/$slug"
 ```
 
-Do this **after** revoking their dashboard sessions and API tokens, not
-instead: see [session lifecycle and
-revocation](model.md#session-lifecycle-and-revocation). Deleting the directory
-is safe while the hub is running — the next request from that identity recreates
-an empty one, and the user is simply logged out.
+Removing a directory is safe while the hub is running — a request from that
+identity would recreate an empty one, and the user would simply be logged out —
+but after an offboarding there is none: the identity is denied.
 
 ---
 

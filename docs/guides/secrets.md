@@ -1840,6 +1840,21 @@ identity, not under `ui`. A lease revoked from the panel writes a second row
 naming the person who pressed the button: the broker's own release event names
 the executor, which does not answer "who took this away".
 
+### When the owner of a personal secret leaves
+
+Offboarding destroys a departed person's personal secrets and revokes every
+grant over them, including grants to projects other people own (Task 20400).
+If your project was granted a colleague's credential, its next run is refused
+it by name — `github_pat "alice-pat", a personal credential of
+alice@example.com, was destroyed … when its owner was offboarded` — in the
+audit trail and as a `credential_refused` event on the project's Activity tab.
+Grant the project a credential that somebody still on the hub owns: a shared
+secret from a maintainer, or one of your own. Under a legal hold the secret is
+kept, but its grants are revoked all the same — the refusal then says the
+credential was *withdrawn* when its owner was offboarded — and nobody but its
+departed owner could grant it again. See the
+[runbook](../operations/runbook.md#somebody-leaves).
+
 ---
 
 ## Choosing TTLs

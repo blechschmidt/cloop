@@ -1990,8 +1990,17 @@ own, sever anything this hub has already issued. Seven surfaces outlive it:
 | Running tasks | Still executing, in their name |
 | Project memberships | Other people's projects shared with them by name — until a maintainer removes them |
 
-`cloop hub user offboard` severs all seven, and reports an eighth — the projects
-they own — without touching it.
+Four more are what they *keep* here rather than hold open:
+
+| Stored | What survives an IdP disablement |
+| --- | --- |
+| Personal secrets | Their GitHub PATs — the git-proxy-guarded ones included — and kubeconfigs, sealed, indefinitely |
+| Grants over them | Live, including grants to projects other people own, which go on spending the departed person's credential |
+| Grant requests | Still pending — an approver could mint a grant for somebody the hub no longer admits |
+| Claude Code login | Their OAuth refresh token in plaintext, the CLI's transcripts and project history, under every hub member's config directory — and a login they had in flight, in a member's memory |
+
+`cloop hub user offboard` severs all seven, destroys all four, and reports one
+more — the projects they own — without touching it.
 
 ```bash
 # 1. Look first. Nothing is changed, and the set printed is exactly the set
@@ -2000,15 +2009,92 @@ cloop hub user offboard alice@example.com --dry-run
 
 # 2. Do it.
 cloop hub user offboard alice@example.com --reason "left the company, HR-882"
+
+# Under a legal hold: sever access, keep what they stored.
+cloop hub user offboard alice@example.com --keep-credentials --reason "left, legal hold LH-17"
 ```
 
 Sessions, API tokens, glasses links, project memberships and the deny binding
 are written in **one transaction**: either the person is out of all five or
 nothing changed. There is
-no half-offboarded state to discover a month later. Leases and running tasks
-cannot join that transaction — they are broker memory and other databases — so
-they are applied after it, and any failure is reported rather than rolled back
-over a severing that already succeeded. A partial run exits non-zero.
+no half-offboarded state to discover a month later. Leases, the stored
+credentials, running tasks and Claude Code logins cannot join that transaction —
+they are broker memory, other databases and other hub members' filesystems — so
+they are applied after it, in that order, and any failure is reported rather
+than rolled back over a severing that already succeeded. A partial run exits
+non-zero.
+
+**What they stored is destroyed after that** (Task 20400), each part reporting
+its own failure:
+
+1. every live grant over their personal secrets is revoked — the dry run lists
+   each one with its subject, so a shared project that is about to lose a
+   colleague's credential is visible before you confirm;
+2. their personal secrets are deleted through the broker: the sealed payload
+   and wrapped data key are overwritten before the row goes, the write-ahead log
+   is checkpointed so the database file itself holds zeroes (a checkpoint a
+   reader held off is a warning), the deletion is audited, and a tombstone keeps
+   the name;
+3. their pending grant requests are withdrawn — your reason goes on the audit
+   row, not in the note request reviewers see;
+4. their running tasks are told to stop, as before;
+5. their Claude Code login ends on every hub member — a login in flight is
+   cancelled, each home is logged out with `claude auth logout`, which revokes
+   the session at Anthropic, and its directory is removed.
+
+None of it needs `CLOOP_SECRET_KEY`: destroying a credential removes rows and
+reads none, so the command still works from a shell without the hub's sealing
+passphrase. The dashboard's offboarding on a hub with
+`executors.allow_host_process: false` skips the logout — that hub runs no
+program on a request's behalf — and the report says the credential was
+destroyed on the hub but not revoked upstream; the CLI, an operator's shell,
+logs out the homes in its own tree whatever the policy, and members apply
+their own. A task stop is asynchronous: if one of their runs on the hub's host
+was still winding down, re-run the offboarding once it has stopped, so nothing
+it wrote into a removed directory survives.
+
+**Every member's Claude home.** A home lives under the config directory of the
+process that created it, not in the database. The command removes the copy
+under its own, and asks every running hub member over the bus to remove theirs;
+the dashboard asks the other members over the peer channel. A copy that could
+not be reached is a failure that names it:
+
+| Failure says | What to do |
+| --- | --- |
+| `hub member … did not answer … a build older than this one` | Upgrade that member and re-run, or remove the listed `claude-identities/<slug>` directories under its config directory by hand |
+| `… holds this control plane exclusively (ui.cluster.exclusive)` | That hub reads no bus. Offboard from its dashboard, which removes its copies, or remove them by hand |
+| `… stopped … kept Claude logins under … on <host>` | A stopped member left its tree on a host that is still up. Remove the named directories there |
+| `refused to end the Claude logins of …` | A member found no deny binding for that spelling — check `cloop hub role list --identity …` |
+
+Re-running is safe: everything already destroyed is simply not found again.
+
+**A colleague's project that loses a credential is told.** If one of the person's
+personal secrets was granted to a project somebody else runs, that project's next
+run is refused it by name — `github_pat "alice-pat", a personal credential of
+alice@example.com, was destroyed on 2026-10-10 when its owner was offboarded` —
+in the lease's audit row and, once per hub process, as a `credential_refused`
+event on the project's own Activity tab. Under a legal hold it reads "was
+withdrawn … when its owner was offboarded", and it still names the credential
+when the secret is destroyed days later. Your offboarding reason is never in it,
+and the dashboards that refresh their Secrets panel are not told whom.
+The project needs a credential somebody still here owns. A lease that project's
+run already holds is not taken away mid-run; its revoked grant stops the lease
+being extended, so it lapses within 15 minutes, and the dry run names it with
+the time. Revoke the lease under **Secrets → Leases** to end it sooner.
+
+**A legal hold** (`--keep-credentials`, or *Legal hold* in the dashboard) keeps
+their personal secrets and Claude Code homes exactly as they are. Access is
+still severed: the grants are revoked, the requests withdrawn and a login in
+flight cancelled — a hold preserves evidence, it does not keep a departed
+person's credential in use. The report lists what was kept, and
+`user.offboard_hold` records that the hold was in force. When the hold is lifted,
+run the offboarding again without `--keep-credentials`: it finds what was kept
+and destroys it. Its sessions are gone by then, and a session is one of the
+things that tie an email to a subject, so give each spelling the first report
+resolved to — the email, then `sub:<subject>` — or delete the kept secrets from
+the Secrets panel (admins may delete another person's personal secret) and
+remove the homes with the slug recipe in
+[per-user Claude Code logins](../security/claude-code-identity.md#deprovisioning-a-user).
 
 **Give an email or a subject; either resolves to both.** The surfaces are keyed
 inconsistently — a session carries an email, a token's owner may carry only a
@@ -2030,9 +2116,10 @@ cloop hub audit --entity-type user --entity-id alice@example.com
 
 The same operation is in the dashboard under **Secrets → Offboard a user**,
 gated on `user.manage`. It previews before it writes, for the same reason the
-CLI does. It refuses to offboard the identity making the request — that would
-revoke the session issuing it and deny the account that must undo it; use the
-CLI if that is really what you want.
+CLI does, and its *Legal hold* box is `--keep-credentials`. It refuses to
+offboard the identity making the request — that would revoke the session
+issuing it and deny the account that must undo it; use the CLI if that is
+really what you want.
 
 > Running hubs are told of every session, token and glasses link this ends,
 > and close the dashboards and sandbox terminals they opened within about a

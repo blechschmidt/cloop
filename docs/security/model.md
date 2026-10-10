@@ -454,6 +454,7 @@ being bypassed (`pkg/executor/policy.go`):
 | Placement | `Select` rejects candidates on `ConstraintHostPolicy` | no failover lands on the host |
 | Driver | `localprocess.Start` re-checks before spawning | backstop for direct callers |
 | HTTP | five host-touching endpoints check `denyHostSideEffect` | HTTP 409 naming `allow_host_process` |
+| Step | an operation that must not be refused checks the policy inside its one host-touching step | the step is skipped and reported; the rest of the operation proceeds |
 
 The policy is a **ratchet**: `ApplyHostExecutionPolicy` only ever tightens.
 Passing `true` after `false` is a no-op, so a later config reload, a
@@ -466,6 +467,20 @@ start, login code, logout) and replay-run creation. They are not exempt: they ar
 it is allowed to exist. `TestGatedListsAgree` fails if that list and the list of
 gated HTTP routes ever diverge, so a new gated handler cannot be added on one
 side only.
+
+One operation cannot be gated that way, because refusing it would be the
+failure: offboarding has to destroy a departed person's Claude Code login on a
+strict hub too. Its host-touching part is one best-effort step — `claude auth
+logout`, which revokes the session at Anthropic before the home is removed —
+and the policy is checked inside that step (`offboard.LocalClaude`), which is
+skipped and reported while the removal goes ahead. The call-graph gate lists
+the handler that reaches it in `gatedHostSteps`, beside `gatedHostExecution`,
+and `TestGatedStepsRunNothingUnderStrictMode` drives it through a real peer call
+between two hub members: under strict mode the stand-in `claude` is never run
+and the home is still removed, and with host execution allowed the same request
+does run it — so the proof cannot pass because the step never ran. Because the
+check is in the step, it also covers the dashboard's own offboarding, which
+reaches the step through an interface the reference graph does not follow.
 
 ### Git the hub runs for a feature
 
@@ -1512,6 +1527,143 @@ their handlers (`pkg/ui/secrets_owner.go`), which is why an operator now reaches
 `GET /api/leases` and lease revocation stayed at `secret.grant`/`secret.revoke`.
 A lease is live fleet state — which executor is holding which credential right
 now — and has no owner to scope it by.
+
+### Offboarding: what a departed identity keeps
+
+`cloop hub user offboard` and **Secrets → Offboard a user** end everything a
+person can *use* — sessions, API tokens, glasses links, memberships, leases on
+their projects, their running tasks — and write a deny binding (see the
+[runbook](../operations/runbook.md#somebody-leaves)). Until Task 20400 they left
+everything the person *kept* here: their personal secrets, sealed and with every
+grant over them still live, so a shared project a colleague ran went on
+spending a departed person's PAT; the self-service requests they had filed, open
+for somebody to approve; and their Claude Code login home — an OAuth refresh
+token in plaintext beside the CLI's transcripts and project history — under
+every hub member's config directory, with a login in flight still parked in a
+member's memory. `claudecodeauth.ForgetHome` called itself "the deprovisioning
+path" and had no caller.
+
+After the credential transaction and the leases, the run now takes the stored
+footprint apart, in this order, each step reporting its own failure and none
+undoing the severing:
+
+1. **Grants over their personal secrets are revoked** through the broker, with
+   the reason on each `secret.revoke` row and the cause — `owner_offboarded` —
+   on the grant itself (`broker_grants.revoked_cause`), including grants to
+   projects other people own. The plan lists every one with its subject, so the
+   operator sees which shared project loses which credential before approving.
+2. **Their personal secrets are destroyed** through `Broker.DeleteSecretBecause`:
+   the sealed payload and the wrapped data key are overwritten with zeroes of the
+   same length before the row is deleted, in one transaction, so the pages the
+   database commits carry zeroes where the material was rather than an unlinked
+   cell a later copy of `state.db` could still open (`TestDeleteBrokerSecretOverwritesTheSealedBytes`).
+   In WAL mode those pages land in the log first, so the run then checkpoints it
+   back into the database file at once, and reports a checkpoint a reader held
+   off. A tombstone keeps what the secret was — name, kind, owner, when, by whom,
+   and why — and nothing sealed.
+3. **Their pending grant requests are withdrawn** by the one withdrawal its
+   requester does not make (`WithdrawRequestOnOffboard`), under the operator's
+   name. The decision note is a fixed sentence: everyone who reviews requests
+   reads it, so the reason goes on the audit row, which only admins read. A
+   request filed through one of their API tokens is recorded under the token's
+   label and is found by it too.
+4. **Their tasks are told to stop** — the existing step, moved ahead of the
+   last one so a run of theirs is not still writing to its Claude config
+   directory while that is removed.
+5. **Their Claude Code logins end on every hub member**: a login in flight is
+   cancelled first — one that completed after the directory was gone would
+   write a fresh credential into a new one — then each home is logged out with
+   `claude auth logout`, which revokes the session at Anthropic and not only on
+   disk, and its directory removed. Logout is best-effort; the directory goes
+   either way. A home that is a symbolic link is removed without being followed,
+   and never logged out through. The dashboard's offboarding on a hub with
+   `executors.allow_host_process: false` skips the logout, because that hub runs
+   no program on a request's behalf, and the report says the credential was
+   destroyed there but not revoked upstream
+   (`TestStrictModeSkipsLogoutButStillRemovesTheHome`); the CLI, an operator's
+   shell rather than a hub acting on a request, runs it for the tree beside it
+   whatever the policy. A task stop is asynchronous, so a run winding down on
+   the hub's host can still write to a removed directory — the session it holds
+   was revoked by the logout, and re-running the offboarding once their tasks
+   have stopped removes what it wrote.
+
+None of it needs `CLOOP_SECRET_KEY`. Destroying a credential removes rows and
+reads none, so the broker the run builds is keyless (`secretbroker.WithoutKey`):
+it can list, revoke, delete and withdraw, and every operation that would seal or
+open a payload fails. That is what keeps the CLI usable from a shell without the
+hub's sealing passphrase — the emergency it exists for — and the dashboard uses
+the same construction, so both front ends destroy the same rows the same way.
+
+**Every member's copy.** A Claude home lives under the config directory of the
+process that created it, not in the database: members on one machine under one
+user share a tree, members under different users or in containers with their
+own filesystems keep one each. The member serving a dashboard offboarding
+removes its own copy and asks every live peer over the signed peer channel
+(`/api/internal/cluster/offboard/claude`); the CLI, which is no member, writes
+the request on the [cluster bus](../architecture/hub-cluster.md#events) and reads
+each member's answer back, addressed to it. A member acts on another process's
+word only for an identity the control plane denies, which the credential
+transaction has already made true (`TestAMemberEndsLoginsOnlyForADeniedIdentity`).
+What the run could not reach is a failure, named: a live member that did not
+answer — a build older than this one does not know the request — a hub holding
+the control plane exclusively, which reads no bus, and a stopped member whose
+advertised tree is on a host the run did reach and was not among the trees it
+reached (`TestOffboardReachesEveryMembersClaudeHome`,
+`TestTheCLIReachesMembersOverTheBus`, `TestAMemberThatDoesNotAnswerIsNamed`).
+Under the Helm chart a hub keeps no Claude home at all: the chart's hub is
+strict by default (`config.allowHostProcess: false`), which refuses dashboard
+sign-in to Claude, and even where it is not, the image's `$HOME` sits on the
+read-only root filesystem outside the state volume, where no home can be
+created. A copy-per-replica tree could only arise from a values file that
+mounts a writable `$HOME/.config` per Pod — and then it is each replica's, and
+reached as above.
+
+**The project that lost a credential is told.** A shared project granted a
+colleague's personal credential finds out on its next run, from a lease refusal
+that names the secret and whose it was — "github_pat \"alice-pat\", a personal
+credential of alice@example.com, was destroyed on 2026-10-10 when its owner was
+offboarded" — rather than "secret not found" (`TestTheSharedProjectIsToldWhichCredentialItLost`).
+It is decided by the cause on the grant, not by timestamps: a grant withdrawn at
+the offboarding is named whether its secret was destroyed in the same run, kept
+under a legal hold ("was withdrawn on … when its owner was offboarded",
+`TestALegalHoldStillTellsTheSharedProject`), or destroyed days later when the
+hold was lifted (`TestAGrantWithdrawnAtOffboardingIsNamedWhenTheSecretGoesLater`).
+A grant somebody revoked by hand, or one that had simply expired, is named on
+its audit row and not put in front of the project. The refusal is the lease's
+`secret.lease` deny row, and it is also written to the project's own journal as
+a `credential_refused` event on the first run after the loss on each hub
+process, because the people running the project cannot see a grant over
+somebody else's personal secret. The offboarding's stated reason is never in
+it: for a departure that is often an HR matter, and it stays in the audit trail
+and on the tombstone. The dashboards' Secrets panels are told to re-read without
+being told whom. A lease that colleague's run already holds is not taken away —
+the rest of what it carries is theirs — but its revoked grant stops the
+keepalive extending it, so it lapses within a lease period, and the plan names
+it with the time it lapses by.
+
+**A legal hold** (`--keep-credentials`, or the dashboard's *Legal hold* box)
+keeps the personal secrets and the Claude homes exactly as they are and severs
+everything else regardless: the grants are revoked, the requests withdrawn and
+logins in flight cancelled, because a hold preserves evidence and is no reason
+to keep spending a departed person's credential. Revocation is a stamp, so the
+grants survive as evidence too. The plan and the report say what was kept, and
+[`user.offboard_hold`](../reference/audit-events.md#user) records that a hold was
+in force whether or not anything was found to keep. A kept personal secret is
+inert: its owner is denied, and no permission lets anybody else spend it.
+
+Each part leaves its own row:
+[`user.offboard_grant`](../reference/audit-events.md#user),
+[`user.offboard_secret`](../reference/audit-events.md#user),
+[`user.offboard_request`](../reference/audit-events.md#user) and
+[`user.offboard_claude`](../reference/audit-events.md#user), beside the broker's
+own per-item rows.
+
+What it does not do: it destroys the hub's copies. A GitHub PAT or a kubeconfig
+the person also holds elsewhere still works there until revoked at its issuer,
+and an upstream Claude session survives where logout was skipped or failed. A
+backup of `state.db` taken before the offboarding still holds the sealed
+material, under a key the hub still has — handle backups as the
+[threat model](threat-model.md#deployment-level-threats) says.
 
 ### Session lifecycle and revocation
 
@@ -2981,6 +3133,8 @@ what it is looking for.
 | The policy ratchets — it can never be loosened back | `TestPolicyOnlyTightens` |
 | Each of the five host-touching endpoints returns 409 naming `allow_host_process` | `TestGatedHandlersRefuseUnderStrictMode` |
 | The gated-endpoint list and the gated-call-graph list cannot drift apart | `TestGatedListsAgree` |
+| A handler that touches the host in one step of an operation that must not be refused spawns nothing under strict mode, through the real handler, and does spawn it otherwise | `TestGatedStepsRunNothingUnderStrictMode` |
+| Every gated step has its proof, and every proof its exemption | `TestGatedStepListsAgree` |
 
 ### Release provenance — `pkg/provenance`, `pkg/upgrade`, `pkg/executor/install`
 
@@ -3058,6 +3212,22 @@ credential away from another user — see [Personal secrets](#personal-secrets).
 | An operator cannot mint into the shared namespace | `TestOperatorCannotMintASharedSecret` |
 | The request catalogue never names another user's personal secret, not even to an admin | `TestSecretCatalogHidesOtherUsersPersonalSecrets` |
 | The six routes lowered to `secret.own` are exactly the six intended, and leases stayed above them | `TestSecretsRoutesNarrowOperatorsToTheirOwn` |
+
+### Offboarding — `offboarding_test.go` and the package suites
+
+The rows above keep a personal credential away from other users while its owner
+is here. These make sure it does not outlive its owner's departure — see
+[Offboarding: what a departed identity keeps](#offboarding-what-a-departed-identity-keeps).
+
+| Guarantee | Test |
+| --- | --- |
+| After offboarding no `broker_secrets` row has the departed owner — under either spelling of them — while another user's personal secret and the shared ones remain, and the departed owner's ciphertext and wrapped data key are no longer in the database file, read without its WAL and with no checkpoint but the run's own | `TestOffboardingLeavesNoPersonalSecretOfTheDepartedOwner` |
+| Deleting a broker secret overwrites its sealed bytes, in page and overflow chain alike, before the row goes (in `pkg/statedb`) | `TestDeleteBrokerSecretOverwritesTheSealedBytes` |
+| Offboarding destroys the personal secrets, revokes the grants over them, withdraws the requests filed under either spelling or through their tokens, and removes every Claude home; a legal hold keeps the secrets and the homes and still severs access; a part that fails is reported and holds nothing else back (in `pkg/offboard`) | `TestOffboardingStoredCredentials` |
+| A shared project granted a deleted personal credential is refused it by name on its next lease, without the offboarding's reason — decided by the cause on the grant, so also under a legal hold and when the secret goes days later, and not for a grant revoked by hand or expired | `TestTheSharedProjectIsToldWhichCredentialItLost`, `TestALeaseRefusesADeletedPersonalCredentialByName`, `TestALegalHoldStillTellsTheSharedProject`, `TestAGrantWithdrawnAtOffboardingIsNamedWhenTheSecretGoesLater`, `TestARefusalIsHandedBackOnlyForWhatTheDeletionTook`, `TestAnExpiredGrantOverADeletedSecretIsNotHandedBack` |
+| A Claude home on another hub member is reached — over the peer channel from the dashboard, over the bus from the CLI — and a member that cannot be asked is named (in `pkg/ui`) | `TestOffboardReachesEveryMembersClaudeHome`, `TestTheCLIReachesMembersOverTheBus`, `TestAMemberThatDoesNotAnswerIsNamed` |
+| A member ends logins on another process's word only for an identity the control plane denies | `TestAMemberEndsLoginsOnlyForADeniedIdentity` |
+| A hub that runs no program on a request's behalf skips `claude auth logout` and still removes the home; a home that is a symbolic link is removed without being followed | `TestStrictModeSkipsLogoutButStillRemovesTheHome`, `TestASymlinkedHomeIsRemovedWithoutBeingFollowed` |
 
 ### Harness output redaction — `redaction_test.go`
 

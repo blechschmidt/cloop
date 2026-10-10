@@ -257,6 +257,30 @@ Recorded because a threat model that lists only theoretical threats is less
 useful than one that lists the threats that were actually present. All are
 fixed and all have a regression test.
 
+**Offboarding severed the person and kept their credentials.** `cloop hub user
+offboard` and the dashboard's offboarding ended sessions, tokens, glasses links,
+memberships, leases and running tasks, and touched none of the per-user stores
+added after them. A departed user's personal secrets — GitHub PATs, the
+git-proxy-guarded ones included, and kubeconfigs — stayed sealed indefinitely,
+with every grant over them live, so a shared project a colleague ran kept
+spending them; the runbook's only remedy was for an admin to revoke personal
+grants by hand. Their pending grant requests stayed open, approvable into a
+grant for somebody the hub no longer admitted. Their Claude Code login home —
+the OAuth refresh token in plaintext, the CLI's transcripts and project history
+— stayed under the config directory of every hub member that had served them,
+and `claudecodeauth.ForgetHome`, documented as the deprovisioning path, had no
+caller; a login in flight stayed parked in a member's memory. And deleting a
+secret only unlinked its row, leaving the ciphertext and wrapped data key in
+the database file's free pages, under a key the hub still holds. Fixed in Task
+20400: the run revokes the grants, destroys the secrets through the broker with
+their sealed columns overwritten first and a tombstone left to name them,
+withdraws the requests, and ends the Claude logins on every member, reporting
+each copy it could not reach; `--keep-credentials` keeps the stored credentials
+for a legal hold and severs everything else; and a project that lost a
+credential is refused it by name (`TestOffboardingLeavesNoPersonalSecretOfTheDepartedOwner`,
+`TestOffboardingStoredCredentials`, `TestDeleteBrokerSecretOverwritesTheSealedBytes`,
+`TestOffboardReachesEveryMembersClaudeHome`, `TestTheSharedProjectIsToldWhichCredentialItLost`).
+
 **A failed-over run was nobody's run, and the run it replaced kept its
 credentials.** When an executor stopped answering, failover started the stranded
 run's recorded spec on a replacement and watched only for its session to close.
@@ -503,6 +527,7 @@ variable and fails if it can.
 | **E**levation of privilege | SSRF into the hub's private network | Loopback, RFC1918 and link-local are blocked unless explicitly listed in `--cidrs`; a cloud metadata service (`pkg/cloudmeta` — `169.254.169.254`, AWS's `fd00:ec2::254`, Alibaba's `100.100.100.200` and the rest) requires a CIDR that names its own address; a `/0`, and any prefix containing a metadata address without naming it, are refused at grant time (`TestWideCIDRsCannotBypassTheBlockSet`) | Granting a private CIDR is a real hole by intent — grant the narrowest prefix and port |
 | **E**levation of privilege | DNS rebinding between check and dial | Resolve-once pinning: the name is resolved once, every resolved address is policy-checked, and the dial goes to the checked literal | — |
 | **E**levation of privilege | Exfiltration through an allowed host | Per-session byte quotas (`--max-up`, `--max-down`), enforced mid-stream | CONNECT tunnels are opaque — cloop holds no key for the origin, so it sees bytes, not content. `--methods` gates plain HTTP only |
+| **I**nformation disclosure / **E**levation of privilege | A departed user's stored credentials outlive their offboarding: their personal PATs and kubeconfigs stay sealed with every grant over them live, so a colleague's shared project keeps spending them; their pending grant requests stay open for an approver to mint; their Claude Code refresh token and transcripts stay in plaintext under every hub member's config directory | Offboarding revokes every grant over the person's personal secrets, destroys the secrets through the broker — sealed payload and wrapped data key overwritten before the row is deleted — withdraws their pending requests, cancels a login in flight, logs each Claude home out and removes it on every hub member: over the peer channel from the dashboard, over the bus from the CLI (`TestOffboardingLeavesNoPersonalSecretOfTheDepartedOwner`, `TestOffboardingStoredCredentials`, `TestDeleteBrokerSecretOverwritesTheSealedBytes`, `TestOffboardReachesEveryMembersClaudeHome`, `TestTheCLIReachesMembersOverTheBus`). A member acts on another process's word only for an identity the control plane denies (`TestAMemberEndsLoginsOnlyForADeniedIdentity`). A legal hold keeps the secrets and the homes and severs everything else (`TestOffboardingStoredCredentials`). The project that lost a credential is refused it by name on its next run, decided by the cause recorded on the grant — under a hold too (`TestTheSharedProjectIsToldWhichCredentialItLost`, `TestALegalHoldStillTellsTheSharedProject`) | Only the hub's copies are destroyed: a token the person also holds elsewhere works until its issuer revokes it, and the upstream Claude session survives where logout was skipped — the dashboard's offboarding on a strict hub, which runs no program on a request's behalf — or failed. A run of theirs still winding down on the hub's host can write into a removed home after its task was told to stop; the session it holds was revoked by the logout, and a re-run removes what it wrote. If a reader holds off the checkpoint the run asks for — reported as a warning — a copy of `state.db` made without its `-wal` holds the destroyed secrets' old pages until the next checkpoint. A member that does not answer, a hub holding the control plane exclusively and a stopped member's tree on a reachable host are reported as failures, not reached. A lease a colleague's run already holds keeps the credential until it lapses, within 15 minutes, because its revoked grant stops the keepalive. A backup taken before the offboarding still holds the sealed material |
 
 ## Cross-cutting: hub members
 

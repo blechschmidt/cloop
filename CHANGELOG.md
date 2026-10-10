@@ -310,6 +310,44 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Offboarding destroys what a departed user kept on the hub, not only what
+  they could use.** `cloop hub user offboard` and **Secrets → Offboard a user**
+  ended sessions, tokens, glasses links, memberships, leases and tasks, and left
+  the person's personal secrets — GitHub PATs, git-proxy-guarded ones included,
+  and kubeconfigs — sealed indefinitely with every grant over them live, so a
+  colleague's shared project kept spending them; left their pending grant
+  requests open; and left their Claude Code login home — a plaintext OAuth
+  refresh token, transcripts and history — under every hub member's config
+  directory, with `claudecodeauth.ForgetHome`, "the deprovisioning path",
+  uncalled. The plan now has a **Credentials** section, shown by `--dry-run`:
+  personal secrets (name, kind, created), the grants over them with their
+  subjects, whether a Claude home and a credential exist on each member, and
+  pending requests. After the credential transaction and the leases, the run
+  revokes the grants, deletes the secrets through the broker, withdraws the
+  requests, stops the person's tasks, then cancels a login in flight,
+  best-effort `claude auth logout`s each home and removes it — each step
+  reporting its own failure and none rolling back the severing. A secret's
+  sealed payload and wrapped data key are now overwritten before its row is
+  deleted and the WAL checkpointed, so a later copy of `state.db` holds zeroes
+  where the material was; a tombstone keeps the name and the grant records why
+  it was revoked (migration 0062, additive). The CLI needs no `CLOOP_SECRET_KEY` for any of it
+  (`secretbroker.WithoutKey`). Claude homes are reached on every hub member —
+  over the peer channel from the dashboard, over the bus from the CLI — and a
+  member that does not answer, a hub holding the control plane exclusively, and
+  a stopped member's tree on a reachable host are named as failures; a member
+  acts on another process's word only for an identity the control plane denies.
+  On a strict hub the logout step is skipped and reported, gated inside the step
+  and proven through a real peer call (`gatedHostSteps`). `--keep-credentials`
+  (and *Legal hold* in the dashboard) keeps the secrets and homes and still
+  severs access, recorded as `user.offboard_hold`. A shared project that was
+  granted a destroyed — or, under a hold, withdrawn — personal credential is
+  refused it by name on its next run, in the lease's audit row and once per hub
+  process as a `credential_refused` journal event, instead of a bare "secret
+  not found"; the offboarding's reason reaches neither that nor the withdrawn
+  requests' notes. New audit actions:
+  `user.offboard_grant`, `user.offboard_secret`, `user.offboard_request`,
+  `user.offboard_claude`, `user.offboard_hold` (Task 20400).
+
 - **An SSO hub without a role policy says it runs with RBAC off, and one click
   leaves that state.** With `ui.oidc` enabled and neither `role_mappings` nor a
   `default_role` — the upgrade rule, and the shape of a hub configured with
