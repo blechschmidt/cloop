@@ -811,15 +811,11 @@ func awaitRun(ctx context.Context, t *testing.T, x tool, hub hubClient, idx int,
 			Lines   []string `json:"lines"`
 		}
 		hub.must("GET", fmt.Sprintf("/api/livelog?project_idx=%d", idx), nil, &live)
-		// An entry is a chunk of the Pod's output, not a line: split them.
-		lines = lines[:0]
-		for _, chunk := range live.Lines {
-			lines = append(lines, strings.Split(strings.TrimRight(chunk, "\n"), "\n")...)
-		}
+		lines = logLines(live.Lines)
 		if live.Running {
 			started = true
 		}
-		if !live.Running && strings.Contains(strings.Join(live.Lines, "\n"), "SUMMARY kube") {
+		if !live.Running && strings.Contains(strings.Join(live.Lines, ""), "SUMMARY kube") {
 			return true, ""
 		}
 		if !live.Running && len(live.Lines) > 0 && (started || time.Since(begun) > 30*time.Second) {
@@ -1058,6 +1054,21 @@ func conditional(on bool, ids ...string) []string {
 	return nil
 }
 
+// logLines turns the live log's entries back into lines. An entry is a chunk
+// of the Pod's output as the driver read it — up to 4 KiB of the log stream,
+// cut wherever the read ended — not a line, so a line can straddle two
+// entries. Splitting each entry on its own turned "RESULT C1 PASS …" into
+// "RESULT " and "C1 PASS …" the day the probe's output grew by one check, and
+// the run read as C1 never having reported. The entries are consecutive pieces
+// of one stream: join them, then split.
+func logLines(chunks []string) []string {
+	joined := strings.TrimRight(strings.Join(chunks, ""), "\n")
+	if joined == "" {
+		return nil
+	}
+	return strings.Split(joined, "\n")
+}
+
 func lastLine(lines []string) string {
 	if len(lines) == 0 {
 		return ""
@@ -1066,3 +1077,21 @@ func lastLine(lines []string) string {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// TestLogLinesJoinsChunksBeforeSplitting needs no cluster: it pins the parse
+// the end-to-end test reads the probe's results with.
+func TestLogLinesJoinsChunksBeforeSplitting(t *testing.T) {
+	chunks := []string{
+		"stand-in: probe\n  RESULT A1 PASS the key\n  RESULT ",
+		"C1 PASS the CA\n  SUMMARY kube pass=2 fail=0\n",
+	}
+	got := parseResults(logLines(chunks))
+	for _, id := range []string{"A1", "C1"} {
+		if r, ok := got[id]; !ok || !r.pass {
+			t.Errorf("check %s = %+v (found %v); a line split across two chunks must still parse", id, r, ok)
+		}
+	}
+	if lines := logLines(nil); lines != nil {
+		t.Errorf("logLines(nil) = %q, want nil", lines)
+	}
+}
