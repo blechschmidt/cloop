@@ -80,18 +80,28 @@ type SealedRow struct {
 type sealedPopulation struct {
 	set        string
 	countQuery string
+
+	// table, keyColumn and valueColumn describe the population to a reader
+	// that cannot assume this binary's schema — ReadSealedFacts, reading a
+	// backup (Task 20410). everyRow says every row holds sealed material;
+	// otherwise only rows whose valueColumn is non-empty do, as countQuery
+	// has it.
+	table, keyColumn, valueColumn string
+	everyRow                      bool
 }
 
 var sealedPopulations = []sealedPopulation{
 	{
 		set:        "secrets",
 		countQuery: `SELECT COUNT(*) FROM broker_secrets WHERE key_id = ?`,
+		table:      "broker_secrets", keyColumn: "key_id", valueColumn: "payload", everyRow: true,
 	},
 	{
 		set: "sessions",
 		countQuery: `SELECT COUNT(*) FROM sessions
 		             WHERE refresh_key_id = ? AND refresh_sealed IS NOT NULL
 		               AND length(refresh_sealed) > 0`,
+		table: "sessions", keyColumn: "refresh_key_id", valueColumn: "refresh_sealed",
 	},
 	{
 		// The hub CA's private key and its leaves' (Task 20409). Shredding the
@@ -100,6 +110,7 @@ var sealedPopulations = []sealedPopulation{
 		set: "hub_tls",
 		countQuery: `SELECT COUNT(*) FROM hub_tls
 		             WHERE key_id = ? AND key_sealed IS NOT NULL AND length(key_sealed) > 0`,
+		table: "hub_tls", keyColumn: "key_id", valueColumn: "key_sealed",
 	},
 }
 
@@ -171,8 +182,12 @@ func (d *DB) PutKEK(row KEKRow) error {
 func (d *DB) ListKEKs() ([]KEKRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return listKEKs(d.conn)
+}
 
-	rows, err := d.conn.Query(
+// listKEKs reads the registry through conn, newest first.
+func listKEKs(conn *sql.DB) ([]KEKRow, error) {
+	rows, err := conn.Query(
 		`SELECT id, salt, state, check_value, created_at, created_by, retired_at
 		 FROM broker_keks ORDER BY created_at DESC, id ASC`)
 	if err != nil {
@@ -324,6 +339,46 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 	return nil
 }
 
+// AbandonKEKs retires the given keys although sealed rows still reference
+// them, and returns the ids it retired (Task 20410).
+//
+// RetireKEK refuses exactly this, and it is right to: retiring a referenced
+// key destroys what the rows hold. AbandonKEKs exists for the one caller that
+// has already decided that — `cloop db restore --accept-secret-loss`, restoring
+// a backup whose keys the hub's CLOOP_SECRET_KEY cannot derive. Left live,
+// those keys stop the hub starting at all (secretbroker.OpenKeyring refuses a
+// registry with a live key it cannot derive, rather than fork it); retired,
+// the hub mints a fresh primary and every row sealed under them reports that
+// its key was retired and its material cannot be recovered — which is now the
+// truth. The backup file itself still holds the salts.
+func (d *DB) AbandonKEKs(ids []string, at time.Time) ([]string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("statedb: abandon sealing keys: %w", classifyDriverErr(err))
+	}
+	defer tx.Rollback()
+
+	var done []string
+	for _, id := range ids {
+		res, err := tx.Exec(
+			`UPDATE broker_keks SET state='retired', salt='', check_value=NULL, retired_at=?
+			 WHERE id = ? AND state <> 'retired'`, formatTimeRFC(at), id)
+		if err != nil {
+			return nil, fmt.Errorf("statedb: abandon sealing key %s: %w", id, classifyDriverErr(err))
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			done = append(done, id)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("statedb: abandon sealing keys: %w", classifyDriverErr(err))
+	}
+	return done, nil
+}
+
 // ---------------------------------------------------------------------------
 // Rotation history
 // ---------------------------------------------------------------------------
@@ -424,7 +479,7 @@ func (d *DB) countByKey(query, what string) (map[string]int, error) {
 			return nil, fmt.Errorf("statedb: scan %s key count: %w", what, classifyDriverErr(err))
 		}
 		if keyID == "" {
-			keyID = "legacy"
+			keyID = LegacyKeyID
 		}
 		out[keyID] += n
 	}

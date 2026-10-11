@@ -23,6 +23,19 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
+// backupTestKey is the CLOOP_SECRET_KEY these tests seal sidecars under and
+// restore with. Explicit rather than read from the environment, so a test
+// behaves the same on a host that exports a real key as in CI, which has none.
+const backupTestKey = "statedb-backup-test-key-0123456789abcdefghij"
+
+// restoreOpts fills in what every restore needs: the key the sidecar was
+// sealed under, and a reason.
+func restoreOpts(o dbbackup.RestoreOptions) dbbackup.RestoreOptions {
+	o.Key = backupTestKey
+	o.Reason = "backup round-trip test"
+	return o
+}
+
 // seedDB writes a realistic plan with several tasks and step rows so the
 // backup tests have something non-trivial to compare against. Returns the
 // DB handle (closed by t.Cleanup) and the on-disk path.
@@ -300,14 +313,14 @@ func TestRestore_ProducesIdenticalState(t *testing.T) {
 	_, src := seedDB(t)
 
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 
 	// Restore into a fresh directory (no pre-existing dst → no --force needed).
 	dstDir := t.TempDir()
 	dst := filepath.Join(dstDir, "state.db")
-	report, err := dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{})
+	report, err := dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{}))
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -338,7 +351,7 @@ func TestRestore_ProducesIdenticalState(t *testing.T) {
 func TestRestore_RefusesActiveDatabaseWithoutForce(t *testing.T) {
 	_, src := seedDB(t)
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 
@@ -348,7 +361,7 @@ func TestRestore_RefusesActiveDatabaseWithoutForce(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("live db pretend"), 0o600); err != nil {
 		t.Fatalf("seed dst: %v", err)
 	}
-	_, err := dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{})
+	_, err := dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{}))
 	if err == nil {
 		t.Fatal("expected error when dst exists without --force, got nil")
 	}
@@ -371,7 +384,7 @@ func TestRestore_RefusesActiveDatabaseWithoutForce(t *testing.T) {
 func TestRestore_ForceMovesExistingFileAside(t *testing.T) {
 	_, src := seedDB(t)
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 
@@ -381,7 +394,7 @@ func TestRestore_ForceMovesExistingFileAside(t *testing.T) {
 	if err := os.WriteFile(dst, []byte(sentinel), 0o600); err != nil {
 		t.Fatalf("seed dst: %v", err)
 	}
-	report, err := dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{Force: true})
+	report, err := dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{Force: true}))
 	if err != nil {
 		t.Fatalf("Restore --force: %v", err)
 	}
@@ -407,7 +420,7 @@ func TestRestore_ForceMovesExistingFileAside(t *testing.T) {
 func TestRestore_RefusesCorruptedBackup(t *testing.T) {
 	_, src := seedDB(t)
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 
@@ -426,7 +439,7 @@ func TestRestore_RefusesCorruptedBackup(t *testing.T) {
 
 	dstDir := t.TempDir()
 	dst := filepath.Join(dstDir, "state.db")
-	_, err = dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{SkipChecksum: true})
+	_, err = dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{SkipChecksum: true}))
 	if err == nil {
 		t.Fatal("expected error when restoring corrupted backup, got nil")
 	}
@@ -442,7 +455,7 @@ func TestRestore_RefusesCorruptedBackup(t *testing.T) {
 func TestRestore_RefusesChecksumMismatch(t *testing.T) {
 	_, src := seedDB(t)
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 
@@ -461,7 +474,7 @@ func TestRestore_RefusesChecksumMismatch(t *testing.T) {
 	f.Close()
 
 	dst := filepath.Join(t.TempDir(), "state.db")
-	_, err = dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{})
+	_, err = dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{}))
 	if err == nil {
 		t.Fatal("expected checksum mismatch error, got nil")
 	}
@@ -476,7 +489,7 @@ func TestRestore_RefusesChecksumMismatch(t *testing.T) {
 func TestRestore_SkipChecksumAcceptsLegitMetadataMissing(t *testing.T) {
 	_, src := seedDB(t)
 	backupPath := filepath.Join(t.TempDir(), "backup.db")
-	if _, err := dbbackup.Backup(src, backupPath); err != nil {
+	if _, err := dbbackup.BackupWithOptions(src, backupPath, dbbackup.BackupOptions{Key: backupTestKey}); err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
 	// Drop the sidecar.
@@ -485,7 +498,7 @@ func TestRestore_SkipChecksumAcceptsLegitMetadataMissing(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "state.db")
-	if _, err := dbbackup.Restore(backupPath, dst, dbbackup.RestoreOptions{SkipChecksum: true}); err != nil {
+	if _, err := dbbackup.Restore(backupPath, dst, restoreOpts(dbbackup.RestoreOptions{SkipChecksum: true})); err != nil {
 		t.Fatalf("Restore with SkipChecksum and no sidecar: %v", err)
 	}
 	if got := readScalar(t, dst, "goal"); got != "backup test" {

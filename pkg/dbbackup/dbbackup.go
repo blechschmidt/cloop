@@ -22,14 +22,23 @@
 //  3. VACUUM INTO 'output.db' produces a self-contained, defragmented copy.
 //     The copy has no -wal/-shm sidecars; it is a single file.
 //  4. Compute SHA-256 of the copy and write a sidecar metadata JSON
-//     describing source path, size, schema version, and duration.
+//     describing source path, size, schema version, and duration — and, read
+//     back from the copy, the sealing keys its sealed rows depend on and
+//     where its audit chain ends, the whole sealed under a key derived from
+//     CLOOP_SECRET_KEY (manifest.go).
 //
-// Restore flow:
+// Restore flow (Task 20410 put everything before the swap into Inspect):
 //
-//  1. Validate the backup with PRAGMA integrity_check (read-only handle).
-//  2. Verify the SHA-256 against the metadata sidecar (if present).
-//  3. Refuse to overwrite an existing destination unless --force is set.
-//  4. Atomically swap the file in via tmp+rename.
+//  1. Preflight, read-only, before anything is touched: PRAGMA
+//     integrity_check, the schema this binary can open, the SHA-256 and the
+//     seal over the sidecar, and whether the CLOOP_SECRET_KEY the restored
+//     hub will run with derives every sealing key the backup's secrets are
+//     sealed under. Each refusal names the flag that overrides it, if any.
+//  2. Refuse to overwrite an existing destination unless --force is set.
+//  3. Atomically swap the file in via tmp+rename.
+//  4. Record the restore: an audit.restored row in the restored chain, and a
+//     restore record sealed to the audit checkpoint sinks, so `cloop hub
+//     audit verify --checkpoints` can tell this restore from a truncation.
 //
 // Why VACUUM INTO instead of OS-level copy:
 //
@@ -50,6 +59,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -57,10 +69,13 @@ import (
 // metadata path: "/path/foo.db" → "/path/foo.db.meta.json".
 const MetadataSuffix = ".meta.json"
 
+// maxMetadataSize bounds a sidecar.
+const maxMetadataSize = 4 << 20
+
 // Metadata is persisted next to the backup file. Restore consults it to
-// verify the backup before overwriting the target. All fields are optional
-// for forward-compat — Restore tolerates an old metadata blob that is
-// missing newer fields.
+// verify the backup before overwriting the target. Every field after
+// CloopVersion is the manifest (manifest.go), absent from sidecars written
+// before Task 20410; such a sidecar is unsealed, and a restore says so.
 type Metadata struct {
 	Source        string    `json:"source"`
 	Backup        string    `json:"backup"`
@@ -70,6 +85,17 @@ type Metadata struct {
 	DurationMS    int64     `json:"duration_ms"`
 	SchemaVersion int       `json:"schema_version"`
 	CloopVersion  string    `json:"cloop_version,omitempty"`
+
+	// Manifest is the manifest format, ManifestVersion.
+	Manifest int `json:"manifest,omitempty"`
+	// Keys are the sealing keys the backup's sealed rows depend on.
+	Keys []ManifestKey `json:"keys,omitempty"`
+	// Chain is where the backup's audit chain ends.
+	Chain *ManifestChain `json:"chain,omitempty"`
+	// KeyFingerprint names the CLOOP_SECRET_KEY the sidecar is sealed under,
+	// and Seal is the seal; both empty on an unsealed sidecar.
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	Seal           string `json:"seal,omitempty"`
 }
 
 // BackupReport summarises a successful backup run.
@@ -82,16 +108,42 @@ type BackupReport struct {
 	SHA256        string
 	WALCheckpoint string // "PASSED" or human-readable diagnostic
 	SchemaVersion int
+
+	// Keys and Chain are what the manifest records.
+	Keys  []ManifestKey
+	Chain *ManifestChain
+	// KeyFingerprint names the key the sidecar is sealed under; "" when it
+	// is unsealed, because there was no CLOOP_SECRET_KEY.
+	KeyFingerprint string
+}
+
+// Sealed reports whether the sidecar was sealed.
+func (r *BackupReport) Sealed() bool { return r.KeyFingerprint != "" }
+
+// BackupOptions configures BackupWithOptions.
+type BackupOptions struct {
+	// Key is the CLOOP_SECRET_KEY the sidecar is sealed under; "" writes an
+	// unsealed sidecar, which a restore then refuses without --allow-unsealed.
+	Key string
 }
 
 // Backup creates a hot backup of the SQLite database at srcPath and writes
-// it to outPath. The destination directory must exist. A sibling
+// it to outPath, sealing its sidecar under the process's CLOOP_SECRET_KEY.
+// See BackupWithOptions.
+func Backup(srcPath, outPath string) (*BackupReport, error) {
+	return BackupWithOptions(srcPath, outPath, BackupOptions{Key: os.Getenv(EnvKey)})
+}
+
+// BackupWithOptions creates a hot backup of the SQLite database at srcPath
+// and writes it to outPath. The destination directory must exist. A sibling
 // "<outPath>.meta.json" file is written alongside containing the SHA-256
-// checksum, source size, and other metadata used by Restore for validation.
+// checksum, source size, and other metadata used by Restore for validation,
+// and the manifest: the copy's sealing keys and audit head, sealed under
+// opts.Key.
 //
 // If outPath already exists, it is overwritten — operators are expected to
 // rotate backup filenames (timestamp, sequence, etc.) externally.
-func Backup(srcPath, outPath string) (*BackupReport, error) {
+func BackupWithOptions(srcPath, outPath string, opts BackupOptions) (*BackupReport, error) {
 	if srcPath == "" {
 		return nil, errors.New("dbbackup: empty source path")
 	}
@@ -177,6 +229,15 @@ func Backup(srcPath, outPath string) (*BackupReport, error) {
 		return nil, fmt.Errorf("dbbackup: checksum: %w", err)
 	}
 
+	// What the manifest records is read back from the copy, not from the
+	// source: the source keeps taking writes, and a manifest that described
+	// a moment the backup does not hold would be wrong in exactly the
+	// details a restore relies on.
+	facts, head, err := readBackupFacts(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("dbbackup: read the backup's keys and audit head: %w", err)
+	}
+
 	duration := time.Since(started)
 
 	meta := Metadata{
@@ -187,6 +248,12 @@ func Backup(srcPath, outPath string) (*BackupReport, error) {
 		SHA256:        checksum,
 		DurationMS:    duration.Milliseconds(),
 		SchemaVersion: schemaVersion,
+		Manifest:      ManifestVersion,
+		Keys:          manifestKeys(facts),
+		Chain:         manifestChain(head),
+	}
+	if err := meta.seal(opts.Key); err != nil {
+		return nil, fmt.Errorf("dbbackup: seal the sidecar: %w", err)
 	}
 	metaPath := outPath + MetadataSuffix
 	if err := writeMetadata(metaPath, meta); err != nil {
@@ -198,15 +265,35 @@ func Backup(srcPath, outPath string) (*BackupReport, error) {
 	_ = os.Chmod(metaPath, 0o600)
 
 	return &BackupReport{
-		Source:        srcPath,
-		Output:        outPath,
-		MetadataPath:  metaPath,
-		SizeBytes:     stat.Size(),
-		Duration:      duration,
-		SHA256:        checksum,
-		WALCheckpoint: checkpointMsg,
-		SchemaVersion: schemaVersion,
+		Source:         srcPath,
+		Output:         outPath,
+		MetadataPath:   metaPath,
+		SizeBytes:      stat.Size(),
+		Duration:       duration,
+		SHA256:         checksum,
+		WALCheckpoint:  checkpointMsg,
+		SchemaVersion:  schemaVersion,
+		Keys:           meta.Keys,
+		Chain:          meta.Chain,
+		KeyFingerprint: meta.KeyFingerprint,
 	}, nil
+}
+
+// readBackupFacts reads a backup's sealing keys and audit head through a
+// read-only connection: the file is a backup, and statedb.Open would migrate
+// it.
+func readBackupFacts(path string) (statedb.SealedFacts, statedb.AuditHead, error) {
+	conn, err := statedb.OpenConn(path, statedb.ReadOnly)
+	if err != nil {
+		return statedb.SealedFacts{}, statedb.AuditHead{}, err
+	}
+	defer conn.Close()
+	facts, err := statedb.ReadSealedFacts(conn, secretbroker.LegacySaltMetaKey)
+	if err != nil {
+		return facts, statedb.AuditHead{}, err
+	}
+	head, err := statedb.ReadAuditHead(conn)
+	return facts, head, err
 }
 
 // RestoreReport describes a successful restore.
@@ -216,6 +303,11 @@ type RestoreReport struct {
 	SizeBytes    int64
 	Duration     time.Duration
 	BackedUpPath string // pre-restore copy of the destination, if any
+
+	// Preflight is what the backup was found to be before the swap.
+	Preflight *Preflight
+	// Recorded says how the restore was recorded; see Recording.
+	Recorded Recording
 }
 
 // RestoreOptions configures Restore.
@@ -225,27 +317,84 @@ type RestoreOptions struct {
 	// any of its WAL/SHM sidecars exist (heuristic for "active database").
 	Force bool
 
-	// SkipChecksum disables the SHA-256 verification step. Useful only for
-	// recovering from a backup whose metadata sidecar has been lost.
+	// Key is the CLOOP_SECRET_KEY the restored hub will run with. The
+	// backup's sealing keys must derive from it, and its sidecar must carry
+	// its seal; the restore record is sealed under it. Restore never reads
+	// the environment itself: the caller says which key it means.
+	Key string
+
+	// SkipChecksum restores without checking the sidecar at all — no digest,
+	// no seal. For a backup whose sidecar was lost; nothing then vouches that
+	// the backup was not edited, and the restore records that it was skipped.
 	SkipChecksum bool
+
+	// AllowUnsealed accepts a sidecar whose seal cannot be checked here:
+	// written unsealed (before Task 20410, or by a hub with no
+	// CLOOP_SECRET_KEY), sealed under another key, or with no Key to check
+	// it. The digest is still checked.
+	AllowUnsealed bool
+
+	// AcceptSecretLoss restores a backup whose sealing keys Key cannot
+	// derive, and retires those keys in the restored database so the hub can
+	// start and mint a fresh one; what they sealed is reported lost. The
+	// backup file keeps them. Recorded on the audit.restored row and the
+	// restore record.
+	AcceptSecretLoss bool
+
+	// Reason says why; it is recorded and required. Actor is who.
+	Reason string
+	Actor  string
+
+	// CheckpointFile is the audit checkpoint file (audit.checkpoints.file):
+	// where the restore looks for the newest checkpoint it supersedes, and
+	// where it appends its restore record. "" reads and writes no file.
+	// CheckpointStderr receives the record's stderr copy; nil writes none.
+	CheckpointFile   string
+	CheckpointStderr io.Writer
+	// Chain is the role the restore record names, auditcheckpoint.Chain*;
+	// "" takes the role the newest checkpoint for this database names, or
+	// project when there is none.
+	Chain string
+
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
 }
 
-// Restore validates the backup at backupPath and atomically swaps it into
-// dstPath. Validation steps:
+// afterPreflight runs between a restore's preflight and its copy of the
+// backup. Nil outside tests, which use it to change the file in that window.
+var afterPreflight func(backupPath string)
+
+// ErrNoReason is returned when a restore is asked for without a reason.
+var ErrNoReason = errors.New("dbbackup: a restore needs a reason; it is recorded with the restore")
+
+func (o RestoreOptions) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+// Restore checks the backup at backupPath (Inspect), atomically swaps it into
+// dstPath, and records the restore.
 //
-//   - PRAGMA integrity_check on the backup file (read-only).
-//   - SHA-256 verification against the metadata sidecar, if present.
-//   - Schema version sanity (any positive integer is accepted).
-//
+// Nothing is touched until every check has passed: a refusal returns a
+// *RefusedError naming each reason and the flag, if any, that overrides it.
 // If dstPath already exists and Force is false, Restore returns an error.
 // When Force is true, the existing destination is moved to a sibling
 // .pre-restore backup before the swap, so a botched restore is recoverable.
+//
+// Once the backup is in place the restore is recorded (record.go). A failure
+// there returns the report with an *UnrecordedError: the database is
+// restored, and the error says what is missing from the record of it.
 func Restore(backupPath, dstPath string, opts RestoreOptions) (*RestoreReport, error) {
 	if backupPath == "" {
 		return nil, errors.New("dbbackup: empty backup path")
 	}
 	if dstPath == "" {
 		return nil, errors.New("dbbackup: empty destination path")
+	}
+	if strings.TrimSpace(opts.Reason) == "" {
+		return nil, ErrNoReason
 	}
 	if abs, err := filepath.Abs(backupPath); err == nil {
 		backupPath = abs
@@ -256,25 +405,21 @@ func Restore(backupPath, dstPath string, opts RestoreOptions) (*RestoreReport, e
 	if backupPath == dstPath {
 		return nil, errors.New("dbbackup: backup and destination paths are identical")
 	}
-	stat, err := os.Stat(backupPath)
+
+	pre, err := Inspect(backupPath, PreflightOptions{
+		Key:              opts.Key,
+		SkipChecksum:     opts.SkipChecksum,
+		AllowUnsealed:    opts.AllowUnsealed,
+		AcceptSecretLoss: opts.AcceptSecretLoss,
+	})
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("dbbackup: backup not found: %s", backupPath)
-		}
-		return nil, fmt.Errorf("dbbackup: stat backup: %w", err)
+		return nil, err
 	}
-	if stat.IsDir() {
-		return nil, fmt.Errorf("dbbackup: backup path is a directory: %s", backupPath)
+	if err := pre.Err(); err != nil {
+		return nil, err
 	}
-
-	if err := validateBackup(backupPath); err != nil {
-		return nil, fmt.Errorf("dbbackup: backup invalid: %w", err)
-	}
-
-	if !opts.SkipChecksum {
-		if err := verifyChecksum(backupPath); err != nil {
-			return nil, fmt.Errorf("dbbackup: checksum mismatch: %w", err)
-		}
+	if afterPreflight != nil {
+		afterPreflight(backupPath)
 	}
 
 	// Active-DB guard: if any of dst, dst-wal, or dst-shm exists, the
@@ -287,72 +432,109 @@ func Restore(backupPath, dstPath string, opts RestoreOptions) (*RestoreReport, e
 			dstPath,
 		)
 	}
-
-	started := time.Now()
-
-	// Snapshot the existing destination so an operator can roll back a bad
-	// restore. We move (rename) rather than copy because state.db can be
-	// large and we want the swap to be atomic at the filesystem level.
-	var preRestoreDir string
-	if _, err := os.Stat(dstPath); err == nil {
-		preRestoreDir = dstPath + ".pre-restore." + started.UTC().Format("20060102T150405")
-		if err := os.Rename(dstPath, preRestoreDir); err != nil {
-			return nil, fmt.Errorf("dbbackup: stash existing destination: %w", err)
-		}
-		// Best-effort: stash WAL/SHM sidecars too so a roll-back recovers
-		// the full live state. We do not fail the restore if these are absent.
-		for _, suffix := range []string{"-wal", "-shm"} {
-			src := dstPath + suffix
-			if _, statErr := os.Stat(src); statErr == nil {
-				_ = os.Rename(src, preRestoreDir+suffix)
-			}
-		}
+	// --force overwrites a database; it does not take one from under a hub
+	// still serving it, which would keep writing to the file moved aside and
+	// lose every write after the swap.
+	if err := refuseServingHub(dstPath, opts.now()); err != nil {
+		return nil, err
 	}
+
+	started := opts.now()
 
 	// Stage to a sibling .swap file in the destination directory so the
 	// rename is atomic on POSIX. Copy rather than rename across the
-	// filesystem boundary that may exist between backup and dst.
+	// filesystem boundary that may exist between backup and dst. The copy is
+	// hashed as it is made and must be the file the preflight checked:
+	// whoever can write the backup could otherwise replace it between the
+	// check and the copy, and restore something nothing vouched for.
 	dstDir := filepath.Dir(dstPath)
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return nil, fmt.Errorf("dbbackup: mkdir destination dir: %w", err)
 	}
 	stagePath := dstPath + ".restore.swap"
-	if err := copyFile(backupPath, stagePath, 0o600); err != nil {
-		// Roll back the pre-restore stash so we don't leave the user with
-		// no destination at all.
-		if preRestoreDir != "" {
-			_ = os.Rename(preRestoreDir, dstPath)
-		}
+	staged, err := copyFileSHA256(backupPath, stagePath, 0o600)
+	if err != nil {
 		return nil, fmt.Errorf("dbbackup: stage backup: %w", err)
+	}
+	if !strings.EqualFold(staged, pre.SHA256) {
+		_ = os.Remove(stagePath)
+		return nil, fmt.Errorf("dbbackup: %s changed between its check and its copy (sha256 %s, then %s); "+
+			"nothing was restored", backupPath, pre.SHA256, staged)
+	}
+
+	// Snapshot the existing destination so an operator can roll back a bad
+	// restore. We move (rename) rather than copy because state.db can be
+	// large and we want the swap to be atomic at the filesystem level.
+	//
+	// The database is three files, and they move together: a -wal left
+	// beside the restored file is replayed into it the first time anything
+	// opens it — SQLite does not ask whose log it is — which turns a restore
+	// into the database the log came from. So every one that exists moves,
+	// whether or not the main file does, a move that fails stops the restore,
+	// and a failure after them puts all of them back.
+	stash := dstPath + ".pre-restore." + started.UTC().Format("20060102T150405")
+	var moved []string // suffixes moved aside, in order
+	putBack := func() error {
+		var errs []error
+		for i := len(moved) - 1; i >= 0; i-- {
+			if err := os.Rename(stash+moved[i], dstPath+moved[i]); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if _, err := os.Lstat(dstPath + suffix); err != nil {
+			continue
+		}
+		if err := os.Rename(dstPath+suffix, stash+suffix); err != nil {
+			_ = os.Remove(stagePath)
+			return nil, errors.Join(fmt.Errorf("dbbackup: move %s aside: %w", dstPath+suffix, err), putBack())
+		}
+		moved = append(moved, suffix)
+	}
+	var preRestoreDir string
+	if len(moved) > 0 {
+		preRestoreDir = stash + moved[0] // the main file's, unless only a sidecar was there
 	}
 	if err := os.Rename(stagePath, dstPath); err != nil {
 		_ = os.Remove(stagePath)
-		if preRestoreDir != "" {
-			_ = os.Rename(preRestoreDir, dstPath)
-		}
-		return nil, fmt.Errorf("dbbackup: atomic rename: %w", err)
+		return nil, errors.Join(fmt.Errorf("dbbackup: atomic rename: %w", err), putBack())
 	}
 
-	return &RestoreReport{
+	report := &RestoreReport{
 		Backup:       backupPath,
 		Destination:  dstPath,
-		SizeBytes:    stat.Size(),
-		Duration:     time.Since(started),
+		SizeBytes:    pre.SizeBytes,
 		BackedUpPath: preRestoreDir,
-	}, nil
+		Preflight:    pre,
+	}
+	report.Recorded, err = record(dstPath, pre, opts)
+	report.Duration = opts.now().Sub(started)
+	return report, err
 }
 
 // LoadMetadata reads the sidecar metadata file written next to a backup.
-// Returns (nil, nil) if the file is missing — backups without metadata are
-// allowed (e.g. when SkipChecksum is later passed to Restore).
+// Returns (nil, nil) if the file is missing; a restore then refuses unless
+// SkipChecksum says the sidecar is not to be checked.
 func LoadMetadata(backupPath string) (*Metadata, error) {
 	metaPath := backupPath + MetadataSuffix
-	data, err := os.ReadFile(metaPath)
+	f, err := os.Open(metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("dbbackup: read metadata: %w", err)
+	}
+	defer f.Close()
+	// A sidecar is a few kilobytes; one that is not is not a sidecar, and is
+	// not read whole into memory to find that out.
+	data, err := io.ReadAll(io.LimitReader(f, maxMetadataSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("dbbackup: read metadata: %w", err)
+	}
+	if len(data) > maxMetadataSize {
+		return nil, fmt.Errorf("dbbackup: metadata %s is over %d bytes", metaPath, maxMetadataSize)
 	}
 	var m Metadata
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -397,24 +579,26 @@ func validateBackup(path string) error {
 	return nil
 }
 
-// verifyChecksum recomputes the backup's SHA-256 and compares against the
-// sidecar metadata. Missing metadata is treated as a soft pass, so backups
-// shipped without sidecar (e.g. via tar) can still be restored using
-// Restore with SkipChecksum.
-func verifyChecksum(backupPath string) error {
-	meta, err := LoadMetadata(backupPath)
-	if err != nil {
-		return err
+// ErrHubServing is returned when a restore is refused because a hub process
+// still serves the destination database.
+var ErrHubServing = errors.New("dbbackup: a hub is serving the destination database")
+
+// refuseServingHub fails when a hub process serves the database at dbPath —
+// it holds the control-plane lease, or is a live member of a cluster whose
+// leader is between leases — the check `cloop db maintain` makes before a
+// VACUUM. A probe that fails is not evidence of a hub; a lapsed lease is none.
+func refuseServingHub(dbPath string, now time.Time) error {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil // nothing there to serve
 	}
-	if meta == nil || meta.SHA256 == "" {
-		return nil // no expectation to match
+	if st, err := hublease.Inspect(hublease.Options{DBPath: dbPath}); err == nil && st.Live {
+		return fmt.Errorf("%w: %s (pid %d) has held the lease since %s — stop it first; a hub writing to a "+
+			"database swapped from under it loses everything it writes after the swap",
+			ErrHubServing, st.Row.Hostname, st.Row.PID, st.Row.AcquiredAt.Format(time.RFC3339))
 	}
-	got, err := fileSHA256(backupPath)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(got, meta.SHA256) {
-		return fmt.Errorf("expected %s, got %s", meta.SHA256, got)
+	if live, err := hubcluster.LiveMemberRows(dbPath, now); err == nil && len(live) > 0 {
+		return fmt.Errorf("%w: %d hub process(es) serve it, %s (pid %d) among them — stop them first",
+			ErrHubServing, len(live), live[0].Hostname, live[0].PID)
 	}
 	return nil
 }
@@ -433,19 +617,6 @@ func destinationActive(dstPath string) bool {
 	return false
 }
 
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 func writeMetadata(path string, m Metadata) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -454,25 +625,31 @@ func writeMetadata(path string, m Metadata) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func copyFile(src, dst string, mode os.FileMode) error {
+// copyFileSHA256 copies src to dst and returns the SHA-256 of what it copied.
+func copyFileSHA256(src, dst string, mode os.FileMode) (string, error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, h), in); err != nil {
 		_ = out.Close()
 		_ = os.Remove(dst)
-		return err
+		return "", err
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
 		_ = os.Remove(dst)
-		return err
+		return "", err
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

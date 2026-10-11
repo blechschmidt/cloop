@@ -45,21 +45,43 @@ type AuditHead struct {
 func (d *DB) AuditHead() (AuditHead, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return auditHead(d.conn, true)
+}
 
+// ReadAuditHead reads the head of the audit chain in the database behind conn:
+// a connection OpenConn opened, typically ReadOnly on a backup this package
+// must not migrate (Task 20410). A database that predates the audit tables
+// reads as an empty chain, and one that predates prune anchors as unpruned.
+func ReadAuditHead(conn *sql.DB) (AuditHead, error) {
+	hasEvents, err := tableExists(conn, "audit_events")
+	if err != nil || !hasEvents {
+		return AuditHead{}, err
+	}
+	hasAnchors, err := tableExists(conn, "audit_anchors")
+	if err != nil {
+		return AuditHead{}, err
+	}
+	return auditHead(conn, hasAnchors)
+}
+
+// auditHead reads the head through conn; anchors says audit_anchors exists.
+func auditHead(conn *sql.DB, anchors bool) (AuditHead, error) {
 	var h AuditHead
-	row := d.conn.QueryRow(`SELECT ` + anchorColumns + ` FROM audit_anchors
-		ORDER BY pruned_through_id DESC, id DESC LIMIT 1`)
-	a, err := scanAnchor(row)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
-		return AuditHead{}, fmt.Errorf("statedb audit: head anchor: %w", classifyDriverErr(err))
-	default:
-		h.Anchor = &a
+	if anchors {
+		row := conn.QueryRow(`SELECT ` + anchorColumns + ` FROM audit_anchors
+			ORDER BY pruned_through_id DESC, id DESC LIMIT 1`)
+		a, err := scanAnchor(row)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return AuditHead{}, fmt.Errorf("statedb audit: head anchor: %w", classifyDriverErr(err))
+		default:
+			h.Anchor = &a
+		}
 	}
 
 	var ts string
-	err = d.conn.QueryRow(
+	err := conn.QueryRow(
 		`SELECT id, row_hash, timestamp FROM audit_events ORDER BY id DESC LIMIT 1`,
 	).Scan(&h.LastID, &h.LastRowHash, &ts)
 	switch {
@@ -72,7 +94,7 @@ func (d *DB) AuditHead() (AuditHead, error) {
 		}
 	}
 	var first sql.NullInt64
-	if err := d.conn.QueryRow(`SELECT MIN(id), COUNT(*) FROM audit_events`).Scan(&first, &h.Rows); err != nil {
+	if err := conn.QueryRow(`SELECT MIN(id), COUNT(*) FROM audit_events`).Scan(&first, &h.Rows); err != nil {
 		return AuditHead{}, fmt.Errorf("statedb audit: head count: %w", classifyDriverErr(err))
 	}
 	h.FirstID = first.Int64

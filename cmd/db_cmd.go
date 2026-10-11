@@ -317,7 +317,11 @@ How it works:
      supplied path. SQLite guarantees the copy is consistent at the read
      transaction's snapshot point — concurrent writes do not corrupt it.
   3. A sidecar '<output>.meta.json' is written with SHA-256 checksum,
-     source path, size, schema version, and duration.
+     source path, size, schema version, and duration — and the manifest a
+     restore checks first: the sealing keys the backup's secrets depend on
+     and where its audit chain ends. The whole sidecar is sealed under a key
+     derived from CLOOP_SECRET_KEY, so a backup edited and its digest
+     recomputed is refused at restore.
 
 The default output path is
 .cloop/backups/state-<UTC-timestamp>.db. Use --output to override it.
@@ -362,7 +366,22 @@ Exit codes:
 		fmt.Printf("  duration:        %s\n", report.Duration.Round(time.Millisecond))
 		fmt.Printf("  sha256:          %s\n", report.SHA256)
 		fmt.Printf("  schema version:  %d\n", report.SchemaVersion)
-		fmt.Printf("  metadata:        %s\n\n", report.MetadataPath)
+		if c := report.Chain; c != nil && c.LastID > 0 {
+			fmt.Printf("  audit head:      id %d (%s)\n", c.LastID, shortHex(c.LastRowHash))
+		}
+		var sealedRows int
+		for _, k := range report.Keys {
+			sealedRows += k.Total()
+		}
+		fmt.Printf("  sealing keys:    %d, sealing %d row(s)\n", len(report.Keys), sealedRows)
+		fmt.Printf("  metadata:        %s\n", report.MetadataPath)
+		if report.Sealed() {
+			fmt.Printf("  sidecar seal:    under CLOOP_SECRET_KEY %s\n\n", report.KeyFingerprint)
+		} else {
+			color.New(color.FgYellow, color.Bold).Println("  sidecar seal:    NONE — there is no CLOOP_SECRET_KEY, so nothing will prove this backup")
+			color.New(color.FgYellow, color.Bold).Println("                   was not edited; restoring it needs --allow-unsealed")
+			fmt.Println()
+		}
 		pass.Println("Backup complete.")
 		return nil
 	},
@@ -370,77 +389,60 @@ Exit codes:
 
 var dbRestoreCmd = &cobra.Command{
 	Use:   "restore <backup-path>",
-	Short: "Restore .cloop/state.db from a backup created by 'cloop db backup'",
-	Long: `Validate a backup and atomically swap it into .cloop/state.db.
+	Short: "Restore .cloop/state.db from a backup, after checking it opens under this hub's key",
+	Long: `Check a backup, swap it into .cloop/state.db, and record the restore.
 
-Validation steps:
-  1. PRAGMA integrity_check on the backup file (read-only handle).
-  2. SHA-256 verification against the sidecar metadata, if present.
+Before anything is touched, a read-only preflight asks every question a
+restore depends on, and refuses — changing nothing — on any "no":
 
-Refuses to overwrite an active database (when state.db, state.db-wal,
-or state.db-shm exist alongside it) without --force. With --force, the
-existing destination is moved to a sibling .pre-restore.<timestamp>
-file before the swap so a botched restore is recoverable.
+  1. PRAGMA integrity_check, and a schema this binary can open.
+  2. The sidecar: its SHA-256 matches the file, and its seal — an HMAC under a
+     key derived from CLOOP_SECRET_KEY — verifies, so a backup edited and its
+     digest recomputed is refused.
+  3. The sealing keys: the CLOOP_SECRET_KEY this hub will run with derives
+     every key the backup's secrets, sessions and hub CA keys are sealed
+     under. A refusal names each key it cannot open and what it seals.
+
+Each refusal names the flag that overrides it. --accept-secret-loss restores
+a backup whose keys this CLOOP_SECRET_KEY cannot derive: those keys are
+retired in the restored database so the hub can start, and what they sealed
+is lost there (the backup file keeps it). It is deliberately not --force,
+which only allows overwriting a live database. Import the right key from
+escrow instead whenever you can: cloop hub key escrow import.
+
+Then the restore is recorded, because to the audit checkpoints a restore
+looks exactly like a tail deleted while the hub kept writing: an audit.restored
+row is appended to the restored chain, and a restore record sealed under the
+checkpoint key goes to audit.checkpoints.file (or --checkpoints) and stderr,
+naming the backup, the head restored to, the newest checkpoint superseded and
+the history lost, who, and --reason. 'cloop hub audit verify --checkpoints'
+then reports the restore as acknowledged instead of failing on it.
+
+--force is required when a live database is present; the existing file is
+moved to a sibling .pre-restore.<timestamp> first. Stop the hub first: a
+restore is refused while a hub holds the control-plane lease or a cluster
+member is live. --check runs the preflight alone and writes nothing:
+rehearse a restore with it.
 
 Exit codes:
-  0  restore completed
-  1  restore failed (backup invalid, refused without --force, etc.)
-  2  the restore command itself could not run (file missing, etc.)`,
+  0  restored and recorded (with --check: the backup would restore)
+  1  refused or failed; nothing was changed
+  2  the restore could not run (backup missing, unreadable)
+  3  restored, but the record of it is incomplete — the output says what`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		backupPath := args[0]
-		force, _ := cmd.Flags().GetBool("force")
-		skipChecksum, _ := cmd.Flags().GetBool("skip-checksum")
-
-		workdir, _ := os.Getwd()
-		dstPath := filepath.Join(workdir, ".cloop", "state.db")
-
-		header := color.New(color.FgCyan, color.Bold)
-		pass := color.New(color.FgGreen, color.Bold)
-		warn := color.New(color.FgYellow, color.Bold)
-		fail := color.New(color.FgRed, color.Bold)
-		dim := color.New(color.Faint)
-
-		header.Println("cloop db restore")
-		dim.Printf("  backup:      %s\n", backupPath)
-		dim.Printf("  destination: %s\n\n", dstPath)
-
-		if _, err := os.Stat(backupPath); err != nil {
-			fail.Printf("Restore could not run: %v\n", err)
-			exitProcess(2)
+		o := dbRestoreOptions{Backup: args[0], Key: os.Getenv(dbbackup.EnvKey), Stderr: os.Stderr}
+		o.Workdir, _ = os.Getwd()
+		o.Force, _ = cmd.Flags().GetBool("force")
+		o.SkipChecksum, _ = cmd.Flags().GetBool("skip-checksum")
+		o.AllowUnsealed, _ = cmd.Flags().GetBool("allow-unsealed")
+		o.AcceptSecretLoss, _ = cmd.Flags().GetBool("accept-secret-loss")
+		o.Check, _ = cmd.Flags().GetBool("check")
+		o.Reason, _ = cmd.Flags().GetString("reason")
+		o.CheckpointFile, _ = cmd.Flags().GetString("checkpoints")
+		if code := runDBRestore(os.Stdout, o); code != restoreExitOK {
+			exitProcess(code)
 		}
-
-		// Surface metadata up front so the operator sees what they are
-		// restoring before any disk mutation happens.
-		if meta, err := dbbackup.LoadMetadata(backupPath); err == nil && meta != nil {
-			dim.Printf("  metadata: created %s, size %s, schema v%d, sha256=%s…\n\n",
-				meta.CreatedAt.Format(time.RFC3339),
-				humanBytes(meta.SizeBytes),
-				meta.SchemaVersion,
-				safePrefix(meta.SHA256, 12),
-			)
-		} else {
-			dim.Println("  metadata: (no sidecar found)")
-			fmt.Println()
-		}
-
-		report, err := dbbackup.Restore(backupPath, dstPath, dbbackup.RestoreOptions{
-			Force:        force,
-			SkipChecksum: skipChecksum,
-		})
-		if err != nil {
-			fail.Printf("Restore failed: %v\n", err)
-			exitProcess(1)
-		}
-
-		fmt.Printf("  size:        %s\n", humanBytes(report.SizeBytes))
-		fmt.Printf("  duration:    %s\n", report.Duration.Round(time.Millisecond))
-		if report.BackedUpPath != "" {
-			warn.Printf("  rolled-back snapshot saved to %s\n", report.BackedUpPath)
-			dim.Println("  (delete it once you have verified the restored DB.)")
-		}
-		fmt.Println()
-		pass.Println("Restore complete.")
 		return nil
 	},
 }
@@ -461,7 +463,12 @@ func init() {
 	dbMaintainCmd.Flags().Bool("prune-audit", false, "Apply audit.retention_days before vacuuming (see 'cloop hub audit prune')")
 	dbBackupCmd.Flags().String("output", "", "Output path for the backup file (default: .cloop/backups/state-<UTC>.db)")
 	dbRestoreCmd.Flags().Bool("force", false, "Overwrite an active destination database; the previous file is preserved as .pre-restore.<timestamp>")
-	dbRestoreCmd.Flags().Bool("skip-checksum", false, "Skip SHA-256 verification against the sidecar metadata")
+	dbRestoreCmd.Flags().String("reason", "", "Why the database is being restored (required; recorded with the restore)")
+	dbRestoreCmd.Flags().Bool("check", false, "Run the preflight only and write nothing: would this backup restore under this key?")
+	dbRestoreCmd.Flags().Bool("skip-checksum", false, "Do not check the sidecar at all — no digest, no seal (for a backup whose sidecar was lost)")
+	dbRestoreCmd.Flags().Bool("allow-unsealed", false, "Accept a sidecar whose seal cannot be checked here (unsealed, or sealed under another key); the digest is still checked")
+	dbRestoreCmd.Flags().Bool("accept-secret-loss", false, "Restore although CLOOP_SECRET_KEY cannot open the backup's sealing keys; retires them, losing what they seal (recorded)")
+	dbRestoreCmd.Flags().String("checkpoints", "", "Audit checkpoint file to read superseded checkpoints from and append the restore record to (default: audit.checkpoints.file)")
 	dbCmd.AddCommand(dbVerifyCmd)
 	dbCmd.AddCommand(dbMaintainCmd)
 	dbCmd.AddCommand(dbBackupCmd)
