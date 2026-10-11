@@ -255,7 +255,7 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 | `--behind-proxy` | Leave `ui.tls` empty; a proxy or Ingress terminates TLS. **The proxy must set `X-Forwarded-Proto: https`**, and the hub believes it only from loopback or an address in `ui.trusted_proxies` — add the proxy's address there when it runs on another host. That header is what tells the hub the browser's connection was encrypted: without it `/install.sh` is refused and enrollment offers no one-line installer. |
 | `--oidc-issuer`, `--oidc-client-id` | Enable SSO. A client *secret* is optional — without one the hub is a public client and PKCE authenticates the code exchange. Where one is used it is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
 | `--admin-email` | Break-glass admin, matched on the email claim. Repeatable. |
-| `--git-proxy-port`, `--kube-guard-port` | Where the two monitors listen, and the port of the URL sandboxes reach them at on `--external-url`'s host. `8443` and `8444` by default; each must differ from `--port` and from the other. |
+| `--git-proxy-port`, `--kube-guard-port` | Where the two monitors listen, and the port of the URL sandboxes reach them at on `--external-url`'s host. `8443` and `8444` by default; a default that is `--port` or the external URL's own port moves up by 1000 (a dashboard at `https://hub:8443` gets a git proxy on 9443), while a port you name that collides is refused. |
 | `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. |
 
 ### About `CLOOP_SECRET_KEY`

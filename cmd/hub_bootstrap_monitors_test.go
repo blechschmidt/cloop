@@ -69,7 +69,17 @@ func TestHubBootstrap_MonitorPorts(t *testing.T) {
 	if got := cfg.Executors.KubeGuard.ListenAddr; got != "0.0.0.0:9444" {
 		t.Errorf("kube_guard.listen_addr = %q", got)
 	}
+	// A dashboard reached at :8443 behind a proxy — the eval stack's shape: the
+	// default git proxy port would advertise the dashboard's URL, so it moves.
+	behind := bootstrapInto(t, t.TempDir(), "--behind-proxy", "--external-url", "https://hub.example.com:8443")
+	if got := behind.Executors.GitProxy.AdvertiseURL; got != "https://hub.example.com:9443" {
+		t.Errorf("git_proxy beside a dashboard at :8443 is advertised at %q", got)
+	}
+	if got := behind.Executors.KubeGuard.AdvertiseURL; got != "https://hub.example.com:8444" {
+		t.Errorf("kube_guard beside a dashboard at :8443 is advertised at %q", got)
+	}
 	for _, args := range [][]string{
+		{"--external-url", "https://hub.example.com:8443", "--git-proxy-port", "8443"}, // named, and taken
 		{"--git-proxy-port", "8080"},                              // the dashboard's own
 		{"--git-proxy-port", "9443", "--kube-guard-port", "9443"}, // one port, two monitors
 		{"--kube-guard-port", "0"},

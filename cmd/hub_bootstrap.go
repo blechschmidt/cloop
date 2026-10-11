@@ -243,21 +243,28 @@ func resolveHubBootstrapOpts(cmd *cobra.Command) (*hubBootstrapOpts, error) {
 	// the external URL's host, because that is the name this hub is known by.
 	// Each monitor speaks TLS itself with a certificate the hub issues
 	// (tls: auto), so these are always https, whatever scheme the dashboard
-	// is served with.
-	for _, p := range []struct {
-		flag string
-		port int
-	}{{"--git-proxy-port", o.GitProxyPort}, {"--kube-guard-port", o.KubeGuardPort}} {
-		if p.port < 1 || p.port > 65535 {
-			return nil, fmt.Errorf("%s must be between 1 and 65535 (got %d)", p.flag, p.port)
-		}
-		if p.port == o.Port {
-			return nil, fmt.Errorf("%s %d is the dashboard's --port; each listener needs its own", p.flag, p.port)
-		}
+	// is served with. A port must differ from the dashboard's --port and from
+	// the external URL's, or the advertised URL would name the dashboard —
+	// `--external-url https://hub:8443` behind a proxy is common enough that a
+	// default which collides moves rather than fails.
+	taken := map[int]string{o.Port: "the dashboard's --port"}
+	extPort := 443
+	if u.Scheme == "http" {
+		extPort = 80
 	}
-	if o.GitProxyPort == o.KubeGuardPort {
-		return nil, fmt.Errorf("--git-proxy-port and --kube-guard-port are both %d; each monitor needs its own port",
-			o.GitProxyPort)
+	if p := u.Port(); p != "" {
+		extPort, _ = strconv.Atoi(p)
+	}
+	if _, dup := taken[extPort]; !dup {
+		taken[extPort] = "the port in --external-url, where browsers reach the dashboard"
+	}
+	var err2 error
+	if o.GitProxyPort, err2 = monitorPort(cmd, "git-proxy-port", o.GitProxyPort, taken); err2 != nil {
+		return nil, err2
+	}
+	taken[o.GitProxyPort] = "--git-proxy-port"
+	if o.KubeGuardPort, err2 = monitorPort(cmd, "kube-guard-port", o.KubeGuardPort, taken); err2 != nil {
+		return nil, err2
 	}
 	o.GitProxyURL = "https://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(o.GitProxyPort))
 	o.KubeGuardURL = "https://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(o.KubeGuardPort))
@@ -286,6 +293,27 @@ func resolveHubBootstrapOpts(cmd *cobra.Command) (*hubBootstrapOpts, error) {
 		o.ServiceUser = "cloop"
 	}
 	return o, nil
+}
+
+// monitorPort settles one monitor's port. One the operator named must be free
+// of every port in taken; a default that is not moves up by a thousand, so
+// 8443 becomes 9443 beside a dashboard reached at :8443, until one is.
+func monitorPort(cmd *cobra.Command, flag string, port int, taken map[int]string) (int, error) {
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("--%s must be between 1 and 65535 (got %d)", flag, port)
+	}
+	if what, dup := taken[port]; dup {
+		if cmd.Flags().Changed(flag) {
+			return 0, fmt.Errorf("--%s %d is %s; each listener needs its own port", flag, port, what)
+		}
+		for p := port + 1000; p <= 65535; p += 1000 {
+			if _, dup := taken[p]; !dup {
+				return p, nil
+			}
+		}
+		return 0, fmt.Errorf("--%s: no free default port; name one", flag)
+	}
+	return port, nil
 }
 
 func isLoopbackHost(h string) bool {

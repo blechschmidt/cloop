@@ -1645,6 +1645,13 @@ jobs:
           grep -q 'CLOOP_SECRET_KEY='         .cloop/hub.env
           [ "$(stat -c %a .cloop/hub.env)" = 600 ] || { echo "hub.env is not 0600"; exit 1; }
           grep -q 'ProtectSystem=strict'      out.txt   # the printed systemd unit
+          # Task 20409: both credential monitors on, the hub issuing their
+          # certificates, at the external URL's host — and the summary says
+          # which ports executors must reach.
+          [ "$(grep -c 'tls: auto' .cloop/config.yaml)" = 2 ] || {
+            echo "bootstrap did not turn both credential monitors on with tls: auto"; exit 1; }
+          grep -q 'advertise_url: https://hub.example.com:8443' .cloop/config.yaml
+          grep -q 'Ports executors must reach' out.txt
 
       - name: Set up Helm
         uses: azure/setup-helm@v4

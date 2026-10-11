@@ -12,7 +12,11 @@
 # outcomes. It is committed rather than generated at `compose up` time so the
 # eval stack is reproducible and so this file can be read before running it —
 # but it is a real bootstrap output, not a hand-written approximation, and
-# regenerating it with the command above should produce the same thing.
+# regenerating it with the command above produces the same thing apart from
+# two deliberate edits: the image trust section below is added, and the
+# git_proxy and kube_guard sections bootstrap writes (tls: auto, on ports 9443
+# and 8444 beside a dashboard reached at :8443) are left out, because this
+# stack publishes nginx's port alone and its agent reaches no other.
 #
 # This is the hosted profile: deliberately stricter than cloop's built-in
 # defaults, which target a single developer in a git checkout. Loosening one
