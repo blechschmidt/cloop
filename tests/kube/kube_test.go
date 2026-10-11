@@ -27,7 +27,8 @@
 //     workload Pods — and a per-Pod egress filter;
 //  5. registers a project whose origin is github.com/acme/granted, grants it a
 //     PAT limited to that repository and one branch pattern, a read-only
-//     kubeconfig for a test namespace, and a harness credential;
+//     kubeconfig for a test namespace and the same kubeconfig again for a
+//     second namespace with a write (Task 20413), and a harness credential;
 //  6. dispatches its one task, which runs probe.sh in the Pod; and asserts the
 //     probe's results, the forge's refs, the gitproxy.push_denied and
 //     kubeguard audit rows, that the granted harness login is in the
@@ -118,11 +119,11 @@ const (
 //go:embed probe.sh
 var probeScript string
 
-// forgeNS and targetNS are this run's namespaces — the forge's, and the one
-// the kubeconfig grant covers. Named per run: CI runs the test twice against
-// one cluster, and the first run's namespaces are still terminating when the
-// second starts.
-var forgeNS, targetNS string
+// forgeNS, targetNS and secondNS are this run's namespaces — the forge's, the
+// one the kubeconfig grant covers, and the one its second grant covers (Task
+// 20413). Named per run: CI runs the test twice against one cluster, and the
+// first run's namespaces are still terminating when the second starts.
+var forgeNS, targetNS, secondNS string
 
 func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	kubeconfig := os.Getenv(kubeconfigEnv)
@@ -156,7 +157,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	t.Logf("release %s (%s) in %s, workloads in %s", release, fullname, ns, workloadNS)
 
 	stamp := fmt.Sprintf("%d", time.Now().Unix())
-	forgeNS, targetNS = "cloop-e2e-forge-"+stamp, "cloop-e2e-target-"+stamp
+	forgeNS, targetNS, secondNS = "cloop-e2e-forge-"+stamp, "cloop-e2e-target-"+stamp, "cloop-e2e-second-"+stamp
 	replicas := x.out(ctx, "get", "deploy", "-n", ns, fullname, "-o", "jsonpath={.spec.replicas}")
 	t.Logf("the hub runs %s replica(s)", replicas)
 	allowed, denied := "cloop/e2e-allowed-"+stamp, "cloop/e2e-other-"+stamp
@@ -184,7 +185,8 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	leaf := ca.Issue(t, "github.com", forgeHost, forgeHost+".cluster.local")
 	if !keep {
 		t.Cleanup(func() {
-			x.run(context.Background(), nil, true, "kubectl", "delete", "namespace", forgeNS, targetNS, "--wait=false")
+			x.run(context.Background(), nil, true, "kubectl", "delete", "namespace", forgeNS, targetNS, secondNS,
+				"--wait=false")
 		})
 	}
 	forgeIP, forgePod := deployForge(ctx, t, x, leaf, pat)
@@ -235,7 +237,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	registerProject(ctx, t, x, ns, helper, projectDir, "https://github.com/"+grantedRepo+".git")
 	params := map[string]string{
 		"REPO": grantedRepo, "OTHER_REPO": otherRepo, "STAMP": stamp,
-		"ALLOWED": allowed, "DENIED": denied, "BRANCH_RULE": branchRule, "K8S_NS": targetNS,
+		"ALLOWED": allowed, "DENIED": denied, "BRANCH_RULE": branchRule, "K8S_NS": targetNS, "K8S_NS2": secondNS,
 		"FORGE_URL": "https://" + forgeHost, "EXPECT_EGRESS_BLOCKED": boolDigit(enforced),
 		// A digest, not the key: the probe compares what its environment holds
 		// against it without the value ever being written anywhere.
@@ -293,6 +295,15 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		"secret_ref": "kube-e2e-kubeconfig-" + stamp, "subject": "project:" + projectDir,
 		"namespaces": []string{targetNS}, "ttl_minutes": 120,
 	}, nil)
+	// The same cluster granted again, for another namespace and with a write
+	// (Task 20413). The run's lease carries both grants, and the Pod gets one
+	// kubeconfig with a context for each; until then the two documents shared
+	// a path and the dispatch was refused. The first grant is the narrower, so
+	// its context stays current-context and K1 and K2 are unchanged.
+	hub.must("POST", "/api/grants", map[string]any{
+		"secret_ref": "kube-e2e-kubeconfig-" + stamp, "subject": "project:" + projectDir,
+		"namespaces": []string{secondNS}, "verbs": []string{"get", "list", "watch", "create"}, "ttl_minutes": 120,
+	}, nil)
 	hub.must("POST", fmt.Sprintf("/api/projects/%d/executor", idx), map[string]any{"executor_id": "kubernetes"}, nil)
 	// The stand-in harness needs no Claude login, but the hub refuses to
 	// dispatch to an isolating executor without one (Task 20379).
@@ -332,7 +343,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	}
 
 	// ── 9. What the Pod saw ────────────────────────────────────────────────
-	for _, id := range append([]string{"A1", "H1", "T1", "C1", "WS1", "WS2", "S1", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3"},
+	for _, id := range append([]string{"A1", "H1", "T1", "C1", "WS1", "WS2", "S1", "P1", "B1", "B2", "R1", "K0", "K1", "K2", "K3", "K4"},
 		conditional(enforced, "E1")...) {
 		r, ok := results[id]
 		switch {
@@ -372,6 +383,12 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	// monitor holds may edit this namespace, so only the monitor stood between.
 	if out, err := x.kubectlMay(ctx, "get", "configmap", "-n", targetNS, "e2e-"+stamp, "-o", "name"); err == nil {
 		t.Errorf("configmap e2e-%s exists in %s (%s): the monitor's refusal did not stop the write", stamp, targetNS, out)
+	}
+	// And the write the second grant allows did land, in its namespace: each
+	// context presents its own grant's session (Task 20413).
+	if out, err := x.kubectlMay(ctx, "get", "configmap", "-n", secondNS, "e2e2-"+stamp, "-o", "name"); err != nil {
+		t.Errorf("configmap e2e2-%s is not in %s (%s): the second grant's context did not write through the "+
+			"monitor", stamp, secondNS, out)
 	}
 
 	// ── 10. What the forge holds ───────────────────────────────────────────
@@ -625,20 +642,26 @@ func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertes
 	return ip, pod
 }
 
-// targetKubeconfig makes the namespace the kubeconfig grant covers, a
-// ServiceAccount that may *edit* it — so a refused write can only have been
-// refused by the monitor — and returns a kubeconfig for that account as the
-// hub Pod reaches the API server.
+// targetKubeconfig makes the namespaces the kubeconfig grants cover, a
+// ServiceAccount that may *edit* both — so a refused write, or a refused read
+// of the other grant's namespace, can only have been refused by the monitor —
+// and returns a kubeconfig for that account as the hub Pod reaches the API
+// server.
 func targetKubeconfig(ctx context.Context, t *testing.T, x tool) (string, string) {
 	t.Helper()
+	editor := func(ns string) map[string]any {
+		return map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+			"metadata": map[string]any{"name": "e2e-editor", "namespace": ns},
+			"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"},
+			"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": "e2e-editor", "namespace": targetNS}}}
+	}
 	x.apply(ctx,
 		map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": targetNS}},
+		map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": secondNS}},
 		map[string]any{"apiVersion": "v1", "kind": "ServiceAccount",
 			"metadata": map[string]any{"name": "e2e-editor", "namespace": targetNS}},
-		map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
-			"metadata": map[string]any{"name": "e2e-editor", "namespace": targetNS},
-			"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"},
-			"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": "e2e-editor", "namespace": targetNS}}},
+		editor(targetNS),
+		editor(secondNS),
 	)
 	token := x.out(ctx, "create", "token", "e2e-editor", "-n", targetNS, "--duration=2h")
 	caData := x.out(ctx, "config", "view", "--raw", "--minify",
@@ -1038,6 +1061,14 @@ func assertAudit(t *testing.T, hub hubClient, since time.Time, projectDir, denie
 	}
 	if !has(kube, "kubeguard.request_allowed", `"resource":"pods"`, `"verb":"list"`) {
 		t.Error("no kubeguard.request_allowed row for kubectl get pods (executor.kubeGuard.auditAllowed is on)")
+	}
+	// The second grant's context (Task 20413): its write allowed in its own
+	// namespace, and the first grant's context refused there.
+	if !has(kube, "kubeguard.request_allowed", "configmaps", `"namespace":"`+secondNS+`"`) {
+		t.Error("no kubeguard.request_allowed row for the second grant's kubectl create configmap")
+	}
+	if !has(kube, "kubeguard.request_denied", `"resource":"pods"`, `"namespace":"`+secondNS+`"`) {
+		t.Error("no kubeguard.request_denied row for the first grant's context reading the second's namespace")
 	}
 }
 

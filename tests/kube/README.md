@@ -32,8 +32,9 @@ minted their sessions and are forwarded.
    from a throwaway CA. `acme/granted` holds one commit and **no `.cloop/`**:
    the project and its task exist only on the hub, so the Pod can only have
    them from the seed the hub sends in the run's lease Secret (Task 20402).
-4. Creates `cloop-e2e-target-<stamp>` and a ServiceAccount that may *edit* it, so a
-   refused write can only have been refused by the monitor.
+4. Creates `cloop-e2e-target-<stamp>` and `cloop-e2e-second-<stamp>`, and a
+   ServiceAccount that may *edit* both, so a refused write — or a refused read
+   of the other grant's namespace — can only have been refused by the monitor.
 5. `helm upgrade --reuse-values` with `executor.gitProxy`, `executor.kubeGuard`
    (with `auditAllowed`), `executor.monitorTLS.auto` — the hub issues both
    certificates from its own CA, and no `git_ca_bundle` is rendered (checked
@@ -45,8 +46,11 @@ minted their sessions and are forwarded.
    then over the API: the project's goal and its one task (`POST /api/init`,
    `POST /api/tasks`); a `github_pat` secret granted for `acme/granted` only,
    writes limited to `cloop/e2e-allowed-*`; a kubeconfig grant for
-   the target namespace with no verbs (read-only); a harness credential; the
-   binding to the `kubernetes` executor. Then `POST /api/run`.
+   the target namespace with no verbs (read-only), and the same kubeconfig
+   granted again for the second namespace with `create` — one cluster granted
+   twice, which the Pod receives as one merged kubeconfig with a context per
+   grant (Task 20413); a harness credential; the binding to the `kubernetes`
+   executor. Then `POST /api/run`.
 7. Reads the run's live log and checks:
 
 | id | passes when |
@@ -64,6 +68,7 @@ minted their sessions and are forwarded.
 | K1 | `kubectl get pods` succeeds through the monitor |
 | K2 | `kubectl create configmap` is refused by the monitor as read-only — and, checked from outside, no configmap was created |
 | K3 | no cluster token (a JWT) is readable in the Pod: not in the environment, the lease directory or the delivered kubeconfig |
+| K4 | kubectl sees one context per kubeconfig grant, `current-context` the read-only one and first in `CLOOP_K8S_CONTEXTS`; `kubectl --context` reaches each grant's own namespace through the monitor and is refused, by the monitor, in the other grant's namespace and in `kube-system`; and the second grant's context creates a configmap in its namespace — checked from outside too |
 | E1 | (only when the CNI enforces NetworkPolicy) the forge is unreachable from the Pod directly |
 
    Then: neither the PAT nor the cluster's ServiceAccount token is anywhere in
@@ -72,7 +77,9 @@ minted their sessions and are forwarded.
    nothing; the audit trail holds `gitproxy.push_denied` for the denied branch,
    `gitproxy.push_allowed`, a refusal naming `acme/other`,
    `kubeguard.request_denied` for configmaps and `kubeguard.request_allowed` for
-   pods; and the run's Pod, Secrets and NetworkPolicy are deleted.
+   pods, a `kubeguard.request_allowed` for the second grant's configmap and a
+   `kubeguard.request_denied` for the first grant's context reading the second
+   namespace; and the run's Pod, Secrets and NetworkPolicy are deleted.
 8. Checks the round trip (Task 20402): the hub's own plan — the one the
    dashboard renders — shows the task done and attributed to the `kubernetes`
    executor, which can only be true if the run's outcome came back out of the

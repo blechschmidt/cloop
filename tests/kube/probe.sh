@@ -12,6 +12,8 @@
 #                     inside the hub's refs/heads/cloop/**)
 #   BRANCH_RULE       the grant's branch pattern, which a refusal must name
 #   K8S_NS            the namespace the kubeconfig grant covers, read-only
+#   K8S_NS2           the namespace a second grant of the same kubeconfig
+#                     covers, with a write (Task 20413)
 #   FORGE_URL         the forge's own in-cluster URL, for the egress check
 #   EXPECT_EGRESS_BLOCKED  1 when the hub proved the CNI enforces NetworkPolicy
 #   HARNESS_KEY_SHA256  sha256 of the ANTHROPIC_API_KEY the run was granted
@@ -25,7 +27,7 @@
 # instead of passing it through, so the stand-in's two lines plus one per check
 # and the summary is the whole budget. A diagnostic belongs in a check's detail.
 set -u
-: "${REPO:?}" "${OTHER_REPO:?}" "${STAMP:?}" "${ALLOWED:?}" "${DENIED:?}" "${BRANCH_RULE:?}" "${K8S_NS:?}"
+: "${REPO:?}" "${OTHER_REPO:?}" "${STAMP:?}" "${ALLOWED:?}" "${DENIED:?}" "${BRANCH_RULE:?}" "${K8S_NS:?}" "${K8S_NS2:?}"
 
 pass=0
 fail=0
@@ -218,6 +220,54 @@ elif grep -q 'read-only access to the cluster' "$O"; then
 	res K2 PASS "kubectl create configmap refused by the monitor: $(brief "$O")"
 else
 	res K2 FAIL "kubectl create configmap failed, but not with the monitor's refusal: $(brief "$O")"
+fi
+# Two grants of one cluster, one document (Task 20413): K8S_NS read-only and
+# K8S_NS2 with a write. kubectl sees a context per grant, current-context the
+# narrower; each reaches its own grant's namespace through the monitor and is
+# refused everywhere else, and the second writes where only it may. One RESULT
+# line for all of it: the output budget above has room for one more.
+k4() {
+	ctxs=$(kubectl config get-contexts -o name 2>"$O") || { echo "kubectl config get-contexts: $(brief "$O")"; return 1; }
+	[ "$(printf '%s\n' "$ctxs" | grep -c .)" = 2 ] || { echo "kubectl sees contexts '$(printf '%s' "$ctxs" | tr '\n' ' ')', want two"; return 1; }
+	cur=$(kubectl config current-context 2>/dev/null)
+	case ",${CLOOP_K8S_CONTEXTS:-}," in
+	",$cur,"*) ;;
+	*) echo "CLOOP_K8S_CONTEXTS='${CLOOP_K8S_CONTEXTS:-}' does not lead with current-context '$cur'"; return 1 ;;
+	esac
+	got=""
+	for c in $ctxs; do
+		ns=$(kubectl config view -o "jsonpath={.contexts[?(@.name==\"$c\")].context.namespace}" 2>/dev/null)
+		case $ns in
+		"$K8S_NS") other=$K8S_NS2 ;;
+		"$K8S_NS2") other=$K8S_NS ;;
+		*) echo "context $c is pinned to '$ns', neither granted namespace"; return 1 ;;
+		esac
+		[ "$c" != "$cur" ] || [ "$ns" = "$K8S_NS" ] || { echo "current-context $cur is the $ns grant, not the narrower"; return 1; }
+		got="$got $c=$ns"
+		kubectl --context "$c" get pods -n "$ns" >"$O" 2>&1 || { echo "--context $c get pods -n $ns: $(brief "$O")"; return 1; }
+		for no in "$other" kube-system; do
+			if kubectl --context "$c" get pods -n "$no" >"$O" 2>&1; then
+				echo "--context $c reached namespace $no"
+				return 1
+			fi
+			grep -q "is not in this session's allowlist" "$O" ||
+				{ echo "--context $c -n $no failed, but not with the monitor's refusal: $(brief "$O")"; return 1; }
+		done
+		if [ "$ns" = "$K8S_NS2" ]; then
+			kubectl --context "$c" create configmap "e2e2-$STAMP" -n "$ns" --from-literal=probe=1 >"$O" 2>&1 ||
+				{ echo "--context $c create configmap -n $ns: $(brief "$O")"; return 1; }
+		fi
+	done
+	case "$got" in
+	*"=$K8S_NS "*"=$K8S_NS2" | *"=$K8S_NS2 "*"=$K8S_NS") ;;
+	*) echo "contexts$got do not cover both grants"; return 1 ;;
+	esac
+	echo "contexts$got each reach only their own grant's namespace through the monitor; the second wrote there"
+}
+if detail=$(k4); then
+	res K4 PASS "$detail"
+else
+	res K4 FAIL "$detail"
 fi
 
 # ── Egress: what a NetworkPolicy the CNI enforces takes away ──────────────
