@@ -487,12 +487,15 @@ func countRunStart(ex executor.Executor, err error) {
 //
 // The duration is the driver's own account of the workload when it has one,
 // and otherwise the time since this member began tracking the run.
-func countRunSettled(ex executor.Executor, st executor.Status, stErr error, stopped bool, tracked time.Time) {
+//
+// It returns the reason the run was counted as failing, "" for a completion.
+func countRunSettled(ex executor.Executor, st executor.Status, stErr error, stopped bool, tracked time.Time) string {
 	if ex == nil {
-		return
+		return ""
 	}
 	kind, iso := runLabels(ex)
-	if reason := settledReason(st, stErr, stopped); reason != "" {
+	reason := settledReason(st, stErr, stopped)
+	if reason != "" {
 		hubmetrics.TaskFailures.Inc(kind, iso, reason)
 	} else {
 		hubmetrics.TaskCompletions.Inc(kind, iso)
@@ -500,6 +503,7 @@ func countRunSettled(ex executor.Executor, st executor.Status, stErr error, stop
 	if d, ok := runDuration(st, stErr, tracked, time.Now()); ok {
 		hubmetrics.TaskDuration.Observe(d.Seconds(), kind, iso)
 	}
+	return reason
 }
 
 // settledReason classifies a settled run: "" for a completion, otherwise the

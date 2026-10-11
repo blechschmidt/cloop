@@ -202,6 +202,11 @@ func TestMetricsEndToEnd(t *testing.T) {
 	// isolating executor it is bound to below (Task 20379).
 	setProvider(t, dir, "mock")
 	srv := New(dir, 0, "")
+	// Every run the hub settles, as it is counted. Set before the server
+	// serves: the goroutines that call it are then ordered after this write.
+	type settledRun struct{ handle, reason string }
+	settled := make(chan settledRun, 8)
+	srv.runSettledHook = func(handle, reason string) { settled <- settledRun{handle, reason} }
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -297,6 +302,32 @@ func TestMetricsEndToEnd(t *testing.T) {
 			time.Sleep(25 * time.Millisecond)
 		}
 	}
+	// awaitSettled waits for the hub to count handle's run, and checks how it
+	// was counted. Waiting on the count rather than polling the scrape for
+	// the number it should produce means a run counted the wrong way fails
+	// here at once, saying how it was counted. A stopped run once was counted
+	// as a completion, its stop noted only after the run had already ended,
+	// and all a poll could say was that it timed out (Task 20414).
+	outcome := func(reason string) string {
+		if reason == "" {
+			return "a completion"
+		}
+		return "a failure, reason " + reason
+	}
+	awaitSettled := func(what, handle, want string) {
+		t.Helper()
+		select {
+		case got := <-settled:
+			if got.handle != handle {
+				t.Fatalf("%s: the hub settled %s, want %s", what, got.handle, handle)
+			}
+			if got.reason != want {
+				t.Fatalf("%s was counted as %s, want %s", what, outcome(got.reason), outcome(want))
+			}
+		case <-time.After(time.Minute):
+			t.Fatalf("%s was never settled", what)
+		}
+	}
 	// idle waits until the last run is settled: nothing executing, nothing
 	// tracked. A start before then would be refused as a second harness.
 	idle := func() {
@@ -318,9 +349,7 @@ func TestMetricsEndToEnd(t *testing.T) {
 		t.Fatalf("POST /api/run = %d: %s", code, body)
 	}
 	runner.finish(runner.latest(), 0, 2*time.Minute)
-	waitScrape("the finished run to be counted", func(b string) bool {
-		return value(b, completions)-value(before, completions) == 1
-	})
+	awaitSettled("the finished run", runner.latest(), "")
 	idle()
 
 	refuser := newMetricsStub("metrics-e2e-refuser", kind, executor.IsolationVM)
@@ -340,13 +369,13 @@ func TestMetricsEndToEnd(t *testing.T) {
 	if code, body := call(http.MethodPost, "/api/run", admin); code != http.StatusOK {
 		t.Fatalf("POST /api/run (to be stopped) = %d: %s", code, body)
 	}
+	stopped := runner.latest()
 	if code, body := call(http.MethodPost, "/api/stop", admin); code != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("POST /api/stop = %d: %s", code, body)
 	}
-	runs := waitScrape("the stopped run to be counted", func(b string) bool {
-		return value(b, failure(hubmetrics.FailCancelled))-value(before, failure(hubmetrics.FailCancelled)) == 1
-	})
+	awaitSettled("the stopped run", stopped, hubmetrics.FailCancelled)
 	idle()
+	runs := scrape()
 
 	for name, want := range map[string]float64{
 		starts:                            3,

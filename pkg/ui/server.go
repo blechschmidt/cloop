@@ -853,6 +853,15 @@ type Server struct {
 	// 20366); nil in production.
 	streamJoinHook func(workDir string)
 
+	// runSettledHook, when set, runs once runEnded has counted a settled run
+	// in the hub metrics, with the run's handle and the reason it was
+	// counted under: "" for a completion, else a hubmetrics.Fail* reason.
+	// It is the moment a scrape first shows the run, so a test waits on it
+	// rather than polling /metrics, and sees at once how the run was
+	// counted (Task 20414). Set before the Server serves; nil in
+	// production.
+	runSettledHook func(handleID, reason string)
+
 	// Cluster is this hub's membership of a control plane served by several
 	// `cloop ui` processes (Task 20354). Nil means standalone: this process
 	// leads, owns everything and publishes nothing, which is also what every

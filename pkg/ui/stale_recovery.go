@@ -120,16 +120,19 @@ func (s *Server) trackRunWithCancel(workDir string, ex executor.Executor, handle
 	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID, cancel: cancel, tracked: time.Now()}
 }
 
-// noteStopRequested records that the control plane asked handleID's run to
-// stop. Keyed on the handle as well as the project, so a stop meant for a run
-// that has since ended cannot mark the next one.
-func (s *Server) noteStopRequested(workDir, handleID string) {
+// noteStopRequested records whether the control plane asked handleID's run to
+// stop, and returns what was recorded before. Keyed on the handle as well as
+// the project, so a stop meant for a run that has since ended cannot mark the
+// next one.
+func (s *Server) noteStopRequested(workDir, handleID string, requested bool) (was bool) {
 	s.runHandleMu.Lock()
 	defer s.runHandleMu.Unlock()
 	if run, ok := s.runHandles[workDir]; ok && run.handleID == handleID {
-		run.stopRequested = true
+		was = run.stopRequested
+		run.stopRequested = requested
 		s.runHandles[workDir] = run
 	}
+	return was
 }
 
 // untrackRun forgets workDir's workload. The map is therefore bounded by the
@@ -355,7 +358,10 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	stopped := run.handleID == handleID && run.stopRequested
 	s.untrackRun(workDir)
 	s.reconcileDeadRun(workDir, verdict)
-	countRunSettled(ex, st, stErr, stopped, run.tracked)
+	reason := countRunSettled(ex, st, stErr, stopped, run.tracked)
+	if s.runSettledHook != nil && ex != nil {
+		s.runSettledHook(handleID, reason)
+	}
 	// A feature that completed and asked for it gets its pull request now
 	// (Task 20341). A no-op for everything else; the work is backgrounded.
 	s.maybeAutoOpenFeaturePR(workDir)

@@ -80,13 +80,20 @@ func (s *Server) interruptRun(workDir string) stopDelivery {
 		// when the project may only be showing a stale status.
 		st, statusErr := run.ex.Status(ctx, run.handleID)
 		if statusErr != nil || !st.State.Terminal() {
+			// So that settling it counts a cancellation: an interrupted run
+			// pauses and exits zero, which alone reads as finished. Noted
+			// before the signal, not after it: a run that exits at once can
+			// be settled before Signal returns — a remote agent's report of
+			// the exit can overtake its reply to the signal — and noted
+			// after, that run was counted as having completed (Task 20414).
+			asked := s.noteStopRequested(workDir, run.handleID, true)
 			if err := run.ex.Signal(ctx, run.handleID, executor.SignalInterrupt); err != nil {
+				// Not asked by this stop after all. Unless an earlier one
+				// was, a run that ends on its own has completed.
+				s.noteStopRequested(workDir, run.handleID, asked)
 				d.ExecutorErr = err
 			} else {
 				d.Signalled++
-				// So that settling it counts a cancellation: an interrupted
-				// run pauses and exits zero, which alone reads as finished.
-				s.noteStopRequested(workDir, run.handleID)
 				// A stopped run's way out closes now, open tunnels and all,
 				// rather than when it finishes winding down: pausing writes
 				// the project's state, which needs no network (Task 20378).

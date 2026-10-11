@@ -269,3 +269,78 @@ while :; do wait; done
 		t.Errorf("the /proc scan interrupted a run its executor had already reached; marks: %q", got)
 	}
 }
+
+// signalWatcher is a recordingExecutor that runs onSignal as it is asked to
+// deliver a signal, before it records it.
+type signalWatcher struct {
+	*recordingExecutor
+	onSignal func()
+}
+
+func (w *signalWatcher) Signal(ctx context.Context, handleID string, sig executor.Signal) error {
+	w.onSignal()
+	return w.recordingExecutor.Signal(ctx, handleID, sig)
+}
+
+// TestStopIsNotedBeforeTheRunIsSignalled: settling a run reads whether the hub
+// asked it to stop, because an interrupted run pauses and exits zero exactly
+// like one that finished. A run can exit on the interrupt and be settled
+// before Signal even returns — a remote agent's report of the exit can
+// overtake its reply — so the stop has to be on record by the time the
+// executor is asked. Noted after the signal, such a run was counted as a
+// completion (Task 20414, TestMetricsEndToEnd's flake).
+func TestStopIsNotedBeforeTheRunIsSignalled(t *testing.T) {
+	dir := t.TempDir()
+	srv := &Server{WorkDir: dir}
+	var asked, noted bool
+	ex := &signalWatcher{recordingExecutor: runningExecutor(), onSignal: func() {
+		run, _ := srv.trackedRun(dir)
+		asked, noted = true, run.stopRequested
+	}}
+	srv.trackRun(dir, ex, "h1")
+
+	if d := srv.interruptRun(dir); d.Signalled != 1 {
+		t.Fatalf("Signalled = %d, want 1", d.Signalled)
+	}
+	if !asked {
+		t.Fatal("the executor was never asked to interrupt the run")
+	}
+	if !noted {
+		t.Error("the executor was asked before the stop was noted: a run that exits on the interrupt at once is settled as having completed")
+	}
+}
+
+// TestAFailedSignalLeavesTheStopNoteAsItFoundIt: a stop that could not be
+// delivered did not stop anything. It must not leave the run marked as
+// stopped — one that then finishes on its own completed — and it must not
+// take back the mark of an earlier stop that was delivered, or the run that
+// one stopped is counted as having completed.
+func TestAFailedSignalLeavesTheStopNoteAsItFoundIt(t *testing.T) {
+	dir := t.TempDir()
+	srv := &Server{WorkDir: dir}
+	ex := runningExecutor()
+	srv.trackRun(dir, ex, "h1")
+	noted := func() bool {
+		run, _ := srv.trackedRun(dir)
+		return run.stopRequested
+	}
+	unreachable := errors.New("agent sgx is not connected")
+
+	ex.signalErr = unreachable
+	if d := srv.interruptRun(dir); d.ExecutorErr == nil {
+		t.Fatal("a signal the executor refused was reported delivered")
+	}
+	if noted() {
+		t.Error("a stop that never reached the run left it marked as stopped")
+	}
+
+	ex.signalErr = nil
+	if d := srv.interruptRun(dir); d.Signalled != 1 || !noted() {
+		t.Fatalf("a delivered stop: Signalled = %d, noted = %t, want 1 and true", d.Signalled, noted())
+	}
+	ex.signalErr = unreachable
+	srv.interruptRun(dir)
+	if !noted() {
+		t.Error("a second stop that could not be delivered took back the first one's mark")
+	}
+}
