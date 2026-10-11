@@ -1886,6 +1886,47 @@ opened with the static token is the static token's: nothing that ends a session
 or a token reaches it, and [retiring the static token](#retiring-the-static-token)
 ends it on every member.
 
+**A terminal holds a session too** (Task 20412). On a hub with single sign-on,
+`cloop login` runs the RFC 8628 device authorization grant: the terminal prints
+a code, a signed-in browser approves it at `/device`, and the result is a row in
+this same store of kind `cli`, authenticated by `Authorization: Bearer
+cloop_cli_…` rather than by cookie — each credential finds only its own kind of
+session. Everything above applies to it unchanged: both clocks (its own, and
+never longer than a browser's), the claim-freshness rule, IdP-side revocation,
+revocation from the Active sessions panel or the shell, offboarding, and the
+streams and terminals it opens closing when it ends. Three properties are
+specific to how it is minted:
+
+- **The approval is a sign-in.** Approving sends the browser through the
+  provider's authorization endpoint again, and the CLI session is written from
+  that round trip's `id_token` and refresh grant, for the same subject only. It
+  is never a copy of the browser session's claims or of its refresh token,
+  which a provider that rotates refresh tokens would end at the first refresh
+  of the other. The round trip asks for `max_age=device_approval_max_age_minutes`
+  — `prompt=login&max_age=0` when the browser session is itself older — and
+  where the provider reports `auth_time`, the hub holds it to that: a sign-in
+  older than the limit behind a fresh dashboard session (a silent re-login on
+  an old provider session) is sent round again with `prompt=login`, and one
+  that ignored `prompt=login` is refused. A provider that reports no
+  `auth_time` is trusted to have honoured what it was asked.
+- **Nothing is handed out.** The terminal generates its credential and sends
+  only its SHA-256 when it asks for a code; the session is written under a
+  labelled hash of that digest and the token endpoint answers with no secret.
+  The second hash is what keeps the commitment from being a way in: a session's
+  id is public, and a session written under the commitment itself could be
+  planted, by anybody, under the id of one that had ended — signing the
+  terminal still holding its credential in as them. The device table holds
+  digests of both codes, and of the credential until the terminal collects its
+  session.
+- **Only a person at a browser approves.** The approval routes take a browser
+  session cookie and nothing else — not a terminal's session, not an API token —
+  and a runtime deny binding naming the identity, which offboarding writes,
+  refuses the approval, read fresh rather than from the binding cache.
+
+The phishing risk this grant carries, and what the approval page does about it,
+is in the [threat model](threat-model.md#①-browser--hub). The walkthrough is
+[Working from a terminal](../getting-started/terminal.md).
+
 **IdP-side revocation.** Disabling a user at the identity provider changes
 nothing the hub can observe on its own: the cookie is still valid and the
 claims in it were valid when issued. cloop closes that gap by keeping the

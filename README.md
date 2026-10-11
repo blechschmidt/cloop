@@ -134,6 +134,12 @@ That writes a configuration with `executors.allow_host_process: false` and
 [security model](docs/security/model.md), then the
 [operator runbook](docs/operations/runbook.md).
 
+Developers on such a hub sign their terminal in from the browser they already
+use — `cloop login https://cloop.example.com` prints a code to approve there —
+and then work with its projects from the shell: `cloop remote` for tasks, runs
+and live logs, `cloop task attach` for a shell in a running task's sandbox. See
+[working from a terminal](docs/getting-started/terminal.md).
+
 ### Security conformance suite
 
 [`tests/security/`](tests/security/) is an executable specification of the

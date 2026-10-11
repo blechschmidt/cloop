@@ -1002,6 +1002,112 @@ cloop hub cluster status     # the members, the leader, and where each is reache
 answers while every member is down, and lists members that stopped within the
 last day as gone.
 
+## Working with a hub from a terminal
+
+A terminal signs in to a hub with single sign-on by device authorization and
+then works with its projects as the person who approved it. The walkthrough is
+[Working from a terminal](../getting-started/terminal.md); this is the
+reference.
+
+### `cloop login <hub-url>`
+
+Signs this terminal in. It prints a code and the hub's approval page; a browser
+signed in to the hub approves the code there (after a fresh sign-in at the
+identity provider when its own is older than
+`ui.oidc.device_approval_max_age_minutes`), and the terminal gets a **CLI
+session** — a session of kind `cli` in the hub's store, on clocks never longer
+than a browser session's, re-checked with the identity provider on the same
+rule, listed and revoked like any session, ended by offboarding.
+
+```bash
+cloop login https://cloop.example.com
+cloop login https://cloop.internal --ca-file /etc/ssl/internal-ca.pem
+cloop login https://cloop.example.com --no-browser --hostname build-box-7
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ca-file` | — | PEM bundle to trust for the hub's certificate; kept with the session |
+| `--no-browser` | `false` | Print the approval link without opening a browser (one is opened only on a desktop session) |
+| `--default` | `false` | Make this hub the default; the first hub signed in to already is |
+| `--hostname` | the host name | What the approval page calls this machine |
+
+The terminal generates its session credential before asking for a code and
+sends the hub only its SHA-256; the approval writes the session under that
+digest, and the hub's answer to the terminal's poll carries the session's id and
+no secret. `cloop login` checks that id is its own digest and refuses anything
+else. A session this terminal already held for the hub is ended there when the
+new one replaces it.
+
+Exits non-zero when the code is denied (`the sign-in was denied`), expires
+(`the code expired before it was approved`), or the hub has no single sign-on or
+has terminal sign-in turned off (`ui.oidc.device_login: false`).
+
+### `cloop logout [hub-url]`
+
+Ends this terminal's session **at the hub**, then deletes it from the credential
+file. Without a URL it signs out of the default hub.
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Every hub this terminal is signed in to. Also reads a credential file other users can read — to revoke what may have been copied — which every other command refuses, `logout` of a single hub included: it would write the other hubs' credentials back into a file that looks private again |
+| `--force` | Delete the credentials even if the hub cannot be reached to end the session (which then stays valid there until it expires or is revoked from the dashboard) |
+
+A session the hub had already ended — revoked, expired, idle — is forgotten
+without complaint. The credential file is removed once it holds no hub.
+
+### `cloop whoami [hub-url]`
+
+Asks the hub who this terminal's session is: identity, session kind and host
+name, role, hub-wide permissions, and how long the session has left. `--json`
+prints the hub's `/api/me` answer with the hub URL and session id added. Exits
+non-zero, saying so, when the session has ended.
+
+### `cloop remote`
+
+The projects on a hub, as the signed-in identity. Every subcommand is one of the
+dashboard's own calls, so the hub authorises it exactly as it would the
+dashboard's button. A `<project>` is a name, an index or a path, as `cloop
+remote projects` lists them; an ambiguous name is refused with the candidates.
+
+```bash
+cloop remote projects [--json]
+cloop remote tasks <project> [--status pending] [--json]
+cloop remote add <project> <title> [--description <text>] [--json]
+cloop remote run <project>
+cloop remote stop <project>
+cloop remote logs <project> [--follow]
+```
+
+| Subcommand | Calls | Permission |
+|------------|-------|------------|
+| `projects` | `GET /api/projects?indices=1` | `project.read` |
+| `tasks` | `GET /api/tasks` | `project.read` |
+| `add` | `POST /api/tasks` | `task.mutate` |
+| `run` | `POST /api/run` | `run.start` |
+| `stop` | `POST /api/stop` | `run.stop` |
+| `logs` | `GET /api/livelog`; with `--follow`, the dashboard's WebSocket `/api/ws` | `project.read` |
+
+`logs --follow` prints the run's output from the backlog the hub replays on
+connect onwards, notes on stderr when the run starts and stops, and runs until
+`Ctrl-C` — or until the hub closes the stream because the session ended or
+access to the project was withdrawn, which exits non-zero with the hub's reason.
+
+Persistent flags: `--hub <url>` (default: `CLOOP_HUB_URL`, else the default
+hub), and `--token <api-token>`, which replaces the stored session for scripts
+and needs `--hub`. `CLOOP_API_TOKEN` names no hub of its own: set beside
+`CLOOP_HUB_URL` it is that hub's token and no other's; set alone it is used only
+for a hub this terminal holds no session for — so a token exported for one hub
+is never sent to another named with `--hub`.
+
+**The credential file** is `$XDG_CONFIG_HOME/cloop/hubs.json`
+(`~/.config/cloop/hubs.json`), mode `0600` in a `0700` directory. Every command
+that would present a credential from it refuses a file its group or anybody
+else can read, and nothing prints a credential. [`cloop task attach`](../operations/attach.md)
+uses the stored session for the hub it targets — `--hub`, `CLOOP_HUB_URL` or the
+default hub — when no `--token` is given, on the same rule for
+`CLOOP_API_TOKEN`.
+
 ### `cloop hub`
 
 Control-plane transport security.
@@ -1164,6 +1270,11 @@ cloop hub session revoke 3f9c1e7a --reason "stolen cookie, INC-4412"
 cloop hub session revoke --identity alice@example.com --reason "compromise INC-4412"
 cloop hub session revoke --all --reason "rotating IdP client secret"
 ```
+
+`list` shows each session's kind — `browser`, or `cli` for a terminal signed in
+with [`cloop login`](#cloop-login) — and `--json` adds the host name a
+terminal reported as `client`. A terminal session is revoked exactly as a
+browser's is, and closes what it holds open the same way.
 
 `revoke` requires exactly one selector — an id, `--identity`, or `--all` — with
 no default, because the three differ by two orders of magnitude in blast radius.

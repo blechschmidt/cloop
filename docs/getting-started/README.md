@@ -1,7 +1,7 @@
 # Getting started
 
-Six pages, in order. They assume nothing except a terminal and a provider you
-can reach.
+Seven pages, in order. They assume nothing except a terminal and a provider you
+can reach — the last one, a hub someone else runs.
 
 - **[Installation](installation.md)** — prerequisites, `go install`, building
   from source, the container image, and shell completion. Ends with a working
@@ -22,6 +22,11 @@ can reach.
   first project, done from a browser and in the order the screens come at you:
   decide where work may run, create a project pinned there, then build and start
   its plan. Screenshots throughout.
+- **[Working from a terminal](terminal.md)** — `cloop login` on a hub with
+  single sign-on: the code your terminal prints, approving it from the browser
+  you are signed in with, and the session that gives the terminal — then
+  `cloop remote` for projects, tasks, runs and live logs, `cloop task attach`,
+  and signing out.
 
 ## After that
 

@@ -2001,6 +2001,48 @@ session at the IdP ends too. Revocation semantics, including what happens when
 the IdP is unreachable, are in
 [Session lifecycle and revocation](../security/model.md#session-lifecycle-and-revocation).
 
+### Terminal sign-in (`cloop login`)
+
+A hub with single sign-on also signs terminals in: `cloop login <hub>` prints a
+code, a signed-in browser approves it at `/device`, and the terminal gets a CLI
+session — a row in the same session store, of kind `cli`, authenticated as
+`Authorization: Bearer cloop_cli_…`. The walkthrough is
+[Working from a terminal](../getting-started/terminal.md).
+
+```yaml
+ui:
+  oidc:
+    device_login: true                    # on wherever SSO is; false turns it off
+    cli_session_ttl_hours: 24             # default and ceiling: session_ttl_hours
+    cli_idle_timeout_hours: 8             # default and ceiling: idle_timeout_hours
+    device_approval_max_age_minutes: 120  # a sign-in longer ago re-authenticates to approve
+```
+
+| Key | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `device_login` | `true` | — | Whether `POST /api/device/code` and `/api/device/token` answer, and `/device` is served. Off, `cloop login` is told terminal sign-in is turned off. |
+| `cli_session_ttl_hours` | `session_ttl_hours` | `1`–`session_ttl_hours` | A terminal session's absolute lifetime, from its approval. Never longer than a browser session's: the credential that sits in a file is the one that should go stale first. |
+| `cli_idle_timeout_hours` | `idle_timeout_hours` | `1`–`idle_timeout_hours`, and never above `cli_session_ttl_hours` | How long a terminal session may go unused. The janitor sweeps each kind of session on its own idle clock. |
+| `device_approval_max_age_minutes` | `120` | `1`–`1440`, or `-1` never to ask | How long ago the person approving may have signed in. The approval's round trip asks the provider for `max_age` of this; a browser session older than it is sent with `prompt=login&max_age=0` instead. Where the `id_token` carries `auth_time` the hub holds it to that — a sign-in older than this behind a fresh dashboard session (a silent re-login) goes round again with `prompt=login`, and one that ignored the prompt is refused — so a provider that ignored either is caught rather than believed. A provider that reports no `auth_time` (Entra ID unless that optional claim is configured) is trusted to have honoured them. |
+
+Everything else is the browser session's: `refresh_interval_minutes` and
+`max_claim_age_minutes` apply unchanged, because the approval is itself an
+authorization-code sign-in whose `id_token` and refresh grant become the CLI
+session's own — never a copy of the browser's. Without `CLOOP_SECRET_KEY` no
+refresh grant is kept, so a terminal session's claims stay as of its approval
+and actions above operator need a fresh `cloop login` once they are older than
+`max_claim_age_minutes`; the terminal is told so when it signs in.
+
+Two endpoints answer before authentication — a terminal asking for a code holds
+no credential yet. They take JSON only, like every state-changing request, and
+are bounded instead of gated: twelve codes per client address per ten minutes,
+two thousand in flight hub-wide, a code dead after ten minutes and worthless
+until a signed-in person approves it, polling held to the interval by
+`slow_down`. The browser's three routes — `/api/device/lookup`, `approve`,
+`deny` — take a browser session cookie and nothing else: not a terminal's
+session, not an API token, not the static token. See the
+[HTTP API](http-api.md) for each.
+
 ### Web UI (`cloop ui`)
 
 Where the dashboard listens depends on whether it can tell people apart

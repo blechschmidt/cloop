@@ -225,12 +225,24 @@ cloop task attach 41 -- ps aux
 # Interactive (needs sandbox.attach.write)
 cloop task attach 41 --write
 
-# Against a remote hub
+# Against a hub with single sign-on, signed in with `cloop login` first
+cloop login https://hub.example.com:8888
+cloop task attach 41
+
+# Against a remote hub, with an API token
 cloop task attach 41 --hub https://hub.example.com:8888 --token "$CLOOP_API_TOKEN"
 ```
 
-The hub URL defaults to `http://127.0.0.1:8080` or `$CLOOP_HUB_URL`; the token
-also reads `$CLOOP_API_TOKEN`. On a multi-project hub, pass `--project-idx`.
+The hub is `--hub`, else `$CLOOP_HUB_URL`, else the default hub
+[`cloop login`](../getting-started/terminal.md) recorded — named on stderr
+before anything is typed, since it need not be the hub on this machine — else
+`http://127.0.0.1:8080`. The credential is `--token`, else the session
+`cloop login` stored for that hub — a session of your own, with your
+permissions, that ends the terminal when it is revoked — else
+`$CLOOP_API_TOKEN` where it is the hub's: beside `$CLOOP_HUB_URL` it is that
+hub's token and no other's, and alone it is the local hub's when nothing names a
+hub, and otherwise used only for a hub with no stored session. On a
+multi-project hub, pass `--project-idx`.
 
 With `--write` the local terminal is put into raw mode, so keystrokes reach the
 sandbox one at a time and the remote shell's own echo is the only echo. Window

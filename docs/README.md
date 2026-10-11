@@ -15,7 +15,7 @@ moment it is listed here and nowhere else.
 
 ## Getting started
 
-Six pages in order, indexed at
+Seven pages in order, indexed at
 **[getting started](getting-started/README.md)**:
 
 - **[Installation](getting-started/installation.md)** — prerequisites,
@@ -34,6 +34,12 @@ Six pages in order, indexed at
   things in the order you meet them, in screenshots: choose where work is
   allowed to run, create a project that runs there, fill it with tasks and
   start it. Includes enrolling a remote device.
+- **[Working from a terminal](getting-started/terminal.md)** — `cloop login`
+  on a hub with single sign-on: a code approved from your signed-in browser
+  gives the terminal a session of its own, on the browser's rules — then
+  `cloop remote` (projects, tasks, run, stop, live logs), `cloop task attach`,
+  `cloop whoami` and `cloop logout`, the credential file and what refuses it,
+  and [what the approval page is telling you](getting-started/terminal.md#what-the-approval-page-is-telling-you).
 
 ## Architecture
 
