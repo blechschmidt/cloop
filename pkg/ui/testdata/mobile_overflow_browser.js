@@ -642,9 +642,8 @@ const RUN_BAR = `(() => {
     // alone, or its status and button cannot share a row.
     //
     // At 360px, the width this hub's own telemetry reports for its users'
-    // phones. Not at 320px: there the header alone is 3px too wide once a
-    // project with a long name is open — its selector button, whatever the
-    // tab — which is a separate fault and would hide this one behind it.
+    // phones. 320px is the layout sweep's (layout_sweep_browser_test.go), which
+    // also caught the header's selector 3px past the edge there (Task 20407).
     await cdp.eval(`closeHiddenProjectsModal()`);
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 360, height: 780, deviceScaleFactor: 3, mobile: true,

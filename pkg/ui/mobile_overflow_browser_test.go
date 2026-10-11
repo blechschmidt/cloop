@@ -716,11 +716,16 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 				"opportunity, so the text runs straight out through the side",
 				narrowPhoneWidth, r.WorstOverflowPx, r.WorstName)
 		}
-		// As with #tabNav on desktop, no document-width assertion here. The
-		// Settings tab does overflow at 320px — by 116px — but the offender is
-		// an unwrapped <code> block (the agent-enrolment snippet), measured
-		// identically on the parent commit and nothing to do with the project
-		// list. Fixing it belongs to whoever owns that panel.
+		// And the page under it. The Settings tab overflowed a 320px phone by
+		// 116px until Task 20407 — an unwrapped <code> in the build note, not
+		// the project list — so this was left unasserted; every tab and dialog
+		// is now held to it by layout_sweep_browser_test.go.
+		p := got.HiddenList.Page
+		if p.OverflowPx > 1 || p.InnerWidth > p.ExpectedWidth+1 {
+			t.Errorf("at %dpx Settings, under the hidden-projects dialog, is %dpx wider than the "+
+				"screen and the layout viewport is %dpx. Widest offender: %s",
+				p.ExpectedWidth, p.OverflowPx, p.InnerWidth, got.HiddenList.Widest.String())
+		}
 	})
 
 	t.Run("no project element is the widest thing on the page", func(t *testing.T) {
