@@ -204,7 +204,23 @@ func cspReported() float64 {
 	return sum
 }
 
+// skipCrawlUnderRace keeps the hostile-strings crawls out of CI's race step.
+// They press every control of the dashboard in Chrome, two minutes and more,
+// and under the race detector on a slow runner that took pkg/ui past the
+// step's 30-minute package timeout (CI run 38119330983). What they test is
+// the browser's behaviour, which the detector does not see into, so CI runs
+// them in a job of their own without it (.github/workflows/ci.yml, "Hostile
+// strings in a real browser"). CLOOP_XSS_CRAWL=1 runs them under -race too.
+func skipCrawlUnderRace(t *testing.T) {
+	t.Helper()
+	if raceDetector && os.Getenv("CLOOP_XSS_CRAWL") == "" {
+		t.Skip("the hostile-strings crawl runs without -race, in a CI job of its own; " +
+			"set CLOOP_XSS_CRAWL=1 to run it under the race detector")
+	}
+}
+
 func TestHostileStrings_EveryControlInBrowser(t *testing.T) {
+	skipCrawlUnderRace(t)
 	chrome := findChrome()
 	if chrome == "" {
 		t.Skip("no Chrome/Chromium installed; cannot press the dashboard's controls")
@@ -356,6 +372,7 @@ func TestHostileStrings_EveryControlInBrowser(t *testing.T) {
 // with, why, who shared it, and the signed-in user's own display name. Each
 // is chosen by an identity provider's claims or by the member who typed it.
 func TestHostileMemberIdentities_InBrowser(t *testing.T) {
+	skipCrawlUnderRace(t)
 	chrome := findChrome()
 	if chrome == "" {
 		t.Skip("no Chrome/Chromium installed; cannot press the dashboard's controls")

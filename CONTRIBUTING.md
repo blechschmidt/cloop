@@ -56,6 +56,13 @@ dominate, and each has a fix already in place that new tests should reuse:
   command's timeout when the reply arrives and call `process.exit` on success;
   a timer left armed holds node — and the Go test waiting on it — up to 20 s
   after the work is done. `TestBrowserDriversReleaseNodeWhenDone` enforces it.
+- **Long browser crawls.** A browser test that runs for minutes stays out of
+  the race step: the detector cannot see into the browser, and on a slow
+  runner the two-minute hostile-strings crawl took `pkg/ui` past the step's
+  30-minute package timeout. `TestHostileStrings_EveryControlInBrowser` and
+  `TestHostileMemberIdentities_InBrowser` skip under `-race` (set
+  `CLOOP_XSS_CRAWL=1` to run them there anyway) and run in CI's **Hostile
+  strings in a real browser** job, which fails unless each prints PASS.
 - **Loading the module for static analysis.** `tests/security` type-checks the
   whole module once per binary (`loadModule`); a new structural check reads
   that load rather than calling `packages.Load` again (~30 s under `-race`).

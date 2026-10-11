@@ -316,6 +316,69 @@ jobs:
           path: coverage.out
           retention-days: 7
 
+  browser-xss:
+    name: Hostile strings in a real browser
+    runs-on: ubuntu-latest
+    # The dashboard's markup carries no code and its policy runs only the hub's
+    # own scripts (Task 20408). These two tests are the proof in a browser: a
+    # hub seeded with hostile strings in every field a workload or a peer
+    # writes, every tab, the header and every dialog opened in Chrome, every
+    # control pressed, and nothing may run or be blocked.
+    #
+    # A job of their own rather than part of Build and Test's race step. The
+    # crawl takes two minutes and more there, and on a slow runner it took
+    # pkg/ui past that step's 30-minute package timeout (run 38119330983) —
+    # while the race detector, which is that step's point, does not see into
+    # the browser's behaviour these tests are about. Under -race the tests
+    # skip unless CLOOP_XSS_CRAWL is set; here, without it, they run in about
+    # two minutes, in parallel with everything else.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        # The drivers speak CDP over Node's built-in WebSocket.
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Warm the browser
+        # Best effort, as in Build and Test: a runner without Chrome is caught
+        # by the next step, whose tests then skip and so never print PASS.
+        run: |
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+          if [ -n "$chrome" ]; then
+            timeout 60 "$chrome" --headless=new --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
+            echo "warmed $chrome"
+          else
+            echo "no Chrome on PATH; the crawl will say whether it found one"
+          fi
+
+      - name: Press every control with hostile strings on the page
+        timeout-minutes: 16 # observed locally: ~2.5 min; -timeout 15m below fires first
+        # The status is not evidence that the crawl ran: each test skips — exit
+        # 0 — without Chrome or node. Assert the outcome, as the flagship job
+        # does: the top-level PASS line of each.
+        run: |
+          set -euo pipefail
+          go test ./pkg/ui/ -count=1 -timeout 15m -v \
+            -run '^(TestHostileStrings_EveryControlInBrowser|TestHostileMemberIdentities_InBrowser)$' \
+            2>&1 | tee /tmp/xss-crawl.log
+          for t in TestHostileStrings_EveryControlInBrowser TestHostileMemberIdentities_InBrowser; do
+            grep -qE "^--- PASS: $t \(" /tmp/xss-crawl.log || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped; see the log for why"
+              exit 1
+            }
+          done
+
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
