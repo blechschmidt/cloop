@@ -717,17 +717,14 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	st.broker = broker
 	st.attempted = true
 
-	// The lease below returns *every* grant matching this executor, not only
-	// the throwaway one minted just after — so an operator who granted a
-	// github_pat to `executor:*` would have that token materialised into the
-	// smoke sandbox. On a hub with executors.git_proxy enabled the token is
-	// supposed to stay on the hub, and this process cannot honour that: the
-	// proxy runs inside the running hub, not in a short-lived CLI, so there is
-	// nothing here to hand the credential to.
-	//
-	// Refuse that one kind rather than deliver it unguarded. The smoke test's
-	// own credential is a kubeconfig and is unaffected, so the diagnostic still
-	// exercises the whole path it exists to check.
+	// The lease below withholds every grant but the smoke's own throwaway
+	// (smokeWithhold), so no operator credential is opened for its sandbox.
+	// This refusal is the second line, for a git token granted to the
+	// executor in the moment between listing the grants and leasing: on a hub
+	// with executors.git_proxy enabled the token is supposed to stay on the
+	// hub, and this process cannot honour that — the proxy runs inside the
+	// running hub, not in a short-lived CLI, so there is nothing here to hand
+	// the credential to. Refused rather than delivered unguarded.
 	if smokeGitProxyRequired(dir) {
 		broker.GitGuard = secretbroker.UnavailableGitGuard{
 			Reason: "cloop hub doctor runs outside the hub process and has no git proxy to " +
@@ -754,15 +751,6 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	cl.push("secret "+secret.ID, func(c context.Context) error {
 		return broker.DeleteSecret(c, secret.ID, "hub-doctor-smoke")
 	})
-	// The same rule for kubeconfigs (Task 20409): the lease below would also
-	// deliver any real kubeconfig granted to this executor, and on a hub with
-	// executors.kube_guard enabled the cluster credential is supposed to stay
-	// in the hub's monitor, which this process does not run. Only the smoke's
-	// own throwaway — a token for 127.0.0.1:1 — is delivered as a document;
-	// any other kubeconfig refuses the lease rather than reach the sandbox.
-	if smokeKubeGuardRequired(dir) {
-		broker.KubeGuard = smokeKubeGuard{throwaway: secret.ID}
-	}
 
 	grant, err := broker.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: secret.ID,
@@ -786,20 +774,52 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 		return broker.Revoke(c, grant.ID, "hub-doctor-smoke")
 	})
 
-	lease, err := broker.Lease(ctx, ex.ID(), "")
+	// Leased for this executor exactly as a task is, with every other grant
+	// aimed at it withheld (Task 20413): the smoke proves the delivery path
+	// with a credential that can reach nothing, and an operator's real ones —
+	// a kubeconfig whose hub keeps cluster credentials in its monitor, a PAT
+	// its git proxy holds, or any other — have no business in a diagnostic's
+	// sandbox. Withheld grants are refused before their payloads are opened,
+	// each on its own audit row.
+	requester := secretbroker.Requester{ExecutorID: ex.ID()}
+	withhold, err := smokeWithhold(broker, requester, grant.ID)
+	if err != nil {
+		return finish(StageFail, fmt.Sprintf("could not list the grants aimed at this executor: %v", err),
+			"The smoke leases only its own throwaway credential and has to know which grants to "+
+				"withhold to do so; `cloop hub doctor` without --smoke reports the state of the secret store")
+	}
+	requester.Withhold = withhold
+	lease, err := broker.LeaseFor(ctx, requester, "")
 	if err != nil {
 		return finish(StageFail, fmt.Sprintf("could not take a lease: %v", err),
 			"The broker minted and granted a credential but would not lease it; this is the "+
 				"code path every real task takes, so no task can obtain credentials either")
 	}
+	cl.push("lease "+lease.ID, func(context.Context) error { broker.Release(lease.ID); return nil })
+	for _, m := range lease.Materials {
+		if m.GrantID != grant.ID {
+			// Granted to this executor after the withhold list was read. It is
+			// released with the lease, never delivered.
+			return finish(StageFail,
+				fmt.Sprintf("secret %s was granted to this executor while the smoke ran, and its lease "+
+					"would have carried it into the smoke sandbox", m.SecretName),
+				"Run the smoke again; it withholds every grant but its own throwaway, and lists them "+
+					"just before it leases")
+		}
+	}
 	if lease.Empty() {
+		why := ""
+		for _, r := range lease.Refused {
+			if r.GrantID == grant.ID {
+				why = ": " + r.Reason
+			}
+		}
 		return finish(StageFail,
-			"the lease came back with no material, so nothing would reach the sandbox",
+			"the lease came back with no material, so nothing would reach the sandbox"+why,
 			"A grant exists for this executor but produced no material — check its constraints "+
 				"with `cloop secret grants`")
 	}
 	st.lease = lease
-	cl.push("lease "+lease.ID, func(context.Context) error { broker.Release(lease.ID); return nil })
 
 	// Which rendering is correct is a property of the driver, exactly as it is
 	// for a real dispatch: a driver whose workload can read the hub's
@@ -879,40 +899,23 @@ func smokeGitProxyRequired(dir string) bool {
 	return false
 }
 
-// smokeKubeGuardRequired is smokeGitProxyRequired for executors.kube_guard.
-func smokeKubeGuardRequired(dir string) bool {
-	cfg, err := config.Load(dir)
-	if err != nil || cfg == nil || cfg.Executors.KubeGuard.Enabled {
-		return true
-	}
-	ports, err := config.UIInstancePorts(dir)
+// smokeWithhold names every active grant aimed at r except keep — the smoke's
+// own throwaway — each with the reason its refusal row records, so the smoke's
+// lease opens no operator credential.
+func smokeWithhold(broker *secretbroker.Broker, r secretbroker.Requester, keep string) (map[string]string, error) {
+	grants, err := broker.ListGrants(secretbroker.GrantFilter{ActiveOnly: true})
 	if err != nil {
-		return true
+		return nil, err
 	}
-	for _, port := range ports {
-		hub, _, err := config.LoadUIInstance(dir, port)
-		if err != nil || hub == nil || hub.Executors.KubeGuard.Enabled {
-			return true
+	out := map[string]string{}
+	for _, g := range grants {
+		if g.ID == keep || !g.Subject.Matches(r) {
+			continue
 		}
+		out[g.ID] = "cloop hub doctor --smoke leases only its own throwaway credential, so grant " + g.ID +
+			" is not opened for its sandbox"
 	}
-	return false
-}
-
-// smokeKubeGuard stands in for the hub's Kubernetes monitor in the smoke run:
-// it lets the run's own throwaway kubeconfig through as a document, and
-// refuses every other, which on a hub with the monitor enabled must not leave
-// the hub.
-type smokeKubeGuard struct{ throwaway string }
-
-func (g smokeKubeGuard) GuardKubeconfig(ctx context.Context, req secretbroker.KubeGuardRequest) (secretbroker.KubeGuardResult, error) {
-	if req.SecretID == g.throwaway {
-		return secretbroker.KubeGuardResult{}, nil
-	}
-	return secretbroker.UnavailableKubeGuard{
-		Reason: "cloop hub doctor runs outside the hub process and has no Kubernetes monitor to hold " +
-			"kubeconfig " + req.SecretName + "; executors.kube_guard is enabled, so it is refused rather " +
-			"than written into the smoke sandbox",
-	}.GuardKubeconfig(ctx, req)
+	return out, nil
 }
 
 // smokeKubeconfig renders the throwaway credential.

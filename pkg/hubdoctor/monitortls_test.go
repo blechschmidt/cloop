@@ -254,38 +254,46 @@ func TestSmokePassesOnAFreshlyBootstrappedHub(t *testing.T) {
 	}
 }
 
-// TestSmokeKeepsARealKubeconfigOutOfItsSandbox: the smoke's lease returns every
-// grant matching its executor. On a hub whose kube_guard is on, a real
-// kubeconfig among them must not reach the smoke sandbox as a document — the
-// monitor that would hold it runs in the hub, not in this process — so that
-// grant is refused, while the smoke's own throwaway is still delivered and the
-// run still proves the circuit.
+// TestSmokeKeepsARealKubeconfigOutOfItsSandbox: the smoke leases its own
+// throwaway credential and withholds every other grant aimed at its executor
+// (Task 20413). A real kubeconfig among them never reaches the smoke sandbox —
+// not on a hub whose kube_guard keeps cluster credentials in a monitor this
+// process does not run, and not on one without — and the run still proves the
+// circuit with the throwaway.
+//
+// Before Task 20413 the smoke refused the operator's kubeconfig through a
+// stand-in guard on a kube_guard hub only, and on any other delivered it beside
+// the throwaway at the same path, which refused the dispatch.
 func TestSmokeKeepsARealKubeconfigOutOfItsSandbox(t *testing.T) {
-	w := newSmokeWorld(t)
-	if err := os.WriteFile(config.ConfigPath(w.dir), []byte("executors:\n  kube_guard:\n    enabled: true\n"+
-		"    tls: auto\n    listen_addr: 0.0.0.0:8444\n    advertise_url: https://hub.example.com:8444\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The throwaway alone: the stage passes.
-	if res := w.only(t, w.run(t, Options{})); !res.OK() {
-		t.Fatalf("smoke with only its own kubeconfig: %+v", res)
-	}
+	for _, guarded := range []bool{true, false} {
+		t.Run(map[bool]string{true: "kube_guard on", false: "kube_guard off"}[guarded], func(t *testing.T) {
+			w := newSmokeWorld(t)
+			if guarded {
+				if err := os.WriteFile(config.ConfigPath(w.dir), []byte("executors:\n  kube_guard:\n    enabled: true\n"+
+					"    tls: auto\n    listen_addr: 0.0.0.0:8444\n    advertise_url: https://hub.example.com:8444\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The throwaway alone: the stage passes.
+			if res := w.only(t, w.run(t, Options{})); !res.OK() {
+				t.Fatalf("smoke with only its own kubeconfig: %+v", res)
+			}
 
-	db, err := statedb.Open(state.DBPath(w.dir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := secretstore.New(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := secretbroker.New(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const realToken = "real-cluster-token-that-must-stay-in-the-monitor"
-	sec, err := b.Mint(context.Background(), secretbroker.MintRequest{Name: "prod-cluster",
-		Kind: secretbroker.KindKubeconfig, Actor: "test", Payload: []byte(`apiVersion: v1
+			db, err := statedb.Open(state.DBPath(w.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := secretstore.New(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := secretbroker.New(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const realToken = "real-cluster-token-that-must-stay-in-the-monitor"
+			sec, err := b.Mint(context.Background(), secretbroker.MintRequest{Name: "prod-cluster",
+				Kind: secretbroker.KindKubeconfig, Actor: "test", Payload: []byte(`apiVersion: v1
 kind: Config
 current-context: prod
 clusters:
@@ -302,35 +310,39 @@ users:
   user:
     token: ` + realToken + `
 `)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Grant(context.Background(), secretbroker.GrantRequest{SecretRef: sec.ID,
-		Subject:     secretbroker.Subject{Type: secretbroker.SubjectExecutor, Value: w.ex.ID()},
-		Constraints: secretbroker.Constraints{Contexts: []string{"prod"}}, Actor: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-
-	before := len(w.ex.specs)
-	res := w.only(t, w.run(t, Options{}))
-	if !res.OK() {
-		t.Fatalf("smoke beside a refused kubeconfig: %+v", res)
-	}
-	w.ex.mu.Lock()
-	ran := len(w.ex.specs) > before
-	w.ex.mu.Unlock()
-	if !ran {
-		t.Fatal("the smoke dispatched nothing, so the assertion below would be vacuous")
-	}
-	w.ex.mu.Lock()
-	specs := append([]executor.Spec(nil), w.ex.specs...)
-	w.ex.mu.Unlock()
-	for _, spec := range specs {
-		for _, f := range spec.SecretFiles {
-			if strings.Contains(string(f.Content), realToken) {
-				t.Fatal("the real cluster token reached the smoke sandbox")
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			if _, err := b.Grant(context.Background(), secretbroker.GrantRequest{SecretRef: sec.ID,
+				Subject:     secretbroker.Subject{Type: secretbroker.SubjectExecutor, Value: w.ex.ID()},
+				Constraints: secretbroker.Constraints{Contexts: []string{"prod"}}, Actor: "test"}); err != nil {
+				t.Fatal(err)
+			}
+			_ = db.Close()
+
+			before := len(w.ex.specs)
+			res := w.only(t, w.run(t, Options{}))
+			if !res.OK() {
+				t.Fatalf("smoke beside a withheld kubeconfig: %+v", res)
+			}
+			w.ex.mu.Lock()
+			specs := append([]executor.Spec(nil), w.ex.specs...)
+			w.ex.mu.Unlock()
+			if len(specs) <= before {
+				t.Fatal("the smoke dispatched nothing, so the assertion below would be vacuous")
+			}
+			for _, spec := range specs {
+				for _, f := range spec.SecretFiles {
+					if strings.Contains(string(f.Content), realToken) {
+						t.Fatal("the real cluster token reached the smoke sandbox")
+					}
+				}
+				for _, kv := range spec.Env {
+					if strings.Contains(kv, realToken) || strings.HasPrefix(kv, secretbroker.KubeContextsEnvKey+"=") {
+						t.Fatalf("the operator's kubeconfig reached the smoke workload's environment: %s", kv)
+					}
+				}
+			}
+		})
 	}
 }
