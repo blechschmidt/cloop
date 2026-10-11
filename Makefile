@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
+.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
         release-dist \
         terraform-test terraform-validate
@@ -33,6 +33,14 @@ DOCS_PORT ?= 8000
 # How far the published site may lag main's docs-touching commits before
 # `make docs-freshness` (and the scheduled workflow that runs it) fails.
 DOCS_MAX_LAG_HOURS ?= 6
+
+# golangci-lint, pinned: CI's Lint job installs it with `make lint-tool` and runs
+# `make lint`, so a finding there is a finding here. Bump it in this one place,
+# and fix what the new version reports in the same change. Installed into
+# dist/tools under a versioned name, so a bump reinstalls and nothing on PATH is
+# consulted.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT := $(DIST)/tools/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # Per-target fuzz time. 30s is enough to catch shallow panics on every parser
 # without making the target painful to run locally; CI may set a longer budget.
@@ -149,6 +157,32 @@ BENCH ?= .
 bench:
 	$(GO) test -run='^$$' -bench='$(BENCH)' -benchtime=$(BENCHTIME) -benchmem \
 		-timeout 30m ./pkg/ui/ ./pkg/statedb/ ./pkg/quota/
+
+## lint: staticcheck's SA checks, unused and ineffassign over the whole module,
+##       tests included, as CI's Lint job runs them (.golangci.yml says what is
+##       enabled and why errcheck is not). Installs the pinned linter first.
+##
+## The first run on a machine type-checks the module and its dependencies and
+## takes a minute or two; later runs reuse golangci-lint's cache and take
+## seconds. LINT_ARGS passes extra flags, e.g. LINT_ARGS=--new-from-rev=origin/main.
+LINT_ARGS ?=
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run $(LINT_ARGS) ./...
+
+## lint-tool: install the pinned golangci-lint into dist/tools (once per version)
+lint-tool: $(GOLANGCI_LINT)
+
+## lint-version: print the pinned golangci-lint version (CI keys its caches on it)
+lint-version:
+	@echo $(GOLANGCI_LINT_VERSION)
+
+# `go install` with a GOBIN of its own, then a rename: the binary carries its
+# version in its name, so `make lint` after a bump cannot run the old one.
+$(GOLANGCI_LINT):
+	@mkdir -p $(DIST)/tools/.install
+	GOBIN=$(abspath $(DIST)/tools/.install) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	mv $(DIST)/tools/.install/golangci-lint $@
+	@rmdir $(DIST)/tools/.install
 
 # ---------------------------------------------------------------------------
 # Documentation site (https://blechschmidt.github.io/cloop/)
@@ -306,7 +340,8 @@ release-dist:
 	@test -n "$(VERSION)" || { echo "usage: make release-dist VERSION=v0.0.1"; exit 2; }
 	@GO=$(GO) ./scripts/build-release.sh $(VERSION) $(DIST)/release
 
-## clean: remove build artifacts, coverage reports and the documentation site
+## clean: remove build artifacts, coverage reports, the documentation site and
+##        the pinned linter (all under dist/)
 clean:
 	rm -f $(BINARY) coverage.out
 	rm -rf $(DIST)

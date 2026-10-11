@@ -168,6 +168,96 @@ jobs:
           # this job for a reason that looks nothing like a vulnerability.
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    # golangci-lint with staticcheck's SA checks, unused and ineffassign —
+    # .golangci.yml says what is enabled and why errcheck is not. go vet passes
+    # code these reject — a model a command resolved and then ignored, a
+    # documented knob nothing read, a TLS field Go has ignored since 1.18, a
+    # deprecated API — and 72 such findings had accumulated before this job
+    # existed (Task 20411), on top of the deprecated nhooyr.io/websocket that
+    # carried every WebSocket the hub speaks.
+    #
+    # A job of its own, parallel to everything else, so it never sits on the
+    # critical path: Build and Test is the long pole at 13-20 minutes, and
+    # this job is a fraction of that even with both caches cold. The linter is
+    # the version the Makefile pins, installed and run through the same
+    # targets a developer uses (`make lint`), so a finding here reproduces
+    # locally with one command and the version lives in one place.
+    #
+    # Its analysis cache is scoped the way golangci-lint-action scopes its
+    # own: keyed on the linter version, go.sum, the config and the ISO week,
+    # restored on every run, written only by a push to main. That keeps it to
+    # about one entry per week rather than one per commit — the repository's
+    # Actions cache sits at its 10 GB limit, where every new entry evicts an
+    # older one, and the image layers Publish images keeps there are what it
+    # would evict. A stale week-old cache is still most of the work: the
+    # linter re-analyses only the packages whose inputs changed since.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache keys
+        id: keys
+        run: |
+          set -euo pipefail
+          {
+            echo "version=$(make -s lint-version)"
+            echo "go=$(go env GOVERSION)"
+            echo "week=$(date -u +%G-W%V)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the pinned linter
+        # Built from source by `go install`, so that the checksum database
+        # vouches for exactly the module the Makefile names, by the module's
+        # own toolchain — about a minute, paid once per version and toolchain.
+        id: linter
+        uses: actions/cache/restore@v6
+        with:
+          path: dist/tools
+          key: golangci-lint-bin-${{ runner.os }}-${{ steps.keys.outputs.version }}-${{ steps.keys.outputs.go }}
+
+      - name: Install the pinned linter
+        run: make lint-tool
+
+      - name: Save the pinned linter
+        if: github.event_name == 'push' && steps.linter.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: dist/tools
+          key: ${{ steps.linter.outputs.cache-primary-key }}
+
+      - name: Restore the analysis cache
+        id: analysis
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-analysis-${{ runner.os }}-${{ steps.keys.outputs.version }}-${{ hashFiles('go.sum', '.golangci.yml') }}-${{ steps.keys.outputs.week }}
+          restore-keys: |
+            golangci-lint-analysis-${{ runner.os }}-${{ steps.keys.outputs.version }}-${{ hashFiles('go.sum', '.golangci.yml') }}-
+            golangci-lint-analysis-${{ runner.os }}-${{ steps.keys.outputs.version }}-
+
+      - name: golangci-lint
+        run: make lint
+
+      - name: Save the analysis cache
+        # Even when the lint failed: the analysis it did is still valid input
+        # for the next run, which is likely the fix for what it found.
+        if: always() && steps.analysis.outcome == 'success' && github.event_name == 'push' && steps.analysis.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/golangci-lint
+          key: ${{ steps.analysis.outputs.cache-primary-key }}
+
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest

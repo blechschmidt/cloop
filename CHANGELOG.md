@@ -12,6 +12,18 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **CI gates on staticcheck, unused and ineffassign.** A **Lint** job runs
+  golangci-lint (pinned in the Makefile, v2.14.0) with staticcheck's SA checks,
+  `unused` and `ineffassign` over the whole module, tests included, in parallel
+  with the rest of CI; `make lint` runs exactly what it runs. The 72 findings
+  already in the tree are fixed — 39 unused declarations, 9 ineffective
+  assignments and 24 staticcheck findings, among them TLS configs setting
+  `PreferServerCipherSuites`, which Go has ignored since 1.18, and the JWK
+  parsers' deprecated `elliptic.IsOnCurve` (now
+  `ecdsa.ParseUncompressedPublicKey`, accepting exactly what it accepted
+  before). errcheck stays off until it has a baseline of its own:
+  `CONTRIBUTING.md` explains why, and how to silence a finding that is wrong
+  (Task 20411).
 - **The edge channel: devices can follow the hub's own build, signed by CI.**
   After CI passes on a push to `main`, the new `edge.yml` workflow builds that
   commit for every release platform — stamped `dev+g<short sha>` as the hub's

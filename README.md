@@ -153,6 +153,7 @@ it in the [security model](docs/security/model.md#the-guarantee--test-table).
 ```bash
 make build          # compile ./cloop
 make test           # unit tests (race + coverage) and the e2e suite
+make lint           # staticcheck (SA), unused and ineffassign, as CI's Lint job runs them
 make docs-serve     # live-preview the documentation site
 ```
 

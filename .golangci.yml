@@ -1,0 +1,52 @@
+version: "2"
+
+# Lint gate for CI's Lint job (.github/workflows/ci.yml). Run it locally with
+# `make lint`, which installs exactly the version CI pins.
+#
+# The enabled set is what can gate today with zero findings, and every finding
+# it reports is one to fix rather than to baseline:
+#
+#   - staticcheck, its SA checks only: misuse of the standard library,
+#     concurrency mistakes, code that cannot do what it says, deprecated APIs
+#     (SA1019 is what reported nhooyr.io/websocket before Task 20411 retired
+#     it). Its other families stay off: ST is naming and comment style, QF
+#     suggests refactors, and S1 rewrites working code into shorter code.
+#     None of them finds a bug.
+#   - unused: unreferenced functions, types, fields and constants.
+#   - ineffassign: assignments whose value is never read.
+#
+# errcheck is off. It reported 4,516 findings when this gate was planned
+# (2026-10-10), most of them deliberate — a best-effort Close, a write to a
+# ResponseWriter whose client has gone — and a gate cannot start from that
+# number; it needs a baseline of its own before it can be turned on. gofmt and
+# go vet are gated by the Static analysis job and are not repeated here.
+
+run:
+  # Tests are linted too: t.Fatal called from a goroutine (SA2002) does not
+  # stop the test it belongs to, which is how a broken test goes on passing.
+  tests: true
+  # The job fails rather than editing go.mod; `go mod tidy` is gated
+  # separately.
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - staticcheck
+    - unused
+    - ineffassign
+  settings:
+    staticcheck:
+      checks:
+        - "SA*"
+  exclusions:
+    # No preset exclusions: each one hides a class of finding rather than a
+    # reviewed instance. A finding that is genuinely wrong is silenced where
+    # it occurs, with `//nolint:<linter> // <why>` on the line.
+    presets: []
+
+issues:
+  # Zero means unlimited. The defaults (50 per linter, 3 per identical text)
+  # would hide most of a regression behind its first few instances.
+  max-issues-per-linter: 0
+  max-same-issues: 0

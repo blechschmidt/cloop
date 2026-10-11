@@ -230,6 +230,68 @@ goroutine to any subsystem, add a matching test in that package — copy
 the canonical reference file's shape and document the goroutine you're
 guarding.
 
+## Static checks
+
+Three CI jobs judge the source rather than its behaviour. Each runs in parallel
+with the tests, and each reproduces locally with one command:
+
+| CI job | What it gates | Locally |
+| --- | --- | --- |
+| **Static analysis** | `go vet`; `gofmt`; every release platform compiles; `tests/arch` (unreferenced packages, retired modules and the other structural rules there); `go mod tidy` leaves `go.mod` and `go.sum` alone | `go vet ./...`, `go test ./tests/arch/`, and `gofmt -l $(git ls-files '*.go')`, which must print nothing |
+| **Vulnerability scan** | `govulncheck`: a known-vulnerable symbol this code can reach | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` |
+| **Lint** | `golangci-lint` with staticcheck's SA checks, `unused` and `ineffassign`, tests included | `make lint` |
+
+### Lint
+
+```bash
+make lint                                         # what CI's Lint job runs
+make lint LINT_ARGS=--new-from-rev=origin/main    # only what this branch adds
+```
+
+`make lint` installs the golangci-lint version the Makefile pins
+(`GOLANGCI_LINT_VERSION`) into `dist/tools/` and runs it with
+[`.golangci.yml`](.golangci.yml) — the same two targets CI runs, so a finding
+there reproduces here. The first run type-checks the module and its
+dependencies and takes a minute or two; golangci-lint caches its analysis, and
+later runs take seconds.
+
+What is enabled is what gates with zero findings, and each check reports a bug
+class rather than a style preference: staticcheck's **SA** checks (misuse of
+the standard library, concurrency mistakes, code that cannot do what it says,
+deprecated APIs), **unused** and **ineffassign**. On its first run the gate
+found a command that resolved its model from configuration and then ignored
+it, a documented `CLOOP_SOAK_KEEP` that nothing read, and TLS configs setting
+a field Go has ignored since 1.18. The style families (ST, QF, S1) stay off,
+and so does **errcheck**: it reports over 4,500 unchecked errors, most of
+them deliberate — a best-effort `Close`, a write to a client that has gone —
+and a gate cannot start from that number. It needs a baseline of its own
+first.
+
+Fix a finding rather than silence it. When the finding is genuinely wrong — a
+test that writes to a nil map because it needs a collector to panic, a nil
+`Context` that is the input under test — silence it on that line, naming the
+linter, with the reason after a second `//`:
+
+```go
+m["boom"] = 1 //nolint:staticcheck // SA5000 is the point: assignment to entry in nil map
+```
+
+Never `//nolint:staticcheck — reason`. golangci-lint reads everything after the
+colon as a comma-separated list of linter names, so that directive names a
+linter called `staticcheck — reason`: it warns about an unknown linter and
+silences nothing.
+
+To move to a newer linter, change `GOLANGCI_LINT_VERSION` in the Makefile, run
+`make lint`, and fix what the new version reports in the same change.
+
+### Retired modules
+
+`nhooyr.io/websocket` is deprecated in favour of `github.com/coder/websocket`,
+its maintained successor with the same API. `go test ./tests/arch/` fails if
+the old path is imported anywhere, tests included, or named in `go.mod`
+(`TestNoRetiredModules`); the next module to retire gets an entry in `retired`
+in `tests/arch/retiredmodules_test.go`.
+
 ## Unreferenced packages
 
 A new `pkg/<feature>/` that nothing imports fails CI's **Static analysis** job:
@@ -293,7 +355,7 @@ pending, start the Documentation site workflow by hand (**Run workflow** on
 After every change, run:
 
 ```bash
-/usr/local/go/bin/go build -o cloop . && /usr/local/go/bin/go vet ./...
+/usr/local/go/bin/go build -o cloop . && /usr/local/go/bin/go vet ./... && make lint
 ```
 
 Commit messages follow conventional-commit style (`feat(...)`, `fix(...)`,
