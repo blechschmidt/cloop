@@ -65,6 +65,7 @@ hostile by assumption** — it runs code the hub did not write, chosen by an LLM
 | WebSocket hijacking | `wsOriginAllowed`: absent `Origin` (CLI/agent), or an `Origin` exactly — scheme, host, port — one of the hub's own: the one the request was addressed to, `ui.external_url`, `ui.allowed_origins`, `ui.allowed_ws_origins`. No loopback or other-port allowance | `pkg/ui/originguard.go`, `pkg/executor/remote/origin.go` |
 | Forwarded headers | `X-Forwarded-Proto`/`-Host`/`-For` believed from loopback, `ui.trusted_proxies` and signed cluster forwards only; `X-Forwarded-For` walked from the right | `pkg/sameorigin/proxies.go` |
 | Authorization | every route declares its `Perm` in `routeTable()`; `gate()` wraps each one; `require()` is the single enforcement point | `pkg/ui/routes.go:143,210`, `pkg/ui/authz.go:214` |
+| Injected markup | Every value escaped where it is rendered; markup carries no code — controls name actions in `data-action` attributes that one delegated dispatcher looks up in a registry, never `window`, and hover and drag events only in a table of their own; `script-src 'self'` with no `'unsafe-inline'` or `'unsafe-eval'`, `base-uri 'none'`, `form-action 'self'`, `object-src 'none'` on every response; violations reported to `POST /api/csp-report` | `pkg/ui/assets/js/00-core.js`, `pkg/ui/csp.go`, `pkg/oidcauth/script.go` |
 | Abuse | per-IP token-bucket rate limiting; bounded WebSocket connections per IP and in total | `pkg/ui` |
 
 The route table is the design decision worth calling out. Permissions are not
@@ -3613,6 +3614,27 @@ listed.
 | Refusals are counted and audited, and the audit is rate-limited | `pkg/ui: TestRefusalsAreCountedAndAudited`, `TestRefusalAuditIsRateLimited`, `TestRefusedUpgradesAreCountedToo` |
 | In Chrome, a page on another port and on another site submits a `text/plain` form and `no-cors` fetches and opens a WebSocket: all refused, nothing written; a rebound name gets 421; the dashboard in the same browser still adds a task and saves a setting | `pkg/ui: TestAPageElsewhereCannotDriveAnOpenHubInBrowser` |
 | `cloop serve` grants CORS only with a token, refuses forged and form requests and, without a token, rebinding names | `pkg/apiserver: TestServeWithoutATokenGrantsNoPageElsewhere`, `TestServeWithoutATokenRefusesARebindingHost`, `TestServeWithATokenKeepsCORSForTheTokenHolder` |
+
+### Markup carries no code — the package suites
+
+A string a workload or a peer wrote reaches the dashboard in a hundred places,
+and the policy is what holds when one of them is not escaped (Task 20408; [the
+threat model's row](threat-model.md#①-browser--hub), [the policy and its report
+endpoint](../reference/configuration.md#content-security-policy-and-violation-reports)).
+
+| Guarantee | Test |
+| --- | --- |
+| Neither HTML document, no string any front-end script builds markup from, and no Go string literal of `pkg/ui` or `pkg/oidcauth` carries an event-handler attribute — in any case, after a quote or a `/` with no space, quoted or bare, as a browser reads one; nothing installs one with `setAttribute`; and the detectors catch each shape they look for | `pkg/ui: TestNoInlineEventHandlers`, `TestInlineHandlerGateCatchesTheShapes` |
+| No document the hub serves — the two HTML assets, markup any script builds, and the HTML `pkg/ui` and `pkg/oidcauth` write — carries an inline script; the dashboard loads its theme bootstrap from its head, and the glasses page only its own hashed script | `pkg/ui: TestNoInlineScripts`, `TestStaticAssets_NoInlineScript`, `TestGlassesPage_LoadsOnlyItsOwnScript`; `pkg/oidcauth: TestSignInDocumentsLoadOnlyTheScript` |
+| Every control names an action the registry holds for its event, and the registry holds nothing no control names | `pkg/ui: TestDashboard_EveryActionIsRegistered` |
+| The pointer passing over an element and a drag crossing one run only an action registered for that very event, never a click's, and a click never runs one of theirs: markup laid over the page cannot act without a click | `pkg/ui: TestDashboard_PassingEventsRunOnlyTheirOwnActions` |
+| A project named with each hostile shape — the reported `&quot;` break-out among them — is carried as data by all five sites that spliced it into script, and a click acts on that project under that name | `pkg/ui: TestDashboard_HostileProjectNamesStayData` |
+| The exact policy is on every kind of document — dashboard, glasses page, assets, sign-in documents and script, the error page, JSON — with and without single sign-on | `pkg/ui: TestContentSecurityPolicyOnEveryDocument` |
+| In Chrome, with hostile strings in every field a workload or peer writes, every tab and dialog the layout sweep visits has every control pressed: nothing runs, no element carries a handler or a `javascript:` URL, the policy blocks nothing, and a handler injected on purpose is blocked, seen by the page and the browser, and reported to the hub exactly once | `pkg/ui: TestHostileStrings_EveryControlInBrowser` |
+| The same with sign-on, for the strings only it has: members' identities and reasons, and the signed-in user's display name in the header and the presence bar | `pkg/ui: TestHostileMemberIdentities_InBrowser` |
+| The sign-in documents carry their values as data — the renewal verdict and the landing destination — and post only to their own origin | `pkg/oidcauth: TestRenewDocumentEscapesProviderText`, `TestRenewDocumentPostsOnlyToItsOwnOrigin`, `TestLoginLandingEscapesDestination` |
+| The report endpoint takes both report formats without a credential, counts by closed label sets, refuses what a browser would not send, and logs and records — scrubbed before anything is encoded — within its budget and the telemetry policy | `pkg/ui: TestCSPReportsAreCountedInBothFormats`, `TestCSPReportNeedsNoCredential`, `TestCSPReportRefusesWhatABrowserWouldNotSend`, `TestCSPReportRecordsWithinItsBudget`, `TestCSPReportFollowsTheTelemetryPolicy` |
+| Reports without a session draw on a budget of their own, so anonymous senders cannot fill the log, turn the telemetry table over or crowd out a signed-in user's reports; each line and row names the signed-in sender or nobody — never the static token a grant on this pre-auth route would have named — and reading the session does not count the report as the user being active; Chrome sends the session cookie with its report, so a signed-in viewer's is named | `pkg/ui: TestCSPReportBudgetsAnonymousSendersApart`, `TestCSPRecordBudgetRefills`, `TestHostileMemberIdentities_InBrowser`; `pkg/oidcauth: TestPeekIdentityLeavesTheIdleClockAlone` |
 
 ### RBAC enforcement — the package suites
 

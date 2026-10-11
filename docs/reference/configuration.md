@@ -2063,15 +2063,91 @@ When a `--token` is set:
 - Failed authentication attempts are **rate-limited**: after 5 consecutive
   failures from the same IP the endpoint returns HTTP 429 and blocks that IP
   for 60 seconds.
+- The dashboard's assets under `/assets/` are served before authentication,
+  as the page that names them is: static files compiled into the binary,
+  identical on every hub. Until Task 20408 a token hub served its page and
+  refused its script.
 - All responses include hardened HTTP headers:
-  - `Content-Security-Policy` — restricts resource loading to same-origin
+  - `Content-Security-Policy` — only the hub's own script files run; see
+    [below](#content-security-policy-and-violation-reports)
   - `X-Content-Type-Options: nosniff`
   - `X-Frame-Options: DENY` — with single sign-on configured, `SAMEORIGIN` on
     `/auth/renew` and the OIDC callback only, which the dashboard frames to
     renew a session's claims (`frame-ancestors 'self'` in the CSP, whose
     `frame-src` then also names the identity provider)
   - `Referrer-Policy: no-referrer`
-- CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
+- No CORS header is sent to anyone (Task 20394).
+
+#### Content-Security-Policy and violation reports
+
+Every response the hub sends — the dashboard, the display-glasses page, the
+sign-in documents, assets and API answers alike — carries one policy (Task
+20408):
+
+```text
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; connect-src 'self'; frame-src 'self' [identity provider];
+frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none';
+report-uri /api/csp-report
+```
+
+`frame-src` names the identity provider when single sign-on is configured, and
+`frame-ancestors` is `'self'` on `/auth/renew` and the OIDC callback, the two
+documents the silent renewal frames. Nothing else varies, and nothing is
+configurable.
+
+Only the hub's own script files run: no inline script, no inline event handler,
+no `eval`, no `javascript:` URL. The dashboard routes every control through one
+delegated dispatcher — a control names an action in a `data-action` attribute,
+which `pkg/ui/assets/js/00-core.js` looks up in a registry, and the pointer
+passing over an element or a drag crossing it runs only what was registered for
+that very event — so a string a workload or a peer wrote that reaches the page
+past a missed escape cannot run, and neither can a handler somebody writes back
+into the markup: `TestNoInlineEventHandlers` fails the build first. The theme bootstrap and the
+display-glasses page's script are assets of their own, and the two sign-in
+documents carry their values in the markup and load `GET /auth/sign-in.js`.
+Inline *styles* are still allowed; see the
+[threat model](../security/threat-model.md#out-of-scope).
+
+`report-uri` names the hub's own `POST /api/csp-report`. A browser sends it a
+report for each violation, and the hub:
+
+- counts it in [`cloop_csp_violations_total`](../operations/metrics.md#what-the-pages-policy-blocked),
+  by effective directive and by which of its documents it was;
+- logs it at warn level as `csp_violation`, its URLs credential-scrubbed;
+- records it as a telemetry event of kind `csp` where `ui.telemetry` collects
+  that document's front end ([telemetry](../operations/telemetry.md)).
+
+The log line and the event name the signed-in user whose browser sent the
+report — it carries the session cookie, which a browser sends with a
+same-origin report — or nobody. Reading that session does not count the report
+as the user being active.
+
+The endpoint takes no credential and is served before authentication: the
+glasses page's credential is a header its script adds and the sign-in documents
+are for someone not yet signed in, so a browser has none to send with a report
+from either. It is bounded accordingly — `POST` only, `application/csp-report`
+or `application/reports+json` and nothing a form can send, a 64 KiB body, the
+first 32 reports of a batch, and the per-IP rate limit every route sits behind.
+The log line and the telemetry row come from two hub-wide budgets: 30 at once
+and 60 a minute for a signed-in browser's reports, and for every report on a
+hub that asks for no credential; 10 at once and one a minute for the rest — the
+glasses page's, a static-token dashboard's, a sign-in error page's, anyone's.
+Anonymous senders therefore cannot fill the log, turn over the telemetry table,
+which keeps its newest 50,000 rows, or crowd out a signed-in user's reports.
+The counter counts every report, as reported: anyone who can reach the hub can
+send one, so a rate is a reason to read the log lines' `client_ip` and `actor`,
+not proof on its own.
+
+A violation on the dashboard is a control the dispatcher does not route — a
+button that does nothing — or markup somebody injected that the policy stopped.
+Either is a defect to fix; alert on any rate.
+
+`report-to` is deliberately not in the policy. A browser that knows it ignores
+`report-uri` when both are present, and delivers through the Reporting API in
+batches, later, and only to an endpoint it considers trustworthy — a hub
+reached over plain HTTP on a LAN address would get nothing. Measured on Chrome
+151, `report-uri` arrived at once and `report-to` not at all in ninety seconds.
 
 #### Two dashboards in one directory
 
