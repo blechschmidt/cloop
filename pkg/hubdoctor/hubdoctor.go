@@ -425,6 +425,10 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkExposure(ctx, dir, cfg, opts, add)
 	checkSecretKey(dir, cfg, add)
 	checkRBAC(cfg, add)
+	// After the policy it would bypass: whether the static admin token is
+	// still accepted beside an enforced one, and how long it has gone unused
+	// (Task 20406).
+	checkStaticToken(dir, cfg, opts, add)
 	checkImagePolicy(ctx, dir, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
 	checkEdgeLag(dir, add)

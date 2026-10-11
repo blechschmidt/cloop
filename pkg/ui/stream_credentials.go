@@ -23,7 +23,8 @@ package ui
 // it marks at the moment the token matched. A re-check asks about that
 // credential and no other. Nothing infers "static token" from a session that
 // is missing: a session stream whose session is gone is closed, never
-// re-authorized as the deployment.
+// re-authorized as the deployment. And since Task 20406 the static token ends
+// too, when it is retired (static_token.go).
 //
 // # When it is asked
 //
@@ -44,14 +45,15 @@ package ui
 //
 // The client is taken out of its room before it is told, as one evicted from
 // a project is (members.go). A WebSocket is sent a credential_ended message
-// naming the reason — session_ended or token_revoked — and closed with 1008
-// and the same reason; an SSE stream gets a terminal credential_ended event; a
+// naming the reason — session_ended, token_revoked or static_token_retired —
+// and closed with 1008 and the same reason; an SSE stream gets a terminal credential_ended event; a
 // terminal gets a closed frame and a 1008.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -85,11 +87,11 @@ func (c streamCredential) none() bool {
 	return c.sessionHash == "" && c.tokenID == "" && !c.static
 }
 
-// revocable reports whether anything can end the credential: the static
-// token cannot be revoked short of a restart, and no credential cannot be
-// revoked at all.
+// revocable reports whether anything can end the credential: a session, an
+// API token, and since Task 20406 the static token, by retiring it. No
+// credential cannot be revoked at all.
 func (c streamCredential) revocable() bool {
-	return c.sessionHash != "" || c.tokenID != ""
+	return c.sessionHash != "" || c.tokenID != "" || c.static
 }
 
 // kind names the credential for a log line.
@@ -176,10 +178,14 @@ type streamEnd struct {
 const (
 	streamEndSession = "session_ended"
 	streamEndToken   = "token_revoked"
+	// streamEndStaticToken: the static token that opened the stream was
+	// retired (Task 20406).
+	streamEndStaticToken = "static_token_retired"
 )
 
 // credentialEnded reports whether the credential a stream was opened with has
-// stopped being valid, and why. The static token and no credential never end.
+// stopped being valid, and why. The static token ends when it is retired; no
+// credential never ends.
 func (s *Server) credentialEnded(c streamCredential) (streamEnd, bool) {
 	if c.sessionHash != "" {
 		if _, st := s.OIDC.CheckSession(c.sessionHash); st != oidcauth.SessionLive {
@@ -191,7 +197,23 @@ func (s *Server) credentialEnded(c streamCredential) (streamEnd, bool) {
 			return tokenStreamEnd(err), true
 		}
 	}
+	if c.static {
+		if rec, retired := s.ownStaticTokenRetirement(); retired {
+			return staticTokenStreamEnd(rec), true
+		}
+	}
 	return streamEnd{}, false
+}
+
+// staticTokenStreamEnd is why a stream the static token opened ends: the
+// token was retired.
+func staticTokenStreamEnd(rec statedb.RetiredStaticTokenRow) streamEnd {
+	return streamEnd{
+		code:  streamEndStaticToken,
+		cause: "retired",
+		message: fmt.Sprintf("The static token this connection was opened with was retired on %s by %s.",
+			rec.RetiredAt.UTC().Format(time.RFC3339), rec.RetiredBy),
+	}
 }
 
 // recheckToken re-reads the token a stream was opened with.
@@ -314,6 +336,9 @@ func (s *Server) credentialAuthority(c streamCredential) (user *oidcauth.Identit
 		}
 		return identityFromOwner(t.OwnerBinding()), t, streamEnd{}, true
 	case c.static:
+		if rec, retired := s.ownStaticTokenRetirement(); retired {
+			return nil, nil, staticTokenStreamEnd(rec), false
+		}
 		return nil, nil, streamEnd{}, true
 	}
 	// No credential: a hub without sign-on or a static token, where every
@@ -351,6 +376,7 @@ type credentialRechecks struct {
 	mu       sync.Mutex
 	sessions map[string]struct{}
 	tokens   map[string]struct{}
+	static   bool
 	all      bool
 	running  bool
 
@@ -386,6 +412,12 @@ func (s *Server) recheckTokenStreams(tokenID string) {
 	})
 }
 
+// recheckStaticTokenStreams re-checks every stream the static token opened,
+// after a retirement (Task 20406).
+func (s *Server) recheckStaticTokenStreams() {
+	s.queueCredentialRecheck(func(q *credentialRechecks) { q.static = true })
+}
+
 // recheckAllCredentialStreams re-checks every stream whose credential can end.
 func (s *Server) recheckAllCredentialStreams() {
 	s.queueCredentialRecheck(func(q *credentialRechecks) { q.all = true })
@@ -409,9 +441,9 @@ func (s *Server) runCredentialRechecks() {
 	q := &s.credRechecks
 	for {
 		q.mu.Lock()
-		sessions, tokens, all := q.sessions, q.tokens, q.all
-		q.sessions, q.tokens, q.all = nil, nil, false
-		if len(sessions) == 0 && len(tokens) == 0 && !all {
+		sessions, tokens, static, all := q.sessions, q.tokens, q.static, q.all
+		q.sessions, q.tokens, q.static, q.all = nil, nil, false, false
+		if len(sessions) == 0 && len(tokens) == 0 && !static && !all {
 			q.running = false
 			q.mu.Unlock()
 			return
@@ -423,7 +455,7 @@ func (s *Server) runCredentialRechecks() {
 				if !c.revocable() {
 					return false
 				}
-				if all {
+				if all || (static && c.static) {
 					return true
 				}
 				if _, ok := sessions[c.sessionHash]; ok && c.sessionHash != "" {

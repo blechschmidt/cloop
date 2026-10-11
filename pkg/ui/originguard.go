@@ -133,7 +133,7 @@ func (s *Server) ownOrigins(r *http.Request, dashboardSocket bool) []sameorigin.
 // openHub reports a hub with no browser credential — the predicate the bind
 // address is decided by (pkg/exposure), asked of this process.
 func (s *Server) openHub() bool {
-	return !exposure.HasSignIn(s.oidcEnabled(), s.Token != "")
+	return !exposure.HasSignIn(s.oidcEnabled(), s.staticTokenConfigured())
 }
 
 // answeredHosts is the configured part of an open hub's Host allowlist:

@@ -456,7 +456,7 @@ func (s *Server) handleTokensList(w http.ResponseWriter, r *http.Request) {
 		Tokens:            views,
 		GrantableRoles:    s.grantableRoles(r),
 		Projects:          s.scopableProjects(r),
-		StaticTokenActive: s.Token != "",
+		StaticTokenActive: s.staticTokenConfigured(),
 	})
 }
 

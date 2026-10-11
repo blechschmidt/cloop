@@ -1851,8 +1851,8 @@ The re-check is the request path's own verdict — the same session cache, the
 same two clocks, the token row re-read — so a stream ends exactly when a request
 carrying its credential would be refused. It does not count as use: an
 unattended tab's open stream does not keep its session from going idle. A
-WebSocket is sent `credential_ended`, naming `session_ended` or `token_revoked`,
-and closed with `1008` and the same reason; an SSE stream gets a terminal
+WebSocket is sent `credential_ended`, naming `session_ended`, `token_revoked` or
+`static_token_retired`, and closed with `1008` and the same reason; an SSE stream gets a terminal
 `credential_ended` event; a terminal gets a closed frame and a `1008`, and the
 reason is in its `sandbox.attach.close` audit event. The client is taken out of
 its room first, so nothing broadcast after the ending reaches it. A claim
@@ -1867,8 +1867,9 @@ the static token — and so re-authorized a revoked session's shell as the
 deployment's allow-all, beyond the reach of deny bindings, membership removal
 and offboarding. It now resolves its authority from the credential it recorded,
 as that credential stands now, and fails closed when it has ended. A stream
-opened with the static token is the static token's, and nothing that ends a
-session or a token reaches it.
+opened with the static token is the static token's: nothing that ends a session
+or a token reaches it, and [retiring the static token](#retiring-the-static-token)
+ends it on every member.
 
 **IdP-side revocation.** Disabling a user at the identity provider changes
 nothing the hub can observe on its own: the cookie is still valid and the
@@ -2329,16 +2330,17 @@ have.
 
 ### Migrating off the static token
 
-`--token` / `CLOOP_UI_TOKEN` still works, and will keep working — a hub that
-goes dark because its one credential was retired under it is a worse outcome
-than a shared secret. But it is worse than a PAT in three ways:
+`--token` / `CLOOP_UI_TOKEN` still works until you retire it — nothing retires
+it for you, because a hub that goes dark when its one credential is withdrawn
+under it is a worse outcome than a shared secret. But it is worse than a PAT in
+three ways:
 
 | | static `--token` | API token |
 | --- | --- | --- |
 | Authorization | bypasses RBAC (`admin`, source `static_token`) | carries roles; every check applies |
 | Project reach | every project on the hub | optionally pinned to specific projects |
 | Expiry | never | optional, enforced at verification |
-| Revocation | rotate the secret, break every caller | revoke one, others unaffected |
+| Revocation | retire it on every member at once; deploy a new value for the callers that remain | revoke one, others unaffected |
 | Attribution | one identity for everyone | one per caller, named in the audit trail |
 
 To migrate:
@@ -2348,10 +2350,16 @@ To migrate:
 2. Replace the static value in each caller's configuration. The header is the
    same, so only the value changes.
 3. Confirm from `cloop hub token list` that each token shows a recent
-   **LAST USED** — that is how you know nothing is still on the old credential.
-4. Remove `--token` and `CLOOP_UI_TOKEN` and restart the hub.
+   **LAST USED**, and from `cloop hub token static status` (or the Settings
+   card) that the static token's own last use is older than any caller you
+   know of — that is how you know nothing is still on the old credential.
+4. Retire it: `cloop hub token static retire --reason "..."`, or Settings →
+   Static admin token → Retire. Every member refuses it within seconds, without
+   a restart, and closes what it opened.
+5. Remove `--token` and `CLOOP_UI_TOKEN` from the deployment at the next
+   rollout. Step 4 does not wait for it.
 
-Without `ui.oidc`, step 4 leaves the hub with no sign-in: API tokens restrict
+Without `ui.oidc`, step 5 leaves the hub with no sign-in: API tokens restrict
 the callers that present one, and a request presenting none is still served.
 Such a hub listens on `127.0.0.1` only, and refuses an address beyond loopback
 (`ui.listen`, `--listen`) at startup ([Network exposure](#network-exposure--exposure_testgo-and-the-package-suites)).
@@ -2360,6 +2368,53 @@ the static token goes.
 
 While the static token is configured, `cloop ui` warns at startup and the
 Tokens panel shows a banner. Both disappear once it is gone.
+
+### Retiring the static token
+
+Retiring writes the token's fingerprint — a domain-separated SHA-256, never the
+value — to `retired_static_tokens` in the control plane, with when, by whom and
+why, and records `static_token.retired` in the audit trail in the same commit.
+From then on:
+
+- **Every member refuses it.** The member that retired it at once; the others
+  within a bus poll, on the notice the retirement posts — and `cloop hub token
+  static retire`, which is no member, posts the same one; a member that reads
+  no bus (`ui.cluster.exclusive`) within 30 seconds, when it re-reads the set;
+  a member that starts later reads the set before it serves.
+- **The refusal says why.** A request presenting it — in the
+  `Authorization` header or as `?token=` — gets `401` with
+  `code: static_token_retired`, when it was retired and by whom, and what to
+  present instead. The reason stays in the trail and on the Settings card. A
+  refusal does not count toward the per-address guess lockout: presenting a
+  retired token is not guessing. After a leak, who is still presenting it is
+  the question, so refusals are counted, with the last client address, on the
+  Settings card and in `cloop hub token static status`.
+- **What it opened ends.** Every dashboard WebSocket and SSE stream the token
+  opened, on every member, is told `credential_ended` with
+  `static_token_retired`, and a WebSocket is closed with `1008` and the same
+  reason; a sandbox terminal it opened gets a closed frame saying why and a
+  `1008`, recorded in its `sandbox.attach.close` audit event.
+- **It stays configured.** A retired token is never read as no token: a
+  token-only hub stays closed, keeps the bind a hub with sign-in gets, and
+  admits API tokens and nothing else. Retiring the only credential of such a
+  hub when no admin API token exists would leave nobody able to administer it,
+  so it is refused unless forced; the operator at the hub's shell can always
+  mint one with `cloop hub token create --role admin`.
+- **A new value works.** Retirement is per fingerprint: deploying a new
+  `CLOOP_UI_TOKEN` and restarting admits the new one, and the retired value is
+  refused for good — including by a hub that has since rotated.
+
+The static token may retire itself, which is the break-glass case: an operator
+holding only the leaked credential uses it once, to lock it.
+
+One function, `checkStaticToken` in `pkg/ui`, compares a presented credential
+with the static token and asks whether it is retired; both authentication gates
+act on its verdict, and `tests/arch` fails a second comparison. Each member also
+records the token's last use — time and client address — in memory and flushes
+it to `static_token_use` every 30 seconds and when it stops, never once per
+request; `cloop hub doctor` warns `ui.static_token` while a static token is
+accepted beside single sign-on with an enforced role policy, with how long it
+has gone unused.
 
 
 ### Configuring OIDC single sign-on
@@ -2539,7 +2594,8 @@ When enabled:
   `CLAUDE_CODE_OAUTH_TOKEN`, which outranks the directory; see
   [per-user Claude Code logins](claude-code-identity.md).
 - The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
-  API automation and sees all projects. It carries no owner binding, so the
+  API automation, and sees all projects, until it is
+  [retired](#retiring-the-static-token) — do that once SSO works. It carries no owner binding, so the
   Claude Code auth and usage endpoints refuse it with `403` rather than
   falling back to the host's account.
 - Sessions are persisted in the hub's control-plane database and survive a
@@ -3603,10 +3659,27 @@ a reconstruction, so this row set spans three packages.
 | Every WebSocket and SSE channel — a project's socket, the landing page's, `/api/events`, `/api/projects/events` — closes when the session or token that opened it ends: an operator's revocation, `logout-all`, sign-out, idle and absolute expiry, a token revoked or expired. It is told `credential_ended` with `session_ended` or `token_revoked`, a WebSocket closes `1008` with the same reason, and the hub lets the client go | `pkg/ui: TestStreamCredentials_EveryEndingClosesEveryChannel` |
 | A sandbox terminal closes on its session's revocation at once, and on a token revoked behind the hub's back at its own re-check | `pkg/ui: TestAttach_ARevokedSessionClosesItsTerminal`, `TestAttach_ARevokedTokenClosesItsTerminalOnTheRecheck` |
 | A revoked session's terminal is never re-authorized as the static token: its authority comes from the credential it recorded, and fails closed once that ends | `pkg/ui: TestAttachStillAuthorized_SeesASessionRevocation` |
-| A claim refresh does not close a stream; nothing that ends a session or a token closes one opened with the static token; a stream with no credential is refused under sign-on | `pkg/ui: TestStreamCredentials_AClaimRefreshDoesNotCloseAStream`, `TestStreamCredentials_StaticTokenStreamsAreUnaffected`, `TestStreamCredentials_NoCredentialIsRefusedUnderSignOn` |
+| A claim refresh does not close a stream; nothing that ends a session or a token closes one opened with the static token, and retiring the static token does; a stream with no credential is refused under sign-on | `pkg/ui: TestStreamCredentials_AClaimRefreshDoesNotCloseAStream`, `TestStreamCredentials_StaticTokenStreamsEndOnlyWhenItIsRetired`, `TestStreamCredentials_NoCredentialIsRefusedUnderSignOn` |
 | A stream's re-check is not use, so an unattended tab's session still goes idle | `pkg/oidcauth: TestCheckSessionLeavesTheIdleClockAlone`, `TestCheckSessionNamesEachEnding` |
 | A session's change is announced only once it can be read back, so a listener re-checking on the notice finds it ended | `pkg/oidcauth: TestSessionChangeIsAnnouncedAfterTheRowIsGone` |
 | A revocation made on one hub member or from a shell closes the streams another member holds within a bus poll | `pkg/ui: TestClusterCredentialEndingsCloseStreamsOnEveryMember`; `cmd: TestSessionRevokeAnnouncesWhatItEnded`, `TestTokenRevokeAnnouncesTheToken`, `TestOffboardAnnouncesTheSessionsAndTokensItEnded` |
+
+### The static admin token — the package suites
+
+Retiring the static token at runtime (Task 20406;
+[retiring the static token](#retiring-the-static-token)).
+
+| Guarantee | Test |
+| --- | --- |
+| A retired token is refused in the header and as `?token=`, with when, by whom and what instead, without counting toward the lockout, and the retirement is audited | `pkg/ui: TestStaticToken_RetiredIsRefusedOnTheRetiringMember` |
+| A peer refuses it after the bus notice — from another member or the CLI — and closes the streams it opened there | `pkg/ui: TestClusterStaticTokenRetirementReachesEveryMember`; `cmd: TestStaticTokenRetireFindsTheHeldTokenAndAnnouncesIt` |
+| A member started after the retirement refuses it; a new value is admitted and the retired one is still refused | `pkg/ui: TestStaticToken_RetirementSurvivesARestartAndANewValueIsAdmitted` |
+| A token-only hub stays closed after its token is retired, and retiring its only credential with no admin API token is refused unless forced | `pkg/ui: TestStaticToken_TokenOnlyHubStaysClosedAfterRetirement`, `TestStaticToken_RetireRefusesToStrandATokenOnlyHub`; `cmd: TestStaticTokenRetireRefusesToStrandAHub` |
+| Streams and sandbox terminals the token opened close on its retirement with `1008` `static_token_retired`, at once | `pkg/ui: TestStreamCredentials_RetiringTheStaticTokenClosesItsStreamsAtOnce`, `TestAttach_RetiringTheStaticTokenClosesItsTerminal` |
+| Its last use is held in memory and written by the flush, never by the request | `pkg/ui: TestStaticToken_LastUseIsKeptInMemoryAndFlushed` |
+| Whether it is retired cannot be read: it is refused | `pkg/ui: TestStaticToken_UnreadableRetirementsRefuseTheToken` |
+| Only `checkStaticToken` compares it, and both authentication gates ask it | `tests/arch: TestStaticTokenIsComparedInOneFunction`, `TestBothAuthenticationGatesAskCheckStaticToken`, `TestStaticTokenGateFlagsASecondComparison` |
+| `cloop hub doctor` warns `ui.static_token` for SSO with an enforced policy and an accepted token, saying how long it has gone unused, and nowhere else | `pkg/hubdoctor: TestStaticTokenAcrossTheMatrix`, `TestStaticTokenSaysHowLongItHasGoneUnused`, `TestStaticTokenRetiredIsAPass` |
 
 ### Container sandbox — `container_test.go`
 

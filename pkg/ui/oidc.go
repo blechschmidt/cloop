@@ -7,7 +7,6 @@ package ui
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -121,9 +120,11 @@ func viewerKeyFor(user *oidcauth.Identity) string {
 //  1. /auth/* (the login machinery itself) and static assets pass through.
 //  2. A valid session cookie passes.
 //  3. The static bearer token (--token / CLOOP_UI_TOKEN) passes — API
-//     automation keeps working without a browser session. A *supplied but
-//     wrong* token counts toward the per-IP auth-failure lockout exactly
-//     like in token-only mode.
+//     automation keeps working without a browser session — unless it was
+//     retired, which is refused with when, by whom and what to use instead,
+//     and not counted as a guess (Task 20406). A *supplied but wrong* token
+//     counts toward the per-IP auth-failure lockout exactly like in
+//     token-only mode. checkStaticToken decides, for both gates.
 //  4. Everything else: browser navigations are redirected to /auth/login,
 //     carrying where they were going; API/XHR/WebSocket requests receive 401
 //     JSON with the sign-in hint (see signInHintHeader). Requests without
@@ -149,29 +150,21 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 		next.ServeHTTP(w, r2)
 		return
 	}
-	if s.Token != "" {
-		// Marked as the static token's on admission: a stream opened this
-		// way records it, and is never re-authorized as the static token for
-		// any other reason (Task 20398).
-		supplied := false
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			supplied = true
-			if !s.authLockoutActive(s.clientIP(r)) &&
-				subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, admitStaticToken(r))
-				return
-			}
-		}
-		if tok := r.URL.Query().Get("token"); tok != "" {
-			supplied = true
-			if !s.authLockoutActive(s.clientIP(r)) &&
-				subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, admitStaticToken(r))
-				return
-			}
-		}
-		if supplied {
-			s.recordAuthFailure(s.clientIP(r))
+	if v := s.checkStaticToken(r); v.presented {
+		ip := s.clientIP(r)
+		switch {
+		case v.admitted && !s.authLockoutActive(ip):
+			// Marked as the static token's on admission: a stream opened
+			// this way records it, and is never re-authorized as the static
+			// token for any other reason (Task 20398).
+			s.noteStaticTokenUse(ip)
+			next.ServeHTTP(w, admitStaticToken(r))
+			return
+		case v.retired != nil || v.unverifiable:
+			s.refuseStaticToken(w, v, ip)
+			return
+		case s.staticTokenConfigured():
+			s.recordAuthFailure(ip)
 			setSignInHint(w)
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return

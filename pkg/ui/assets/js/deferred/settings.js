@@ -1495,9 +1495,85 @@
       });
     }
 
+    // ── Static admin token (Task 20406) ──────────────────────────────────────────
+    //
+    // Whether this hub still accepts --token / CLOOP_UI_TOKEN, its fingerprint and
+    // last use, and the button that retires it on every member without a restart.
+    // The verdicts — accepted, retired, strands — are the hub's; nothing is worked
+    // out here.
+
+    function loadStaticToken() {
+      const panel = document.getElementById('staticTokenPanel');
+      if (typeof canGlobal === 'function' && !canGlobal('token.admin')) {
+        if (panel) panel.style.display = 'none';
+        return Promise.resolve();
+      }
+      return api('/api/static-token').then(d => { if (d && !d.error) renderStaticToken(d); }).catch(() => {});
+    }
+
+    function renderStaticToken(d) {
+      const body = document.getElementById('staticTokenBody');
+      const badge = document.getElementById('staticTokenBadge');
+      const actions = document.getElementById('staticTokenActions');
+      if (!body || !badge || !actions) return;
+      const cls = {accepted: 'failed', retired: 'complete'}[d.status] || 'unknown';
+      badge.innerHTML = '<span class="badge ' + cls + '" style="font-size:10px">' + esc(d.status || 'none') + '</span>';
+      actions.style.display = d.status === 'accepted' ? 'flex' : 'none';
+      if (!d.configured) {
+        body.textContent = 'This hub has no static token: API tokens and single sign-on are how it is reached.';
+        return;
+      }
+      const when = t => esc(new Date(t).toLocaleString());
+      let html = 'Fingerprint <code>' + esc(d.fingerprint || '') + '</code> &middot; ' + (d.last_used_at
+        ? 'last used ' + when(d.last_used_at) + (d.last_used_ip ? ' from ' + esc(d.last_used_ip) : '')
+        : 'never used');
+      if (d.retired) {
+        html += '<br>Retired ' + when(d.retired.at) + ' by ' + esc(d.retired.by) +
+          (d.retired.reason ? ': ' + esc(d.retired.reason) : '') +
+          '. Every hub member refuses it; a new value deployed in its place is accepted.';
+        if (d.refused) {
+          html += '<br>Refused ' + esc(String(d.refused.count)) + ' time(s) since, last ' + when(d.refused.last_at) +
+            (d.refused.last_ip ? ' from ' + esc(d.refused.last_ip) : '') + '.';
+        }
+      } else if (d.status === 'accepted') {
+        html += '<br>A request presenting it is an administrator outside RBAC, and it never expires. ' +
+          (d.sso ? 'Retire it once single sign-on works.' : 'Mint an admin API token, then retire it.');
+        if (d.strands) {
+          html += '<br><strong>Nothing else can administer this hub</strong>: no single sign-on and no admin ' +
+            'API token. Retiring it anyway locks every browser out until someone at the hub runs ' +
+            '<code>cloop hub token create --role admin</code>.';
+        }
+        if (d.self) html += '<br>This page is signed in with it: retiring it ends this page\'s access.';
+      } else if (d.status === 'unknown') {
+        html += '<br>Whether it is retired could not be read; it is refused until it can be.';
+      }
+      body.innerHTML = html;
+    }
+
+    function retireStaticToken(force) {
+      const input = document.getElementById('staticTokenReason');
+      const reason = ((input && input.value) || '').trim();
+      if (reason.length < 4) { toast('Say why: the retirement is recorded in the audit trail', 'err'); return; }
+      if (force !== true && !confirm('Retire the static admin token?\n\nEvery hub member refuses it at once, and ' +
+        'the dashboards and sandbox terminals it opened close. Only deploying a new value issues another.')) return;
+      apiMethod('POST', '/api/static-token/retire', {reason: reason, force: force === true}).then(d => {
+        if (d && d.error) {
+          if (force !== true && /no way in/.test(d.error) && confirm(d.error + '\n\nRetire it anyway?')) {
+            retireStaticToken(true);
+            return;
+          }
+          toast(d.error, 'err');
+          return;
+        }
+        if (input) input.value = '';
+        toast(d && d.retired ? 'Static token retired on every hub member' : 'It was already retired', 'ok');
+        if (d && d.token) renderStaticToken(d.token);
+      }).catch(err => toast('Retire failed: ' + ((err && err.message) || err), 'err'));
+    }
+
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
-      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadTelemetryPolicy(); loadCIPanel();
+      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadStaticToken(); loadTelemetryPolicy(); loadCIPanel();
       loadGitHubApps(); loadUSBSettings(); loadGlassesLink();
       window.loadHiddenProjects(); window.loadBuildInfo();
     }
@@ -1505,7 +1581,8 @@
     return h.mount({
       open, saveConfigField, saveAnthropicCfg, saveOpenAICfg, saveOllamaCfg, saveSTTCfg,
       clearSTTCfg, confirmReset, saveProvider, saveCCModel, loadOIDCSettings, oidcAddMapping,
-      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadTelemetryPolicy,
+      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadStaticToken, retireStaticToken,
+      loadTelemetryPolicy,
       onTelemetryPolicyToggle, saveTelemetryPolicy, ghAppDiscover, ghAppSaveInstallation,
       loadGitHubApps, loadCISettings, saveCISettings, copyCISnippet, loadCIRules, ciNewRule,
       ciCancelRule, ciSaveRule, ciTestRule, loadCISessions, loadCIExchanges, loadCIPanel,
@@ -1733,6 +1810,16 @@
             <button class="btn settings-save" data-act="saveOIDCSettings">Save</button>
           </div>
           <div id="oidcStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <div class="settings-section" id="staticTokenPanel" data-global-perm="token.admin" data-perm-hide>
+          <h3>Static admin token <span id="staticTokenBadge"></span></h3>
+          <div id="staticTokenBody" style="font-size:12px"></div>
+          <div id="staticTokenActions" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+            <input class="form-input" id="staticTokenReason" autocomplete="off" maxlength="1000"
+              placeholder="Why it is retired (recorded in the audit trail)" style="flex:1;min-width:200px">
+            <button class="btn danger" data-act="retireStaticToken">Retire</button>
+          </div>
         </div>
 
         <div class="settings-section" id="telemetryPolicySection" data-global-perm="user.manage" data-perm-hide>

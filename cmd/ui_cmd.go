@@ -548,7 +548,9 @@ func warnStaticTokenDeprecated() {
 			"\n"+
 			"    cloop hub token create ci --role operator --project my-app --expires-in 30d\n"+
 			"\n"+
-			"  Then drop --token / CLOOP_UI_TOKEN. See docs/security/model.md.")
+			"  Once single sign-on works, retire it on every member without a restart —\n"+
+			"  cloop hub token static retire --reason \"...\" — then drop --token /\n"+
+			"  CLOOP_UI_TOKEN. See docs/security/model.md.")
 }
 
 func init() {

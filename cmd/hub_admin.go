@@ -35,6 +35,10 @@ package cmd
 //     replicas. Same treatment as role bindings, and the reason `session
 //     revoke` still works when the listener is wedged.
 //
+//   - retired static tokens are re-read by every hub on the bus notice
+//     `cloop hub token static retire` posts and at least every 30 seconds
+//     (Task 20406). Same treatment again.
+//
 // Anything added here that a hub caches for its lifetime belongs in the first
 // group.
 

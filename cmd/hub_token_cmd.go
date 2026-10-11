@@ -55,7 +55,10 @@ These subcommands write directly to the hub's state database and therefore
 require filesystem access to it. That is the intended bootstrap path for a
 hub that has no credential yet; day to day, prefer the Tokens panel or
 POST /api/tokens, which additionally refuse to mint a token stronger than the
-caller.`,
+caller.
+
+` + "`cloop hub token static`" + ` shows whether the deprecated static token is still
+accepted and retires it on every hub member without a restart.`,
 }
 
 var hubTokenCreateCmd = &cobra.Command{

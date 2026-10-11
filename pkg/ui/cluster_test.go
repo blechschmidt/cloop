@@ -50,6 +50,13 @@ func fastClusterOptions(dbPath, advertise string) hubcluster.Options {
 // newClusterMember starts one member serving the control plane at dir.
 func newClusterMember(t *testing.T, dir string) *clusterMember {
 	t.Helper()
+	return newClusterMemberWithToken(t, dir, "")
+}
+
+// newClusterMemberWithToken is newClusterMember for a member given a static
+// token, as `cloop ui --token` gives one.
+func newClusterMemberWithToken(t *testing.T, dir, token string) *clusterMember {
+	t.Helper()
 	var (
 		mu      sync.RWMutex
 		handler http.Handler = http.NotFoundHandler()
@@ -66,7 +73,7 @@ func newClusterMember(t *testing.T, dir string) *clusterMember {
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
-	srv := New(dir, 0, "")
+	srv := New(dir, 0, token)
 	srv.Cluster = node
 	srv.startClusterBus()
 	ctx, cancel := context.WithCancel(context.Background())

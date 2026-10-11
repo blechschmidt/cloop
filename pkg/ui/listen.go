@@ -23,7 +23,7 @@ func (s *Server) listenPlan() (exposure.Plan, error) {
 		Listen:                      s.ListenHost,
 		Port:                        s.Port,
 		SSO:                         s.oidcEnabled(),
-		StaticToken:                 s.Token != "",
+		StaticToken:                 s.staticTokenConfigured(),
 		AllowUnauthenticatedNetwork: s.AllowUnauthenticatedNetwork,
 		TLS:                         s.TLSEnabled(),
 		ExternalURL:                 public,

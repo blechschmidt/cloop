@@ -3,7 +3,6 @@ package ui
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -452,8 +451,18 @@ type uiIPBucket struct {
 type Server struct {
 	WorkDir  string
 	Port     int
-	Token    string   // optional auth token; empty = no auth
 	Projects []string // extra project directories for multi-project dashboard
+
+	// staticToken is the deprecated --token / CLOOP_UI_TOKEN, empty for none:
+	// an administrator credential outside RBAC. Unexported, and read only by
+	// staticTokenConfigured, staticTokenFingerprint and checkStaticToken
+	// (tests/arch, Task 20406): a presented value is compared with it in one
+	// place, and "is one configured" never reads "retired" as "none".
+	staticToken string
+	// staticTok is what the hub knows about the token besides its value:
+	// which tokens are retired, and when it was last used. See
+	// static_token.go.
+	staticTok staticTokenGuard
 
 	// openAPI is the rendered API description, built once by
 	// registerRoutes. See openapi_api.go for why it is not built on
@@ -930,7 +939,7 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 		Cluster:         node,
 		WorkDir:         workdir,
 		Port:            port,
-		Token:           token,
+		staticToken:     token,
 		clients:         make(map[*sseClient]struct{}),
 		hubClients:      make(map[string]map[*hubClient]struct{}),
 		wsConnPerIP:     make(map[string]int),
@@ -1406,6 +1415,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
 	go s.watchMemberships(watcherCtx)
+	// Which static tokens are retired is read before the listener serves a
+	// request, and kept current with the token's last use by every member on
+	// its own (Task 20406). See static_token.go.
+	s.startStaticTokenGuard(watcherCtx.Done())
 	s.runLeaderDuty(watcherCtx, "autobackup", s.watchAutoBackup)
 	// Bounds .cloop on a timer. Started after the lease for the same reason
 	// the other sweeps are: its VACUUM step rewrites the control-plane file,
@@ -1453,7 +1466,7 @@ func (s *Server) Run(ctx context.Context) error {
 		plan.Port = tcp.Port // the port actually bound, when Port was 0
 	}
 	auth := ""
-	if s.Token != "" {
+	if s.staticTokenConfigured() {
 		auth = " (token auth enabled)"
 	}
 	fmt.Printf("cloop dashboard running at %s, listening on %s%s\n", plan.URL(), plan, auth)
@@ -1557,6 +1570,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// from the reconciliation pass that started it, so this is what owns it
 	// (Task 20281).
 	reconcile.StopPeriodicSweep()
+	// The static token's last use since the previous flush, so stopping does
+	// not lose the answer to "is anything still using it" (Task 20406).
+	if err := s.flushStaticTokenUse(time.Now()); err != nil {
+		s.log().Warn(logger.EventAuthz, 0, "static token: report use at shutdown",
+			map[string]interface{}{"error": err.Error()})
+	}
 	// Release the API-token database handle held open for the authentication
 	// path, so a hub restarted in-process (tests, `cloop hub bootstrap`) does
 	// not leak a connection per lifecycle.
@@ -1834,9 +1853,11 @@ func (s *Server) clientIP(r *http.Request) string {
 // set) every route is gated behind an IdP session, with the static bearer
 // token still accepted for automation — see oidcGate in oidc.go. Otherwise
 // the original token-only behavior applies: Bearer-token auth on all /api/*
-// routes when s.Token is set; the root path "/" is always served without
-// auth so the login page can be loaded in the browser. Failed attempts are
-// rate-limited per IP in both modes.
+// routes when a static token is configured; the root path "/" is always
+// served without auth so the login page can be loaded in the browser. Failed
+// attempts are rate-limited per IP in both modes. Whether a request carries
+// the static token, and whether that token is retired, is checkStaticToken's
+// verdict in both (Task 20406).
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if servedBeforeAuth(r) {
@@ -1858,14 +1879,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r2)
 			return
 		}
-		if s.Token == "" || r.URL.Path == "/" {
+		// A retired token is still a configured one: the hub stays closed
+		// after its only credential was retired, and API tokens are what
+		// get in (Task 20406).
+		if !s.staticTokenConfigured() || r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		ip := s.clientIP(r)
 
-		// Check the per-IP failure lockout before evaluating the token.
+		// The header and the ?token= an EventSource sends, judged together
+		// and in constant time. A retired token is not a guess: it is told
+		// when and by whom it was retired, and does not count toward the
+		// lockout below.
+		v := s.checkStaticToken(r)
+		if v.retired != nil || v.unverifiable {
+			s.refuseStaticToken(w, v, ip)
+			return
+		}
+
+		// The per-IP failure lockout is checked before anything is admitted.
 		if s.authLockoutActive(ip) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
@@ -1874,21 +1908,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check Authorization: Bearer <token> header. Constant-time compare
-		// so response timing leaks nothing about how many token bytes match.
-		//
 		// Admitted requests are marked as the static token's, which is what a
 		// long-lived stream records as the credential it was opened with
-		// (Task 20398).
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
-				next.ServeHTTP(w, admitStaticToken(r))
-				return
-			}
-		}
-		// Fallback: ?token=<token> query param (needed for EventSource which
-		// cannot send custom headers).
-		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(s.Token)) == 1 {
+		// (Task 20398), and counted as its last use (Task 20406).
+		if v.admitted {
+			s.noteStaticTokenUse(ip)
 			next.ServeHTTP(w, admitStaticToken(r))
 			return
 		}

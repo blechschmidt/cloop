@@ -1137,6 +1137,25 @@ var registry = []Entry{
 		Note:      "The anti-escalation check. A maintainer trying to mint an admin token lands here.",
 	},
 
+	// ── static_token ───────────────────────────────────────────────────────
+	// The deprecated --token / CLOOP_UI_TOKEN: an administrator credential
+	// outside RBAC with no expiry. Retiring it is the one lifecycle event it
+	// has, and the only way to end it short of redeploying every member.
+	{
+		Action:    ActionStaticTokenRetired,
+		Home:      HomeControlPlane,
+		Entity:    "static_token",
+		Trigger:   "The static admin token is retired, from the Settings card or `cloop hub token static retire`.",
+		Payload:   []string{"fingerprint", "reason", "via", "forced", "self", "os_user"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Filed against the token's fingerprint — a SHA-256 of the value, never the value. " +
+			"`self` is true when the static token retired itself; `forced` when the retirement " +
+			"overrode the refusal to leave a hub without single sign-on or an admin API token " +
+			"with no way in. Recorded in the same commit as the retirement, so a retirement " +
+			"with no row cannot happen.",
+	},
+
 	// ── session ────────────────────────────────────────────────────────────
 	// The OIDC session lifecycle. The claims_* trio exists because a session's
 	// authority has to be re-asserted against the IdP rather than trusted for

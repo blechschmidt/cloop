@@ -79,6 +79,13 @@ same-origin parent — can clear it. ` + "`GET /api/me`" + ` reports the session
 hub holds no refresh token for the session. See
 [silent renewal](../security/model.md#silent-renewal-from-the-browser).
 
+The deprecated static token (` + "`--token`" + ` / ` + "`CLOOP_UI_TOKEN`" + `) is a bearer credential
+too, and can be retired at runtime (` + "`POST /api/static-token/retire`" + `, or
+` + "`cloop hub token static retire`" + `). A request presenting a retired one — in the
+header or as ` + "`?token=`" + ` — is answered ` + "`401`" + ` with ` + "`code: static_token_retired`" + `,
+` + "`retired_at`" + `, ` + "`retired_by`" + ` and ` + "`instead`" + `, what to present in its place; it does
+not count toward the per-address failure lockout.
+
 ` + "`cloop serve`" + ` is different: it is a single-project daemon with one optional
 bearer token and no permission model, so its endpoints are either behind that
 token or exempt from it.

@@ -33,6 +33,13 @@ same-origin parent — can clear it. `GET /api/me` reports the session's clocks:
 hub holds no refresh token for the session. See
 [silent renewal](../security/model.md#silent-renewal-from-the-browser).
 
+The deprecated static token (`--token` / `CLOOP_UI_TOKEN`) is a bearer credential
+too, and can be retired at runtime (`POST /api/static-token/retire`, or
+`cloop hub token static retire`). A request presenting a retired one — in the
+header or as `?token=` — is answered `401` with `code: static_token_retired`,
+`retired_at`, `retired_by` and `instead`, what to present in its place; it does
+not count toward the per-address failure lockout.
+
 `cloop serve` is different: it is a single-project daemon with one optional
 bearer token and no permission model, so its endpoints are either behind that
 token or exempt from it.
@@ -77,7 +84,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-234 endpoints, by the permission each one requires:
+236 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -98,7 +105,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
-| `token.admin` | 3 |
+| `token.admin` | 5 |
 | `user.manage` | 12 |
 | `view.prefs` | 2 |
 
@@ -282,6 +289,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/sessions` | `session.admin` | global |
 | DELETE | `/api/sessions/{id}` | `session.admin` | global |
 | GET | `/api/state` | `project.read` | project |
+| GET | `/api/static-token` | `token.admin` | global |
+| POST | `/api/static-token/retire` | `token.admin` | global |
 | GET | `/api/steps` | `project.read` | project |
 | POST | `/api/stop` | `run.stop` | project |
 | POST | `/api/suggest/add` | `task.mutate` | project |

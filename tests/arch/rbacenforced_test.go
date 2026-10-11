@@ -87,6 +87,7 @@ var rbacAsks = []struct{ file, fn, callee string }{
 	{"pkg/ui/oidc_config_api.go", "oidcRBACOf", "authz.Enforced"},
 	{"pkg/ui/oidcconfig.go", "wouldDemoteCaller", "authz.Enforced"},
 	{"pkg/hubdoctor/rbac.go", "checkRBAC", "authz.Enforced"},
+	{"pkg/hubdoctor/statictoken.go", "checkStaticToken", "oc.RBACEnforced"},
 	{"cmd/ui_rbac.go", "reportRBAC", "authz.Enforced"},
 	{"pkg/config/oidc.go", "RBACEnforced", "authz.Enforced"},
 }

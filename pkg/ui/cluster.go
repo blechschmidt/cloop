@@ -91,6 +91,9 @@ const (
 	// invalidateToken: an API token or glasses link was revoked (Task
 	// 20398); each member re-checks the streams it opened there.
 	invalidateToken = "token"
+	// invalidateStaticToken: a static admin token was retired (Task 20406);
+	// each member re-reads the retired set and ends what the token opened.
+	invalidateStaticToken = "static_token"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -507,9 +510,11 @@ func (s *Server) onBusGap() {
 		}
 	}
 	s.hubMu.Unlock()
-	// Among the lost events may be a session or a token that ended: ask
-	// every stream now rather than at its keepalive (Task 20398).
+	// Among the lost events may be a session or a token that ended, or a
+	// static token retired: ask every stream now rather than at its
+	// keepalive (Tasks 20398, 20406).
 	s.evictSessionCache("", true)
+	_ = s.reloadRetiredStaticTokens()
 	s.recheckAllCredentialStreams()
 }
 
@@ -604,6 +609,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		if err := ev.Decode(&p); err == nil {
 			s.recheckTokenStreams(p.TokenID)
 		}
+	case invalidateStaticToken:
+		// A static token retired on another member or by the CLI (Task
+		// 20406). The payload names it, but the set is re-read whole: the
+		// table, not the notice, is what a member refuses by.
+		s.onStaticTokenRetired()
 	case invalidateAgent:
 		var p agentInvalidation
 		if err := ev.Decode(&p); err == nil {

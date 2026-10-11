@@ -331,6 +331,12 @@ const (
 	// ActionAPITokenCreateDenied records a mint refused by the anti-escalation check.
 	ActionAPITokenCreateDenied Action = "api_token.create_denied"
 
+	// ── static_token ───────────────────────────────────────────────────────
+
+	// ActionStaticTokenRetired records the static admin token being retired:
+	// every hub member refuses it from then on, without a restart (Task 20406).
+	ActionStaticTokenRetired Action = "static_token.retired"
+
 	// ── session ────────────────────────────────────────────────────────────
 
 	// ActionSessionCreated records a sign-in completing.

@@ -6,8 +6,9 @@ package ui
 // the client is taken out of its room, told why, and closed with 1008. These
 // tests hold every long-lived channel to the same shape for every way a
 // credential ends — and prove the two things that must not end one: a claim
-// refresh, which announces itself exactly as a revocation does, and anything
-// at all, for a stream opened with the static token.
+// refresh, which announces itself exactly as a revocation does, and any
+// session or token ending, for a stream opened with the static token. That
+// one ends only when the static token is retired (Task 20406).
 //
 // None of them starts a run.
 
@@ -580,11 +581,15 @@ func TestStreamCredentials_AClaimRefreshDoesNotCloseAStream(t *testing.T) {
 	}
 }
 
-// TestStreamCredentials_StaticTokenStreamsAreUnaffected: a stream opened with
-// the static token recorded that it was, and nothing that ends a session or a
-// token reaches it — not a revocation of every session, not a token revoked,
-// not every session's clock running out, not a re-check of everything.
-func TestStreamCredentials_StaticTokenStreamsAreUnaffected(t *testing.T) {
+// TestStreamCredentials_StaticTokenStreamsEndOnlyWhenItIsRetired: a stream
+// opened with the static token recorded that it was, and nothing that ends a
+// session or a token reaches it — not a revocation of every session, not a
+// token revoked, not every session's clock running out, not a re-check of
+// everything. Retiring the static token does: the stream is told why and
+// closed with 1008, as any other credential's (Task 20406; it was
+// TestStreamCredentials_StaticTokenStreamsAreUnaffected, when the static
+// token could not end short of a restart).
+func TestStreamCredentials_StaticTokenStreamsEndOnlyWhenItIsRetired(t *testing.T) {
 	for _, ch := range credentialChannels {
 		ch := ch
 		t.Run(ch.name, func(t *testing.T) {
@@ -595,7 +600,7 @@ func TestStreamCredentials_StaticTokenStreamsAreUnaffected(t *testing.T) {
 
 			ls := ch.open(t, f, nil, bearerHeader(credStaticToken))
 			waitMember(t, "the stream to register", func() bool { return len(f.srv.openStreamCredentials()) == 1 })
-			if cred := f.srv.openStreamCredentials()[0]; !cred.static || cred.revocable() {
+			if cred := f.srv.openStreamCredentials()[0]; !cred.static || cred.sessionHash != "" || cred.tokenID != "" {
 				t.Fatalf("the stream recorded %+v, want the static token alone", cred)
 			}
 			ls.awaitMessage(t, ch.probe(f))
@@ -622,8 +627,87 @@ func TestStreamCredentials_StaticTokenStreamsAreUnaffected(t *testing.T) {
 
 			ls.assertOpen(t, 300*time.Millisecond)
 			ls.awaitMessage(t, ch.probe(f))
+
+			// Retired — by itself, which it may.
+			retireViaRoute(t, f.ts.URL, bearerHeader(credStaticToken), false)
+			expectStaticTokenEnded(t, ls)
+			waitMember(t, "the hub to let the stream go", func() bool { return len(f.srv.openStreamCredentials()) == 0 })
 		})
 	}
+}
+
+// expectStaticTokenEnded asserts a stream ended because the static token that
+// opened it was retired.
+func expectStaticTokenEnded(t *testing.T, ls *liveStream) {
+	t.Helper()
+	got := ls.awaitEnd(t, 5*time.Second)
+	if got.told["reason"] != streamEndStaticToken || got.told["cause"] != "retired" ||
+		!strings.Contains(got.told["message"], "retired") {
+		t.Fatalf("the %s ended telling %v (close %d %q, err %v), want static_token_retired",
+			ls.kind, got.told, got.closeCode, got.closeReason, got.err)
+	}
+	if strings.HasPrefix(ls.kind, "WebSocket") &&
+		(got.closeCode != websocket.StatusPolicyViolation || got.closeReason != streamEndStaticToken) {
+		t.Errorf("close %d %q, want 1008 %q", got.closeCode, got.closeReason, streamEndStaticToken)
+	}
+}
+
+// TestStreamCredentials_RetiringTheStaticTokenClosesItsStreamsAtOnce: the
+// retirement itself ends what the token opened — the keepalives are an hour
+// away, so nothing else can — and leaves a session's stream alone.
+func TestStreamCredentials_RetiringTheStaticTokenClosesItsStreamsAtOnce(t *testing.T) {
+	for _, ch := range credentialChannels {
+		ch := ch
+		t.Run(ch.name, func(t *testing.T) {
+			streamTicks(t, time.Hour)
+			f := newCredFixture(t)
+			static := ch.open(t, f, nil, bearerHeader(credStaticToken))
+			alice := f.signIn(t, aliceEmail, "sub-alice")
+			session := ch.open(t, f, alice, nil)
+			waitMember(t, "both streams to register", func() bool { return len(f.srv.openStreamCredentials()) == 2 })
+
+			// Retired by an administrator's session this time.
+			req, _ := http.NewRequest(http.MethodPost, f.ts.URL+"/api/static-token/retire",
+				strings.NewReader(`{"reason":"single sign-on works now"}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := f.root.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("retire = %d", resp.StatusCode)
+			}
+			expectStaticTokenEnded(t, static)
+			session.assertOpen(t, 300*time.Millisecond)
+			session.awaitMessage(t, ch.probe(f))
+		})
+	}
+}
+
+// TestAttach_RetiringTheStaticTokenClosesItsTerminal: a sandbox terminal the
+// static token opened — the static token's allow-all, the one shell no deny
+// binding reaches — closes when the token is retired, at once, with 1008 and
+// the reason in the closed frame and the audit trail.
+func TestAttach_RetiringTheStaticTokenClosesItsTerminal(t *testing.T) {
+	setAttachRecheckInterval(t, time.Hour)
+	idp := newUIFakeIdP(t)
+	srv, ts := newOIDCTestServer(t, idp, credStaticToken, []string{rootEmail})
+	t.Cleanup(srv.closeTokenManager)
+	ls := openTerminal(t, srv, ts.URL, nil, bearerHeader(credStaticToken))
+	ls.assertOpen(t, 200*time.Millisecond)
+
+	retireViaRoute(t, ts.URL, bearerHeader(credStaticToken), false)
+	got := ls.awaitEnd(t, 5*time.Second)
+	if got.closeCode != websocket.StatusPolicyViolation || got.closeReason != streamEndStaticToken {
+		t.Errorf("close %d %q, want 1008 %q", got.closeCode, got.closeReason, streamEndStaticToken)
+	}
+	if got.told == nil || !strings.Contains(got.told["message"], "retired") {
+		t.Errorf("the terminal was told %v, want why", got.told)
+	}
+	waitMember(t, "the close to be audited", func() bool {
+		return strings.Contains(attachCloseDetails(t, srv), streamEndStaticToken)
+	})
 }
 
 // TestStreamCredentials_NoCredentialIsRefusedUnderSignOn: with sign-on on,

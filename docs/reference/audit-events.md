@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 148 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 149 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 128 |
+| `control-plane` | the hub's own state.db | 129 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 3 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-148 actions in 39 families. Every action is listed: this section is the whole
+149 actions in 40 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (1)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (1)
 
 ### task.*
 
@@ -501,6 +501,16 @@ Payload keys:
 - `api_token.auth_failed` — Filed against the token's *public* id (`cloop_pat_<id>`), never the secret half, and against `(unparseable)` when the credential is not even shaped like a token — so a garbage value is not echoed back into the trail. Rate of this action by `ip` is the credential-stuffing signal.
 - `api_token.create_denied` — The anti-escalation check. A maintainer trying to mint an admin token lands here.
 - `api_token.created` — `kind` distinguishes a service-account token from a glasses link, which is a token with one narrow role and a URL as its only delivery mechanism.
+
+### static_token.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `static_token.retired` | `static_token` | control-plane | stable | The static admin token is retired, from the Settings card or `cloop hub token static retire`. |
+
+Payload keys, on every action above: `fingerprint`, `reason`, `via`, `forced`, `self`, `os_user`
+
+- `static_token.retired` — Filed against the token's fingerprint — a SHA-256 of the value, never the value. `self` is true when the static token retired itself; `forced` when the retirement overrode the refusal to leave a hub without single sign-on or an admin API token with no way in. Recorded in the same commit as the retirement, so a retirement with no row cannot happen.
 
 ### session.*
 

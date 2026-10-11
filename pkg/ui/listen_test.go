@@ -112,7 +112,7 @@ func TestListenPlanReadsWhatTheServerHolds(t *testing.T) {
 		{name: "open, every interface, acknowledged",
 			srv:  &Server{Port: 8080, ListenHost: "0.0.0.0", AllowUnauthenticatedNetwork: true},
 			want: "*:8080", ack: true},
-		{name: "token", srv: &Server{Port: 8080, Token: "t"}, want: "*:8080"},
+		{name: "token", srv: &Server{Port: 8080, staticToken: "t"}, want: "*:8080"},
 		{name: "SSO", srv: &Server{Port: 8080, OIDC: sso}, want: "*:8080"},
 		{name: "SSO, loopback", srv: &Server{Port: 8080, OIDC: sso, ListenHost: "127.0.0.1"}, want: "127.0.0.1:8080"},
 	}
