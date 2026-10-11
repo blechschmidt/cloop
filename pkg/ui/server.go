@@ -651,7 +651,9 @@ type Server struct {
 
 	// cspBudget bounds what the CSP report endpoint logs and records, hub
 	// process wide, signed-in and anonymous senders apart (csp.go, Task 20408).
+	// cspClock is the budgets' clock where a test fixes it; nil is time.Now.
 	cspBudget cspBudgets
+	cspClock  func() time.Time
 
 	// Live harness output, partitioned by project workDir (Task 20189).
 	// There is deliberately no un-keyed buffer here: every accessor in

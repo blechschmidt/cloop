@@ -424,17 +424,25 @@ func TestHostileMemberIdentities_InBrowser(t *testing.T) {
 	}
 	// The control's report came from a signed-in browser, which sends its
 	// session cookie with a same-origin report: the hub names the viewer, and
-	// draws on the signed-in budget for it (csp.go).
-	f.logs.mu.Lock()
-	defer f.logs.mu.Unlock()
-	var actors []string
-	for _, e := range f.logs.entries {
-		if e.Event == "csp_violation" {
-			actors = append(actors, fmt.Sprint(e.Data["actor"]))
+	// draws on the signed-in budget for it (csp.go). The browser sends it on
+	// its own schedule, so wait for it.
+	actors := func() []string {
+		f.logs.mu.Lock()
+		defer f.logs.mu.Unlock()
+		var out []string
+		for _, e := range f.logs.entries {
+			if e.Event == "csp_violation" {
+				out = append(out, fmt.Sprint(e.Data["actor"]))
+			}
 		}
+		return out
 	}
-	if want := strings.ToLower(aliceEmail); len(actors) != 1 || actors[0] != want {
-		t.Errorf("the control's report was logged under %q, want once under the signed-in viewer %q", actors, want)
+	deadline := time.Now().Add(15 * time.Second)
+	for len(actors()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got, want := actors(), strings.ToLower(aliceEmail); len(got) != 1 || got[0] != want {
+		t.Errorf("the control's report was logged under %q, want once under the signed-in viewer %q", got, want)
 	}
 }
 

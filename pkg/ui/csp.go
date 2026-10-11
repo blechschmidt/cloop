@@ -307,6 +307,9 @@ func (s *Server) handleCSPReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	if s.cspClock != nil {
+		now = s.cspClock()
+	}
 	// Who sent it, read without counting the report as the user being active
 	// — a page reports on its own behalf. Not grantFor: this route is served
 	// before authentication, and a grant there takes a request without a

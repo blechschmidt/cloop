@@ -407,6 +407,10 @@ func TestCSPReportRecordsWithinItsBudget(t *testing.T) {
 	srv, ts := cspTelemetryServer(t, "")
 	logged := &captureLogger{}
 	srv.Log = logged
+	// A stopped clock: under -race on a CI runner forty reports took 2.8 s,
+	// long enough for the budget to earn a token back mid-test.
+	at := time.Now()
+	srv.cspClock = func() time.Time { return at }
 	before := cspCount(t, "script-src-attr", "dashboard")
 
 	const sent = cspSignedBurst + 10
@@ -500,6 +504,8 @@ func TestCSPReportBudgetsAnonymousSendersApart(t *testing.T) {
 	srv, ts, signedIn := cspSignOnServer(t)
 	logged := &captureLogger{}
 	srv.Log = logged
+	at := time.Now()
+	srv.cspClock = func() time.Time { return at }
 	before := cspCount(t, "script-src-attr", "glasses")
 
 	const flood = cspAnonBurst + 15
