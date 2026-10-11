@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
@@ -138,6 +139,18 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 	}
 	if id := s.sessionIdentity(r); id != nil {
 		next.ServeHTTP(w, r)
+		return
+	}
+	// A terminal's session credential that no longer resolves (Task 20412) is
+	// answered here, as an ended session. Letting it fall through would
+	// compare it against the static token — a constant-time compare of a
+	// value that was never a guess at it, counted toward the address's
+	// lockout, which on a shared NAT locks out the browser beside it too.
+	if oidcauth.PresentsCLICredential(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		apierror.WriteError(w, apierror.New(apierror.CodeUnauthorized,
+			"this terminal's session has ended — it was signed out, revoked, offboarded, or it expired or went "+
+				"unused too long. Run `cloop login` again."))
 		return
 	}
 	// A scoped API token authenticates before the static one is considered,
@@ -351,10 +364,14 @@ func (s *Server) handleOIDCLogout(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "OIDC authentication is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	s.OIDC.Logout(w, r)
+	ended := s.OIDC.Logout(w, r)
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
 		"redirect": s.OIDC.EndSessionURL(),
+		// Whether a session ended here, for `cloop logout` (Task 20412): a
+		// terminal revokes its own session through this route, and false
+		// means there was none left to end.
+		"ended": ended != nil,
 	})
 }
 
@@ -405,6 +422,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	body["email"] = id.Email
 	body["name"] = id.Name
 	body["admin"] = s.OIDC.IsAdmin(id)
+	// browser or cli (Task 20412): `cloop whoami` says which, and a terminal
+	// session's idle window is its own.
+	body["session_kind"] = rec.KindName()
+	if rec.IsCLI() {
+		if idle := s.OIDC.CLIIdleTimeout(); idle > 0 {
+			body["idle_timeout_seconds"] = int64(idle / time.Second)
+		}
+		if rec.Client != "" {
+			body["client"] = rec.Client
+		}
+	}
 	addSessionSchedule(body, s.OIDC, rec)
 	jsonOK(w, body)
 }

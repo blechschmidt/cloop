@@ -1284,6 +1284,9 @@ func (s *Server) routeTable() []routeSpec {
 	// fetches an icon — a browser probing /favicon.ico, a display-glasses
 	// launcher rendering a saved app — sends a credential. See icons.go.
 	table = append(table, s.executorUpgradeRoutes()...)
+	// Terminal sign-in (Task 20412): `cloop login`'s two endpoints and the
+	// approval page a signed-in browser decides on.
+	table = append(table, s.deviceRoutes()...)
 	// The review gate's settings (Task 20357), beside the other per-project
 	// run options under /api/options.
 	table = append(table, s.reviewGateRoutes()...)

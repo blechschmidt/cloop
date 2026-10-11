@@ -178,6 +178,8 @@ func (s *Store) Put(rec oidcauth.SessionRecord) error {
 		RefreshCheckedAt:  rec.RefreshCheckedAt,
 		ClaimsAsOf:        rec.ClaimsAsOf,
 		ClaimsExpireAt:    rec.ClaimsExpireAt,
+		Kind:              rec.KindName(),
+		Client:            rec.Client,
 	})
 }
 
@@ -218,8 +220,8 @@ func (s *Store) DeleteBySubject(subject, keepID string) ([]oidcauth.SessionRecor
 	return s.toRecords(rows), nil
 }
 
-func (s *Store) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]oidcauth.SessionRecord, error) {
-	rows, err := s.db.DeleteExpiredSessions(absoluteCutoff, idleCutoff)
+func (s *Store) DeleteExpired(c oidcauth.ExpiryCutoffs) ([]oidcauth.SessionRecord, error) {
+	rows, err := s.db.DeleteExpiredSessions(sessionCutoffs(c))
 	if err != nil {
 		return nil, err
 	}
@@ -228,8 +230,12 @@ func (s *Store) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]oidcauth.
 
 // CountLive counts the sessions DeleteExpired would keep, in SQL: listing
 // them to count would unseal every refresh token in the table.
-func (s *Store) CountLive(absoluteCutoff, idleCutoff time.Time) (int, error) {
-	return s.db.CountLiveSessions(absoluteCutoff, idleCutoff)
+func (s *Store) CountLive(c oidcauth.ExpiryCutoffs) (int, error) {
+	return s.db.CountLiveSessions(sessionCutoffs(c))
+}
+
+func sessionCutoffs(c oidcauth.ExpiryCutoffs) statedb.SessionCutoffs {
+	return statedb.SessionCutoffs{Absolute: c.Absolute, Idle: c.Idle, CLIIdle: c.CLIIdle}
 }
 
 var _ oidcauth.LiveCounter = (*Store)(nil)
@@ -344,7 +350,20 @@ func (s *Store) toRecord(row statedb.SessionRow) oidcauth.SessionRecord {
 		RefreshCheckedAt: row.RefreshCheckedAt,
 		ClaimsAsOf:       row.ClaimsAsOf,
 		ClaimsExpireAt:   row.ClaimsExpireAt,
+		Kind:             sessionKind(row.Kind),
+		Client:           row.Client,
 	}
+}
+
+// sessionKind reads the stored kind. Anything but "cli" is a browser session —
+// the only kind there was before the column, and the one that authenticates
+// by cookie, which is the kind a value this build does not know must not be
+// promoted out of.
+func sessionKind(stored string) oidcauth.SessionKind {
+	if stored == statedb.SessionKindCLI {
+		return oidcauth.SessionKindCLI
+	}
+	return oidcauth.SessionKindBrowser
 }
 
 func (s *Store) toRecords(rows []statedb.SessionRow) []oidcauth.SessionRecord {

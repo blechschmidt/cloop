@@ -311,6 +311,14 @@ func (s *Server) newGrant(r *http.Request) *grant {
 	}
 	id := s.sessionIdentity(r)
 	if id == nil {
+		// A session credential that no longer resolves got past the gate
+		// while it still did — it expired, idled out or was revoked in the
+		// moment between. It is not the static token and must never be read
+		// as it: nothing is granted (Task 20412: a terminal knows its
+		// session's expiry to the second, and could aim at that moment).
+		if presentsSessionCredential(r) && !admittedByStaticToken(r) {
+			return &grant{server: s}
+		}
 		// OIDC is on but there is no session: the request got past
 		// authMiddleware on the static bearer token, which is the
 		// deployment's own secret and therefore an operator credential.
@@ -320,6 +328,15 @@ func (s *Server) newGrant(r *http.Request) *grant {
 	subject := subjectFromIdentity(id)
 	s.warnUnsatisfiableBindings(subject)
 	return &grant{server: s, subject: subject}
+}
+
+// presentsSessionCredential reports whether r carries a sign-in session's
+// credential — a browser's cookie or a terminal's bearer — live or not.
+func presentsSessionCredential(r *http.Request) bool {
+	if c, err := r.Cookie(oidcauth.SessionCookieName); err == nil && c.Value != "" {
+		return true
+	}
+	return oidcauth.PresentsCLICredential(r)
 }
 
 // warnUnsatisfiableBindings reports, once per hub, every role mapping that the

@@ -1251,6 +1251,49 @@ var registry = []Entry{
 			"`ip` and `user_agent` are the browser that performed the renewal.",
 	},
 
+	// ── device ─────────────────────────────────────────────────────────────
+	// A terminal signing in to a hub with single sign-on (Task 20412). The
+	// session it becomes is an ordinary session row of kind "cli", so its
+	// creation, expiry and revocation are the session.* events above; these
+	// three are the grant itself — who asked, from where, and who said yes.
+	{
+		Action:    ActionDeviceCodeIssued,
+		Home:      HomeControlPlane,
+		Entity:    "device_authorization",
+		Trigger:   "A terminal asks the hub for a sign-in code (`cloop login`): POST /api/device/code.",
+		Payload:   devicePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Unauthenticated by design — the terminal has no credential yet — and rate-limited per address. " +
+			"`device_id` is a prefix of the device code's digest, never the code; `client_hostname` is what the " +
+			"terminal reported and proves nothing.",
+	},
+	{
+		Action:    ActionDeviceApproved,
+		Home:      HomeControlPlane,
+		Entity:    "device_authorization",
+		Trigger:   "A signed-in browser approves a terminal's code at /device and completes the identity provider round trip that writes the CLI session.",
+		Payload:   devicePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`session_id` is the CLI session's id, whose own `session.created` row (kind `cli`, `via` " +
+			"`device_grant`) follows; `ip` and `user_agent` are the approving browser's, the `client_*` keys the " +
+			"terminal's. `reauth` is true when the browser session was older than " +
+			"`ui.oidc.device_approval_max_age_minutes` and the provider was asked for a fresh sign-in.",
+	},
+	{
+		Action:    ActionDeviceDenied,
+		Home:      HomeControlPlane,
+		Entity:    "device_authorization",
+		Trigger:   "A terminal's code is denied at /device, or the hub refuses the approval on the approver's behalf.",
+		Payload:   devicePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`reason` is `denied_at_approval_page` for a person pressing Deny; `identity_refused` when a runtime " +
+			"deny binding (an offboarding) matched the approving identity; `session_error` when the session " +
+			"could not be written. The actor is `hub` for the last two.",
+	},
+
 	// ── request ────────────────────────────────────────────────────────────
 	{
 		Action:    ActionRequestOriginRefused,
@@ -1823,7 +1866,14 @@ var (
 	sessionPayload = []string{
 		"event", "session_id", "subject", "email", "actor", "reason", "ip",
 		"user_agent", "prior_role", "role", "dropped_claims",
-		"issued_at", "selector", "selected", "via", "os_user",
+		"issued_at", "selector", "selected", "via", "os_user", "kind", "client",
+	}
+
+	// devicePayload is what a device.* row says about a terminal's sign-in:
+	// the authorization, who asked for it, and who decided it (Task 20412).
+	devicePayload = []string{
+		"device_id", "client_ip", "client_user_agent", "client_hostname", "expires_at",
+		"session_id", "subject", "email", "ip", "user_agent", "reason", "reauth", "kind", "client",
 	}
 
 	// requestRefusalPayload is what a refused request said about where it came

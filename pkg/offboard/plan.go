@@ -69,6 +69,7 @@ func BuildPlan(o Options) (Plan, error) {
 				IP:        row.IP,
 				IssuedAt:  row.IssuedAt,
 				ExpiresAt: row.ExpiresAt,
+				Kind:      defaultKind(row.Kind),
 			})
 		}
 	}
@@ -426,4 +427,13 @@ func marshalPayload(payload map[string]any) (string, error) {
 		return "", fmt.Errorf("encode audit payload: %w", err)
 	}
 	return string(b), nil
+}
+
+// defaultKind names a stored session kind, reading a row from before the
+// column as the browser session it is.
+func defaultKind(kind string) string {
+	if kind == "" {
+		return statedb.SessionKindBrowser
+	}
+	return kind
 }

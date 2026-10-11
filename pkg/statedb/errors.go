@@ -127,6 +127,12 @@ var (
 	// same answer to the caller.
 	ErrSessionNotFound = errors.New("statedb: session not found")
 
+	// ErrDeviceAuthorizationNotFound indicates no device_authorizations row
+	// has the requested device code or user code (Task 20412). An ordinary
+	// outcome: a mistyped user code, and a device code that expired and was
+	// swept, look exactly like this, and must be answered alike.
+	ErrDeviceAuthorizationNotFound = errors.New("statedb: device authorization not found")
+
 	// ErrRoleBindingNotFound indicates no role_bindings row has the requested
 	// id. Unlike the two above this is a genuine operator error rather than an
 	// expected outcome — binding ids are only ever obtained by listing the

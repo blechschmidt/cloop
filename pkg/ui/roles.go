@@ -133,6 +133,18 @@ func (s *Server) logConnectionDenied(transport string, b *authz.Binding) {
 		map[string]interface{}{"binding": b.Value, "claim": string(b.Claim)})
 }
 
+// invalidateRoleCache makes this hub's next authorization decision read the
+// runtime bindings as they stand (Task 20412). A no-op before the store is
+// open.
+func (s *Server) invalidateRoleCache() {
+	s.roles.mu.Lock()
+	store := s.roles.store
+	s.roles.mu.Unlock()
+	if store != nil {
+		store.Invalidate()
+	}
+}
+
 // closeRoleStore releases the runtime binding database handle.
 func (s *Server) closeRoleStore() {
 	s.roles.mu.Lock()

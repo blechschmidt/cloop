@@ -141,6 +141,9 @@ type SessionRef struct {
 	IP        string    `json:"ip,omitempty"`
 	IssuedAt  time.Time `json:"issued_at,omitempty"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// Kind is browser or cli: a terminal signed in with `cloop login` holds a
+	// session like a browser does, and is severed with it (Task 20412).
+	Kind string `json:"kind,omitempty"`
 }
 
 // TokenRef is one API token or glasses link.

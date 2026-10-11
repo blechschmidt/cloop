@@ -581,7 +581,9 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// other one has to keep serving a dashboard while it is. 0065 (hub_tls,
 	// Task 20409) is applied by the first hub that starts a monitor under
 	// tls: auto, beside an older one that still serves the same database.
-	for _, v := range []int{35, 36, 41, 65} {
+	// 0066 (terminal sign-in, Task 20412) appends two columns to sessions,
+	// which the :8080 hub's binary reads on every request it authenticates.
+	for _, v := range []int{35, 36, 41, 65, 66} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

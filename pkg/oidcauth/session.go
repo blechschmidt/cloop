@@ -70,6 +70,38 @@ type SessionRecord struct {
 	// zero value, which is a session created before these columns existed.
 	ClaimsAsOf     time.Time
 	ClaimsExpireAt time.Time
+
+	// Kind is what the session authenticates (Task 20412): a browser, by its
+	// cookie, or a terminal, by `Authorization: Bearer cloop_cli_…`. Neither
+	// is accepted the other way. Empty reads as a browser session — see
+	// IsCLI — and Client is the host name a terminal reported, a label like
+	// IP and UserAgent.
+	Kind   SessionKind
+	Client string
+}
+
+// ExpiryCutoffs are the absolute times a store compares sessions against to
+// decide which have ended: Absolute against ExpiresAt for every kind, and the
+// two idle cutoffs against LastSeen — Idle for browser sessions, CLIIdle for
+// terminal ones, whose idle clock is their own (Task 20412). A zero idle
+// cutoff matches no session with a recorded LastSeen, which is how a disabled
+// idle clock is expressed.
+type ExpiryCutoffs struct {
+	Absolute time.Time
+	Idle     time.Time
+	CLIIdle  time.Time
+}
+
+// ended reports whether rec is past one of c's cutoffs.
+func (c ExpiryCutoffs) ended(rec SessionRecord) bool {
+	if !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(c.Absolute) {
+		return true
+	}
+	idle := c.Idle
+	if rec.IsCLI() {
+		idle = c.CLIIdle
+	}
+	return !rec.LastSeen.After(idle)
 }
 
 // Expired reports whether the session is past its absolute ceiling.
@@ -114,11 +146,10 @@ type SessionStore interface {
 	// removes all of them), returning what it deleted so each can be audited.
 	DeleteBySubject(subject, keepID string) ([]SessionRecord, error)
 
-	// DeleteExpired removes sessions whose ExpiresAt is at or before
-	// absoluteCutoff, or whose LastSeen is at or before idleCutoff, returning
-	// what it deleted. Both cutoffs are absolute times: the store holds no
-	// opinion about how long a session should live.
-	DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]SessionRecord, error)
+	// DeleteExpired removes sessions past one of c's cutoffs, returning what
+	// it deleted. The cutoffs are absolute times: the store holds no opinion
+	// about how long a session should live.
+	DeleteExpired(c ExpiryCutoffs) ([]SessionRecord, error)
 
 	// DueForRefresh returns up to limit sessions holding a refresh token whose
 	// last IdP check is at or before cutoff, oldest first.
@@ -334,6 +365,16 @@ type SessionAudit struct {
 	// an event an auditor can act on and one that only says something changed.
 	DroppedClaims []string
 
+	// Kind and Client describe the session the event is about (Task 20412):
+	// browser or cli, and for a terminal the host name it reported. Empty
+	// Kind means the emitter did not know, which the sink leaves out.
+	Kind   SessionKind
+	Client string
+
+	// Device is set on the device.* events and names the authorization; the
+	// sink files those under it rather than under SessionID.
+	Device *DeviceAuditDetail
+
 	// Via names the path an event arrived by when it was not the hub's own
 	// doing: "browser_renewal" for claims a silent renewal re-asserted from
 	// the user's browser (Task 20359). Empty for the server-side refresh.
@@ -454,14 +495,12 @@ func (m *memStore) DeleteBySubject(subject, keepID string) ([]SessionRecord, err
 	return out, nil
 }
 
-func (m *memStore) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]SessionRecord, error) {
+func (m *memStore) DeleteExpired(c ExpiryCutoffs) ([]SessionRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []SessionRecord
 	for id, s := range m.rows {
-		expired := !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(absoluteCutoff)
-		idle := !s.LastSeen.After(idleCutoff)
-		if !expired && !idle {
+		if !c.ended(s) {
 			continue
 		}
 		out = append(out, s)
@@ -471,14 +510,12 @@ func (m *memStore) DeleteExpired(absoluteCutoff, idleCutoff time.Time) ([]Sessio
 }
 
 // CountLive counts the sessions DeleteExpired would keep.
-func (m *memStore) CountLive(absoluteCutoff, idleCutoff time.Time) (int, error) {
+func (m *memStore) CountLive(c ExpiryCutoffs) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for _, s := range m.rows {
-		expired := !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(absoluteCutoff)
-		idle := !s.LastSeen.After(idleCutoff)
-		if !expired && !idle {
+		if !c.ended(s) {
 			n++
 		}
 	}

@@ -545,6 +545,46 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 				config.OIDCMaxClaimAgeMinutesDefault, config.OIDCDisabledSentinel, n)
 		}
 		cfg.UI.OIDC.MaxClaimAgeMinutes = n
+	case "ui.oidc.device_login":
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "on":
+			v := true
+			cfg.UI.OIDC.DeviceLogin = &v
+		case "false", "0", "no", "off":
+			v := false
+			cfg.UI.OIDC.DeviceLogin = &v
+		default:
+			return fmt.Errorf("ui.oidc.device_login must be true or false (got %q)", value)
+		}
+	case "ui.oidc.cli_session_ttl_hours", "ui.oidc.cli_idle_timeout_hours":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("%s: expected integer, got %q", key, value)
+		}
+		// The ceiling is the browser session's own clock, which the
+		// effective value is held down to; the hard bounds here are the ones
+		// the browser's keys take.
+		if n != 0 && (n < config.OIDCSessionTTLHoursLower || n > config.OIDCSessionTTLHoursUpper) {
+			return fmt.Errorf("%s must be between %d and %d (or 0 to match the browser session's) (got %d)",
+				key, config.OIDCSessionTTLHoursLower, config.OIDCSessionTTLHoursUpper, n)
+		}
+		if key == "ui.oidc.cli_session_ttl_hours" {
+			cfg.UI.OIDC.CLISessionTTLHours = n
+		} else {
+			cfg.UI.OIDC.CLIIdleTimeoutHours = n
+		}
+	case "ui.oidc.device_approval_max_age_minutes":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.device_approval_max_age_minutes: expected integer, got %q", value)
+		}
+		if n != 0 && n != config.OIDCDisabledSentinel &&
+			(n < config.OIDCDeviceApprovalMaxAgeMinutesLower || n > config.OIDCDeviceApprovalMaxAgeMinutesUpper) {
+			return fmt.Errorf("ui.oidc.device_approval_max_age_minutes must be between %d and %d (0 for the default %d, %d never to ask for a fresh sign-in) (got %d)",
+				config.OIDCDeviceApprovalMaxAgeMinutesLower, config.OIDCDeviceApprovalMaxAgeMinutesUpper,
+				config.OIDCDeviceApprovalMaxAgeMinutesDefault, config.OIDCDisabledSentinel, n)
+		}
+		cfg.UI.OIDC.DeviceApprovalMaxAgeMinutes = n
 	case "ui.oidc.clock_skew_seconds":
 		n, err := strconv.Atoi(value)
 		if err != nil {

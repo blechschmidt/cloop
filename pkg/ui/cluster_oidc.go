@@ -47,6 +47,9 @@ func (s *Server) InstallOIDCHooks(cfg *oidcauth.Config) {
 		return
 	}
 	cfg.OnCacheInvalidate = s.onSessionChanged
+	// A terminal's approved code becomes a session only for an identity no
+	// runtime deny binding names (Task 20412).
+	cfg.SessionGate = s.cliSessionGate
 	n := s.clusterNode()
 	if n == nil {
 		return

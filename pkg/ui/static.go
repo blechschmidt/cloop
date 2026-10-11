@@ -50,7 +50,7 @@ import (
 // The icon set (Task 20228) is listed explicitly rather than as a directory
 // glob so that an asset which is never served cannot slip into the binary.
 //
-//go:embed assets/index.html assets/glasses.html assets/app.css assets/chart.umd.min.js assets/js
+//go:embed assets/index.html assets/glasses.html assets/device.html assets/app.css assets/chart.umd.min.js assets/js
 //go:embed assets/favicon.ico assets/icon-192.png assets/icon-512.png
 //go:embed assets/apple-touch-icon.png assets/icon.svg assets/manifest.webmanifest
 var assetFS embed.FS
@@ -171,6 +171,9 @@ var deferredScripts = []struct{ token, path string }{
 var pageScripts = []struct{ token, path string }{
 	{"theme.js", "assets/js/page/theme.js"},
 	{"glasses.js", "assets/js/page/glasses.js"},
+	// The terminal sign-in approval page's (Task 20412), a document of its
+	// own like the glasses front end.
+	{"device.js", "assets/js/page/device.js"},
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
@@ -220,6 +223,11 @@ type assetSet struct {
 	// beside it (pageScripts), fetched once per deploy.
 	glasses *staticAsset
 
+	// device is the terminal sign-in approval page, served from /device (Task
+	// 20412). Not content-addressed, like glasses: the terminal prints its
+	// address. Its script is the hashed device.js (pageScripts).
+	device *staticAsset
+
 	// The individual sources, kept so tests can assert over the whole front
 	// end the way they used to assert over the dashboardHTML constant.
 	css    string
@@ -251,6 +259,9 @@ type assetSet struct {
 	// renderedGlasses is glassesTmpl with its asset URLs filled in: the
 	// document /glasses serves.
 	renderedGlasses string
+	// deviceTmpl and renderedDevice are the same pair for /device.
+	deviceTmpl     string
+	renderedDevice string
 }
 
 // deferredScript is one of deferredScripts, as written and as served (its
@@ -289,6 +300,7 @@ func buildAssets() *assetSet {
 	indexTmpl := read("assets/index.html")
 
 	glassesTmpl := read("assets/glasses.html")
+	deviceTmpl := read("assets/device.html")
 
 	// Comments are for maintainers, not for every browser that paints the
 	// dashboard; they were over a third of its script's wire bytes, and of its
@@ -320,6 +332,7 @@ func buildAssets() *assetSet {
 		servedBoundary: servedBoundary,
 		indexTmpl:      string(indexTmpl),
 		glassesTmpl:    string(glassesTmpl),
+		deviceTmpl:     string(deviceTmpl),
 	}
 
 	// name → (placeholder token, base file name, content type, bytes).
@@ -361,13 +374,14 @@ func buildAssets() *assetSet {
 		set.pageScripts[d.token] = script(d.token, d.path)
 	}
 
-	page, glasses := set.indexTmpl, set.glassesTmpl
+	page, glasses, device := set.indexTmpl, set.glassesTmpl, set.deviceTmpl
 	for _, h := range hashed {
 		url := "/assets/" + h.stem + "." + contentHash(h.body) + "." + h.ext
 		a := newStaticAsset(h.ctype, cacheImmutable, h.body)
 		set.byPath[url] = a
 		page = strings.ReplaceAll(page, "{{asset:"+h.token+"}}", url)
 		glasses = strings.ReplaceAll(glasses, "{{asset:"+h.token+"}}", url)
+		device = strings.ReplaceAll(device, "{{asset:"+h.token+"}}", url)
 	}
 
 	// And the page's own comments, the last prose on the first paint: 22 KB
@@ -384,6 +398,14 @@ func buildAssets() *assetSet {
 	// this still the page I have" without ever serving a stale one.
 	set.renderedGlasses = glasses
 	set.glasses = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(glasses))
+	// The approval page's comments explain the page to its maintainers, not
+	// to the person approving: stripped like index.html's.
+	set.renderedDevice = device
+	servedDevice, deviceErr := stripHTMLComments(device)
+	if deviceErr != nil {
+		fmt.Fprintf(os.Stderr, "ui: serving the approval page with its comments: %v\n", deviceErr)
+	}
+	set.device = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(servedDevice))
 	return set
 }
 

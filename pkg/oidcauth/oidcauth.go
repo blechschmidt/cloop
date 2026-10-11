@@ -309,6 +309,36 @@ type Config struct {
 	// Implementations must not block.
 	RenewObserver func(RenewOutcome)
 
+	// DeviceLogin turns on the device authorization grant that signs a
+	// terminal in (Task 20412, device.go): `cloop login` against this hub.
+	DeviceLogin bool
+
+	// CLISessionTTL and CLIIdleTimeout are a terminal session's two clocks.
+	// Zero uses the browser's; anything longer than the browser's is held
+	// down to it, because a terminal session — the credential that sits in a
+	// file — is never longer-lived than a browser one. A negative
+	// CLIIdleTimeout turns the terminal's idle clock off only where the
+	// browser's is off too.
+	CLISessionTTL  time.Duration
+	CLIIdleTimeout time.Duration
+
+	// DeviceApprovalMaxAge is how long ago a browser session may have signed
+	// in and still approve a terminal without signing in again at the
+	// identity provider. Zero uses DefaultDeviceApprovalMaxAge; negative
+	// never asks.
+	DeviceApprovalMaxAge time.Duration
+
+	// Devices persists device authorizations. Nil uses Store when it is also
+	// a DeviceStore (pkg/sessionstore is), and process memory otherwise.
+	Devices DeviceStore
+
+	// SessionGate is asked before a terminal session is written for an
+	// approved code, with the identity the provider just asserted; an error
+	// refuses it and denies the code. pkg/ui supplies a check of the runtime
+	// deny bindings, so an account being offboarded cannot start a terminal
+	// session on the way out. Nil admits everyone the provider vouches for.
+	SessionGate func(Identity) error
+
 	// RequestIsTLS reports whether a request reached the hub over TLS as the
 	// browser sees it: the hub's own listener, or a proxy the hub trusts that
 	// said so in X-Forwarded-Proto (Task 20394). cookie_secure "auto"
@@ -366,6 +396,12 @@ type Identity struct {
 	// empty and every identity falls back to oidc.default_role.
 	Groups []string `json:"groups,omitempty"`
 	Roles  []string `json:"roles,omitempty"`
+
+	// AuthTime is the id_token's auth_time: when the person last actually
+	// authenticated at the provider, as opposed to when the token was minted.
+	// Read once, by an approval that demanded a fresh sign-in (device.go), and
+	// never stored or serialised.
+	AuthTime time.Time `json:"-"`
 }
 
 // OwnerKey returns the stable string used to record project ownership:
@@ -421,6 +457,14 @@ type pendingLogin struct {
 	silent      bool
 	sessionHash string
 	subject     string
+
+	// device marks an approval of a terminal's code (Task 20412): the
+	// callback writes the terminal's session from what the provider returns,
+	// for the authorization named by this device code digest, and only if the
+	// provider answers for subject. reauth records that the request demanded a
+	// fresh sign-in, which the callback then holds the provider to.
+	device string
+	reauth bool
 }
 
 // cachedSession is one entry of the read-through session cache.
@@ -457,6 +501,9 @@ type Authenticator struct {
 	jwksFetched time.Time
 
 	store SessionStore
+
+	// devices holds the terminal sign-ins in flight (Task 20412).
+	devices DeviceStore
 
 	// idpMu guards the readiness view: whether the issuer has ever resolved,
 	// and the last failure if it has not.
@@ -622,9 +669,18 @@ func New(cfg Config) (*Authenticator, error) {
 			"past that the setting extends the life of every expired token rather than "+
 			"compensating for drift", cfg.ClockSkew, MaxClockSkew))
 	}
+	normalizeDeviceConfig(&cfg)
 	store := cfg.Store
 	if store == nil {
 		store = NewMemorySessionStore(maxSessions)
+	}
+	devices := cfg.Devices
+	if devices == nil {
+		if ds, ok := store.(DeviceStore); ok {
+			devices = ds
+		} else {
+			devices = NewMemoryDeviceStore()
+		}
 	}
 	a := &Authenticator{
 		cfg:      cfg,
@@ -634,6 +690,7 @@ func New(cfg Config) (*Authenticator, error) {
 		cache:    map[string]*cachedSession{},
 		flights:  map[string]*claimFlight{},
 		store:    store,
+		devices:  devices,
 	}
 	a.noteFrameOrigins(nil)
 	return a, nil
@@ -900,11 +957,19 @@ const (
 	// reads as "can people sign in". Its own verdict goes to
 	// Config.RenewObserver.
 	LoginRenewal LoginOutcome = "renewal"
+
+	// LoginDevice means the callback completed the approval of a terminal's
+	// code rather than a sign-in (Task 20412). Not a sign-in verdict either:
+	// it shares the callback route for the reason a renewal does, and its
+	// outcome is in the device.* audit events.
+	LoginDevice LoginOutcome = "device_approval"
 )
 
 // Recorded reports whether o is a verdict worth counting. Neither a pending
-// login nor a silent renewal is a sign-in verdict.
-func (o LoginOutcome) Recorded() bool { return o != LoginPending && o != LoginRenewal }
+// login, a silent renewal nor a terminal's approval is a sign-in verdict.
+func (o LoginOutcome) Recorded() bool {
+	return o != LoginPending && o != LoginRenewal && o != LoginDevice
+}
 
 // BeginLogin starts the authorization-code flow: it records a one-shot
 // state + nonce + PKCE verifier and redirects the browser to the IdP's
@@ -1057,6 +1122,10 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) L
 		a.completeRenew(w, r, p, q)
 		return LoginRenewal
 	}
+	if p != nil && p.device != "" {
+		a.completeDeviceApproval(w, r, p, q)
+		return LoginDevice
+	}
 	if e := q.Get("error"); e != "" {
 		desc := strings.TrimSpace(e + " " + q.Get("error_description"))
 		a.errorPage(w, http.StatusForbidden, "The identity provider rejected the sign-in: "+desc, nil)
@@ -1131,6 +1200,13 @@ func isPreflightFailure(err error) bool {
 // through safeReturnPath, and loginLandingHTML escapes it for each of the
 // three grammars it lands in anyway.
 func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request, returnTo string) {
+	a.completeLanding(w, r, returnTo, "Signed in. Opening the dashboard…")
+}
+
+// completeLanding is completeLogin's mechanism with its own line of text: the
+// approval of a terminal's code returns to the approval page the same way,
+// across the same cross-site redirect (Task 20412).
+func (a *Authenticator) completeLanding(w http.ResponseWriter, r *http.Request, returnTo, message string) {
 	dest := returnTo
 	if dest == "" {
 		dest = "/"
@@ -1143,7 +1219,7 @@ func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, loginLandingHTML(dest))
+	_, _ = io.WriteString(w, landingHTML(dest, message))
 }
 
 // loginLandingHTML is served once, immediately after sign-in. It is a page
@@ -1155,6 +1231,12 @@ func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request, re
 // to location.replace: the hub's policy runs no inline script (Task 20408), and
 // a value never spliced into JavaScript has no string literal to escape.
 func loginLandingHTML(dest string) string {
+	return landingHTML(dest, "Signed in. Opening the dashboard…")
+}
+
+// landingHTML is loginLandingHTML with the line of text the page shows. The
+// message is always this package's own constant text, escaped regardless.
+func landingHTML(dest, message string) string {
 	attr := html.EscapeString(dest)
 	return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1162,7 +1244,7 @@ func loginLandingHTML(dest string) string {
 <title>Signing in…</title>
 <style>body{font:14px system-ui,sans-serif;margin:4rem auto;max-width:28rem;text-align:center;color:#333}</style>
 </head><body>
-<p>Signed in. Opening the dashboard…</p>
+<p>` + html.EscapeString(message) + `</p>
 <p><a id="continue" href="` + attr + `">Continue</a></p>
 <script src="` + ScriptPath + `"></script>
 </body></html>

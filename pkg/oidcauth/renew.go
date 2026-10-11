@@ -179,7 +179,9 @@ func (a *Authenticator) BrowserRenewIn(id string) (time.Duration, bool) {
 		return 0, false
 	}
 	rec, err := a.storedSession(id)
-	if err != nil || rec.RefreshToken != "" {
+	// A terminal session has no browser to renew from; its claims are
+	// re-asserted by the hub's own refresh or not at all (Task 20412).
+	if err != nil || rec.RefreshToken != "" || rec.IsCLI() {
 		return 0, false
 	}
 	return renewAfter(rec, a.cfg.MaxClaimAge, a.now()), true
@@ -238,7 +240,10 @@ func (a *Authenticator) BeginRenew(w http.ResponseWriter, r *http.Request) Renew
 	// Looked up without advancing the idle clock: a renewal is the dashboard
 	// keeping its authority current, not the user doing anything, and counting
 	// it as activity would keep an unattended tab's session alive forever.
-	rec, ok := a.peekSession(r)
+	//
+	// The cookie's session only: renewal runs in a browser frame, and a
+	// terminal session has no browser to run it in (Task 20412).
+	rec, ok := a.peekCookieSession(r)
 	if !ok {
 		return a.renewResult(w, renewVerdict{outcome: RenewNoSession})
 	}

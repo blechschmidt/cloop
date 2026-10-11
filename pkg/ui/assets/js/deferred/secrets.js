@@ -1714,6 +1714,8 @@
       truncated: false,
       absoluteTTL: 0,
       idleTimeout: 0,
+      cliAbsoluteTTL: 0,
+      cliIdleTimeout: 0,
       durable: true,
       idpRevocation: true,
       maxClaimAge: 0,
@@ -1728,6 +1730,8 @@
         sessState.truncated     = !!d.truncated;
         sessState.absoluteTTL   = d.absolute_ttl_seconds || 0;
         sessState.idleTimeout   = d.idle_timeout_seconds || 0;
+        sessState.cliAbsoluteTTL = d.cli_absolute_ttl_seconds || 0;
+        sessState.cliIdleTimeout = d.cli_idle_timeout_seconds || 0;
         sessState.durable       = d.durable !== false;
         sessState.idpRevocation = d.idp_revocation !== false;
         sessState.maxClaimAge   = d.max_claim_age_seconds || 0;
@@ -1759,6 +1763,13 @@
           'if it cannot be confirmed.'
         : ' Claim-freshness checking is disabled (<code>max_claim_age_minutes: -1</code>), so privileged ' +
           'actions use the groups and roles captured at sign-in however old they are.';
+      // A terminal's session (cloop login) runs on clocks of its own, never
+      // longer than a browser's; said only when they differ.
+      const cli = sessState.cliAbsoluteTTL > 0 &&
+        (sessState.cliAbsoluteTTL !== sessState.absoluteTTL || sessState.cliIdleTimeout !== sessState.idleTimeout)
+        ? ' Terminal sessions (<code>cloop login</code>) end after ' + esc(_secFmtDuration(sessState.cliAbsoluteTTL)) +
+          (sessState.cliIdleTimeout > 0 ? ', or after ' + esc(_secFmtDuration(sessState.cliIdleTimeout)) + ' unused.' : '.')
+        : '';
       const refused = sessState.claimsRefused > 0
         ? ' <strong>' + sessState.claimsRefused + '</strong> privileged action' +
           (sessState.claimsRefused === 1 ? ' has' : 's have') +
@@ -1768,7 +1779,7 @@
         'Sessions end after ' + esc(_secFmtDuration(sessState.absoluteTTL)) + ' regardless of activity, or sooner if they ' +
         esc(idle) + '. Terminating one takes effect on this hub immediately and on any other replica within 30 seconds; ' +
         'work already running on behalf of that user is not interrupted, only their access to start more.' +
-        claims + refused;
+        cli + claims + refused;
     }
 
     // _sessRenderBanner surfaces the two degraded modes where the operator will act
@@ -1823,9 +1834,10 @@
         return '<tr' + (s.current ? ' style="background:var(--hover-bg)"' : '') + '>' +
           '<td><strong>' + esc(who) + '</strong>' +
             (s.email && s.email !== who ? '<br><span class="sec-count">' + esc(s.email) + '</span>' : '') +
-            (s.current ? ' <span class="sec-chip kind">this session</span>' : '') + '</td>' +
+            (s.current ? ' <span class="sec-chip kind">this session</span>' : '') +
+            (s.kind === 'cli' ? ' <span class="sec-chip kind" title="signed in with cloop login">terminal</span>' : '') + '</td>' +
           '<td class="sec-fp">' + esc(s.ip || '—') + '</td>' +
-          '<td class="sec-hide-sm" title="' + esc(s.user_agent || '') + '">' + esc(_sessDevice(s.user_agent)) + '</td>' +
+          '<td class="sec-hide-sm" title="' + esc(s.user_agent || '') + '">' + esc(_sessDevice(s.user_agent, s)) + '</td>' +
           '<td class="audit-time sec-hide-sm">' + esc(_secFmtTime(s.issued_at)) + '</td>' +
           '<td>' + _sessIdleCell(s) + '</td>' +
           '<td><span class="' + _secTTLClass(s.expires_in_seconds) + '">' +
@@ -1875,11 +1887,13 @@
     // simply quiet. Without the comparison "idle 2h" means nothing on its own.
     function _sessIdleCell(s) {
       const idle = Math.max(0, s.idle_seconds || 0);
+      // A terminal's session idles out on its own clock.
+      const limit = s.kind === 'cli' ? sessState.cliIdleTimeout : sessState.idleTimeout;
       let cls = 'sec-ttl';
-      if (sessState.idleTimeout > 0) {
-        const left = sessState.idleTimeout - idle;
-        if (left <= 0)                         cls = 'sec-ttl gone';
-        else if (left < sessState.idleTimeout * 0.2) cls = 'sec-ttl warn';
+      if (limit > 0) {
+        const left = limit - idle;
+        if (left <= 0)               cls = 'sec-ttl gone';
+        else if (left < limit * 0.2) cls = 'sec-ttl warn';
       }
       return '<span class="' + cls + '">' + esc(_secFmtDuration(idle)) + '</span>';
     }
@@ -1888,7 +1902,10 @@
     // and purely cosmetic: the full string is in the cell's title, and nothing
     // keys off either — a User-Agent is attacker-supplied, so it is a label to
     // recognise a session by, never an input to a decision.
-    function _sessDevice(ua) {
+    function _sessDevice(ua, s) {
+      // A terminal signed in with `cloop login` (Task 20412) names its host;
+      // its user agent is cloop's own.
+      if (s && s.kind === 'cli') return 'Terminal' + (s.client ? ' · ' + s.client : '');
       if (!ua) return '—';
       const browser =
         /Edg\//.test(ua)                        ? 'Edge'    :

@@ -467,6 +467,12 @@ type Server struct {
 	// static_token.go.
 	staticTok staticTokenGuard
 
+	// deviceCodes and deviceMisses limit terminal sign-in (Task 20412,
+	// device_api.go): codes issued per client address, and codes a browser
+	// looked up that did not exist. Zero values are ready.
+	deviceCodes  windowCounter
+	deviceMisses windowCounter
+
 	// openAPI is the rendered API description, built once by
 	// registerRoutes. See openapi_api.go for why it is not built on
 	// demand: walking the route table from inside a request handler makes
@@ -1960,8 +1966,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // the feature exists to remove. They refuse outright when ui.ci.enabled is
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
-	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r)
+	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
+		isDeviceGrantEndpoint(r)
 }
+
+// The terminal sign-in endpoints (Task 20412, isDeviceGrantEndpoint) are the
+// second kind as well: a terminal asking for a code, and polling for the
+// answer, holds no credential yet — that is what it is asking for. They refuse
+// outright on a hub without single sign-on or with ui.oidc.device_login off,
+// and are bounded as device_api.go describes.
 
 // isPublicAsset reports whether the request is for one of the content-hashed
 // assets under /assets/: the dashboard's script and stylesheet, the deferred
@@ -6628,11 +6641,27 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	// get the projects page, and address theirs by index.
 	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0 ||
 		!statusesInclude(statuses, s.primaryProjectPath())
-	jsonOK(w, map[string]interface{}{
+	body := map[string]interface{}{
 		"projects":      statuses,
 		"stats":         stats,
 		"multi_project": multiProject,
-	})
+	}
+	// The index each project answers to in ?project_idx and
+	// /api/projects/{idx}, keyed by path, for a client that names projects
+	// rather than counting cards — `cloop remote` (Task 20412). The position
+	// in visibleProjectEntries, as the glasses' list computes it, not in the
+	// status list, which can omit a project whose state failed to load and
+	// shift every index after it. Asked for, so the dashboard's payload is
+	// unchanged.
+	if r.URL.Query().Get("indices") == "1" {
+		visible := s.visibleProjectEntries(r)
+		indices := make(map[string]int, len(visible))
+		for i, e := range visible {
+			indices[e.Path] = i
+		}
+		body["indices"] = indices
+	}
+	jsonOK(w, body)
 }
 
 // handleProjectsEvents is an SSE endpoint for multi-project updates.

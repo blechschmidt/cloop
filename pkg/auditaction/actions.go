@@ -359,6 +359,18 @@ const (
 	// different subject than the session's, which leaves the session as it was.
 	ActionSessionRenewalMismatch Action = "session.renewal_mismatch"
 
+	// ── device ─────────────────────────────────────────────────────────────
+
+	// ActionDeviceCodeIssued records a terminal asking for a sign-in code
+	// (`cloop login`, Task 20412).
+	ActionDeviceCodeIssued Action = "device.code_issued"
+	// ActionDeviceApproved records a signed-in browser approving a terminal's
+	// code, and the CLI session it became.
+	ActionDeviceApproved Action = "device.approved"
+	// ActionDeviceDenied records a terminal's code denied — in the browser, or
+	// by the hub on the approver's behalf.
+	ActionDeviceDenied Action = "device.denied"
+
 	// ── request ────────────────────────────────────────────────────────────
 
 	// ActionRequestOriginRefused records a state-changing request or a

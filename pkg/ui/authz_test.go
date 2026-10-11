@@ -74,6 +74,25 @@ var publicRouteAllowlist = map[string]string{
 		"and taking no id — there is no parameter that could reach someone else's, and requiring a " +
 		"permission would put an operator in the path of the one action a user must be able to take " +
 		"immediately after losing a device",
+	"POST /api/device/code": "a terminal asking for a sign-in code (`cloop login`, Task 20412) holds no credential " +
+		"yet — that is what it is asking for. Served before authentication too (isDeviceGrantEndpoint). Bounded " +
+		"rather than gated: codes per client address and hub-wide, a code is worth nothing until a signed-in " +
+		"person approves it, and the request commits to a session credential the terminal already holds",
+	"POST /api/device/token": "the same terminal polling for the answer (Task 20412). It names a 256-bit device " +
+		"code, learns about that code alone, is held to the polling interval by slow_down, and hands out no " +
+		"credential even once approved — the terminal committed to its own when it asked for the code",
+	"GET /device": "the terminal sign-in approval page (Task 20412): a static document like the SPA shell, " +
+		"loaded only after authMiddleware sent a browser without a session through sign-in and back; everything " +
+		"it shows comes from the three decision routes below",
+	"POST /api/device/lookup": "the approval page reading one code (Task 20412). Self-scoped like logout-all — it " +
+		"resolves the code for the caller's own browser session and nobody else's — and oidcauth refuses any " +
+		"credential but a browser's session cookie; misses are rate-limited per session",
+	"POST /api/device/approve": "approving signs the caller's own terminal in as the caller (Task 20412): no role " +
+		"it could exceed, nobody else it could act for. oidcauth takes only a browser session cookie — never a " +
+		"terminal's session or an API token — and the approval completes only through a fresh identity-provider " +
+		"round trip for the same subject",
+	"POST /api/device/deny": "refusing a code a terminal asked for (Task 20412): self-scoped, browser sessions only, " +
+		"and denying grants nothing",
 	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
 	"POST /api/csp-report": "Content-Security-Policy violation reports, sent by the browser itself (Task 20408). " +

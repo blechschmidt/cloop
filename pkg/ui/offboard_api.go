@@ -118,6 +118,13 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 		rep.Warnings = append(rep.Warnings, "the secret store could not be opened, so personal secrets, "+
 			"their grants and pending requests were not checked: "+serr.Error())
 	}
+	// The deny bindings went in the same transaction, behind the role
+	// store's cache: on this hub they hold from the next request rather than
+	// within its refresh interval (Task 20412). Other members still take up
+	// to rolestore.DefaultTTL, as for any runtime binding.
+	if len(rep.DeniesWritten) > 0 {
+		s.invalidateRoleCache()
+	}
 	// Memberships went in the credential transaction, behind the store's
 	// back: bring this hub's cache up to date now — which also closes the
 	// person's open streams on those projects — and tell the other members.
@@ -237,6 +244,7 @@ func (s authSessions) List() ([]offboard.SessionRef, error) {
 			IP:        rec.IP,
 			IssuedAt:  rec.IssuedAt,
 			ExpiresAt: rec.ExpiresAt,
+			Kind:      rec.KindName(),
 		})
 	}
 	return out, nil

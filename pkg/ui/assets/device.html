@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<!--
+  Approve a terminal sign-in (Task 20412).
+
+  `cloop login` prints a code and this page's address. A signed-in browser
+  enters the code here, sees who is asking and from where, and approves or
+  denies it. Approving sends the browser through the identity provider once
+  more; its callback writes the terminal's session and comes back here, and
+  the page reads the outcome back from the hub rather than trusting the URL.
+
+  A document of its own, not a dashboard tab: it costs the dashboard's first
+  paint nothing, and it runs no script but js/page/device.js — the hub's
+  policy runs no inline script and no inline handler (Task 20408). Every value
+  the hub returns is set as text, never as markup: the host name and user agent
+  on this page are whatever the terminal chose to send.
+
+  The warning is not decoration. Device-code phishing — a code somebody else
+  started, sent to you with a plausible story — is the known attack on this
+  grant, and nothing in the protocol can tell it from your own. What can is
+  you, reading where the request came from beside where you are.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Sign in a terminal · cloop</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#c9d1d9;--dim:#8b949e;--accent:#58a6ff;--warn-bg:#3a2a12;--warn-line:#d29922;--bad:#f85149;--good:#3fb950}
+@media (prefers-color-scheme: light){:root{--bg:#f6f8fa;--card:#fff;--line:#d0d7de;--fg:#1f2328;--dim:#59636e;--accent:#0969da;--warn-bg:#fff8c5;--warn-line:#9a6700;--bad:#cf222e;--good:#1a7f37}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:34rem;margin:6vh 1rem 2rem;padding:1.75rem;background:var(--card);border:1px solid var(--line);border-radius:12px}
+h1{font-size:1.25rem;margin:0 0 .5rem}
+p{margin:.5rem 0}
+.lead{color:var(--dim)}
+label{display:block;font-weight:600;margin:1rem 0 .35rem}
+.row{display:flex;gap:.5rem;flex-wrap:wrap}
+input{flex:1 1 12rem;min-width:0;padding:.6rem .75rem;font:600 1.15rem/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{padding:.6rem 1.1rem;font:inherit;font-weight:600;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+button:disabled{opacity:.55;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{color:var(--bad);border-color:var(--bad)}
+.warning{margin:1.1rem 0;padding:.85rem 1rem;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:8px}
+.warning strong{display:block;margin-bottom:.25rem}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:1rem 0}
+dt{color:var(--dim)}
+dd{margin:0;word-break:break-word;overflow-wrap:anywhere}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.note{padding:.6rem .8rem;border-left:3px solid var(--warn-line);color:var(--fg)}
+.note.ok{border-left-color:var(--good)}
+.actions{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1.25rem}
+#status{min-height:1.5em;margin-top:1rem;font-weight:600}
+#status.bad{color:var(--bad)}
+#status.good{color:var(--good)}
+[hidden]{display:none!important}
+@media (max-width:420px){dl{grid-template-columns:1fr}dt{margin-top:.4rem}}
+</style>
+<script src="{{asset:device.js}}" defer></script>
+</head>
+<body>
+<main>
+  <h1>Sign in a terminal</h1>
+  <p class="lead">A terminal running <code>cloop login</code> shows a code. Enter it to sign that terminal in to this hub as you.</p>
+
+  <form id="code-form" autocomplete="off">
+    <label for="code">Code shown in your terminal</label>
+    <div class="row">
+      <input id="code" name="code" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="24" placeholder="BCDFG-HJKLM" aria-describedby="code-help">
+      <button type="submit" id="continue">Continue</button>
+    </div>
+    <p id="code-help" class="lead">Ten letters, like <span class="mono">BCDFG-HJKLM</span>. Codes expire after ten minutes.</p>
+  </form>
+
+  <section id="request" hidden aria-labelledby="request-title">
+    <h2 id="request-title" hidden>The sign-in request</h2>
+    <div class="warning" role="alert">
+      <strong>Only approve a code you started yourself.</strong>
+      Approving signs whoever is running that terminal in to this hub as you — your projects, tasks, runs, logs and
+      sandbox terminals, with your permissions — until the session expires or is revoked. If somebody sent you this
+      code or this link, deny it.
+    </div>
+    <dl>
+      <dt>Signs in as</dt><dd id="who"></dd>
+      <dt>Code</dt><dd id="shown-code" class="mono"></dd>
+      <dt>Requested from</dt><dd id="from-ip" class="mono"></dd>
+      <dt>Your browser</dt><dd id="your-ip" class="mono"></dd>
+      <dt>Host name it reports</dt><dd id="from-host"></dd>
+      <dt>Client it reports</dt><dd id="from-agent"></dd>
+      <dt>Requested</dt><dd id="when"></dd>
+      <dt>Session</dt><dd id="lifetime"></dd>
+    </dl>
+    <p id="network-note" class="note" hidden></p>
+    <p id="reauth-note" class="note" hidden></p>
+    <div class="actions">
+      <button type="button" id="approve" class="primary">Approve</button>
+      <button type="button" id="deny" class="danger">Deny</button>
+    </div>
+  </section>
+
+  <p id="status" role="status" aria-live="polite"></p>
+</main>
+</body>
+</html>

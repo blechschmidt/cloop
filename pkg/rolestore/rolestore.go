@@ -115,6 +115,16 @@ func New(db *statedb.DB, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
+// Invalidate makes the next RuntimeBindings read the table rather than the
+// cache (Task 20412). For the moments a binding written a second ago must
+// already hold: minting a credential, and the offboarding that just wrote a
+// deny on this hub.
+func (s *Store) Invalidate() {
+	s.mu.Lock()
+	s.fetched = time.Time{}
+	s.mu.Unlock()
+}
+
 // RuntimeBindings implements authz.RuntimeSource.
 func (s *Store) RuntimeBindings() []authz.Binding {
 	s.mu.Lock()

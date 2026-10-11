@@ -84,11 +84,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-238 endpoints, by the permission each one requires:
+244 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 30 |
+| `public` (no permission) | 36 |
 | `audit.read` | 5 |
 | `config.write` | 15 |
 | `executor.manage` | 28 |
@@ -160,6 +160,11 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/cost/identities` | `project.read` | global |
 | POST | `/api/csp-report` | `public` | global |
 | GET | `/api/deps` | `project.read` | project |
+| POST | `/api/device/approve` | `public` | global |
+| POST | `/api/device/code` | `public` | global |
+| POST | `/api/device/deny` | `public` | global |
+| POST | `/api/device/lookup` | `public` | global |
+| POST | `/api/device/token` | `public` | global |
 | GET | `/api/dictate` | `project.read` | project |
 | GET | `/api/disk-usage` | `project.read` | project |
 | GET | `/api/epics` | `project.read` | project |
@@ -340,6 +345,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/auth/logout` | `public` | global |
 | GET | `/auth/renew` | `public` | global |
 | GET | `/auth/sign-in.js` | `public` | global |
+| GET | `/device` | `public` | global |
 | GET | `/favicon.ico` | `public` | global |
 | GET | `/glasses` | `public` | global |
 | GET | `/icon-192.png` | `public` | global |

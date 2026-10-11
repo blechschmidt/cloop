@@ -172,6 +172,41 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 		if ev.Via != "" {
 			payload["via"] = ev.Via
 		}
+		// Which kind of session — a browser's, or a terminal's from `cloop
+		// login` — and for a terminal the host name it reported (Task 20412).
+		if ev.Kind != "" {
+			payload["kind"] = string(ev.Kind)
+		}
+		if ev.Client != "" {
+			payload["client"] = ev.Client
+		}
+		// A device.* event is about a terminal's sign-in code rather than a
+		// session, and is filed under the code's public id. The ip and
+		// user_agent keys are then the browser that decided it; the client_*
+		// keys are the terminal that asked.
+		entityType, entityID := "session", ev.SessionID
+		if d := ev.Device; d != nil {
+			entityType, entityID = "device_authorization", d.ID
+			payload["device_id"] = d.ID
+			if d.ClientIP != "" {
+				payload["client_ip"] = d.ClientIP
+			}
+			if d.ClientUserAgent != "" {
+				payload["client_user_agent"] = d.ClientUserAgent
+			}
+			if d.ClientHostname != "" {
+				payload["client_hostname"] = d.ClientHostname
+			}
+			if !d.ExpiresAt.IsZero() {
+				payload["expires_at"] = d.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+			if d.Reauth {
+				payload["reauth"] = true
+			}
+			if ev.SessionID != "" {
+				payload["session_id"] = ev.SessionID
+			}
+		}
 		actor := ev.Actor
 		if actor == "" {
 			actor = "system"
@@ -189,8 +224,8 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 			Timestamp:  ev.At,
 			Actor:      actor,
 			EventType:  string(ev.Event),
-			EntityType: "session",
-			EntityID:   ev.SessionID,
+			EntityType: entityType,
+			EntityID:   entityID,
 			Payload:    statedb.MarshalAuditPayload(payload),
 		}); err != nil {
 			s.log().Warn(logger.EventAuthz, 0, "session audit: append",
@@ -264,6 +299,12 @@ type sessionView struct {
 	// Current marks the caller's own session so the panel can label it and
 	// warn before terminating it.
 	Current bool `json:"current"`
+
+	// Kind is browser or cli, and Client the host name a terminal reported
+	// when it signed in with `cloop login` (Task 20412). A terminal session
+	// is listed, and revoked, exactly as a browser's is.
+	Kind   string `json:"kind"`
+	Client string `json:"client,omitempty"`
 }
 
 type sessionsListResponse struct {
@@ -273,6 +314,10 @@ type sessionsListResponse struct {
 	// from a config file the reader may not have.
 	AbsoluteTTLSeconds int64 `json:"absolute_ttl_seconds"`
 	IdleTimeoutSeconds int64 `json:"idle_timeout_seconds"`
+	// The same for terminal sessions (Task 20412), whose clocks are their
+	// own and never longer.
+	CLIAbsoluteTTLSeconds int64 `json:"cli_absolute_ttl_seconds"`
+	CLIIdleTimeoutSeconds int64 `json:"cli_idle_timeout_seconds"`
 
 	// Durable is false when sessions live only in this process, and
 	// IdPRevocation false when no refresh token is retained. Both are
@@ -359,17 +404,19 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		claimAgeSeconds = int64(maxClaimAge.Seconds())
 	}
 	jsonOK(w, sessionsListResponse{
-		Sessions:           views,
-		AbsoluteTTLSeconds: int64(s.OIDC.SessionTTL().Seconds()),
-		IdleTimeoutSeconds: int64(s.OIDC.IdleTimeout().Seconds()),
-		Durable:            s.sessionStoreDurable(),
-		IdPRevocation:      s.SessionStoreSealsRefreshTokens(),
-		ClaimsReasserted:   reasserted,
-		ClaimsUnverified:   unverified,
-		MaxClaimAgeSeconds: claimAgeSeconds,
-		ClaimsRefused:      s.OIDC.ClaimsRefused(),
-		Total:              total,
-		Truncated:          truncated,
+		Sessions:              views,
+		AbsoluteTTLSeconds:    int64(s.OIDC.SessionTTL().Seconds()),
+		IdleTimeoutSeconds:    int64(s.OIDC.IdleTimeout().Seconds()),
+		CLIAbsoluteTTLSeconds: int64(s.OIDC.CLISessionTTL().Seconds()),
+		CLIIdleTimeoutSeconds: int64(s.OIDC.CLIIdleTimeout().Seconds()),
+		Durable:               s.sessionStoreDurable(),
+		IdPRevocation:         s.SessionStoreSealsRefreshTokens(),
+		ClaimsReasserted:      reasserted,
+		ClaimsUnverified:      unverified,
+		MaxClaimAgeSeconds:    claimAgeSeconds,
+		ClaimsRefused:         s.OIDC.ClaimsRefused(),
+		Total:                 total,
+		Truncated:             truncated,
 	})
 }
 
@@ -445,6 +492,8 @@ func toSessionView(rec oidcauth.SessionRecord, now time.Time, currentID string, 
 		ExpiresAt:   formatSessionTime(rec.ExpiresAt),
 		IdPChecked:  formatSessionTime(rec.RefreshCheckedAt),
 		Current:     currentID != "" && rec.ID == currentID,
+		Kind:        rec.KindName(),
+		Client:      rec.Client,
 
 		// ClaimsAssertedAt, not ClaimsAsOf: a session predating the claim
 		// columns reports its sign-in, which is when its claims were in fact

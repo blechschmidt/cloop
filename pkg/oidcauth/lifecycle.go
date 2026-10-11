@@ -49,6 +49,7 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 	rec := SessionRecord{
 		ID:        HashSessionID(sid),
 		Identity:  id,
+		Kind:      SessionKindBrowser,
 		IP:        RequestIP(r),
 		UserAgent: truncate(userAgent(r), 300),
 		IssuedAt:  now,
@@ -86,6 +87,7 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		UserAgent: rec.UserAgent,
 		At:        now,
 		Reason:    refreshReadyReason(refreshToken),
+		Kind:      SessionKindBrowser,
 	})
 	return sid, nil
 }
@@ -130,7 +132,7 @@ func (a *Authenticator) enforceSessionLimit(id Identity, now time.Time) {
 		// An already-dead session is not headroom somebody else is using.
 		// Counting it would evict a live session to make room for a row the
 		// next read would have refused anyway.
-		if rec.Expired(now) || rec.Idle(now, a.cfg.IdleTimeout) {
+		if rec.Expired(now) || rec.Idle(now, a.idleTimeoutFor(rec)) {
 			continue
 		}
 		mine = append(mine, rec)
@@ -204,7 +206,33 @@ func (a *Authenticator) SessionFromRequest(r *http.Request) (SessionRecord, bool
 // silent claim renewal (renew.go) is the one today. Counting those as activity
 // would let an open, unattended tab keep its session alive indefinitely, which
 // is the one thing the idle clock exists to prevent.
+//
+// A request authenticates with one of two credentials, and each finds only its
+// own kind of session (Task 20412): the cookie a browser session, and a
+// terminal's `Authorization: Bearer cloop_cli_…` a CLI session. A terminal
+// credential that does not resolve is an ended session, and the cookie that
+// may ride along with it is not consulted — a request that names a credential
+// is answered about that credential.
 func (a *Authenticator) peekSession(r *http.Request) (SessionRecord, bool) {
+	if !a.Enabled() || r == nil {
+		return SessionRecord{}, false
+	}
+	if PresentsCLICredential(r) {
+		cred, ok := cliCredential(r)
+		if !ok {
+			return SessionRecord{}, false
+		}
+		rec, state := a.resolve(CLISessionID(HashSessionID(cred)))
+		return rec, state == SessionLive && rec.IsCLI()
+	}
+	return a.peekCookieSession(r)
+}
+
+// peekCookieSession resolves the browser session r's cookie names, without
+// advancing its idle clock. A terminal's session presented as a cookie is
+// refused: its credential is a bearer, and a cookie carrying it is not a
+// browser that signed in.
+func (a *Authenticator) peekCookieSession(r *http.Request) (SessionRecord, bool) {
 	if !a.Enabled() || r == nil {
 		return SessionRecord{}, false
 	}
@@ -213,7 +241,21 @@ func (a *Authenticator) peekSession(r *http.Request) (SessionRecord, bool) {
 		return SessionRecord{}, false
 	}
 	rec, state := a.resolve(HashSessionID(c.Value))
-	return rec, state == SessionLive
+	return rec, state == SessionLive && !rec.IsCLI()
+}
+
+// browserSession is SessionFromRequest restricted to the browser's own
+// credential: the session r's cookie names, its idle clock advanced. For the
+// actions only a person at a browser may take — approving a terminal's code.
+func (a *Authenticator) browserSession(r *http.Request) (SessionRecord, bool) {
+	rec, ok := a.peekCookieSession(r)
+	if !ok {
+		return SessionRecord{}, false
+	}
+	now := a.now()
+	a.touch(rec.ID, now)
+	rec.LastSeen = now
+	return rec, true
 }
 
 // SessionState is what CheckSession found: whether a session would still
@@ -266,7 +308,7 @@ func (a *Authenticator) resolve(hash string) (SessionRecord, SessionState) {
 		a.terminate(rec, AuditSessionExpired, ReasonAbsoluteTTL, "system")
 		return SessionRecord{}, SessionExpired
 	}
-	if rec.Idle(now, a.cfg.IdleTimeout) {
+	if rec.Idle(now, a.idleTimeoutFor(rec)) {
 		a.terminate(rec, AuditSessionExpired, ReasonIdleTimeout, "system")
 		return SessionRecord{}, SessionIdle
 	}
@@ -397,6 +439,8 @@ func (a *Authenticator) auditTermination(rec SessionRecord, event auditaction.Ac
 		Reason:    reason,
 		IP:        rec.IP,
 		UserAgent: rec.UserAgent,
+		Kind:      SessionKind(rec.KindName()),
+		Client:    rec.Client,
 	})
 }
 
@@ -514,7 +558,7 @@ func (a *Authenticator) SessionCount() int {
 // listing of the durable store unseals every refresh token in it, which is no
 // thing to do for the sake of a number.
 type LiveCounter interface {
-	CountLive(absoluteCutoff, idleCutoff time.Time) (int, error)
+	CountLive(c ExpiryCutoffs) (int, error)
 }
 
 // LiveSessionCount returns how many sessions are valid now: neither past their
@@ -526,12 +570,9 @@ func (a *Authenticator) LiveSessionCount() (int, error) {
 		return 0, nil
 	}
 	now := a.now()
-	idleCutoff := now.Add(-a.cfg.IdleTimeout)
-	if a.cfg.IdleTimeout <= 0 {
-		idleCutoff = time.Time{} // idle clock disabled, as in SweepExpired
-	}
+	cutoffs := a.expiryCutoffs(now)
 	if c, ok := a.store.(LiveCounter); ok {
-		return c.CountLive(now, idleCutoff)
+		return c.CountLive(cutoffs)
 	}
 	rows, err := a.store.List()
 	if err != nil {
@@ -539,11 +580,27 @@ func (a *Authenticator) LiveSessionCount() (int, error) {
 	}
 	n := 0
 	for _, rec := range rows {
-		if !rec.Expired(now) && !rec.Idle(now, a.cfg.IdleTimeout) {
+		if !rec.Expired(now) && !rec.Idle(now, a.idleTimeoutFor(rec)) {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// expiryCutoffs turns the configured clocks into the absolute cutoffs a store
+// sweeps by, at now. A disabled idle clock gets the zero time: a cutoff no
+// session with a recorded LastSeen is at or before. The zero time would still
+// match a row whose LastSeen is zero, which is exactly the corrupt row we
+// would rather leave for a human.
+func (a *Authenticator) expiryCutoffs(now time.Time) ExpiryCutoffs {
+	c := ExpiryCutoffs{Absolute: now}
+	if a.cfg.IdleTimeout > 0 {
+		c.Idle = now.Add(-a.cfg.IdleTimeout)
+	}
+	if a.cfg.CLIIdleTimeout > 0 {
+		c.CLIIdle = now.Add(-a.cfg.CLIIdleTimeout)
+	}
+	return c
 }
 
 // ── janitor ─────────────────────────────────────────────────────────────────
@@ -564,6 +621,7 @@ func (a *Authenticator) RunJanitor(ctx context.Context) {
 			return
 		case <-t.C:
 			a.SweepExpired()
+			a.SweepDevices()
 			a.RevalidateDue(ctx)
 		}
 	}
@@ -577,14 +635,7 @@ func (a *Authenticator) SweepExpired() int {
 		return 0
 	}
 	now := a.now()
-	idleCutoff := now.Add(-a.cfg.IdleTimeout)
-	if a.cfg.IdleTimeout <= 0 {
-		// Idle clock disabled: choose a cutoff no row can be at or before.
-		// The zero time would still match a row whose LastSeen is zero, which
-		// is exactly the corrupt row we would rather leave for a human.
-		idleCutoff = time.Time{}
-	}
-	gone, err := a.store.DeleteExpired(now, idleCutoff)
+	gone, err := a.store.DeleteExpired(a.expiryCutoffs(now))
 	if err != nil {
 		return 0
 	}

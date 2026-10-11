@@ -81,6 +81,7 @@ type idClaims struct {
 	Exp               int64    `json:"exp"`
 	Iat               int64    `json:"iat"`
 	Nonce             string   `json:"nonce"`
+	AuthTime          int64    `json:"auth_time"`
 	Email             string   `json:"email"`
 	Name              string   `json:"name"`
 	PreferredUsername string   `json:"preferred_username"`
@@ -245,13 +246,17 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 	if name == "" {
 		name = claims.PreferredUsername
 	}
-	return &Identity{
+	id := &Identity{
 		Sub:    claims.Sub,
 		Email:  claims.emailAddress(),
 		Name:   name,
 		Groups: claims.groupValues(),
 		Roles:  claims.roleValues(a.cfg.ClientID),
-	}, nil
+	}
+	if claims.AuthTime > 0 {
+		id.AuthTime = time.Unix(claims.AuthTime, 0)
+	}
+	return id, nil
 }
 
 // verifyJWSPayload parses a compact JWS, verifies its signature against the

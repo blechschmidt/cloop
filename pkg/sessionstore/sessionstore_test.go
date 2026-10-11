@@ -237,7 +237,8 @@ func TestDeleteExpiredHonoursBothClocks(t *testing.T) {
 		}
 	}
 
-	gone, err := store.DeleteExpired(now, now.Add(-8*time.Hour))
+	cut := now.Add(-8 * time.Hour)
+	gone, err := store.DeleteExpired(oidcauth.ExpiryCutoffs{Absolute: now, Idle: cut, CLIIdle: cut})
 	if err != nil {
 		t.Fatalf("DeleteExpired: %v", err)
 	}
@@ -280,14 +281,15 @@ func TestCountLiveMatchesTheSweep(t *testing.T) {
 	}
 
 	idleCutoff := now.Add(-8 * time.Hour)
-	n, err := store.CountLive(now, idleCutoff)
+	cutoffs := oidcauth.ExpiryCutoffs{Absolute: now, Idle: idleCutoff, CLIIdle: idleCutoff}
+	n, err := store.CountLive(cutoffs)
 	if err != nil {
 		t.Fatalf("CountLive: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("CountLive = %d, want 2 (live and no-ceiling)", n)
 	}
-	gone, err := store.DeleteExpired(now, idleCutoff)
+	gone, err := store.DeleteExpired(cutoffs)
 	if err != nil {
 		t.Fatalf("DeleteExpired: %v", err)
 	}

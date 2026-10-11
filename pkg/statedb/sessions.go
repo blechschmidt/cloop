@@ -47,12 +47,54 @@ type SessionRow struct {
 	// columns, and pkg/oidcauth/claimfresh.go for what reads them.
 	ClaimsAsOf     time.Time
 	ClaimsExpireAt time.Time
+
+	// Kind is what the session authenticates — SessionKindBrowser by cookie,
+	// SessionKindCLI by bearer — and Client the host name a terminal reported
+	// (Task 20412, migrations/0066_device_login.sql). An empty Kind is written
+	// as a browser session, which is what every row before the column was.
+	Kind   string
+	Client string
+}
+
+// The session kinds the kind column holds. pkg/oidcauth owns what they mean;
+// these are the stored spellings, and the sweep below compares against one.
+const (
+	SessionKindBrowser = "browser"
+	SessionKindCLI     = "cli"
+)
+
+// SessionCutoffs are the absolute times a session is compared against to
+// decide whether it has ended (Task 20412). Absolute applies to expires_at for
+// every kind; the idle cutoffs to last_seen, one per kind, because a CLI
+// session idles out on its own clock. The caller computes them from its
+// policy, so this layer stays free of any opinion about how long a session
+// should live.
+type SessionCutoffs struct {
+	Absolute time.Time
+	Idle     time.Time
+	CLIIdle  time.Time
+}
+
+// sessionEndedWhere selects the sessions past one of cutoffs. expires_at = ”
+// means "no absolute ceiling" and must not match; last_seen is written on
+// every insert, so it needs no such guard.
+const sessionEndedWhere = `(expires_at <> '' AND expires_at <= ?)
+	OR (kind = '` + SessionKindCLI + `' AND last_seen <= ?)
+	OR (kind <> '` + SessionKindCLI + `' AND last_seen <= ?)`
+
+func (c SessionCutoffs) args() []any {
+	return []any{
+		c.Absolute.UTC().Format(time.RFC3339Nano),
+		c.CLIIdle.UTC().Format(time.RFC3339Nano),
+		c.Idle.UTC().Format(time.RFC3339Nano),
+	}
 }
 
 const sessionColumns = `id, subject, issuer, email, display_name, owner_key,
 	groups_json, roles_json, ip, user_agent,
 	issued_at, last_seen, expires_at, refresh_sealed, refresh_checked_at,
-	refresh_key_id, refresh_wrapped_dek, claims_as_of, claims_expire_at`
+	refresh_key_id, refresh_wrapped_dek, claims_as_of, claims_expire_at,
+	kind, client`
 
 // PutSession inserts a session row.
 //
@@ -81,7 +123,7 @@ func (d *DB) PutSession(row SessionRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Subject, row.Issuer, row.Email, row.DisplayName, row.OwnerKey,
 		groups, roles, row.IP, row.UserAgent,
 		row.IssuedAt.UTC().Format(time.RFC3339Nano),
@@ -93,6 +135,8 @@ func (d *DB) PutSession(row SessionRow) error {
 		row.RefreshWrappedDEK,
 		formatOptionalTime(row.ClaimsAsOf),
 		formatOptionalTime(row.ClaimsExpireAt),
+		defaultString(row.Kind, SessionKindBrowser),
+		row.Client,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert session: %w", classifyDriverErr(err))
@@ -306,20 +350,15 @@ func (d *DB) DeleteSessionsBySubject(subject, keepID string) ([]SessionRow, erro
 	return doomed, nil
 }
 
-// DeleteExpiredSessions removes sessions past either clock and returns what it
-// deleted.
+// DeleteExpiredSessions removes sessions past one of c's cutoffs and returns
+// what it deleted.
 //
-// absoluteCutoff is compared against expires_at (the ceiling set at login) and
-// idleCutoff against last_seen. Both are absolute times computed by the caller
-// from its configured policy, so this layer stays free of any opinion about
-// how long a session should live.
-func (d *DB) DeleteExpiredSessions(absoluteCutoff, idleCutoff time.Time) ([]SessionRow, error) {
-	abs := absoluteCutoff.UTC().Format(time.RFC3339Nano)
-	idle := idleCutoff.UTC().Format(time.RFC3339Nano)
-	// expires_at = '' means "no absolute ceiling" and must not match; last_seen
-	// is written on every insert, so it needs no such guard.
-	const where = `WHERE (expires_at <> '' AND expires_at <= ?) OR last_seen <= ?`
-
+// The absolute cutoff is compared against expires_at (the ceiling set at
+// login) and the idle cutoffs against last_seen, each kind against its own:
+// a CLI session idles out on a clock no longer than a browser's (Task 20412).
+// All are absolute times computed by the caller from its configured policy, so
+// this layer stays free of any opinion about how long a session should live.
+func (d *DB) DeleteExpiredSessions(c SessionCutoffs) ([]SessionRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -329,7 +368,7 @@ func (d *DB) DeleteExpiredSessions(absoluteCutoff, idleCutoff time.Time) ([]Sess
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	rows, err := tx.Query(`SELECT `+sessionColumns+` FROM sessions `+where, abs, idle)
+	rows, err := tx.Query(`SELECT `+sessionColumns+` FROM sessions WHERE `+sessionEndedWhere, c.args()...)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: select expired sessions: %w", classifyDriverErr(err))
 	}
@@ -341,7 +380,7 @@ func (d *DB) DeleteExpiredSessions(absoluteCutoff, idleCutoff time.Time) ([]Sess
 	if len(doomed) == 0 {
 		return nil, nil
 	}
-	if _, err := tx.Exec(`DELETE FROM sessions `+where, abs, idle); err != nil {
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE `+sessionEndedWhere, c.args()...); err != nil {
 		return nil, fmt.Errorf("statedb: expire sessions: %w", classifyDriverErr(err))
 	}
 	if err := tx.Commit(); err != nil {
@@ -351,18 +390,14 @@ func (d *DB) DeleteExpiredSessions(absoluteCutoff, idleCutoff time.Time) ([]Sess
 }
 
 // CountLiveSessions counts the sessions DeleteExpiredSessions would keep under
-// the same two cutoffs: neither past expires_at nor last seen at or before
-// idleCutoff. A count rather than a listing, so nothing sealed leaves the row.
-func (d *DB) CountLiveSessions(absoluteCutoff, idleCutoff time.Time) (int, error) {
-	abs := absoluteCutoff.UTC().Format(time.RFC3339Nano)
-	idle := idleCutoff.UTC().Format(time.RFC3339Nano)
-
+// the same cutoffs. A count rather than a listing, so nothing sealed leaves the
+// row.
+func (d *DB) CountLiveSessions(c SessionCutoffs) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	var n int
 	if err := d.conn.QueryRow(
-		`SELECT COUNT(*) FROM sessions WHERE NOT ((expires_at <> '' AND expires_at <= ?) OR last_seen <= ?)`,
-		abs, idle,
+		`SELECT COUNT(*) FROM sessions WHERE NOT (`+sessionEndedWhere+`)`, c.args()...,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("statedb: count live sessions: %w", classifyDriverErr(err))
 	}
@@ -411,6 +446,7 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 		&groups, &roles, &out.IP, &out.UserAgent,
 		&issued, &lastSeen, &expires, &sealed, &chkd,
 		&out.RefreshKeyID, &out.RefreshWrappedDEK, &claimsAsOf, &claimsExpire,
+		&out.Kind, &out.Client,
 	); err != nil {
 		return SessionRow{}, err
 	}

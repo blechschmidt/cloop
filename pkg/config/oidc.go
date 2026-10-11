@@ -43,6 +43,12 @@ func (o OIDCConfig) AuthConfig() oidcauth.Config {
 		MaxClaimAge:     time.Duration(o.EffectiveMaxClaimAgeMinutes()) * time.Minute,
 		ClockSkew:       o.EffectiveClockSkew(),
 		CookieSecure:    o.CookieSecure,
+		// Terminal sign-in (Task 20412): `cloop login`, and the clocks of the
+		// CLI session it yields.
+		DeviceLogin:          o.DeviceLoginEnabled(),
+		CLISessionTTL:        time.Duration(o.EffectiveCLISessionTTLHours()) * time.Hour,
+		CLIIdleTimeout:       time.Duration(o.EffectiveCLIIdleTimeoutHours()) * time.Hour,
+		DeviceApprovalMaxAge: time.Duration(o.EffectiveDeviceApprovalMaxAgeMinutes()) * time.Minute,
 	}
 }
 

@@ -77,6 +77,26 @@ func TestWriteConvergesWithinTTL(t *testing.T) {
 	}
 }
 
+// TestInvalidateReadsTheTableAtOnce: minting a credential, and the
+// offboarding that just wrote a deny, read the bindings as they stand rather
+// than as cached up to a TTL ago (Task 20412).
+func TestInvalidateReadsTheTableAtOnce(t *testing.T) {
+	db := newDB(t)
+	now := time.Now()
+	store, err := New(db, WithTTL(10*time.Second), WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	putDeny(t, db, "alice@example.com")
+	if got := store.RuntimeBindings(); len(got) != 0 {
+		t.Fatalf("precondition: the cache answered %d bindings inside its TTL", len(got))
+	}
+	store.Invalidate()
+	if got := store.RuntimeBindings(); len(got) != 1 || got[0].Value != "alice@example.com" {
+		t.Fatalf("after Invalidate: %+v, want the deny written a moment ago", got)
+	}
+}
+
 // TestReadFailureKeepsTheLastGoodAnswer is the failure policy, and it is the
 // one that matters: bindings here only ever remove authority config already
 // granted, so an empty answer on a storage fault is a path back to admin.

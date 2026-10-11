@@ -2491,6 +2491,31 @@ type OIDCConfig struct {
 	// "auto" (default — set when the request arrived over TLS or with
 	// X-Forwarded-Proto: https), "always", or "never".
 	CookieSecure string `yaml:"cookie_secure,omitempty"`
+
+	// DeviceLogin lets a terminal sign in to this hub with `cloop login`: the
+	// RFC 8628 device authorization grant, approved by a signed-in browser at
+	// /device (Task 20412). The result is a CLI session — a session like a
+	// browser's, on the clocks below — never an API token. On by default
+	// wherever single sign-on is; false turns the two endpoints off.
+	DeviceLogin *bool `yaml:"device_login,omitempty"`
+
+	// CLISessionTTLHours is a terminal session's absolute lifetime. Zero uses
+	// session_ttl_hours; values are clamped to 1..session_ttl_hours, because
+	// the credential that lives in a file must not outlive a browser's.
+	CLISessionTTLHours int `yaml:"cli_session_ttl_hours,omitempty"`
+
+	// CLIIdleTimeoutHours ends a terminal session unused for this long. Zero
+	// uses idle_timeout_hours; values are clamped to 1..idle_timeout_hours
+	// and to cli_session_ttl_hours.
+	CLIIdleTimeoutHours int `yaml:"cli_idle_timeout_hours,omitempty"`
+
+	// DeviceApprovalMaxAgeMinutes is how long ago a browser session may have
+	// signed in and still approve a terminal's code without signing in again
+	// at the identity provider. Zero uses the default (120); values are
+	// clamped to 1..1440; -1 never asks. Approving a terminal mints a
+	// credential, so it gets a sign-in that is recent, the way a forge's
+	// "sudo mode" does.
+	DeviceApprovalMaxAgeMinutes int `yaml:"device_approval_max_age_minutes,omitempty"`
 }
 
 // RoleMapping is one claim→role binding in oidc.role_mappings. It mirrors
@@ -2667,6 +2692,71 @@ func (o OIDCConfig) EffectiveMaxClaimAgeMinutes() int {
 		return OIDCMaxClaimAgeMinutesUpper
 	}
 	return o.MaxClaimAgeMinutes
+}
+
+// OIDC terminal sign-in bounds (Task 20412). The terminal session's own
+// lifetimes have no constants of their own: their default and their ceiling
+// are the browser session's.
+const (
+	OIDCDeviceApprovalMaxAgeMinutesDefault = 120
+	OIDCDeviceApprovalMaxAgeMinutesLower   = 1
+	OIDCDeviceApprovalMaxAgeMinutesUpper   = 1440
+)
+
+// DeviceLoginEnabled reports whether terminals may sign in with `cloop login`:
+// on unless device_login is set to false.
+func (o OIDCConfig) DeviceLoginEnabled() bool {
+	return o.DeviceLogin == nil || *o.DeviceLogin
+}
+
+// EffectiveCLISessionTTLHours returns a terminal session's absolute lifetime:
+// session_ttl_hours unless set lower, and never higher.
+func (o OIDCConfig) EffectiveCLISessionTTLHours() int {
+	ttl := o.EffectiveSessionTTLHours()
+	h := o.CLISessionTTLHours
+	switch {
+	case h <= 0, h > ttl:
+		return ttl
+	case h < OIDCSessionTTLHoursLower:
+		return OIDCSessionTTLHoursLower
+	}
+	return h
+}
+
+// EffectiveCLIIdleTimeoutHours returns a terminal session's idle window:
+// idle_timeout_hours unless set lower, and never higher than it or than the
+// terminal session's lifetime.
+func (o OIDCConfig) EffectiveCLIIdleTimeoutHours() int {
+	idle := o.EffectiveIdleTimeoutHours()
+	h := o.CLIIdleTimeoutHours
+	switch {
+	case h <= 0, h > idle:
+		h = idle
+	case h < OIDCIdleTimeoutHoursLower:
+		h = OIDCIdleTimeoutHoursLower
+	}
+	if ttl := o.EffectiveCLISessionTTLHours(); h > ttl {
+		h = ttl
+	}
+	return h
+}
+
+// EffectiveDeviceApprovalMaxAgeMinutes returns how old a browser session may
+// be and still approve a terminal without signing in again. A negative
+// configured value is passed through as -1, the explicit "never ask"; every
+// other out-of-band value is clamped.
+func (o OIDCConfig) EffectiveDeviceApprovalMaxAgeMinutes() int {
+	switch {
+	case o.DeviceApprovalMaxAgeMinutes < 0:
+		return -1
+	case o.DeviceApprovalMaxAgeMinutes == 0:
+		return OIDCDeviceApprovalMaxAgeMinutesDefault
+	case o.DeviceApprovalMaxAgeMinutes < OIDCDeviceApprovalMaxAgeMinutesLower:
+		return OIDCDeviceApprovalMaxAgeMinutesLower
+	case o.DeviceApprovalMaxAgeMinutes > OIDCDeviceApprovalMaxAgeMinutesUpper:
+		return OIDCDeviceApprovalMaxAgeMinutesUpper
+	}
+	return o.DeviceApprovalMaxAgeMinutes
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting

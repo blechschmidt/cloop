@@ -112,10 +112,12 @@ var hubSessionListCmd = &cobra.Command{
 		}
 		now := time.Now()
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tIDENTITY\tIP\tIDLE\tEXPIRES\tIDP CHECKED\tCLAIM AGE")
+		fmt.Fprintln(w, "ID\tKIND\tIDENTITY\tIP\tIDLE\tEXPIRES\tIDP CHECKED\tCLAIM AGE")
 		for _, rec := range records {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				truncateField(rec.ID, 16),
+				// cli: a terminal signed in with `cloop login` (Task 20412).
+				rec.KindName(),
 				truncateField(sessionIdentityLabel(rec), 32),
 				truncateField(orDash(rec.IP), 20),
 				durationLabel(now.Sub(rec.LastSeen)),
@@ -385,6 +387,9 @@ func sessionsToJSON(records []oidcauth.SessionRecord) []map[string]any {
 			// re-confirmed.
 			"claims_as_of":     rec.ClaimsAssertedAt().UTC(),
 			"claims_expire_at": rec.ClaimsExpireAt.UTC(),
+			// browser or cli, and the host name a terminal reported (Task 20412).
+			"kind":   rec.KindName(),
+			"client": rec.Client,
 		})
 	}
 	return out
