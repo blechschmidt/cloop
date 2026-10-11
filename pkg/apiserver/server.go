@@ -154,9 +154,9 @@ type Server struct {
 	rlMu      sync.Mutex
 	rlBuckets map[string]*ipBucket
 
-	// Graceful shutdown plumbing. httpServer is set in Run after the
-	// http.Server is constructed so Shutdown can call its Shutdown method.
-	// shutdownMu serialises Shutdown vs Run-failure cleanup.
+	// Graceful shutdown plumbing. httpServer is set in Run before the
+	// listener is bound, so Shutdown can call its Shutdown method as soon as
+	// the port answers. shutdownMu serialises Shutdown vs Run-failure cleanup.
 	shutdownMu sync.Mutex
 	httpServer *http.Server
 	// boundAddr is the address the listener holds once Run has bound
@@ -418,10 +418,32 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	plan.TLS = tlsCfg != nil
 
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           s.buildHandler(mux),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		TLSConfig:         tlsCfg,
+	}
+	// Recorded before the port can accept a connection. A caller that sees
+	// the port answer and calls Shutdown must find this server: recorded any
+	// later, that Shutdown was a no-op and Run served on. A Serve that starts
+	// after Shutdown returns ErrServerClosed at once.
+	s.shutdownMu.Lock()
+	s.httpServer = httpSrv
+	s.shutdownMu.Unlock()
+
 	// Bound before the banner, so the banner names an address the server
 	// holds rather than one it is about to try.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		s.shutdownMu.Lock()
+		if s.httpServer == httpSrv {
+			s.httpServer = nil
+		}
+		s.shutdownMu.Unlock()
 		return fmt.Errorf("listen on %s: %w", plan, err)
 	}
 	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
@@ -446,16 +468,7 @@ func (s *Server) Run(ctx context.Context) error {
 		"tls":     tlsCfg != nil,
 	})
 
-	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           s.buildHandler(mux),
-		ReadHeaderTimeout: httpReadHeaderTimeout,
-		ReadTimeout:       httpReadTimeout,
-		WriteTimeout:      httpWriteTimeout,
-		IdleTimeout:       httpIdleTimeout,
-	}
 	if tlsCfg != nil {
-		httpSrv.TLSConfig = tlsCfg
 		s.log().Info(logger.EventSessionStart, 0, "cloop API server TLS enabled", map[string]interface{}{
 			"min_version": tlsconf.VersionName(tlsCfg.MinVersion),
 			"cert_file":   s.TLSCertFile,
@@ -463,7 +476,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.shutdownMu.Lock()
-	s.httpServer = httpSrv
 	s.boundAddr = ln.Addr()
 	s.shutdownMu.Unlock()
 
