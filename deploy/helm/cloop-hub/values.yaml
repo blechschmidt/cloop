@@ -270,6 +270,15 @@ secrets:
   #     --from-literal=CLOOP_UI_TOKEN="$(head -c32 /dev/urandom | base64 | tr -d =)" \
   #     --from-literal=CLOOP_OIDC_CLIENT_SECRET=…
   #
+  # CLOOP_UI_TOKEN is the static admin token: an administrator outside RBAC
+  # that never expires. It is how a fresh hub is reached before single sign-on
+  # works. Once SSO works, retire it — `cloop hub token static retire --reason
+  # "SSO is live"` in the hub pod, or Settings → Static admin token → Retire —
+  # and every replica refuses it at once, without a restart; then drop it from
+  # the Secret at the next rollout. `cloop hub doctor` warns (ui.static_token)
+  # for as long as it is accepted beside an enforced role policy. Retirement is
+  # per value: a new value deployed later is accepted again.
+  #
   # CLOOP_SECRET_KEY is the master passphrase for the secret broker: every
   # key-encryption key is derived from it, and those keys seal the data keys
   # that seal each brokered kubeconfig, PAT and egress credential. Losing it
@@ -286,7 +295,7 @@ secrets:
   # values file, in the release's stored manifest and in `helm get manifest`.
   create: false
   secretKey: ""              # CLOOP_SECRET_KEY
-  uiToken: ""                # CLOOP_UI_TOKEN
+  uiToken: ""                # CLOOP_UI_TOKEN — retire it once SSO works (above)
   oidcClientSecret: ""       # CLOOP_OIDC_CLIENT_SECRET
 
   # Additional environment variables from other Secrets — provider API keys

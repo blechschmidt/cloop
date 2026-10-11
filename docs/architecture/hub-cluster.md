@@ -178,8 +178,8 @@ not shut down, as a pre-cluster hub was.
 What one member produces and every member's dashboards must see travels on a
 bus (`hub_bus`): harness output, a run starting or ending, presence (who is
 viewing which project), edit-conflict markers, task changes, executor and audit
-events, and invalidations — a quota override changed, a session revoked, an
-agent deleted, a project registered. Writes are batched every 50ms; every
+events, and invalidations — a quota override changed, a session revoked, a
+static token retired, an agent deleted, a project registered. Writes are batched every 50ms; every
 member polls every 250ms, which is the latency a dashboard sees for an event
 produced elsewhere. Events are kept for two minutes. A member that fell further
 behind than that — a long pause — learns it missed events and tells its

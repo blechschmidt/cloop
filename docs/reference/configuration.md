@@ -2035,18 +2035,31 @@ behind an https URL above. With nothing on the port it judges what
 `cloop ui --port N` would do with this configuration (a static token counts
 when `CLOOP_UI_TOKEN` is exported in the doctor's shell).
 
-> **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It still works and will keep
-> working, but it bypasses RBAC entirely, sees every project on the hub, and
-> cannot be revoked for one caller without breaking every other. Mint a scoped
-> API token per caller (above), then drop the flag and the environment
-> variable. `cloop ui` prints a warning at startup while it is still set, and
-> the Tokens panel shows a banner. See
-> [Migrating off the static token](../security/model.md#migrating-off-the-static-token).
+> **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It works until you retire it,
+> but it bypasses RBAC entirely, sees every project on the hub, never expires,
+> and cannot be revoked for one caller without breaking every other. Mint a
+> scoped API token per caller (above); once single sign-on works, retire the
+> static token — `cloop hub token static retire --reason "..."`, or Settings →
+> Static admin token → Retire — and drop the flag and the environment variable
+> at the next rollout. `cloop ui` prints a warning at startup while it is still
+> set, the Tokens panel shows a banner, and `cloop hub doctor` warns
+> `ui.static_token` while one is accepted beside an enforced role policy. See
+> [Migrating off the static token](../security/model.md#migrating-off-the-static-token)
+> and [Retiring the static token](../security/model.md#retiring-the-static-token).
 
 When a `--token` is set:
 
 - Every `/api/*` request must present `Authorization: Bearer <token>` or
   `?token=<token>`.
+- A **retired** token is refused by every hub member, without a restart, with a
+  `401` saying when and by whom it was retired and what to present instead —
+  in the header and as `?token=` alike, and without counting toward the
+  rate-limit lockout below. It stays configured: a token-only hub whose token is
+  retired stays closed and admits API tokens only. Retirements live in the
+  control plane's `retired_static_tokens` table, keyed by the token's
+  fingerprint; a member reads them before it serves, on the hub-bus notice a
+  retirement posts, and every 30 seconds. Deploying a new value is how a new
+  token is issued.
 - Failed authentication attempts are **rate-limited**: after 5 consecutive
   failures from the same IP the endpoint returns HTTP 429 and blocks that IP
   for 60 seconds.

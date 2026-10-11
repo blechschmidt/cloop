@@ -1053,6 +1053,35 @@ These subcommands write to the state database directly rather than through the
 HTTP API, so they require filesystem access to it — the same root-shell caveat
 as `cloop hub token`.
 
+### `cloop hub token static`
+
+The deprecated static `--token` / `CLOOP_UI_TOKEN`: whether running hubs still
+accept it, its last use, and retiring it on every member without a restart.
+
+```bash
+cloop hub token static status                     # fingerprint, held by, last used, refusals
+cloop hub token static status --json              # for scripting (unused_seconds included)
+cloop hub token static retire --reason "SSO is live, INC-4471"
+cloop hub token static retire --fingerprint 3f9c1e7a --reason "rotated, CHG-2291"
+```
+
+| Flag | Applies to | Default | Description |
+|------|-----------|---------|-------------|
+| `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
+| `--json` | `status` | `false` | Machine-readable output |
+| `--reason` | `retire` | — | Required; recorded with the retirement and in the audit trail |
+| `--fingerprint` | `retire` | — | The token to retire, by at least 8 characters of the fingerprint `status` prints, when hubs hold several |
+| `--force` | `retire` | `false` | Retire it although a hub with no single sign-on and no active admin API token would be left with nobody able to administer it |
+
+The token is found without its value: every hub process holding one reports its
+fingerprint and last use to the control plane, and `CLOOP_UI_TOKEN` exported in
+this shell names one too. `retire` posts a notice on the hub bus; members refuse
+the token within about a second and close the dashboard streams and sandbox
+terminals it opened, and a member started with `ui.cluster.exclusive` refuses it
+within 30 seconds. Retirement is per value: deploying a new `CLOOP_UI_TOKEN`
+issues a new token, and the retired one is refused for good. See
+[Retiring the static token](../security/model.md#retiring-the-static-token).
+
 ### `cloop hub session`
 
 List and terminate signed-in dashboard sessions. Operates on the session table

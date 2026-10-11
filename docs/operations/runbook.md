@@ -137,7 +137,7 @@ What it checks, and what each one catches that nothing else does:
 | `policy` | whether `executors.allow_host_process` was *decided* or merely defaulted |
 | `oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config |
 | `tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
-| `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one |
+| `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one. `ui.static_token`: **warn** while a static token is accepted — exported in the doctor's shell, or reported by a running hub — beside single sign-on with an enforced role policy, saying how long it has gone unused; **pass** once it is retired. Silent without SSO, where the token is the sign-in, and without a policy, where `rbac.enforced` is the finding |
 | `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
 | `rbac` | **whether a role policy is in force at all** (`rbac.enforced`: `authz.Enforced`, the answer the request gate acts on — a failure, naming the issuer, for single sign-on with no `role_mappings` and no `default_role`, where every identity the issuer authenticates holds every permission but executor administration; see [when RBAC is in force](../security/model.md#when-rbac-is-in-force)); the mappings parse; the default role's blast radius, reported only where a policy makes it mean something; group bindings with no `groups` scope; and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's |
 | `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable where the container or Kubernetes executor verifies signatures — and a warning that enrolled devices do not — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names |
@@ -1191,11 +1191,24 @@ to reach the sandbox image's trust store *before* the hub starts serving it —
 otherwise the first symptom is every provisioning fetch failing to verify the
 peer.
 
-### Dashboard token (`CLOOP_UI_TOKEN`) — manual, causes a logout
+### Dashboard token (`CLOOP_UI_TOKEN`) — retire the old value, deploy a new one
 
-Generate 32 random bytes, replace it in `hub.env` (or the Kubernetes Secret),
-restart. All token-authenticated clients must be updated; OIDC sessions are
-unaffected. There is no overlap window, so schedule it.
+Prefer not to rotate it at all: once single sign-on works, retire it and give
+each remaining caller a scoped API token (`cloop hub token create`).
+
+To rotate it anyway, generate 32 random bytes, replace it in `hub.env` (or the
+Kubernetes Secret) and restart each member. A member admits whichever value it
+was started with, so during a rolling restart both values work. When every
+member runs the new value, retire the old one so a copy left anywhere is
+refused, by every member, for good:
+
+```console
+$ cloop hub token static status                 # both fingerprints, which hubs hold which
+$ cloop hub token static retire --fingerprint <old> --reason "rotated, CHG-2291"
+```
+
+Retirement is per value: a retired one is never admitted again, so the next
+rotation needs a new value too. OIDC sessions are unaffected throughout.
 
 ### Enrollment tokens and agent credentials — revoke and re-enrol
 
@@ -2013,6 +2026,7 @@ ip6tables -I INPUT -p tcp --dport 8080 ! -i lo -j DROP
 cloop audit-log list --since 72h
 # 3. Restart it with a build that defaults to loopback, or give it sign-in
 #    (ui.oidc, or CLOOP_UI_TOKEN) before it listens on the network again.
+#    Retire a static token once SSO works: `cloop hub token static retire`.
 ```
 
 The finding names the cause when it can: *this build would listen on
@@ -2028,6 +2042,40 @@ and the doctor cannot see it: ask through the proxy
 (`curl -so /dev/null -w '%{http_code}' https://<host>:<proxy-port>/api/projects`
 answering 200 is the same finding). Remove that server block, or put
 authentication in it, as well.
+
+#### The static token leaked
+
+`--token` / `CLOOP_UI_TOKEN` is an administrator outside RBAC that never
+expires. Retire it first — no Secret edit and no restart — and work out what it
+did afterwards:
+
+```bash
+# 1. Refuse it on every member, now. Running hubs refuse it within about a
+#    second and close the dashboards and sandbox terminals it opened.
+cloop hub token static retire --reason "leaked in a CI log, INC-4412"
+#    On a hub with no single sign-on and no admin API token this is refused:
+#    nobody could administer the hub afterwards. Mint one first, or add --force.
+cloop hub token create break-glass --role admin --expires-in 7d
+
+# 2. Is anyone still presenting it? Refusals are counted, with the last address.
+cloop hub token static status
+
+# 3. What did it do while it worked? Where a role policy is in force its
+#    requests are recorded under the actor static-token; on a hub without one,
+#    under local.
+cloop audit-log list --actor static-token --since 72h
+cloop audit-log list --type static_token.retired
+
+# 4. Callers that still need a credential get a scoped API token — or, if a
+#    static token is unavoidable, a new CLOOP_UI_TOKEN value and a restart.
+```
+
+The same is a button in the dashboard: Settings → Static admin token → Retire.
+The token may retire itself, so an operator holding nothing else can use it
+once, to lock it. A retired token stays configured — a token-only hub stays
+closed and admits API tokens only — and each refusal tells the caller when and
+by whom it was retired; the reason stays in the trail. A member started with
+`ui.cluster.exclusive` reads no bus and refuses it within 30 seconds.
 
 #### A session was stolen
 
