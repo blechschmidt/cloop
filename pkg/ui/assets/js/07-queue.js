@@ -4,7 +4,7 @@
 // evolve discoveries, external merges). The view is read-only: rows are written
 // by the orchestrator and exposed via /api/queue.
 
-window.loadQueue = function() { loadQueue(); };
+act('loadQueue', loadQueue);
 
 function _queueKindBadge(kind) {
   const map = {

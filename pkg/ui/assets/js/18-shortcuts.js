@@ -96,17 +96,17 @@ function _renderHelpModalBody() {
   body.innerHTML = html;
 }
 
-window.openHelpModal = function() {
+act('openHelpModal', function() {
   if (helpOpen) return;
   helpOpen = true;
   _renderHelpModalBody();
   openOverlay('help-backdrop', {dismiss: closeHelpModal});
-};
+});
 
-window.closeHelpModal = function() {
+act('closeHelpModal', function() {
   helpOpen = false;
   closeOverlay('help-backdrop');
-};
+});
 
 // Close help modal when clicking backdrop (not modal itself).
 document.getElementById('help-backdrop').addEventListener('click', function(e) {
@@ -213,7 +213,7 @@ function renderCmdResults(query) {
       ? esc(c.label).replace(new RegExp('('+escRe(q)+')', 'gi'), '<em>$1</em>')
       : esc(c.label);
     const sel = i === cmdSelectedIdx ? ' selected' : '';
-    return '<div class="cmd-item'+sel+'" role="option" aria-selected="'+(i===cmdSelectedIdx)+'" data-idx="'+i+'" onclick="cmdSelect('+i+')" onmouseenter="cmdHover('+i+')">'+
+    return '<div class="cmd-item'+sel+'" role="option" aria-selected="'+(i===cmdSelectedIdx)+'" data-idx="'+i+'" data-arg="'+i+'" data-action="cmdSelect" data-action-mouseenter="cmdHover">'+
       '<span class="cmd-item-icon">'+c.icon+'</span>'+
       '<span class="cmd-item-label cmd-item-match">'+labelHtml+'</span>'+
       (c.shortcut ? '<span class="cmd-item-shortcut"><kbd>'+esc(c.shortcut)+'</kbd></span>' : '')+
@@ -232,20 +232,20 @@ function scrollCmdItemIntoView() {
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
-window.cmdSelect = function(idx) {
+act('cmdSelect', function(idx) {
   const cmd = cmdFiltered[idx];
   if (!cmd) return;
   closeCommandPalette();
   cmd.action();
-};
+}, NUM);
 
-window.cmdHover = function(idx) {
+actOn('mouseenter', 'cmdHover', function(idx) {
   cmdSelectedIdx = idx;
   document.querySelectorAll('.cmd-item').forEach((el,i) => {
     el.classList.toggle('selected', i === idx);
     el.setAttribute('aria-selected', i === idx ? 'true' : 'false');
   });
-};
+}, NUM);
 
 document.getElementById('cmd-input').addEventListener('input', function() {
   renderCmdResults(this.value);
@@ -524,7 +524,7 @@ function _applyTheme(theme) {
   _applyTheme(t);
 })();
 
-window.toggleTheme = function() {
+act('toggleTheme', function() {
   const current = document.documentElement.getAttribute('data-theme') || 'dark';
   const next = current === 'light' ? 'dark' : 'light';
   localStorage.setItem('cloop-theme', next);
@@ -535,7 +535,7 @@ window.toggleTheme = function() {
   if (typeof activeTab !== 'undefined' && activeTab === 'timeline') {
     loadTimeline();
   }
-};
+});
 
 checkAuthAndInit();
 

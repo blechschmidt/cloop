@@ -1,6 +1,6 @@
 // ── Dependency graph tab ─────────────────────────────────────────────────────
 
-window.loadDeps = function() { loadDeps(); };
+act('loadDeps', loadDeps);
 
 let _depsData   = null;   // { nodes, edges }
 let _depsNodes  = [];     // positioned nodes
@@ -333,8 +333,8 @@ function openDepsDetail(node) {
   sidebar.style.display = 'flex';
 }
 
-window.closeDepsDetail = function() {
+act('closeDepsDetail', function() {
   const sidebar = document.getElementById('depsSidebar');
   if (sidebar) sidebar.style.display = 'none';
-};
+});
 

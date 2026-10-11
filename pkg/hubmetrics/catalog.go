@@ -300,6 +300,21 @@ var (
 	})
 )
 
+// What a browser reports the hub's Content-Security-Policy blocked (Task
+// 20408), from the same-origin report endpoint. directive is the effective
+// directive, and document which of the hub's documents the page was — both
+// mapped onto the closed sets in pkg/ui's csp.go, since a report is whatever
+// its sender wrote and an unrecognised value counts as "other". Never labelled
+// by the blocked URL or the source file, which a sender chooses.
+var (
+	CSPViolations = Default.MustRegister(Definition{
+		Name:   "cloop_csp_violations_total",
+		Help:   "Content-Security-Policy violations browsers reported, by effective directive (script-src-attr, script-src-elem, script-src, style-src-attr, style-src-elem, style-src, img-src, connect-src, frame-src, frame-ancestors, base-uri, form-action, object-src, default-src, worker-src, font-src, media-src, manifest-src, other) and by document (dashboard, glasses, sign-in, other). script-src-attr on the dashboard is an inline handler a conversion missed, or markup somebody injected: a button that does nothing, or an attack the policy stopped.",
+		Type:   TypeCounter,
+		Labels: []string{"directive", "document"},
+	})
+)
+
 // Result write-back. The distinction the labels carry is the one the code
 // makes: a rejection is the hub refusing what a sandbox returned, an outage is
 // the hub being unable to find out. They page differently — the first is a

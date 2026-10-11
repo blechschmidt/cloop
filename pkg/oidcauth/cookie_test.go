@@ -140,8 +140,9 @@ func TestCallbackUsesLandingPageUnderStrict(t *testing.T) {
 	// Three independent ways to reach "/": script, meta refresh, and a link.
 	// The first two cover the automatic case under different browser settings;
 	// the link means a user with both disabled gets a button rather than a
-	// blank page.
-	for _, want := range []string{`location.replace("/")`, `http-equiv="refresh"`, `href="/"`} {
+	// blank page. The script is the sign-in script by URL, which follows the
+	// link (Task 20408).
+	for _, want := range []string{`<script src="` + ScriptPath + `">`, `http-equiv="refresh"`, `<a id="continue" href="/">`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page is missing %s:\n%s", want, body)
 		}

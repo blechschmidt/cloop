@@ -372,7 +372,7 @@
         h += '<li>Open this URL in your browser and sign in:</li>';
         h += '</ol>';
         h += '<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">';
-        h += '<a href="' + esc(sess.url) + '" target="_blank" rel="noopener" style="font-size:12px;word-break:break-all;color:var(--link,#3a8bdc);flex:1;padding:6px 8px;background:var(--bg,#0d0d0d);border-radius:4px;border:1px solid var(--border)">' + esc(sess.url) + '</a>';
+        h += '<a href="' + esc(/^https?:\/\//i.test(sess.url || '') ? sess.url : '') + '" target="_blank" rel="noopener" style="font-size:12px;word-break:break-all;color:var(--link,#3a8bdc);flex:1;padding:6px 8px;background:var(--bg,#0d0d0d);border-radius:4px;border:1px solid var(--border)">' + esc(sess.url) + '</a>';
         h += '<button class="btn" type="button" data-act="copyClaudeAuthURL" style="font-size:12px;padding:6px 10px">Copy</button>';
         h += '</div>';
         h += '<ol start="2" style="font-size:13px;color:var(--muted);margin:0 0 10px 18px;padding:0;line-height:1.7">';

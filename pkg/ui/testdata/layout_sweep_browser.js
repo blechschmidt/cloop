@@ -10,6 +10,13 @@
 // sideways and the fixture's strings. The dialogs are this file's: OPENERS
 // below is the registry the Go side holds against every openOverlay() call
 // site, so a dialog added without an opener here fails the gate.
+//
+// With mode "xss" (Task 20408, xss_browser_test.go) the same tabs and dialogs
+// are opened over a hub seeded with hostile strings, and instead of measuring
+// each one the driver presses every control in it — buttons, actions, fields
+// typed into, selects changed — and reports what the page's policy blocked,
+// whether the sentinel those strings set ever got set, and any element that
+// carries a handler attribute or a javascript: URL.
 
 'use strict';
 
@@ -337,6 +344,117 @@ window.__sweep = (function () {
 })();
 `;
 
+// ── The XSS crawl (mode "xss") ──────────────────────────────────────────────
+//
+// Installed in every document beside a recorder of what the policy blocks.
+// list() names every control under a scope by a selector path it can be found
+// by again; activate() presses one the way its kind is used: a click, a
+// select moved to its next option, a field filled with a hostile string and
+// submitted with Enter. A link is not followed off the page — inspect()
+// reports its scheme instead. window.open is recorded, not opened.
+const XSS_PROBE = String.raw`
+window.__csp = [];
+document.addEventListener('securitypolicyviolation', e => window.__csp.push({
+  directive: e.effectiveDirective, blocked: e.blockedURI, sample: e.sample, source: e.sourceFile, line: e.lineNumber,
+}));
+window.__opened = [];
+window.open = function (u) { window.__opened.push(String(u)); return null; };
+window.__xssCrawl = (function () {
+  'use strict';
+  const SEL = 'button, a[href], summary, select, input:not([type="hidden"]), textarea, [role="button"], ' +
+    '[role="option"], [role="tab"], [tabindex], [data-action], [data-act], [data-action-change], ' +
+    '[data-action-input], [data-action-enter], [data-action-keydown], [data-change], [data-input], [data-enter]';
+  function pathOf(el) {
+    const parts = [];
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      if (n.id) { parts.unshift('#' + CSS.escape(n.id)); break; }
+      let i = 1;
+      for (let s = n.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === n.tagName) i++;
+      parts.unshift(n.tagName.toLowerCase() + ':nth-of-type(' + i + ')');
+    }
+    return parts.join(' > ');
+  }
+  const shown = el => el.checkVisibility({checkVisibilityCSS: true}) && !el.disabled;
+  const label = el => ((el.getAttribute('data-action') || el.getAttribute('data-act') || el.id ||
+    el.tagName.toLowerCase()) + ' ' + (el.innerText || el.value || el.getAttribute('aria-label') || '')).slice(0, 60);
+  function list(scope) {
+    const out = [], seen = new Set();
+    for (const s of scope) {
+      const root = document.querySelector(s);
+      if (!root) continue;
+      for (const el of [root, ...root.querySelectorAll(SEL)]) {
+        if (!el.matches(SEL) || !shown(el)) continue;
+        const p = pathOf(el);
+        if (seen.has(p)) continue;
+        seen.add(p);
+        out.push({path: p, label: label(el)});
+      }
+    }
+    return out;
+  }
+  function present(p) {
+    const el = document.querySelector(p);
+    return !!el && shown(el);
+  }
+  function activate(p, hostile) {
+    const el = document.querySelector(p);
+    if (!el || !shown(el)) return 'gone';
+    const tag = el.tagName;
+    if (tag === 'A') {
+      const h = (el.getAttribute('href') || '').trim();
+      if (h.startsWith('#') || /^javascript:/i.test(h)) { el.click(); return 'ok'; }
+      return 'link';
+    }
+    if (tag === 'SELECT') {
+      if (el.options.length > 1) {
+        el.selectedIndex = (el.selectedIndex + 1) % el.options.length;
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+      return 'ok';
+    }
+    if (tag === 'TEXTAREA' || (tag === 'INPUT' && /^(text|search|email|url|number|password|tel|)$/i.test(el.type))) {
+      el.focus();
+      if (!el.readOnly) {
+        el.value = el.type === 'number' ? '7' : hostile;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+      el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+      el.click();
+      return 'ok';
+    }
+    if (tag === 'INPUT' && el.type === 'file') return 'file';
+    el.click();
+    return 'ok';
+  }
+  function inspect() {
+    const found = [];
+    for (const el of document.querySelectorAll('*')) {
+      for (const a of el.attributes) {
+        if (/^on/i.test(a.name)) found.push({kind: 'handler', where: pathOf(el), detail: a.name + '=' + a.value.slice(0, 80)});
+        if (/^(href|src|action|formaction|xlink:href)$/i.test(a.name) && /^\s*javascript:/i.test(a.value)) {
+          found.push({kind: 'javascript-url', where: pathOf(el), detail: a.name + '=' + a.value.slice(0, 80)});
+        }
+      }
+      if (el.tagName === 'SCRIPT' && !el.src && el.textContent.trim()) {
+        found.push({kind: 'inline-script', where: pathOf(el), detail: el.textContent.slice(0, 80)});
+      }
+      if ((el.tagName === 'IMG' && el.getAttribute('src') === 'x') || (el.tagName === 'svg' && el.hasAttribute('onload'))) {
+        found.push({kind: 'injected-element', where: pathOf(el), detail: el.outerHTML.slice(0, 80)});
+      }
+    }
+    return found;
+  }
+  // drain hands over what this document recorded, and starts afresh.
+  function drain() {
+    const out = {csp: window.__csp.splice(0), opened: window.__opened.splice(0),
+      xss: window.__xss === undefined ? null : String(window.__xss)};
+    return out;
+  }
+  return {list, present, activate, inspect, drain};
+})();
+`;
+
 // ── Page helpers ────────────────────────────────────────────────────────────
 
 const q = s => JSON.stringify(s);
@@ -351,6 +469,13 @@ let cdp;
 let inflight = new Map();   // requestId -> url, for the requests the page is waiting on
 let current = 'boot';       // the scenario running, to attribute what the page throws
 const exceptions = [];      // every uncaught exception, by scenario
+// Mode "xss" only.
+const XSS = CONFIG.mode === 'xss';
+let waitMs = WAIT_MS;       // what waitFor and idle allow; within() shortens it
+let blocking = false;       // refuse the page's writes (Fetch.requestPaused)
+let blocked = 0;            // writes refused
+let navigations = 0;        // main-frame navigations, to notice a click that left the page
+const cspIssues = [];       // what the browser says its policy blocked, by scenario
 
 function track() {
   cdp.on(msg => {
@@ -373,6 +498,40 @@ function track() {
       // confirm() and prompt() block the page; nothing here wants one.
       cdp.send('Page.handleJavaScriptDialog', {accept: false}).catch(() => {});
       break;
+    case 'Page.frameNavigated':
+      if (!p.frame.parentId) navigations++;
+      break;
+    case 'Audits.issueAdded': {
+      // The browser's own account of what the policy blocked: unlike the
+      // page's listener it survives the document that raised it.
+      const i = p.issue || {};
+      if (i.code === 'ContentSecurityPolicyIssue') {
+        const d = (i.details && i.details.contentSecurityPolicyIssueDetails) || {};
+        cspIssues.push({scenario: current, directive: d.violatedDirective || '', blocked: d.blockedURL || '',
+          type: d.contentSecurityPolicyViolationType || ''});
+      }
+      break;
+    }
+    case 'Fetch.requestPaused': {
+      // While a crawl presses buttons, nothing it does may change the hub:
+      // every request but a read, and the browser's own CSP reports, is
+      // answered here with a refusal whose text is hostile too, so the page's
+      // error paths render it.
+      const m = p.request.method;
+      // The page's own trail, too, always: hundreds of presses would push the
+      // seeded event the Telemetry tab is checked for off its first page.
+      const trail = m === 'POST' && /\/api\/telemetry(\?|$)/.test(p.request.url);
+      if ((blocking || trail) && m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !/\/api\/csp-report/.test(p.request.url)) {
+        blocked++;
+        cdp.send('Fetch.fulfillRequest', {requestId: p.requestId, responseCode: 403,
+          responseHeaders: [{name: 'Content-Type', value: 'application/json'}],
+          body: Buffer.from(JSON.stringify({error: CONFIG.hostile || 'refused by the sweep'})).toString('base64'),
+        }).catch(() => {});
+      } else {
+        cdp.send('Fetch.continueRequest', {requestId: p.requestId}).catch(() => {});
+      }
+      break;
+    }
     }
   });
 }
@@ -381,7 +540,7 @@ function track() {
 // expression for what the page shows instead, evaluates to — usually the
 // whole diagnosis.
 async function waitFor(expr, what, diag) {
-  const deadline = Date.now() + WAIT_MS;
+  const deadline = Date.now() + waitMs;
   for (;;) {
     let v = false;
     try { v = await cdp.eval(expr); } catch (e) { /* navigating */ }
@@ -403,7 +562,7 @@ const settled = () => cdp.eval('new Promise(r => requestAnimationFrame(() => req
 // running — so a panel that renders a response and then fetches the next thing
 // it needs is waited out, not caught between the two.
 async function idle(what) {
-  const deadline = Date.now() + WAIT_MS;
+  const deadline = Date.now() + waitMs;
   let quiet = 0;
   while (quiet < 2) {
     if (Date.now() >= deadline) {
@@ -499,6 +658,7 @@ async function selectProject() {
   await cdp.eval(`(() => { const c = [...document.querySelectorAll('#projList .proj-card')]
     .find(c => c.innerText.includes(${q(F.project)})); c.click(); })()`);
   await waitFor(hasText('#projectBreadcrumb', F.project), 'the fixture project to open');
+  if (!F.taskTitle) return; // a fixture with no tasks to show
   await openTab('tasks');
   // Completed tasks too: they carry the longest content a task has, its result.
   await click('#toggleCompletedBtn');
@@ -553,7 +713,7 @@ const TAB_READY = {
 //
 // widths narrows a dialog to the viewports where it exists at all.
 
-const execCard = fn => `#execList button[onclick*="'${fn}'"]`;
+const execCard = fn => `#execList button[data-action="${fn}"]`;
 
 async function onExecutors(fn) {
   await openTab('executors');
@@ -570,7 +730,7 @@ async function onSecrets(act) {
 // onTask presses one of a task row's own buttons on the Tasks tab.
 async function onTask(fn, id) {
   await openTab('tasks');
-  const sel = `#taskListFull .task-item[data-task-id="${id}"] button[onclick="${fn}(${id})"]`;
+  const sel = `#taskListFull .task-item[data-task-id="${id}"] button[data-action="${fn}"][data-arg="${id}"]`;
   await waitFor(visible(sel), 'task #' + id + '\'s ' + fn + ' button');
   await click(sel);
 }
@@ -605,16 +765,16 @@ const OPENERS = {
   'pcModal': {
     open: async () => {
       await openTab('provider-calls');
-      await waitFor(visible('#pcTbody [onclick*="openProviderCallModal"]'), 'a provider call');
-      await click('#pcTbody [onclick*="openProviderCallModal"]');
+      await waitFor(visible('#pcTbody [data-action="openProviderCallModal"]'), 'a provider call');
+      await click('#pcTbody [data-action="openProviderCallModal"]');
     },
     ready: hasText('#pcModal', F.promptMarker),
   },
   'new-project-overlay': {
     open: async () => {
       await openTab('projects');
-      await waitFor(visible('[onclick*="openNewProjectModal"]'), 'the New project button');
-      await click('[onclick*="openNewProjectModal"]');
+      await waitFor(visible('[data-action="openNewProjectModal"]'), 'the New project button');
+      await click('[data-action="openNewProjectModal"]');
     },
     ready: visible('#new-project-overlay input'),
   },
@@ -707,7 +867,7 @@ const OPENERS = {
       await openTab('projects');
       await cdp.eval(`(() => { const c = [...document.querySelectorAll('#projList .proj-card')]
         .find(c => c.innerText.includes(${q(F.project)}));
-        c.querySelector('[onclick*="projectDelete"]').click(); })()`);
+        c.querySelector('[data-action="projectDelete"]').click(); })()`);
     },
     ready: hasText('#delproj-overlay', F.project),
   },
@@ -733,7 +893,7 @@ const OPENERS = {
     // is the longest unbroken thing the hub ever prints.
     open: async () => {
       await openTab('executors');
-      await click(`#tab-executors button[onclick*="'openEnrollModal'"]`);
+      await click(`#tab-executors button[data-action="openEnrollModal"]`);
       await waitFor(visible('#enrollName'), 'the enrollment form');
       await type('#enrollName', F.deviceName);
       await click('#enrollSubmitBtn');
@@ -847,6 +1007,169 @@ async function sweepScenario(out, name, scope, viewports, before) {
   return rec;
 }
 
+// ── The XSS crawl ───────────────────────────────────────────────────────────
+
+// quiet waits for what a press set off, but no longer than a press deserves:
+// a control that starts a request the hub never answers must not stall the
+// crawl for WAIT_MS.
+async function quiet(before) {
+  const deadline = Date.now() + 1500;
+  const fresh = () => [...inflight.keys()].some(k => !before.has(k));
+  try { await settled(); } catch (e) { /* navigating */ }
+  while (fresh() && Date.now() < deadline) await sleep(15);
+  try { await settled(); } catch (e) { /* navigating */ }
+}
+
+// within runs fn with waitFor and idle allowed ms rather than WAIT_MS: a
+// state a press left the page in shows quickly, and a page that cannot reach
+// it is booted again rather than waited on.
+async function within(ms, fn) {
+  const was = waitMs;
+  waitMs = ms;
+  try { return await fn(); } finally { waitMs = was; }
+}
+
+// boot loads the dashboard and opens the fixture project, as main does first.
+async function boot() {
+  // From the defaults: a press may have flipped a remembered preference —
+  // completed tasks hidden, a filter set — that the openers assume.
+  try { await cdp.eval('localStorage.clear(); sessionStorage.clear()'); } catch (e) { /* not on the page */ }
+  await cdp.send('Page.navigate', {url: BASE + '/'});
+  await waitFor(`typeof window.switchTab === 'function' && typeof window.__sweep === 'object' &&
+    sessionStorage.getItem('cloop_resume') === null`, 'the dashboard to boot');
+  await idle('after boot');
+  await selectProject();
+}
+
+// drain collects what the page recorded into rec.
+async function drain(rec) {
+  let d;
+  try { d = await cdp.eval('window.__xssCrawl.drain()'); } catch (e) { return; }
+  if (!d) return;
+  rec.csp.push(...d.csp);
+  rec.opened.push(...d.opened);
+  if (d.xss !== null) rec.xss.push(d.xss);
+}
+
+// crawlScenario opens a scenario and presses every control in scope. A press
+// that leaves the scenario — closes the dialog, switches the tab, navigates
+// away — is undone by opening it again before the next one; a control that is
+// not there once it is open again is reported as skipped.
+async function crawlScenario(out, name, scope, open) {
+  const rec = {name, controls: 0, pressed: 0, links: 0, reboots: 0, skipped: [], csp: [], opened: [], xss: [], findings: []};
+  out.scenarios.push(rec);
+  current = name;
+  const t0 = Date.now();
+  let nav = navigations;
+  // enter reaches the scenario: from wherever the last press left the page if
+  // it can, quickly, and from a fresh page if not.
+  const enter = async () => {
+    blocking = false;
+    try {
+      await within(6000, async () => { await open(); await idle('opening ' + name); });
+    } catch (e) {
+      rec.reboots++;
+      await boot();
+      await open();
+      await idle('opening ' + name);
+    }
+    nav = navigations;
+  };
+  try {
+    await enter();
+    const controls = await cdp.eval(`window.__xssCrawl.list(${q(scope)})`);
+    rec.controls = controls.length;
+    blocking = true;
+    for (const c of controls.slice(0, CONFIG.max_presses || 80)) {
+      if (navigations !== nav || !await cdp.eval(`window.__xssCrawl.present(${q(c.path)})`).catch(() => false)) {
+        await drain(rec);
+        await enter();
+        blocking = true;
+        if (!await cdp.eval(`window.__xssCrawl.present(${q(c.path)})`)) { rec.skipped.push(c.label); continue; }
+      }
+      const before = new Set(inflight.keys());
+      const r = await cdp.eval(`window.__xssCrawl.activate(${q(c.path)}, ${q(CONFIG.hostile)})`).catch(() => 'navigated');
+      if (r === 'ok' || r === 'navigated') rec.pressed++;
+      else if (r === 'link') rec.links++;
+      await quiet(before);
+    }
+    blocking = false;
+    if (navigations === nav) rec.findings = await cdp.eval('window.__xssCrawl.inspect()');
+    await drain(rec);
+  } catch (e) {
+    rec.error = String(e && e.stack || e);
+  }
+  blocking = false;
+  rec.ms = Date.now() - t0;
+  return rec;
+}
+
+// crawlAll is mode "xss": every tab, the header around them, and every dialog,
+// at one width. Then a control: one inline handler, injected and pressed, which
+// both the page's recorder and the browser's issue log must see — the run's
+// zeros mean nothing unless that one is counted.
+async function crawlAll(out) {
+  await cdp.send('Fetch.enable', {patterns: [{urlPattern: '*'}]});
+  await cdp.send('Audits.enable');
+  await cdp.send('Page.setInterceptFileChooserDialog', {enabled: true}).catch(() => {});
+  await cdp.send('Page.setDownloadBehavior', {behavior: 'deny'}).catch(() => {});
+  const v = CONFIG.viewports[CONFIG.viewports.length - 1];
+  await setViewport(v);
+  if (CONFIG.cookie) {
+    // A signed-in user's session, minted by the test through the provider.
+    await cdp.send('Network.setCookie', {name: 'cloop_session', value: CONFIG.cookie, url: BASE, httpOnly: true});
+  }
+  await boot();
+  // A narrower crawl a test names itself: a tab, what shows it is ready, and
+  // the part of the page to press.
+  for (const sc of CONFIG.scenarios || []) {
+    await crawlScenario(out, sc.name, sc.scope, async () => {
+      await closeAll();
+      await openTab(sc.tab);
+      await waitFor(sc.ready, sc.name + '\'s content');
+    });
+  }
+  for (const tab of CONFIG.scenarios ? [] : CONFIG.tabs) {
+    await crawlScenario(out, 'tab:' + tab, ['#tab-' + tab], async () => {
+      await closeAll();
+      if (!TAB_READY[tab]) throw new Error('TAB_READY has no entry for the ' + tab + ' tab');
+      await openTab(tab);
+      await waitFor(TAB_READY[tab], 'the ' + tab + ' tab\'s content');
+    });
+  }
+  if (!CONFIG.scenarios) {
+    await crawlScenario(out, 'header', ['header', '#filterBar', '#presenceBar'], async () => {
+      await closeAll();
+      await openTab('tasks');
+    });
+  }
+  for (const [key, op] of Object.entries(CONFIG.scenarios ? {} : OPENERS)) {
+    const id = key.split('#')[0];
+    const vw = op.widths ? CONFIG.viewports.find(x => op.widths.includes(x.name)) : v;
+    if (!vw) continue;
+    await setViewport(vw);
+    await crawlScenario(out, 'dialog:' + key, ['#' + id], async () => {
+      await closeAll();
+      await op.open();
+      await waitFor(`window.isOverlayOpen(${q(id)})`, 'the ' + key + ' dialog to open');
+      await waitFor(op.ready, 'the ' + key + ' dialog\'s content');
+    });
+    await setViewport(v);
+  }
+  try { await closeAll(); } catch (e) { await boot(); }
+
+  // The control.
+  const ctl = {name: 'control', csp: [], opened: [], xss: [], findings: []};
+  current = 'control';
+  await cdp.eval(`(() => { const b = document.createElement('button'); b.id = 'xssControl';
+    b.setAttribute('onclick', "window.__xss = 'control'"); document.body.appendChild(b); b.click(); })()`);
+  await waitFor('window.__csp.length > 0', 'the control violation to be recorded');
+  await drain(ctl);
+  out.control = ctl;
+  out.csp_issues = cspIssues;
+  out.blocked = blocked;
+}
+
 async function main() {
   const out = {scenarios: [], allow_seen: [], openers: Object.keys(OPENERS)};
   const launched = await launchChrome();
@@ -858,6 +1181,7 @@ async function main() {
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {source: PROBE});
+    if (XSS) await cdp.send('Page.addScriptToEvaluateOnNewDocument', {source: XSS_PROBE});
     // The Assistant tab keeps its conversation in the session, so the fixture's
     // goes there; and a resume marker whose removal says boot is done.
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {source: `try {
@@ -865,6 +1189,12 @@ async function main() {
       sessionStorage.setItem('cloop_assistant_history', ${q(JSON.stringify(F.assistant))});
       localStorage.setItem('cloop-theme', 'light');
     } catch (e) {}`});
+    if (XSS) {
+      await crawlAll(out);
+      out.exceptions = exceptions;
+      out.elapsed_ms = Date.now() - t0;
+      return JSON.stringify(out);
+    }
     const vps = CONFIG.viewports;
     await setViewport(vps[vps.length - 1]);
     await cdp.send('Page.navigate', {url: BASE + '/'});
@@ -943,6 +1273,11 @@ async function main() {
     out.self_test_wide = await selfMeasure();
   } catch (e) {
     out.error = String(e && e.stack || e);
+    // What the page had recorded when it failed: a hostile string that ran
+    // on the way in is the likeliest reason a crawl cannot open its project.
+    if (XSS) {
+      try { out.at_error = await cdp.eval('window.__xssCrawl.drain()'); } catch (e2) { /* gone */ }
+    }
   } finally {
     out.elapsed_ms = Date.now() - t0;
     try { cdp.ws.close(); } catch (e) { /* already closed */ }

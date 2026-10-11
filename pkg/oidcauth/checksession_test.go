@@ -8,6 +8,7 @@ package oidcauth
 // session changed must arrive only once the change can be read back.
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -204,5 +205,47 @@ func TestSessionChangeIsAnnouncedAfterTheRowIsGone(t *testing.T) {
 			t.Errorf("%s: announced while the row was still in the store — a listener "+
 				"re-reading on the notice finds the session alive", name)
 		}
+	}
+}
+
+// TestPeekIdentityLeavesTheIdleClockAlone: PeekIdentity names a live session's
+// user — the hub's Content-Security-Policy report endpoint stamps reports
+// with it — without counting the request as use. A page whose policy keeps
+// blocking something reports every time it does, and that must not keep an
+// unattended tab signed in. It names nobody for a missing, unknown or idle
+// session, and nobody on a hub without sign-on.
+func TestPeekIdentityLeavesTheIdleClockAlone(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.SessionTTL = 24 * time.Hour
+		c.IdleTimeout = time.Hour
+	})
+	sid, err := a.createSession(Identity{Sub: "u1", Email: "u1@example.com"}, reqWithCookie("x"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := a.PeekIdentity(reqWithCookie(sid)); id == nil || id.Sub != "u1" || id.Email != "u1@example.com" {
+		t.Fatalf("PeekIdentity on a live session = %+v, want u1", id)
+	}
+	for _, r := range []*http.Request{httptest.NewRequest("POST", "/api/csp-report", nil), reqWithCookie("no-such-session")} {
+		if id := a.PeekIdentity(r); id != nil {
+			t.Errorf("PeekIdentity named %+v for a request without a live session", id)
+		}
+	}
+	for elapsed := time.Duration(0); elapsed < 59*time.Minute; elapsed += 30 * time.Second {
+		clk.advance(30 * time.Second)
+		if a.PeekIdentity(reqWithCookie(sid)) == nil {
+			t.Fatalf("after %s of peeks the session no longer reads as live", elapsed)
+		}
+	}
+	clk.advance(2 * time.Minute)
+	if id := a.PeekIdentity(reqWithCookie(sid)); id != nil {
+		t.Fatalf("an hour of nothing but peeks left the session naming %+v: a peek that counts as use "+
+			"keeps an unattended tab signed in for ever", id)
+	}
+	var off *Authenticator
+	if id := off.PeekIdentity(reqWithCookie(sid)); id != nil {
+		t.Errorf("PeekIdentity on a hub without sign-on = %+v, want nobody", id)
 	}
 }

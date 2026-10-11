@@ -59,8 +59,9 @@ func TestDashboard_FirewallPanels(t *testing.T) {
 
 	cards, dialog, _ := strings.Cut(res["device_dialog"].HTML, "\n----\n")
 	// Through panelAct: the dialog is deferred (Task 20386).
-	need("device_dialog", "the cards", cards, "panelAct('execadmin','openExecutorFirewall',0)")
-	if strings.Contains(cards, "'openExecutorFirewall',1)") || strings.Contains(cards, "'openExecutorFirewall',2)") {
+	need("device_dialog", "the cards", cards, `data-action="openExecutorFirewall" data-arg="0"`)
+	if strings.Contains(cards, `data-action="openExecutorFirewall" data-arg="1"`) ||
+		strings.Contains(cards, `data-action="openExecutorFirewall" data-arg="2"`) {
 		t.Error("device_dialog: the host-process and virtual executors must not offer a device firewall")
 	}
 	need("device_dialog", "the dialog", dialog,

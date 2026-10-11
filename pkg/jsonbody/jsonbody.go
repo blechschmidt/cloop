@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -55,14 +56,20 @@ type Options struct {
 	Optional bool
 	// Strict refuses fields dst does not declare.
 	Strict bool
+	// MediaTypes are JSON media types the body may carry besides
+	// application/json. A browser sends its Content-Security-Policy reports
+	// as application/csp-report or application/reports+json, which a form on
+	// another page cannot produce either (Task 20408). The body still decodes
+	// as JSON.
+	MediaTypes []string
 }
 
 // Decode reads r's JSON body into dst. It reports whether the handler may
 // continue; when it may not, the response has been written.
 func Decode(w http.ResponseWriter, r *http.Request, dst any, o Options) bool {
 	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
-	if ct != "" && !sameorigin.IsJSON(ct) {
-		writeMediaType(w, ct)
+	if ct != "" && !sameorigin.IsJSON(ct) && !IsMediaType(ct, o.MediaTypes...) {
+		writeMediaType(w, ct, o.MediaTypes...)
 		return false
 	}
 	limit := o.Limit
@@ -94,7 +101,7 @@ func Decode(w http.ResponseWriter, r *http.Request, dst any, o Options) bool {
 		return false
 	}
 	if ct == "" {
-		writeMediaType(w, "")
+		writeMediaType(w, "", o.MediaTypes...)
 		return false
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -125,6 +132,21 @@ func MediaTypeMessage(sent string, also ...string) string {
 		"so the hub accepts neither.", accepted, got)
 }
 
-func writeMediaType(w http.ResponseWriter, sent string) {
-	apierror.WriteError(w, apierror.New(apierror.CodeUnsupportedMediaType, MediaTypeMessage(sent)))
+func writeMediaType(w http.ResponseWriter, sent string, also ...string) {
+	apierror.WriteError(w, apierror.New(apierror.CodeUnsupportedMediaType, MediaTypeMessage(sent, also...)))
+}
+
+// IsMediaType reports whether contentType names one of types, parameters
+// aside and case insensitively.
+func IsMediaType(contentType string, types ...string) bool {
+	mt, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	if err != nil {
+		return false
+	}
+	for _, t := range types {
+		if strings.EqualFold(mt, t) {
+			return true
+		}
+	}
+	return false
 }

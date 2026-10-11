@@ -76,6 +76,14 @@ var publicRouteAllowlist = map[string]string{
 		"immediately after losing a device",
 	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
+	"POST /api/csp-report": "Content-Security-Policy violation reports, sent by the browser itself (Task 20408). " +
+		"Served before authentication too (isCSPReport): the glasses page's credential is a header its script " +
+		"adds and the sign-in documents are for someone not yet signed in, so the report a browser sends from " +
+		"either carries none. It counts what it is told and records a bounded amount (csp.go); it reads and " +
+		"changes nothing else",
+	"GET /auth/sign-in.js": "the sign-in documents' script (Task 20408): static, identical on every hub, " +
+		"and loaded by the post-login landing page and the renewal frame's result, neither of which can depend " +
+		"on a session — public like the rest of /auth/",
 	"GET /api/version": "the hub's own build info (Task 20249). Read-only, identical for every caller, " +
 		"carrying no project, tenant or user data. Public here still means authenticated — only " +
 		"isPublicShell bypasses authMiddleware — so the build fingerprint reaches exactly the people " +
@@ -879,10 +887,10 @@ func TestFrontendGatesTheHighRiskControls(t *testing.T) {
 		{`id="tasksCtrlStop"`, "run.stop", "stopping a run from the Tasks tab"},
 		{`id="goalEditBtn"`, "project.write", "changing the goal reshapes the project"},
 		{`id="instructionsEditBtn"`, "project.write", "changing instructions reshapes the project"},
-		{`onclick="submitAddTask()"`, "task.mutate", "adding a task"},
+		{`data-action="submitAddTask"`, "task.mutate", "adding a task"},
 		{`id="suggestBtn"`, "task.mutate", "brainstorming spends provider budget"},
-		// Through panelAct since the dialog is deferred (Task 20386).
-		{`onclick="panelAct('execadmin','openEnrollModal')"`, "executor.manage", "enrolling a device lets it run workloads"},
+		// The dialog is deferred (Task 20386); the action fetches it.
+		{`data-action="openEnrollModal"`, "executor.manage", "enrolling a device lets it run workloads"},
 	}
 	for _, r := range required {
 		t.Run(r.perm+" on "+r.marker, func(t *testing.T) {

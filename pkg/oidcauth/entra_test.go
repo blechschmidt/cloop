@@ -116,17 +116,18 @@ func TestRedirectURLPathIsRoutable(t *testing.T) {
 	t.Parallel()
 
 	refused := []string{
-		"https://cloop.example.com/auth//cb",    // empty segment: unclean
-		"https://cloop.example.com/auth/./cb",   // dot segment: unclean
-		"https://cloop.example.com/auth/../api", // escapes /auth/ once cleaned
-		"https://cloop.example.com/auth/cb//",   // trailing empty segment
-		"https://cloop.example.com/auth/cb{",    // malformed wildcard
-		"https://cloop.example.com/auth/{x}",    // a wildcard, capturing the other /auth/ routes
-		"https://cloop.example.com/auth/{$}",    // an anchor
-		"https://cloop.example.com/auth/cb%7B",  // decodes to a brace
-		"https://cloop.example.com/auth/a%2Fb",  // routed as /auth/a/b, requested as one segment
-		"https://cloop.example.com/auth/login",  // the hub's own GET sign-in route
-		"https://cloop.example.com/auth/renew",  // likewise
+		"https://cloop.example.com/auth//cb",        // empty segment: unclean
+		"https://cloop.example.com/auth/./cb",       // dot segment: unclean
+		"https://cloop.example.com/auth/../api",     // escapes /auth/ once cleaned
+		"https://cloop.example.com/auth/cb//",       // trailing empty segment
+		"https://cloop.example.com/auth/cb{",        // malformed wildcard
+		"https://cloop.example.com/auth/{x}",        // a wildcard, capturing the other /auth/ routes
+		"https://cloop.example.com/auth/{$}",        // an anchor
+		"https://cloop.example.com/auth/cb%7B",      // decodes to a brace
+		"https://cloop.example.com/auth/a%2Fb",      // routed as /auth/a/b, requested as one segment
+		"https://cloop.example.com/auth/login",      // the hub's own GET sign-in route
+		"https://cloop.example.com/auth/renew",      // likewise
+		"https://cloop.example.com/auth/sign-in.js", // the sign-in documents' script (Task 20408)
 	}
 	for _, redirect := range refused {
 		t.Run("refused "+redirect, func(t *testing.T) {

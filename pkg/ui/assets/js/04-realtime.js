@@ -36,10 +36,10 @@ function renderLiveLog() {
   }
 }
 
-window.clearLiveLog = function() {
+act('clearLiveLog', function() {
   liveLogText = '';
   renderLiveLog();
-};
+});
 
 // ── Real-time push: WebSocket (primary) with SSE fallback ────────────────────
 
@@ -62,10 +62,14 @@ function renderPresenceBar(users) {
   let html = '<span class="presence-label">&#x1F465; Online:</span>';
   for (const u of users) {
     const isYou = u.id === myClientID;
-    const initials = u.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    // A name is the signed-in user's display name or email, as their identity
+    // provider released it: another user's words, escaped like any (it was
+    // markup in everyone's presence bar until Task 20408).
+    const name = String(u.name || '');
+    const initials = esc(name.split(' ').map(w => w[0] || '').join('').toUpperCase().slice(0, 2));
     const cls = isYou ? 'presence-avatar you' : 'presence-avatar';
-    const tip = isYou ? u.name + ' (you)' : u.name;
-    html += '<div class="' + cls + '" style="background:' + u.color + '" title="' + tip + '">'
+    const tip = esc(isYou ? name + ' (you)' : name);
+    html += '<div class="' + cls + '" style="background:' + esc(u.color) + '" title="' + tip + '">'
           + initials
           + '<span class="presence-tooltip">' + tip + '</span>'
           + '</div>';
@@ -87,11 +91,11 @@ function showConflictToast(msg) {
   _conflictDismissTimer = setTimeout(dismissConflictToast, 6000);
 }
 
-window.dismissConflictToast = function() {
+act('dismissConflictToast', function() {
   const toast = document.getElementById('conflictToast');
   if (toast) toast.classList.remove('visible');
   clearTimeout(_conflictDismissTimer);
-};
+});
 
 // ── Client ID (sent with every REST mutation for conflict detection) ──────────
 

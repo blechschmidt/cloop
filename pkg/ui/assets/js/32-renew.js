@@ -230,7 +230,7 @@ function signInAgain(force) {
   const here = window.location.pathname + window.location.search + window.location.hash;
   window.location.assign('/auth/login?return=' + encodeURIComponent(here));
 }
-window.signInAgain = function() { signInAgain(true); };
+act('signInAgain', function() { signInAgain(true); });
 
 // resumeView reopens what the user was looking at before signInAgain took
 // them away: the project, by path (indices shift), and the tab. Boot calls it

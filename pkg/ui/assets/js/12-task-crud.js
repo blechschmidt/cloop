@@ -5,7 +5,7 @@ function parseDepsInput(val) {
   return val.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
 }
 
-window.submitAddTask = function() {
+act('submitAddTask', function() {
   const title = document.getElementById('newTaskTitle').value.trim();
   if (!title) { toast('Title is required', 'err'); return; }
   api(pUrl('/api/task/add'), {
@@ -30,32 +30,41 @@ window.submitAddTask = function() {
       }
     } else toast(d.error||'Add failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
+});
+
+// Ctrl+Enter (Cmd+Enter on a Mac) adds the task from its description box,
+// where a plain Enter is a new line.
+ACTIONS.addTaskDescKey = function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    submitAddTask();
+  }
 };
 
-window.setStatus = function(id, status) {
+act('setStatus', function(id, status) {
   api(pUrl('/api/task/status'), {id, status}).then(d => {
     if (d.ok) { toast('Task '+id+': '+status, 'ok'); refreshState(); }
     else toast(d.error||'Update failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+}, el => [+el.dataset.arg, el.dataset.argStatus]);
 
 // reopenAbortedTask and clearAbortedTask record the two verdicts available on a
 // task whose stored summary is a provider refusal rather than work
 // (Task 20224). Until now the only way to act on one of these findings was
 // `cloop task audit-ledger --reopen` on the CLI — which is why fourteen of them
 // sat unnoticed in this project's own plan for about a hundred iterations.
-window.reopenAbortedTask = function(id) {
+act('reopenAbortedTask', function(id) {
   api(pUrl('/api/tasks/'+id+'/reopen-aborted'), {}).then(d => {
     if (d.ok) { toast('Task '+id+' reopened — it never ran', 'ok'); refreshState(); }
     else toast(d.error||'Reopen failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+}, NUM);
 
 // The note is mandatory server-side: a clearance without a reason cannot be
 // told apart from giving up on the audit, and an audit nobody can close is an
 // audit that gets ignored. Prompt rather than a modal because the answer is one
 // line ("re-landed by Task N") and this is a rare, deliberate action.
-window.clearAbortedTask = function(id) {
+act('clearAbortedTask', function(id) {
   const note = window.prompt(
     'This task is recorded as done but its summary is a provider refusal.\n\n' +
     'Where did the work actually land? (e.g. "re-implemented by Task 20016")');
@@ -65,7 +74,7 @@ window.clearAbortedTask = function(id) {
     if (d.ok) { toast('Task '+id+': ledger entry checked', 'ok'); refreshState(); }
     else toast(d.error||'Could not clear the finding', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+}, NUM);
 
 window.moveTask = function(id, direction) {
   api(pUrl('/api/task/move'), {id, direction}).then(d => {
@@ -74,7 +83,7 @@ window.moveTask = function(id, direction) {
   }).catch(() => toast('Request failed', 'err'));
 };
 
-window.removeTask = function(id) {
+act('removeTask', function(id) {
   pendingDeleteId = id;
   const task = appState && appState.plan && appState.plan.tasks
     ? appState.plan.tasks.find(t => t.id === id) : null;
@@ -82,14 +91,14 @@ window.removeTask = function(id) {
   document.getElementById('deleteModalMsg').textContent =
     'Delete task "' + title + '"? This action cannot be undone.';
   openOverlay('delete-modal-overlay', {dismiss: closeDeleteModal});
-};
+}, NUM);
 
-window.closeDeleteModal = function() {
+act('closeDeleteModal', function() {
   closeOverlay('delete-modal-overlay');
   pendingDeleteId = null;
-};
+});
 
-window.executeDeleteTask = function() {
+act('executeDeleteTask', function() {
   const id = pendingDeleteId;
   closeDeleteModal();
   if (!id) return;
@@ -97,11 +106,11 @@ window.executeDeleteTask = function() {
     if (d.ok) { toast('Task #' + id + ' removed', 'ok'); refreshState(); }
     else toast(d.error || 'Remove failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+});
 
 // ── Drag-and-drop handlers ───────────────────────────────────────────────────
 
-window.onDragStart = function(e, id) {
+actOn('dragstart', 'onDragStart', function(e, id) {
   dragSrcId = id;
   e.dataTransfer.effectAllowed = 'move';
   // Use setTimeout so the class is applied after browser snapshot
@@ -109,21 +118,21 @@ window.onDragStart = function(e, id) {
     const el = document.querySelector('.task-item[data-task-id="'+id+'"]');
     if (el) el.classList.add('dragging');
   }, 0);
-};
+}, EV_NUM);
 
-window.onDragOver = function(e, id) {
+actOn('dragover', 'onDragOver', function(e, id) {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
   document.querySelectorAll('.task-item').forEach(el => el.classList.remove('drag-over'));
   const el = document.querySelector('.task-item[data-task-id="'+id+'"]');
   if (el && id !== dragSrcId) el.classList.add('drag-over');
-};
+}, EV_NUM);
 
-window.onDragLeave = function(e) {
-  e.currentTarget.classList.remove('drag-over');
-};
+actOn('dragleave', 'onDragLeave', function(e, row) {
+  row.classList.remove('drag-over');
+}, (el, ev) => [ev, el]);
 
-window.onDrop = function(e, targetId) {
+actOn('drop', 'onDrop', function(e, targetId) {
   e.preventDefault();
   document.querySelectorAll('.task-item').forEach(el => el.classList.remove('drag-over', 'dragging'));
   const srcId = dragSrcId;
@@ -165,16 +174,16 @@ window.onDrop = function(e, targetId) {
     if (d.ok) refreshState();
     else toast(d.error || 'Reorder failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+}, EV_NUM);
 
-window.onDragEnd = function(e) {
+actOn('dragend', 'onDragEnd', function(e) {
   document.querySelectorAll('.task-item').forEach(el => el.classList.remove('dragging', 'drag-over'));
   dragSrcId = null;
-};
+}, EV);
 
 // ── Edit modal ───────────────────────────────────────────────────────────────
 
-window.openEditModal = function(id) {
+act('openEditModal', function(id) {
   const tasks = (appState && appState.plan && appState.plan.tasks) || [];
   const t = tasks.find(x => x.id === id);
   if (!t) { toast('Task #' + id + ' not found', 'err'); return; }
@@ -186,16 +195,16 @@ window.openEditModal = function(id) {
   const mmEl = document.getElementById('modalMaxMinutes');
   if (mmEl) mmEl.value = t.max_minutes || 0;
   openOverlay('modal-overlay', {dismiss: closeModal, focus: '#modalTitle_'});
-};
+}, NUM);
 
-window.closeModal = function() {
+act('closeModal', function() {
   // Before the overlay closes, not after: cancelEditDictation dismisses the
   // "apply what you said" chooser, which sits on top of this modal, and the
   // overlay stack has to unwind innermost-first or the focus it hands back
   // goes to a dialog that is already hidden (Task 20302).
   if (typeof cancelEditDictation === 'function') cancelEditDictation();
   closeOverlay('modal-overlay');
-};
+});
 
 // ── Task details modal (read-only execution view) ──────────────────────────
 
@@ -225,16 +234,16 @@ window.openTaskDetails = function(id) {
 // modals: the terminal is a live session the reader deliberately opened, and
 // tearing it down because they dismissed the task summary behind it would drop
 // the output they opened it to watch.
-window.closeTaskDetails = function() {
+act('closeTaskDetails', function() {
   closeOverlay('td-overlay');
   _tdCurrentId = null;
-};
+});
 
-window.taskDetailsEditCurrent = function() {
+act('taskDetailsEditCurrent', function() {
   const id = _tdCurrentId;
   closeTaskDetails();
   if (id) openEditModal(id);
-};
+});
 
 // ── Reproduction (Task 20221) ─────────────────────────────────────────────
 //
@@ -328,7 +337,7 @@ function _tdLoadReproductions(id) {
     .catch(() => {});
 }
 
-window.taskDetailsReproduce = function() {
+act('taskDetailsReproduce', function() {
   const id = _tdCurrentId;
   if (!id) return;
   const btn = document.getElementById('td-reproduce-btn');
@@ -361,7 +370,7 @@ window.taskDetailsReproduce = function() {
       if (btn) { btn.textContent = 'Reproduce'; btn.disabled = false; }
       if (host) host.innerHTML = '<div class="td-empty">Request failed</div>';
     });
-};
+});
 
 function _fmtDateTime(s) {
   if (!s) return '';
@@ -572,7 +581,10 @@ function _renderTaskDetails(d) {
   }
 
   if (t.links && t.links.length) {
-    const items = t.links.map(l => '<div class="td-link-row">• <a href="'+esc(l.url)+'" target="_blank" rel="noopener">'+esc(l.label||l.url)+'</a> <span class="td-trunc-note">['+esc(l.kind||'link')+']</span></div>').join('');
+    const items = t.links.map(l => '<div class="td-link-row">• ' + (safeURL(l.url)
+      ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener">'+esc(l.label||l.url)+'</a>'
+      : '<span title="'+esc(l.url)+'">'+esc(l.label||l.url)+'</span>') +
+      ' <span class="td-trunc-note">['+esc(l.kind||'link')+']</span></div>').join('');
     html += '<div class="td-section"><h3>Links</h3>'+items+'</div>';
   }
 
@@ -589,15 +601,15 @@ function _renderTaskDetails(d) {
 
 // Triggered from the task list. Ignore clicks that originated on action
 // buttons or the drag handle so existing edit/remove/status flows still work.
-window.taskRowClick = function(e, id) {
+act('taskRowClick', function(e, id) {
   const t = e && e.target;
   if (t && t.closest) {
     if (t.closest('.task-actions') || t.closest('.drag-handle') || t.closest('a') || t.closest('button')) return;
   }
   openTaskDetails(id);
-};
+}, EV_NUM);
 
-window.submitEditTask = function() {
+act('submitEditTask', function() {
   const id       = parseInt(document.getElementById('modalTaskId').value);
   const title    = document.getElementById('modalTitle_').value.trim();
   const desc     = document.getElementById('modalDesc').value.trim();
@@ -622,7 +634,7 @@ window.submitEditTask = function() {
     if (d.ok) { closeModal(); toast('Task updated', 'ok'); refreshState(); }
     else toast(d.error||'Edit failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+});
 
 // ── Sandbox attach terminal (Task 20265) ───────────────────────────────────
 //
@@ -792,7 +804,7 @@ function _atLoadInfo(id) {
 // Deliberately does not close the task details modal behind it: the terminal is
 // a side view of the task being read, and closing it has to return the reader
 // to where they were.
-window.taskDetailsAttach = function() {
+act('taskDetailsAttach', function() {
   const id = _tdCurrentId;
   if (!id) return;
   const overlay = document.getElementById('at-overlay');
@@ -863,7 +875,7 @@ window.taskDetailsAttach = function() {
     _atNote('disconnected');
     _atSetInput(false, 'Session closed');
   };
-};
+});
 
 // _atCloseSocket ends the session politely — the server releases the sandbox's
 // attach slot on {"type":"close"}, whereas a bare socket close leaves it held
@@ -879,7 +891,7 @@ function _atCloseSocket(reason) {
   if (reason) _atNote(reason);
 }
 
-window.closeAttachTerminal = function() {
+act('closeAttachTerminal', function() {
   _atCloseSocket('');
   _atTaskID = null;
   _atBuf = '';
@@ -890,7 +902,7 @@ window.closeAttachTerminal = function() {
   const inp = document.getElementById('at-input');
   if (inp) inp.value = '';
   closeOverlay('at-overlay');
-};
+});
 
 // A line-at-a-time input rather than raw key capture. Capturing keys in the
 // browser would promise an interactive terminal this transport does not

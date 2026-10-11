@@ -45,6 +45,12 @@ func TestDecode(t *testing.T) {
 		{name: "strict refuses unknown fields", ct: "application/json", body: `{"title":"a","x":1}`, opts: Options{Strict: true}, wantCode: 400, wantErr: "INVALID_INPUT"},
 		{name: "lenient ignores unknown fields", ct: "application/json", body: `{"title":"a","x":1}`, wantOK: true, title: "a"},
 		{name: "too large", ct: "application/json", body: `{"title":"` + strings.Repeat("a", 100) + `"}`, opts: Options{Limit: 32}, wantCode: 413, wantErr: "PAYLOAD_TOO_LARGE"},
+		// A CSP report's media types (Task 20408): taken where declared, and
+		// only there; a form's types stay refused either way.
+		{name: "declared report type", ct: "application/csp-report", body: `{"title":"r"}`, opts: Options{MediaTypes: []string{"application/csp-report"}}, wantOK: true, title: "r"},
+		{name: "declared type, any case", ct: "Application/Reports+JSON", body: `{"title":"s"}`, opts: Options{MediaTypes: []string{"application/reports+json"}}, wantOK: true, title: "s"},
+		{name: "undeclared report type", ct: "application/csp-report", body: `{"title":"r"}`, wantCode: 415, wantErr: "UNSUPPORTED_MEDIA_TYPE"},
+		{name: "text/plain beside declared types", ct: "text/plain", body: `{"title":"x"}`, opts: Options{MediaTypes: []string{"application/csp-report"}}, wantCode: 415, wantErr: "UNSUPPORTED_MEDIA_TYPE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var body io.Reader = strings.NewReader(tc.body)

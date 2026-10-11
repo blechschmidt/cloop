@@ -99,15 +99,15 @@ async function shot(cdp, name) {
   fs.writeFileSync(path.join(SHOTS, name + '.png'), Buffer.from(r.data, 'base64'));
 }
 
-// cardIndex finds the index the page's own list gives the device's card. The
-// card's buttons reach their deferred dialogs through panelAct (Task 20386):
-// onclick="panelAct('execadmin','<fn>',<index>)".
+// cardIndex finds the index the page's own list gives the device's card. Each
+// of the card's buttons names its deferred dialog as an action, with the
+// card's index as its argument (Task 20408): data-action="<fn>" data-arg="<i>".
 async function cardIndex(cdp, fn) {
   await cdp.eval(`window.loadExecutors()`);
   const deadline = Date.now() + WAIT_MS;
   for (;;) {
-    const i = await cdp.eval(`(() => { const re = new RegExp("'" + ${JSON.stringify(fn)} + "',(\\\\d+)\\\\)");
-      const m = re.exec((document.getElementById('execList') || {}).innerHTML || ''); return m ? Number(m[1]) : -1; })()`);
+    const i = await cdp.eval(`(() => { const b = document.querySelector('#execList button[data-action=' + JSON.stringify(${JSON.stringify(fn)}) + ']');
+      return b ? Number(b.dataset.arg) : -1; })()`);
     if (i >= 0) return i;
     if (Date.now() >= deadline) throw new Error('no card offers ' + fn);
     await sleep(50);
@@ -116,7 +116,7 @@ async function cardIndex(cdp, fn) {
 
 // openFromCard clicks the card's button, which fetches the dialog first.
 async function openFromCard(cdp, fn, idx) {
-  await act(cdp, click('#execList button[onclick*="\'' + fn + '\',' + idx + ')"]'));
+  await act(cdp, click('#execList button[data-action="' + fn + '"][data-arg="' + idx + '"]'));
 }
 
 async function main(cdp) {
@@ -138,7 +138,7 @@ async function main(cdp) {
   // One card offers the button: the device's, not the hub's host-process
   // executor's nor the virtual executor's.
   out.firewall_buttons = await cdp.eval(
-    `(document.getElementById('execList').innerHTML.match(/'openExecutorFirewall',/g) || []).length`);
+    `document.querySelectorAll('#execList button[data-action="openExecutorFirewall"]').length`);
   await openFromCard(cdp, 'openExecutorFirewall', idx);
   await waitFor(cdp, `!!document.getElementById('efwAllow')`, 'the device dialog');
   out.device_fields_visible = true;

@@ -486,6 +486,42 @@ see [`ui.trusted_proxies`](../reference/configuration.md#tls).
 sum by (reason) (rate(cloop_cross_origin_refusals_total[5m])) > 0
 ```
 
+## What the page's policy blocked
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_csp_violations_total` | counter | `directive`, `document` |
+
+Counts the Content-Security-Policy violations browsers report to the hub's
+`POST /api/csp-report` (Task 20408;
+[the configuration reference](../reference/configuration.md#content-security-policy-and-violation-reports)).
+The hub's policy runs only its own script files, so on a healthy hub this stays
+at zero. `directive` is the effective directive — `script-src-attr`,
+`script-src-elem`, `script-src`, `style-src-attr`, `style-src-elem`,
+`style-src`, `img-src`, `connect-src`, `frame-src`, `frame-ancestors`,
+`base-uri`, `form-action`, `object-src`, `default-src`, `worker-src`,
+`font-src`, `media-src`, `manifest-src`, or `other` — and `document` which of
+the hub's documents reported it: `dashboard`, `glasses`, `sign-in` (the
+`/auth/` documents) or `other`. A report is whatever its sender wrote, so a
+value outside those sets is counted as `other`; the blocked URL and the source
+file are in the warn-level `csp_violation` log line and, with telemetry on, a
+`csp` event in the trail, never here. The endpoint takes no credential, so the
+counter counts what senders say: before acting on a spike, read those lines'
+`client_ip` and `actor` — a report from a signed-in browser names its user.
+
+| What it looks like | What it usually is |
+| --- | --- |
+| `script-src-attr` on `dashboard` | a control whose inline handler a conversion missed — a button that does nothing — or a handler attribute in markup somebody injected, which the policy stopped |
+| `script-src-elem` | an inline `<script>` or one from another origin: a page change that did not load its script as an asset, or an injection |
+| `script-src` with `blocked` `eval` | code that compiles strings, which the policy has never allowed |
+| `frame-src` | a renewal frame sent somewhere the policy does not name — usually an identity provider whose authorization endpoint moved to another origin |
+
+Every one is a defect or an attack; alert on any rate.
+
+```promql
+sum by (directive, document) (increase(cloop_csp_violations_total[15m])) > 0
+```
+
 ## Write-back
 
 | Metric | Type | Labels |

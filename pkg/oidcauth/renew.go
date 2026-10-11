@@ -45,12 +45,12 @@ package oidcauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"html"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -551,33 +551,47 @@ func (a *Authenticator) renewResult(w http.ResponseWriter, v renewVerdict) Renew
 	return v.outcome
 }
 
+// renewPostMessage is the verdict the result document posts to the dashboard.
+// RenewIn is set only when the dashboard should schedule the next renewal.
+type renewPostMessage struct {
+	Type    string `json:"type"`
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail"`
+	RenewIn *int64 `json:"renew_in,omitempty"`
+	Changed bool   `json:"changed"`
+}
+
 // renewResultHTML renders the result document.
 //
-// The message is addressed to "/" — the sending document's own origin — rather
-// than "*" or a configured URL. The browser then delivers it only to a parent
-// on exactly this origin: a page elsewhere that framed this document learns
-// nothing, not even that somebody is signed in here, and no spelling of the
-// redirect URL (an explicit :443, a different case) can make the hub address a
-// message to an origin the browser does not consider its own.
+// The message rides in a data attribute as JSON and the sign-in script (see
+// script.go) posts it, because the hub's policy runs no inline script (Task
+// 20408). JSON encoded and then HTML-escaped, it is data to both parsers that
+// read it — the provider's error text above all, since a provider may put
+// anything in error_description — and nothing is spliced into JavaScript.
 //
-// Every interpolated value is escaped, the provider's error text above all: a
-// provider may put anything in error_description.
+// The script addresses the message to "/" — the sending document's own origin
+// — rather than "*" or a configured URL. The browser then delivers it only to a
+// parent on exactly this origin: a page elsewhere that framed this document
+// learns nothing, not even that somebody is signed in here, and no spelling of
+// the redirect URL (an explicit :443, a different case) can make the hub
+// address a message to an origin the browser does not consider its own.
 func renewResultHTML(v renewVerdict) string {
-	var msg strings.Builder
-	msg.WriteString("{type: " + jsString(renewMessageType))
-	msg.WriteString(", outcome: " + jsString(string(v.outcome)))
-	msg.WriteString(", detail: " + jsString(truncate(v.detail, 300)))
-	if v.schedule {
-		msg.WriteString(", renew_in: " + strconv.FormatInt(int64(v.renewIn/time.Second), 10))
+	msg := renewPostMessage{
+		Type:    renewMessageType,
+		Outcome: string(v.outcome),
+		Detail:  truncate(v.detail, 300),
+		Changed: v.changed,
 	}
-	msg.WriteString(", changed: " + strconv.FormatBool(v.changed) + "}")
+	if v.schedule {
+		in := int64(v.renewIn / time.Second)
+		msg.RenewIn = &in
+	}
+	b, _ := json.Marshal(msg) // strings, a bool and an integer: it cannot fail
 	return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Renewing sign-in…</title></head>
+<html lang="en" data-renew="` + html.EscapeString(string(b)) + `"><head><meta charset="utf-8"><title>Renewing sign-in…</title></head>
 <body>
 <p>` + html.EscapeString(renewSummary(v.outcome)) + `</p>
-<script>
-try { parent.postMessage(` + msg.String() + `, "/"); } catch (e) {}
-</script>
+<script src="` + ScriptPath + `"></script>
 </body></html>
 `
 }

@@ -13,7 +13,8 @@
 // the Settings halves of 30-telemetry.js, 32-githubapp.js and 23-executors.js.
 // The build section (29-build.js) and the hidden-projects button (05-projects.js)
 // stay in the bundle, which draws them elsewhere too; their markup is here and
-// their inline handlers call those resident functions on window.
+// names those resident functions as bundle actions (data-action), which the
+// document-wide dispatcher in 00-core.js routes like any other (Task 20408).
 //
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
@@ -1241,7 +1242,9 @@
       }
       if (empty) empty.style.display = 'none';
       body.innerHTML = ciState.sessions.map((s, i) => {
-        const who = s.run_url
+        // The run URL is a claim the pipeline's token carries: a link only
+        // over http(s), never a javascript: one (Task 20408).
+        const who = /^https?:\/\//i.test(s.run_url || '')
           ? '<a href="' + esc(s.run_url) + '" target="_blank" rel="noopener">' + esc(s.repository || s.id) + '</a>'
           : esc(s.repository || s.id);
         const u = s.usage || {};
@@ -2050,7 +2053,7 @@
           <div id="glassesStatus" style="font-size:13px;margin-bottom:12px;color:var(--muted)">Loading…</div>
           <div id="glassesUrlBox" style="display:none;margin-bottom:12px">
             <label class="form-label">Your link — shown once, copy it now</label>
-            <input class="form-input" id="glassesUrl" readonly onclick="this.select()" style="font-family:monospace;font-size:12px">
+            <input class="form-input" id="glassesUrl" readonly data-action="selectText" style="font-family:monospace;font-size:12px">
             <p id="glassesWarning" style="font-size:12px;color:var(--warn,#e0a800);margin-top:8px"></p>
           </div>
           <button class="btn primary" id="glassesGenBtn" data-act="generateGlassesLink">Generate link</button>
@@ -2061,7 +2064,7 @@
         <div class="settings-section">
           <h3 style="display:flex;align-items:center;gap:12px">
             Build
-            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto;font-weight:400" onclick="loadBuildInfo()">&#8635; Refresh</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto;font-weight:400" data-action="loadBuildInfo">&#8635; Refresh</button>
           </h3>
           <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
             Which build of cloop is serving this dashboard, and how recent it is. A deploy moves
@@ -2076,7 +2079,7 @@
         <div class="settings-section">
           <h3>Hidden Projects</h3>
           <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Projects you have hidden from the Projects tab. Hiding is yours alone: it changes nothing for other users, and the project keeps running. Which projects they are is behind the button &mdash; opening Settings does not put their names on screen.</p>
-          <button class="btn" id="hiddenProjectsBtn" onclick="openHiddenProjectsModal()" disabled>No hidden projects</button>
+          <button class="btn" id="hiddenProjectsBtn" data-action="openHiddenProjectsModal" disabled>No hidden projects</button>
         </div>
 
         <div class="settings-section danger-zone">

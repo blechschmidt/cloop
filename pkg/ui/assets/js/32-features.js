@@ -35,10 +35,6 @@ function projectIdxByPath(path) {
   return projList().findIndex(p => p.path === path);
 }
 
-function safeURL(u) {
-  return /^https?:\/\//i.test(u || '') ? u : '';
-}
-
 function featurePRBadge(f) {
   const pr = f && f.pr;
   if (!pr || !pr.number) return '';
@@ -72,20 +68,20 @@ function featureOptionBadges(f) {
 function featureChips(path) {
   const fs = featuresOf(path);
   if (!fs.length) return '';
-  return '<div class="feat-chips" onclick="event.stopPropagation();openFeatureFromEvent(event)">' +
+  return '<div class="feat-chips" data-action="">' +
     fs.map(({p, i}) => {
       const f = p.feature || {};
       const pct = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
-      return '<button class="feat-chip" data-open-idx="' + i + '" title="' + esc(f.branch || '') + '">' +
+      return '<button class="feat-chip" data-action="openFeature" data-open-idx="' + i + '" title="' + esc(f.branch || '') + '">' +
         '<span class="proj-health-dot ' + esc(p.health || 'unknown') + '"></span>&#9095; ' + esc(f.title || f.slug || p.name) +
         ' <span class="feat-chip-meta">' + (p.running ? 'running' : pct + '%') + '</span></button>';
     }).join('') + '</div>';
 }
 
-window.openFeatureFromEvent = function(e) {
-  const el = e.target && e.target.closest ? e.target.closest('[data-open-idx]') : null;
-  if (!el) return;
-  const i = parseInt(el.getAttribute('data-open-idx'), 10);
+// A chip opens its feature; the strip around the chips is a boundary, so a
+// click between them does not open the card's own project.
+ACTIONS.openFeature = function() {
+  const i = parseInt(this.dataset.openIdx, 10);
   const p = projList()[i];
   if (p) openProject(i, p.name);
 };
@@ -222,7 +218,7 @@ function slugify(name) {
   return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
 }
 
-window.openNewFeatureModal = function() {
+act('openNewFeatureModal', function() {
   const cur = currentProject();
   if (!cur || cur.parent) return;
   _nfParentPath = cur.path;
@@ -233,9 +229,9 @@ window.openNewFeatureModal = function() {
   document.getElementById('nfSlug').textContent = '';
   document.getElementById('nfError').style.display = 'none';
   openOverlay('newfeat-overlay', {dismiss: closeNewFeatureModal, focus: '#nfName'});
-};
+});
 
-window.closeNewFeatureModal = function() { closeOverlay('newfeat-overlay'); };
+act('closeNewFeatureModal', function() { closeOverlay('newfeat-overlay'); });
 
 (function() {
   const name = document.getElementById('nfName');
@@ -252,7 +248,7 @@ function formError(id, msg) {
   el.style.display = msg ? '' : 'none';
 }
 
-window.submitNewFeature = function() {
+act('submitNewFeature', function() {
   const name = document.getElementById('nfName').value.trim();
   const desc = document.getElementById('nfDesc').value.trim();
   if (!name || !slugify(name)) return formError('nfError', 'Give the feature a name with letters or digits.');
@@ -292,7 +288,7 @@ window.submitNewFeature = function() {
     }).catch(() => {});
   }).catch(err => formError('nfError', (err && err.message) || 'Could not create the feature'))
     .finally(() => { btn.disabled = false; btn.textContent = 'Create feature'; });
-};
+});
 
 // ── Pull requests ────────────────────────────────────────────────────────────
 
@@ -317,9 +313,9 @@ window.openFeaturePRModal = function(i) {
   openOverlay('featpr-overlay', {dismiss: closeFeaturePRModal, focus: '#fprSubmit'});
 };
 
-window.closeFeaturePRModal = function() { closeOverlay('featpr-overlay'); };
+act('closeFeaturePRModal', function() { closeOverlay('featpr-overlay'); });
 
-window.submitFeaturePR = function() {
+act('submitFeaturePR', function() {
   const route = featureRoute(_fprRef, '/pr');
   if (!route) return formError('fprError', 'The feature is no longer listed.');
   const btn = document.getElementById('fprSubmit');
@@ -347,7 +343,7 @@ window.submitFeaturePR = function() {
     if (url && !d.result.existing) window.open(url, '_blank', 'noopener');
   }).catch(err => formError('fprError', (err && err.message) || 'Could not open the pull request'))
     .finally(() => { btn.disabled = false; btn.textContent = label; });
-};
+});
 
 window.refreshFeaturePR = function(i) {
   const route = featureRoute(featureRef(i), '/pr/refresh');
@@ -374,9 +370,9 @@ window.openRemoveFeatureModal = function(i) {
   openOverlay('delfeat-overlay', {dismiss: closeRemoveFeatureModal});
 };
 
-window.closeRemoveFeatureModal = function() { closeOverlay('delfeat-overlay'); };
+act('closeRemoveFeatureModal', function() { closeOverlay('delfeat-overlay'); });
 
-window.submitRemoveFeature = function() {
+act('submitRemoveFeature', function() {
   const ref = _dfRef;
   const route = featureRoute(ref, '');
   if (!route) return formError('dfError', 'The feature is no longer listed.');
@@ -396,4 +392,4 @@ window.submitRemoveFeature = function() {
     loadProjects();
   }).catch(err => formError('dfError', (err && err.message) || 'Could not remove the feature'))
     .finally(() => { btn.disabled = false; });
-};
+});

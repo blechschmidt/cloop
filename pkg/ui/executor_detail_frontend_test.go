@@ -108,16 +108,16 @@ func TestDashboard_ExecutorDetailIsAuditable(t *testing.T) {
 	// the drill-in appears anywhere in the list would be satisfied by the
 	// History button alone, and clicking the card — which is what the panel's
 	// affordances promise — would silently do nothing. The dialog is deferred
-	// since Task 20386, so the card reaches it through panelAct.
+	// since Task 20386; the card names the action that fetches it (Task 20408).
 	list := results["clean"].List
 	if tag, ok := openingTag(list, "exec-card-main"); !ok {
 		t.Errorf("no exec-card-main region on the card, so there is no clickable "+
 			"surface to drill in from:\n%s", list)
-	} else if !strings.Contains(tag, "panelAct('execadmin','openExecutorDetail',") {
+	} else if !strings.Contains(tag, `data-action="openExecutorDetail"`) {
 		t.Errorf("the executor card's main region carries no drill-in handler, so "+
 			"clicking the card does nothing:\n%s", tag)
 	}
-	if !strings.Contains(list, "panelAct('execadmin','openExecutorDetail',0)") {
+	if !strings.Contains(list, `data-action="openExecutorDetail" data-arg="0"`) {
 		t.Errorf("no index-dispatched drill-in on the card, so the detail "+
 			"endpoint stays unreachable from the dashboard:\n%s", list)
 	}

@@ -6,7 +6,7 @@
 // the picker's "currently bound" preselection.
 let execData = null;
 
-window.loadExecutors = function() {
+act('loadExecutors', function() {
   // The fleet is not a project's to read: a member whose only role is on a
   // shared project would draw a refusal on every Overview (Task 20366).
   if (!canGlobal('executor.read')) return Promise.resolve(null);
@@ -33,7 +33,7 @@ window.loadExecutors = function() {
         + esc(err && err.message || String(err)) + '</div>';
     }
   });
-};
+});
 
 function _execDotClass(status) {
   if (status === 'online' || status === 'offline' || status === 'degraded') return status;
@@ -330,12 +330,9 @@ function _renderExecutors(d) {
     const kind = _execKindLabel(ex.kind);
     let h = '<div class="exec-card' + (ex.blocked ? ' blocked' : '') + '">';
     // Everything above the action row is the drill-in target (Task 20258).
-    // The wrapper exists so the buttons below stay outside it: a card-wide
-    // handler would need the buttons to stopPropagation, and an onclick whose
-    // first token is `event` is invisible to the reachability gate in
-    // frontend_test.go — the fix would have quietly disabled the check that
-    // keeps Cordon and Drain wired.
-    h += '<div class="exec-card-main" onclick="panelAct(\'execadmin\',\'openExecutorDetail\',' + i + ')" '
+    // The wrapper exists so the buttons below stay outside it rather than
+    // inside an action they would each have to fence off.
+    h += '<div class="exec-card-main" data-action="openExecutorDetail" data-arg="' + i + '" '
       + 'title="Show what has actually run on this executor">';
     h += '<div class="exec-card-head">';
     h += '<span class="exec-dot ' + _execDotClass(ex.status) + '" title="' + esc(ex.status || 'unknown') + '"></span>';
@@ -427,19 +424,19 @@ function _renderExecutors(d) {
     // Index-based dispatch, never an interpolated string: an executor name
     // with a quote in it is exactly how Tasks 163/20033 broke.
     h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
-      + 'onclick="panelAct(\'execadmin\',\'openExecutorDetail\',' + i + ')" '
+      + 'data-action="openExecutorDetail" data-arg="' + i + '" '
       + 'title="In-flight work, recent completions, and whether anything ran on the host">History</button>';
     // Only for enrolled devices. For a driver the hub builds itself the mode is
     // implied by the driver and lives in config.yaml, so offering the button
     // would promise a control that could not take effect (Task 20307).
     if (ex.kind === 'remote') {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
-        + 'onclick="panelAct(\'execadmin\',\'openExecutorSandbox\',' + i + ')" '
+        + 'data-action="openExecutorSandbox" data-arg="' + i + '" '
         + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>';
     }
     // Sub-executors with their own firewall and devices (Task 20345).
     if (ex.kind === 'remote' || ex.kind === 'virtual') {
-      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="panelAct(\'execadmin\',\'openExecutorVirtual\',' + i + ')" '
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="openExecutorVirtual" data-arg="' + i + '" '
         + 'title="Sandboxes on this device with their own runtime, IP firewall and USB devices">'
         + (ex.kind === 'virtual' ? 'Edit' : 'Virtual' + (ex.virtual_count ? ' (' + esc(ex.virtual_count) + ')' : '')) + '</button>';
     }
@@ -448,7 +445,7 @@ function _renderExecutors(d) {
     // whose firewall is part of its definition, nor the host-process driver,
     // which has no network of a workload's own to filter.
     if (ex.kind === 'remote' || ex.kind === 'container' || ex.kind === 'kubernetes') {
-      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="panelAct(\'execadmin\',\'openExecutorFirewall\',' + i + ')" '
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="openExecutorFirewall" data-arg="' + i + '" '
         + 'title="The most any sandbox here may reach">Firewall</button>';
     }
     // Limits and Access apply to every executor kind, unlike Sandbox above: a
@@ -457,20 +454,20 @@ function _renderExecutors(d) {
     // both are offered for hub-configured backends as well as enrolled ones
     // (Task 20310).
     h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
-      + 'onclick="panelAct(\'execadmin\',\'openExecutorLimits\',' + i + ')" '
+      + 'data-action="openExecutorLimits" data-arg="' + i + '" '
       + 'title="The most CPU, memory, disk and processes any one workload here may be given">Limits</button>';
     h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
-      + 'onclick="panelAct(\'execadmin\',\'openExecutorAudience\',' + i + ')" '
+      + 'data-action="openExecutorAudience" data-arg="' + i + '" '
       + 'title="Which users and groups may run work on this executor">Access</button>';
     if (ex.admin_held) {
-      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="uncordonExecutor(' + i + ')">Uncordon</button>';
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="uncordonExecutor" data-arg="' + i + '">Uncordon</button>';
     } else {
-      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="cordonExecutor(' + i + ')">Cordon</button>';
-      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="drainExecutor(' + i + ')">Drain</button>';
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="cordonExecutor" data-arg="' + i + '">Cordon</button>';
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="drainExecutor" data-arg="' + i + '">Drain</button>';
     }
     if (ex.enrolled && ex.kind === 'remote') {
       h += _execUpgradeButton(ex, i);
-      h += '<button class="btn danger" style="padding:3px 9px;font-size:11.5px" onclick="revokeExecutor(' + i + ')">Revoke</button>';
+      h += '<button class="btn danger" style="padding:3px 9px;font-size:11.5px" data-action="revokeExecutor" data-arg="' + i + '">Revoke</button>';
     } else if (ex.virtual) {
       h += '<span style="font-size:11px;color:var(--muted)">Virtual executor on ' + esc(ex.virtual.parent_name || ex.virtual.parent_id) + '</span>';
     } else {
@@ -482,92 +479,34 @@ function _renderExecutors(d) {
   }).join('');
 }
 
-window.revokeExecutor = function(idx) {
-  const ex = execData && execData.executors && execData.executors[idx];
-  if (!ex) return;
-  if (!confirm('Revoke ' + ex.name + '?\n\nIts credential stops working immediately, its session is '
-      + 'closed, and every project bound to it is unbound. The device must be re-enrolled to come back.')) {
-    return;
-  }
-  apiMethod('DELETE', '/api/executors/' + encodeURIComponent(ex.id))
-    .then(d => {
-      if (d && d.error) { toast(d.error, 'err'); return; }
-      toast('Executor revoked', 'ok');
-      loadExecutors();
-    })
-    .catch(() => toast('Failed to revoke executor', 'err'));
-};
+// The executor cards' buttons act through deferred/execadmin.js (Tasks 20386,
+// 20408): the dialogs and the admin actions — revoke, cordon, uncordon, drain —
+// are its, fetched on the first press. Each button names one action, with the
+// card's index as its argument. One action per function rather than a generic
+// one taking the panel function's name, which would let an attribute reach any
+// function the panel has.
+const execAct = fn => function() { panelAct('execadmin', fn, +this.dataset.arg); };
+ACTIONS.openExecutorDetail   = execAct('openExecutorDetail');
+ACTIONS.openExecutorSandbox  = execAct('openExecutorSandbox');
+ACTIONS.openExecutorVirtual  = execAct('openExecutorVirtual');
+ACTIONS.openExecutorFirewall = execAct('openExecutorFirewall');
+ACTIONS.openExecutorLimits   = execAct('openExecutorLimits');
+ACTIONS.openExecutorAudience = execAct('openExecutorAudience');
+ACTIONS.upgradeExecutor      = execAct('upgradeExecutor');
+ACTIONS.revokeExecutor       = execAct('revokeExecutor');
+ACTIONS.cordonExecutor       = execAct('cordonExecutor');
+ACTIONS.uncordonExecutor     = execAct('uncordonExecutor');
+ACTIONS.drainExecutor        = execAct('drainExecutor');
+ACTIONS.editFleetAutoUpdate  = () => panelAct('execadmin', 'editFleetAutoUpdate');
+ACTIONS.openEnrollModal      = () => panelAct('execadmin', 'openEnrollModal');
 
-// ── Scheduling actions (Task 20162) ─────────────────────────────────────────
-//
-// Cordon/drain/uncordon are the non-destructive half of executor management:
-// they change where the scheduler places work without touching what is already
-// running there, which is what revoking cannot do.
-//
-// All three take an *index* and look the executor up in execData for the same
-// reason revokeExecutor does — an executor name, or an operator-typed reason,
-// interpolated into an onclick attribute is the bug class of Tasks 163/20033.
-
-// _execAt resolves a card index to its executor, or null.
+// _execAt resolves a card index to its executor, or null. Indices, never
+// names: an executor name or an operator-typed reason in markup is the bug
+// class of Tasks 163/20033.
 function _execAt(idx) {
   return (execData && execData.executors && execData.executors[idx]) || null;
 }
 
-window.cordonExecutor = function(idx) {
-  const ex = _execAt(idx);
-  if (!ex) return;
-  const reason = prompt('Cordon ' + ex.name + '?\n\nNew work goes elsewhere; whatever it is '
-    + 'running now continues untouched. Optional reason:', '');
-  if (reason === null) return;
-  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/cordon', {reason: reason})
-    .then(d => {
-      if (!d || d.error) { toast((d && d.error) || 'Failed to cordon', 'err'); return; }
-      toast(ex.name + ' is ' + (d.state || 'cordoned'), 'ok');
-      loadExecutors();
-    })
-    .catch(() => toast('Failed to cordon executor', 'err'));
-};
-
-window.uncordonExecutor = function(idx) {
-  const ex = _execAt(idx);
-  if (!ex) return;
-  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/uncordon')
-    .then(d => {
-      if (!d || d.error) { toast((d && d.error) || 'Failed to uncordon', 'err'); return; }
-      // Uncordon returns a node to the state its probes justify, not
-      // unconditionally to ready. Reporting the state it actually came back in
-      // is the difference between "uncordon is broken" and "it is still sick".
-      const state = d.state || 'ready';
-      let msg = ex.name + ' is ' + state;
-      if (state !== 'ready' && d.reason) msg += ' — ' + d.reason;
-      toast(msg, d.schedulable ? 'ok' : 'err');
-      loadExecutors();
-    })
-    .catch(() => toast('Failed to uncordon executor', 'err'));
-};
-
-window.drainExecutor = function(idx) {
-  const ex = _execAt(idx);
-  if (!ex) return;
-  const reason = prompt('Drain ' + ex.name + '?\n\nIt stops taking new work immediately; work '
-    + 'already running finishes. Put it back with Uncordon. Optional reason:', '');
-  if (reason === null) return;
-  // No timeout_seconds: the drain takes effect at once and the request must not
-  // hang the dashboard waiting on a task that may run for an hour.
-  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/drain', {reason: reason})
-    .then(d => {
-      if (!d || d.error) { toast((d && d.error) || 'Failed to drain', 'err'); return; }
-      if (d.drained) {
-        toast(ex.name + ' is drained — nothing in flight', 'ok');
-      } else if (d.in_flight_known) {
-        toast(ex.name + ' is draining — ' + d.in_flight + ' session(s) still running', 'ok');
-      } else {
-        toast(ex.name + ' is draining', 'ok');
-      }
-      loadExecutors();
-    })
-    .catch(() => toast('Failed to drain executor', 'err'));
-};
 
 // _execDetailErrText pulls a sentence out of whatever the failure arrived as:
 // a structured API error body, a bare string, or a rejected promise.
@@ -613,7 +552,7 @@ function _renderExecutorCard(d) {
   }
 }
 
-window.openExecutorPickerModal = function() {
+act('openExecutorPickerModal', function() {
   // A feature runs where its project runs (Task 20341).
   if (isFeatureSelected()) { toast('A feature runs on its project\'s executor — change it on the project', 'err'); return; }
   const sel = document.getElementById('epExecutor');
@@ -624,7 +563,7 @@ window.openExecutorPickerModal = function() {
   // Always refetch: an executor may have gone offline, or the policy may
   // have changed, since the tab was last painted.
   loadExecutors().then(d => _populateExecutorPicker(d));
-};
+});
 
 function _populateExecutorPicker(d) {
   const sel = document.getElementById('epExecutor');
@@ -651,11 +590,11 @@ function _populateExecutorPicker(d) {
   }
 }
 
-window.closeExecutorPickerModal = function() {
+act('closeExecutorPickerModal', function() {
   closeOverlay('executor-picker-overlay');
-};
+});
 
-window.submitExecutorBind = function() {
+act('submitExecutorBind', function() {
   const sel = document.getElementById('epExecutor');
   const errEl = document.getElementById('epError');
   const btn = document.getElementById('epSaveBtn');
@@ -690,7 +629,7 @@ window.submitExecutorBind = function() {
       errEl.style.display = 'block';
     }
   });
-};
+});
 
 // ── Claude Code per-project caps (overview panel) ──────────────────────────
 //
@@ -716,6 +655,7 @@ function _ccSetVal(id, v) {
 }
 
 // {force:true} skips the throttle: the ↻ button and the reload after a save.
+ACTIONS.refreshCCLimits = () => loadCCLimits({force: true});
 window.loadCCLimits = function(opts) {
   var section = document.getElementById('ccLimitsSection');
   if (!section) return;
@@ -747,7 +687,7 @@ window.loadCCLimits = function(opts) {
               ? '<div style="margin-top:6px;color:var(--muted)">Figures below are frozen at ' + esc(fmtDate(d.stale_since)) + '.</div>'
               : '')
           + '<div style="margin-top:8px"><button class="btn" style="padding:4px 10px;font-size:12px" '
-          + 'onclick="switchTab(\'budget\')">Open Claude Code sign-in</button></div>';
+          + 'data-action="switchTab" data-arg="budget">Open Claude Code sign-in</button></div>';
       } else if (d.usage_error) {
         // Not an auth problem: transient, so keep it low-key.
         authBox.style.display = '';
@@ -817,7 +757,7 @@ window.loadCCLimits = function(opts) {
   });
 };
 
-window.saveCCLimits = function() {
+act('saveCCLimits', function() {
   var body = {
     max_weekly_pct:        parseFloat(document.getElementById('ccMaxWeeklyPct').value)       || 0,
     max_five_hour_pct:     parseFloat(document.getElementById('ccMaxFiveHourPct').value)     || 0,
@@ -837,7 +777,7 @@ window.saveCCLimits = function() {
     }
     loadCCLimits({force: true});
   }).catch(function(err) { alert('Save failed: ' + err); });
-};
+});
 
 // Returning to a backgrounded tab is when staleness shows, so refresh then.
 // Throttled, so tab-flicking costs nothing, and a hidden tab asks for nothing —
@@ -909,7 +849,7 @@ function _execUpgradeButton(ex, i) {
       + (skew.hub_version || 'a newer build') + '. Roll it forward now.'
     : 'Reinstall or change this device’s build. It reports ' + current + '.';
   return '<button class="' + cls + '" style="padding:3px 9px;font-size:11.5px" '
-    + 'onclick="panelAct(\'execadmin\',\'upgradeExecutor\',' + i + ')" title="' + esc(title) + '">Upgrade</button>';
+    + 'data-action="upgradeExecutor" data-arg="' + i + '" title="' + esc(title) + '">Upgrade</button>';
 }
 
 // ── Fleet auto-update policy ────────────────────────────────────────────────
@@ -963,6 +903,6 @@ function _renderAutoUpdateBar(d) {
       + 'upgraded by hand</span>';
   }
   h += '<button class="btn" style="padding:3px 9px;font-size:11.5px;margin-left:auto" '
-    + 'onclick="panelAct(\'execadmin\',\'editFleetAutoUpdate\')">Configure</button>';
+    + 'data-action="editFleetAutoUpdate">Configure</button>';
   bar.innerHTML = h;
 }

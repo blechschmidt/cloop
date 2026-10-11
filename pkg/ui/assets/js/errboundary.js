@@ -371,6 +371,29 @@
     });
   } catch (_) {}
 
+  // ── the toast's and the banner's buttons ─────────────────────────────────
+  //
+  // Bound here rather than through the bundle's actions (Task 20408): this
+  // script runs after their markup and before the bundle, and the buttons are
+  // for exactly the page whose bundle did not parse or keeps throwing.
+  try {
+    var bind = function(id, fn) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    };
+    var hide = function(id) {
+      return function() {
+        var el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      };
+    };
+    var reload = function() { location.reload(); };
+    bind('errboundary-toast-reload', reload);
+    bind('errboundary-toast-close', hide('errboundary-toast'));
+    bind('errboundary-banner-dismiss', hide('errboundary-banner'));
+    bind('errboundary-banner-reload', reload);
+  } catch (_) {}
+
   // ── the API the bundle uses ───────────────────────────────────────────────
 
   window.cloopTelemetry = {

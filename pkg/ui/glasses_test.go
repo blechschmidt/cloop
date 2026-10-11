@@ -90,8 +90,13 @@ func TestDashboard_MainIIFEClosesInLastFragment(t *testing.T) {
 // the wearable's page
 // ---------------------------------------------------------------------------
 
-// glassesPageSource is the shell as served.
-func glassesPageSource() string { return loadAssets().glassesTmpl }
+// glassesPageSource is the wearable's front end as written: the shell and the
+// script it loads, which was inline until Task 20408. Tests that look for what
+// the page calls or draws read both, as dashboardSource reads the dashboard.
+func glassesPageSource() string {
+	a := loadAssets()
+	return a.glassesTmpl + "\n" + a.pageScripts["glasses.js"].raw
+}
 
 func TestGlassesPage_ServedWithValidator(t *testing.T) {
 	t.Parallel()
@@ -115,21 +120,31 @@ func TestGlassesPage_ServedWithValidator(t *testing.T) {
 	}
 }
 
-// TestGlassesPage_IsSelfContained keeps the wearable to one round trip. A
-// device on a phone's link pays for each request, and the dashboard bundle it
-// would otherwise pull is hundreds of kilobytes of panels it cannot render.
-func TestGlassesPage_IsSelfContained(t *testing.T) {
+// TestGlassesPage_LoadsOnlyItsOwnScript keeps the wearable to as few round
+// trips as the hub's policy allows. A device on a phone's link pays for each
+// request, and the dashboard bundle it would otherwise pull is hundreds of
+// kilobytes of panels it cannot render. So: its CSS inline, nothing from
+// anywhere else, and exactly one script — its own, content-hashed, which the
+// device caches until the next deploy. Inline script is not an option: the
+// policy runs none (Task 20408).
+func TestGlassesPage_LoadsOnlyItsOwnScript(t *testing.T) {
 	t.Parallel()
 
-	src := glassesPageSource()
-	for _, bad := range []string{"<script src=", "<link rel=\"stylesheet\"", "{{asset:", "//cdn.", "http://", "https://"} {
-		if strings.Contains(src, bad) {
-			t.Errorf("glasses.html references %q — it must be a single self-contained document "+
-				"with no external CSS, script or font", bad)
+	page := loadAssets().renderedGlasses
+	for _, bad := range []string{"<link rel=\"stylesheet\"", "{{asset:", "//cdn.", "http://", "https://", "/assets/app."} {
+		if strings.Contains(page, bad) {
+			t.Errorf("glasses.html references %q — it carries its own CSS and loads only its own script", bad)
 		}
 	}
-	if !strings.Contains(src, "<style>") || !strings.Contains(src, "<script>") {
-		t.Error("glasses.html should carry its own inline <style> and <script>")
+	if !strings.Contains(page, "<style>") {
+		t.Error("glasses.html should carry its own inline <style>")
+	}
+	scripts := regexp.MustCompile(`<script[^>]*>`).FindAllString(page, -1)
+	if len(scripts) != 1 || !regexp.MustCompile(`^<script src="/assets/glasses\.[0-9a-f]+\.js">$`).MatchString(scripts[0]) {
+		t.Errorf("glasses.html should load exactly one script, its own hashed glasses.js; it has %v", scripts)
+	}
+	if regexp.MustCompile(`<script>`).MatchString(page) {
+		t.Error("glasses.html carries inline script, which the hub's policy does not run")
 	}
 }
 

@@ -567,6 +567,11 @@ func (s *Server) routeTable() []routeSpec {
 		// without a valid session — and answers with a document rather than a
 		// status, because a frame cannot surface one.
 		{Pattern: "GET " + oidcauth.RenewPath, Handler: s.handleOIDCRenew, Perm: public},
+		// The two sign-in documents' script (Task 20408): the landing page
+		// after sign-in and the renewal result carry their values as data,
+		// and this reads them — the hub's policy runs no inline script.
+		// Static, and public like the rest of /auth/.
+		{Pattern: "GET " + oidcauth.ScriptPath, Handler: oidcauth.ServeScript, Perm: public},
 
 		// Self-service "sign out everywhere" (Task 20176). Ungated on
 		// purpose: the handler scopes the deletion to the caller's own
@@ -583,6 +588,13 @@ func (s *Server) routeTable() []routeSpec {
 		// Browser error reports. Writes no state, and the error boundary
 		// must keep working for a user whose role grants nothing.
 		{Pattern: "POST /api/client-error", Handler: s.handleClientError, Perm: public},
+
+		// What the Content-Security-Policy blocked, as the browser reports
+		// it (Task 20408). Public and served before authentication
+		// (isCSPReport): the browser sends a report with no credential the
+		// glasses page or a sign-in document has. It counts, and records a
+		// bounded amount — see csp.go.
+		{Pattern: "POST " + cspReportPath, Handler: s.handleCSPReport, Perm: public},
 
 		// Browser telemetry ingest (Task 20251). Public for the same reason
 		// the line above is, and on the same reasoning: an instrument that

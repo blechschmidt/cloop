@@ -91,13 +91,13 @@ async function openHidden() {
 }
 
 // gridIndices returns the project index each rendered card dispatches on, in
-// render order. It reads the openProject() call on the card itself — the
-// same string the browser would run on click — rather than any convenient
-// data-* attribute added for testing.
+// render order. It reads the card's own action and argument — what the
+// dispatcher passes to openProject on click (Task 20408) — rather than any
+// convenient attribute added for testing.
 function gridIndices() {
   const html = document.getElementById('projList').innerHTML || '';
   const out = [];
-  const re = /openProject\((\d+),/g;
+  const re = /data-action="openProject" data-arg="(\d+)"/g;
   let m;
   while ((m = re.exec(html)) !== null) out.push(Number(m[1]));
   return out;
@@ -121,7 +121,7 @@ function hiddenPanel() {
   const indices = [];
   const names = [];
   let m;
-  const reIdx = /projectUnhide\((\d+),/g;
+  const reIdx = /data-action="projectUnhide" data-arg="(\d+)"/g;
   while ((m = reIdx.exec(html)) !== null) indices.push(Number(m[1]));
   const reName = /class="hidden-proj-name">([^<]*)</g;
   while ((m = reName.exec(html)) !== null) names.push(m[1]);
@@ -232,7 +232,7 @@ const scenarios = {
 
     const html = document.getElementById('multiProjectCards').innerHTML || '';
     const indices = [];
-    const re = /openProject\((\d+),/g;
+    const re = /data-action="openProject" data-arg="(\d+)"/g;
     let m;
     while ((m = re.exec(html)) !== null) indices.push(Number(m[1]));
 
@@ -240,7 +240,7 @@ const scenarios = {
     // quietly undo the feature by offering the hidden project for selection.
     const dropHtml = document.getElementById('projSelectorDropdown').innerHTML || '';
     const dropIndices = [];
-    const reDrop = /selectProjectFromDropdown\((\d+),/g;
+    const reDrop = /data-action="selectProjectFromDropdown" data-arg="(\d+)"/g;
     while ((m = reDrop.exec(dropHtml)) !== null) dropIndices.push(Number(m[1]));
 
     return {

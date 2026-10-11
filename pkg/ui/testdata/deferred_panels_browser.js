@@ -247,11 +247,11 @@ async function openTab(cdp, tab, sel) {
 // card finds the device's card and returns its index, from its buttons.
 async function cardIndex(cdp) {
   return waitFor(cdp, `(() => {
-    const m = /'openExecutorSandbox',(\\d+)\\)/.exec((document.getElementById('execList') || {}).innerHTML || '');
-    return m ? String(m[1]) : ''; })()`, 'the device card').then(Number);
+    const b = document.querySelector('#execList button[data-action="openExecutorSandbox"]');
+    return b ? String(b.dataset.arg) : ''; })()`, 'the device card').then(Number);
 }
 
-const cardButton = (fn, i) => `#execList button[onclick*="'${fn}',${i})"]`;
+const cardButton = (fn, i) => `#execList button[data-action="${fn}"][data-arg="${i}"]`;
 
 // scenario runs one check from a cold page and records what it found, or why
 // it could not finish — a later scenario still runs.
@@ -349,7 +349,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'enroll', cdp, async () => {
     await executors();
-    await click(cdp, `#tab-executors button[onclick*="'openEnrollModal'"]`);
+    await click(cdp, `#tab-executors button[data-action="openEnrollModal"]`);
     await waitFor(cdp, visible('#enrollName'), 'the enrollment dialog');
     await type(cdp, '#enrollName', 'dp-edge');
     await click(cdp, '#enrollSubmitBtn');

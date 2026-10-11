@@ -1335,6 +1335,85 @@
         .catch(() => toast('Failed to save the policy', 'err'));
     }
 
+    // ── Revoke, cordon, uncordon, drain ─────────────────────────────────────
+    //
+    // The executor cards' admin actions (Tasks 20158, 20162), deferred with the
+    // dialogs by Task 20408: they are an admin's, so first paint need not carry
+    // them. Cordon, drain and uncordon change where the scheduler places work
+    // without touching what is already running, which is what revoking cannot.
+
+    function revokeExecutor(idx) {
+      const ex = _execAt(idx);
+      if (!ex) return;
+      if (!confirm('Revoke ' + ex.name + '?\n\nIts credential stops working immediately, its session is '
+          + 'closed, and every project bound to it is unbound. The device must be re-enrolled to come back.')) {
+        return;
+      }
+      apiMethod('DELETE', '/api/executors/' + encodeURIComponent(ex.id))
+        .then(d => {
+          if (d && d.error) { toast(d.error, 'err'); return; }
+          toast('Executor revoked', 'ok');
+          loadExecutors();
+        })
+        .catch(() => toast('Failed to revoke executor', 'err'));
+    }
+
+    function cordonExecutor(idx) {
+      const ex = _execAt(idx);
+      if (!ex) return;
+      const reason = prompt('Cordon ' + ex.name + '?\n\nNew work goes elsewhere; whatever it is '
+        + 'running now continues untouched. Optional reason:', '');
+      if (reason === null) return;
+      apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/cordon', {reason: reason})
+        .then(d => {
+          if (!d || d.error) { toast((d && d.error) || 'Failed to cordon', 'err'); return; }
+          toast(ex.name + ' is ' + (d.state || 'cordoned'), 'ok');
+          loadExecutors();
+        })
+        .catch(() => toast('Failed to cordon executor', 'err'));
+    }
+
+    function uncordonExecutor(idx) {
+      const ex = _execAt(idx);
+      if (!ex) return;
+      apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/uncordon')
+        .then(d => {
+          if (!d || d.error) { toast((d && d.error) || 'Failed to uncordon', 'err'); return; }
+          // Uncordon returns a node to the state its probes justify, not
+          // unconditionally to ready. Reporting the state it actually came back in
+          // is the difference between "uncordon is broken" and "it is still sick".
+          const state = d.state || 'ready';
+          let msg = ex.name + ' is ' + state;
+          if (state !== 'ready' && d.reason) msg += ' — ' + d.reason;
+          toast(msg, d.schedulable ? 'ok' : 'err');
+          loadExecutors();
+        })
+        .catch(() => toast('Failed to uncordon executor', 'err'));
+    }
+
+    function drainExecutor(idx) {
+      const ex = _execAt(idx);
+      if (!ex) return;
+      const reason = prompt('Drain ' + ex.name + '?\n\nIt stops taking new work immediately; work '
+        + 'already running finishes. Put it back with Uncordon. Optional reason:', '');
+      if (reason === null) return;
+      // No timeout_seconds: the drain takes effect at once and the request must not
+      // hang the dashboard waiting on a task that may run for an hour.
+      apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/drain', {reason: reason})
+        .then(d => {
+          if (!d || d.error) { toast((d && d.error) || 'Failed to drain', 'err'); return; }
+          if (d.drained) {
+            toast(ex.name + ' is drained — nothing in flight', 'ok');
+          } else if (d.in_flight_known) {
+            toast(ex.name + ' is draining — ' + d.in_flight + ' session(s) still running', 'ok');
+          } else {
+            toast(ex.name + ' is draining', 'ok');
+          }
+          loadExecutors();
+        })
+        .catch(() => toast('Failed to drain executor', 'err'));
+    }
+
     return h.mount({
       openExecutorDetail, closeExecutorDetail, openExecutorTaskRef, openExecutorSandbox,
       closeExecutorSandbox, onExecSandboxModeChange, saveExecutorSandbox, clearExecutorSandbox,
@@ -1344,7 +1423,7 @@
       closeExecutorLimits, saveExecutorLimits, clearExecutorLimits, openExecutorAudience,
       closeExecutorAudience, addExecutorAudience, removeExecutorAudience, openEnrollModal,
       closeEnrollModal, submitEnroll, copyEnrollCommand, copyEnrollInstall, upgradeExecutor,
-      editFleetAutoUpdate
+      editFleetAutoUpdate, revokeExecutor, cordonExecutor, uncordonExecutor, drainExecutor
     }, null, null, `
       <div id="enroll-overlay" data-overlay="flex" data-dismiss="closeEnrollModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">

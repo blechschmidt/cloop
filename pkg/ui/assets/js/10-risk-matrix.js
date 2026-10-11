@@ -1,6 +1,6 @@
 // ── Risk Matrix tab ───────────────────────────────────────────────────────────
 
-window.loadRiskMatrix = function() { loadRiskMatrix(); };
+act('loadRiskMatrix', loadRiskMatrix);
 
 function loadRiskMatrix() {
   const status  = document.getElementById('rmStatus');

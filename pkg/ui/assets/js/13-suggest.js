@@ -11,24 +11,24 @@ let suggestShown = 0;     // generation whose outcome has been announced
 let suggestPlan  = false; // the cards are a plan's tasks rather than ideas
 let suggestBusy  = false; // an add is in flight
 
-window.toggleSuggestPanel = function() {
+act('toggleSuggestPanel', function() {
   const panel = document.getElementById('suggestPanel');
   const btn   = document.getElementById('suggestToggleBtn');
   const isHidden = panel.style.display === 'none';
   panel.style.display = isHidden ? '' : 'none';
   btn.textContent = isHidden ? 'Hide suggestions' : 'Brainstorm ideas';
-};
+});
 
 // syncSuggestMode relabels the count for what Generate will do: with a
 // request typed it is the plan's length, and left blank the AI decides it;
 // without one it is how many ideas to brainstorm.
-window.syncSuggestMode = function() {
+act('syncSuggestMode', function() {
   const plan = !!document.getElementById('suggestInput').value.trim();
   document.getElementById('suggestCountLabel').textContent = plan ? 'Tasks in plan:' : 'Ideas to generate:';
   document.getElementById('suggestCount').placeholder = plan ? 'auto' : '5';
-};
+});
 
-window.runSuggest = function() {
+act('runSuggest', function() {
   const path  = selectedProjectPath;
   const input = document.getElementById('suggestInput').value.trim();
   const count = Math.max(0, parseInt(document.getElementById('suggestCount').value) || 0);
@@ -50,7 +50,7 @@ window.runSuggest = function() {
       harnessRefused(d);
     }
   }).catch(() => { if (path === selectedProjectPath) _suggestFail('Request failed'); });
-};
+});
 
 // applySuggestStatus is called from the WebSocket 'suggest_status' event
 // handler with the latest job state. It updates the UI when the job finishes
@@ -146,8 +146,8 @@ function renderSuggestions() {
         (desc ? '<div class="suggest-card-desc"><span class="suggest-card-label">What:</span> '+desc+'</div>' : '')+
         (why  ? '<div class="suggest-card-why"><span class="suggest-card-label">Why:</span> '+why+'</div>' : '')+
         '<div class="suggest-card-actions">'+
-          '<button class="btn primary" onclick="acceptSuggestion('+i+')">Add as task</button>'+
-          '<button class="btn"         onclick="rejectSuggestion('+i+')">Skip</button>'+
+          '<button class="btn primary" data-action="acceptSuggestion" data-arg="'+i+'">Add as task</button>'+
+          '<button class="btn"         data-action="rejectSuggestion" data-arg="'+i+'">Skip</button>'+
         '</div>'+
       '</div>';
   });
@@ -173,25 +173,25 @@ function _suggestAdd(sgs) {
   }).catch(() => toast('Request failed', 'err')).finally(() => { suggestBusy = false; });
 }
 
-window.acceptSuggestion = function(idx) {
+act('acceptSuggestion', function(idx) {
   const sg = currentSuggestions[idx];
   if (sg) _suggestAdd([sg]);
-};
+}, NUM);
 
-window.rejectSuggestion = function(idx) {
+act('rejectSuggestion', function(idx) {
   if (!currentSuggestions[idx]) return;
   currentSuggestions.splice(idx, 1);
   renderSuggestions();
-};
+}, NUM);
 
-window.addAllSuggestions = function() {
+act('addAllSuggestions', function() {
   _suggestAdd(currentSuggestions.slice());
-};
+});
 
-window.clearSuggestions = function() {
+act('clearSuggestions', function() {
   currentSuggestions = [];
   renderSuggestions();
-};
+});
 
 // resetSuggestPanel forgets the panel when the user leaves a project: its
 // cards belong to that project, and accepting them under another would put
@@ -212,7 +212,7 @@ let dcTaskId   = 0;     // parent task being decomposed (0 = modal closed)
 let dcSubtasks = [];    // proposed sub-tasks, each with a _keep selection flag
 let dcBusy     = false; // an AI preview or apply request is in flight
 
-window.openDecomposeModal = function(id) {
+act('openDecomposeModal', function(id) {
   const tasks = (appState && appState.plan && appState.plan.tasks) || [];
   const t = tasks.find(x => x.id === id);
   dcTaskId   = id;
@@ -242,12 +242,12 @@ window.openDecomposeModal = function(id) {
     document.getElementById('dc-body').innerHTML =
       '<div class="empty-state"><h3>Request failed</h3><p>Could not reach the server.</p></div>';
   });
-};
+}, NUM);
 
-window.closeDecomposeModal = function() {
+act('closeDecomposeModal', function() {
   closeOverlay('dc-overlay');
   dcTaskId = 0; dcSubtasks = []; dcBusy = false;
-};
+});
 
 function renderDecomposeList() {
   const body = document.getElementById('dc-body');
@@ -262,7 +262,7 @@ function renderDecomposeList() {
     '(each depending on the previous) and marks the parent task as <strong>skipped</strong>.</div>'+
     dcSubtasks.map((st, i) =>
       '<label class="dc-sub'+(st._keep?'':' off')+'">'+
-        '<input type="checkbox" '+(st._keep?'checked':'')+' onchange="toggleDecomposeSub('+i+')">'+
+        '<input type="checkbox" '+(st._keep?'checked':'')+' data-action-change="toggleDecomposeSub" data-arg="'+i+'">'+
         '<div style="flex:1;min-width:0">'+
           '<div class="dc-sub-title">'+(i+1)+'. '+esc(st.title||'')+'</div>'+
           (st.description ? '<div class="dc-sub-desc">'+esc(st.description)+'</div>' : '')+
@@ -277,11 +277,11 @@ function renderDecomposeList() {
   updateDecomposeFooter();
 }
 
-window.toggleDecomposeSub = function(i) {
+act('toggleDecomposeSub', function(i) {
   if (!dcSubtasks[i]) return;
   dcSubtasks[i]._keep = !dcSubtasks[i]._keep;
   renderDecomposeList();
-};
+}, NUM);
 
 function updateDecomposeFooter() {
   const kept = dcSubtasks.filter(st => st._keep).length;
@@ -293,7 +293,7 @@ function updateDecomposeFooter() {
     dcSubtasks.length ? kept+'/'+dcSubtasks.length+' selected' : '';
 }
 
-window.applyDecompose = function() {
+act('applyDecompose', function() {
   if (dcBusy || !dcTaskId) return;
   const id = dcTaskId;
   const kept = dcSubtasks.filter(st => st._keep).map(st => ({
@@ -320,5 +320,5 @@ window.applyDecompose = function() {
     updateDecomposeFooter();
     toast('Request failed', 'err');
   });
-};
+});
 

@@ -235,11 +235,16 @@ func TestStaticAssets_ServedPageHasEveryTab(t *testing.T) {
 	}
 
 	// switchTab targets come from both surfaces: the nav buttons live in the
-	// HTML, programmatic switches (deep links, keyboard shortcuts) in the JS.
+	// HTML and name the action (Task 20408), programmatic switches (deep
+	// links, keyboard shortcuts) call it in the JS.
 	targets := map[string]bool{}
-	for _, m := range regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`).
-		FindAllStringSubmatch(page+"\n"+js, -1) {
-		targets[m[1]] = true
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`),
+		regexp.MustCompile(`data-action=\\?"switchTab\\?" data-arg=\\?"([a-zA-Z0-9_-]+)`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(page+"\n"+js, -1) {
+			targets[m[1]] = true
+		}
 	}
 
 	var noEntry, noPanel []string
@@ -266,42 +271,45 @@ func TestStaticAssets_ServedPageHasEveryTab(t *testing.T) {
 			len(noPanel), strings.Join(noPanel, "\n  "))
 	}
 
-	// switchTab itself has to be reachable from the inline onclick attributes
-	// in the shell, which means it must escape the bundle's IIFE.
-	if !strings.Contains(js, "window.switchTab = function") {
-		t.Error("window.switchTab is not assigned in the served JS — every nav " +
-			"button would throw a ReferenceError")
+	// switchTab has to be a registered action: every nav button names it
+	// (Task 20408).
+	if !strings.Contains(js, "act('switchTab', function") {
+		t.Error("switchTab is not registered as an action in the served JS — every nav " +
+			"button would throw")
 	}
 }
 
-// TestStaticAssets_NoNewInlineScript keeps the CSP story honest. The policy
-// still carries 'unsafe-inline' for the pre-paint theme bootstrap that has to
-// run before first paint; the split must not have added a second inline
-// script, because the goal is to be able to drop 'unsafe-inline' later without
-// hunting for stragglers.
-func TestStaticAssets_NoNewInlineScript(t *testing.T) {
+// TestStaticAssets_NoInlineScript: the served page runs no inline script, and
+// loads the theme bootstrap — the last inline script it had — as an asset in
+// its head, before the stylesheet paints anything (Task 20408). Under the
+// hub's policy an inline script would not run; this says so at the commit that
+// adds one rather than as a missing theme in a browser.
+func TestStaticAssets_NoInlineScript(t *testing.T) {
 	_, page := fetchDashboard(t)
 
-	inline := regexp.MustCompile(`<script(?:\s[^>]*)?>`).FindAllStringIndex(page, -1)
-	var bodies []string
-	for _, loc := range inline {
+	tags := regexp.MustCompile(`<script(?:\s[^>]*)?>`).FindAllStringIndex(page, -1)
+	var srcs []string
+	for _, loc := range tags {
+		tag := page[loc[0]:loc[1]]
 		rest := page[loc[1]:]
 		end := strings.Index(rest, "</script>")
 		if end < 0 {
 			t.Fatal("unterminated <script> in the served page")
 		}
-		if body := strings.TrimSpace(rest[:end]); body != "" {
-			bodies = append(bodies, body)
+		if body := strings.TrimSpace(rest[:end]); body != "" || !strings.Contains(tag, " src=") {
+			t.Errorf("inline script in the served page — the policy runs none: %s%s", tag, body)
+			continue
 		}
+		srcs = append(srcs, tag)
 	}
-	if len(bodies) != 1 {
-		t.Fatalf("served page has %d inline <script> block(s), want exactly 1 "+
-			"(the pre-paint theme bootstrap). Every other script must be an "+
-			"external asset so the CSP can eventually drop 'unsafe-inline'.\n%v",
-			len(bodies), bodies)
+	head := page[:strings.Index(page, "</head>")]
+	theme := regexp.MustCompile(`<script src="/assets/theme\.[0-9a-f]+\.js"></script>`).FindStringIndex(head)
+	if theme == nil {
+		t.Fatalf("the theme bootstrap is not loaded from the head; scripts: %v", srcs)
 	}
-	if !strings.Contains(bodies[0], "cloop-theme") {
-		t.Errorf("the one inline script is not the theme bootstrap:\n%s", bodies[0])
+	if css := strings.Index(head, `rel="stylesheet"`); css >= 0 && css < theme[0] {
+		t.Error("the stylesheet is linked before the theme bootstrap runs: a light-theme user sees " +
+			"the dark theme paint first")
 	}
 }
 

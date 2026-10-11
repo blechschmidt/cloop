@@ -97,10 +97,10 @@ const scenarios = {
     window.switchTab('projects');
     await globalThis.__settle();
     const grid = html('projList');
-    const cardIdx = all(/openProject\((\d+),/g, grid).map(Number);
+    const cardIdx = all(/data-action="openProject" data-arg="(\d+)"/g, grid).map(Number);
     const chipIdx = all(/data-open-idx="(\d+)"/g, grid).map(Number);
-    const alphaCard = grid.indexOf('openProject(0,');
-    const betaCard = grid.indexOf('openProject(1,');
+    const alphaCard = grid.indexOf('data-action="openProject" data-arg="0"');
+    const betaCard = grid.indexOf('data-action="openProject" data-arg="1"');
     const chipPos = grid.indexOf('data-open-idx="2"');
     return {
       cards: cardIdx,
@@ -117,7 +117,7 @@ const scenarios = {
     await boot();
     window.switchTab('overview');
     await globalThis.__settle();
-    return {cards: all(/openProject\((\d+),/g, html('multiProjectCards')).map(Number)};
+    return {cards: all(/data-action="openProject" data-arg="(\d+)"/g, html('multiProjectCards')).map(Number)};
   },
 
   // The header dropdown lists each project followed by its features.
@@ -126,7 +126,7 @@ const scenarios = {
     await open(globalThis.__harness, 0, 'alpha');
     const drop = html('projSelectorDropdown');
     return {
-      order: all(/selectProjectFromDropdown\((\d+),/g, drop).map(Number),
+      order: all(/data-action="selectProjectFromDropdown" data-arg="(\d+)"/g, drop).map(Number),
       sub: (drop.match(/proj-selector-item[^"]* sub/g) || []).length,
     };
   },

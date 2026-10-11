@@ -412,6 +412,8 @@
   .audit-table td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
   .audit-row { cursor:pointer; }
   .audit-row:hover { background:var(--hover-bg); }
+  .pc-row { transition:background .1s; }
+  .pc-row:hover { background:var(--hover-bg); }
   .audit-row.expanded { background:var(--hover-bg); }
 
   /* Disk & Retention panel (Task 20229). Reuses .audit-table for the

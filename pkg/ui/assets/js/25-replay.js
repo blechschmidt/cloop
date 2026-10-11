@@ -3,7 +3,7 @@
 // handlers were never wired up — clicks on Run replay / Refresh / Close
 // (modal) all threw ReferenceError. These provide the minimum needed for
 // the tab to function: list, create, and the side-by-side diff modal.
-window.loadReplayRuns = function() {
+act('loadReplayRuns', function() {
   const list  = document.getElementById('replayRuns');
   const count = document.getElementById('replayCount');
   if (!list) return;
@@ -43,7 +43,7 @@ window.loadReplayRuns = function() {
   }).catch(err => {
     list.innerHTML = '<div style="color:var(--red);font-size:12px">Failed to load replay runs: ' + esc(String(err)) + '</div>';
   });
-};
+});
 
 function _openReplayDiff(id) {
   const modal = document.getElementById('replayDiffModal');
@@ -70,11 +70,11 @@ function _openReplayDiff(id) {
   });
 }
 
-window.closeReplayDiff = function() {
+act('closeReplayDiff', function() {
   closeOverlay('replayDiffModal');
-};
+});
 
-window.submitReplay = function() {
+act('submitReplay', function() {
   const sel    = document.getElementById('replayTaskSel');
   const prov   = document.getElementById('replayProvider');
   const model  = document.getElementById('replayModel');
@@ -109,7 +109,7 @@ window.submitReplay = function() {
   }).catch(err => {
     if (status) status.textContent = 'Replay failed: ' + String(err);
   });
-};
+});
 
 // Populate the replay task selector with completed tasks from current state
 // whenever the replay tab becomes active. Exposed on window so switchTab

@@ -13,12 +13,12 @@ let _pcAutoFollow   = true;    // when true, new live calls scroll to top
 let _pcReloadTimer  = null;    // debounce for filter changes
 const _PC_MAX_ROWS  = 500;     // cap in-memory list to keep render cheap
 
-window.loadProviderCalls = function() { loadProviderCalls(); };
-window.openProviderCallModal = function(id) { openProviderCallModal(id); };
-window.closeProviderCallModal = function() { closeProviderCallModal(); };
-window.submitProviderCallReplay = function() { submitProviderCallReplay(); };
-window.pcSwitchSub = function(name) { pcSwitchSub(name); };
-window.pcResetReplayPrompt = function() { pcResetReplayPrompt(); };
+act('loadProviderCalls', loadProviderCalls);
+act('openProviderCallModal', openProviderCallModal, NUM);
+act('closeProviderCallModal', closeProviderCallModal);
+act('submitProviderCallReplay', submitProviderCallReplay);
+act('pcSwitchSub', pcSwitchSub, ARG);
+act('pcResetReplayPrompt', pcResetReplayPrompt);
 
 function _pcDebouncedReload() {
   if (_pcReloadTimer) clearTimeout(_pcReloadTimer);
@@ -29,9 +29,9 @@ function _pcAutoFollowChange() {
   const cb = document.getElementById('pcAutoFollow');
   _pcAutoFollow = !!(cb && cb.checked);
 }
-// The filter bar names both inline (oninput, onchange), so they have to be global.
-window._pcDebouncedReload = _pcDebouncedReload;
-window._pcAutoFollowChange = _pcAutoFollowChange;
+// The filter bar names both (data-action-input, data-action-change).
+act('_pcDebouncedReload', _pcDebouncedReload);
+act('_pcAutoFollowChange', _pcAutoFollowChange);
 
 function _pcStatusBadge(status) {
   const map = {
@@ -116,8 +116,7 @@ function renderProviderCalls() {
     const errCell  = r.status !== 'ok' && r.error_message
       ? '<div style="color:var(--red);font-size:10px;margin-top:2px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.error_message) + '">' + esc(r.error_message) + '</div>'
       : '';
-    const onclick = 'onclick="openProviderCallModal(' + parseInt(r.id, 10) + ')"';
-    return '<tr ' + onclick + ' data-pc-id="' + parseInt(r.id, 10) + '" style="transition:background .1s" onmouseover="this.style.background=\'var(--hover-bg,rgba(127,127,127,0.08))\'" onmouseout="this.style.background=\'\'">' +
+    return '<tr class="pc-row" data-action="openProviderCallModal" data-arg="' + parseInt(r.id, 10) + '" data-pc-id="' + parseInt(r.id, 10) + '">' +
       '<td style="' + cellStyle + ';font-family:var(--font-mono,monospace);font-size:11px">' + esc(_pcTimeShort(r.timestamp)) + '</td>' +
       '<td style="' + cellStyle + '">' + _pcStatusBadge(r.status) + errCell + '</td>' +
       '<td style="' + cellStyle + '">' + esc(r.provider || '—') + '</td>' +

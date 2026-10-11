@@ -1,6 +1,101 @@
 (function() {
 'use strict';
 
+// ── Actions (Task 20408) ─────────────────────────────────────────────────────
+//
+// Markup never carries code. A control names an action — data-action for a
+// click, data-action-<event> for any other event — and keeps its arguments in
+// data-arg (and data-arg-<name> where it needs more than one), which the
+// action reads as data. One listener per event type, on the document, runs
+// the action the innermost such element names.
+//
+// An inline handler is JavaScript the HTML parser assembles from attribute
+// text, after it has decoded the character references in it: a project name
+// holding the literal text &quot; closed the string it was spliced into and
+// ran as code with the viewer's session. Under the policy the hub now sends
+// (script-src 'self', no 'unsafe-inline') an inline handler does not run at
+// all, so a control converted to an action is also the only kind that works.
+//
+// ACTIONS is everything a data-action can invoke: a click, Enter in a field,
+// a change to one or typing in it — a press the user aims at the control.
+// PASSING holds, per event type, what the pointer and a drag set off on their
+// way across the page: mouseenter and the drag events run only what was
+// registered for that very event (actOn), never an entry of ACTIONS, so an
+// element injected over the whole page cannot fire an action as the pointer
+// moves. Each entry is called with this = the element and the event as its
+// argument; a name a table does not hold throws, so a control nobody
+// registered fails loudly rather than as a dead button. Neither is window:
+// fetch lives there, and an attribute that could name it would let an
+// injected element spend the user's session on a click. (Deferred panels
+// route their own data-act through mountPanel, to their own functions only.)
+const ACTIONS = Object.create(null);
+const PASSING = Object.create(null);
+['mouseenter', 'dragstart', 'dragover', 'dragleave', 'drop', 'dragend'].forEach(t => { PASSING[t] = Object.create(null); });
+
+// act registers fn as the action name, its arguments read from the element
+// and the event by argsOf (none without it), and leaves fn on window, where
+// the rest of the page and the tests have always called it by name. An action
+// nothing else calls goes straight into ACTIONS instead. actOn registers one
+// for a single PASSING event type; an unknown type throws at boot.
+function act(name, fn, argsOf, type) {
+  (type ? PASSING[type] : ACTIONS)[name] = function(ev) { return fn.apply(this, argsOf ? argsOf(this, ev) : []); };
+  return window[name] = fn;
+}
+const actOn = (type, name, fn, argsOf) => act(name, fn, argsOf, type);
+// The argument readers act is most often given.
+const ARG = el => [el.dataset.arg];
+const NUM = el => [+el.dataset.arg];
+const VAL = el => [el.value];
+const EV = (el, ev) => [ev];
+const EV_NUM = (el, ev) => [ev, +el.dataset.arg];
+// A project by its index in the payload, with the name its card was drawn for.
+const IDX_NAME = el => [+el.dataset.arg, el.dataset.argName];
+// Two any page may use: a dismiss button that hides the bar it sits in, and a
+// read-only field that selects its whole value when clicked, for copying.
+ACTIONS.hideParent = function() { this.parentNode.style.display = 'none'; };
+ACTIONS.selectText = function() { this.select(); };
+
+function runAction(el, name, ev) {
+  // An empty name is a boundary: data-action="" on a container keeps a click
+  // inside it from reaching an action further out.
+  if (!name) return;
+  const h = (PASSING[ev.type] || ACTIONS)[name];
+  if (!h) throw new Error('no ' + ev.type + ' action is registered as ' + JSON.stringify(name));
+  h.call(el, ev);
+}
+
+['click', 'change', 'input', 'keydown', 'dragstart', 'dragover', 'dragleave', 'drop', 'dragend'].forEach(type => {
+  const attr = type === 'click' ? 'data-action' : 'data-action-' + type;
+  const key = type === 'click' ? 'action' : 'action' + type[0].toUpperCase() + type.slice(1);
+  document.addEventListener(type, ev => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    // A dialog's backdrop: a click on the element itself, not inside it.
+    if (type === 'click' && t.dataset && t.dataset.actionBackdrop) return runAction(t, t.dataset.actionBackdrop, ev);
+    const el = t.closest('[' + attr + ']');
+    if (el && !el.disabled) return runAction(el, el.dataset[key], ev);
+    if (type !== 'keydown' || ev.isComposing) return;
+    // Enter in a field submits what data-action-enter names; Shift+Enter is
+    // left to a textarea for a new line.
+    const enter = ev.key === 'Enter' && !ev.shiftKey && t.closest('[data-action-enter]');
+    if (enter) {
+      ev.preventDefault();
+      return runAction(enter, enter.dataset.actionEnter, ev);
+    }
+    // A control drawn as role=button answers Enter and Space as a button would.
+    if ((ev.key === 'Enter' || ev.key === ' ') && t.matches('[role="button"][data-action]:not(button)')) {
+      ev.preventDefault();
+      runAction(t, t.dataset.action, ev);
+    }
+  });
+});
+// mouseenter does not bubble, but it is captured on its way to every element
+// the pointer enters.
+document.addEventListener('mouseenter', ev => {
+  const t = ev.target;
+  if (t.dataset && t.dataset.actionMouseenter) runAction(t, t.dataset.actionMouseenter, ev);
+}, true);
+
 let appState = null;
 let evtSource = null;
 let activeTab = 'overview';
@@ -52,7 +147,7 @@ function hideLoginModal() {
   document.getElementById('loginTokenInput').value = '';
 }
 
-window.submitLogin = function() {
+act('submitLogin', function() {
   const input = document.getElementById('loginTokenInput');
   const token = input.value.trim();
   if (!token) return;
@@ -70,7 +165,7 @@ window.submitLogin = function() {
   }).catch(() => {
     document.getElementById('loginError').classList.add('visible');
   });
-};
+});
 
 // ── Drag-and-drop state ──────────────────────────────────────────────────────
 let dragSrcId = null;
@@ -210,7 +305,7 @@ window.ensureChartLib = ensureChartLib;
 
 // ── Tab switching ───────────────────────────────────────────────────────────
 
-window.switchTab = function(name) {
+act('switchTab', function(name) {
   activeTab = name;
   // Name the screen for the diagnostic trail (Task 20251). Done here rather
   // than left to the reporter's DOM query, because this is the authoritative
@@ -307,7 +402,7 @@ window.switchTab = function(name) {
 
   // Update scope hint badge in header to make project-vs-global clear.
   updateScopeHint(name);
-};
+}, ARG);
 
 // updateScopeHint reflects whether the active tab is per-project or global.
 // In single-project mode the hint still appears so the distinction is clear.
@@ -401,8 +496,8 @@ function updateModelDropdown() {
   const models = providerModels[prov] || [{value:'', label:'(default)'}];
   sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
 }
-// The init form's provider select names it inline, so it has to be global.
-window.updateModelDropdown = updateModelDropdown;
+// The init form's provider select names it (data-action-change).
+act('updateModelDropdown', updateModelDropdown);
 
 // Track current project's provider+model+effort for pre-populating the
 // Provider/Model picker modal opened from the Provider stat card.
@@ -457,7 +552,7 @@ function renderActiveOptions(s) {
       '<input type="number" id="maxParallelInput" min="1" max="64" step="1" value="' + mpVal + '" ' +
         'style="width:56px;background:transparent;color:var(--text);border:1px solid var(--border);' +
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
-        'onchange="setMaxParallel(this.value)" />' +
+        'data-action-change="setMaxParallel" />' +
       '<span class="opt-flag" title="Currently: ' + mpDisplay + ' worker(s)">-j ' + mpDisplay + '</span>' +
     '</div>';
   // Step timeout control. Disabled by default (Task 20147): an unset/empty
@@ -473,7 +568,7 @@ function renderActiveOptions(s) {
       '<input type="text" id="stepTimeoutInput" value="' + (stVal === '0' ? 'off' : stVal) + '" ' +
         'style="width:56px;background:transparent;color:var(--text);border:1px solid var(--border);' +
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
-        'onchange="setStepTimeout(this.value)" />' +
+        'data-action-change="setStepTimeout" />' +
     '</div>';
   // Per-task default wall-clock budget (Task 20143). 0 = "no timeout"
   // (Task 20148: tasks have no timeout by default). Changes here take effect
@@ -490,7 +585,7 @@ function renderActiveOptions(s) {
       '<input type="number" id="taskTimeoutInput" min="0" max="10080" step="1" value="' + ttVal + '" ' +
         'style="width:64px;background:transparent;color:var(--text);border:1px solid var(--border);' +
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
-        'onchange="setTaskTimeout(this.value)" />' +
+        'data-action-change="setTaskTimeout" />' +
       '<span class="opt-flag" title="0 = no timeout">' + ttDisplay + '</span>' +
     '</div>';
   const enabledCount = opts.filter(o => o[0]).length;
@@ -504,10 +599,8 @@ function renderActiveOptions(s) {
   grid.innerHTML = buildOptionBadges(opts) + parallelControls + stepTimeoutControl + taskTimeoutControl;
 }
 
-// Exposed on window because the Active Options badges use inline onchange
-// handlers that resolve in the global scope, while this whole script is
-// wrapped in an IIFE.
-window.setMaxParallel = function(raw) {
+// The Active Options inputs name these three as data-action-change.
+act('setMaxParallel', function(raw) {
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 1 || n > 64) {
     toast('Max Parallel must be between 1 and 64', 'error');
@@ -536,13 +629,13 @@ window.setMaxParallel = function(raw) {
     }
     toast('Update failed: ' + err.message, 'error');
   });
-};
+}, VAL);
 
 // setTaskTimeout updates the project-level default wall-clock budget per
 // task (Task 20143). Submitting 0 means no timeout (Task 20148) — tasks run
 // until they finish. Affects currently-running tasks within ~3 seconds via
 // the orchestrator's live-deadline poller.
-window.setTaskTimeout = function(raw) {
+act('setTaskTimeout', function(raw) {
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0 || n > 10080) {
     toast('Task Timeout must be 0 (off) or 1..10080 minutes', 'error');
@@ -570,9 +663,9 @@ window.setTaskTimeout = function(raw) {
     }
     toast('Update failed: ' + err.message, 'error');
   });
-};
+}, VAL);
 
-window.setStepTimeout = function(raw) {
+act('setStepTimeout', function(raw) {
   const val = raw.trim().toLowerCase();
   const sendVal = (val === 'off' || val === '0' || val === '') ? '0' : val;
   apiMethod('POST', pUrl('/api/options/step-timeout'), {value: sendVal}).then(d => {
@@ -583,7 +676,7 @@ window.setStepTimeout = function(raw) {
       toast('Update failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
     }
   }).catch(err => toast('Error: ' + err, 'error'));
-};
+}, VAL);
 
 function buildOptionBadges(opts) {
   return opts.map(o => {
@@ -592,7 +685,7 @@ function buildOptionBadges(opts) {
     if (toggleKey) {
       return '<button class="option-badge ' + cls + ' togglable" type="button" ' +
         'title="' + esc(o[4]) + '" ' +
-        'onclick="toggleOption(\'' + toggleKey + '\', ' + (o[0] ? 'false' : 'true') + ')">' +
+        'data-action="toggleOption" data-arg="' + toggleKey + '" data-arg-on="' + !o[0] + '">' +
         '<span class="opt-icon">' + o[1] + '</span>' +
         '<span>' + esc(o[2]) + '</span>' +
         '<span class="opt-flag">' + esc(o[3]) + '</span>' +
@@ -606,15 +699,14 @@ function buildOptionBadges(opts) {
   }).join('');
 }
 
-// Exposed on window because the Active Options badges use inline onclick
-// handlers that resolve in the global scope, while this whole script is
-// wrapped in an IIFE.
+// Each Active Options badge names this action, its flag in data-arg and the
+// value a click sets in data-arg-on.
 //
 // The badge is flipped optimistically in the DOM before the POST so the click
 // feels instant — without this, the user waits for one HTTP round-trip plus a
 // full render(s) (which re-fetches /api/steps) before seeing any visual
 // change. On HTTP error the optimistic update is reverted.
-window.toggleOption = function(flag, value) {
+act('toggleOption', function(flag, value) {
   const prev = appState ? !!appState[flag] : !value;
   if (appState) {
     appState[flag] = value;
@@ -641,7 +733,7 @@ window.toggleOption = function(flag, value) {
     }
     toast('Toggle failed: ' + err.message, 'error');
   });
-};
+}, el => [el.dataset.arg, el.dataset.argOn === 'true']);
 
 function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
@@ -721,6 +813,13 @@ function esc(s) {
   return String(s ?? '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// safeURL is u when it may be a link's href — http or https — and '' when not.
+// esc() keeps a value inside its attribute; it does nothing about a
+// javascript: URL a task's links can carry (Task 20408).
+function safeURL(u) {
+  return /^https?:\/\//i.test(u || '') ? u : '';
 }
 
 // errText: any API error value -> one line of readable text (Task 20320).

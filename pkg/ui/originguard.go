@@ -270,6 +270,10 @@ func (s *Server) bodyTypeAccepted(r *http.Request, ct string) bool {
 		return true
 	case p == ciMountPath || strings.HasPrefix(p, ciMountPath+"/"):
 		return true
+	case p == cspReportPath:
+		// The two JSON types a browser sends its policy reports as, and
+		// neither one a form can (Task 20408).
+		return jsonbody.IsMediaType(ct, cspReportMediaTypes...)
 	case sameorigin.IsMultipartForm(ct):
 		return multipartRoutes[p]
 	}

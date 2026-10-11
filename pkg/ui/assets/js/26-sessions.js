@@ -22,11 +22,11 @@ window.signOut = function() {
 // signOutEverywhere ends every *other* session for this user and leaves the
 // current one alone, so an operator who clicks it from the dashboard is not
 // thrown out of the page they clicked it from.
-window.signOutEverywhere = function() {
+act('signOutEverywhere', function() {
   if (!confirm('Sign out of every other session?\n\nEvery other browser and device signed in as you is ended immediately. This session stays open.')) return;
   api('/api/session/logout-all', {}).then(d => {
     const n = (d && d.ended) || 0;
     toast(n ? 'Ended ' + n + ' other session' + (n === 1 ? '' : 's') : 'No other sessions were open', 'ok');
     panelIf('secrets', 'loadSessions');
   }).catch(err => toast('Sign out everywhere failed: ' + ((err && err.message) || String(err)), 'err'));
-};
+});

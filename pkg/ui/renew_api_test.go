@@ -20,10 +20,12 @@ package ui
 
 import (
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -122,6 +124,26 @@ func (f *renewFixture) renew(t *testing.T, c *http.Client) (*http.Response, stri
 	return resp, string(b)
 }
 
+// renewDoc reads the verdict a renewal document carries for its parent: the
+// data-renew attribute the sign-in script posts (Task 20408), decoded as a
+// browser decodes it. Missing, it is an empty map, so a check on a field
+// fails with the document in the message.
+func renewDoc(body string) map[string]any {
+	out := map[string]any{}
+	m := regexp.MustCompile(`data-renew="([^"]*)"`).FindStringSubmatch(body)
+	if m == nil || !strings.Contains(body, `<script src="`+oidcauth.ScriptPath+`"></script>`) {
+		return out
+	}
+	_ = json.Unmarshal([]byte(html.UnescapeString(m[1])), &out)
+	return out
+}
+
+// renewOutcome is the outcome a renewal document reports to its parent.
+func renewOutcome(body string) string {
+	s, _ := renewDoc(body)["outcome"].(string)
+	return s
+}
+
 func TestRenewRouteIsServed(t *testing.T) {
 	f := newRenewFixture(t, nil)
 	f.clk.off = 10 * time.Minute // past the bound: the state the feature exists for
@@ -130,7 +152,7 @@ func TestRenewRouteIsServed(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
 	}
-	if !strings.Contains(body, `outcome: "ok"`) || !strings.Contains(body, "parent.postMessage(") {
+	if renewOutcome(body) != "ok" {
 		t.Fatalf("the renewal did not report success to its parent:\n%s", body)
 	}
 	if _, silent := f.idp.authorizeCounts(); silent != 1 {
@@ -143,7 +165,7 @@ func TestRenewRouteIsServed(t *testing.T) {
 	}
 	// And the frame learns when to come back without asking /api/me, whose
 	// request would count as the user being active.
-	if !strings.Contains(body, "renew_in: ") {
+	if _, ok := renewDoc(body)["renew_in"]; !ok {
 		t.Errorf("the answer carries no next schedule:\n%s", body)
 	}
 }
@@ -156,7 +178,7 @@ func TestRenewWithoutASessionSaysSo(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — a frame cannot surface a 401", resp.StatusCode)
 	}
-	if !strings.Contains(body, `outcome: "no_session"`) {
+	if renewOutcome(body) != "no_session" {
 		t.Fatalf("body = %s, want a no_session verdict", body)
 	}
 }
@@ -171,7 +193,7 @@ func TestRenewOnAHubWithoutSingleSignOn(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `outcome: "not_enabled"`) {
+	if resp.StatusCode != http.StatusOK || renewOutcome(string(b)) != "not_enabled" {
 		t.Fatalf("GET /auth/renew without OIDC = %d %s, want a not_enabled document", resp.StatusCode, b)
 	}
 }
@@ -180,7 +202,7 @@ func TestRenewInteractionRequired(t *testing.T) {
 	f := newRenewFixture(t, nil)
 	f.idp.setSilentError("login_required")
 	_, body := f.renew(t, f.c)
-	if !strings.Contains(body, `outcome: "interaction_required"`) {
+	if renewOutcome(body) != "interaction_required" {
 		t.Fatalf("a provider that needs to see the user produced:\n%s", body)
 	}
 	// The session survives: the provider declining to answer silently says
@@ -290,7 +312,7 @@ func TestClaimRefusalSaysWhetherARenewalClearsIt(t *testing.T) {
 		t.Fatalf("details = %v, want renewable no_refresh_token", refusal.Error.Details)
 	}
 
-	if _, doc := f.renew(t, f.c); !strings.Contains(doc, `outcome: "ok"`) {
+	if _, doc := f.renew(t, f.c); renewOutcome(doc) != "ok" {
 		t.Fatalf("renewal failed:\n%s", doc)
 	}
 	if status, body := do(t, f.c, http.MethodGet, f.ts.URL+"/api/sessions", ""); status != http.StatusOK {

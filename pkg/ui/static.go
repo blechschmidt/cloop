@@ -161,6 +161,18 @@ var deferredScripts = []struct{ token, path string }{
 	{"execadmin.js", "assets/js/deferred/execadmin.js"},
 }
 
+// pageScripts are scripts a page loads with a script element of its own
+// rather than as part of the bundle (Task 20408): the dashboard's theme, which
+// has to run in the head before anything paints, and the whole of the
+// display-glasses front end. Both were inline until the hub's policy stopped
+// running inline script. They live in assets/js/page/, which
+// TestStaticAssets_BundleCoversEveryFragment does not read as bundle fragments,
+// and a page names each by its token as it names any other asset.
+var pageScripts = []struct{ token, path string }{
+	{"theme.js", "assets/js/page/theme.js"},
+	{"glasses.js", "assets/js/page/glasses.js"},
+}
+
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
 // so the response for a given URL can be cached forever; the HTML that names
 // those URLs must be revalidated on every load or a deploy would never be
@@ -202,9 +214,10 @@ type assetSet struct {
 	icons map[string]*staticAsset
 
 	// glasses is the wearable's shell, served from /glasses (Task 20194).
-	// Self-contained rather than content-addressed: it is a few kilobytes of
-	// markup, CSS and script in one document, so a device on a phone's link
-	// paints after a single round trip instead of three.
+	// Not content-addressed itself: the device re-opens the URL its wearer
+	// saved. Its markup and CSS are one document, so a device on a phone's
+	// link paints after one round trip; its script is the hashed glasses.js
+	// beside it (pageScripts), fetched once per deploy.
 	glasses *staticAsset
 
 	// The individual sources, kept so tests can assert over the whole front
@@ -223,9 +236,11 @@ type assetSet struct {
 	// whole-line comments removed like the bundle's, or boundary itself if
 	// the stripper declined.
 	servedBoundary string
-	// deferred holds each deferred script as written and as served, by token.
-	deferred  map[string]deferredScript
-	indexTmpl string
+	// deferred holds each deferred script as written and as served, by token,
+	// and pageScripts each of pageScripts.
+	deferred    map[string]deferredScript
+	pageScripts map[string]deferredScript
+	indexTmpl   string
 	// renderedPage is indexTmpl with its asset URLs filled in, comments and
 	// all, for the tests that read the front end as its source; servedPage is
 	// it as it goes over the wire, its comments removed (htmlstrip.go), or
@@ -233,6 +248,9 @@ type assetSet struct {
 	renderedPage string
 	servedPage   string
 	glassesTmpl  string
+	// renderedGlasses is glassesTmpl with its asset URLs filled in: the
+	// document /glasses serves.
+	renderedGlasses string
 }
 
 // deferredScript is one of deferredScripts, as written and as served (its
@@ -317,29 +335,39 @@ func buildAssets() *assetSet {
 		{"errboundary.js", "errboundary", "js", jsContentType, []byte(servedBoundary)},
 		{"chart.js", "chart", "js", jsContentType, chart},
 	}
-	set.deferred = make(map[string]deferredScript, len(deferredScripts))
-	for _, d := range deferredScripts {
-		raw := string(read(d.path))
+	// script reads one deferred or page script, strips it like the bundle, and
+	// queues it to be hashed under its token.
+	script := func(token, path string) deferredScript {
+		raw := string(read(path))
 		served, err := stripJSLineComments(raw)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ui: serving %s with its comments: %v\n", d.path, err)
+			fmt.Fprintf(os.Stderr, "ui: serving %s with its comments: %v\n", path, err)
 		}
-		set.deferred[d.token] = deferredScript{raw: raw, served: served}
 		hashed = append(hashed, struct {
 			token string
 			stem  string
 			ext   string
 			ctype string
 			body  []byte
-		}{d.token, strings.TrimSuffix(d.token, ".js"), "js", jsContentType, []byte(served)})
+		}{token, strings.TrimSuffix(token, ".js"), "js", jsContentType, []byte(served)})
+		return deferredScript{raw: raw, served: served}
+	}
+	set.deferred = make(map[string]deferredScript, len(deferredScripts))
+	for _, d := range deferredScripts {
+		set.deferred[d.token] = script(d.token, d.path)
+	}
+	set.pageScripts = make(map[string]deferredScript, len(pageScripts))
+	for _, d := range pageScripts {
+		set.pageScripts[d.token] = script(d.token, d.path)
 	}
 
-	page := set.indexTmpl
+	page, glasses := set.indexTmpl, set.glassesTmpl
 	for _, h := range hashed {
 		url := "/assets/" + h.stem + "." + contentHash(h.body) + "." + h.ext
 		a := newStaticAsset(h.ctype, cacheImmutable, h.body)
 		set.byPath[url] = a
 		page = strings.ReplaceAll(page, "{{asset:"+h.token+"}}", url)
+		glasses = strings.ReplaceAll(glasses, "{{asset:"+h.token+"}}", url)
 	}
 
 	// And the page's own comments, the last prose on the first paint: 22 KB
@@ -354,7 +382,8 @@ func buildAssets() *assetSet {
 	// no-cache with an ETag, like index.html: the glasses re-open the saved
 	// URL on every glance, and a 304 is the cheapest possible answer to "is
 	// this still the page I have" without ever serving a stale one.
-	set.glasses = newStaticAsset("text/html; charset=utf-8", cacheNoCache, glassesTmpl)
+	set.renderedGlasses = glasses
+	set.glasses = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(glasses))
 	return set
 }
 

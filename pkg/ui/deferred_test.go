@@ -94,9 +94,7 @@ func mountedFunctions(src string) map[string]bool {
 // class of Tasks 20033 and 20065, moved somewhere the old gate cannot see.
 func TestDeferredPanelsRouteEveryAction(t *testing.T) {
 	set := loadAssets()
-	exposed := extractWindowExposures(dashboardSource)
 	routed := regexp.MustCompile(`data-(?:act|change|input|enter|dismiss)="([A-Za-z_$][\w$]*)"`)
-	inline := regexp.MustCompile(`\bon(?:click|change|input|keydown|submit)="(?:if\(event\.target===this\))?([A-Za-z_$][\w$]*)`)
 	mounting := 0
 	for _, d := range deferredScripts {
 		src := set.deferred[d.token].raw
@@ -114,19 +112,9 @@ func TestDeferredPanelsRouteEveryAction(t *testing.T) {
 				t.Errorf("%s: a control names %q, which its panel does not mount — pressing it throws", d.path, n[1])
 			}
 		}
-		// What inline handlers the moved markup still has must reach a
-		// function on window, like any inline handler on the page: the
-		// panel's own functions are not there.
-		for _, m := range inline.FindAllStringSubmatch(src, -1) {
-			name := m[1]
-			if name == "this" || name == "event" || name == "document" || name == "window" {
-				continue
-			}
-			if _, ok := exposed[name]; !ok || fns[name] {
-				t.Errorf("%s: an inline handler calls %q, which is not on window — use a data-act the "+
-					"panel mounts instead", d.path, name)
-			}
-		}
+		// A data-action in the moved markup is the bundle's, not the panel's:
+		// TestDashboard_EveryActionIsRegistered holds it to the registry, and
+		// an inline handler there would not run at all (Task 20408).
 	}
 	if mounting < 7 {
 		t.Fatalf("only %d deferred scripts mount markup; the seven of Task 20386 should, so this gate "+
@@ -170,6 +158,11 @@ func TestDeferredTabsAndShimsResolve(t *testing.T) {
 
 	shims := regexp.MustCompile(`panelAct\(\\?'([a-z]+)\\?',\s*\\?'([A-Za-z_$][\w$]*)\\?'`)
 	calls := shims.FindAllStringSubmatch(set.renderedPage+set.bundle+deferredSource(), -1)
+	// The executor cards' actions (23-executors.js) are each execAct('fn'),
+	// which is panelAct('execadmin', 'fn', <the card's index>) (Task 20408).
+	for _, m := range regexp.MustCompile(`\bexecAct\('([A-Za-z_$][\w$]*)'\)`).FindAllStringSubmatch(set.bundle, -1) {
+		calls = append(calls, []string{m[0], "execadmin", m[1]})
+	}
 	if len(calls) < 8 {
 		t.Fatalf("found %d panelAct calls; the executor cards alone make seven, so this gate has gone vacuous",
 			len(calls))

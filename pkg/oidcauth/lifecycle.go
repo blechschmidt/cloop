@@ -168,6 +168,19 @@ func (a *Authenticator) IdentityFromRequest(r *http.Request) *Identity {
 	return &id
 }
 
+// PeekIdentity is IdentityFromRequest for a request a page makes on its own
+// behalf — a browser's Content-Security-Policy report is one: it names the
+// session's user without counting the request as that user being active, as
+// peekSession explains.
+func (a *Authenticator) PeekIdentity(r *http.Request) *Identity {
+	rec, ok := a.peekSession(r)
+	if !ok {
+		return nil
+	}
+	id := rec.Identity
+	return &id
+}
+
 // SessionFromRequest resolves and validates r's session, refreshing the idle
 // clock as a side effect. It reports false for a missing, unknown, expired, or
 // idle session — deliberately without distinguishing them, since the caller

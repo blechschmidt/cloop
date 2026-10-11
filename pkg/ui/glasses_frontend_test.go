@@ -66,10 +66,10 @@ func runGlassesScenarios() glassesRunResult {
 		return glassesRunResult{skip: "node not installed; cannot drive the glasses page"}
 	}
 
-	m := glassesScriptRe.FindStringSubmatch(glassesPageSource())
-	if m == nil {
-		return glassesRunResult{err: errors.New("no inline <script> in glasses.html — the " +
-			"extraction broke, or the page stopped being self-contained")}
+	script := loadAssets().pageScripts["glasses.js"].raw
+	if script == "" {
+		return glassesRunResult{err: errors.New("no glasses.js among the page scripts — the " +
+			"page's script moved")}
 	}
 
 	// Not t.TempDir(): this run outlives any one test. The script is only
@@ -81,7 +81,7 @@ func runGlassesScenarios() glassesRunResult {
 	defer os.RemoveAll(dir)
 
 	path := filepath.Join(dir, "glasses.js")
-	if err := os.WriteFile(path, []byte(m[1]), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		return glassesRunResult{err: fmt.Errorf("write script: %w", err)}
 	}
 	shim, err := filepath.Abs("testdata/glassesdom.js")
@@ -123,8 +123,6 @@ func runGlassesScenarios() glassesRunResult {
 	}
 	return glassesRunResult{results: results}
 }
-
-var glassesScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
 
 func glassesScenario(t *testing.T, results map[string]json.RawMessage, name string, into any) {
 	t.Helper()

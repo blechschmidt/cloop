@@ -38,13 +38,13 @@ function _fwSum(r) {
 // _fwForm renders the five fields under prefix p, filled from r.
 function _fwForm(p, r) {
   r = r || {};
-  const ev = ' oninput="fwSync(\'' + p + '\')"';
+  const ev = ' data-action-input="fwSync" data-arg="' + p + '"';
   const field = (k, label, v, hint, rows) => '<div class="form-group"><label class="form-label">' + label + '</label>'
     + (rows ? '<textarea class="form-input" rows="' + rows + '" id="' + p + k + '"' + ev + '>' + esc(v) + '</textarea>'
       : '<input class="form-input" id="' + p + k + '" value="' + esc(v) + '"' + ev + '>')
     + '<div class="form-hint">' + hint + '</div></div>';
   return '<label class="sec-own-opt"><input type="checkbox" id="' + p + 'Pub"' + (r.allow_public_internet ? ' checked' : '')
-    + ' onchange="fwSync(\'' + p + '\')"><span><strong>Allow the public Internet</strong> — every public address; '
+    + ' data-action-change="fwSync" data-arg="' + p + '"><span><strong>Allow the public Internet</strong> — every public address; '
     + 'private and link-local ranges stay closed unless the allowlist names them, a cloud metadata service unless '
     + 'it names its own address.</span></label>'
     + '<div class="form-row">' + field('Allow', 'Allowlist', (r.allow_cidrs || []).join('\n'), 'Also reachable.', 2)
@@ -64,10 +64,10 @@ function _fwRead(p) {
   };
 }
 
-window.fwSync = function(p) {
+act('fwSync', function(p) {
   const s = document.getElementById(p + 'Sum');
   if (s) s.textContent = 'In effect: ' + _fwSum(_fwRead(p)) + '. Everything else is dropped.';
-};
+}, ARG);
 
 // _fwMeta renders the hub's notes on a stored rule set whose allowlist holds a
 // range containing a cloud metadata service it does not name (Task 20397):
@@ -165,8 +165,8 @@ function _pfwRender(d, note) {
     + '<div style="flex:2;min-width:min(280px,100%)"><div id="pfwState">' + _pfwState(d) + '</div>'
     + note + '<div id="pfwWarn"></div>' + _fwForm('pfw', d.configured ? d.rules : (d.governing || {}))
     + '<div class="modal-footer">'
-    + (d.configured ? '<button class="btn danger" onclick="clearProjectFirewall()">Remove rules</button>' : '')
-    + '<button class="btn primary" onclick="saveProjectFirewall()">Save rules</button></div></div></div>';
+    + (d.configured ? '<button class="btn danger" data-action="clearProjectFirewall">Remove rules</button>' : '')
+    + '<button class="btn primary" data-action="saveProjectFirewall">Save rules</button></div></div></div>';
   fwSync('pfw');
   pfwShown = _pfwReading();
 }
@@ -193,8 +193,8 @@ function _pfwSave(payload) {
     .catch(e => toast(_execDetailErrText(e) || 'Save failed', 'err'));
 }
 
-window.saveProjectFirewall = function() { _pfwSave(_fwRead('pfw')); };
+act('saveProjectFirewall', function() { _pfwSave(_fwRead('pfw')); });
 
-window.clearProjectFirewall = function() {
+act('clearProjectFirewall', function() {
   if (confirm('Remove this project’s firewall rules?\n\nIts runs will get the governing rules.')) _pfwSave({clear: true});
-};
+});

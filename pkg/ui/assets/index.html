@@ -14,7 +14,9 @@
 <link rel="icon" sizes="48x48 32x32 16x16" href="/favicon.ico">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0d1117">
-<script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- The theme, before anything paints: a blocking script of its own, since the
+     hub's policy runs no inline script (Task 20408). -->
+<script src="{{asset:theme.js}}"></script>
 <link rel="stylesheet" href="{{asset:app.css}}">
 <!-- Chart.js is named here but not loaded here (Task 20289). It is ~200 KiB
      decoded — a fifth of everything the dashboard ships — and its only
@@ -51,9 +53,9 @@
     <h2>cloop dashboard</h2>
     <p>This dashboard is protected. Enter the access token to continue.</p>
     <input type="password" id="loginTokenInput" placeholder="Access token" autocomplete="off"
-           onkeydown="if(event.key==='Enter')submitLogin()">
+           data-action-enter="submitLogin">
     <div class="login-error" id="loginError">Invalid token. Please try again.</div>
-    <button onclick="submitLogin()">Unlock</button>
+    <button data-action="submitLogin">Unlock</button>
   </div>
 </div>
 
@@ -63,9 +65,9 @@
     <div class="live-dot" id="liveDot"></div>
     <!-- Project selector (shown in multi-project mode) -->
     <div class="proj-selector-wrap" id="projSelectorWrap">
-      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
+      <button class="tab-btn" data-action="clearProjectSelection" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
       <div style="position:relative">
-        <button class="proj-selector-btn" id="projSelectorBtn" onclick="toggleProjectSelector()" title="Switch project">
+        <button class="proj-selector-btn" id="projSelectorBtn" data-action="toggleProjectSelector" title="Switch project">
           <span id="projSelectorLabel">All Projects</span>
           <span class="arrow">&#9660;</span>
         </button>
@@ -74,14 +76,14 @@
     </div>
     <!-- Project breadcrumb (kept for compatibility; hidden since selector replaces it) -->
     <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;min-width:0;max-width:100%">
-      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
+      <button class="tab-btn" data-action="clearProjectSelection" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
       <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
     </div>
     <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
     <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
     <span id="quotaSelfBadge" class="quota-self-badge" aria-live="polite" style="display:none"></span>
     <!-- Hamburger button (mobile only) -->
-    <button class="hamburger-btn" id="hamburgerBtn" onclick="openMobileNav()" aria-label="Open navigation menu" aria-expanded="false">
+    <button class="hamburger-btn" id="hamburgerBtn" data-action="openMobileNav" aria-label="Open navigation menu" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <line x1="3" y1="5"  x2="17" y2="5"/>
         <line x1="3" y1="10" x2="17" y2="10"/>
@@ -90,15 +92,15 @@
     </button>
 
     <div class="spacer"></div>
-    <button class="help-toggle-btn" id="helpToggleBtn" onclick="openHelpModal()" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">
+    <button class="help-toggle-btn" id="helpToggleBtn" data-action="openHelpModal" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">
       <span aria-hidden="true">?</span>
     </button>
-    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme (t)">
+    <button class="theme-toggle-btn" id="themeToggleBtn" data-action="toggleTheme" aria-label="Toggle dark/light mode" title="Toggle theme (t)">
       <span id="themeToggleIcon">&#9788;</span>
     </button>
     <!-- Signed-in user + sign-out (rendered only when OIDC auth is enabled) -->
     <span class="user-chip" id="userChip"></span>
-    <button class="theme-toggle-btn" id="logoutAllBtn" style="display:none" onclick="signOutEverywhere()"
+    <button class="theme-toggle-btn" id="logoutAllBtn" style="display:none" data-action="signOutEverywhere"
             aria-label="Sign out everywhere" title="Sign out of every other session (lost or shared device)">
       <span aria-hidden="true">&#8635;</span>
     </button>
@@ -109,31 +111,31 @@
     <div class="tab-nav" id="tabNav">
       <div class="tab-group">
         <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
-        <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
-        <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
-        <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
-        <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
-        <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
-        <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
-        <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
-        <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
-        <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
-        <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
-        <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
-        <button class="tab-btn"        onclick="switchTab('replay')"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
-        <button class="tab-btn"        onclick="switchTab('provider-calls')" id="tbtn-provider-calls" title="Live provider HTTP call inspector: prompts, responses, headers, replay (per-project)">Provider Calls</button>
+        <button class="tab-btn active" data-action="switchTab" data-arg="overview"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="tasks"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="queue"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="kanban"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="timeline"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="kb"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="deps"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="risk-matrix" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="analytics" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="chat"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="assistant" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="replay"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="provider-calls" id="tbtn-provider-calls" title="Live provider HTTP call inspector: prompts, responses, headers, replay (per-project)">Provider Calls</button>
         <span class="tab-divider" aria-hidden="true"></span>
       </div>
       <div class="tab-group">
         <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
-        <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
-        <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
-        <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
-        <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
-        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
-        <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide onclick="switchTab('quotas')" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
-        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="tbtn-telemetry" title="What the browser and display-glasses front ends actually did: gestures, view changes, requests and errors, as an ordered trail per page load (global, admin only)">Telemetry</button>
-        <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
+        <button class="tab-btn global-tab" data-action="switchTab" data-arg="projects"  id="tbtn-projects" title="All projects list (global)">Projects</button>
+        <button class="tab-btn global-tab" data-action="switchTab" data-arg="budget"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
+        <button class="tab-btn global-tab" data-action="switchTab" data-arg="executors" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
+        <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide data-action="switchTab" data-arg="secrets" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
+        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide data-action="switchTab" data-arg="audit" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
+        <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide data-action="switchTab" data-arg="quotas" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
+        <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide data-action="switchTab" data-arg="telemetry" id="tbtn-telemetry" title="What the browser and display-glasses front ends actually did: gestures, view changes, requests and errors, as an ordered trail per page load (global, admin only)">Telemetry</button>
+        <button class="tab-btn global-tab" data-action="switchTab" data-arg="settings"  id="tbtn-settings" title="Settings (global)">Settings</button>
       </div>
     </div>
   </header>
@@ -142,7 +144,7 @@
   <div id="presenceBar" role="status" aria-live="polite" aria-label="Connected collaborators"></div>
 
   <!-- ── Conflict toast ── -->
-  <div id="conflictToast" role="alert" aria-live="assertive" onclick="dismissConflictToast()">
+  <div id="conflictToast" role="alert" aria-live="assertive" data-action="dismissConflictToast">
     <span class="conflict-icon">&#x26A0;&#xFE0F;</span>
     <div class="conflict-body">
       <div class="conflict-title">Edit conflict detected</div>
@@ -154,17 +156,17 @@
   <!-- ── Unified search / filter bar ── -->
   <div id="filterBar" class="filter-bar" style="display:none" role="search" aria-label="Filter tasks">
     <div class="filter-bar-inner">
-      <input type="search" id="filterQ" class="filter-search-input" placeholder="&#x1F50D;&#xFE0E; Search title &amp; description…" aria-label="Search tasks" oninput="onFilterChange()">
+      <input type="search" id="filterQ" class="filter-search-input" placeholder="&#x1F50D;&#xFE0E; Search title &amp; description…" aria-label="Search tasks" data-action-input="onFilterChange">
       <div class="filter-group filter-status-group">
         <span class="filter-label">Status:</span>
-        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="pending" onchange="onFilterChange()"> Pending</label>
-        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="in_progress" onchange="onFilterChange()"> In Progress</label>
-        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="done" onchange="onFilterChange()"> Done</label>
-        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="failed" onchange="onFilterChange()"> Failed</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="pending" data-action-change="onFilterChange"> Pending</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="in_progress" data-action-change="onFilterChange"> In Progress</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="done" data-action-change="onFilterChange"> Done</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="failed" data-action-change="onFilterChange"> Failed</label>
       </div>
       <div class="filter-group">
         <span class="filter-label">Priority:</span>
-        <select id="filterPriority" class="filter-select" aria-label="Filter by priority" onchange="onFilterChange()">
+        <select id="filterPriority" class="filter-select" aria-label="Filter by priority" data-action-change="onFilterChange">
           <option value="">Any</option>
           <option value="1">P1 Critical</option>
           <option value="2">P2 High</option>
@@ -174,53 +176,53 @@
       </div>
       <div class="filter-group">
         <span class="filter-label">Assignee:</span>
-        <select id="filterAssignee" class="filter-select" aria-label="Filter by assignee" onchange="onFilterChange()">
+        <select id="filterAssignee" class="filter-select" aria-label="Filter by assignee" data-action-change="onFilterChange">
           <option value="">Any</option>
         </select>
       </div>
       <div class="filter-group">
         <span class="filter-label">Tags:</span>
         <div class="filter-tags-wrap" id="filterTagsWrap">
-          <button type="button" class="filter-tag-toggle" id="filterTagToggle" onclick="toggleTagDropdown(event)" aria-haspopup="listbox" aria-expanded="false">
+          <button type="button" class="filter-tag-toggle" id="filterTagToggle" data-action="toggleTagDropdown" aria-haspopup="listbox" aria-expanded="false">
             Tags <span id="filterTagCount"></span>&#9662;
           </button>
           <div class="filter-tags-panel" id="filterTagsPanel" role="listbox" aria-label="Tag filter"></div>
         </div>
       </div>
-      <button class="btn filter-clear-btn" id="filterClearBtn" onclick="clearFilters()" style="display:none" title="Clear all filters">Clear filters</button>
+      <button class="btn filter-clear-btn" id="filterClearBtn" data-action="clearFilters" style="display:none" title="Clear all filters">Clear filters</button>
       <span class="filter-badge" id="filterBadge" aria-live="polite"></span>
     </div>
   </div>
 
   <!-- ── Mobile navigation overlay ── -->
-  <div class="mobile-nav-overlay" id="mobileNavOverlay" data-overlay="class:open" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
+  <div class="mobile-nav-overlay" id="mobileNavOverlay" data-overlay="class:open" data-action-backdrop="closeMobileNav" aria-hidden="true">
     <nav class="mobile-nav-panel" role="navigation" aria-label="Main navigation">
       <div class="mobile-nav-header">
         <span class="mobile-nav-title">cloop</span>
-        <button class="mobile-nav-close" onclick="closeMobileNav()" aria-label="Close navigation">&#x2715;</button>
+        <button class="mobile-nav-close" data-action="closeMobileNav" aria-label="Close navigation">&#x2715;</button>
       </div>
       <div class="mobile-nav-section-label">Project</div>
-      <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
-      <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
-      <button class="m-tab-btn" onclick="switchTab('queue')"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity</button>
-      <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
-      <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
-      <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
-      <button class="m-tab-btn" onclick="switchTab('deps')"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
-      <button class="m-tab-btn" onclick="switchTab('risk-matrix')" id="mtbtn-risk-matrix"><span class="m-tab-icon">&#9888;</span>Risk Matrix</button>
-      <button class="m-tab-btn" onclick="switchTab('analytics')" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
-      <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
-      <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
-      <button class="m-tab-btn" onclick="switchTab('replay')"    id="mtbtn-replay"><span class="m-tab-icon">&#9851;</span>Replay</button>
-      <button class="m-tab-btn" onclick="switchTab('provider-calls')" id="mtbtn-provider-calls"><span class="m-tab-icon">&#128268;</span>Provider Calls</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="overview"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="tasks"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="queue"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="kanban"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="timeline"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="kb"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="deps"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="risk-matrix" id="mtbtn-risk-matrix"><span class="m-tab-icon">&#9888;</span>Risk Matrix</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="analytics" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="chat"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="assistant" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="replay"    id="mtbtn-replay"><span class="m-tab-icon">&#9851;</span>Replay</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="provider-calls" id="mtbtn-provider-calls"><span class="m-tab-icon">&#128268;</span>Provider Calls</button>
       <div class="mobile-nav-section-label">Global</div>
-      <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
-      <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
-      <button class="m-tab-btn" onclick="switchTab('executors')" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
-      <button class="m-tab-btn" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="mtbtn-secrets"><span class="m-tab-icon">&#128273;</span>Secrets</button>
-      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="mtbtn-audit"><span class="m-tab-icon">&#128209;</span>Audit</button>
-      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="mtbtn-telemetry"><span class="m-tab-icon">&#128225;</span>Telemetry</button>
-      <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="projects"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="budget"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="executors" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
+      <button class="m-tab-btn" data-global-perm="secret.grant" data-perm-hide data-action="switchTab" data-arg="secrets" id="mtbtn-secrets"><span class="m-tab-icon">&#128273;</span>Secrets</button>
+      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide data-action="switchTab" data-arg="audit" id="mtbtn-audit"><span class="m-tab-icon">&#128209;</span>Audit</button>
+      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide data-action="switchTab" data-arg="telemetry" id="mtbtn-telemetry"><span class="m-tab-icon">&#128225;</span>Telemetry</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="settings"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
     </nav>
   </div>
 
@@ -250,7 +252,7 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Provider</label>
-              <select class="form-select" id="initProvider" onchange="updateModelDropdown()">
+              <select class="form-select" id="initProvider" data-action-change="updateModelDropdown">
                 <option value="claudecode">claudecode (default)</option>
                 <option value="anthropic">anthropic</option>
                 <option value="openai">openai</option>
@@ -287,7 +289,7 @@
             <input type="checkbox" id="initPMMode"> Start in PM mode (decompose goal into tasks)
           </label>
           <br>
-          <button class="btn primary" onclick="submitInit()">Initialize Project</button>
+          <button class="btn primary" data-action="submitInit">Initialize Project</button>
         </div>
       </div>
 
@@ -313,7 +315,7 @@
             <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
               <div id="statusBadge"></div>
               <span id="runBuildNote" class="form-hint" style="display:none"></span>
-              <button class="btn" id="goalEditBtn" data-perm="project.write" onclick="openGoalEditModal()" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+              <button class="btn" id="goalEditBtn" data-perm="project.write" data-action="openGoalEditModal" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
             </div>
           </div>
         </div>
@@ -324,7 +326,7 @@
           <div class="card goal-card">
             <div class="goal-text empty" id="instructionsText" style="white-space:pre-wrap;font-size:13px;font-weight:400">No instructions set</div>
             <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
-              <button class="btn" id="instructionsEditBtn" data-perm="project.write" onclick="openInstructionsEditModal()" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+              <button class="btn" id="instructionsEditBtn" data-perm="project.write" data-action="openInstructionsEditModal" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
             </div>
           </div>
         </div>
@@ -338,17 +340,17 @@
               <div class="stat-value accent" id="statSteps">—</div>
               <div class="stat-sub" id="statStepsSub"></div>
             </div>
-            <div class="stat-card stat-card-clickable" id="providerCard" onclick="openProviderModelModal()" title="Click to change provider and model" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openProviderModelModal();}">
+            <div class="stat-card stat-card-clickable" id="providerCard" data-action="openProviderModelModal" title="Click to change provider and model" tabindex="0" role="button">
               <div class="stat-label">Provider <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statProvider" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statModel"></div>
             </div>
-            <div class="stat-card stat-card-clickable" id="executorCard" onclick="openExecutorPickerModal()" title="Click to change where this project's harness runs" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openExecutorPickerModal();}">
+            <div class="stat-card stat-card-clickable" id="executorCard" data-action="openExecutorPickerModal" title="Click to change where this project's harness runs" tabindex="0" role="button">
               <div class="stat-label">Executor <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statExecutor" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statExecutorSub"></div>
             </div>
-            <div class="stat-card stat-card-clickable" id="reviewGateCard" onclick="openReviewGateModal()" title="Click to set up the review gate: a reviewer model that checks each task's changes before they are pushed or merged" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openReviewGateModal();}">
+            <div class="stat-card stat-card-clickable" id="reviewGateCard" data-action="openReviewGateModal" title="Click to set up the review gate: a reviewer model that checks each task's changes before they are pushed or merged" tabindex="0" role="button">
               <div class="stat-label">Review gate <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statReviewGate" style="font-size:13px;margin-top:4px">off</div>
               <div class="stat-sub" id="statReviewGateSub"></div>
@@ -392,7 +394,7 @@
         <div class="section" id="featuresSection" style="display:none">
           <div class="section-title" style="display:flex;align-items:center;gap:12px">
             Features
-            <button class="btn primary" id="newFeatureBtn" data-perm="project.write" onclick="openNewFeatureModal()" style="margin-left:auto;padding:4px 10px;font-size:12px">+ New feature</button>
+            <button class="btn primary" id="newFeatureBtn" data-perm="project.write" data-action="openNewFeatureModal" style="margin-left:auto;padding:4px 10px;font-size:12px">+ New feature</button>
           </div>
           <div id="featuresList"></div>
         </div>
@@ -401,7 +403,7 @@
         <div class="section" id="ccLimitsSection" style="display:none">
           <div class="section-title" style="display:flex;align-items:center;gap:12px">
             Claude Code Subscription Caps
-            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadCCLimits({force:true})" title="Refresh usage">&#8635;</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" data-action="refreshCCLimits" title="Refresh usage">&#8635;</button>
           </div>
           <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:10px">
             Block this project from running once your global Claude Code subscription utilization reaches the configured percentage.
@@ -430,7 +432,7 @@
               <input class="form-input" id="ccMaxWeeklySonnetPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
             </div>
           </div>
-          <button class="btn primary" onclick="saveCCLimits()">Save Caps</button>
+          <button class="btn primary" data-action="saveCCLimits">Save Caps</button>
           <span id="ccLimitsSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
         </div>
 
@@ -438,19 +440,19 @@
         <div class="section">
           <div class="section-title">Controls</div>
           <div class="controls">
-            <button id="ctrlRun" class="btn success" data-perm="run.start" onclick="apiRun()" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
+            <button id="ctrlRun" class="btn success" data-perm="run.start" data-action="apiRun" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run
             </button>
-            <button id="ctrlStop" class="btn danger" data-perm="run.stop" onclick="apiStop()" style="display:none">
+            <button id="ctrlStop" class="btn danger" data-perm="run.stop" data-action="apiStop" style="display:none">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
               Pause / Stop
             </button>
-            <button class="btn" onclick="refreshState()">
+            <button class="btn" data-action="refreshState">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
               Refresh
             </button>
-            <button class="btn mic" id="micBtn" onclick="openVoiceModal()" title="Voice command (cloop listen)">
+            <button class="btn mic" id="micBtn" data-action="openVoiceModal" title="Voice command (cloop listen)">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
               Voice
             </button>
@@ -463,15 +465,15 @@
               <div class="voice-transcript" id="voiceTranscript" style="color:var(--muted)">Transcription will appear here</div>
               <div class="voice-output" id="voiceOutput" style="display:none"></div>
               <div class="voice-modal-btns">
-                <button class="btn mic" id="voiceRecordBtn" onclick="toggleVoiceRecording()">
+                <button class="btn mic" id="voiceRecordBtn" data-action="toggleVoiceRecording">
                   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/></svg>
                   Record
                 </button>
-                <button class="btn primary" id="voiceSendBtn" onclick="sendVoiceAudio()" disabled>
+                <button class="btn primary" id="voiceSendBtn" data-action="sendVoiceAudio" disabled>
                   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
                   Execute
                 </button>
-                <button class="btn" onclick="closeVoiceModal()">Cancel</button>
+                <button class="btn" data-action="closeVoiceModal">Cancel</button>
               </div>
             </div>
           </div>
@@ -484,7 +486,7 @@
         <div class="live-output-wrap" id="liveOutputWrap">
           <div class="live-output-header">
             <div class="section-title">Live Output</div>
-            <button class="live-output-clear" onclick="clearLiveLog()" title="Clear output">Clear</button>
+            <button class="live-output-clear" data-action="clearLiveLog" title="Clear output">Clear</button>
           </div>
           <div class="live-output-box" id="liveOutputBox" role="log" aria-live="polite" aria-label="Live run output"></div>
         </div>
@@ -541,12 +543,12 @@
         <span id="tasksRunBuild" class="form-hint" style="display:none"></span>
         <span class="tasks-run-hint">Options are set in <strong>Active Options</strong> on the Overview tab.</span>
         <span class="spacer"></span>
-        <button id="tasksCtrlRun" class="btn success" data-perm="run.start" onclick="apiRun()"
+        <button id="tasksCtrlRun" class="btn success" data-perm="run.start" data-action="apiRun"
                 title="Start a run on this project with the options enabled in Active Options on the Overview tab.">
           <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
           Start run
         </button>
-        <button id="tasksCtrlStop" class="btn danger" data-perm="run.stop" onclick="apiStop()" style="display:none"
+        <button id="tasksCtrlStop" class="btn danger" data-perm="run.stop" data-action="apiStop" style="display:none"
                 title="Stop now. The current task goes back to pending for the next run.">
           <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
           Pause / Stop
@@ -556,11 +558,11 @@
       <div class="section">
         <div class="section-title">Add Task</div>
         <div class="add-task-bar">
-          <input class="form-input" id="newTaskTitle" placeholder="Task title..." style="flex:2;min-width:200px" onkeydown="if(event.key==='Enter')submitAddTask()">
+          <input class="form-input" id="newTaskTitle" placeholder="Task title..." style="flex:2;min-width:200px" data-action-enter="submitAddTask">
           <!-- Multi-line (Task 20343): an <input> flattened the brief's line breaks. -->
           <textarea class="form-textarea" id="newTaskDesc" rows="3" placeholder="Description (optional)"
                     aria-label="Description (optional)" title="Enter starts a new line; Ctrl+Enter (Cmd+Enter on a Mac) adds the task"
-                    onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();submitAddTask()}"></textarea>
+                    data-action-keydown="addTaskDescKey"></textarea>
           <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1">
           <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
           <!-- Dictate a task (Task 20238). Hidden until GET /api/dictate says a
@@ -573,11 +575,11 @@
                deleting a row. -->
           <button class="btn mic" id="dictateTaskBtn" data-perm="task.mutate" style="display:none"
                   title="Dictate into the focused field, otherwise the task title"
-                  aria-label="Dictate into the focused field, otherwise the task title" onclick="toggleTaskDictation()">
+                  aria-label="Dictate into the focused field, otherwise the task title" data-action="toggleTaskDictation">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
             <span id="dictateTaskLabel">Dictate</span>
           </button>
-          <button class="btn primary" data-perm="task.mutate" onclick="submitAddTask()">Add Task</button>
+          <button class="btn primary" data-perm="task.mutate" data-action="submitAddTask">Add Task</button>
         </div>
       </div>
 
@@ -586,22 +588,22 @@
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           AI Feature Suggestions
           <span id="suggestCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
-          <button id="suggestToggleBtn" class="btn" data-perm="task.mutate" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleSuggestPanel()">Brainstorm ideas</button>
+          <button id="suggestToggleBtn" class="btn" data-perm="task.mutate" style="margin-left:auto;padding:3px 10px;font-size:11px" data-action="toggleSuggestPanel">Brainstorm ideas</button>
         </div>
         <div id="suggestPanel" style="display:none">
           <div class="card" style="margin-bottom:12px">
             <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal — or describe what you want, and have it broken down into a plan of tasks. Review each one — add what you like, skip the rest, or accept them all.</p>
             <textarea class="form-textarea" id="suggestInput" rows="2" maxlength="8000" style="margin-bottom:10px" aria-label="What to plan"
-                      placeholder="Optional: describe what you want done to get a plan of tasks. Leave empty to brainstorm ideas." oninput="syncSuggestMode()"></textarea>
+                      placeholder="Optional: describe what you want done to get a plan of tasks. Leave empty to brainstorm ideas." data-action-input="syncSuggestMode"></textarea>
             <div class="suggest-controls">
               <label class="form-label" id="suggestCountLabel" for="suggestCount" style="margin:0;white-space:nowrap">Ideas to generate:</label>
               <input class="form-input" id="suggestCount" type="number" min="1" max="20" placeholder="5" style="width:70px">
-              <button class="btn primary" id="suggestBtn" data-perm="task.mutate" onclick="runSuggest()">
+              <button class="btn primary" id="suggestBtn" data-perm="task.mutate" data-action="runSuggest">
                 <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
                 Generate
               </button>
-              <button class="btn" id="suggestAddAllBtn" data-perm="task.mutate" onclick="addAllSuggestions()" style="display:none">Add all</button>
-              <button class="btn" id="suggestClearBtn"  onclick="clearSuggestions()" style="display:none">Clear</button>
+              <button class="btn" id="suggestAddAllBtn" data-perm="task.mutate" data-action="addAllSuggestions" style="display:none">Add all</button>
+              <button class="btn" id="suggestClearBtn"  data-action="clearSuggestions" style="display:none">Clear</button>
             </div>
             <div id="suggestStatusLine" style="display:none" class="suggest-status">
               <span class="spinner" id="suggestSpinner"></span>
@@ -616,7 +618,7 @@
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
-          <button id="toggleCompletedBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedTasks()">Show completed</button>
+          <button id="toggleCompletedBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" data-action="toggleCompletedTasks">Show completed</button>
         </div>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
@@ -630,7 +632,7 @@
         <span class="section-title" style="margin:0">Task Activity</span>
         <span style="font-size:11px;color:var(--muted)">Every execution, heal retry, evolve discovery, and external merge — tied to its task. The single source of truth for what cloop is doing.</span>
         <span class="spacer"></span>
-        <select id="queueFilterKind" class="filter-select" onchange="loadQueue()" aria-label="Filter by kind">
+        <select id="queueFilterKind" class="filter-select" data-action-change="loadQueue" aria-label="Filter by kind">
           <option value="">All kinds</option>
           <option value="task">PM task</option>
           <option value="heal">Auto-heal</option>
@@ -638,7 +640,7 @@
           <option value="external">External</option>
           <option value="session">Session</option>
         </select>
-        <select id="queueFilterStatus" class="filter-select" onchange="loadQueue()" aria-label="Filter by status">
+        <select id="queueFilterStatus" class="filter-select" data-action-change="loadQueue" aria-label="Filter by status">
           <option value="">All statuses</option>
           <option value="queued">Queued</option>
           <option value="running">Running</option>
@@ -646,7 +648,7 @@
           <option value="failed">Failed</option>
           <option value="skipped">Skipped</option>
         </select>
-        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadQueue()">Refresh</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadQueue">Refresh</button>
       </div>
       <div id="queueStatsBar" class="stats-grid" style="margin-top:10px;margin-bottom:12px"></div>
       <div id="queueEmpty" class="empty-state" style="display:none">
@@ -676,40 +678,40 @@
     <div id="tab-kanban" class="tab-panel">
       <div class="kanban-toolbar">
         <span class="section-title" style="margin:0">Kanban Board</span>
-        <button class="btn" id="kanbanCompactBtn" style="padding:3px 10px;font-size:11px" onclick="toggleKanbanCompact()">Compact</button>
-        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="refreshState()">Refresh</button>
+        <button class="btn" id="kanbanCompactBtn" style="padding:3px 10px;font-size:11px" data-action="toggleKanbanCompact">Compact</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="refreshState">Refresh</button>
       </div>
       <div id="kanbanBoard" class="kanban-board">
         <div class="kanban-col" id="kb-col-pending"     data-status="pending">
           <div class="kanban-col-header"><span class="kanban-col-title">Pending</span><span class="kanban-col-count" id="kb-cnt-pending">0</span></div>
           <div class="kanban-col-body" id="kb-body-pending"
-               ondragover="kanbanColDragOver(event,'pending')"
-               ondragleave="kanbanColDragLeave(event,'pending')"
-               ondrop="kanbanColDrop(event,'pending')">
+               data-action-dragover="kanbanColDragOver" data-arg="pending"
+               data-action-dragleave="kanbanColDragLeave"
+               data-action-drop="kanbanColDrop">
           </div>
         </div>
         <div class="kanban-col" id="kb-col-in_progress" data-status="in_progress">
           <div class="kanban-col-header"><span class="kanban-col-title">In Progress</span><span class="kanban-col-count" id="kb-cnt-in_progress">0</span></div>
           <div class="kanban-col-body" id="kb-body-in_progress"
-               ondragover="kanbanColDragOver(event,'in_progress')"
-               ondragleave="kanbanColDragLeave(event,'in_progress')"
-               ondrop="kanbanColDrop(event,'in_progress')">
+               data-action-dragover="kanbanColDragOver" data-arg="in_progress"
+               data-action-dragleave="kanbanColDragLeave"
+               data-action-drop="kanbanColDrop">
           </div>
         </div>
         <div class="kanban-col" id="kb-col-done"        data-status="done">
           <div class="kanban-col-header"><span class="kanban-col-title">Done</span><span class="kanban-col-count" id="kb-cnt-done">0</span></div>
           <div class="kanban-col-body" id="kb-body-done"
-               ondragover="kanbanColDragOver(event,'done')"
-               ondragleave="kanbanColDragLeave(event,'done')"
-               ondrop="kanbanColDrop(event,'done')">
+               data-action-dragover="kanbanColDragOver" data-arg="done"
+               data-action-dragleave="kanbanColDragLeave"
+               data-action-drop="kanbanColDrop">
           </div>
         </div>
         <div class="kanban-col" id="kb-col-failed"      data-status="failed">
           <div class="kanban-col-header"><span class="kanban-col-title">Failed / Skipped</span><span class="kanban-col-count" id="kb-cnt-failed">0</span></div>
           <div class="kanban-col-body" id="kb-body-failed"
-               ondragover="kanbanColDragOver(event,'failed')"
-               ondragleave="kanbanColDragLeave(event,'failed')"
-               ondrop="kanbanColDrop(event,'failed')">
+               data-action-dragover="kanbanColDragOver" data-arg="failed"
+               data-action-dragleave="kanbanColDragLeave"
+               data-action-drop="kanbanColDrop">
           </div>
         </div>
       </div>
@@ -719,7 +721,7 @@
     <div id="tab-timeline" class="tab-panel">
       <div class="timeline-toolbar">
         <span class="section-title" style="margin:0">Gantt Chart</span>
-        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadTimeline()">Refresh</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadTimeline">Refresh</button>
         <span id="timelineStatus" style="font-size:11px;color:var(--muted)"></span>
       </div>
       <div id="timelineEmpty" class="empty-state" style="display:none">
@@ -747,10 +749,10 @@
       <div class="kb-tab-toolbar">
         <span class="section-title" style="margin:0">Knowledge Base</span>
         <div class="kb-search-wrap">
-          <input class="form-input kb-search-input" id="kbSearchInput" placeholder="Search entries..." oninput="filterKBCards(this.value)">
+          <input class="form-input kb-search-input" id="kbSearchInput" placeholder="Search entries..." data-action-input="filterKBCards">
         </div>
-        <button class="btn primary" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" onclick="toggleKBAddForm()">+ Add Entry</button>
-        <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadKB()">Refresh</button>
+        <button class="btn primary" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-action="toggleKBAddForm">+ Add Entry</button>
+        <button class="btn" style="padding:4px 10px;font-size:12px" data-action="loadKB">Refresh</button>
       </div>
 
       <!-- Add Entry form (hidden by default) -->
@@ -769,8 +771,8 @@
           <input class="form-input" id="kbNewTags" placeholder="Comma-separated tags, e.g. api,auth" style="flex:1">
         </div>
         <div style="display:flex;gap:8px;margin-top:6px">
-          <button class="btn primary" data-perm="task.mutate" onclick="submitKBAdd()">Save Entry</button>
-          <button class="btn" onclick="toggleKBAddForm()">Cancel</button>
+          <button class="btn primary" data-perm="task.mutate" data-action="submitKBAdd">Save Entry</button>
+          <button class="btn" data-action="toggleKBAddForm">Cancel</button>
         </div>
       </div>
 
@@ -785,9 +787,9 @@
     <div id="tab-deps" class="tab-panel">
       <div class="deps-toolbar">
         <span class="section-title" style="margin:0">Task Dependency Graph</span>
-        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadDeps()">Refresh</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadDeps">Refresh</button>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-left:8px">
-          <input type="checkbox" id="depsShowAll" onchange="loadDeps()"> Show all tasks
+          <input type="checkbox" id="depsShowAll" data-action-change="loadDeps"> Show all tasks
         </label>
       </div>
       <div id="depsEmpty" class="deps-empty" style="display:none">
@@ -810,7 +812,7 @@
       <div id="depsSidebar" class="deps-sidebar" style="display:none">
         <div class="deps-sidebar-header">
           <span id="depsSidebarTitle" class="deps-sidebar-title"></span>
-          <button class="deps-sidebar-close" onclick="closeDepsDetail()" aria-label="Close">&#x2715;</button>
+          <button class="deps-sidebar-close" data-action="closeDepsDetail" aria-label="Close">&#x2715;</button>
         </div>
         <div id="depsSidebarBody" class="deps-sidebar-body"></div>
       </div>
@@ -820,7 +822,7 @@
     <div id="tab-risk-matrix" class="tab-panel">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
         <span class="section-title" style="margin:0">Risk Matrix</span>
-        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadRiskMatrix()">Refresh</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadRiskMatrix">Refresh</button>
         <span id="rmStatus" style="font-size:11px;color:var(--muted)"></span>
       </div>
       <div id="rmEmpty" class="empty-state" style="display:none">
@@ -867,9 +869,9 @@
           <span class="chat-hint">Type a command or question — or hold <kbd>Space</kbd> to talk</span>
           <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
             <label class="chat-tts-label" title="Read responses aloud">
-              <input type="checkbox" id="chatTtsToggle" onchange="toggleTTS(this.checked)"> TTS
+              <input type="checkbox" id="chatTtsToggle" data-action-change="toggleTTS"> TTS
             </label>
-            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="clearChatHistory()">Clear</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px" data-action="clearChatHistory">Clear</button>
           </div>
         </div>
         <div class="chat-messages" id="chatMessages">
@@ -881,12 +883,12 @@
           </div>
         </div>
         <div class="chat-input-bar">
-          <button class="btn mic chat-mic-btn" id="chatMicBtn" onclick="toggleChatVoice()" title="Hold Space or click to record voice command">
+          <button class="btn mic chat-mic-btn" id="chatMicBtn" data-action="toggleChatVoice" title="Hold Space or click to record voice command">
             <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
           </button>
           <input class="form-input chat-input" id="chatInput" placeholder="Ask anything or give a command..."
-                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitChat();}">
-          <button class="btn primary" onclick="submitChat()" style="flex-shrink:0">
+                 data-action-enter="submitChat">
+          <button class="btn primary" data-action="submitChat" style="flex-shrink:0">
             <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
             Send
           </button>
@@ -896,8 +898,8 @@
             <span class="live-dot connected" style="width:6px;height:6px"></span>
             Recording...
           </span>
-          <button class="btn danger" style="padding:4px 10px;font-size:12px" onclick="stopChatVoice()">Stop &amp; Send</button>
-          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="cancelChatVoice()">Cancel</button>
+          <button class="btn danger" style="padding:4px 10px;font-size:12px" data-action="stopChatVoice">Stop &amp; Send</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" data-action="cancelChatVoice">Cancel</button>
         </div>
       </div>
     </div>
@@ -908,15 +910,15 @@
         <div class="chat-header">
           <span class="section-title" style="margin:0">&#129302; Plan Assistant</span>
           <span class="chat-hint">Ask questions about your plan — the AI has full task context</span>
-          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="clearAssistantPanel()">Clear</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" data-action="clearAssistantPanel">Clear</button>
         </div>
         <div class="assistant-chips" id="assistantChips">
           <span class="chip-label">Try asking:</span>
-          <button class="assist-chip" onclick="assistantChipAsk('What tasks are blocked?')">What tasks are blocked?</button>
-          <button class="assist-chip" onclick="assistantChipAsk('What should I work on next?')">What should I work on next?</button>
-          <button class="assist-chip" onclick="assistantChipAsk('Summarise progress for stakeholders')">Summarise progress for stakeholders</button>
-          <button class="assist-chip" onclick="assistantChipAsk('Which tasks are overdue or at risk?')">Which tasks are overdue or at risk?</button>
-          <button class="assist-chip" onclick="assistantChipAsk('Give me a risk assessment of the current plan')">Risk assessment</button>
+          <button class="assist-chip" data-action="assistantChipAsk" data-arg="What tasks are blocked?">What tasks are blocked?</button>
+          <button class="assist-chip" data-action="assistantChipAsk" data-arg="What should I work on next?">What should I work on next?</button>
+          <button class="assist-chip" data-action="assistantChipAsk" data-arg="Summarise progress for stakeholders">Summarise progress for stakeholders</button>
+          <button class="assist-chip" data-action="assistantChipAsk" data-arg="Which tasks are overdue or at risk?">Which tasks are overdue or at risk?</button>
+          <button class="assist-chip" data-action="assistantChipAsk" data-arg="Give me a risk assessment of the current plan">Risk assessment</button>
         </div>
         <div class="chat-messages" id="assistantMessages">
           <div class="chat-welcome" id="assistantWelcome">
@@ -929,9 +931,8 @@
         <div class="chat-input-bar">
           <textarea class="form-input chat-input assistant-textarea" id="assistantInput"
                     rows="1" placeholder="Ask about your plan..."
-                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitAssistantChat();}
-                               autoGrowTextarea(this);"></textarea>
-          <button class="btn primary" onclick="submitAssistantChat()" style="flex-shrink:0">
+                    data-action-enter="submitAssistantChat" data-action-input="autoGrowTextarea"></textarea>
+          <button class="btn primary" data-action="submitAssistantChat" style="flex-shrink:0">
             <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
             Send
           </button>
@@ -953,8 +954,8 @@
           <input id="replayProvider" class="form-input" placeholder="provider (e.g. anthropic)" style="max-width:170px"/>
           <input id="replayModel" class="form-input" placeholder="model" style="max-width:240px"/>
           <input id="replayJudge" class="form-input" placeholder="judge: provider:model (optional)" style="max-width:260px"/>
-          <button class="btn primary" onclick="submitReplay()">Run replay</button>
-          <button class="btn" onclick="loadReplayRuns()" title="Refresh">&#x21bb;</button>
+          <button class="btn primary" data-action="submitReplay">Run replay</button>
+          <button class="btn" data-action="loadReplayRuns" title="Refresh">&#x21bb;</button>
         </div>
         <div id="replayStatus" style="font-size:12px;color:var(--text-dim);min-height:18px;margin-bottom:8px"></div>
       </div>
@@ -968,11 +969,11 @@
       </div>
 
       <!-- side-by-side diff modal -->
-      <div id="replayDiffModal" data-overlay="flex" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeReplayDiff()">
+      <div id="replayDiffModal" data-overlay="flex" class="modal-backdrop" style="display:none" data-action-backdrop="closeReplayDiff">
         <div class="modal-card" style="max-width:1200px;width:96%;max-height:90vh;display:flex;flex-direction:column">
           <div class="modal-header">
             <span class="section-title" id="replayDiffTitle" style="margin:0">Replay diff</span>
-            <button class="btn" onclick="closeReplayDiff()">Close</button>
+            <button class="btn" data-action="closeReplayDiff">Close</button>
           </div>
           <div id="replayDiffMeta" style="font-size:12px;color:var(--text-dim);padding:6px 12px"></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px;flex:1;min-height:0">
@@ -1003,7 +1004,7 @@
           <span id="pcLiveDot" class="badge" style="font-size:11px;background:var(--green,#22c55e);color:white">LIVE</span>
           <span id="pcCount" style="font-size:11px;color:var(--text-dim)"></span>
           <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-            <select id="pcFilterProvider" class="filter-select" onchange="loadProviderCalls()" aria-label="Filter by provider">
+            <select id="pcFilterProvider" class="filter-select" data-action-change="loadProviderCalls" aria-label="Filter by provider">
               <option value="">All providers</option>
               <option value="anthropic">anthropic</option>
               <option value="openai">openai</option>
@@ -1011,9 +1012,9 @@
               <option value="claudecode">claudecode</option>
               <option value="mock">mock</option>
             </select>
-            <input id="pcFilterTaskID" class="form-input" type="number" min="0" placeholder="task id" style="max-width:90px;padding:3px 6px;font-size:11px" oninput="_pcDebouncedReload()" aria-label="Filter by task id">
-            <label class="filter-check" style="font-size:11px"><input type="checkbox" id="pcAutoFollow" checked onchange="_pcAutoFollowChange()"> Auto-follow</label>
-            <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadProviderCalls()" title="Refresh">&#x21bb; Refresh</button>
+            <input id="pcFilterTaskID" class="form-input" type="number" min="0" placeholder="task id" style="max-width:90px;padding:3px 6px;font-size:11px" data-action-input="_pcDebouncedReload" aria-label="Filter by task id">
+            <label class="filter-check" style="font-size:11px"><input type="checkbox" id="pcAutoFollow" checked data-action-change="_pcAutoFollowChange"> Auto-follow</label>
+            <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadProviderCalls" title="Refresh">&#x21bb; Refresh</button>
           </div>
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
@@ -1043,20 +1044,20 @@
       </div>
 
       <!-- Provider call detail / replay modal -->
-      <div id="pcModal" data-overlay="flex" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeProviderCallModal()">
+      <div id="pcModal" data-overlay="flex" class="modal-backdrop" style="display:none" data-action-backdrop="closeProviderCallModal">
         <div class="modal-card" style="max-width:1280px;width:97%;max-height:92vh;display:flex;flex-direction:column">
           <div class="modal-header">
             <span class="section-title" id="pcModalTitle" style="margin:0">Provider call</span>
-            <button class="btn" onclick="closeProviderCallModal()" aria-label="Close">Close</button>
+            <button class="btn" data-action="closeProviderCallModal" aria-label="Close">Close</button>
           </div>
 
           <div id="pcModalMeta" style="font-size:12px;color:var(--text-dim);padding:6px 14px;display:flex;flex-wrap:wrap;gap:14px"></div>
 
           <div style="padding:0 14px;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border)" role="tablist">
-            <button class="tab-btn pc-subtab active" data-pc-sub="prompt"   onclick="pcSwitchSub('prompt')">Prompt</button>
-            <button class="tab-btn pc-subtab"        data-pc-sub="response" onclick="pcSwitchSub('response')">Response</button>
-            <button class="tab-btn pc-subtab"        data-pc-sub="headers"  onclick="pcSwitchSub('headers')">Headers</button>
-            <button class="tab-btn pc-subtab"        data-pc-sub="replay"   onclick="pcSwitchSub('replay')">Replay</button>
+            <button class="tab-btn pc-subtab active" data-pc-sub="prompt"   data-action="pcSwitchSub" data-arg="prompt">Prompt</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="response" data-action="pcSwitchSub" data-arg="response">Response</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="headers"  data-action="pcSwitchSub" data-arg="headers">Headers</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="replay"   data-action="pcSwitchSub" data-arg="replay">Replay</button>
           </div>
 
           <div style="flex:1;min-height:0;overflow:auto;padding:10px 14px">
@@ -1081,8 +1082,8 @@
               <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Re-run this call against the project's current provider config. Edits below are applied; leave fields blank to replay verbatim.</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
                 <input id="pcReplayModel" class="form-input" placeholder="Model (e.g. claude-opus-4-7)" style="flex:1;min-width:220px"/>
-                <button class="btn primary" id="pcReplayRun" onclick="submitProviderCallReplay()">&#9851; Run replay</button>
-                <button class="btn" onclick="pcResetReplayPrompt()" title="Reset edits to the original prompt">Reset</button>
+                <button class="btn primary" id="pcReplayRun" data-action="submitProviderCallReplay">&#9851; Run replay</button>
+                <button class="btn" data-action="pcResetReplayPrompt" title="Reset edits to the original prompt">Reset</button>
               </div>
               <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">System prompt (editable)</div>
               <textarea id="pcReplaySystem" class="form-input" rows="3" style="width:100%;font-family:monospace;font-size:12px;margin-bottom:8px"></textarea>
@@ -1149,8 +1150,8 @@
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           Projects
-          <button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="openNewProjectModal()">+ New Project</button>
-          <button id="toggleCompletedProjectsBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedProjects()">Show completed</button>
+          <button class="btn primary" style="padding:4px 10px;font-size:12px" data-action="openNewProjectModal">+ New Project</button>
+          <button id="toggleCompletedProjectsBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" data-action="toggleCompletedProjects">Show completed</button>
         </div>
         <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
           No projects loaded. Use <code>cloop ui --projects /path/a /path/b</code> or <code>--scan /root/Projects</code>.
@@ -1172,11 +1173,11 @@
           Analytics
           <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap">
             <label style="font-size:12px;color:var(--muted)">From:</label>
-            <input type="date" id="analyticsFrom" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
+            <input type="date" id="analyticsFrom" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" data-action-change="loadAnalytics">
             <label style="font-size:12px;color:var(--muted)">To:</label>
-            <input type="date" id="analyticsTo" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
-            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="analyticsResetRange()">Last 30d</button>
-            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAnalytics()">&#8635; Refresh</button>
+            <input type="date" id="analyticsTo" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" data-action-change="loadAnalytics">
+            <button class="btn" style="padding:4px 10px;font-size:12px" data-action="analyticsResetRange">Last 30d</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px" data-action="loadAnalytics">&#8635; Refresh</button>
           </div>
         </div>
 
@@ -1187,7 +1188,7 @@
              silent set of blank cards is indistinguishable from "no data". -->
         <div id="analyticsChartStatus" role="status" style="display:none;margin-top:16px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);font-size:12.5px;color:var(--muted);align-items:center;gap:10px;flex-wrap:wrap">
           <span id="analyticsChartStatusText">Loading charts…</span>
-          <button class="btn" id="analyticsChartRetry" style="display:none;padding:3px 10px;font-size:11px" onclick="retryAnalyticsCharts()">Retry</button>
+          <button class="btn" id="analyticsChartRetry" style="display:none;padding:3px 10px;font-size:11px" data-action="retryAnalyticsCharts">Retry</button>
         </div>
 
         <div id="analyticsCharts">
@@ -1263,8 +1264,8 @@
         <div class="section-title" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
           Executors
           <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; shared by every project</span>
-          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadExecutors()" title="Refresh executor list">&#8635; Refresh</button>
-          <button class="btn primary" data-global-perm="executor.manage" style="padding:4px 10px;font-size:12px" onclick="panelAct('execadmin','openEnrollModal')" title="Mint an enrollment token for a remote device">+ Enroll device</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" data-action="loadExecutors" title="Refresh executor list">&#8635; Refresh</button>
+          <button class="btn primary" data-global-perm="executor.manage" style="padding:4px 10px;font-size:12px" data-action="openEnrollModal" title="Mint an enrollment token for a remote device">+ Enroll device</button>
         </div>
         <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
           An executor is where a harness actually runs. <strong>Host</strong> forks a child process of this
@@ -1305,7 +1306,7 @@
 
           <p style="text-align:center;margin-bottom:16px">
             <button class="btn primary" data-global-perm="executor.manage"
-                    style="padding:6px 14px;font-size:13px" onclick="panelAct('execadmin','openEnrollModal')">+ Enroll a device</button>
+                    style="padding:6px 14px;font-size:13px" data-action="openEnrollModal">+ Enroll a device</button>
           </p>
 
           <p style="text-align:center">
@@ -1336,12 +1337,12 @@
   </main>
 
   <!-- ── FAB: quick task add (mobile only) ── -->
-  <button id="fab-add-task" onclick="fabAddTask()" aria-label="Add task" title="Add task" style="display:none">+</button>
+  <button id="fab-add-task" data-action="fabAddTask" aria-label="Add task" title="Add task" style="display:none">+</button>
 
 </div>
 
 <!-- New Project modal -->
-<div id="new-project-overlay" data-overlay="flex" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="new-project-overlay" data-overlay="flex" data-action-backdrop="closeNewProjectModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">New Project</h2>
     <div class="form-group">
@@ -1422,14 +1423,14 @@
 
     <div id="npError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none;white-space:pre-wrap"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
-      <button class="btn primary" onclick="submitNewProject()">Create Project</button>
+      <button class="btn" data-action="closeNewProjectModal">Cancel</button>
+      <button class="btn primary" data-action="submitNewProject">Create Project</button>
     </div>
   </div>
 </div>
 
 <!-- Executor picker modal (per-project: where this project's harness runs) -->
-<div id="executor-picker-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorPickerModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="executor-picker-overlay" data-overlay="flex" data-action-backdrop="closeExecutorPickerModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Execution target</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -1443,20 +1444,20 @@
     <div id="epHint" style="font-size:11.5px;color:var(--muted);margin-bottom:12px;line-height:1.5"></div>
     <div id="epError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeExecutorPickerModal()">Cancel</button>
-      <button class="btn primary" id="epSaveBtn" onclick="submitExecutorBind()">Save</button>
+      <button class="btn" data-action="closeExecutorPickerModal">Cancel</button>
+      <button class="btn primary" id="epSaveBtn" data-action="submitExecutorBind">Save</button>
     </div>
   </div>
 </div>
 
 <!-- Provider / Model picker modal -->
-<div id="provider-model-overlay" data-overlay="flex" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="provider-model-overlay" data-overlay="flex" data-action-backdrop="closeProviderModelModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Provider &amp; Model</h2>
     <div class="form-row">
       <div class="form-group" style="flex:1">
         <label class="form-label">Provider</label>
-        <select class="form-select" id="pmProvider" onchange="onPMProviderChange()">
+        <select class="form-select" id="pmProvider" data-action-change="onPMProviderChange">
           <option value="claudecode">claudecode</option>
           <option value="anthropic">anthropic</option>
           <option value="openai">openai</option>
@@ -1488,37 +1489,37 @@
     </p>
     <div id="pmError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeProviderModelModal()">Cancel</button>
-      <button class="btn primary" onclick="saveProviderModel()">Save</button>
+      <button class="btn" data-action="closeProviderModelModal">Cancel</button>
+      <button class="btn primary" data-action="saveProviderModel">Save</button>
     </div>
   </div>
 </div>
 
 <!-- Review gate modal (Task 20357) -->
-<div id="review-gate-overlay" data-overlay="flex" onclick="if(event.target===this)closeReviewGateModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="review-gate-overlay" data-overlay="flex" data-action-backdrop="closeReviewGateModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div role="dialog" aria-labelledby="rgTitle" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 id="rgTitle" style="font-size:15px;font-weight:600;margin-bottom:8px">Review gate</h2>
     <p class="form-hint" style="margin-bottom:12px">A reviewer model checks each task's changes before anything is pushed or merged. The agent's pushes are held and sent only after it approves.</p>
     <label class="form-label" style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="rgEnabled"> Review each task before its changes leave this machine</label>
     <div class="form-row">
       <div class="form-group" style="flex:1"><label class="form-label" for="rgProvider">Reviewer provider</label>
-        <select class="form-select" id="rgProvider" onchange="onRGProviderChange()"><option value="">Same as the project</option><option value="claudecode">claudecode</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="ollama">ollama</option></select></div>
+        <select class="form-select" id="rgProvider" data-action-change="onRGProviderChange"><option value="">Same as the project</option><option value="claudecode">claudecode</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="ollama">ollama</option></select></div>
       <div class="form-group" style="flex:1"><label class="form-label" for="rgModel">Reviewer model</label><select class="form-select" id="rgModel"></select></div>
     </div>
     <div class="form-row">
       <div class="form-group" style="flex:1"><label class="form-label" for="rgEffort">Effort (claudecode)</label><select class="form-select" id="rgEffort"><option value="">(default)</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
       <div class="form-group" style="flex:1"><label class="form-label" for="rgMode">When changes are requested</label>
-        <select class="form-select" id="rgMode" onchange="onRGModeChange()"><option value="fix">Send back to the agent to fix</option><option value="block">Block: fail the task</option><option value="advisory">Advisory: publish anyway</option></select></div>
+        <select class="form-select" id="rgMode" data-action-change="onRGModeChange"><option value="fix">Send back to the agent to fix</option><option value="block">Block: fail the task</option><option value="advisory">Advisory: publish anyway</option></select></div>
     </div>
     <div class="form-group" id="rgRoundsRow"><label class="form-label" for="rgRounds">Fix rounds before blocking</label><input class="form-input" id="rgRounds" type="number" min="1" max="5" step="1" style="max-width:90px"></div>
     <div class="form-group"><label class="form-label" for="rgInstructions">Extra review criteria (optional)</label><textarea class="form-textarea" id="rgInstructions" maxlength="4000" placeholder="e.g. Reject any change to database migrations."></textarea></div>
     <div id="rgError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
-    <div class="modal-footer"><button class="btn" onclick="closeReviewGateModal()">Cancel</button><button class="btn primary" data-perm="config.write" onclick="saveReviewGate()">Save</button></div>
+    <div class="modal-footer"><button class="btn" data-action="closeReviewGateModal">Cancel</button><button class="btn primary" data-perm="config.write" data-action="saveReviewGate">Save</button></div>
   </div>
 </div>
 
 <!-- Edit Goal modal -->
-<div id="goal-edit-overlay" data-overlay="flex" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="goal-edit-overlay" data-overlay="flex" data-action-backdrop="closeGoalEditModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Project Goal</h2>
     <div class="form-group">
@@ -1528,14 +1529,14 @@
     <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Updates the project goal saved in state. Existing tasks and progress are preserved.</p>
     <div id="goalEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeGoalEditModal()">Cancel</button>
-      <button class="btn primary" onclick="saveGoalEdit()">Save Goal</button>
+      <button class="btn" data-action="closeGoalEditModal">Cancel</button>
+      <button class="btn primary" data-action="saveGoalEdit">Save Goal</button>
     </div>
   </div>
 </div>
 
 <!-- Edit Instructions modal -->
-<div id="instructions-edit-overlay" data-overlay="flex" onclick="if(event.target===this)closeInstructionsEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="instructions-edit-overlay" data-overlay="flex" data-action-backdrop="closeInstructionsEditModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Instructions / Constraints</h2>
     <div class="form-group">
@@ -1545,26 +1546,26 @@
     <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Persisted in state and prepended to every task prompt. Leave empty to clear.</p>
     <div id="instructionsEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeInstructionsEditModal()">Cancel</button>
-      <button class="btn primary" onclick="saveInstructionsEdit()">Save Instructions</button>
+      <button class="btn" data-action="closeInstructionsEditModal">Cancel</button>
+      <button class="btn primary" data-action="saveInstructionsEdit">Save Instructions</button>
     </div>
   </div>
 </div>
 
 <!-- Delete confirmation modal -->
-<div id="delete-modal-overlay" data-overlay="flex" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="delete-modal-overlay" data-overlay="flex" data-action-backdrop="closeDeleteModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div id="delete-modal" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:400px;max-width:92vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--red)">Delete Task</h2>
     <p id="deleteModalMsg" style="font-size:13px;color:var(--muted);margin-bottom:16px"></p>
     <div class="modal-footer">
-      <button class="btn" onclick="closeDeleteModal()">Cancel</button>
-      <button class="btn danger" onclick="executeDeleteTask()">Delete</button>
+      <button class="btn" data-action="closeDeleteModal">Cancel</button>
+      <button class="btn danger" data-action="executeDeleteTask">Delete</button>
     </div>
   </div>
 </div>
 
 <!-- Edit task modal -->
-<div id="modal-overlay" data-overlay="class:open" onclick="if(event.target===this)closeModal()">
+<div id="modal-overlay" data-overlay="class:open" data-action-backdrop="closeModal">
   <div id="modal">
     <h2 id="modalTitle">Edit Task</h2>
     <div class="form-group">
@@ -1587,7 +1588,7 @@
         <button class="btn mic" id="dictateEditBtn" data-perm="task.mutate" style="display:none"
                 title="Dictate into the focused field, otherwise these details"
                 aria-label="Dictate into the focused field, otherwise these details"
-                onclick="toggleEditDictation()">
+                data-action="toggleEditDictation">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
           <span id="dictateEditLabel">Dictate</span>
         </button>
@@ -1610,44 +1611,44 @@
     </div>
     <input type="hidden" id="modalTaskId">
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn primary" onclick="submitEditTask()">Save Changes</button>
+      <button class="btn" data-action="closeModal">Cancel</button>
+      <button class="btn primary" data-action="submitEditTask">Save Changes</button>
     </div>
   </div>
 </div>
 
 <!-- Task details modal (read-only — execution result, failure diagnosis, output) -->
-<div id="td-overlay" data-overlay="class:open" onclick="if(event.target===this)closeTaskDetails()">
+<div id="td-overlay" data-overlay="class:open" data-action-backdrop="closeTaskDetails">
   <div id="td-modal" role="dialog" aria-modal="true" aria-labelledby="td-title">
     <div class="td-header">
       <h2 id="td-title">Task Details</h2>
-      <button class="td-close" onclick="closeTaskDetails()" aria-label="Close">&times;</button>
+      <button class="td-close" data-action="closeTaskDetails" aria-label="Close">&times;</button>
     </div>
     <div id="td-body" class="td-body"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeTaskDetails()">Close</button>
-      <button class="btn" id="td-attach-btn" onclick="taskDetailsAttach()" disabled
+      <button class="btn" data-action="closeTaskDetails">Close</button>
+      <button class="btn" id="td-attach-btn" data-action="taskDetailsAttach" disabled
               title="Checking whether this task has an attachable sandbox…">Attach</button>
-      <button class="btn" id="td-reproduce-btn" onclick="taskDetailsReproduce()" disabled
+      <button class="btn" id="td-reproduce-btn" data-action="taskDetailsReproduce" disabled
               title="Checking whether this task can be reproduced…">Reproduce</button>
-      <button class="btn primary" id="td-edit-btn" onclick="taskDetailsEditCurrent()">Edit task</button>
+      <button class="btn primary" id="td-edit-btn" data-action="taskDetailsEditCurrent">Edit task</button>
     </div>
   </div>
 </div>
 
 <!-- Sandbox attach terminal (Task 20265) -->
-<div id="at-overlay" data-overlay="class:open" onclick="if(event.target===this)closeAttachTerminal()">
+<div id="at-overlay" data-overlay="class:open" data-action-backdrop="closeAttachTerminal">
   <div id="at-modal" role="dialog" aria-modal="true" aria-labelledby="at-title">
     <div class="td-header">
       <h2 id="at-title">Sandbox Terminal</h2>
-      <button class="td-close" onclick="closeAttachTerminal()" aria-label="Close">&times;</button>
+      <button class="td-close" data-action="closeAttachTerminal" aria-label="Close">&times;</button>
     </div>
     <div id="at-banner" class="at-banner"></div>
     <pre id="at-screen" class="at-screen" tabindex="0" aria-live="polite"></pre>
     <div class="modal-footer">
       <input class="form-input" id="at-input" placeholder="Read-only session" disabled
              autocomplete="off" spellcheck="false" style="flex:1;font-family:var(--mono,monospace)">
-      <button class="btn" onclick="closeAttachTerminal()">Close</button>
+      <button class="btn" data-action="closeAttachTerminal">Close</button>
     </div>
   </div>
 </div>
@@ -1664,11 +1665,11 @@
      "Edit with AI" is the only one that costs a provider call, so it is the
      only one that can fail — and when it does, the other two are still on
      screen. -->
-<div id="dr-overlay" data-overlay="class:open" onclick="if(event.target===this)closeDictateApply()">
+<div id="dr-overlay" data-overlay="class:open" data-action-backdrop="closeDictateApply">
   <div id="dr-modal" role="dialog" aria-modal="true" aria-labelledby="dr-title">
     <div class="dc-header">
       <h2 id="dr-title">Apply what you said</h2>
-      <button class="dc-close" onclick="closeDictateApply()" aria-label="Close">&times;</button>
+      <button class="dc-close" data-action="closeDictateApply" aria-label="Close">&times;</button>
     </div>
     <div class="dc-body">
       <div class="dc-hint">These details already have text in them. Choose what to do with what you just said — nothing is saved until you press Save Changes.</div>
@@ -1676,35 +1677,35 @@
       <div class="dr-busy" id="dr-busy" style="display:none">Editing the details with the model — this takes a few seconds.</div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeDictateApply()">Cancel</button>
-      <button class="btn" id="dr-append-btn" onclick="dictateApplyAppend()"
+      <button class="btn" data-action="closeDictateApply">Cancel</button>
+      <button class="btn" id="dr-append-btn" data-action="dictateApplyAppend"
               title="Keep the existing details and add what you said to the end.">Add to the end</button>
-      <button class="btn" id="dr-replace-btn" onclick="dictateApplyReplace()"
+      <button class="btn" id="dr-replace-btn" data-action="dictateApplyReplace"
               title="Discard the existing details and use what you said instead.">Replace</button>
-      <button class="btn primary" id="dr-revise-btn" onclick="dictateApplyRevise()"
+      <button class="btn primary" id="dr-revise-btn" data-action="dictateApplyRevise"
               title="Treat what you said as an instruction and let the model edit the existing details.">Edit with AI</button>
     </div>
   </div>
 </div>
 
 <!-- Decompose modal (AI splits a task into sub-tasks; user reviews before applying) -->
-<div id="dc-overlay" data-overlay="class:open" onclick="if(event.target===this)closeDecomposeModal()">
+<div id="dc-overlay" data-overlay="class:open" data-action-backdrop="closeDecomposeModal">
   <div id="dc-modal" role="dialog" aria-modal="true" aria-labelledby="dc-title">
     <div class="dc-header">
       <h2 id="dc-title">Decompose Task</h2>
-      <button class="dc-close" onclick="closeDecomposeModal()" aria-label="Close">&times;</button>
+      <button class="dc-close" data-action="closeDecomposeModal" aria-label="Close">&times;</button>
     </div>
     <div id="dc-body" class="dc-body"></div>
     <div class="modal-footer">
       <span id="dc-count" style="margin-right:auto;font-size:12px;color:var(--muted)"></span>
-      <button class="btn" onclick="closeDecomposeModal()">Cancel</button>
-      <button class="btn primary" id="dc-apply-btn" onclick="applyDecompose()" style="display:none">Add sub-tasks</button>
+      <button class="btn" data-action="closeDecomposeModal">Cancel</button>
+      <button class="btn primary" id="dc-apply-btn" data-action="applyDecompose" style="display:none">Add sub-tasks</button>
     </div>
   </div>
 </div>
 
 <!-- ── Features (Task 20341) ──────────────────────────────────────────────── -->
-<div id="newfeat-overlay" data-overlay="flex" onclick="if(event.target===this)closeNewFeatureModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="newfeat-overlay" data-overlay="flex" data-action-backdrop="closeNewFeatureModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:8px">New feature</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:14px">A git worktree of <strong id="nfParent"></strong> on its own branch, with its own task list and run settings. It runs in parallel with the project and its other features.</p>
@@ -1734,13 +1735,13 @@
     </div>
     <div id="nfError" style="display:none;color:var(--red);font-size:12px;margin-bottom:10px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeNewFeatureModal()">Cancel</button>
-      <button class="btn primary" id="nfSubmit" onclick="submitNewFeature()">Create feature</button>
+      <button class="btn" data-action="closeNewFeatureModal">Cancel</button>
+      <button class="btn primary" id="nfSubmit" data-action="submitNewFeature">Create feature</button>
     </div>
   </div>
 </div>
 
-<div id="featpr-overlay" data-overlay="flex" onclick="if(event.target===this)closeFeaturePRModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="featpr-overlay" data-overlay="flex" data-action-backdrop="closeFeaturePRModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:8px" id="fprTitle">Open pull request</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:14px" id="fprIntro"></p>
@@ -1753,13 +1754,13 @@
     </div>
     <div id="fprError" style="display:none;color:var(--red);font-size:12px;margin-bottom:10px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeFeaturePRModal()">Cancel</button>
-      <button class="btn primary" id="fprSubmit" onclick="submitFeaturePR()">Open pull request</button>
+      <button class="btn" data-action="closeFeaturePRModal">Cancel</button>
+      <button class="btn primary" id="fprSubmit" data-action="submitFeaturePR">Open pull request</button>
     </div>
   </div>
 </div>
 
-<div id="delfeat-overlay" data-overlay="flex" onclick="if(event.target===this)closeRemoveFeatureModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:90;align-items:center;justify-content:center">
+<div id="delfeat-overlay" data-overlay="flex" data-action-backdrop="closeRemoveFeatureModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:90;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:92vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;color:var(--danger,#e55)">Remove feature</h2>
     <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Removes the worktree of <strong id="dfName"></strong> with its task list and history. Its branch <code id="dfBranch"></code> is kept unless you delete it below.</p>
@@ -1767,14 +1768,14 @@
     <label class="adv-label"><input type="checkbox" id="dfForce"> Force: discard uncommitted changes and delete an unmerged branch</label>
     <div id="dfError" style="display:none;color:var(--red);font-size:12px;margin-top:10px"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeRemoveFeatureModal()">Cancel</button>
-      <button class="btn danger" id="dfSubmit" onclick="submitRemoveFeature()">Remove</button>
+      <button class="btn" data-action="closeRemoveFeatureModal">Cancel</button>
+      <button class="btn danger" id="dfSubmit" data-action="submitRemoveFeature">Remove</button>
     </div>
   </div>
 </div>
 
 <!-- ── Delete project confirmation modal ───────────────────────────────── -->
-<div id="delproj-overlay" data-overlay="flex" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+<div id="delproj-overlay" data-overlay="flex" data-action-backdrop="closeDeleteProjectModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
   <div id="delproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw;">
     <h2 style="font-size:15px; font-weight:600; margin-bottom:12px; color:var(--danger,#e55);">Delete project</h2>
     <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
@@ -1796,8 +1797,8 @@
     </label>
     <input type="hidden" id="delproj-idx">
     <div class="modal-footer">
-      <button class="btn" onclick="closeDeleteProjectModal()">Cancel</button>
-      <button class="btn danger" onclick="submitDeleteProject()">Delete</button>
+      <button class="btn" data-action="closeDeleteProjectModal">Cancel</button>
+      <button class="btn danger" data-action="submitDeleteProject">Delete</button>
     </div>
   </div>
 </div>
@@ -1806,7 +1807,7 @@
      #hiddenProjectsList is deliberately empty here: the names exist only while
      this dialog is open, filled by openHiddenProjectsModal() and cleared by
      closeHiddenProjectsModal(). Settings itself carries only a count. -->
-<div id="hiddenproj-overlay" data-overlay="flex" onclick="if(event.target===this)closeHiddenProjectsModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+<div id="hiddenproj-overlay" data-overlay="flex" data-action-backdrop="closeHiddenProjectsModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
   <div id="hiddenproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw; max-height:80vh; overflow-y:auto;">
     <h2 style="font-size:15px; font-weight:600; margin-bottom:8px;">Hidden projects</h2>
     <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
@@ -1815,7 +1816,7 @@
     </p>
     <div id="hiddenProjectsList"></div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeHiddenProjectsModal()">Close</button>
+      <button class="btn" data-action="closeHiddenProjectsModal">Close</button>
     </div>
   </div>
 </div>
@@ -1842,7 +1843,7 @@
   <div id="help-modal">
     <div id="help-modal-header">
       <h3 id="help-modal-title">Keyboard Shortcuts</h3>
-      <button id="help-modal-close" onclick="closeHelpModal()" aria-label="Close help">&times;</button>
+      <button id="help-modal-close" data-action="closeHelpModal" aria-label="Close help">&times;</button>
     </div>
     <div id="help-modal-body" role="document"></div>
     <div id="help-modal-footer">
@@ -1886,24 +1887,24 @@
 <div id="buildStaleBanner" role="status" aria-live="polite" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(480px,92vw);align-items:center;gap:10px;color:var(--text)">
   <span aria-hidden="true" style="font-size:15px">&#8635;</span>
   <span id="buildStaleText" style="flex:1">A new build of cloop is now running &mdash; this page is still on the previous one.</span>
-  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" onclick="reloadForNewBuild()">Reload</button>
-  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="dismissBuildStale()">&times;</button>
+  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" data-action="reloadForNewBuild">Reload</button>
+  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" data-action="dismissBuildStale">&times;</button>
 </div>
 
 <!-- The sign-in needs the user (Task 20359): see 32-renew.js. -->
 <div id="sessionRenewBanner" role="status" aria-live="polite" style="display:none;position:fixed;bottom:76px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:125;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(520px,92vw);align-items:center;gap:10px;color:var(--text)">
   <span aria-hidden="true" style="font-size:15px">&#128274;</span>
   <span id="sessionRenewText" style="flex:1"></span>
-  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" onclick="signInAgain()">Sign in</button>
-  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="this.parentNode.style.display='none'">&times;</button>
+  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" data-action="signInAgain">Sign in</button>
+  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" data-action="hideParent">&times;</button>
 </div>
 
 <!-- ── JS error boundary toast + full-screen recovery banner ───────────── -->
 <div id="errboundary-toast" role="alert" aria-live="assertive" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid rgba(248,81,73,.6);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(440px,92vw);align-items:center;gap:10px;color:var(--text)">
   <span aria-hidden="true" style="color:var(--red);font-size:15px">&#9888;</span>
   <span id="errboundary-toast-text" style="flex:1">Something went wrong &mdash; click to reload.</span>
-  <button id="errboundary-toast-reload" type="button" class="btn" style="padding:4px 10px;font-size:12px" onclick="location.reload()">Reload</button>
-  <button id="errboundary-toast-close" type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="document.getElementById('errboundary-toast').style.display='none'">&times;</button>
+  <button id="errboundary-toast-reload" type="button" class="btn" style="padding:4px 10px;font-size:12px">Reload</button>
+  <button id="errboundary-toast-close" type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px">&times;</button>
 </div>
 <div id="errboundary-banner" role="alertdialog" aria-modal="true" aria-labelledby="errboundary-banner-title" aria-describedby="errboundary-banner-desc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid rgba(248,81,73,.5);border-radius:var(--radius);padding:24px;max-width:min(520px,92vw);text-align:center">
@@ -1911,8 +1912,8 @@
     <h2 id="errboundary-banner-title" style="font-size:16px;font-weight:600;margin-bottom:8px">The dashboard is in a broken state</h2>
     <p id="errboundary-banner-desc" style="font-size:13px;color:var(--muted);margin-bottom:16px">Several JavaScript errors have occurred in quick succession. Reloading the page usually clears the issue. The error details have been logged on the server.</p>
     <div class="modal-footer" style="justify-content:center">
-      <button class="btn" type="button" onclick="document.getElementById('errboundary-banner').style.display='none'">Dismiss</button>
-      <button class="btn primary" type="button" onclick="location.reload()">Reload page</button>
+      <button id="errboundary-banner-dismiss" class="btn" type="button">Dismiss</button>
+      <button id="errboundary-banner-reload" class="btn primary" type="button">Reload page</button>
     </div>
   </div>
 </div>

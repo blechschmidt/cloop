@@ -3,12 +3,12 @@
 let kanbanCompact = false;
 let kbDragTaskId  = null;
 
-window.toggleKanbanCompact = function() {
+act('toggleKanbanCompact', function() {
   kanbanCompact = !kanbanCompact;
   const btn = document.getElementById('kanbanCompactBtn');
   if (btn) btn.textContent = kanbanCompact ? 'Expanded' : 'Compact';
   if (appState) renderKanban(appState);
-};
+});
 
 // Map status values to their column bucket (failed + skipped + timed_out → 'failed' col)
 function kbColFor(status) {
@@ -95,10 +95,10 @@ function renderKanban(s) {
       const compact = kanbanCompact ? ' kb-compact' : '';
       return (
         '<div class="kb-card '+pc+compact+'" draggable="true" data-task-id="'+t.id+'" '+
-          'onclick="taskRowClick(event,'+t.id+')" '+
+          'data-action="taskRowClick" data-arg="'+t.id+'" '+
           'title="Click to view execution summary, output, and history" '+
-          'ondragstart="kbDragStart(event,'+t.id+')" '+
-          'ondragend="kbDragEnd(event)">'+
+          'data-action-dragstart="kbDragStart" '+
+          'data-action-dragend="kbDragEnd">'+
           '<div class="kb-card-header">'+
             '<div class="kb-card-title">'+(t.pinned?'<span class="pin-badge" title="Pinned">📌</span> ':'')+esc(t.title)+'</div>'+
             avatar+
@@ -117,7 +117,7 @@ function renderKanban(s) {
 
 // ── Kanban drag-and-drop ─────────────────────────────────────────────────────
 
-window.kbDragStart = function(e, id) {
+actOn('dragstart', 'kbDragStart', function(e, id) {
   kbDragTaskId = id;
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', String(id));
@@ -125,31 +125,33 @@ window.kbDragStart = function(e, id) {
     const el = document.querySelector('.kb-card[data-task-id="'+id+'"]');
     if (el) el.classList.add('kb-dragging');
   }, 0);
-};
+}, EV_NUM);
 
-window.kbDragEnd = function(e) {
+actOn('dragend', 'kbDragEnd', function(e) {
   kbDragTaskId = null;
   document.querySelectorAll('.kb-card').forEach(el => el.classList.remove('kb-dragging'));
   document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
-};
+}, EV);
 
-window.kanbanColDragOver = function(e, col) {
+actOn('dragover', 'kanbanColDragOver', function(e, col) {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
   document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
   const body = document.getElementById('kb-body-'+col);
   if (body) body.classList.add('kb-drag-over');
-};
+}, (el, ev) => [ev, el.dataset.arg]);
 
-window.kanbanColDragLeave = function(e, col) {
+// box is the column the listener is for: under delegation e.currentTarget is
+// the document, which contains everything.
+actOn('dragleave', 'kanbanColDragLeave', function(e, col, box) {
   // Only remove if leaving the column body itself (not entering a child card)
-  if (!e.currentTarget.contains(e.relatedTarget)) {
+  if (!box.contains(e.relatedTarget)) {
     const body = document.getElementById('kb-body-'+col);
     if (body) body.classList.remove('kb-drag-over');
   }
-};
+}, (el, ev) => [ev, el.dataset.arg, el]);
 
-window.kanbanColDrop = function(e, col) {
+actOn('drop', 'kanbanColDrop', function(e, col) {
   e.preventDefault();
   document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
   const id = kbDragTaskId || parseInt(e.dataTransfer.getData('text/plain'), 10);
@@ -173,5 +175,5 @@ window.kanbanColDrop = function(e, col) {
       toast(d.error || 'Update failed', 'err');
     }
   }).catch(() => toast('Request failed', 'err'));
-};
+}, (el, ev) => [ev, el.dataset.arg]);
 

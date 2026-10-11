@@ -17,11 +17,11 @@ let spaceVoiceActive = false;
   }
 })();
 
-window.toggleTTS = function(enabled) {
+act('toggleTTS', function(enabled) {
   chatTtsEnabled = enabled;
   localStorage.setItem('cloop_chat_tts', enabled ? 'true' : 'false');
   if (!enabled && window.speechSynthesis) window.speechSynthesis.cancel();
-};
+}, el => [el.checked]);
 
 function speakText(text) {
   if (!chatTtsEnabled || !window.speechSynthesis) return;
@@ -81,7 +81,7 @@ function removeChatThinking() {
   if (el) el.remove();
 }
 
-window.submitChat = async function() {
+act('submitChat', async function() {
   const input = document.getElementById('chatInput');
   if (!input) return;
   const msg = input.value.trim();
@@ -109,9 +109,9 @@ window.submitChat = async function() {
     removeChatThinking();
     appendChatBubble('assistant', 'Request failed: ' + err.message, {ts: new Date(), error: true});
   }
-};
+});
 
-window.clearChatHistory = function() {
+act('clearChatHistory', function() {
   const box = document.getElementById('chatMessages');
   if (!box) return;
   box.innerHTML =
@@ -121,7 +121,7 @@ window.clearChatHistory = function() {
     '<div class="chat-welcome-text">Type a natural language command to control your project.<br>' +
     'Examples: <em>"add a task to fix the login bug"</em>, <em>"start the run"</em>, <em>"show me task 3"</em>, <em>"pause"</em></div>' +
     '</div>';
-};
+});
 
 function loadChatHistory() {
   fetch(pUrl('/api/chat/history'), {headers: authHeaders()}).then(r => r.json()).then(history => {

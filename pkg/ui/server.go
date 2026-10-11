@@ -649,6 +649,10 @@ type Server struct {
 	rlMu      sync.Mutex
 	rlBuckets map[string]*uiIPBucket
 
+	// cspBudget bounds what the CSP report endpoint logs and records, hub
+	// process wide, signed-in and anonymous senders apart (csp.go, Task 20408).
+	cspBudget cspBudgets
+
 	// Live harness output, partitioned by project workDir (Task 20189).
 	// There is deliberately no un-keyed buffer here: every accessor in
 	// livelog.go takes a workDir, so a handler that has not resolved a
@@ -1772,11 +1776,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		} else {
 			w.Header().Set("X-Frame-Options", "DENY")
 		}
-		// Strict CSP: only allow same-origin resources plus inline styles/scripts
-		// needed by the SPA. No external connections permitted.
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "+
-				s.frameSrcDirective()+"; frame-ancestors "+frameAncestors)
+		// Only the hub's own script files run, on every document it serves
+		// (Task 20408): see csp.go for the policy and the endpoint it reports
+		// to.
+		w.Header().Set("Content-Security-Policy", s.contentSecurityPolicy(frameAncestors))
 		// Disable the Referrer header for privacy.
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		// HSTS, but only on responses the client received over TLS. Sending
@@ -1947,7 +1950,33 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // the feature exists to remove. They refuse outright when ui.ci.enabled is
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
-	return isPublicShell(r) || isPublicIcon(r) || isCIFederationEndpoint(r)
+	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r)
+}
+
+// isPublicAsset reports whether the request is for one of the content-hashed
+// assets under /assets/: the dashboard's script and stylesheet, the deferred
+// panels, the glasses page's script. The first kind of entry above, for the
+// same reason: compiled into the binary, identical on every deployment, and
+// holding no project, tenant or user data.
+//
+// It was reachable before authentication only on a hub with single sign-on
+// (oidcGate passes /assets/ through). On a hub with a static token the page
+// was served and its own script refused with a 401, so the dashboard never
+// ran; and since Task 20408 moved the glasses page's script into an asset, a
+// wearable — which sends its credential in a header the script adds — would
+// have had no script either. GET and HEAD only.
+func isPublicAsset(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/assets/") && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+}
+
+// isCSPReport reports whether the request is a browser's Content-Security-
+// Policy report (Task 20408). Public because the documents that most need one
+// carry no credential the browser would send with it — the glasses page's is
+// a header its script adds, and the sign-in documents are for someone not yet
+// signed in — and harmless because the endpoint only counts what it is told
+// and records a bounded amount of it (csp.go). POST only.
+func isCSPReport(r *http.Request) bool {
+	return r.URL.Path == cspReportPath && r.Method == http.MethodPost
 }
 
 // isPublicShell reports whether the request is for the display-glasses

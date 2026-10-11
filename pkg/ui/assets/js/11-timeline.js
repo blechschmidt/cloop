@@ -1,6 +1,6 @@
 // ── Timeline (Gantt) tab ─────────────────────────────────────────────────────
 
-window.loadTimeline = function() { loadTimeline(); };
+act('loadTimeline', loadTimeline);
 
 function loadTimeline() {
   api(pUrl('/api/timeline')).then(data => {
@@ -229,9 +229,9 @@ function renderTimeline(data) {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
-window.refreshState = function() {
+act('refreshState', function() {
   api(pUrl('/api/state')).then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
-};
+});
 
 // updateRunButtonState shows the Run button when not running, Stop when running.
 //
@@ -278,7 +278,7 @@ function runBarStatus(running) {
 
 // apiRun starts a run. All run options are read by the server from persisted
 // project state — toggle them via the Active Options badges or Provider card.
-window.apiRun = function() {
+act('apiRun', function() {
   api(pUrl('/api/run'), {}).then(d => {
     if (d.ok) {
       toast('Started: '+d.command, 'ok');
@@ -292,9 +292,9 @@ window.apiRun = function() {
       if (d.running) updateRunButtonState(true);
     }
   }).catch(() => toast('Request failed', 'err'));
-};
+});
 
-window.apiStop = function() {
+act('apiStop', function() {
   // pUrl scopes the stop to the selected project (?project_idx=N) — without
   // it the server falls back to its own WorkDir, so pressing Stop on any
   // other project's page could never find that project's run (Task 20153).
@@ -305,11 +305,11 @@ window.apiStop = function() {
     // child process actually exits or the projects watcher samples PID
     // liveness; no client-side poll required.
   }).catch(() => toast('Request failed', 'err'));
-};
+});
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
-window.submitInit = function() {
+act('submitInit', function() {
   const goal = document.getElementById('initGoal').value.trim();
   if (!goal) { toast('Goal is required', 'err'); return; }
   api(pUrl('/api/init'), {
@@ -324,5 +324,5 @@ window.submitInit = function() {
     if (d.ok) { toast('Project initialized!', 'ok'); refreshState(); }
     else toast(d.error||'Init failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
-};
+});
 

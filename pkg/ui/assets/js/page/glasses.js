@@ -1,0 +1,1647 @@
+// The display-glasses front end (Task 20194), served as an asset of its own
+// since Task 20408: the hub's policy runs no inline script, and this was the
+// whole of glasses.html's. The page loads it at the end of its body, where it
+// ran before; the content hash in its URL lets the device cache it for good,
+// so the extra request is paid once per deploy rather than on every glance.
+(function() {
+'use strict';
+
+// ── credential ──────────────────────────────────────────────────────────────
+// The URL is the only place the glasses can carry one. Lift it out once and
+// keep it in a closure variable: every later call sends it as a header, so the
+// token stops appearing in request lines after the initial page load.
+//
+// Deliberately not copied to sessionStorage or localStorage. It would buy
+// nothing — the device re-opens the saved URL on every launch, so the query
+// string is always there — while putting a live credential in a store that any
+// future script-injection on this origin could read at leisure.
+var TOKEN = '';
+try {
+  TOKEN = new URLSearchParams(location.search).get('token') || '';
+} catch (e) { /* malformed query string: the API calls will 401 and say so */ }
+
+// How many tasks one request asks for, and the ceiling the endpoint enforces
+// on a client-supplied limit. A refresh re-reads the window the wearer has
+// actually paged into view rather than the first page, so pressing More and
+// then waiting a minute does not silently collapse the list back to 25.
+var PAGE = 25, MAX_WINDOW = 100;
+
+// view is one of: projects, tasks, task, add, heard.
+// quick holds the Add screen's ready-made rows, as sent by /api/glasses/tasks;
+// null means "not loaded for this project yet", which is distinct from a
+// project that has none — two of the rows name a failure by id, and offering
+// the previous project's while the new one is still in flight would file work
+// against the wrong plan.
+// from records which screen the confirmation was reached from, so backing out
+// of it returns the wearer where they were rather than somewhere plausible.
+var state = { view: 'projects', project: null, tasks: [], total: 0, status: '',
+              taskID: 0, quick: null, from: 'tasks' };
+
+// What this link may do, as the hub resolves it for the project the wearer has
+// open. Read off the API rather than the token: the credential arrives in a URL
+// the page cannot inspect, and a read-only link must not draw controls it would
+// only be refused for pinching.
+var link = { canAdd: false };
+
+// dead is set once the hub has told us this link is finished (401/403). It is
+// terminal: nothing the wearer can do from a device with no keyboard will make
+// the credential work again, so the page stops asking.
+var dead = false;
+
+function el(id) { return document.getElementById(id); }
+
+function api(path) { return send('GET', path, null); }
+
+// send is api() plus a method and a body, for the two dictation calls. Same
+// credential handling and the same terminal 401/403 rule, because a link that
+// has stopped working has stopped working for writes too.
+function send(method, path, body) {
+  if (dead) { return Promise.reject(new Error(DEAD_MSG)); }
+  var headers = { 'Accept': 'application/json' };
+  if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+  var init = { method: method, headers: headers, credentials: 'same-origin', cache: 'no-store' };
+  if (body instanceof FormData) {
+    init.body = body;            // the browser sets the multipart boundary
+  } else if (body != null) {
+    headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  var started = Date.now();
+  return fetch(path, init)
+    .then(function(res) {
+      // On the trail before the status is acted on, so a link that dies mid
+      // session shows the call that killed it rather than only its aftermath.
+      tel('fetch', method + ' ' + path + ' → ' + res.status,
+        { status: res.status, ms: Date.now() - started });
+      if (res.status === 401 || res.status === 403) {
+        // Terminal, and the retry loop has to stop here rather than keep
+        // asking. Every rejected attempt costs the hub an audit record and
+        // trips its per-IP auth-failure lockout — and because glasses tether
+        // through a phone, that lockout is shared with every other caller
+        // behind the same address. A pair sitting forgotten in a drawer must
+        // not be able to lock out the CI tokens.
+        //
+        // The trail stops here too, and deliberately: telFlush refuses once
+        // dead is set, so whatever is still queued is dropped rather than
+        // posted with a credential the hub has just rejected. What was already
+        // flushed — the timer fires every ten seconds — is what an
+        // investigation gets, and the terminal state itself is the one thing
+        // the page reports in plain words to the wearer anyway.
+        //
+        // dead is set *before* the event is recorded, not after: tel() flushes
+        // as soon as the queue reaches its batch size, so recording first would
+        // — one time in thirty-two — post that batch while dead was still
+        // false, spending exactly the auth failure this branch exists to stop.
+        dead = true;
+        tel('lifecycle', 'link rejected: ' + res.status);
+        stopPolling();
+        throw new Error(DEAD_MSG);
+      }
+      if (!res.ok) { throw new Error('cloop returned ' + res.status); }
+      return res.json();
+    });
+}
+
+var DEAD_MSG = 'This link is no longer valid. Generate a new one from the cloop dashboard, ' +
+               'then re-add the app with the new URL.';
+
+function say(text, bad) {
+  var m = el('msg');
+  setText(m, text || '');
+  m.className = bad ? 'bad' : '';
+}
+
+function fail(err) { say(err && err.message ? err.message : String(err), true); }
+
+// ── diagnostic trail ────────────────────────────────────────────────────────
+// The reason this page has telemetry at all (Task 20251). These glasses have no
+// developer tools, no console, no network inspector, and a wearer whose entire
+// reporting channel is a sentence of prose. Three separate tasks were spent
+// reproducing such a sentence by simulation — "swiping right selects the first
+// item once and then nothing" was diagnosed by building a model of the device
+// and guessing until the guess matched. A trail answers it directly.
+//
+// So what is recorded is not exceptions. Almost none of these failures throw.
+// It is gestures: which key the device sent, how long the focus ring was, and
+// where the cursor went — which is precisely the evidence that distinguishes
+// "the gesture never arrived" from "it arrived and the ring was empty" from
+// "it arrived, the ring was fine, and select() did nothing".
+var TEL_ENDPOINT = '/api/glasses/telemetry';
+// Asked before anything is sent (Task 20311). Collection is off unless an
+// operator switched it on, and posting first to find that out would already
+// have sent the trail. telCollect is null until the hub answers: null holds
+// events, false discards them and stops recording, true sends.
+var TEL_CFG_URL = '/api/glasses/telemetry/config';
+var telCollect = null, telAsked = false;
+var telSession = '', telSeq = 0, telQueue = [], telTimer = null;
+var telRecorded = 0, telPosted = 0;
+// Budgets. Every gesture costs two events — one when it arrives, one for where
+// it left the cursor — so 400 is around 200 swipes, comfortably past the point
+// where a trail has already shown what went wrong, and about 60 KB on a link
+// that is usually a phone tether. Small enough that a runaway loop on a device
+// the wearer cannot debug stops costing anything quickly, which is the case
+// these exist for. The batch stays under telemetry.MaxBatchEvents (64), and the
+// flush is slower than the dashboard's because a wearable session is a handful
+// of glances rather than an afternoon.
+var TEL_EVENT_MAX = 400, TEL_POST_MAX = 30, TEL_BATCH = 32, TEL_FLUSH_MS = 10000;
+
+try {
+  var telBuf = new Uint8Array(8);
+  window.crypto.getRandomValues(telBuf);
+  for (var telI = 0; telI < telBuf.length; telI++) {
+    telSession += ('0' + telBuf[telI].toString(16)).slice(-2);
+  }
+} catch (e) { telSession = 'n' + Math.floor(Math.random() * 1e12).toString(16); }
+
+// telAsk resolves telCollect, once. Fails closed on every unhappy path — a
+// refused, unreachable or unparseable answer leaves the trail off for this page
+// load. A wearer cannot be asked to confirm anything, so the only safe reading
+// of "the hub did not say yes" is no.
+function telAsk() {
+  if (telAsked) { return; }
+  telAsked = true;
+  try {
+    var headers = {};
+    if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+    fetch(TEL_CFG_URL, { headers: headers, credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(b) {
+        if (!b || !b.collect) { telDeny(); return; }
+        telCollect = true;
+        if (telQueue.length) { telFlush(false); }
+      })
+      .catch(telDeny);
+  } catch (e) { telDeny(); }
+}
+
+function telDeny() {
+  telCollect = false;
+  try {
+    telQueue.length = 0;
+    if (telTimer !== null) { clearTimeout(telTimer); telTimer = null; }
+  } catch (e) {}
+}
+
+function tel(kind, message, detail) {
+  try {
+    if (telCollect === false) { return; }
+    if (telRecorded >= TEL_EVENT_MAX) { return; }
+    telRecorded++;
+    var d = '';
+    if (detail != null) { try { d = JSON.stringify(detail); } catch (e) { d = ''; } }
+    telQueue.push({
+      kind: kind, seq: ++telSeq, ts: Date.now(),
+      message: String(message == null ? '' : message),
+      view: state.view, detail: d
+    });
+    if (telQueue.length >= TEL_BATCH) { telFlush(false); }
+    else if (telTimer === null) {
+      telTimer = setTimeout(function() { telTimer = null; telFlush(false); }, TEL_FLUSH_MS);
+    }
+  } catch (e) { /* the trail must never be the thing that breaks the page */ }
+}
+
+function telFlush(beacon) {
+  try {
+    // Nothing leaves the device before the hub has said it wants it. While the
+    // answer is outstanding the queue is held rather than dropped, so the
+    // gestures recorded during the first glance still arrive; on the unload
+    // path an unanswered probe simply means the batch is abandoned.
+    if (telCollect === null) { telAsk(); return; }
+    if (telCollect === false) { telDeny(); return; }
+    if (telTimer !== null) { clearTimeout(telTimer); telTimer = null; }
+    if (!telQueue.length) { return; }
+    // Once the link is dead, stop. This is the same rule send() follows and for
+    // the same reason: every rejected attempt costs an audit record and counts
+    // toward the hub's per-IP auth-failure lockout, which — because glasses
+    // tether through a phone — is shared with every other caller behind that
+    // address. A forgotten pair flushing a trail it can no longer authenticate
+    // would lock out exactly what the retry rule was written to protect.
+    if (dead || telPosted >= TEL_POST_MAX) { telQueue.length = 0; return; }
+    telPosted++;
+
+    var body = JSON.stringify({
+      source: 'glasses', session: telSession, events: telQueue.splice(0, TEL_BATCH)
+    });
+    // sendBeacon cannot carry the Authorization header this link authenticates
+    // with, so it is only usable when a cookie session also exists. Try it on
+    // the unload path anyway — when it works it is the only transport the
+    // browser promises to finish — and fall back to keepalive otherwise.
+    if (beacon && !TOKEN) {
+      try {
+        if (navigator.sendBeacon &&
+            navigator.sendBeacon(TEL_ENDPOINT, new Blob([body], {type: 'application/json'}))) {
+          return;
+        }
+      } catch (e) {}
+    }
+    var headers = { 'Content-Type': 'application/json' };
+    if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+    fetch(TEL_ENDPOINT, {
+      method: 'POST', headers: headers, body: body,
+      credentials: 'same-origin', keepalive: true
+    }).catch(function() {});   // diagnostic, never a reason to retry
+  } catch (e) {}
+}
+
+// What the engine currently considers focused, in one short string.
+//
+// The page deliberately does not *trust* document.activeElement — owning the
+// cursor in a variable is what made the ring walk survive a hostile focus model
+// (Task 20242). But not trusting it is not a reason not to record it, and the
+// distinction it draws is the one the last investigation could not make: a
+// device that aims its key events at the focused element has nowhere to aim
+// them when that is the body. 'body' on a row that should be sitting on a
+// button is the signature of a page that has gone deaf.
+function activeDesc() {
+  try {
+    var a = document.activeElement;
+    if (!a || !a.tagName) { return 'none'; }
+    var s = a.tagName.toLowerCase();
+    if (a.id) { s += '#' + a.id; }
+    else if (a.dataset && a.dataset.key) { s += '[' + a.dataset.key + ']'; }
+    return s;
+  } catch (e) { return '?'; }
+}
+
+// Input the page saw and did not act on.
+//
+// Budgeted separately and tightly: a wearer reading a long result produces a
+// steady stream of vertical drags, and the point of this record is not to count
+// them. It is to answer one question the first trail could not — when the
+// wearer says a swipe did nothing, did anything reach the page at all? A
+// handful of rows settles it; the rest are noise.
+var TEL_INPUT_MAX = 20, telInputs = 0;
+
+function telInput(channel, dx, dy) {
+  if (telInputs >= TEL_INPUT_MAX) { return; }
+  telInputs++;
+  tel('input', 'ignored ' + channel, { ch: channel, dx: dx, dy: dy, ae: activeDesc() });
+}
+
+// setView is the only writer of state.view. Centralised so the transition is
+// recorded exactly once and only when it is real: a trail whose view column
+// repeats is a trail a reader stops trusting.
+function setView(v) {
+  if (state.view === v) { return; }
+  state.view = v;
+  tel('view', v);
+}
+
+window.addEventListener('error', function(ev) {
+  try {
+    tel('error', (ev && ev.message) || 'Unknown error',
+      { line: (ev && ev.lineno) | 0, col: (ev && ev.colno) | 0 });
+    telFlush(false);
+  } catch (e) {}
+});
+window.addEventListener('pagehide', function() { telFlush(true); });
+
+// Whether the wearer is still looking.
+//
+// The one real session on record stops dead after five events and nothing in it
+// says why. Two explanations fit — the wearer looked away, or the page stopped
+// receiving input — and they call for opposite fixes. Recording the transition
+// separates them for nothing: a 'hidden' row means the first, and its absence
+// while gestures have gone missing means the second.
+//
+// The flush is the other half of the same gap. A wearable session is a glance,
+// and the tail of one was being lost to the ten-second timer every time: this
+// trail arrived in a single batch and everything after it died with the page.
+// `pagehide` was meant to cover that, but a WebView killed while hidden never
+// fires it. Going hidden is the last moment a record is reliably sendable.
+document.addEventListener('visibilitychange', function() {
+  var vis = document.visibilityState === 'visible';
+  tel('lifecycle', vis ? 'visible' : 'hidden');
+  if (!vis) { telFlush(true); }
+});
+
+// ── dom ─────────────────────────────────────────────────────────────────────
+// Everything below builds nodes and writes textContent instead of assembling
+// HTML strings. Two reasons, and the second is the one this page was rewritten
+// for. It removes the hand-rolled escaper that every interpolated task title
+// used to depend on being correct; and it lets a refresh reuse the node that is
+// already on screen, which is what keeps the wearer's focus and scroll offset
+// alive across the poll.
+
+function mk(tag, cls, text) {
+  var n = document.createElement(tag);
+  if (cls) { n.className = cls; }
+  if (text != null) { n.textContent = text; }
+  return n;
+}
+
+// Write only on change. An unconditional assignment re-lays-out the row on
+// every poll even when nothing moved, which on a 600x600 waveguide reads as a
+// flicker once a minute.
+function setText(node, text) {
+  text = text == null ? '' : String(text);
+  if (node.textContent !== text) { node.textContent = text; }
+}
+
+// setClass is the single place a class attribute is written wholesale, which
+// makes it the single place the cursor marker can be lost. Re-assert it here
+// rather than repainting after every caller: show(), setDictateLabel() and the
+// filter strip all rewrite className, and any one of them forgetting would
+// leave the wearer looking at an unmarked selection.
+function setClass(node, cls) {
+  if (node === cursor) { cls = cls ? cls + ' sel' : 'sel'; }
+  if (node.className !== cls) { node.className = cls; }
+}
+
+// show() keeps the class contract and the hidden property in step. The CSS
+// hides #back and #more by default and reveals them on .on; `hidden` carries
+// the same fact somewhere the focus ring can read without consulting layout,
+// so a control the wearer cannot see is never a stop on the way round.
+function show(node, on) {
+  node.hidden = !on;
+  setClass(node, on ? 'on focusable' : 'focusable');
+}
+
+// A status word arrives from the API and lands in a class attribute. Statuses
+// are a closed set of identifiers, but a stray space would silently add a
+// second class, so keep it to what the stylesheet actually defines.
+function dotClass(word) { return 'dot ' + String(word || '').replace(/[^a-z_]/gi, ''); }
+
+// ── reconciler ──────────────────────────────────────────────────────────────
+// The list is patched in place rather than rebuilt from a string. Two things
+// depend on node identity surviving a refresh: the wearer's focus, which sits
+// on one of these buttons, and the scroll offset, which a wholesale innerHTML
+// swap drops back to the top. Reusing the node for a key that is still there
+// preserves both, so the minute poll is invisible unless something changed.
+function patch(host, items, keyOf, build, fill) {
+  var live = {}, i, key, node;
+  for (i = 0; i < host.childNodes.length; i++) {
+    key = host.childNodes[i].dataset && host.childNodes[i].dataset.key;
+    if (key) { live[key] = host.childNodes[i]; }
+  }
+  var want = [];
+  for (i = 0; i < items.length; i++) {
+    key = keyOf(items[i]);
+    node = live[key];
+    if (node) { delete live[key]; } else { node = build(items[i]); node.dataset.key = key; }
+    fill(node, items[i]);
+    want.push(node);
+  }
+  for (key in live) {
+    if (live[key].parentNode === host) { host.removeChild(live[key]); }
+  }
+  for (i = 0; i < want.length; i++) {
+    if (host.childNodes[i] !== want[i]) { host.insertBefore(want[i], host.childNodes[i] || null); }
+  }
+}
+
+// patchList is patch() plus the one case node reuse cannot cover: the focused
+// row itself disappearing, because a task changed status out from under a
+// filter or a project was hidden. Dropping focus to the top of the document is
+// the worst available answer on a device whose only correction is swiping the
+// whole way back down, so land on whatever now occupies that position.
+function patchList(host, items, keyOf, build, fill) {
+  var held = cursorNode();
+  var owned = !!(held && held.parentNode === host);
+  var at = owned ? indexIn(host, held) : -1;
+
+  patch(host, items, keyOf, build, fill);
+
+  if (owned && held.parentNode !== host && host.childNodes.length) {
+    select(host.childNodes[Math.min(at < 0 ? 0 : at, host.childNodes.length - 1)]);
+  }
+}
+
+function indexIn(host, node) {
+  for (var i = 0; i < host.childNodes.length; i++) {
+    if (host.childNodes[i] === node) { return i; }
+  }
+  return -1;
+}
+
+function clear(host) {
+  while (host.firstChild) { host.removeChild(host.firstChild); }
+}
+
+// ── gestures ────────────────────────────────────────────────────────────────
+// The device delivers arrow-key and Enter keydowns aimed at document
+// .activeElement and supplies no focus navigation of its own, so this handler
+// is the whole cursor.
+//
+// Three things here are defensive against a runtime this code cannot be tested
+// against directly, and each one is a way the previous attempt stayed inert on
+// the hardware while passing in a desktop browser:
+//
+//   1. The gesture is read from ev.key, ev.code *and* ev.keyCode. This device
+//      is not a keyboard — it synthesises key events from band and captouch
+//      gestures — and engines in that class variously send the legacy
+//      'Left'/'Right' names, leave key as 'Unidentified' and fill only
+//      keyCode, or set code alone. Matching one spelling is how a handler ends
+//      up never firing, which is exactly what the symptom said: sideways
+//      swipes scrolled the tasks page horizontally, and a handler that runs
+//      cannot let that happen, because it calls preventDefault().
+//
+//   2. The listener is on the capture phase, so nothing downstream can consume
+//      the event first, and defaultPrevented is not consulted — in capture it
+//      can only have been set by something above us in the path, and on this
+//      page there is nothing above us that should win.
+//
+//   3. The selection is a variable this page owns, not document.activeElement.
+//      If the engine refuses to focus a <button>, or re-aims focus at the top
+//      of the document after every gesture, reading focus back gives -1 every
+//      time and the ring restarts from the first control — a cursor that
+//      "selects the first item once and then never moves". Owning it means the
+//      ring advances whatever the device does with focus. focus() is still
+//      called, for real browsers and assistive tech; it is just not believed.
+//
+// Left and right are the selection axis, and they wrap, so the ring is closed
+// and a wearer can always reach every control by continuing to swipe one way.
+// Up and down are left alone while the document can scroll, because reading a
+// long task result is what that axis is for and the wearer asked to keep it;
+// on a screen that fits, where they would otherwise do nothing at all, they
+// fall back to moving the selection.
+
+// cursor is the selection. Never read it directly — cursorNode() is the read,
+// and it answers null for a cursor that has been detached or hidden.
+var cursor = null;
+
+function focusables() {
+  var all = document.querySelectorAll('.focusable'), out = [], i;
+  for (i = 0; i < all.length; i++) {
+    if (!all[i].hidden && !all[i].disabled) { out.push(all[i]); }
+  }
+  return out;
+}
+
+// The cursor, if it is still a control on screen. A row can be removed by a
+// refresh or hidden by a view change while it holds the selection, and a stale
+// node has to read as "no cursor" rather than as a position in the ring.
+function cursorNode() {
+  var ring = focusables();
+  if (cursor && ring.indexOf(cursor) >= 0) { return cursor; }
+  // Nothing of ours: adopt the engine's focus if it happens to be useful, so a
+  // tap on the phone that the glasses tether through carries on from there.
+  var active = document.activeElement;
+  if (active && ring.indexOf(active) >= 0) { return active; }
+  return null;
+}
+
+// stay is the second argument for a selection the wearer did not ask for — see
+// reanchor(). It keeps everything except the scroll: the cursor moves, the
+// highlight moves, focus moves, and the viewport stays exactly where it is.
+function select(node, stay) {
+  if (!node) { return; }
+  if (cursor && cursor !== node && cursor.classList) { cursor.classList.remove('sel'); }
+  cursor = node;
+  if (node.classList) { node.classList.add('sel'); }
+  // preventScroll because scrollIntoView below does the scrolling, and does it
+  // with 'nearest': a row already on screen stays exactly where the wearer is
+  // looking instead of being yanked to the middle.
+  try { node.focus({ preventScroll: true }); } catch (e) { try { node.focus(); } catch (e2) {} }
+  if (!stay && node.scrollIntoView) { node.scrollIntoView({ block: 'nearest' }); }
+}
+
+// How much of a control the wearer can see: 2 whole, 1 partly, 0 not at all.
+// A shim or an engine without layout reports no rectangle, and "cannot tell"
+// has to read as fully visible — treating everything as off-screen would
+// re-anchor the cursor on every single swipe.
+var SEEN_FULLY = 2, SEEN_PARTLY = 1, SEEN_NOT = 0;
+
+function seen(node) {
+  if (!node || !node.getBoundingClientRect) { return SEEN_FULLY; }
+  var r = node.getBoundingClientRect();
+  if (!r) { return SEEN_FULLY; }
+  var h = window.innerHeight ||
+    (document.documentElement && document.documentElement.clientHeight) || 0;
+  if (!h) { return SEEN_FULLY; }
+  if (r.bottom <= 0 || r.top >= h) { return SEEN_NOT; }
+  return (r.top >= 0 && r.bottom <= h) ? SEEN_FULLY : SEEN_PARTLY;
+}
+
+// The control to hand the cursor to when the wearer has scrolled away from it,
+// searched in the direction they swiped. A whole row is preferred over one cut
+// off at the edge, because select() scrolls what it picks into view and
+// choosing a half-visible row would jerk the column the wearer just placed.
+function anchor(ring, delta) {
+  var best = -1, i, from = delta > 0 ? 0 : ring.length - 1, step = delta > 0 ? 1 : -1;
+  for (i = from; i >= 0 && i < ring.length; i += step) {
+    var how = seen(ring[i]);
+    if (how === SEEN_FULLY) { return i; }
+    if (how === SEEN_PARTLY && best < 0) { best = i; }
+  }
+  return best;
+}
+
+function moveCursor(delta) {
+  var ring = focusables();
+  if (!ring.length) { return; }
+  var at = ring.indexOf(cursorNode());
+
+  // The wearer has scrolled away from the selection. Where they are looking is
+  // no longer where the cursor is, so hand it to what is actually in front of
+  // them rather than stepping from a row they left behind and dragging the
+  // whole column back to it. This is the "after a vertical scroll" half of the
+  // report: up and down move the page and not the cursor, which is exactly
+  // what lets the two drift apart.
+  if (at >= 0 && seen(ring[at]) === SEEN_NOT) {
+    var landing = anchor(ring, delta);
+    if (landing >= 0) { select(ring[landing]); return; }
+  }
+
+  var next = at < 0 ? (delta > 0 ? 0 : ring.length - 1) : at + delta;
+  select(ring[(next % ring.length + ring.length) % ring.length]);
+}
+
+function selectFirstRow() {
+  var rows = el('list').childNodes;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].classList && rows[i].classList.contains('focusable')) { select(rows[i]); return; }
+  }
+  moveCursor(1);
+}
+
+// The ring is never left without a cursor.
+//
+// Straight from the trail: one gesture ended `go → -1` on a ring of six. The
+// wearer had pinched a project open, the view had switched to tasks, and for
+// the whole of the fetch that followed — 466 ms there, unbounded on a phone
+// tether — the page offered six reachable controls and had selected none of
+// them. Two things are wrong with that at once. The wearer loses the highlight
+// and has nothing to aim at; and because this device delivers its key events to
+// document.activeElement, an unanchored page is one with nowhere to deliver
+// them.
+//
+// Landing somewhere costs nothing: when the list arrives a moment later
+// loadProjects/loadTasks call selectFirstRow() and move the cursor on.
+//
+// Somewhere, but not just anywhere. This anchor is a placeholder the page
+// picked, not a choice the wearer made, so it goes on the control where an
+// accidental pinch is harmless. That rules out the first of the ring: on the
+// tasks screen that is Back, and a wearer who pinches twice — the ordinary
+// "did that register?" reaction to a screen that has not painted yet — would
+// bounce straight out of the project they just opened. Refresh is always on
+// screen and costs a reload at worst.
+function reanchor() {
+  if (cursorNode()) { return; }
+  var ring = focusables();
+  if (!ring.length) { return; }
+  var refresh = el('reload');
+  // `stay`, because this also runs on the minute poll, and Refresh lives in the
+  // header. A wearer part way down a long task result would otherwise be pulled
+  // back to the top once a minute by a selection they never made — the exact
+  // complaint ("auto-reloading should be smooth instead of entirely resetting
+  // the view") that Task 20237 was opened for. Nothing is lost: on the
+  // transition this is written for, the list has just been cleared and the page
+  // is at the top already.
+  select(ring.indexOf(refresh) >= 0 ? refresh : ring[0], true);
+}
+
+function pageScrolls() {
+  var d = document.scrollingElement || document.documentElement;
+  return !!d && d.scrollHeight > d.clientHeight + 1;
+}
+
+// What the device sent, in the page's own vocabulary. '' means "not ours".
+var GESTURE_KEYS = {
+  ArrowLeft: 'prev', Left: 'prev',
+  ArrowRight: 'next', Right: 'next',
+  ArrowUp: 'up', Up: 'up',
+  ArrowDown: 'down', Down: 'down',
+  Enter: 'go', Return: 'go', ' ': 'go', Space: 'go', Spacebar: 'go', NumpadEnter: 'go',
+  Escape: 'back', Esc: 'back', BrowserBack: 'back', GoBack: 'back'
+};
+// Last resort, and the reason it is safe: these seven codes mean the same seven
+// keys on every layout, so falling back to them cannot capture a letter.
+var GESTURE_CODES = { 13: 'go', 27: 'back', 32: 'go', 37: 'prev', 38: 'up', 39: 'next', 40: 'down' };
+
+// Own properties only: ev.key is attacker-adjacent free text, and a key named
+// 'constructor' would otherwise walk up to Object.prototype and hand back a
+// function from something documented to return one of five words.
+function lookup(map, k) {
+  return (k && Object.prototype.hasOwnProperty.call(map, k)) ? map[k] : '';
+}
+
+function gestureOf(ev) {
+  return lookup(GESTURE_KEYS, ev.key) || lookup(GESTURE_KEYS, ev.code) ||
+    lookup(GESTURE_CODES, ev.keyCode || ev.which) || '';
+}
+
+// What a gesture does, independent of how it arrived. Split out from the
+// keydown handler because a key is no longer the only way one gets here: the
+// touch recogniser below feeds the same five words in. Returns false for a
+// gesture this page does not claim, which is the signal to leave the browser's
+// default alone.
+function applyGesture(g) {
+  if (g === 'next' || g === 'prev') {
+    moveCursor(g === 'next' ? 1 : -1);
+    return true;
+  }
+  if (g === 'down' || g === 'up') {
+    if (pageScrolls()) { return false; }   // the reading axis: leave the scroll alone
+    moveCursor(g === 'down' ? 1 : -1);
+    return true;
+  }
+  if (g === 'go') {
+    // A pinch arrives as Enter on whatever has focus, and on a fresh or
+    // rebuilt screen that can still be the body. Treat it as "give me the
+    // cursor back" rather than dropping the gesture: it is the only way out
+    // for a wearer who has no other key to press.
+    var target = cursorNode();
+    if (target) {
+      // Activate explicitly and swallow the default. A native button would
+      // otherwise do it too, and the device's Enter is not reliably trusted;
+      // doing it here is one activation in both cases rather than two in one
+      // and none in the other.
+      target.click();
+    } else {
+      moveCursor(1);
+    }
+    return true;
+  }
+  if (g === 'back') { goBack(); return true; }
+  return false;
+}
+
+document.addEventListener('keydown', function(ev) {
+  // A modifier means a real keyboard and a real shortcut; the band has none.
+  if (ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
+  var g = gestureOf(ev);
+
+  // The trail entry this page exists to produce. Recorded before the gesture
+  // is acted on and carrying what the device actually sent alongside what the
+  // page made of it, because the failures worth debugging here divide exactly
+  // on that line: a spelling the lookup tables do not know shows up as a key
+  // with no gesture, while a recognised gesture that changes nothing points at
+  // the ring or at select(). telRing/telCursor are read here rather than
+  // inside moveCursor so an ignored gesture is on the trail too — one that
+  // never reaches moveCursor is the single most common shape of "swiping does
+  // nothing", and instrumenting only the handler would omit it.
+  try {
+    var telBefore = focusables();
+    tel('gesture', g || ('unmapped: ' + (ev.key || ev.code || ev.keyCode)), {
+      ch: 'key',
+      key: String(ev.key || ''), code: String(ev.code || ''), which: ev.keyCode || 0,
+      ring: telBefore.length, at: telBefore.indexOf(cursorNode()),
+      scrolls: pageScrolls(), ae: activeDesc()
+    });
+  } catch (e) {}
+
+  if (!applyGesture(g)) { return; }   // not ours: leave the default alone
+  telLanded('key', g);
+  ev.preventDefault();
+}, true);
+
+// Where the gesture left the cursor. Paired with the `at` recorded when it
+// arrived, this is the whole of the reported symptom in two numbers: equal
+// indices across consecutive gestures is "selects the first item once and then
+// nothing", and it is otherwise invisible from outside the device.
+function telLanded(channel, g) {
+  try {
+    var ring = focusables(), at = ring.indexOf(cursorNode());
+    tel('gesture', g + ' → ' + at, { ch: channel, after: at, ring: ring.length, ae: activeDesc() });
+  } catch (e) {}
+}
+
+// ── touch ───────────────────────────────────────────────────────────────────
+// The sideways gesture is not a key on this device.
+//
+// That is not a guess. The handler above records `unmapped: <key>` for any
+// keydown whose spelling the tables do not know, and the one real Ray-Ban
+// Display session on record contains no such row — no ArrowLeft, no Left, no
+// stray keyCode. It contains exactly one gesture, a pinch, which arrived as
+// Enter/13 and was handled correctly. Meanwhile the wearer reported twice that
+// sideways gestures moved a scrollbar, and that up and down scrolled the page.
+// Both of those are touch panning. The device speaks touch; the page had been
+// listening for arrow keys it never sends.
+//
+// So this is the channel the cursor actually needs, and the keydown handler
+// above stays exactly as it was — a real keyboard, a tethered phone and any
+// firmware that does send arrows all keep working.
+//
+// Recognition is on touchend rather than mid-drag, because one swipe should
+// move the cursor one stop: a threshold crossed during touchmove fires again on
+// every later move of the same drag, which is a cursor that skids.
+var SWIPE_MIN_PX = 28;    // below this a drag is a tap with a shaky finger
+var SWIPE_BIAS = 1.3;     // and it must be this much more sideways than vertical
+var swipeFrom = null;
+
+// The dictate button runs its own pointer gesture with its own touch-action and
+// pointer capture, and a hold that drifts sideways must not also be read as a
+// swipe — that would move the cursor out from under a recording in progress.
+function ownsItsOwnTouch(node) {
+  for (var n = node; n && n !== document; n = n.parentNode) {
+    if (n.id === 'dictate') { return true; }
+  }
+  return false;
+}
+
+document.addEventListener('touchstart', function(ev) {
+  if (!ev.touches || ev.touches.length !== 1 || ownsItsOwnTouch(ev.target)) {
+    swipeFrom = null;
+    return;
+  }
+  swipeFrom = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+}, true);
+
+document.addEventListener('touchmove', function(ev) {
+  if (!swipeFrom) { return; }
+  // A second finger is a pinch-zoom or a stray temple touch, not a swipe.
+  if (ev.touches && ev.touches.length > 1) { swipeFrom = null; return; }
+  var t = ev.touches && ev.touches[0];
+  if (!t) { return; }
+  // Claim the horizontal axis as soon as the drag is clearly sideways. The
+  // page has no horizontal scroll to give away (overflow-x is hidden), so the
+  // only thing preventDefault suppresses here is the browser deciding this
+  // gesture belongs to it.
+  if (isSideways(t.clientX - swipeFrom.x, t.clientY - swipeFrom.y) && ev.cancelable) {
+    ev.preventDefault();
+  }
+}, { capture: true, passive: false });
+
+document.addEventListener('touchend', function(ev) {
+  var from = swipeFrom;
+  swipeFrom = null;
+  if (!from) { return; }
+  var t = ev.changedTouches && ev.changedTouches[0];
+  if (!t) { return; }
+  var dx = t.clientX - from.x, dy = t.clientY - from.y;
+
+  if (!isSideways(dx, dy)) {
+    // Not a swipe, and worth a line on the trail only if it is also not one of
+    // the two things that are meant to end up here. A tap is the wearer
+    // pressing a control and a downward drag is them reading; both work, both
+    // are constant, and both would spend the budget before anything surprising
+    // arrived. What is left is a gesture the page saw and could not name — the
+    // exact evidence missing when the first trail showed a swipe doing nothing.
+    var tap = Math.abs(dx) < SWIPE_MIN_PX && Math.abs(dy) < SWIPE_MIN_PX;
+    var reading = Math.abs(dy) >= Math.abs(dx) * SWIPE_BIAS;
+    if (!tap && !reading) { telInput('touch', Math.round(dx), Math.round(dy)); }
+    return;
+  }
+
+  var g = dx < 0 ? 'next' : 'prev';
+  try {
+    var ring = focusables();
+    tel('gesture', g, {
+      ch: 'touch', dx: Math.round(dx), dy: Math.round(dy),
+      ring: ring.length, at: ring.indexOf(cursorNode()),
+      scrolls: pageScrolls(), ae: activeDesc()
+    });
+  } catch (e) {}
+
+  applyGesture(g);
+  telLanded('touch', g);
+  // Suppress the click the browser synthesises from this touch. Without it a
+  // sideways swipe that happens to end over a row opens that row — the wearer
+  // asks for the next item and lands two screens away.
+  if (ev.cancelable) { ev.preventDefault(); }
+}, true);
+
+function isSideways(dx, dy) {
+  return Math.abs(dx) >= SWIPE_MIN_PX && Math.abs(dx) >= Math.abs(dy) * SWIPE_BIAS;
+}
+
+// Some WebViews report a band swipe as a wheel rather than as touch. Cheap to
+// accept and impossible to confuse with anything else here: this page has no
+// horizontal scrolling surface, so a horizontal wheel can only be a gesture.
+// A vertical wheel is left alone — that is the reading axis.
+var WHEEL_MIN_PX = 40, WHEEL_QUIET_MS = 250;
+var wheelAcc = 0, wheelAt = 0;
+
+document.addEventListener('wheel', function(ev) {
+  var dx = ev.deltaX || 0, dy = ev.deltaY || 0;
+  if (Math.abs(dx) < Math.abs(dy) * SWIPE_BIAS) { wheelAcc = 0; return; }
+  var now = Date.now();
+  // One physical gesture arrives as a burst of small deltas. Accumulate within
+  // the burst and reset once it goes quiet, so a flick is one cursor stop.
+  if (now - wheelAt > WHEEL_QUIET_MS) { wheelAcc = 0; }
+  wheelAt = now;
+  wheelAcc += dx;
+  if (Math.abs(wheelAcc) < WHEEL_MIN_PX) { return; }
+  var g = wheelAcc > 0 ? 'next' : 'prev';   // deltaX > 0 is content moving left
+  wheelAcc = 0;
+  try {
+    var ring = focusables();
+    tel('gesture', g, {
+      ch: 'wheel', dx: Math.round(dx), dy: Math.round(dy),
+      ring: ring.length, at: ring.indexOf(cursorNode()),
+      scrolls: pageScrolls(), ae: activeDesc()
+    });
+  } catch (e) {}
+  applyGesture(g);
+  telLanded('wheel', g);
+  if (ev.cancelable) { ev.preventDefault(); }
+}, { capture: true, passive: false });
+
+// ── projects ────────────────────────────────────────────────────────────────
+
+function openProjects() {
+  abandonDictation();
+  setView('projects');
+  state.project = null;
+  state.taskID = 0;
+  state.quick = null;
+  show(el('back'), false);
+  show(el('more'), false);
+  showAddControls();   // a task needs a project to belong to; there is none here
+  setText(el('title'), 'Projects');
+  setText(el('sub'), '');
+  clear(el('filters'));
+  clear(el('list'));
+  say('Loading…');
+  return load(true);
+}
+
+function loadProjects(navigating) {
+  return api('/api/glasses/projects').then(function(d) {
+    if (state.view !== 'projects') { return; }  // the wearer moved on mid-flight
+    // Dictation capability rides on this response so the wearable does not
+    // spend a second request on it (Task 20238). Both halves matter: whether
+    // the hub has a speech backend at all, and whether *this link* may add
+    // tasks — a read-only link must not draw a control it cannot use.
+    if (d && d.dictation) {
+      mic.available = !!d.dictation.available;
+      link.canAdd = !!d.dictation.can_add_tasks;
+    }
+    var projects = (d && d.projects) || [];
+    say(projects.length ? '' : 'No projects yet.');
+    setText(el('sub'), projects.length ? projects.length + (projects.length === 1 ? ' project' : ' projects') : '');
+    patchList(el('list'), projects, projectKey, buildProject, fillProject);
+    if (navigating) { selectFirstRow(); }
+  });
+}
+
+// Keyed by name, not by index: indices shift when a project is hidden or
+// added, and a key that moves would rebuild every row below it and take the
+// wearer's focus with it.
+function projectKey(p) { return 'p:' + p.name; }
+
+function buildProject() {
+  var row = mk('button', 'row focusable');
+  row.type = 'button';
+  var name = mk('div', 'name');
+  row._dot = name.appendChild(mk('span', 'dot'));
+  row._name = name.appendChild(mk('span'));
+  row.appendChild(name);
+  row._meta = row.appendChild(mk('div', 'meta'));
+  var bar = mk('div', 'bar');
+  row._fill = bar.appendChild(mk('i'));
+  row.appendChild(bar);
+  return row;
+}
+
+function fillProject(row, p) {
+  var word = p.running ? 'running' : (p.status || 'idle');
+  row.dataset.idx = p.idx;
+  row.dataset.name = p.name;
+  setClass(row._dot, dotClass(word));
+  setText(row._name, p.name);
+  setText(row._meta, word + ' · ' + p.done + '/' + p.total + ' tasks' +
+    (p.failed > 0 ? ' · ' + p.failed + ' failed' : ''));
+  var pct = (p.total > 0 ? Math.round(p.done / p.total * 100) : 0) + '%';
+  if (row._fill.style.width !== pct) { row._fill.style.width = pct; }
+}
+
+// ── tasks ───────────────────────────────────────────────────────────────────
+
+var FILTERS = [
+  { key: '', label: 'All' },
+  { key: 'in_progress,pending', label: 'Open' },
+  { key: 'done', label: 'Done' },
+  { key: 'failed', label: 'Failed' }
+];
+
+function openTasks(idx, name) {
+  abandonDictation();   // reachable from the Add screen, possibly mid-recording
+  setView('tasks');
+  state.project = { idx: idx, name: name };
+  state.tasks = [];
+  state.total = 0;
+  state.taskID = 0;
+  state.quick = null;   // the previous project's rows are not this project's
+  show(el('back'), true);
+  show(el('more'), false);
+  setText(el('title'), name || 'Tasks');
+  setText(el('sub'), '');
+  clear(el('list'));
+  say('Loading…');
+  renderFilters();
+  resetDictate();
+  showAddControls();
+  return load(true);
+}
+
+// mode is 'open', 'refresh' or 'more'. Only 'more' pages forward; a refresh
+// re-reads the whole window the wearer has open so an expanded list stays
+// expanded, and so a task that changed status is updated rather than appended.
+function loadTasks(navigating, mode) {
+  var idx = state.project.idx, status = state.status;
+  var offset = mode === 'more' ? state.tasks.length : 0;
+  var limit = mode === 'refresh' ? Math.min(Math.max(state.tasks.length, PAGE), MAX_WINDOW) : PAGE;
+
+  var url = '/api/glasses/tasks?project_idx=' + encodeURIComponent(idx) +
+    '&offset=' + offset + '&limit=' + limit +
+    (status ? '&status=' + encodeURIComponent(status) : '');
+
+  return api(url).then(function(d) {
+    // A response for the project or filter the wearer has already left is the
+    // bug class this dashboard has fixed eight times over. Drop it.
+    if (state.view !== 'tasks' || !state.project || state.project.idx !== idx || state.status !== status) { return; }
+
+    // The per-project answer, which supersedes the one the project list gave:
+    // a user's task.mutate may be scoped to some projects and not others.
+    if (d && d.dictation) {
+      mic.available = !!d.dictation.available;
+      link.canAdd = !!d.dictation.can_add_tasks;
+    }
+    // The Add screen's rows ride along on the same response (Task 20243). Two
+    // of them name the project's newest failure, so they are rebuilt whenever
+    // the list is — including on the minute poll, which is how a failure that
+    // happened while the wearer was looking becomes pinchable without a
+    // reload.
+    state.quick = (d && d.quick) || [];
+    showAddControls();
+
+    state.total = (d && d.total) || 0;
+    var batch = (d && d.tasks) || [];
+    state.tasks = mode === 'more' ? state.tasks.concat(batch) : batch;
+
+    say(state.tasks.length ? '' : 'No tasks match.');
+    setText(el('sub'), state.tasks.length
+      ? state.tasks.length + ' of ' + state.total + (d && d.goal ? ' · ' + d.goal : '')
+      : '');
+    patchList(el('list'), state.tasks, taskKey, buildTask, fillTask);
+    show(el('more'), state.tasks.length > 0 && state.tasks.length < state.total);
+    if (navigating) { selectFirstRow(); }
+  });
+}
+
+function taskKey(t) { return 't:' + t.id; }
+
+function buildTask(t) {
+  var row = mk('button', 'row focusable');
+  row.type = 'button';
+  row.dataset.task = t.id;
+  var name = mk('div', 'name');
+  row._dot = name.appendChild(mk('span', 'dot'));
+  row._name = name.appendChild(mk('span'));
+  row.appendChild(name);
+  row._meta = row.appendChild(mk('div', 'meta'));
+  return row;
+}
+
+function fillTask(row, t) {
+  setClass(row._dot, dotClass(t.status));
+  setText(row._name, '#' + t.id + ' ' + t.title);
+  setText(row._meta, String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
+}
+
+function renderFilters() {
+  patch(el('filters'), FILTERS, function(f) { return 'f:' + f.key; }, function(f) {
+    var chip = mk('button', 'chip focusable', f.label);
+    chip.type = 'button';
+    chip.dataset.status = f.key;
+    return chip;
+  }, function(chip, f) {
+    setClass(chip, f.key === state.status ? 'chip focusable on' : 'chip focusable');
+  });
+}
+
+// ── one task ────────────────────────────────────────────────────────────────
+
+function openTask(id) {
+  abandonDictation();
+  setView('task');
+  state.taskID = id;
+  show(el('back'), true);
+  show(el('more'), false);
+  showAddControls();
+  clear(el('filters'));
+  clear(el('list'));
+  say('Loading…');
+  // Nothing in a detail pane is focusable, so hand the cursor to Back now
+  // rather than after the fetch: the wearer's next swipe has somewhere to
+  // start from, and the way out of this screen is already under it.
+  select(el('back'));
+  return load(true);
+}
+
+function loadTask() {
+  var id = state.taskID;
+  return api('/api/glasses/tasks/' + encodeURIComponent(id) +
+    '?project_idx=' + encodeURIComponent(state.project ? state.project.idx : 0)).then(function(t) {
+    if (state.view !== 'task' || state.taskID !== id) { return; }
+    say('');
+    setText(el('title'), 'Task #' + t.id);
+    setText(el('sub'), String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
+
+    // Detail is patched like the lists are, for the same reason: a running
+    // task's result grows under the poll, and rebuilding the pane would throw
+    // away the scroll offset of a wearer who is part way down it.
+    var host = el('list'), d = host.firstChild;
+    if (!d || d.dataset.key !== 'detail') {
+      clear(host);
+      d = mk('div', 'detail');
+      d.dataset.key = 'detail';
+      var h = mk('h2');
+      d._dot = h.appendChild(mk('span', 'dot'));
+      d._title = h.appendChild(mk('span'));
+      d.appendChild(h);
+      d._blocks = {};
+      // Executor first (Task 20244): where the task ran is the one field a
+      // wearer must not have to scroll to. Built here inside the reuse branch
+      // with the others, so the pane is still patched rather than rebuilt on
+      // every poll.
+      ['Executor', 'Description', 'Result'].forEach(function(label) {
+        var block = mk('div', 'block');
+        block.appendChild(mk('div', 'label', label));
+        block._body = block.appendChild(mk('div', 'body'));
+        d._blocks[label] = block;
+        d.appendChild(block);
+      });
+      host.appendChild(d);
+    }
+    setClass(d._dot, dotClass(t.status));
+    setText(d._title, t.title);
+    // The server pre-renders the line and decides on_host, so the device never
+    // has to reason about isolation vocabulary. The class carries the warning
+    // colour; the text carries it too, because the wearer may be looking at
+    // this in daylight.
+    fillBlock(d._blocks.Executor, t.executor);
+    setClass(d._blocks.Executor, t.on_host ? 'block host' : 'block');
+    fillBlock(d._blocks.Description, t.description);
+    fillBlock(d._blocks.Result, t.result);
+  });
+}
+
+function fillBlock(block, text) {
+  block.hidden = !text;
+  setText(block._body, text || '');
+}
+
+// ── adding a task ───────────────────────────────────────────────────────────
+// Tasks 20238 (speak it) and 20243 (the button, and a way in that works on the
+// device itself).
+//
+// # What the glasses can and cannot do
+//
+// Meta's own build guide for Ray-Ban Display web apps lists camera, microphone
+// and getUserMedia as unsupported, alongside text input — the runtime grants a
+// web app the display, the Neural Band and captouch as arrow keys, the IMU,
+// location and local storage, and nothing that can hear. There is no permission
+// to ask for and no flag to set: a web app on this device cannot capture audio,
+// so it cannot dictate, and it cannot type either.
+//
+// Dictation still ships, because the same link opened on the phone the glasses
+// tether through *does* have a microphone, and that is one URL away from the
+// same task list. But it hides itself where it cannot work, and on the glasses
+// that left the wearer with no way to add anything and nothing to press —
+// which is what Task 20243 reported.
+//
+// # So what is left
+//
+// Choosing from a list. It is the one composition method arrow keys and Enter
+// can express, so the Add screen is a list: speak it, where a microphone
+// exists, and otherwise a handful of ready-made tasks the hub derives from the
+// project's own plan (see glassesQuickTasks in glasses_api.go — the two at the
+// top name the newest failure by id). A pinch turns one into a real task.
+//
+// # Why a confirmation step
+//
+// The wearer has no keyboard. On the dashboard a wrong word is one keystroke
+// from fixed, because the transcript lands in a text field; here it cannot be
+// edited at all. So what is about to be created is shown and committed by a
+// second pinch, which is the cheapest possible review and the only one
+// available — and it is also what stops a stray pinch on a 600x600 display
+// silently filing work.
+
+var mic = { available: false, rec: null, chunks: [], stream: null, heard: '',
+            heardDesc: '', sound: false, ctx: null,
+            // Push-to-talk (Task 20252). held is the pointerId of the finger on
+            // the button, null when the session came from a click or a pinch.
+            held: null, holdStart: 0, suppressClick: false,
+            abort: false, abortMsg: '' };
+
+// Whisper does not answer "silence". Handed a clip with nothing in it it
+// returns a stock phrase — "Thank you." is the one this endpoint produces —
+// and the metadata cannot tell you: measured against the live API,
+// no_speech_prob is 0.0000 for digital silence and for real speech alike.
+// So the check has to happen where the samples are, before anything is sent.
+function listenForSound(stream) {
+  var Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) { mic.sound = true; return; }   // cannot measure: never block on it
+  try {
+    mic.ctx = new Ctx();
+    var analyser = mic.ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    mic.ctx.createMediaStreamSource(stream).connect(analyser);
+    var buf = new Uint8Array(analyser.fftSize);
+    var poll = setInterval(function() {
+      if (!mic.ctx) { clearInterval(poll); return; }
+      analyser.getByteTimeDomainData(buf);
+      for (var i = 0; i < buf.length; i++) {
+        // 128 is silence here. The threshold is low on purpose: a quiet
+        // talker must get through, and a false positive costs one upload.
+        if (Math.abs(buf[i] - 128) > 6) { mic.sound = true; clearInterval(poll); return; }
+      }
+    }, 100);
+  } catch (e) { mic.sound = true; }
+}
+
+function closeMicCtx() {
+  if (mic.ctx) { try { mic.ctx.close(); } catch (e) {} mic.ctx = null; }
+}
+
+// micUsable reports whether this runtime can record at all — false on the
+// glasses by platform policy, and false on an http origin, where the API is
+// withheld from insecure contexts.
+function micUsable() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+}
+
+// showAddControls places the two chrome buttons this feature owns: "Add task"
+// on the task list, and "Speak a new task" on the screen it opens. Called from
+// every view transition and from the minute poll, so it derives everything from
+// state rather than being told.
+function showAddControls() {
+  // loadTasks calls this on every minute poll, and show() rewrites the class
+  // attribute — which would drop the `rec` styling while the wearer is part
+  // way through speaking, turning the red Stop control back to blue with no
+  // other indication that it is still recording. Leave a live control alone.
+  if (mic.rec || mic.starting) { return; }
+
+  // The way in. Shown on the task list whenever the link may add tasks — not
+  // conditioned on the microphone, which is the bug being fixed: a wearer must
+  // be able to find the feature on the device that cannot record, because that
+  // is where the ready-made rows behind this button are the only option.
+  // ...and not until this project's rows have arrived, so the screen behind it
+  // can never be the previous project's.
+  show(el('add'), state.view === 'tasks' && link.canAdd && state.quick !== null);
+
+  var onAdd = state.view === 'add';
+  var offered = onAdd && mic.available && link.canAdd;
+  show(el('dictate'), offered && micUsable());
+
+  var note = el('micnote');
+  var explain = offered && !micUsable();
+  setText(note, explain
+    ? (window.isSecureContext === false
+        ? 'To add a task by voice, open this link over https — a microphone needs a secure connection.'
+        : 'To add a task by voice, open this same link on your phone. The glasses have no microphone available to web apps.')
+    : '');
+  setClass(note, explain ? 'on' : '');
+}
+
+// openAdd is the screen the button opens: every way of adding a task that
+// works on whatever is reading this page, as a list of pinchable rows.
+function openAdd() {
+  if (!state.project) { return; }
+  setView('add');
+  state.taskID = 0;
+  show(el('back'), true);
+  show(el('more'), false);
+  clear(el('filters'));
+  clear(el('list'));
+  say('');
+  setText(el('title'), 'Add task');
+  resetDictate();
+  showAddControls();
+  renderQuick();
+
+  var speak = el('dictate'), rows = el('list').childNodes;
+  setText(el('sub'), !speak.hidden
+    ? 'Speak it, or pick one below.'
+    : (rows.length ? 'Pick one to add it to ' + state.project.name + '.' : ''));
+  if (speak.hidden && !rows.length) {
+    say('This link cannot add tasks. Generate a new one from the cloop dashboard.', true);
+  }
+
+  // Land on speech where it exists — it is the only way to say something new —
+  // and on the first ready-made row otherwise, so the screen opens with its
+  // best option already under the wearer's next pinch.
+  if (!speak.hidden) { select(speak); }
+  else if (rows.length) { select(rows[0]); }
+  else { select(el('back')); }
+}
+
+// renderQuick draws the ready-made rows. Built outright rather than through
+// patch(): this screen does not poll, so there is no node identity to preserve
+// and nothing to reconcile against.
+function renderQuick() {
+  var host = el('list');
+  clear(host);
+  var quick = state.quick || [];
+  for (var i = 0; i < quick.length; i++) {
+    var q = quick[i] || {};
+    if (!q.title) { continue; }
+    var row = rowButton('quick', q.title);
+    row.dataset.qi = String(i);
+    row.dataset.key = 'q:' + i;
+    host.appendChild(row);
+  }
+}
+
+// The description never reaches the screen — it is several lines of brief for
+// the agent, and the row has to stay one glance wide — but it travels with the
+// title to the confirmation and on to the hub.
+function pickQuick(i) {
+  var q = (state.quick || [])[i];
+  if (!q || !q.title) { return; }
+  openHeard(q.title, q.description, 'add');
+}
+
+// setDictateLabel repaints the control without deciding whether it is shown.
+// The `on` class carries visibility (#dictate.on sets display:block, which
+// outranks the hidden attribute's UA rule), so it has to be derived from the
+// current hidden state rather than asserted — otherwise relabelling a hidden
+// button would put it back on screen.
+function setDictateLabel(text, recording, busy) {
+  var b = el('dictate');
+  setText(b, text);
+  setClass(b, (b.hidden ? 'focusable' : 'on focusable') + (recording ? ' rec' : ''));
+  b.disabled = !!busy;
+}
+
+// ── push-to-talk (Task 20252) ───────────────────────────────────────────────
+//
+// This button is only ever on screen where a microphone exists, and on this
+// link that means the phone the glasses tether through — showAddControls hides
+// it on the wearable itself, where the platform grants no audio capture at all.
+// So the gesture it should answer to is a phone gesture: hold while speaking,
+// release to send, which cannot leave the microphone live the way a two-tap
+// toggle can.
+//
+// The wearable keeps the toggle, because it has to. A Neural Band pinch and a
+// captouch tap arrive here as key events, not pointer events — see the keydown
+// map above — and a key event cannot express a hold. The split below is by
+// pointerType for exactly that reason: touch holds, everything else clicks, and
+// nothing has to know which device it is running on.
+//
+// The dashboard's copy of this lives in assets/js/15-voice.js. The two cannot
+// share code — this page is a standalone document that loads no bundle, which
+// is what keeps it small enough for the glasses to fetch over Bluetooth.
+
+var MIN_HOLD_MS = 400;   // see DICTATE_MIN_HOLD_MS in 15-voice.js
+
+el('dictate').addEventListener('click', function() {
+  // The click a browser synthesises after touchend belongs to the hold that
+  // just ended; letting it through here would restart the recording the
+  // release stopped.
+  if (mic.suppressClick) { mic.suppressClick = false; return; }
+  if (mic.rec) { stopDictation(); return; }
+  startDictation();
+});
+
+el('dictate').addEventListener('pointerdown', function(ev) {
+  var b = el('dictate');
+  if (b.disabled) { return; }
+  if (ev.pointerType === 'mouse') { mic.suppressClick = false; return; }
+  mic.suppressClick = true;
+  if (mic.rec || mic.starting) { releaseHold(ev.timeStamp); return; }
+
+  ev.preventDefault();
+  mic.held = ev.pointerId;
+  mic.holdStart = ev.timeStamp;
+  mic.abort = false;
+  // Capture, so a fingertip that slides off the button still ends the hold
+  // here rather than leaving the microphone running.
+  try { b.setPointerCapture(ev.pointerId); } catch (e) {}
+  setDictateLabel('Starting…', false, false);
+  startDictation();
+});
+
+function endHold() {
+  var b = el('dictate');
+  if (b && mic.held !== null && mic.held !== undefined) {
+    try { b.releasePointerCapture(mic.held); } catch (e) {}
+  }
+  mic.held = null;
+  mic.holdStart = 0;
+}
+
+// at is the releasing event's timeStamp: a hold is measured between the two
+// events' own timestamps, as releaseDictateHold does in 15-voice.js, so a
+// release a busy page gets to late cannot stretch a stray tap into speech.
+function releaseHold(at) {
+  // A zero start means this session did not come from a hold — a pinch or a
+  // click began it and this touch only ends it. There is no hold to be too
+  // short, and a real recording is waiting to be sent.
+  var fromHold = mic.holdStart !== 0;
+  var held = fromHold ? at - mic.holdStart : 0;
+
+  if (mic.rec) {
+    if (fromHold && held < MIN_HOLD_MS) {
+      // Too short to be speech. Discarding says so plainly; uploading it would
+      // come back as one of Whisper's stock phrases and put that on the
+      // confirmation screen as a real task.
+      endHold();
+      abandonDictation();
+      say('Hold the button while you speak.', true);
+      return;
+    }
+    endHold();
+    stopDictation();
+    return;
+  }
+
+  // Released before the microphone went live, so this hold captured nothing.
+  // startDictation acts on the note when getUserMedia finally resolves —
+  // stopping a recorder that does not exist yet would leak the stream it is
+  // about to be handed.
+  if (mic.starting) {
+    mic.abort = true;
+    // Silent when this was not a hold: a pinch that started dictation and a
+    // touch that stopped it before it began is a deliberate cancel.
+    mic.abortMsg = !fromHold ? ''
+      : held < MIN_HOLD_MS ? 'Hold the button while you speak.'
+      : 'Microphone ready. Hold and speak again.';
+    return;
+  }
+  endHold();
+}
+
+function onDictatePointerUp(ev) {
+  if (mic.held === null || mic.held === undefined) { return; }
+  if (ev && ev.pointerId !== undefined && ev.pointerId !== mic.held) { return; }
+  releaseHold(ev ? ev.timeStamp : performance.now());
+}
+
+el('dictate').addEventListener('pointerup', onDictatePointerUp);
+el('dictate').addEventListener('pointercancel', onDictatePointerUp);
+el('dictate').addEventListener('contextmenu', function(ev) { ev.preventDefault(); });
+
+function startDictation() {
+  // mic.rec is only assigned once getUserMedia resolves, so two quick pinches
+  // — easy to produce on a captouch strip — would both find it null and start
+  // two recorders, the first of which becomes unreachable with its microphone
+  // track never stopped. Claim the slot synchronously instead.
+  if (mic.starting) { return; }
+  mic.starting = true;
+  navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  }).then(function(stream) {
+    mic.stream = stream;
+    mic.chunks = [];
+    mic.sound = false;
+    listenForSound(stream);
+    var type = '';
+    ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].some(function(t) {
+      if (window.MediaRecorder.isTypeSupported(t)) { type = t; return true; }
+      return false;
+    });
+    mic.rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
+    mic.rec.ondataavailable = function(ev) { if (ev.data && ev.data.size) { mic.chunks.push(ev.data); } };
+    mic.rec.onstop = function() {
+      // Release the microphone before the upload rather than after: the
+      // recording indicator stays lit while a track is live, and leaving it on
+      // across a network round trip reads as "still listening".
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      closeMicCtx();
+      var blob = new Blob(mic.chunks, { type: (mic.rec && mic.rec.mimeType) || 'audio/webm' });
+      mic.rec = null; mic.stream = null;
+      if (!mic.sound) {
+        resetDictate();
+        say('No sound was recorded. Try again, closer to the microphone.', true);
+        return;
+      }
+      uploadDictation(blob);
+    };
+    mic.rec.start();
+    mic.starting = false;
+    // The finger lifted while getUserMedia was resolving — on a phone this is
+    // the first hold of the session, where the permission prompt eats the whole
+    // press. Nothing was captured, so drop it and say the microphone is ready
+    // rather than reporting a failure the next hold will not repeat.
+    if (mic.abort) {
+      mic.abort = false;
+      endHold();
+      abandonDictation();
+      // Empty on purpose for a deliberate cancel; see releaseHold.
+      if (mic.abortMsg) { say(mic.abortMsg, true); }
+      mic.abortMsg = '';
+      return;
+    }
+    setDictateLabel(mic.held !== null && mic.held !== undefined
+      ? '■ Release to add' : '■ Stop and add', true, false);
+  }).catch(function(err) {
+    mic.starting = false;
+    endHold();
+    resetDictate();
+    say('Microphone unavailable: ' + (err && err.message ? err.message : err), true);
+  });
+}
+
+function stopDictation() {
+  if (mic.rec && mic.rec.state !== 'inactive') { mic.rec.stop(); }
+  setDictateLabel('Transcribing…', false, true);
+}
+
+// abandonDictation drops a recording in progress without uploading it.
+//
+// Navigating away mid-record has to release the microphone. Simply hiding the
+// control would leave the track live — the phone's recording indicator stays
+// lit for the rest of the session — and would leave mic.rec set behind a
+// button relabelled "Speak a new task", so the next pinch would upload the
+// walk through the menus rather than start something new.
+function abandonDictation() {
+  if (!mic.rec && !mic.stream) { return; }
+  var rec = mic.rec;
+  mic.rec = null;                       // onstop reads this; clear it first so
+  if (rec) { rec.onstop = null; }       // the upload path does not run
+  if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+  if (mic.stream) { mic.stream.getTracks().forEach(function(t) { t.stop(); }); }
+  mic.stream = null;
+  closeMicCtx();
+  mic.starting = false;
+  resetDictate();
+}
+
+function uploadDictation(blob) {
+  if (!blob || !blob.size) { resetDictate(); say('Nothing was recorded.', true); return; }
+  var form = new FormData();
+  form.append('audio', blob, 'dictation.' + ((blob.type || '').indexOf('ogg') >= 0 ? 'ogg' : 'webm'));
+  var from = state.project;
+  send('POST', '/api/glasses/transcribe', form).then(function(d) {
+    resetDictate();
+    // The wearer moved on while this was in flight. Dropping the result is
+    // the same rule loadProjects and loadTasks follow, and it matters more
+    // here: openHeard would repaint whatever screen they are now on, and
+    // commitHeard would then find state.project null and silently do nothing.
+    if (state.view !== 'add' || state.project !== from) { return; }
+    if (!d || !d.text) { say('No speech was recognised.', true); return; }
+    openHeard(d.text, '', 'add');
+  }).catch(function(err) { resetDictate(); fail(err); });
+}
+
+// On a phone the button is held, so it has to say so — nothing else on the
+// screen does. The media query only picks wording; the behaviour is chosen per
+// gesture from pointerType, so guessing wrong here is cosmetic. The wearable
+// reports no coarse pointer (it has no pointer at all) and keeps the original
+// label, which is right: there a pinch is a click.
+function dictateIsHeld() {
+  try { return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+  catch (e) { return false; }
+}
+function resetDictate() {
+  setDictateLabel(dictateIsHeld() ? '🎤 Hold to speak a new task' : '🎤 Speak a new task', false, false);
+}
+
+// openHeard is the confirmation screen: what is about to be created, then Add
+// and Discard. Reached from a transcript and from a ready-made row alike —
+// both are a sentence the wearer cannot edit, so both get the same review.
+//
+// desc is the brief that travels with the title and is never shown: it is
+// several lines long and the display is 600 pixels. from is the screen to
+// return to if the wearer backs out.
+function openHeard(text, desc, from) {
+  mic.heard = text;
+  mic.heardDesc = desc || '';
+  mic.starting = false;
+  setView('heard');
+  state.from = from || 'tasks';
+  show(el('back'), true);
+  show(el('more'), false);
+  show(el('add'), false);
+  show(el('dictate'), false);
+  setClass(el('micnote'), '');
+  clear(el('filters'));
+  clear(el('list'));
+  say('');
+  setText(el('title'), 'Add this task?');
+  setText(el('sub'), state.project ? state.project.name : '');
+
+  var host = el('list');
+  var heard = mk('div', '', text);
+  heard.id = 'heard';
+  host.appendChild(heard);
+
+  var addRow = rowButton('confirm', '✓ Add task');
+  host.appendChild(addRow);
+  host.appendChild(rowButton('discard', '✕ Discard'));
+  // Land on Add: it is the reason the wearer got here, and the transcript
+  // above is not focusable, so an unaimed pinch would otherwise hit nothing.
+  select(addRow);
+}
+
+function rowButton(action, label) {
+  var b = mk('button', 'row focusable');
+  b.type = 'button';
+  b.dataset.act = action;
+  b.dataset.key = 'act:' + action;
+  b.appendChild(mk('div', 'name', label));
+  return b;
+}
+
+function commitHeard() {
+  var title = mic.heard;
+  if (!title || !state.project) { return; }
+  var body = { title: title };
+  if (mic.heardDesc) { body.description = mic.heardDesc; }
+  setText(el('title'), 'Adding…');
+  send('POST', '/api/glasses/tasks?project_idx=' + encodeURIComponent(state.project.idx), body)
+    .then(function() {
+      mic.heard = '';
+      mic.heardDesc = '';
+      openTasks(state.project.idx, state.project.name);
+    })
+    .catch(function(err) { fail(err); setText(el('title'), 'Add this task?'); });
+}
+
+// ── navigation ──────────────────────────────────────────────────────────────
+// One delegated listener rather than per-row handlers: rows are rebuilt on
+// every refresh, and re-binding them each time is how a wearable ends up with
+// a growing pile of dead listeners.
+
+el('list').addEventListener('click', function(ev) {
+  var row = ev.target.closest ? ev.target.closest('.row') : null;
+  if (!row) { return; }
+  if (row.dataset.act === 'confirm') { commitHeard(); return; }
+  if (row.dataset.act === 'discard') { goBack(); return; }
+  if (row.dataset.act === 'quick') { pickQuick(parseInt(row.dataset.qi, 10)); return; }
+  if (row.dataset.task) { openTask(parseInt(row.dataset.task, 10)); return; }
+  if (row.dataset.idx !== undefined) { openTasks(parseInt(row.dataset.idx, 10), row.dataset.name); }
+});
+
+el('filters').addEventListener('click', function(ev) {
+  var chip = ev.target.closest ? ev.target.closest('.chip') : null;
+  if (!chip || !state.project) { return; }
+  state.status = chip.dataset.status || '';
+  state.tasks = [];
+  clear(el('list'));
+  renderFilters();
+  // Focus stays on the chip the wearer just activated — the reconciler reuses
+  // it — so the next swipe continues from the filter row rather than from the
+  // top of a list that has just changed under them.
+  loadTasks(false, 'open').catch(fail);
+});
+
+el('more').addEventListener('click', function() {
+  if (state.project) { loadTasks(false, 'more').catch(fail); }
+});
+
+el('back').addEventListener('click', goBack);
+el('add').addEventListener('click', openAdd);
+
+function goBack() {
+  // A discarded or backed-out draft is dropped rather than kept for the next
+  // visit: coming back to a screen still offering to add a sentence the wearer
+  // already rejected is the wrong default when Enter is one pinch.
+  if (state.view === 'heard') {
+    mic.heard = '';
+    mic.heardDesc = '';
+    // Back to where they picked it. After rejecting a transcript or a
+    // ready-made row the next thing a wearer wants is another one, and that is
+    // the Add screen — not the task list, which would cost two more pinches to
+    // get back from.
+    if (state.from === 'add' && state.project) { openAdd(); return; }
+    if (state.project) { openTasks(state.project.idx, state.project.name); return; }
+  }
+  if ((state.view === 'add' || state.view === 'task') && state.project) {
+    openTasks(state.project.idx, state.project.name);
+  } else if (state.view !== 'projects') { openProjects(); }
+}
+
+el('reload').addEventListener('click', function() {
+  var btn = el('reload');
+  setClass(btn, 'busy focusable');
+  load(false).then(function() { setClass(btn, 'focusable'); });
+});
+
+// load dispatches to whichever view is current. navigating says whether the
+// wearer just arrived — the difference between "clear the screen, say Loading
+// and hand them the first row" and "patch what changed and touch nothing
+// else", which is the whole of the smooth-refresh behaviour.
+function load(navigating) {
+  // Every view that fetches has just cleared its list, so this is the moment
+  // the ring is at its shortest and the cursor most likely to be gone. Anchor
+  // before the request rather than after it: the wait is the window the wearer
+  // swipes into, and a cursor that only reappears when the network answers is
+  // one the device has nothing to aim at until then. See reanchor().
+  reanchor();
+  if (state.view === 'projects') { return loadProjects(navigating).catch(fail); }
+  if (state.view === 'tasks' && state.project) { return loadTasks(navigating, navigating ? 'open' : 'refresh').catch(fail); }
+  if (state.view === 'task') { return loadTask().catch(fail); }
+  // Add and its confirmation deliberately fetch nothing. Their rows were
+  // settled when the wearer arrived, and a poll that rebuilt them would move
+  // the cursor out from under someone part way through a decision — or, worse,
+  // repaint a control that is mid-recording.
+  return Promise.resolve();
+}
+
+// The dashboard is push-based over a WebSocket; this page is not, deliberately.
+// A heads-up display spends most of its life asleep, and an idle socket is a
+// radio the wearer is paying for plus a broadcast fan-out the hub is holding
+// open for a device that is not looking. Refreshing only while the document is
+// actually visible costs one small request a minute and stops entirely the
+// moment the wearer looks away — or the moment the link stops working.
+var pollTimer = setInterval(tick, 60000);
+document.addEventListener('visibilitychange', tick);
+
+function tick() {
+  if (dead || document.visibilityState !== 'visible') { return; }
+  load(false);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  document.removeEventListener('visibilitychange', tick);
+}
+
+openProjects();
+})();

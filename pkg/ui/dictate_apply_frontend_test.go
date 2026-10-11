@@ -253,7 +253,7 @@ func TestDashboard_EditModalDictationMarkup(t *testing.T) {
 		t.Fatal("cannot find the end of the edit modal")
 	}
 	modal := src[start : start+end]
-	for _, want := range []string{`id="dictateEditBtn"`, `onclick="toggleEditDictation()"`, `id="modalDesc"`} {
+	for _, want := range []string{`id="dictateEditBtn"`, `data-action="toggleEditDictation"`, `id="modalDesc"`} {
 		if !strings.Contains(modal, want) {
 			t.Errorf("the edit modal does not contain %s", want)
 		}
@@ -268,9 +268,9 @@ func TestDashboard_EditModalDictationMarkup(t *testing.T) {
 	// versus edit; "Add to the end" is the free, non-destructive middle that
 	// makes the other two safe to offer.
 	for _, want := range []string{
-		`onclick="dictateApplyReplace()"`,
-		`onclick="dictateApplyAppend()"`,
-		`onclick="dictateApplyRevise()"`,
+		`data-action="dictateApplyReplace"`,
+		`data-action="dictateApplyAppend"`,
+		`data-action="dictateApplyRevise"`,
 		`id="dr-heard"`,
 	} {
 		if !strings.Contains(src, want) {

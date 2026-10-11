@@ -47,6 +47,7 @@ ended up. Two consecutive entries with the same value are the reported bug.
 | `fetch` | a request the page issued, with status and duration |
 | `lifecycle` | page load, visibility change, a link reaching its terminal state |
 | `note` | anything else, and where an unrecognised kind lands |
+| `csp` | something the hub's Content-Security-Policy blocked, from the report the **browser** sent to `POST /api/csp-report` rather than from the page's script: its directive, the blocked URL or `inline`, the source line. Recorded under the front end whose document it was, so it follows that front end's collection switch, under the signed-in user whose browser sent it or nobody, and within hub-wide budgets — 60 a minute for signed-in browsers' reports, one a minute for anonymous ones, so a flood of forged reports cannot turn the table over; [the metric](metrics.md#what-the-pages-policy-blocked) counts every one |
 
 ### Reading a glasses trail
 

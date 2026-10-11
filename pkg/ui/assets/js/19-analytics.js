@@ -24,7 +24,7 @@ window._scheduleAnalyticsRefresh = _scheduleAnalyticsRefresh;
 const _paletteBg   = ['rgba(88,166,255,.7)','rgba(63,185,80,.7)','rgba(188,140,255,.7)','rgba(57,197,207,.7)','rgba(248,81,73,.7)','rgba(210,153,34,.7)'];
 const _paletteLine = ['#58a6ff','#3fb950','#bc8cff','#39c5cf','#f85149','#d29922'];
 
-window.analyticsResetRange = function() {
+act('analyticsResetRange', function() {
   const to   = new Date();
   const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0,10);
@@ -33,7 +33,7 @@ window.analyticsResetRange = function() {
   if (fi) fi.value = fmt(from);
   if (ti) ti.value = fmt(to);
   loadAnalytics();
-};
+});
 
 // _setChartStatus drives the banner above the canvases (Task 20289).
 //
@@ -73,9 +73,9 @@ function _setChartStatus(state, detail) {
 
 // retryAnalyticsCharts is the banner's Retry button. ensureChartLib() forgets a
 // failed load, so this genuinely re-fetches rather than replaying the rejection.
-window.retryAnalyticsCharts = function() { loadAnalytics(); };
+act('retryAnalyticsCharts', function() { loadAnalytics(); });
 
-window.loadAnalytics = function() {
+act('loadAnalytics', function() {
   // Initialise date pickers if empty.
   const fi = document.getElementById('analyticsFrom');
   const ti = document.getElementById('analyticsTo');
@@ -110,7 +110,7 @@ window.loadAnalytics = function() {
   }).catch(() => {});
   // Task 20126: no client-side polling — refreshes arrive via WS events
   // (see _scheduleAnalyticsRefresh in handleRealtimeMsg dispatch).
-};
+});
 
 function _destroyChart(ch) {
   try { if (ch) ch.destroy(); } catch(_) {}

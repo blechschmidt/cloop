@@ -73,18 +73,22 @@ function appendAssistantBubble(role, content, streaming) {
   return { row, bubbleDiv };
 }
 
-window.assistantChipAsk = function(question) {
+act('assistantChipAsk', function(question) {
   const inp = document.getElementById('assistantInput');
   if (inp) inp.value = question;
   submitAssistantChat();
-};
+}, ARG);
 
 function autoGrowTextarea(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
+// On input rather than the keydown it used to share with Enter, which ran
+// before the keystroke reached the box and named a function the bundle never
+// exposed, so every key in it threw.
+ACTIONS.autoGrowTextarea = function() { autoGrowTextarea(this); };
 
-window.submitAssistantChat = async function() {
+act('submitAssistantChat', async function() {
   if (assistantStreaming) return;
   const input = document.getElementById('assistantInput');
   if (!input) return;
@@ -186,9 +190,9 @@ window.submitAssistantChat = async function() {
     assistantHistory.push({role: 'assistant', content: accumulated});
     saveAssistantHistory();
   }
-};
+});
 
-window.clearAssistantPanel = function() {
+act('clearAssistantPanel', function() {
   assistantHistory = [];
   saveAssistantHistory();
   const box = document.getElementById('assistantMessages');
@@ -199,14 +203,14 @@ window.clearAssistantPanel = function() {
     '<div class="chat-welcome-text">I have full knowledge of your plan — tasks, statuses, priorities, and annotations.<br>' +
     'Ask me anything about your project or click a suggested question above.</div>' +
     '</div>';
-};
+});
 
 // ── Chat voice ────────────────────────────────────────────────────────────────
 
-window.toggleChatVoice = async function() {
+act('toggleChatVoice', async function() {
   if (chatVoiceRecording) { stopChatVoice(); return; }
   await startChatVoice();
-};
+});
 
 async function startChatVoice() {
   try {
@@ -236,17 +240,17 @@ async function startChatVoice() {
   }
 }
 
-window.stopChatVoice = function() {
+act('stopChatVoice', function() {
   if (chatVoiceMediaRecorder && chatVoiceMediaRecorder.state !== 'inactive') chatVoiceMediaRecorder.stop();
-};
+});
 
-window.cancelChatVoice = function() {
+act('cancelChatVoice', function() {
   if (chatVoiceMediaRecorder && chatVoiceMediaRecorder.state !== 'inactive') chatVoiceMediaRecorder.stop();
   chatVoiceBlob = null;
   chatVoiceRecording = false;
   document.getElementById('chatMicBtn').classList.remove('recording');
   document.getElementById('chatVoiceBar').style.display = 'none';
-};
+});
 
 async function sendChatVoice() {
   if (!chatVoiceBlob) return;

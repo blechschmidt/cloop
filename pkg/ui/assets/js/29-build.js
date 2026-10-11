@@ -78,7 +78,7 @@ window.refreshBuildInfo = function() {
 };
 
 // window.loadBuildInfo is the Settings tab's entry point.
-window.loadBuildInfo = function() { return window.refreshBuildInfo(); };
+act('loadBuildInfo', function() { return window.refreshBuildInfo(); });
 
 // _buildCheckStale compares the running build against the one that served this
 // page and raises a persistent banner when they differ.
@@ -103,16 +103,16 @@ function _buildCheckStale(d) {
 // no-cache so a plain reload already re-reads it, and every asset it names is
 // content-hashed — the new shell therefore names new URLs and nothing stale can
 // survive. location.reload() is enough; the explicit call documents why.
-window.reloadForNewBuild = function() { location.reload(); };
+act('reloadForNewBuild', function() { location.reload(); });
 
 // window.dismissBuildStale hides the banner without reloading, for someone
 // mid-edit who does not want to lose a form. The banner does not come back for
 // this page: having decided once, being asked again on every reconnect would
 // be worse than not being told.
-window.dismissBuildStale = function() {
+act('dismissBuildStale', function() {
   const banner = document.getElementById('buildStaleBanner');
   if (banner) banner.style.display = 'none';
-};
+});
 
 // _buildRenderChip writes the compact footer identity.
 function _buildRenderChip(d) {

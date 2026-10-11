@@ -2290,7 +2290,7 @@
             </p>
             <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px">
               <input class="form-input" id="tokenPlaintext" readonly spellcheck="false"
-                     style="font-family:var(--mono, monospace);font-size:12px;flex:1" onclick="this.select()">
+                     style="font-family:var(--mono, monospace);font-size:12px;flex:1" data-action="selectText">
               <button class="btn primary" id="tokenCopyBtn" data-act="copyTokenPlaintext" style="white-space:nowrap">Copy</button>
             </div>
             <div class="sec-hint" style="margin-bottom:14px">

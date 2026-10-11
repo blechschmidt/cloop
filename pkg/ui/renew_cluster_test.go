@@ -151,7 +151,7 @@ func TestClusterRenewalCompletesOnTheMemberThatBeganIt(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("GET /auth/renew: %v", r.err)
 	}
-	if !strings.Contains(r.body, `outcome: "ok"`) {
+	if renewOutcome(r.body) != "ok" {
 		t.Fatalf("renewal across members failed:\n%s", r.body)
 	}
 	// The callback reached B and was answered by A.

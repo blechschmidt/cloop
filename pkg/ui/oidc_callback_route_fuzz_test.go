@@ -37,6 +37,7 @@ func FuzzOIDCCallbackRoutes(f *testing.F) {
 		"https://cloop.example.com/auth/{$}",
 		"https://cloop.example.com/auth/login",
 		"https://cloop.example.com/auth/renew",
+		"https://cloop.example.com/auth/sign-in.js",
 		"https://cloop.example.com/auth/logout",
 		"https://cloop.example.com/auth/callback ",
 		"/auth/callback",

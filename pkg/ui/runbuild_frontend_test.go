@@ -70,7 +70,7 @@ func TestDashboard_RunBuildNote(t *testing.T) {
 		Level   runBuildNotes `json:"level"`
 	}
 	decode("lagging_then_level", &lag)
-	if o := lag.Lagging.Overview; !o.Shown || !strings.Contains(o.HTML, lagText) || !strings.Contains(o.HTML, "adoptBuild()") {
+	if o := lag.Lagging.Overview; !o.Shown || !strings.Contains(o.HTML, lagText) || !strings.Contains(o.HTML, `data-action="adoptBuild"`) {
 		t.Errorf("Overview, lagging run: %+v", o)
 	}
 	if tb := lag.Lagging.Tasks; !tb.Shown || !strings.Contains(tb.HTML, lagText) || strings.Contains(tb.HTML, "<button") {

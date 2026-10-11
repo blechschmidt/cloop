@@ -187,15 +187,15 @@ async function openDialog(cdp) {
     const deadline = Date.now() + WAIT_MS;
     for (;;) {
       const i = await cdp.eval(`(() => {
-        const m = /'openExecutorVirtual',(\\d+)\\)/.exec((document.getElementById('execList') || {}).innerHTML || '');
-        return m ? Number(m[1]) : -1; })()`);
+        const b = document.querySelector('#execList button[data-action="openExecutorVirtual"]');
+        return b ? Number(b.dataset.arg) : -1; })()`);
       if (i >= 0) return i;
       if (Date.now() >= deadline) return -1;
       await sleep(50);
     }
   })();
   if (idx < 0) throw new Error('the device card never offered its Virtual button');
-  await cdp.eval(`document.querySelector('#execList button[onclick*="\\'openExecutorVirtual\\',${idx})"]').click()`);
+  await cdp.eval(`document.querySelector('#execList button[data-action="openExecutorVirtual"][data-arg="${idx}"]').click()`);
   if (!await waitFor(cdp, `!!document.getElementById('evxNetNone')`)) {
     throw new Error('the dialog never rendered its network choice: ' + await cdp.eval(textExpr('evxBody')));
   }

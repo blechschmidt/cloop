@@ -86,8 +86,8 @@ func TestDashboard_AbortedOutcomesAreVisible(t *testing.T) {
 		{"Never ran", "the row must say plainly that the task did not run"},
 		{"provider usage limit", "the class must be rendered in words, not as a raw enum"},
 		{"provider quota exhausted", "a second class must render as its own words"},
-		{"reopenAbortedTask(194)", "an open finding must offer the reopen verdict"},
-		{"clearAbortedTask(194)", "an open finding must offer the keep verdict"},
+		{`data-action="reopenAbortedTask" data-arg="194"`, "an open finding must offer the reopen verdict"},
+		{`data-action="clearAbortedTask" data-arg="194"`, "an open finding must offer the keep verdict"},
 		{"re-landed by cmd/task_tdd.go", "a cleared entry must show why it was allowed to stand"},
 	} {
 		if !strings.Contains(got.HTML, want.needle) {
@@ -98,10 +98,10 @@ func TestDashboard_AbortedOutcomesAreVisible(t *testing.T) {
 	// A reopened task is pending and already queued. It keeps its record as
 	// history, but offering the verdicts again would be meaningless.
 	for _, unwanted := range []struct{ needle, why string }{
-		{"reopenAbortedTask(195)", "a task already reopened must not offer Reopen again"},
-		{"clearAbortedTask(195)", "a task already reopened must not offer Keep"},
-		{"reopenAbortedTask(193)", "a cleared task must not offer Reopen in the list"},
-		{"reopenAbortedTask(20221)", "a task with no finding must not offer the verdicts at all"},
+		{`data-action="reopenAbortedTask" data-arg="195"`, "a task already reopened must not offer Reopen again"},
+		{`data-action="clearAbortedTask" data-arg="195"`, "a task already reopened must not offer Keep"},
+		{`data-action="reopenAbortedTask" data-arg="193"`, "a cleared task must not offer Reopen in the list"},
+		{`data-action="reopenAbortedTask" data-arg="20221"`, "a task with no finding must not offer the verdicts at all"},
 	} {
 		if strings.Contains(got.HTML, unwanted.needle) {
 			t.Errorf("task list wrongly contains %q: %s", unwanted.needle, unwanted.why)

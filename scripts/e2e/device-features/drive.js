@@ -187,7 +187,7 @@ async function openProject(cdp, p) {
     return {i, name};
   }
   await cdp.eval(`window.switchTab('projects')`);
-  const card = `#projList .proj-card[onclick^="openProject(${i},"]`;
+  const card = `#projList .proj-card[data-action="openProject"][data-arg="${i}"]`;
   // A project whose tasks are all done is off the grid until Show completed.
   await waitFor(cdp, `!!document.querySelector('#projList .proj-card, #projList .empty-state')`, 'the project grid');
   if (!(await cdp.eval(`!!document.querySelector(${JSON.stringify(card)})`))
@@ -203,15 +203,15 @@ const result = {step: STEP};
 
 async function stepDeviceFirewall(cdp, exID, cidrs, ports) {
   await cdp.eval(`window.switchTab('executors')`);
-  await waitFor(cdp, `document.querySelectorAll('button[onclick^="openExecutorFirewall("]').length > 0`, 'the Executors panel');
+  await waitFor(cdp, `document.querySelectorAll('button[data-action="openExecutorFirewall"]').length > 0`, 'the Executors panel');
   // The device's own card: the smallest ancestor of a Firewall button that
   // names the device (by ID or name) and holds no other card's button.
   const sel = await cdp.eval(`(() => {
-    for (const b of document.querySelectorAll('button[onclick^="openExecutorFirewall("]')) {
+    for (const b of document.querySelectorAll('button[data-action="openExecutorFirewall"]')) {
       let c = b.parentElement;
       while (c && !c.textContent.includes(${JSON.stringify(exID)})) c = c.parentElement;
-      if (c && c.querySelectorAll('button[onclick^="openExecutorFirewall("]').length === 1) {
-        return 'button[onclick="' + b.getAttribute('onclick') + '"]';
+      if (c && c.querySelectorAll('button[data-action="openExecutorFirewall"]').length === 1) {
+        return 'button[data-action="' + b.dataset.action + '"][data-arg="' + b.dataset.arg + '"]';
       }
     }
     return null; })()`);
@@ -313,13 +313,13 @@ async function stepStart(cdp, p) {
 // it offers — then dismisses it, so nothing is sent.
 async function stepUpgradeDialog(cdp, exID, accept) {
   await cdp.eval(`window.switchTab('executors')`);
-  await waitFor(cdp, `document.querySelectorAll('button[onclick^="upgradeExecutor("]').length > 0`, 'the Executors panel');
+  await waitFor(cdp, `document.querySelectorAll('button[data-action="upgradeExecutor"]').length > 0`, 'the Executors panel');
   const sel = await cdp.eval(`(() => {
-    for (const b of document.querySelectorAll('button[onclick^="upgradeExecutor("]')) {
+    for (const b of document.querySelectorAll('button[data-action="upgradeExecutor"]')) {
       let c = b.parentElement;
       while (c && !c.textContent.includes(${JSON.stringify(exID)})) c = c.parentElement;
-      if (c && c.querySelectorAll('button[onclick^="upgradeExecutor("]').length === 1) {
-        return 'button[onclick="' + b.getAttribute('onclick') + '"]';
+      if (c && c.querySelectorAll('button[data-action="upgradeExecutor"]').length === 1) {
+        return 'button[data-action="' + b.dataset.action + '"][data-arg="' + b.dataset.arg + '"]';
       }
     }
     return null; })()`);
@@ -383,7 +383,7 @@ async function main() {
         await cdp.eval(`window.switchTab('projects')`);
         await sleep(2500);
         result.cards = await cdp.eval(`[...document.querySelectorAll('.proj-card')].map(c =>
-          [c.parentElement && c.parentElement.id, c.getAttribute('onclick'), c.getClientRects().length])`);
+          [c.parentElement && c.parentElement.id, c.dataset.arg, c.dataset.argName, c.getClientRects().length])`);
         result.projects = await cdp.eval(`(window._lastProjectsData.projects || []).map(p => [p.name, p.path])`);
         break;
       default: throw new Error('unknown step ' + STEP);

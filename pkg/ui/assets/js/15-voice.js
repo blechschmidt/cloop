@@ -5,7 +5,7 @@ let voiceChunks = [];
 let voiceRecording = false;
 let voiceBlob = null;
 
-window.openVoiceModal = function() {
+act('openVoiceModal', function() {
   document.getElementById('voiceStatus').textContent = 'Click Record to start recording...';
   document.getElementById('voiceTranscript').textContent = 'Transcription will appear here';
   document.getElementById('voiceTranscript').style.color = 'var(--muted)';
@@ -16,14 +16,14 @@ window.openVoiceModal = function() {
   // Opened last, so the initial focus lands on a button whose state the lines
   // above have already settled.
   openOverlay('voiceModalBackdrop', {dismiss: closeVoiceModal});
-};
+});
 
-window.closeVoiceModal = function() {
+act('closeVoiceModal', function() {
   if (voiceRecording) stopVoiceRecording();
   closeOverlay('voiceModalBackdrop');
-};
+});
 
-window.toggleVoiceRecording = async function() {
+act('toggleVoiceRecording', async function() {
   if (voiceRecording) { stopVoiceRecording(); return; }
 
   try {
@@ -61,7 +61,7 @@ window.toggleVoiceRecording = async function() {
   } catch (err) {
     document.getElementById('voiceStatus').textContent = 'Microphone error: ' + err.message;
   }
-};
+});
 
 function stopVoiceRecording() {
   if (voiceMediaRecorder && voiceMediaRecorder.state !== 'inactive') voiceMediaRecorder.stop();
@@ -368,11 +368,11 @@ function beginDictation(key) {
   startTaskDictation();
 }
 
-window.toggleTaskDictation = function() { beginDictation('add'); };
+act('toggleTaskDictation', function() { beginDictation('add'); });
 
 // The edit modal's microphone (Task 20302). Same recorder, different landing
 // place — what changes is only what happens to the transcript.
-window.toggleEditDictation = function() { beginDictation('edit'); };
+act('toggleEditDictation', function() { beginDictation('edit'); });
 
 async function startTaskDictation() {
   // dictateActive is only set after getUserMedia resolves, so a double click
@@ -737,10 +737,10 @@ window.openDictateApply = function(text) {
   openOverlay('dr-overlay', {dismiss: closeDictateApply});
 };
 
-window.closeDictateApply = function() {
+act('closeDictateApply', function() {
   dictateApplySeq++;
   closeOverlay('dr-overlay');
-};
+});
 
 // applyDictatedDetails writes the chosen text into the editor and leaves the
 // cursor at the end of it, so the next thing the user does is read what landed.
@@ -753,20 +753,20 @@ function applyDictatedDetails(text, msg) {
   toast(msg, 'ok');
 }
 
-window.dictateApplyReplace = function() {
+act('dictateApplyReplace', function() {
   const text = dictateHeardText;
   closeDictateApply();
   applyDictatedDetails(text, 'Details replaced — review, then Save Changes');
-};
+});
 
-window.dictateApplyAppend = function() {
+act('dictateApplyAppend', function() {
   const desc = document.getElementById('modalDesc');
   const text = dictateHeardText;
   closeDictateApply();
   const existing = desc ? desc.value.replace(/\s+$/, '') : '';
   applyDictatedDetails(existing ? existing + '\n\n' + text : text,
                        'Added to the details — review, then Save Changes');
-};
+});
 
 // setDictateApplyBusy disables the three answers while the model is working.
 // Without it a second click posts a second revision, and whichever reply lands
@@ -780,7 +780,7 @@ function setDictateApplyBusy(on) {
   });
 }
 
-window.dictateApplyRevise = function() {
+act('dictateApplyRevise', function() {
   const idEl = document.getElementById('modalTaskId');
   const desc = document.getElementById('modalDesc');
   const id = idEl ? parseInt(idEl.value, 10) : NaN;
@@ -816,7 +816,7 @@ window.dictateApplyRevise = function() {
     if (seq !== dictateApplySeq) return;
     toast('Request failed', 'err');
   });
-};
+});
 
 // cancelEditDictation releases the microphone when the edit modal closes
 // underneath it. Without it, dismissing the modal mid-sentence leaves the
@@ -838,7 +838,7 @@ function cancelEditDictation() {
   dictateTarget = 'add';
 }
 
-window.sendVoiceAudio = async function() {
+act('sendVoiceAudio', async function() {
   if (!voiceBlob) { toast('No recording yet', 'info'); return; }
 
   document.getElementById('voiceStatus').textContent = 'Uploading and transcribing...';
@@ -882,5 +882,5 @@ window.sendVoiceAudio = async function() {
     document.getElementById('voiceSendBtn').disabled = false;
     toast('Voice request failed', 'err');
   }
-};
+});
 

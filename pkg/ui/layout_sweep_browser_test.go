@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -49,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
 )
 
@@ -154,48 +157,125 @@ const (
 
 func layoutLong(parts ...string) string { return strings.Join(parts, " ") }
 
+// sweepStrings is the content a sweep hub is seeded with: the layout sweep's
+// long unbroken names here, or the hostile ones xss_browser_test.go drives the
+// same tabs and dialogs with (Task 20408). Project names are directory names;
+// Secret and Image are validated by the hub, so they hold what it accepts.
+type sweepStrings struct {
+	Project, HiddenProject, OtherProject string
+	// ProjectParent is a path the selected project's directory sits under,
+	// ending in "/", or empty.
+	ProjectParent                                                 string
+	TaskTitle, RiskTaskTitle, FailedTaskTitle, RunningTaskTitle   string
+	Tag, URL, RepoPath                                            string
+	Device, DeviceLabel, Virtual, Image, Email, Secret, TokenName string
+	ResultMarker, PromptMarker, ReplayOutput                      string
+	// FeatureTitle names the features; empty leaves their default titles.
+	FeatureTitle string
+	// Output is a task's captured output; empty writes none.
+	Output string
+	// Suggestion fills a finished AI brainstorm; empty seeds none.
+	Suggestion string
+	// UserAgent is the browser the seeded telemetry claims to come from;
+	// empty sends Go's own.
+	UserAgent string
+}
+
+var layoutSweepStrings = sweepStrings{
+	Project: layoutProject, HiddenProject: layoutHiddenProject,
+	OtherProject:     "billing_service_postgres_major_version_upgrade_dry_run",
+	TaskTitle:        layoutTaskTitle,
+	RiskTaskTitle:    layoutRiskTaskTitle,
+	FailedTaskTitle:  "Backfill_the_audit_trail_for_grants_minted_before_the_checkpoint_rollout",
+	RunningTaskTitle: "Write the operator runbook for draining a rack of edge GPU runners",
+	Tag:              "observability_ingest_pipeline_backpressure",
+	URL:              layoutURL, RepoPath: layoutRepoPath,
+	Device: layoutDevice, Virtual: layoutVirtual, Image: layoutImage, Email: layoutEmail, Secret: layoutSecret,
+	ResultMarker: layoutResultMarker, PromptMarker: layoutPromptMarker, ReplayOutput: layoutReplayOutput,
+	TokenName: "ci_pipeline_for_" + layoutProject,
+}
+
+// seedHubAs is seedHub sent with the User-Agent ua, when one is given.
+func seedHubAs(t *testing.T, ts *httptest.Server, ua, method, path, body string) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		t.Fatalf("%s %s = %d", method, path, resp.StatusCode)
+	}
+}
+
+// jsonBody marshals v for seedHub.
+func jsonBody(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // seedLayoutHub builds the hub the sweep lays out: a fleet of projects, one
 // selected with long everything, an enrolled device with a virtual executor,
 // secrets, grants and a pending request, telemetry, quotas, a KB, a chat, the
 // activity log, provider calls and a replay.
 func seedLayoutHub(t *testing.T) (*httptest.Server, layoutFixture) {
 	t.Helper()
+	ts, _, fx := seedSweepHub(t, layoutSweepStrings)
+	return ts, fx
+}
+
+// seedSweepHub builds that hub from s, returning the Server as well for a
+// caller that seeds what only lives in process.
+func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layoutFixture) {
+	t.Helper()
 	t.Setenv(multiui.EnvRoot, t.TempDir())
 	t.Setenv(secretbroker.EnvPassphraseKey, "layout-sweep-browser-passphrase")
 
-	goal := layoutLong("Make the", layoutProject, "the hub every team ships through:", layoutURL,
-		"and", layoutRepoPath, "both stay green while the executor fleet doubles.")
-	instructions := layoutLong("Always run the reconcile suite at", layoutRepoPath,
-		"before committing; the flaky test lives at", layoutURL, "and must not be skipped.")
+	goal := layoutLong("Make the", s.Project, "the hub every team ships through:", s.URL,
+		"and", s.RepoPath, "both stay green while the executor fleet doubles.")
+	instructions := layoutLong("Always run the reconcile suite at", s.RepoPath,
+		"before committing; the flaky test lives at", s.URL, "and must not be skipped.")
 	now := time.Now()
 	started := now.Add(-90 * time.Minute)
 	done := now.Add(-30 * time.Minute)
 	deadline := now.Add(48 * time.Hour)
 	tasks := []*pm.Task{
-		{ID: 1, Title: layoutTaskTitle, Priority: 1, Status: pm.TaskDone,
-			Description: layoutLong("Dispatch stalls when", layoutDevice, "stops answering. See", layoutURL,
-				"and the worktree at", layoutRepoPath),
-			Result: layoutLong("Committed a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 to", layoutRepoPath,
-				"— the regression test is", layoutResultMarker, "at", layoutURL),
-			Tags:      []string{"observability_ingest_pipeline_backpressure", "executor_registry"},
+		{ID: 1, Title: s.TaskTitle, Priority: 1, Status: pm.TaskDone,
+			Description: layoutLong("Dispatch stalls when", s.Device, "stops answering. See", s.URL,
+				"and the worktree at", s.RepoPath),
+			Result: layoutLong("Committed a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 to", s.RepoPath,
+				"— the regression test is", s.ResultMarker, "at", s.URL),
+			Tags:      []string{s.Tag, "executor_registry"},
 			StartedAt: &started, CompletedAt: &done, EstimatedMinutes: 45, ActualMinutes: 60,
-			RiskScore: 8, ImpactScore: 9, Assignee: layoutEmail, ExternalURL: layoutURL,
-			Links: []pm.Link{{URL: layoutURL, Label: layoutTaskTitle, Kind: pm.DetectLinkKind(layoutURL)}},
-			Annotations: []pm.Annotation{{Timestamp: done, Author: layoutEmail,
-				Text: layoutLong("Verified on", layoutDevice, "against", layoutURL)}}},
-		{ID: 2, Title: layoutRiskTaskTitle, Priority: 2,
+			RiskScore: 8, ImpactScore: 9, Assignee: s.Email, ExternalURL: s.URL,
+			Links: []pm.Link{{URL: s.URL, Label: s.TaskTitle, Kind: pm.DetectLinkKind(s.URL)}},
+			Annotations: []pm.Annotation{{Timestamp: done, Author: s.Email,
+				Text: layoutLong("Verified on", s.Device, "against", s.URL)}}},
+		{ID: 2, Title: s.RiskTaskTitle, Priority: 2,
 			Status: pm.TaskPending, DependsOn: []int{1}, Deadline: &deadline, EstimatedMinutes: 30,
 			RiskScore: 4, ImpactScore: 6,
-			Description: layoutLong("Use", layoutImage, "everywhere", layoutRepoPath, "references a tag.")},
-		{ID: 3, Title: "Backfill_the_audit_trail_for_grants_minted_before_the_checkpoint_rollout", Priority: 3,
+			Description: layoutLong("Use", s.Image, "everywhere", s.RepoPath, "references a tag.")},
+		{ID: 3, Title: s.FailedTaskTitle, Priority: 3,
 			Status: pm.TaskFailed, DependsOn: []int{1, 2}, StartedAt: &started,
-			Description:      layoutLong("Replays", layoutURL),
-			Result:           layoutLong("error: open", layoutRepoPath+"/.cloop/state.db: no such file or directory"),
-			FailureDiagnosis: layoutLong("The worktree", layoutRepoPath, "was pruned before the backfill ran.")},
-		{ID: 4, Title: "Write the operator runbook for draining a rack of edge GPU runners", Priority: 2,
-			Status: pm.TaskInProgress, StartedAt: &started, Description: layoutLong("Covers", layoutDevice)},
+			Description:      layoutLong("Replays", s.URL),
+			Result:           layoutLong("error: open", s.RepoPath+"/.cloop/state.db: no such file or directory"),
+			FailureDiagnosis: layoutLong("The worktree", s.RepoPath, "was pruned before the backfill ran.")},
+		{ID: 4, Title: s.RunningTaskTitle, Priority: 2,
+			Status: pm.TaskInProgress, StartedAt: &started, Description: layoutLong("Covers", s.Device)},
 	}
-	primary := namedProjectDir(t, layoutProject, goal)
+	primary := namedProjectDir(t, s.ProjectParent+s.Project, goal)
 	// A git checkout, which is what features need: the Overview offers them
 	// only to a project at the top of a repository.
 	if err := os.MkdirAll(filepath.Join(primary, ".git"), 0o755); err != nil {
@@ -208,35 +288,49 @@ func seedLayoutHub(t *testing.T) (*httptest.Server, layoutFixture) {
 	ps.Instructions = instructions
 	ps.PMMode = true
 	ps.Plan = &pm.Plan{Goal: goal, Tasks: tasks}
+	if s.Output != "" {
+		// What the task printed, which its details dialog shows.
+		rel := filepath.Join(".cloop", "tasks", "1-output.md")
+		if err := os.MkdirAll(filepath.Join(primary, ".cloop", "tasks"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(primary, rel), []byte(s.Output), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tasks[0].ArtifactPath = rel
+	}
 	if err := ps.Save(); err != nil {
 		t.Fatal(err)
 	}
 
 	others := []string{
 		setupProjectDir(t, "a short goal", nil),
-		namedProjectDir(t, "billing_service_postgres_major_version_upgrade_dry_run",
-			layoutLong("Upgrade without downtime:", layoutURL)),
+		namedProjectDir(t, s.OtherProject, layoutLong("Upgrade without downtime:", s.URL)),
 	}
-	hidden := namedProjectDir(t, layoutHiddenProject, "a project this viewer no longer wants to see")
+	hidden := namedProjectDir(t, s.HiddenProject, "a project this viewer no longer wants to see")
 	others = append(others, hidden)
 
 	// Features, for the Overview's panel and its dialogs.
-	addFeature(t, primary, "reconcile-loop-backpressure-edge-runners", now.Add(-2*time.Hour), nil)
-	addFeature(t, primary, "harness-image-digest-pinning", now.Add(-time.Hour), nil)
+	var title func(*feature.Meta, *state.ProjectState)
+	if s.FeatureTitle != "" {
+		title = func(m *feature.Meta, _ *state.ProjectState) { m.Title = s.FeatureTitle }
+	}
+	addFeature(t, primary, "reconcile-loop-backpressure-edge-runners", now.Add(-2*time.Hour), title)
+	addFeature(t, primary, "harness-image-digest-pinning", now.Add(-time.Hour), title)
 
 	// The device, bound to the project so the Overview draws its executor and
 	// Claude credential cards.
-	device := seedLayoutDevice(t, primary)
+	device := seedLayoutDevice(t, primary, s)
 	if err := executor.Bind(primary, device); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { executor.DefaultRegistry.Unbind(primary) })
 
-	if _, err := kb.Add(primary, layoutTaskTitle, layoutLong("Runbook:", layoutURL, "and", layoutRepoPath),
-		[]string{"observability_ingest_pipeline_backpressure"}); err != nil {
+	if _, err := kb.Add(primary, s.TaskTitle, layoutLong("Runbook:", s.URL, "and", s.RepoPath),
+		[]string{s.Tag}); err != nil {
 		t.Fatal(err)
 	}
-	seedLayoutActivity(t, primary)
+	seedLayoutActivity(t, primary, s)
 
 	srv := New(primary, 0, "")
 	srv.Projects = others
@@ -245,52 +339,63 @@ func seedLayoutHub(t *testing.T) (*httptest.Server, layoutFixture) {
 	// happens-before edge the race detector needs.
 	srv.RPS, srv.Burst = 100000, 100000
 	srv.chatHistories = map[string][]ChatMessage{primary: {
-		{Role: "user", Content: layoutLong("why did", layoutTaskTitle, "fail on", layoutDevice+"?"), Timestamp: done},
-		{Role: "assistant", Content: layoutLong("It could not open", layoutRepoPath, "— see", layoutURL),
-			Timestamp: done, Action: "cloop task show 3 --worktree " + layoutRepoPath},
+		{Role: "user", Content: layoutLong("why did", s.TaskTitle, "fail on", s.Device+"?"), Timestamp: done},
+		{Role: "assistant", Content: layoutLong("It could not open", s.RepoPath, "— see", s.URL),
+			Timestamp: done, Action: "cloop task show 3 --worktree " + s.RepoPath},
 	}}
+	if s.Suggestion != "" {
+		// A finished brainstorm, as the Tasks tab's AI suggestions show it.
+		r := &suggest.Result{Summary: s.Suggestion, Suggestions: []*suggest.Suggestion{
+			{ID: 1, Title: s.Suggestion, Description: s.Suggestion, Rationale: s.Suggestion,
+				Category: suggest.Category(s.Suggestion), Effort: suggest.Effort(s.Suggestion)},
+			{ID: 2, Title: s.TaskTitle, Description: s.URL, Rationale: s.RepoPath},
+		}}
+		srv.suggestJobs = map[string]*suggestJob{primary: {gen: 1, done: true, result: r, ledger: suggest.NewLedger(r)}}
+	}
 	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 10}})
 	withControlPlaneDir(t, primary)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
 	hideProjectAt(t, ts, hidden)
-	seedHub(t, ts, http.MethodPut, "/api/executors/"+device+"/sandbox",
-		`{"mode":"container","engine":"docker","runtime":"runsc","image":"`+layoutImage+`","network":"bridge"}`)
-	seedHub(t, ts, http.MethodPost, "/api/executors/"+device+"/virtuals",
-		`{"name":"`+layoutVirtual+`","spec":{"sandbox":{"mode":"container","engine":"docker"},`+
-			`"firewall":{"allow_public_internet":true,"allow_cidrs":["10.20.0.0/16","172.16.200.0/24"],"resolvers":["1.1.1.1"]}}}`)
-	seedHub(t, ts, http.MethodPost, "/api/secrets",
-		`{"name":"`+layoutSecret+`","kind":"env","payload":"{\"OBSERVABILITY_INGEST_PIPELINE_DEPLOY_KEY\":\"x\"}","personal":false}`)
-	seedHub(t, ts, http.MethodPost, "/api/grants",
-		`{"kind":"env","secret_ref":"`+layoutSecret+`","subject":"project:`+layoutProject+`","ttl_minutes":1440,`+
-			`"env_keys":["OBSERVABILITY_INGEST_PIPELINE_DEPLOY_KEY"]}`)
-	seedHub(t, ts, http.MethodPut, "/api/quotas/"+layoutEmail, `{"limits":{"max_projects":3}}`)
+	seedHub(t, ts, http.MethodPut, "/api/executors/"+device+"/sandbox", jsonBody(t, map[string]any{
+		"mode": "container", "engine": "docker", "runtime": "runsc", "image": s.Image, "network": "bridge"}))
+	seedHub(t, ts, http.MethodPost, "/api/executors/"+device+"/virtuals", jsonBody(t, map[string]any{
+		"name": s.Virtual, "spec": map[string]any{
+			"sandbox": map[string]any{"mode": "container", "engine": "docker"},
+			"firewall": map[string]any{"allow_public_internet": true,
+				"allow_cidrs": []string{"10.20.0.0/16", "172.16.200.0/24"}, "resolvers": []string{"1.1.1.1"}}}}))
+	seedHub(t, ts, http.MethodPost, "/api/secrets", jsonBody(t, map[string]any{
+		"name": s.Secret, "kind": "env", "payload": `{"OBSERVABILITY_INGEST_PIPELINE_DEPLOY_KEY":"x"}`, "personal": false}))
+	seedHub(t, ts, http.MethodPost, "/api/grants", jsonBody(t, map[string]any{
+		"kind": "env", "secret_ref": s.Secret, "subject": "project:" + s.Project, "ttl_minutes": 1440,
+		"env_keys": []string{"OBSERVABILITY_INGEST_PIPELINE_DEPLOY_KEY"}}))
+	seedHub(t, ts, http.MethodPut, "/api/quotas/"+url.PathEscape(s.Email), `{"limits":{"max_projects":3}}`)
 	seedHub(t, ts, http.MethodPut, "/api/config/telemetry", `{"enabled":true}`)
-	seedHub(t, ts, http.MethodPost, "/api/telemetry",
-		`{"source":"dashboard","session":"ls0000000000000000","events":[{"kind":"error","seq":1,"message":"`+
-			layoutURL+`","view":"`+layoutTaskTitle+`"}]}`)
-	fileLayoutRequest(t, primary)
+	seedHubAs(t, ts, s.UserAgent, http.MethodPost, "/api/telemetry", jsonBody(t, map[string]any{
+		"source": "dashboard", "session": "ls0000000000000000",
+		"events": []map[string]any{{"kind": "error", "seq": 1, "message": s.URL, "view": s.TaskTitle}}}))
+	fileLayoutRequest(t, primary, s)
 
-	return ts, layoutFixture{
-		Project: layoutProject, HiddenProject: layoutHiddenProject, Goal: goal, Instructions: instructions,
-		TaskID: 1, PendingTaskID: 2, TaskTitle: layoutTaskTitle, ResultMarker: layoutResultMarker,
-		RiskTaskTitle: layoutRiskTaskTitle, Model: "claude-opus-5-5", Secret: layoutSecret, Email: layoutEmail,
-		DeviceName: layoutDevice, VirtualName: layoutVirtual, Image: layoutImage,
-		TokenName: "ci_pipeline_for_" + layoutProject, Token: "cloop_pat_" + strings.Repeat("a1b2c3d4", 8),
-		Transcript: layoutLong("also cover the case where", layoutDevice, "drops off mid-dispatch, see",
-			layoutURL), TranscriptMarker: layoutDevice,
-		PromptMarker: layoutPromptMarker, ReplayOutput: layoutReplayOutput,
+	return ts, srv, layoutFixture{
+		Project: s.Project, HiddenProject: s.HiddenProject, Goal: goal, Instructions: instructions,
+		TaskID: 1, PendingTaskID: 2, TaskTitle: s.TaskTitle, ResultMarker: s.ResultMarker,
+		RiskTaskTitle: s.RiskTaskTitle, Model: "claude-opus-5-5", Secret: s.Secret, Email: s.Email,
+		DeviceName: s.Device, VirtualName: s.Virtual, Image: s.Image,
+		TokenName: s.TokenName, Token: "cloop_pat_" + strings.Repeat("a1b2c3d4", 8),
+		Transcript: layoutLong("also cover the case where", s.Device, "drops off mid-dispatch, see",
+			s.URL), TranscriptMarker: s.Device,
+		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput,
 		Assistant: []map[string]string{
-			{"role": "user", "content": layoutLong("what blocks", layoutTaskTitle+"?")},
-			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", layoutURL)},
+			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
+			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
 		},
 	}
 }
 
 // seedLayoutDevice registers an enrolled remote device with a long name and a
 // stored inventory, the way seedDevice does for the virtual-executor tests.
-func seedLayoutDevice(t *testing.T, dir string) string {
+func seedLayoutDevice(t *testing.T, dir string, s sweepStrings) string {
 	t.Helper()
 	const id = "layout-sweep-device"
 	caps := remote.AgentCapabilities{
@@ -298,11 +403,11 @@ func seedLayoutDevice(t *testing.T, dir string) string {
 		PacketFilter: true,
 		USBDevices: []executor.USBDevice{{
 			Port: "1-1.4.3", Bus: 1, Dev: 7, VendorID: "1050", ProductID: "0030",
-			Manufacturer: "Yubico", Product: "YubiHSM 2 hardware security module for " + layoutDevice,
+			Manufacturer: "Yubico", Product: "YubiHSM 2 hardware security module for " + s.Device,
 			Serial: "0031650425", Node: "/dev/bus/usb/001/007",
 		}},
 	}
-	dev, err := remote.NewExecutor(remote.Options{ID: id, Name: layoutDevice, Capabilities: caps})
+	dev, err := remote.NewExecutor(remote.Options{ID: id, Name: s.Device, Capabilities: caps})
 	if err != nil {
 		t.Fatalf("NewExecutor: %v", err)
 	}
@@ -327,9 +432,11 @@ func seedLayoutDevice(t *testing.T, dir string) string {
 	}
 	defer db.Close()
 	raw, _ := json.Marshal(caps)
-	if err := db.UpsertExecutor(statedb.ExecutorRow{
-		ID: id, Name: layoutDevice, Kind: executor.KindRemoteAgent, Capabilities: raw,
-	}); err != nil {
+	row := statedb.ExecutorRow{ID: id, Name: s.Device, Kind: executor.KindRemoteAgent, Capabilities: raw}
+	if s.DeviceLabel != "" {
+		row.Labels = map[string]string{"rack": s.DeviceLabel}
+	}
+	if err := db.UpsertExecutor(row); err != nil {
 		t.Fatalf("UpsertExecutor: %v", err)
 	}
 	return id
@@ -337,7 +444,7 @@ func seedLayoutDevice(t *testing.T, dir string) string {
 
 // seedLayoutActivity fills the project's activity log, provider-call log and
 // replay history, each with the fixture's long content.
-func seedLayoutActivity(t *testing.T, dir string) {
+func seedLayoutActivity(t *testing.T, dir string, s sweepStrings) {
 	t.Helper()
 	q, err := taskqueue.Open(dir)
 	if err != nil {
@@ -345,10 +452,10 @@ func seedLayoutActivity(t *testing.T, dir string) {
 	}
 	defer q.Close()
 	for _, e := range []taskqueue.Entry{
-		{Kind: taskqueue.KindTask, TaskID: 1, Title: layoutTaskTitle, Status: taskqueue.StatusDone,
-			Description: layoutLong("Dispatch on", layoutDevice), OutputSummary: layoutLong("Committed to", layoutRepoPath)},
+		{Kind: taskqueue.KindTask, TaskID: 1, Title: s.TaskTitle, Status: taskqueue.StatusDone,
+			Description: layoutLong("Dispatch on", s.Device), OutputSummary: layoutLong("Committed to", s.RepoPath)},
 		{Kind: taskqueue.KindTask, TaskID: 3, Title: "Backfill_the_audit_trail_for_grants_minted_before_the_checkpoint_rollout",
-			Status: taskqueue.StatusFailed, ErrorMessage: layoutLong("open", layoutRepoPath+"/.cloop/state.db: no such file")},
+			Status: taskqueue.StatusFailed, ErrorMessage: layoutLong("open", s.RepoPath+"/.cloop/state.db: no such file")},
 	} {
 		if _, err := q.Enqueue(e); err != nil {
 			t.Fatalf("Enqueue: %v", err)
@@ -356,11 +463,11 @@ func seedLayoutActivity(t *testing.T, dir string) {
 	}
 
 	if _, err := state.AppendProviderCall(dir, statedb.ProviderCallRow{
-		Provider: "anthropic", Model: "claude-opus-5-5", TaskID: 1, TaskTitle: layoutTaskTitle,
+		Provider: "anthropic", Model: "claude-opus-5-5", TaskID: 1, TaskTitle: s.TaskTitle,
 		RequestID: "req_" + strings.Repeat("0a1b2c3d", 6),
-		Prompt:    layoutLong(layoutPromptMarker, "Fix", layoutURL, "in", layoutRepoPath),
-		Response:  layoutLong("Done:", layoutRepoPath), Status: "ok",
-		Headers:     `{"anthropic-ratelimit-requests-reset":"2026-10-11T12:00:00Z","x-request-path":"` + layoutURL + `"}`,
+		Prompt:    layoutLong(s.PromptMarker, "Fix", s.URL, "in", s.RepoPath),
+		Response:  layoutLong("Done:", s.RepoPath), Status: "ok",
+		Headers:     `{"anthropic-ratelimit-requests-reset":"2026-10-11T12:00:00Z","x-request-path":"` + s.URL + `"}`,
 		InputTokens: 1200, OutputTokens: 800, LatencyMs: 2345,
 	}); err != nil {
 		t.Fatalf("AppendProviderCall: %v", err)
@@ -376,17 +483,17 @@ func seedLayoutActivity(t *testing.T, dir string) {
 			prompt, original_output, replayed_output, similarity_score, equivalence_score, equivalence_rationale,
 			duration_ms, input_tokens, output_tokens, error
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), 1, layoutTaskTitle, "anthropic", "claude-opus-5-5",
-		"openai", "gpt-5-codex-max-long-context-preview", layoutLong("Fix", layoutURL),
-		layoutLong("ORIGINAL", layoutRepoPath), layoutLong(layoutReplayOutput, layoutRepoPath),
-		0.42, 3, layoutLong("Both edit", layoutRepoPath), 4321, 1200, 900, ""); err != nil {
+		time.Now().UTC().Format(time.RFC3339Nano), 1, s.TaskTitle, "anthropic", "claude-opus-5-5",
+		"openai", "gpt-5-codex-max-long-context-preview", layoutLong("Fix", s.URL),
+		layoutLong("ORIGINAL", s.RepoPath), layoutLong(s.ReplayOutput, s.RepoPath),
+		0.42, 3, layoutLong("Both edit", s.RepoPath), 4321, 1200, 900, ""); err != nil {
 		t.Fatalf("insert replay_runs: %v", err)
 	}
 }
 
 // fileLayoutRequest files an access request for the fixture secret as somebody
 // else, so the Secrets tab has one for this hub's admin to decide.
-func fileLayoutRequest(t *testing.T, dir string) {
+func fileLayoutRequest(t *testing.T, dir string, s sweepStrings) {
 	t.Helper()
 	bs, err := openBrokersAt(dir)
 	if err != nil {
@@ -401,11 +508,11 @@ func fileLayoutRequest(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	if _, err := bs.secret.RequestAccess(context.Background(), secretbroker.AccessRequestInput{
-		SecretRef: layoutSecret, Subject: subject,
+		SecretRef: s.Secret, Subject: subject,
 		Constraints:   secretbroker.Constraints{EnvKeys: []string{"OBSERVABILITY_INGEST_PIPELINE_DEPLOY_KEY"}},
 		TTL:           time.Hour,
-		Justification: layoutLong("Needed to deploy", layoutProject, "from", layoutRepoPath),
-		Actor:         layoutEmail,
+		Justification: layoutLong("Needed to deploy", s.Project, "from", s.RepoPath),
+		Actor:         s.Email,
 	}); err != nil {
 		t.Fatalf("RequestAccess: %v", err)
 	}

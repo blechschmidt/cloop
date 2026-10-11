@@ -11,7 +11,9 @@ package oidcauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -83,25 +85,35 @@ func completeRenewal(t *testing.T, a *Authenticator, idp *fakeIdP, sid string) *
 	return renewCallback(a, url.Values{"state": {q.Get("state")}, "code": {"authcode-renew"}})
 }
 
-// renewMessage reads the posted message out of the document the frame
-// received. The body rather than the Go return value, on purpose: the body is
-// what the browser acts on.
-var renewFieldRe = regexp.MustCompile(`(type|outcome|detail|renew_in|changed): ("(?:[^"\\]|\\.)*"|-?\d+|true|false)`)
+// renewMessage reads the message out of the document the frame received —
+// the data-renew attribute the sign-in script posts (Task 20408) — decoded the
+// way a browser decodes it: the attribute value, then JSON. The body rather
+// than the Go return value, on purpose: the body is what the browser acts on.
+var renewAttrRe = regexp.MustCompile(`<html lang="en" data-renew="([^"]*)">`)
 
 func renewMessage(t *testing.T, rec *httptest.ResponseRecorder) map[string]string {
 	t.Helper()
 	body := rec.Body.String()
-	i := strings.Index(body, "parent.postMessage(")
-	if i < 0 {
-		t.Fatalf("the renewal document posts nothing to its parent:\n%s", body)
+	m := renewAttrRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("the renewal document carries no message for its parent:\n%s", body)
+	}
+	if !strings.Contains(body, `<script src="`+ScriptPath+`"></script>`) {
+		t.Fatalf("the renewal document does not load the script that posts its message:\n%s", body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &raw); err != nil {
+		t.Fatalf("the message is not JSON once the attribute is decoded: %v\n%s", err, body)
 	}
 	out := map[string]string{}
-	for _, m := range renewFieldRe.FindAllStringSubmatch(body[i:], -1) {
-		v := m[2]
-		if s, err := strconv.Unquote(v); err == nil {
-			v = s
+	for k, v := range raw {
+		switch v := v.(type) {
+		case string:
+			out[k] = v
+		default:
+			b, _ := json.Marshal(v)
+			out[k] = string(b)
 		}
-		out[m[1]] = v
 	}
 	if out["type"] != renewMessageType {
 		t.Fatalf("message type = %q, want %q:\n%s", out["type"], renewMessageType, body)
@@ -802,12 +814,19 @@ func TestRenewDocumentPostsOnlyToItsOwnOrigin(t *testing.T) {
 
 	body := rec.Body.String()
 	// "/" is the sending document's own origin. "*" would publish the fact
-	// that a named user is signed in here to any page holding the frame.
-	if !strings.Contains(body, `, "/"); }`) {
-		t.Errorf("the renewal document does not address its own origin:\n%s", body)
+	// that a named user is signed in here to any page holding the frame. The
+	// document posts through the sign-in script (Task 20408), so the target is
+	// that script's, and the document must load it.
+	if !strings.Contains(body, `<script src="`+ScriptPath+`"></script>`) {
+		t.Errorf("the renewal document does not load the script that posts its message:\n%s", body)
 	}
-	if strings.Contains(body, `"*"`) || strings.Contains(body, `'*'`) {
-		t.Errorf("the renewal document posts to a wildcard origin:\n%s", body)
+	if !strings.Contains(signInScript, `parent.postMessage(JSON.parse(msg), '/')`) {
+		t.Errorf("the sign-in script does not address its own origin:\n%s", signInScript)
+	}
+	for _, src := range []string{body, signInScript} {
+		if strings.Contains(src, `"*"`) || strings.Contains(src, `'*'`) {
+			t.Errorf("the renewal posts to a wildcard origin:\n%s", src)
+		}
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
@@ -847,14 +866,19 @@ func TestRenewDocumentEscapesProviderText(t *testing.T) {
 		"error_description": {`</script><script>alert(1)</script>"); evil("`},
 	})
 	body := rec.Body.String()
-	if strings.Count(body, "</script>") != 1 {
-		t.Fatalf("provider text closed the script element:\n%s", body)
+	if strings.Count(body, "<script") != 1 || strings.Count(body, "</script>") != 1 {
+		t.Fatalf("provider text added a script element:\n%s", body)
 	}
-	if strings.Contains(body, `"); evil("`) {
-		t.Fatalf("provider text escaped its string literal:\n%s", body)
+	if strings.Contains(body, `"); evil("`) || strings.Contains(body, "<script>alert") {
+		t.Fatalf("provider text left its attribute:\n%s", body)
 	}
-	if got := renewMessage(t, rec)["outcome"]; got != string(RenewIdPError) {
+	msg := renewMessage(t, rec)
+	if got := msg["outcome"]; got != string(RenewIdPError) {
 		t.Fatalf("outcome = %q, want idp_error", got)
+	}
+	// And it arrives intact: escaped for the markup, data again for the script.
+	if want := `server_error </script><script>alert(1)</script>"); evil("`; msg["detail"] != want {
+		t.Fatalf("detail = %q, want the provider's text as sent, %q", msg["detail"], want)
 	}
 }
 
@@ -960,15 +984,20 @@ func TestLoginLandingEscapesDestination(t *testing.T) {
 	if strings.Contains(page, "<img") {
 		t.Errorf("the destination injected markup:\n%s", page)
 	}
-	line := page[strings.Index(page, "location.replace("):]
-	line = line[:strings.Index(line, "\n")]
-	if strings.Contains(line, `"+alert(1)+"`) {
-		t.Errorf("an unescaped quote closed the script's string literal: %s", line)
+	// No script carries the destination: the one script element is the
+	// sign-in script by URL, which reads the link (Task 20408).
+	if !strings.Contains(page, `<script src="`+ScriptPath+`"></script>`) || strings.Contains(page, "location.replace") {
+		t.Errorf("the landing page should load the sign-in script and inline none:\n%s", page)
 	}
 	for _, frag := range []string{`url=/x?a="`, `href="/x?a="`} {
 		if strings.Contains(page, frag) {
 			t.Errorf("the destination broke out of an HTML attribute (%q):\n%s", frag, page)
 		}
+	}
+	// The script moves to what the link says, decoded as a browser decodes it.
+	m := regexp.MustCompile(`<a id="continue" href="([^"]*)">`).FindStringSubmatch(page)
+	if m == nil || html.UnescapeString(m[1]) != dest {
+		t.Errorf("the Continue link does not name the destination %q:\n%s", dest, page)
 	}
 }
 
@@ -991,7 +1020,7 @@ func TestSecureLoginLandsOnTheReturnPath(t *testing.T) {
 	if done.Code != http.StatusOK {
 		t.Fatalf("status = %d, want the 200 landing page", done.Code)
 	}
-	if !strings.Contains(done.Body.String(), `location.replace("/?project_idx=4")`) {
+	if !strings.Contains(done.Body.String(), `<a id="continue" href="/?project_idx=4">`) {
 		t.Fatalf("the landing page does not continue to the return path:\n%s", done.Body.String())
 	}
 }

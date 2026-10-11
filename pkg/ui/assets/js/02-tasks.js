@@ -61,7 +61,7 @@ function rebuildTagOptions(tasks) {
     return;
   }
   panel.innerHTML = tags.map(tag =>
-    '<label class="filter-tag-item"><input type="checkbox" class="filter-tag-cb" value="'+esc(tag)+'" onchange="onFilterChange()"'+
+    '<label class="filter-tag-item"><input type="checkbox" class="filter-tag-cb" value="'+esc(tag)+'" data-action-change="onFilterChange"'+
     ((filterState.tags||[]).includes(tag) ? ' checked' : '')+'> '+esc(tag)+'</label>'
   ).join('');
 }
@@ -76,7 +76,7 @@ function rebuildAssigneeOptions(tasks) {
     people.map(a => '<option value="'+esc(a)+'"'+(a===cur?' selected':'')+'>'+esc(a)+'</option>').join('');
 }
 
-window.onFilterChange = function() {
+act('onFilterChange', function() {
   const qEl = document.getElementById('filterQ');
   filterState.q = qEl ? qEl.value : '';
   filterState.status = Array.from(document.querySelectorAll('.filter-status-cb:checked')).map(cb => cb.value);
@@ -96,9 +96,9 @@ window.onFilterChange = function() {
     if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
   }
   if (activeTab === 'timeline') loadTimeline();
-};
+});
 
-window.clearFilters = function() {
+act('clearFilters', function() {
   filterState = { q: '', status: [], tags: [], assignee: '', priority: '' };
   _saveFilterState();
   _restoreFilterInputs();
@@ -112,14 +112,14 @@ window.clearFilters = function() {
     if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
   }
   if (activeTab === 'timeline') loadTimeline();
-};
+});
 
 function _updateFilterClearBtn() {
   const btn = document.getElementById('filterClearBtn');
   if (btn) btn.style.display = _filterActive() ? '' : 'none';
 }
 
-window.toggleTagDropdown = function(e) {
+act('toggleTagDropdown', function(e) {
   if (e) e.stopPropagation();
   const panel = document.getElementById('filterTagsPanel');
   const btn   = document.getElementById('filterTagToggle');
@@ -129,7 +129,7 @@ window.toggleTagDropdown = function(e) {
     btn.classList.toggle('active', open);
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
-};
+}, EV);
 
 // Close tag dropdown when clicking outside.
 document.addEventListener('click', function(e) {
@@ -158,12 +158,12 @@ function isReorderable(t) {
   return (t.status || 'pending') === 'pending';
 }
 
-window.toggleCompletedTasks = function() {
+act('toggleCompletedTasks', function() {
   showCompletedTasks = !showCompletedTasks;
   const btn = document.getElementById('toggleCompletedBtn');
   if (btn) btn.textContent = showCompletedTasks ? 'Hide completed' : 'Show completed';
   if (appState) renderTasks(appState);
-};
+});
 
 function renderTasks(s) {
   const container = document.getElementById('taskListFull');
@@ -250,12 +250,12 @@ function renderTasks(s) {
     // target, and a handle on it would promise a reorder that cannot happen.
     const canOrder = isReorderable(t);
     const dragAttrs = canOrder
-      ? ' draggable="true" ondragstart="onDragStart(event,'+tid+')"'+
-        ' ondragover="onDragOver(event,'+tid+')" ondragleave="onDragLeave(event)"'+
-        ' ondrop="onDrop(event,'+tid+')" ondragend="onDragEnd(event)"'
+      ? ' draggable="true" data-action-dragstart="onDragStart"'+
+        ' data-action-dragover="onDragOver" data-action-dragleave="onDragLeave"'+
+        ' data-action-drop="onDrop" data-action-dragend="onDragEnd"'
       : '';
     return '<div class="task-item '+esc(cls)+bgCls+abCls+'" data-task-id="'+tid+'"'+dragAttrs+' '+
-      'onclick="taskRowClick(event,'+tid+')" '+
+      'data-action="taskRowClick" data-arg="'+tid+'" '+
       'style="cursor:pointer" '+
       'title="Click to view execution summary, output, and history">'+
       (canOrder
@@ -280,9 +280,9 @@ function renderTasks(s) {
       '<div class="task-actions">'+
         statusActions+
         (cls !== 'done' && cls !== 'in_progress'
-          ? '<button class="act split"  title="AI-decompose into sub-tasks" onclick="openDecomposeModal('+tid+')">Split</button>' : '')+
-        '<button class="act edit"   title="Edit"   onclick="openEditModal('+tid+')">Edit</button>'+
-        '<button class="act remove" title="Remove" onclick="removeTask('+tid+')">Remove</button>'+
+          ? '<button class="act split"  title="AI-decompose into sub-tasks" data-action="openDecomposeModal" data-arg="'+tid+'">Split</button>' : '')+
+        '<button class="act edit"   title="Edit"   data-action="openEditModal" data-arg="'+tid+'">Edit</button>'+
+        '<button class="act remove" title="Remove" data-action="removeTask" data-arg="'+tid+'">Remove</button>'+
         priorityBadge(t.priority)+
         '<span style="font-size:11px;color:var(--muted)">#'+tid+'</span>'+
       '</div>'+
@@ -379,7 +379,11 @@ function fmtTaskLinks(t) {
   const items = t.links.map(function(lnk) {
     const icon = kindIcon[lnk.kind] || '🔗';
     const label = lnk.label || lnk.url;
-    return '<a class="task-link-item" href="'+esc(lnk.url)+'" target="_blank" rel="noopener" title="['+esc(lnk.kind)+'] '+esc(lnk.url)+'">'+icon+' '+esc(label)+'</a>';
+    const attrs = ' class="task-link-item" title="['+esc(lnk.kind)+'] '+esc(lnk.url)+'">'+icon+' '+esc(label);
+    // A link only over http(s): a task's links are the workload's to write.
+    return safeURL(lnk.url)
+      ? '<a href="'+esc(lnk.url)+'" target="_blank" rel="noopener"'+attrs+'</a>'
+      : '<span'+attrs+'</span>';
   });
   return '<div class="task-links">'+items.join('')+'</div>';
 }
@@ -454,14 +458,15 @@ function buildStatusActions(t) {
   // real, or record that a later task already did and stop flagging it.
   if (isOpenAbortFinding(t)) {
     btns += '<button class="act reopen" title="Reset to pending so the work actually runs" ' +
-            'onclick="reopenAbortedTask('+t.id+')">Reopen</button>';
+            'data-action="reopenAbortedTask" data-arg="'+t.id+'">Reopen</button>';
     btns += '<button class="act keep" title="Record that the work exists despite the refusal summary" ' +
-            'onclick="clearAbortedTask('+t.id+')">Keep</button>';
+            'data-action="clearAbortedTask" data-arg="'+t.id+'">Keep</button>';
   }
-  if (cls !== 'done')        btns += '<button class="act done"  onclick="setStatus('+t.id+',\'done\')">Done</button>';
-  if (cls !== 'skipped')     btns += '<button class="act skip"  onclick="setStatus('+t.id+',\'skipped\')">Skip</button>';
-  if (cls !== 'failed')      btns += '<button class="act fail"  onclick="setStatus('+t.id+',\'failed\')">Fail</button>';
-  if (cls !== 'pending')     btns += '<button class="act reset" onclick="setStatus('+t.id+',\'pending\')">Reset</button>';
+  const set = (s, c, label) => '<button class="act ' + c + '" data-action="setStatus" data-arg="' + t.id + '" data-arg-status="' + s + '">' + label + '</button>';
+  if (cls !== 'done')        btns += set('done', 'done', 'Done');
+  if (cls !== 'skipped')     btns += set('skipped', 'skip', 'Skip');
+  if (cls !== 'failed')      btns += set('failed', 'fail', 'Fail');
+  if (cls !== 'pending')     btns += set('pending', 'reset', 'Reset');
   return btns;
 }
 

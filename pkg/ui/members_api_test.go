@@ -42,6 +42,8 @@ type memberFixture struct {
 	srv     *Server
 	ts      *httptest.Server
 	project string // alice's project
+	idp     *uiFakeIdP
+	logs    *captureLogger // the hub's log, installed before its first request
 
 	alice, bob, carol, root *http.Client
 }
@@ -76,8 +78,10 @@ func newMemberFixture(t *testing.T, rbac bool, extra ...authz.Binding) *memberFi
 	t.Cleanup(srv.closeMemberStore)
 	// The test drives several sessions and many requests from one address.
 	srv.RPS, srv.Burst = 10000, 10000
+	logs := &captureLogger{}
+	srv.Log = logs
 
-	f := &memberFixture{srv: srv, ts: ts, project: project}
+	f := &memberFixture{srv: srv, ts: ts, project: project, idp: idp, logs: logs}
 	as := func(email, sub string, groups ...string) *http.Client {
 		// Logins are sequential, so the IdP's claims can be flipped
 		// between them (as newRBACFixture does).

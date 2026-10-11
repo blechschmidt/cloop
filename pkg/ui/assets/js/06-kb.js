@@ -2,7 +2,7 @@
 
 let _kbEntries = [];  // full entry list for client-side search
 
-window.loadKB = function() { loadKB(); };
+act('loadKB', loadKB);
 
 function loadKB() {
   api(pUrl('/api/kb')).then(data => {
@@ -25,7 +25,7 @@ function renderKBCards(entries) {
     const tags = (e.tags || []).map(t => '<span class="kb-tag">' + esc(t) + '</span>').join('');
     const bodyText = (e.content || '').replace(/\n/g, '\n');
     return '<div class="kb-entry-card" data-id="' + e.id + '">' +
-      '<button class="kb-card-del" onclick="deleteKBEntry(' + e.id + ')" title="Delete entry">&#x2715;</button>' +
+      '<button class="kb-card-del" data-action="deleteKBEntry" data-arg="' + e.id + '" title="Delete entry">&#x2715;</button>' +
       '<div class="kb-entry-title">' + esc(e.title) + '</div>' +
       (tags ? '<div class="kb-tags">' + tags + '</div>' : '') +
       (bodyText ? '<div class="kb-entry-body">' + esc(bodyText) + '</div>' : '') +
@@ -43,10 +43,10 @@ function filterKBCards(q) {
   );
   renderKBCards(filtered);
 }
-// The search box names it inline (oninput), so it has to be global.
-window.filterKBCards = filterKBCards;
+// The search box names it (data-action-input) with its value as the query.
+act('filterKBCards', filterKBCards, VAL);
 
-window.toggleKBAddForm = function() {
+act('toggleKBAddForm', function() {
   const form = document.getElementById('kbAddForm');
   if (!form) return;
   const visible = form.style.display !== 'none';
@@ -57,9 +57,9 @@ window.toggleKBAddForm = function() {
     document.getElementById('kbNewTags').value = '';
     document.getElementById('kbNewTitle').focus();
   }
-};
+});
 
-window.submitKBAdd = function() {
+act('submitKBAdd', function() {
   const title = (document.getElementById('kbNewTitle').value || '').trim();
   const body  = (document.getElementById('kbNewBody').value  || '').trim();
   const tagsRaw = (document.getElementById('kbNewTags').value || '').trim();
@@ -74,12 +74,12 @@ window.submitKBAdd = function() {
       toast(d.error || 'Failed to add entry', 'err');
     }
   }).catch(() => toast('Failed to add entry', 'err'));
-};
+});
 
-window.deleteKBEntry = function(id) {
+act('deleteKBEntry', function(id) {
   apiMethod('DELETE', pUrl('/api/kb/' + id), null).then(d => {
     if (d.ok) { toast('Entry deleted', 'ok'); loadKB(); }
     else toast(d.error || 'Delete failed', 'err');
   }).catch(() => toast('Delete failed', 'err'));
-};
+}, NUM);
 

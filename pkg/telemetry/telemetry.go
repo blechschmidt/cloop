@@ -113,13 +113,18 @@ const (
 	// KindNote is anything a caller wants recorded that is none of the above,
 	// and the landing place for a kind this build does not recognise.
 	KindNote Kind = "note"
+	// KindCSP is something the hub's Content-Security-Policy blocked, as the
+	// browser itself reported it to the hub's report endpoint (Task 20408),
+	// not as a page's script posted it. The kind that makes a missed handler
+	// conversion a row rather than a button that silently does nothing.
+	KindCSP Kind = "csp"
 )
 
 // Kinds lists every known kind, in the order a UI should offer them.
 //
 // Appended rather than slotted in beside its thematic neighbour: this order is
 // what a filter UI renders, so adding one should not renumber the rest.
-var Kinds = []Kind{KindError, KindRejection, KindGesture, KindView, KindFetch, KindLifecycle, KindNote, KindInput}
+var Kinds = []Kind{KindError, KindRejection, KindGesture, KindView, KindFetch, KindLifecycle, KindNote, KindInput, KindCSP}
 
 // Valid reports whether k is a known kind.
 func (k Kind) Valid() bool {

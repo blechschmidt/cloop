@@ -45,9 +45,10 @@ function panelHelpers() {
 // mountPanel puts a deferred panel's markup on the page — its tab's contents,
 // and its dialogs appended to the document body — and routes its data-act,
 // data-change, data-input, data-enter and data-dismiss (a backdrop click) to
-// the panel's own functions in fns, which its script may not put on window
-// for an inline handler to reach. Delegated from each root, so markup the
-// panel redraws later is routed too. Returns fns.
+// the panel's own functions in fns, which its script keeps to itself.
+// Delegated from each root, so markup the panel redraws later is routed too.
+// A data-action in the panel's markup is the bundle's (00-core.js), and is
+// routed by the document's listeners instead. Returns fns.
 function mountPanel(fns, tab, html, dialogs) {
   const roots = [];
   if (tab) {
@@ -60,13 +61,19 @@ function mountPanel(fns, tab, html, dialogs) {
     t.innerHTML = dialogs;
     Array.from(t.children).forEach(el => roots.push(document.body.appendChild(el)));
   }
+  // Only the panel's own functions: an inherited name — constructor,
+  // toString — is not one of them.
+  const fn = name => {
+    if (!{}.hasOwnProperty.call(fns, name)) throw new Error('no panel action ' + name);
+    return fns[name];
+  };
   roots.forEach(root => ['click', 'change', 'input', 'keydown'].forEach(type => root.addEventListener(type, e => {
-    if (type === 'click' && e.target === root && root.dataset.dismiss) return fns[root.dataset.dismiss]();
+    if (type === 'click' && e.target === root && root.dataset.dismiss) return fn(root.dataset.dismiss)();
     const key = type === 'click' ? 'act' : type === 'keydown' ? 'enter' : type;
     const el = e.target.closest && e.target.closest('[data-' + key + ']');
     if (!el || (type === 'keydown' && e.key !== 'Enter')) return;
     if (type === 'keydown') e.preventDefault();
-    fns[el.dataset[key]].call(el, el.dataset.arg);
+    fn(el.dataset[key]).call(el, el.dataset.arg);
   })));
   applyPermissionGating();
   return fns;
@@ -466,11 +473,10 @@ function renderMultiProjectOverview() {
     const total    = p.total_tasks || 0;
     const done     = p.done_tasks  || 0;
     const pct      = total > 0 ? Math.round(100 * done / total) : -1;
-    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     const valueStr = pct >= 0 ? pct + '% done' : (p.total_steps || 0) + ' steps';
     const subStr   = pct >= 0 ? done + '/' + total + ' tasks' : (p.status || '');
     const modelStr = [p.provider, p.model].filter(Boolean).join(' / ');
-    return '<div class="stat-card" style="cursor:pointer" onclick="openProject('+i+','+nameSafe+')" title="Open project">' +
+    return '<div class="stat-card" style="cursor:pointer" data-action="openProject" data-arg="' + i + '" data-arg-name="' + esc(p.name) + '" title="Open project">' +
       '<div class="stat-label" style="font-weight:600">' + esc(p.name) + '</div>' +
       '<div style="font-size:11px;margin:3px 0"><span style="color:' + hCol + '">&#9679;</span> ' + esc(health) + '</div>' +
       '<div class="stat-value" style="font-size:15px;margin-top:4px">' + esc(valueStr) + '</div>' +
@@ -524,14 +530,14 @@ function _entryKey(e) {
 }
 
 // An expanded row whose output or details the feed shortened loads in full.
-window.toggleStep = function(el) {
+act('toggleStep', function(el) {
   el.classList.toggle('expanded');
   const e = stepsState.loaded.find(x => _entryKey(x) === el.dataset.idx);
   if (e && e.cut) api(pUrl('/api/event-history?' + (e.kind === 'step' ? 'step=' + e.step : 'event=' + -e.id))).then(d => {
     Object.assign(e, d.entries[0], {cut: 0});
     renderStepListPanel();
   }, () => {});
-};
+}, el => [el]);
 
 // syncStepHistory is called from render(s): a project switch loads the new
 // project's newest page; anything else only redraws (the running step).
@@ -602,7 +608,7 @@ function renderRunBuild(s) {
       ' behind this hub' : ', not comparable with this hub (' + b.reference.version + ')');
     if (!b.adoptable) note = ' — its ' + (b.executor || 'executor') + ' executor keeps its own upgrade path';
     else if (r && r.run && r.run.pid === b.pid) note = ' — adoption requested, waiting for the next task boundary';
-    else if (can('run.start')) btn = ' <button class="btn" onclick="adoptBuild()" title="The run validates this hub\'s binary and moves to it between tasks, keeping its process and live log">Adopt at next task boundary</button>';
+    else if (can('run.start')) btn = ' <button class="btn" data-action="adoptBuild" title="The run validates this hub\'s binary and moves to it between tasks, keeping its process and live log">Adopt at next task boundary</button>';
   }
   ['runBuildNote', 'tasksRunBuild'].forEach((id, i) => {
     const el = document.getElementById(id);
@@ -611,9 +617,9 @@ function renderRunBuild(s) {
     el.innerHTML = esc(txt + note) + (i ? '' : btn);
   });
 }
-window.adoptBuild = function() {
+act('adoptBuild', function() {
   api(pUrl('/api/run/adopt-build'), {}).then(d => toast(d.ok ? d.message : (d.error || 'Request failed'), d.ok ? 'ok' : 'err'));
-};
+});
 
 // _eventVisuals maps an event kind to icon glyph + CSS class + short label.
 // Unknown kinds fall back to a neutral bullet so the row still renders.
@@ -674,7 +680,7 @@ function _renderStepRow(e, expanded) {
   const idx = _entryKey(e);
   const isExp = expanded[idx] ? ' expanded' : '';
   const exitCls = e.exit_code === 0 ? 'step-ok' : 'step-bad';
-  return '<div class="step-item'+isExp+'" data-idx="'+idx+'" onclick="toggleStep(this)">'+
+  return '<div class="step-item'+isExp+'" data-idx="'+idx+'" data-action="toggleStep">'+
     '<div class="step-header">'+
       '<span class="step-num">#'+((e.step||0)+1)+'</span>'+
       '<span class="step-task">'+esc(e.message||'(no description)')+'</span>'+
@@ -698,11 +704,11 @@ function _renderEventRow(e, expanded) {
     ? JSON.stringify(e.details, null, 2) : '';
   const expandable = !!(detailsTxt || e.cut);
   const cls = 'step-item event-row' + (expandable ? ' expandable' : '') + isExp;
-  const onclick = expandable ? ' onclick="toggleStep(this)"' : '';
+  const action = expandable ? ' data-action="toggleStep"' : '';
   const chevron = expandable ? '<span class="step-chevron">&#9654;</span>' : '';
   const msg = e.message || (taskRef ? (v.label + ' ' + taskRef) : v.label);
   const showRef = taskRef && (!e.message || e.message.indexOf('#'+e.task_id) === -1);
-  return '<div class="'+cls+'" data-idx="'+idx+'"'+onclick+'>'+
+  return '<div class="'+cls+'" data-idx="'+idx+'"'+action+'>'+
     '<div class="step-header">'+
       '<span class="event-icon '+v.cls+'" title="'+esc(e.kind||'')+'">'+v.glyph+'</span>'+
       '<span class="event-msg">'+esc(msg)+'</span>'+
@@ -745,7 +751,7 @@ function renderStepListPanel() {
     }
     if (!runningTitle) runningTitle = s.status === 'evolving' ? 'Evolving the plan…' : 'Running…';
     const runningOut = (typeof liveLogText !== 'undefined' && liveLogText) ? liveLogText.slice(-4000) : '(awaiting output…)';
-    html += '<div class="step-item step-running'+runningExp+'" data-idx="running" onclick="toggleStep(this)">'+
+    html += '<div class="step-item step-running'+runningExp+'" data-idx="running" data-action="toggleStep">'+
       '<div class="step-header">'+
         '<span class="step-num">#'+runningStepNum+'</span>'+
         '<span class="step-task">'+esc(runningTitle)+'</span>'+

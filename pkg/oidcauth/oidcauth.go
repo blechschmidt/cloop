@@ -765,11 +765,11 @@ func ValidateRedirectURL(raw string) (*url.URL, error) {
 }
 
 // LoginPath, LogoutPath and RenewPath are the hub's other routes under
-// /auth/. They are named here, beside the callback rule, because the callback
-// shares their subtree: the hub registers GET LoginPath and GET RenewPath as
-// routes, and the router panics at startup on a second registration of either
-// rather than serving them. (LogoutPath is a POST, which a GET callback does
-// not collide with.)
+// /auth/, with ScriptPath (script.go). They are named here, beside the callback
+// rule, because the callback shares their subtree: the hub registers GET
+// LoginPath, GET RenewPath and GET ScriptPath as routes, and the router panics
+// at startup on a second registration of any of them rather than serving them.
+// (LogoutPath is a POST, which a GET callback does not collide with.)
 const (
 	LoginPath  = "/auth/login"
 	LogoutPath = "/auth/logout"
@@ -794,7 +794,7 @@ const (
 //   - an escaped "/" ("%2F"): the route is registered from the decoded path,
 //     where it is a second segment, and the request for the escaped form is
 //     matched as one segment and never reaches it;
-//   - the hub's own GET routes, LoginPath and RenewPath.
+//   - the hub's own GET routes, LoginPath, RenewPath and ScriptPath.
 //
 // Each of those once passed this check and then took the route table down or
 // left the callback unreachable (Task 20387). Anything else — another escape,
@@ -809,7 +809,7 @@ func callbackPathProblem(u *url.URL) string {
 		return "must be under /auth/, with a name after it — cloop serves the callback there and nowhere else"
 	}
 	switch p {
-	case LoginPath, RenewPath:
+	case LoginPath, RenewPath, ScriptPath:
 		return "is one of the hub's own sign-in routes; the callback needs a path of its own, such as " +
 			DefaultCallbackPath
 	}
@@ -1146,13 +1146,14 @@ func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request, re
 	_, _ = io.WriteString(w, loginLandingHTML(dest))
 }
 
-// loginLandingHTML is served once, immediately after sign-in. It is inline
+// loginLandingHTML is served once, immediately after sign-in. It is a page
 // rather than a redirect for the reason documented on completeLogin.
 //
-// dest appears in an HTML attribute, a meta refresh directive and a script
-// string literal, and is escaped for each. html.EscapeString alone would not
-// do for the script: an HTML-escaped quote is a quote again by the time the
-// JavaScript parser sees it.
+// dest appears in two HTML attributes — a meta refresh directive and the
+// Continue link — and is HTML-escaped for both. It reaches script only as the
+// link's href, which the sign-in script (script.go) reads as data and passes
+// to location.replace: the hub's policy runs no inline script (Task 20408), and
+// a value never spliced into JavaScript has no string literal to escape.
 func loginLandingHTML(dest string) string {
 	attr := html.EscapeString(dest)
 	return `<!DOCTYPE html>
@@ -1162,26 +1163,10 @@ func loginLandingHTML(dest string) string {
 <style>body{font:14px system-ui,sans-serif;margin:4rem auto;max-width:28rem;text-align:center;color:#333}</style>
 </head><body>
 <p>Signed in. Opening the dashboard…</p>
-<p><a href="` + attr + `">Continue</a></p>
-<script>location.replace(` + jsString(dest) + `);</script>
+<p><a id="continue" href="` + attr + `">Continue</a></p>
+<script src="` + ScriptPath + `"></script>
 </body></html>
 `
-}
-
-// jsString renders s as a JavaScript string literal safe to embed in an inline
-// <script>.
-//
-// json.Marshal is the whole implementation on purpose: it already escapes the
-// characters that make this dangerous. "<", ">" and "&" are written as Unicode
-// escapes, so the literal cannot close the script element, and U+2028 and
-// U+2029, which JSON allows raw and JavaScript treats as line terminators, are
-// escaped too.
-func jsString(s string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return `""`
-	}
-	return string(b)
 }
 
 // purgePendingLocked drops expired login attempts and, if the map is still

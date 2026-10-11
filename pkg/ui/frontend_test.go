@@ -321,68 +321,101 @@ func deferredSource() string {
 // Frontend behaviour is impossible to assert
 // end-to-end from Go without a real browser, but the *structural* invariants
 // that matter most (and that have regressed repeatedly — Tasks 163, 168,
-// 20033, 20065) can be checked by parsing the embedded source:
+// 20033, 20065, 20408) can be checked by parsing the embedded source:
 //
 //   1. The HTML is well-formed enough to load.
-//   2. Every inline `onclick="fn(...)"` handler resolves to a function that
-//      is reachable from the global scope. The dashboard wraps its entire
-//      <script> body in an IIFE, so handlers defined with `function fn(...)`
-//      inside that IIFE are NOT reachable from inline onclick attributes:
-//      they must be declared as `window.fn = function ...` (or assigned
-//      after the IIFE). This rule has been violated repeatedly (most
-//      recently Task 20065) and silently breaks buttons.
-//   3. No inline `onclick="..."` attribute interpolates `JSON.stringify(...)`
-//      (Tasks 163, 20033). That bug ships unescaped double-quotes into an
-//      attribute value and snaps HTML parsing.
-//   4. Every `getElementById('foo')` references either a literal `id="foo"`
+//   2. Every control names a registered action. Markup carries no code since
+//      Task 20408: an element names an action in data-action (a click) or
+//      data-action-<event>, and the bundle's dispatcher (00-core.js) looks it
+//      up in ACTIONS, which act() and direct ACTIONS.name assignments fill —
+//      or, for mouseenter and the drag events, in that event's own table,
+//      which only actOn('event', …) fills. A name nobody registered for its
+//      event throws on every press. Inline handlers are gone altogether, and
+//      csp_gate_test.go keeps them gone.
+//   3. Every `getElementById('foo')` references either a literal `id="foo"`
 //      in the HTML or an ID that is created dynamically in JS via
 //      `<el>.id = 'foo'`. A getElementById against a vanished ID is the
 //      typical signature of a deleted-DOM-with-zombie-JS bug.
-//   5. Every WebSocket type the backend broadcasts has a frontend case
+//   4. Every WebSocket type the backend broadcasts has a frontend case
 //      handler — drift here means silent UX regressions.
-//   6. Every /api/* URL referenced from the frontend is a registered route.
+//   5. Every /api/* URL referenced from the frontend is a registered route.
 
-// extractOnclickHandlers returns the set of distinct identifier names that
-// appear as the *first call* in an inline `onclick="..."` attribute.
-//
-// We only look at simple-call handlers (`onclick="fn(...)"`) — guard
-// patterns like `onclick="if(event.target===this)closeFoo()"` are common
-// for backdrop dismissals; the closeFoo() identifier is still extracted
-// because `event.target` is the literal expression, but we don't try to
-// chase nested calls. JS keywords (`if`, `event`, `document`, `location`,
-// `window`, `return`) are filtered out.
-func extractOnclickHandlers(html string) map[string]struct{} {
-	// Every inline event attribute, not only onclick: an oninput or onchange
-	// naming a function the IIFE keeps to itself throws on every keystroke
-	// just the same, and four did — the KB search box, both Provider Calls
-	// filters and the init form's provider select (found in Task 20386).
-	re := regexp.MustCompile(`on(?:click|change|input|keydown|keyup|submit|blur|focus)="([a-zA-Z_$][a-zA-Z0-9_$]*)`)
-	out := map[string]struct{}{}
-	keywords := map[string]bool{
-		"if": true, "for": true, "while": true, "return": true,
-		"event": true, "document": true, "window": true, "location": true,
-		"true": true, "false": true, "null": true, "undefined": true,
-		"this": true, "void": true, "new": true,
+// actionRefRe matches a control naming an action, in markup or in a JS string
+// that builds markup: data-action="name" or data-action-<event>="name", the
+// quote optionally escaped. data-action="" is a boundary, not a name.
+var actionRefRe = regexp.MustCompile(`data-action(?:-([a-z]+))?=\\?"([A-Za-z_$][\w$]*)"`)
+
+// passingEvents are the event types 00-core.js keeps a table of their own for
+// (PASSING): what the pointer or a drag sets off without the user aiming at
+// the element runs only an action registered for that event.
+var passingEvents = map[string]bool{
+	"mouseenter": true, "dragstart": true, "dragover": true, "dragleave": true, "drop": true, "dragend": true,
+}
+
+// actionKey is how the registry gate names an action: its name for ACTIONS,
+// "event:name" for an entry of an event's own table.
+func actionKey(event, name string) string {
+	if passingEvents[event] {
+		return event + ":" + name
 	}
-	for _, m := range re.FindAllStringSubmatch(html, -1) {
-		name := m[1]
-		if keywords[name] {
-			continue
+	return name
+}
+
+// registeredActions returns the names the bundle registers: act('name', …),
+// which also leaves the function on window, and ACTIONS.name = … for an action
+// nothing else calls — and, keyed "event:name", actOn('event', 'name', …).
+func registeredActions(bundle string) map[string]bool {
+	out := map[string]bool{}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`\bact\('([A-Za-z_$][\w$]*)'`),
+		regexp.MustCompile(`\bACTIONS\.([A-Za-z_$][\w$]*)\s*=`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(bundle, -1) {
+			out[m[1]] = true
 		}
-		out[name] = struct{}{}
+	}
+	for _, m := range regexp.MustCompile(`\bactOn\('([a-z]+)', '([A-Za-z_$][\w$]*)'`).FindAllStringSubmatch(bundle, -1) {
+		out[m[1]+":"+m[2]] = true
 	}
 	return out
 }
 
-// extractWindowExposures returns the set of identifiers assigned to
-// `window.<name> = ...` — these are the functions reachable from inline
-// `onclick=...` handlers because they live on the global object, escaping
-// the IIFE that wraps the dashboard script.
+// referencedActions returns every action name the page's markup and the JS
+// that builds markup use, with one place each is named, for messages.
+func referencedActions(source string) map[string]string {
+	out := map[string]string{}
+	for _, m := range actionRefRe.FindAllStringSubmatchIndex(source, -1) {
+		event := ""
+		if m[2] >= 0 {
+			event = source[m[2]:m[3]]
+		}
+		name := actionKey(event, source[m[4]:m[5]])
+		if _, ok := out[name]; !ok {
+			lo, hi := m[0]-40, m[1]+20
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > len(source) {
+				hi = len(source)
+			}
+			out[name] = strings.TrimSpace(source[lo:hi])
+		}
+	}
+	return out
+}
+
+// extractWindowExposures returns the set of identifiers the bundle puts on
+// window: `window.<name> = ...` assignments and act('<name>', ...), which
+// leaves the function there for the code and tests that call it by name.
 func extractWindowExposures(js string) map[string]struct{} {
-	re := regexp.MustCompile(`window\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=`)
 	out := map[string]struct{}{}
-	for _, m := range re.FindAllStringSubmatch(js, -1) {
-		out[m[1]] = struct{}{}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`window\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=`),
+		regexp.MustCompile(`\bact\('([a-zA-Z_$][a-zA-Z0-9_$]*)'`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(js, -1) {
+			out[m[1]] = struct{}{}
+		}
 	}
 	return out
 }
@@ -390,8 +423,8 @@ func extractWindowExposures(js string) map[string]struct{} {
 // findIIFEBoundsForMainScript returns the [start, end) byte offsets of the
 // main `(function() { 'use strict'; ... })();` wrapper inside the bundle.
 // Functions defined *inside* this range with bare `function fn(...)` syntax
-// are NOT visible to inline onclick handlers; they must be exposed on
-// `window.fn`.
+// are not on window; markup reaches the ones it needs through the action
+// registry (Task 20408).
 //
 // We find this by anchoring on the literal `'use strict';` marker the main
 // IIFE opens with. The error-boundary IIFE that precedes it doesn't use
@@ -458,98 +491,49 @@ func TestDashboard_BasicWellFormedness(t *testing.T) {
 	}
 }
 
-// TestDashboard_OnclickHandlers_AllReachable enforces the architectural
-// invariant that every inline `onclick="fn(...)"` resolves to a function
-// reachable from the global scope. With the main script body wrapped in an
-// IIFE, this means the function must either:
-//   - be assigned to `window.fn = ...`, or
-//   - live in a top-level <script> outside the IIFE (rare).
+// TestDashboard_EveryActionIsRegistered enforces the dispatcher's contract
+// (Task 20408): every action a control names is registered, and every
+// registered action is named by some control.
 //
-// Bare `function fn() {}` *inside* the IIFE is unreachable from inline
-// `onclick=` and silently breaks the button. Catches regressions like
-// Tasks 20033 and 20065.
-func TestDashboard_OnclickHandlers_AllReachable(t *testing.T) {
-	handlers := extractOnclickHandlers(dashboardSource)
-	exposed := extractWindowExposures(dashboardSource)
-
-	legitGlobals := map[string]bool{
-		"alert": true,
+// The first direction is the old reachability gate's job in the new shape. A
+// control naming an action nobody registered throws on every press — and
+// before the dispatcher, a handler the bundle's IIFE kept to itself did the
+// same, which is how Tasks 20033 and 20065 shipped dead buttons.
+//
+// The second keeps the registry from outliving its markup. ACTIONS is the
+// whole of what markup can invoke, including markup somebody injected, so an
+// entry no control uses is surface with no purpose.
+func TestDashboard_EveryActionIsRegistered(t *testing.T) {
+	set := loadAssets()
+	registered := registeredActions(set.bundle)
+	if len(registered) < 100 {
+		t.Fatalf("only %d registered actions found; the dashboard has ~180, so the registry pattern "+
+			"has drifted from registeredActions and this gate has gone vacuous", len(registered))
 	}
-
-	var missing []string
-	for name := range handlers {
-		if _, ok := exposed[name]; ok {
-			continue
+	referenced := referencedActions(dashboardSource)
+	var missing, unused []string
+	for name, where := range referenced {
+		if !registered[name] {
+			missing = append(missing, name+"   ("+where+")")
 		}
-		if legitGlobals[name] {
-			continue
+	}
+	for name := range registered {
+		if _, ok := referenced[name]; !ok {
+			unused = append(unused, name)
 		}
-		missing = append(missing, name)
 	}
 	sort.Strings(missing)
+	sort.Strings(unused)
 	if len(missing) > 0 {
-		t.Errorf("inline onclick handlers reference functions not exposed on "+
-			"window (will throw ReferenceError when clicked because the main "+
-			"<script> is wrapped in an IIFE):\n  %s\n"+
-			"Fix: declare them as `window.%s = function() { ... }` instead of "+
-			"bare `function %s(...)`.", strings.Join(missing, "\n  "),
-			missing[0], missing[0])
+		t.Errorf("%d control(s) name an action nobody registers — pressing one throws:\n  %s\n"+
+			"Register it with act('name', fn, argsOf) beside the function, or ACTIONS.name = "+
+			"function(ev) {…} for an action nothing else calls; one named \"event:name\" — mouseenter "+
+			"or a drag event — with actOn('event', 'name', fn, argsOf), which no click can reach.",
+			len(missing), strings.Join(missing, "\n  "))
 	}
-}
-
-// TestDashboard_NoJSONStringifyInQuotedOnclick is a grep-level guard against
-// the recurring "JSON.stringify inside a double-quoted HTML attribute" bug
-// (Tasks 163, 20033). That pattern produces strings like
-// `onclick="fn("hello")"` which the HTML parser truncates at the first `"`,
-// silently destroying the handler.
-//
-// Allowed exception: `JSON.stringify(x).replace(/"/g,'&quot;')` — that
-// pattern HTML-escapes the quotes after stringifying, which is safe because
-// the browser decodes `&quot;` only after attribute boundaries are resolved.
-//
-// The recommended fix is to use `data-*` attributes plus `addEventListener`,
-// or to pass a numeric index instead of a string.
-func TestDashboard_NoJSONStringifyInQuotedOnclick(t *testing.T) {
-	// Find each `onclick=` hit, then scan ahead in the raw source looking for
-	// `JSON.stringify(` before any `>` (end of opening tag — though in a JS
-	// string literal we may not see one for many chars). We can't rely on a
-	// bounded character class because the safe form contains the literal
-	// `"` inside `.replace(/"/g,'&quot;')`, which would prematurely terminate
-	// any `[^"]` match.
-	var bad []string
-	idx := 0
-	for {
-		i := strings.Index(dashboardSource[idx:], `onclick=`)
-		if i < 0 {
-			break
-		}
-		start := idx + i
-		// Look at a 300-char window after the onclick=. Big enough to span
-		// any reasonable inline handler.
-		end := start + 300
-		if end > len(dashboardSource) {
-			end = len(dashboardSource)
-		}
-		window := dashboardSource[start:end]
-		idx = start + 1
-		// Stop at the first `'` or `\\` that closes the JS string concat —
-		// actually, since we live inside a Go string literal that builds
-		// JS, attribute end markers are unreliable. Just check the window.
-		if !strings.Contains(window, "JSON.stringify") {
-			continue
-		}
-		if strings.Contains(window, "&quot;") {
-			continue // HTML-escaped — safe
-		}
-		bad = append(bad, window)
-	}
-	if len(bad) > 0 {
-		t.Errorf("found %d inline onclick attribute(s) calling JSON.stringify "+
-			"without HTML-escaping the quotes — this snaps HTML parsing when "+
-			"the result contains quotes. Use data-* attributes + addEventListener, "+
-			"pass a numeric index and look up the string client-side, or follow "+
-			"the JSON.stringify with .replace(/\"/g,'&quot;'). First match:\n%s",
-			len(bad), bad[0])
+	if len(unused) > 0 {
+		t.Errorf("%d registered action(s) no control names: %s\nEvery entry is something injected "+
+			"markup could invoke; remove the ones nothing uses.", len(unused), strings.Join(unused, ", "))
 	}
 }
 
@@ -591,18 +575,26 @@ func TestDashboard_GetElementById_AllIDsExist(t *testing.T) {
 }
 
 // TestDashboard_SwitchTabExposedAndAllTargetsExist verifies the tab-switching
-// contract holds: every `switchTab('name')` call has a matching `tab-name`
-// panel in the HTML, and `switchTab` itself is reachable from inline
-// onclick. A renamed tab without a corresponding panel rename produces a
+// contract holds: every tab a control or a call switches to — a
+// `switchTab('name')` call, or data-action="switchTab" with data-arg="name" —
+// has a matching `tab-name` panel in the HTML, and switchTab is a registered
+// action. A renamed tab without a corresponding panel rename produces a
 // silent no-op when clicked.
 func TestDashboard_SwitchTabExposedAndAllTargetsExist(t *testing.T) {
-	if !strings.Contains(dashboardSource, `window.switchTab = function`) {
-		t.Fatal("window.switchTab is not assigned — inline tab clicks will throw")
+	if !strings.Contains(dashboardSource, `act('switchTab', function`) {
+		t.Fatal("switchTab is not registered as an action — every tab button would throw")
 	}
-	re := regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`)
 	tabs := map[string]struct{}{}
-	for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
-		tabs[m[1]] = struct{}{}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`),
+		regexp.MustCompile(`data-action=\\?"switchTab\\?" data-arg=\\?"([a-zA-Z0-9_-]+)`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
+			tabs[m[1]] = struct{}{}
+		}
+	}
+	if len(tabs) < 15 {
+		t.Fatalf("found %d tab targets; the dashboard has ~21 tabs, so the patterns have drifted", len(tabs))
 	}
 	for tab := range tabs {
 		if !strings.Contains(dashboardSource, `id="tab-`+tab+`"`) {
@@ -634,12 +626,10 @@ func TestDashboard_ServedAtRoot(t *testing.T) {
 	}
 }
 
-// TestDashboard_MainIIFEHasUseStrict verifies the wrapper IIFE we rely on
-// for the reachability test above still exists — if someone removes the
-// IIFE (a reasonable future refactor!), the reachability test silently
-// becomes a no-op because every `function fn()` becomes globally reachable.
-// This pins the assumption explicitly so the architectural test stays
-// load-bearing.
+// TestDashboard_MainIIFEHasUseStrict verifies the wrapper IIFE the bundle's
+// helpers live in still exists: it is what keeps them off window, where only
+// the functions act() registers are put, and why markup reaches code through
+// the action registry rather than by name.
 func TestDashboard_MainIIFEHasUseStrict(t *testing.T) {
 	_, _, ok := findIIFEBoundsForMainScript(dashboardSource)
 	if !ok {
@@ -1298,15 +1288,21 @@ func itoaArch(n int) string {
 // inverse of Tasks 20034/20127 (panels removed but JS still references them).
 func TestDashboard_OrphanTabPanels(t *testing.T) {
 	idRE := regexp.MustCompile(`\bid="tab-([a-zA-Z0-9_-]+)"`)
-	switchRE := regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`)
+	// A call, or a control naming the action (Task 20408).
+	switchREs := []*regexp.Regexp{
+		regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`),
+		regexp.MustCompile(`data-action=\\?"switchTab\\?" data-arg=\\?"([a-zA-Z0-9_-]+)`),
+	}
 
 	panels := map[string]bool{}
 	for _, m := range idRE.FindAllStringSubmatch(dashboardSource, -1) {
 		panels[m[1]] = true
 	}
 	switched := map[string]bool{}
-	for _, m := range switchRE.FindAllStringSubmatch(dashboardSource, -1) {
-		switched[m[1]] = true
+	for _, switchRE := range switchREs {
+		for _, m := range switchRE.FindAllStringSubmatch(dashboardSource, -1) {
+			switched[m[1]] = true
+		}
 	}
 
 	var orphans []string
@@ -1340,6 +1336,17 @@ func TestDashboard_NoDuplicateWindowAssignments(t *testing.T) {
 	counts := map[string]int{}
 	for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
 		counts[m[1]]++
+	}
+	// act('name', …) puts the function on window too (Task 20408), and a
+	// second registration under one name shadows the first the same way;
+	// so does a direct ACTIONS.name assignment beside it.
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`\bact\('([a-zA-Z_$][a-zA-Z0-9_$]*)'`),
+		regexp.MustCompile(`\bACTIONS\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
+			counts[m[1]]++
+		}
 	}
 
 	// Allowlist for handlers that are intentionally reassigned (e.g. a
@@ -1475,7 +1482,7 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 		{`id="execList"`, "the executor card container is missing"},
 		{`id="execPolicyBanner"`, "the effective-mode banner is missing — the whole point " +
 			"of the tab is that the host-execution mode is visible"},
-		{`window.loadExecutors = function`, "the panel loader is not exposed on window"},
+		{`act('loadExecutors', function`, "the panel loader is not a registered action"},
 		{`if (name === 'executors') loadExecutors();`, "switchTab never loads the Executors panel"},
 		{`case 'executor_update':`, "the WS event that keeps the panel live is not handled"},
 		{`'/api/executors'`, "the panel never calls its list endpoint"},
@@ -1490,7 +1497,7 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 
 	// The Executors tab is global; Task 20037's convention is that global tabs
 	// are marked as such in the nav and excluded from the breadcrumb.
-	if !strings.Contains(dashboardSource, `class="tab-btn global-tab" onclick="switchTab('executors')"`) {
+	if !strings.Contains(dashboardSource, `class="tab-btn global-tab" data-action="switchTab" data-arg="executors"`) {
 		t.Error("the Executors nav button is not marked global-tab — it would render in " +
 			"the per-project section and imply project scope it does not have")
 	}
@@ -1530,9 +1537,9 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 	}{
 		{`id="executorCard"`, "the Overview executor card is missing"},
 		{`id="statExecutor"`, "the executor card has no value element to render into"},
-		{`onclick="openExecutorPickerModal()"`, "the executor card is not clickable"},
-		{`window.openExecutorPickerModal = function`, "the picker opener is not exposed on window"},
-		{`window.submitExecutorBind = function`, "the picker has no save handler"},
+		{`data-action="openExecutorPickerModal"`, "the executor card is not clickable"},
+		{`act('openExecutorPickerModal', function`, "the picker opener is not a registered action"},
+		{`act('submitExecutorBind', function`, "the picker has no save handler"},
 		{`id="executor-picker-overlay"`, "the picker modal is missing"},
 		{`id="epExecutor"`, "the picker has no executor <select>"},
 		{`'/api/projects/' + idx + '/executor'`, "saving the picker never calls the bind endpoint"},

@@ -361,6 +361,18 @@ import (
 // enough for gzip jitter and a label or two, not for a panel. The way to add
 // one now exists and costs a <meta> and a mount call — a new Settings section
 // or admin dialog belongs in a deferred script, and this gate is what says so.
+//
+// Task 20408 moved every inline handler to one delegated dispatcher, so the
+// policy could drop 'unsafe-inline': 143,027 → 143,575 B wire. index.html lost
+// 413 B (a data-action attribute is shorter than the handler it replaced, and a
+// dialog's backdrop or a role=button's keys need no code at all); the bundle
+// grew 577 B, nearly all of it the dispatcher and its registry in 00-core.js;
+// the theme bootstrap became a 246 B asset of its own, and the error boundary
+// binds its four buttons itself (126 B). The executor cards' admin actions —
+// revoke, cordon, uncordon, drain — moved into deferred/execadmin.js to pay for
+// it (565 B), as the dialogs before them. Then hover and drag events got tables
+// of their own, so no click action can run on one, and mountPanel calls only a
+// panel's own functions: 143,776 B. The ceiling stays: 224 B of slack.
 const eagerWireBudgetBytes = 144_000
 
 // eagerAsset is one member of the first-paint set.

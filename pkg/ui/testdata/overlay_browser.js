@@ -255,7 +255,7 @@ async function run(cdp) {
     // The real in-panel button, if the Executors tab will show it.
     if (typeof switchTab === 'function') { try { switchTab('executors'); } catch (e) {} }
     const real = Array.from(document.querySelectorAll('button'))
-      .find(b => (b.getAttribute('onclick') || '').indexOf("'${OPEN_FN}'") !== -1
+      .find(b => b.getAttribute('data-action') === '${OPEN_FN}'
                  && !b.disabled && b.getClientRects().length);
     if (real) { if (!real.id) real.id = '_test_enroll_invoker'; return real.id; }
     return ${JSON.stringify(FALLBACK_INVOKER)};

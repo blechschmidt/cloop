@@ -105,13 +105,13 @@ function loadProjects() {
   api('/api/projects').then(applyProjects).catch(() => {});
 }
 
-window.toggleCompletedProjects = function() {
+act('toggleCompletedProjects', function() {
   showCompletedProjects = !showCompletedProjects;
   const btn = document.getElementById('toggleCompletedProjectsBtn');
   if (btn) btn.textContent = showCompletedProjects ? 'Hide completed' : 'Show completed';
   // Re-render with cached state.
   if (window._lastProjectsData) renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
-};
+});
 
 // renderProjectFaults surfaces projects the hub could not load.
 //
@@ -234,7 +234,6 @@ function renderProjects(projects, stats) {
     const lastAct = p.last_activity ? relTime(new Date(p.last_activity)) : '—';
     const taskInfo = p.done_tasks + '/' + p.total_tasks + ' tasks';
     const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
-    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     // Build a tooltip that surfaces the running task across projects.
     // For the selected project we know the in-progress task title from
     // appState (kept fresh by task_update events). For other projects we
@@ -246,14 +245,13 @@ function renderProjects(projects, stats) {
         : 'Currently running…';
     }
     const tipSafe = esc(_tip);
-    const pathSafe = JSON.stringify(p.path || '').replace(/"/g, '&quot;');
     // Why a paused project stopped (Task 20285). Shown on the card itself
     // rather than only after opening the project: the grid is where an
     // operator scans a fleet, and "paused" alone gave no way to tell the one
     // waiting on an approval from the one that resumes by itself at 14:50.
     const pauseWhy = (p.status === 'paused') ? pauseReasonText(p.pause_reason) : '';
     return `
-      <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="${tipSafe}">
+      <div class="proj-card${selCls}" data-action="openProject" data-arg="${idx}" data-arg-name="${esc(p.name)}" title="${tipSafe}">
         <div class="proj-health-dot ${health}"></div>
         <div class="proj-name">${esc(p.name)}</div>
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
@@ -266,13 +264,13 @@ function renderProjects(projects, stats) {
           ${(p.provider || p.model) ? `<span title="Provider / Model">${esc([p.provider, p.model].filter(Boolean).join(' / '))}</span>` : ''}
         </div>
         ${featureChips(p.path)}
-        <div class="proj-actions" onclick="event.stopPropagation()">
+        <div class="proj-actions" data-action="">
           ${p.running
-            ? '<button class="btn danger" onclick="projectStop('+idx+')" title="Stop">&#9632; Stop</button>'
-            : '<button class="btn success" onclick="projectRun('+idx+',false)" title="Run">&#9654; Run</button><button class="btn primary" onclick="projectRun('+idx+',true)" title="Run PM">&#9654; PM</button>'
+            ? '<button class="btn danger" data-action="projectStop" data-arg="'+idx+'" title="Stop">&#9632; Stop</button>'
+            : '<button class="btn success" data-action="projectRun" data-arg="'+idx+'" title="Run">&#9654; Run</button><button class="btn primary" data-action="projectRun" data-arg="'+idx+'" data-arg-pm="true" title="Run PM">&#9654; PM</button>'
           }
-          <button class="btn" onclick="projectHide(${idx},${nameSafe})" title="Hide from your dashboard (restore under Settings)">Hide</button>
-          <button class="btn danger" onclick="projectDelete(${idx},${nameSafe},${pathSafe})" title="Remove project">&#10005; Delete</button>
+          <button class="btn" data-action="projectHide" data-arg="${idx}" data-arg-name="${esc(p.name)}" title="Hide from your dashboard (restore under Settings)">Hide</button>
+          <button class="btn danger" data-action="projectDelete" data-arg="${idx}" data-arg-name="${esc(p.name)}" data-arg-path="${esc(p.path || '')}" title="Remove project">&#10005; Delete</button>
         </div>
       </div>
     `;
@@ -287,7 +285,7 @@ function relTime(date) {
   return Math.floor(diff/86400000) + 'd ago';
 }
 
-window.projectRun = function(idx, pm) {
+act('projectRun', function(idx, pm) {
   // No client poll — the server pushes 'projects' + 'run_state' WS events
   // immediately after the run starts so the card and Run/Stop button
   // refresh on their own (Task 20126).
@@ -301,15 +299,15 @@ window.projectRun = function(idx, pm) {
       else if (!harnessRefused(d, idx)) toast((d && d.error) || 'Failed to start run', 'err');
     })
     .catch(() => toast('Failed to start run', 'err'));
-};
+}, el => [+el.dataset.arg, el.dataset.argPm === 'true']);
 
-window.projectStop = function(idx) {
+act('projectStop', function(idx) {
   // No client poll — the server pushes 'projects' + 'run_state' WS events
   // once the SIGINT'd process actually exits (handleProjectStop observer).
   api('/api/projects/' + idx + '/stop', {method:'POST'})
     .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); })
     .catch(() => toast('Failed to stop', 'err'));
-};
+}, NUM);
 
 // ── Hiding ───────────────────────────────────────────────────────────────────
 // Hiding is a per-user view preference, not a deletion and not an access
@@ -334,18 +332,18 @@ function setProjectHidden(idx, name, hidden) {
     .catch(err => toast('Failed to update project: ' + (err && err.message ? err.message : 'error'), 'err'));
 }
 
-window.projectHide = function(idx, name) {
+act('projectHide', function(idx, name) {
   // Leaving the user parked on a project that just vanished from the grid
   // would strand them on an overview they can no longer navigate back to.
   if (selectedProjectIdx === idx && typeof window.clearProjectSelection === 'function') {
     window.clearProjectSelection();
   }
   setProjectHidden(idx, name, true);
-};
+}, IDX_NAME);
 
-window.projectUnhide = function(idx, name) {
+act('projectUnhide', function(idx, name) {
   setProjectHidden(idx, name, false);
-};
+}, IDX_NAME);
 
 // The hidden ones live behind a dialog, not on the Settings page (Task 20328):
 // Settings carries a count, and the names are in the DOM only while
@@ -380,14 +378,13 @@ function fillHiddenProjectsList(projects) {
     return;
   }
   box.innerHTML = hidden.map(({p, i: idx}) => {
-    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     return `
       <div class="hidden-proj-row">
         <div class="hidden-proj-info">
           <span class="hidden-proj-name">${esc(p.name)}</span>
           <span class="hidden-proj-path">${esc(p.path || '')}</span>
         </div>
-        <button class="btn primary" onclick="projectUnhide(${idx},${nameSafe})" title="Show this project again">Unhide</button>
+        <button class="btn primary" data-action="projectUnhide" data-arg="${idx}" data-arg-name="${esc(p.name)}" title="Show this project again">Unhide</button>
       </div>
     `;
   }).join('');
@@ -425,7 +422,7 @@ window.loadHiddenProjects = function() {
   }
 };
 
-window.openHiddenProjectsModal = function() {
+act('openHiddenProjectsModal', function() {
   const box = document.getElementById('hiddenProjectsList');
   const data = window._lastProjectsData;
   hiddenProjectsDialogOpen = true;
@@ -438,9 +435,9 @@ window.openHiddenProjectsModal = function() {
   // No cached payload: the fetch's render pass fills the dialog, which is now
   // open and so no longer refused by renderHiddenProjects().
   if (!data && typeof loadProjects === 'function') loadProjects();
-};
+});
 
-window.closeHiddenProjectsModal = function() {
+act('closeHiddenProjectsModal', function() {
   // Revoked first, so a payload landing in between cannot refill what is on its
   // way out.
   hiddenProjectsDialogOpen = false;
@@ -449,12 +446,12 @@ window.closeHiddenProjectsModal = function() {
   // hidden name and path in the page for the rest of the session.
   const box = document.getElementById('hiddenProjectsList');
   if (box) box.innerHTML = '';
-};
+});
 
 // projectDelete opens the confirmation modal for removing a project from the
 // registry. The user can optionally check "also delete the project root dir"
 // before confirming — the actual DELETE request is sent by submitDeleteProject.
-window.projectDelete = function(idx, name, path) {
+act('projectDelete', function(idx, name, path) {
   const overlay = document.getElementById('delproj-overlay');
   if (!overlay) return;
   document.getElementById('delproj-name').textContent = name || ('project #' + idx);
@@ -462,13 +459,13 @@ window.projectDelete = function(idx, name, path) {
   document.getElementById('delproj-idx').value = String(idx);
   document.getElementById('delproj-deleteRoot').checked = false;
   openOverlay(overlay, {dismiss: closeDeleteProjectModal});
-};
+}, el => [+el.dataset.arg, el.dataset.argName, el.dataset.argPath]);
 
-window.closeDeleteProjectModal = function() {
+act('closeDeleteProjectModal', function() {
   closeOverlay('delproj-overlay');
-};
+});
 
-window.submitDeleteProject = function() {
+act('submitDeleteProject', function() {
   const idx = parseInt(document.getElementById('delproj-idx').value, 10);
   if (isNaN(idx)) { closeDeleteProjectModal(); return; }
   const deleteRoot = document.getElementById('delproj-deleteRoot').checked;
@@ -493,7 +490,7 @@ window.submitDeleteProject = function() {
     closeDeleteProjectModal();
     toast('Failed to delete project: ' + (err && err.message ? err.message : 'error'), 'err');
   });
-};
+});
 
 // Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into Overview.
 //
@@ -501,7 +498,7 @@ window.submitDeleteProject = function() {
 // server-side hub registers this client under the new project's workDir and
 // pushes its initial task_update + future state_diff events automatically —
 // removing the per-switch /api/state polling cost.
-window.openProject = function(idx, name) {
+act('openProject', function(idx, name) {
   selectedProjectIdx  = idx;
   selectedProjectName = name;
   const sel = projList()[idx];
@@ -533,10 +530,10 @@ window.openProject = function(idx, name) {
   // Reconnect WS scoped to the new project — initial state arrives as a
   // task_update event in the new hub subscription.
   connectWS();
-};
+}, IDX_NAME);
 
 // Returns to the Projects landing page from a scoped project view.
-window.clearProjectSelection = function() {
+act('clearProjectSelection', function() {
   selectedProjectIdx  = null;
   selectedProjectName = '';
   selectedProjectPath = '';
@@ -556,7 +553,7 @@ window.clearProjectSelection = function() {
   connectWS();
   // No project selected → no per-project running task to advertise.
   updateBrowserTitle();
-};
+});
 
 // ── Project selector dropdown ─────────────────────────────────────────────────
 
@@ -588,7 +585,7 @@ function updateProjectSelector() {
     const activeCls = selectedProjectIdx === i ? ' active' : '';
     const dotStyle = 'background:' + healthColor(health);
     const label = sub ? '&#9095; ' + esc((p.feature && p.feature.title) || p.name) : esc(p.name);
-    return '<div class="proj-selector-item'+activeCls+(sub ? ' sub' : '')+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name).replace(/"/g,'&quot;')+')">' +
+    return '<div class="proj-selector-item'+activeCls+(sub ? ' sub' : '')+'" data-action="selectProjectFromDropdown" data-arg="'+i+'" data-arg-name="'+esc(p.name)+'">' +
       '<span class="pi-dot" style="'+dotStyle+'"></span>' +
       '<span class="pi-name">'+label+'</span>' +
       '<span style="font-size:10px;color:var(--muted)">'+health+'</span>' +
@@ -601,11 +598,11 @@ function healthColor(h) {
   return map[h] || map.unknown;
 }
 
-window.toggleProjectSelector = function() {
+act('toggleProjectSelector', function() {
   const drop = document.getElementById('projSelectorDropdown');
   if (!drop) return;
   drop.classList.toggle('open');
-};
+});
 
 // Close dropdown on outside click.
 document.addEventListener('click', function(e) {
@@ -616,16 +613,16 @@ document.addEventListener('click', function(e) {
   }
 });
 
-window.selectProjectFromDropdown = function(idx, name) {
+act('selectProjectFromDropdown', function(idx, name) {
   const drop = document.getElementById('projSelectorDropdown');
   if (drop) drop.classList.remove('open');
   if (selectedProjectIdx === idx) return; // already selected
   openProject(idx, name);
-};
+}, IDX_NAME);
 
 // ── Provider / Model picker modal ─────────────────────────────────────────────
 
-window.openProviderModelModal = function() {
+act('openProviderModelModal', function() {
   const provSel  = document.getElementById('pmProvider');
   const errEl    = document.getElementById('pmError');
   if (errEl) errEl.style.display = 'none';
@@ -640,7 +637,7 @@ window.openProviderModelModal = function() {
   if (effSel) effSel.value = _currentEffort || '';
   updatePMEffortAvailability();
   openOverlay('provider-model-overlay', {dismiss: closeProviderModelModal});
-};
+});
 
 // Effort is only honored by the claudecode provider — gray it out (but keep
 // the saved value) for the others so the modal doesn't imply support.
@@ -653,14 +650,14 @@ function updatePMEffortAvailability() {
   if (hint) hint.style.display = isCC ? 'none' : '';
 }
 
-window.closeProviderModelModal = function() {
+act('closeProviderModelModal', function() {
   closeOverlay('provider-model-overlay');
-};
+});
 
-window.onPMProviderChange = function() {
+act('onPMProviderChange', function() {
   populatePMModelDropdown('');
   updatePMEffortAvailability();
-};
+});
 
 function populatePMModelDropdown(preselect) {
   const sel  = document.getElementById('pmModel');
@@ -672,7 +669,7 @@ function populatePMModelDropdown(preselect) {
   ).join('');
 }
 
-window.saveProviderModel = function() {
+act('saveProviderModel', function() {
   const provider = (document.getElementById('pmProvider') || {}).value || '';
   const model    = (document.getElementById('pmModel')    || {}).value || '';
   const effort   = (document.getElementById('pmEffort')   || {}).value || '';
@@ -691,7 +688,7 @@ window.saveProviderModel = function() {
   }).catch(e => {
     if (errEl) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = ''; }
   });
-};
+});
 
 // ── Review gate (Task 20357) ──────────────────────────────────────────────────
 // The gate is a reviewer model that checks each task's changes before they are
@@ -723,12 +720,12 @@ function rgModelOptions(preselect) {
   sel.innerHTML = list.map(m => '<option value="' + esc(m.value) + '"' + (m.value === preselect ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('');
 }
 
-window.onRGProviderChange = function() { rgModelOptions(''); };
-window.onRGModeChange = function() {
+act('onRGProviderChange', function() { rgModelOptions(''); });
+act('onRGModeChange', function() {
   document.getElementById('rgRoundsRow').style.display = document.getElementById('rgMode').value === 'fix' ? '' : 'none';
-};
+});
 
-window.openReviewGateModal = function() {
+act('openReviewGateModal', function() {
   const g = (appState && appState.review_gate) || {};
   document.getElementById('rgEnabled').checked = !!g.enabled;
   document.getElementById('rgProvider').value = g.provider || '';
@@ -740,11 +737,11 @@ window.openReviewGateModal = function() {
   document.getElementById('rgError').style.display = 'none';
   onRGModeChange();
   openOverlay('review-gate-overlay', {dismiss: closeReviewGateModal, focus: '#rgEnabled'});
-};
+});
 
-window.closeReviewGateModal = function() { closeOverlay('review-gate-overlay'); };
+act('closeReviewGateModal', function() { closeOverlay('review-gate-overlay'); });
 
-window.saveReviewGate = function() {
+act('saveReviewGate', function() {
   const val = id => document.getElementById(id).value;
   const errEl = document.getElementById('rgError');
   const body = {
@@ -760,22 +757,22 @@ window.saveReviewGate = function() {
     closeReviewGateModal();
     toast('Review gate ' + (body.enabled ? 'on' : 'off'), 'ok');
   }).catch(e => { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = ''; });
-};
+});
 
 // ── New Project modal ─────────────────────────────────────────────────────────
 
-window.openGoalEditModal = function() {
+act('openGoalEditModal', function() {
   const cur = (document.getElementById('goalText') || {}).textContent || '';
   document.getElementById('goalEditInput').value = cur;
   document.getElementById('goalEditError').style.display = 'none';
   openOverlay('goal-edit-overlay', {dismiss: closeGoalEditModal, focus: '#goalEditInput'});
-};
+});
 
-window.closeGoalEditModal = function() {
+act('closeGoalEditModal', function() {
   closeOverlay('goal-edit-overlay');
-};
+});
 
-window.saveGoalEdit = function() {
+act('saveGoalEdit', function() {
   const goal  = document.getElementById('goalEditInput').value.trim();
   const errEl = document.getElementById('goalEditError');
   if (!goal) { errEl.textContent = 'Goal cannot be empty'; errEl.style.display = ''; return; }
@@ -794,10 +791,10 @@ window.saveGoalEdit = function() {
     errEl.textContent = 'Request failed: ' + e.message;
     errEl.style.display = '';
   });
-};
+});
 
 // ── Instructions edit modal ──────────────────────────────────────────────────
-window.openInstructionsEditModal = function() {
+act('openInstructionsEditModal', function() {
   const errEl = document.getElementById('instructionsEditError');
   if (errEl) errEl.style.display = 'none';
   const inputEl = document.getElementById('instructionsEditInput');
@@ -808,13 +805,13 @@ window.openInstructionsEditModal = function() {
     if (inputEl) inputEl.value = (d && typeof d.instructions === 'string') ? d.instructions : '';
   }).catch(() => {});
   openOverlay('instructions-edit-overlay', {dismiss: closeInstructionsEditModal, focus: '#instructionsEditInput'});
-};
+});
 
-window.closeInstructionsEditModal = function() {
+act('closeInstructionsEditModal', function() {
   closeOverlay('instructions-edit-overlay');
-};
+});
 
-window.saveInstructionsEdit = function() {
+act('saveInstructionsEdit', function() {
   const instructions = document.getElementById('instructionsEditInput').value;
   const errEl = document.getElementById('instructionsEditError');
   errEl.style.display = 'none';
@@ -833,7 +830,7 @@ window.saveInstructionsEdit = function() {
     errEl.textContent = 'Request failed: ' + e.message;
     errEl.style.display = '';
   });
-};
+});
 
 // Populate the model dropdown based on the selected provider.
 function _npUpdateModels() {
@@ -1237,7 +1234,7 @@ function _npCollectAccess() {
   if (add) add.addEventListener('click', function() { _npAddGrantRow(); });
 })();
 
-window.openNewProjectModal = function() {
+act('openNewProjectModal', function() {
   document.getElementById('npDir').value     = '';
   document.getElementById('npGoal').value    = '';
   document.getElementById('npProvider').value = '';
@@ -1252,13 +1249,13 @@ window.openNewProjectModal = function() {
   _npResetAccess();
   _npLoadAccessSources();
   openOverlay('new-project-overlay', {dismiss: closeNewProjectModal});
-};
+});
 
-window.closeNewProjectModal = function() {
+act('closeNewProjectModal', function() {
   closeOverlay('new-project-overlay');
-};
+});
 
-window.submitNewProject = function() {
+act('submitNewProject', function() {
   const dir      = document.getElementById('npDir').value.trim();
   const goal     = document.getElementById('npGoal').value.trim();
   const provider = document.getElementById('npProvider').value;
@@ -1309,5 +1306,5 @@ window.submitNewProject = function() {
     errEl.style.display = '';
     toast('Request failed', 'err');
   });
-};
+});
 
