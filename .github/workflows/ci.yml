@@ -180,11 +180,12 @@ jobs:
     # carried every WebSocket the hub speaks.
     #
     # A job of its own, parallel to everything else, so it never sits on the
-    # critical path: Build and Test is the long pole at 13-20 minutes, and
-    # this job is a fraction of that even with both caches cold. The linter is
-    # the version the Makefile pins, installed and run through the same
-    # targets a developer uses (`make lint`), so a finding here reproduces
-    # locally with one command and the version lives in one place.
+    # critical path: Build and Test is the long pole, ~18 minutes since pkg/ui
+    # moved to shard jobs of its own (Task 20414), and this job is a fraction
+    # of that even with both caches cold. The linter is the version the
+    # Makefile pins, installed and run through the same targets a developer
+    # uses (`make lint`), so a finding here reproduces locally with one
+    # command and the version lives in one place.
     #
     # Its analysis cache is scoped the way golangci-lint-action scopes its
     # own: keyed on the linter version, go.sum, the config and the ISO week,
@@ -320,7 +321,11 @@ jobs:
         # feature. This job took 1,605 s on 1417b88f (job 114529512887),
         # 1,347-2,039 s across the four green runs before the split, of which
         # this step was 1,226-1,890 s; the next slowest packages were
-        # pkg/orchestrator (575-971 s) and pkg/statedb (318-553 s).
+        # pkg/orchestrator (575-971 s) and pkg/statedb (318-553 s). After the
+        # split, on 2df5597d (job 114578534809), this job took 1,059 s and this
+        # step 919 s, with pkg/orchestrator its longest package at 732 s, 41%
+        # of the timeout; the whole workflow took 17m54s, against 26m47s on
+        # 1417b88f and 34m03s on 73de7f62.
         #
         # The packages come from scripts/race-packages.sh, which is go list's
         # set in a different order: the few packages that take minutes first.
@@ -404,6 +409,12 @@ jobs:
     #
     # The shards' coverage profiles are merged with the race step's by the
     # Coverage report job, which uploads what Build and Test used to.
+    #
+    # On 2df5597d the three shards ran pkg/ui's tests in 337, 394 and 341 s,
+    # 19-22% of the 30m timeout, where the race step had taken 1,158-1,787 s
+    # over them; the jobs took 444, 514 and 440 s, 63-81 s of each compiling
+    # the test binary in the check step, so they finish well inside Build and
+    # Test.
     timeout-minutes: 40 # the -timeout below fires first, and says which test
     strategy:
       fail-fast: false # a red shard should not hide the other two's verdicts
@@ -821,7 +832,7 @@ jobs:
     # A separate job rather than more steps on Security Conformance, because
     # that job is 9 minutes and this is the second-longest after Build and
     # Test. Running in parallel costs the workflow no wall-clock at all — its
-    # critical path is Build and Test at ~14 minutes — where appending to an
+    # critical path is Build and Test at ~18 minutes — where appending to an
     # existing job would have pushed a serial chain closer to the timeout cliff
     # Task 20227 pulled it back from.
     #
