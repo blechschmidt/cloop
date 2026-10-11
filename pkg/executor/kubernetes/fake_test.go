@@ -1095,12 +1095,6 @@ func (s *fakeSource) setRenewErr(err error) {
 	s.mu.Unlock()
 }
 
-func (s *fakeSource) setLeaseWindow(d time.Duration) {
-	s.mu.Lock()
-	s.leaseWindow = d
-	s.mu.Unlock()
-}
-
 func (s *fakeSource) Release(leaseID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

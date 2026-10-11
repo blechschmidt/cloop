@@ -31,7 +31,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"slices"
 	"sort"
@@ -573,11 +572,3 @@ func parseRevokeAction(raw string) (remote.RevokeAction, error) {
 			remote.RevokeScrub, remote.RevokeKill, raw)
 	}
 }
-
-// revokeHTTPStatus maps a revocation outcome onto a status code.
-//
-// A partial revocation is 200 with the per-executor detail, not an error: the
-// operation ran, and its result is the payload. Returning 5xx would invite a
-// retry of something that already happened, and would hide the one thing the
-// operator needs to read — which device still has the credential.
-func revokeHTTPStatus(_ leaseRevocation) int { return http.StatusOK }

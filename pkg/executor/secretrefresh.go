@@ -31,7 +31,6 @@ package executor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -188,7 +187,3 @@ func ReplaceSecretFile(path string, content []byte, opts ReplaceOptions) error {
 	}
 	return replaceInDir(dir, name, content, mode, opts)
 }
-
-// errReplaceUnsupported is what a platform without directory-relative file
-// operations answers.
-var errReplaceUnsupported = errors.New("executor: replacing a credential file in place is not supported on this platform")

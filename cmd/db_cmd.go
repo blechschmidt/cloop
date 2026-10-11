@@ -447,15 +447,6 @@ Exit codes:
 	},
 }
 
-// safePrefix returns s[:n] if len(s) >= n, otherwise s. Used for trimming
-// hash digests in human-readable output without panicking on short inputs.
-func safePrefix(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
 func init() {
 	dbVerifyCmd.Flags().Bool("quick", false, "Use PRAGMA quick_check instead of integrity_check (faster, less thorough)")
 	dbMaintainCmd.Flags().Bool("dry-run", false, "Report DB size and reclaimable estimate without running VACUUM/ANALYZE")

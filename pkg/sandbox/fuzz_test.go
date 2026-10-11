@@ -106,7 +106,7 @@ func FuzzParse(f *testing.F) {
 		if h := spec.Hash(); len(h) != 64 {
 			t.Fatalf("Hash() = %q, want 64 hex characters", h)
 		}
-		if spec.Hash() != spec.Hash() {
+		if first, second := spec.Hash(), spec.Hash(); first != second {
 			t.Fatal("Hash() is not deterministic")
 		}
 	})

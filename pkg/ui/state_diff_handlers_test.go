@@ -50,18 +50,6 @@ func attachHubClient(srv *Server, workDir string) *hubClient {
 	return hc
 }
 
-// drainOne returns the next queued wsMessage or fails the test if none.
-func drainOne(t *testing.T, hc *hubClient) wsMessage {
-	t.Helper()
-	select {
-	case msg := <-hc.ch:
-		return msg
-	default:
-		t.Fatal("expected a queued wsMessage, none present")
-		return wsMessage{}
-	}
-}
-
 // drainAll consumes every queued wsMessage and returns them.
 func drainAll(hc *hubClient) []wsMessage {
 	out := []wsMessage{}

@@ -292,7 +292,7 @@ func TestRetryBudget_Context(t *testing.T) {
 	if RetryBudgetFromContext(context.Background()) != nil {
 		t.Fatal("FromContext on bare ctx returned non-nil")
 	}
-	if RetryBudgetFromContext(nil) != nil {
+	if RetryBudgetFromContext(nil) != nil { //nolint:staticcheck // SA1012: a nil Context is the input under test
 		t.Fatal("FromContext(nil) returned non-nil")
 	}
 }

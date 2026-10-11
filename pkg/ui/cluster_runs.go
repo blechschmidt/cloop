@@ -44,7 +44,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
-	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 )
 
@@ -715,9 +714,4 @@ const invalidateRunMoved = "run_moved"
 // clusterHandleStoreFor returns the member-scoped handle store drivers use.
 func (s *Server) clusterHandleStoreFor() executor.HandleStore {
 	return scopeHandleStore(controlPlaneHandleStore(), s.clusterNode())
-}
-
-// logRunEvent writes a cluster event about a project to its journal.
-func (s *Server) logClusterRunEvent(workDir, msg string) {
-	s.log().Info(logger.EventCheckpoint, 0, msg, map[string]interface{}{"project": workDir})
 }

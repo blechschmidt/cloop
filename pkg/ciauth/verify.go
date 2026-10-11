@@ -14,6 +14,7 @@ package ciauth
 // refusal to let a token name its own verification method.
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -541,14 +542,38 @@ func parseJWK(k jwk) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		x := new(big.Int).SetBytes(xb)
-		y := new(big.Int).SetBytes(yb)
-		if !elliptic.P256().IsOnCurve(x, y) {
+		pub, err := p256PublicKey(xb, yb)
+		if err != nil {
 			return nil, errors.New("EC point is not on P-256")
 		}
-		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
+		return pub, nil
 	}
 	return nil, fmt.Errorf("unsupported key type %q", k.Kty)
+}
+
+// p256PublicKey builds a P-256 public key from a JWK's decoded x and y.
+//
+// RFC 7518 §6.2.1.2 makes each coordinate exactly 32 bytes, but this parser
+// has always read them as big-endian integers of any length, so an issuer that
+// drops a leading zero byte (or pads one on) still verifies. That leniency is
+// kept: each coordinate is reduced to its 32-byte form first, and one too large
+// to have one is not a point on the curve. ecdsa.ParseUncompressedPublicKey
+// then refuses an off-curve point or an unreduced coordinate, as
+// elliptic.Curve.IsOnCurve did here before staticcheck's SA1019 retired it and
+// the raw X and Y fields with it (Task 20411).
+func p256PublicKey(xb, yb []byte) (*ecdsa.PublicKey, error) {
+	const size = 32
+	point := make([]byte, 1+2*size)
+	point[0] = 4 // the uncompressed form: 0x04 || X || Y
+	for i, coord := range [][]byte{xb, yb} {
+		coord = bytes.TrimLeft(coord, "\x00")
+		if len(coord) > size {
+			return nil, errors.New("coordinate wider than the curve")
+		}
+		end := 1 + (i+1)*size
+		copy(point[end-len(coord):end], coord)
+	}
+	return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
 }
 
 // claimsFrom projects a decoded payload onto the typed fields. Unreadable or

@@ -57,6 +57,7 @@ Examples:
 
 		// Build provider (optional when --no-ai)
 		var prov provider.Provider
+		model := calibrateModel
 		if !calibrateNoAI {
 			cfg, err := config.Load(workdir)
 			if err != nil {
@@ -75,7 +76,6 @@ Examples:
 				pName = autoSelectProvider()
 			}
 
-			model := calibrateModel
 			if model == "" {
 				switch pName {
 				case "anthropic":
@@ -116,7 +116,7 @@ Examples:
 		}
 
 		opts := provider.Options{
-			Model:   calibrateModel,
+			Model:   model,
 			Timeout: timeout,
 		}
 
@@ -162,7 +162,7 @@ Examples:
 
 			for _, stat := range report.ByRole {
 				factorStr := fmt.Sprintf("%.2fx", stat.Factor)
-				factorColor := color.New(color.Reset)
+				var factorColor *color.Color
 				if stat.Factor > 1.2 {
 					factorColor = errColor // significant underestimation
 				} else if stat.Factor < 0.85 {
@@ -205,7 +205,7 @@ Examples:
 			for _, sg := range report.Suggestions {
 				delta := sg.NewMinutes - sg.OldMinutes
 				deltaStr := fmt.Sprintf("%+d", delta)
-				deltaColor := color.New(color.Reset)
+				var deltaColor *color.Color
 				if delta > 0 {
 					deltaColor = errColor
 				} else if delta < 0 {

@@ -787,7 +787,9 @@ func TestBrokenCollectorDoesNotBlankTheScrape(t *testing.T) {
 	r.RegisterCollector("works", func() { good.Set(42) })
 	r.RegisterCollector("nil-deref", func() {
 		var m map[string]int
-		m["boom"] = 1 // assignment to entry in nil map
+		// A runtime error rather than panic(string): the recovery must not
+		// depend on what the collector panics with.
+		m["boom"] = 1 //nolint:staticcheck // SA5000 is the point: assignment to entry in nil map
 	})
 
 	out := r.Gather() // must not panic

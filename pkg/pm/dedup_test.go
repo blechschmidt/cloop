@@ -1,6 +1,7 @@
 package pm
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -88,7 +89,7 @@ func TestDeduplicateTasks_ShortCircuits(t *testing.T) {
 	emptyOpts := provider.Options{}
 
 	// No candidates → return empty, no provider call.
-	result, err := DeduplicateTasks(nil, nil, emptyOpts, nil, nil)
+	result, err := DeduplicateTasks(context.Background(), nil, emptyOpts, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error with no candidates: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestDeduplicateTasks_ShortCircuits(t *testing.T) {
 	}
 
 	// No existing tasks → return all candidates, no provider call.
-	result, err = DeduplicateTasks(nil, nil, emptyOpts, nil, candidates)
+	result, err = DeduplicateTasks(context.Background(), nil, emptyOpts, nil, candidates)
 	if err != nil {
 		t.Fatalf("unexpected error with no existing: %v", err)
 	}

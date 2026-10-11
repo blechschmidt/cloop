@@ -825,11 +825,10 @@ func contextWithTimeoutIfNone(parent context.Context, d time.Duration) (context.
 // bufferedReader accumulates CLI output into a bounded buffer and exposes a
 // helper that blocks until the OAuth URL line appears (or a deadline fires).
 type bufferedReader struct {
-	mu     sync.Mutex
-	buf    strings.Builder
-	url    string
-	urlCh  chan struct{}
-	closed bool
+	mu    sync.Mutex
+	buf   strings.Builder
+	url   string
+	urlCh chan struct{}
 }
 
 func newBufferedReader() *bufferedReader {

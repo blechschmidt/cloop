@@ -258,20 +258,6 @@ func (e *Executor) applyResult(handleID string, p ResultPayload) error {
 	return store("")
 }
 
-// writeBackResult returns the verified metadata for a handle, or nil.
-func (e *Executor) writeBackResult(handleID string) *executor.WriteBackResult {
-	hs, err := e.lookup(handleID)
-	if err != nil {
-		return nil
-	}
-	hs.mu.Lock()
-	defer hs.mu.Unlock()
-	if hs.writeBack == nil {
-		return nil
-	}
-	return hs.writeBack.result
-}
-
 // WriteBackBundle implements executor.WriteBackFetcher.
 //
 // The bytes are released to the caller and dropped here in the same breath.

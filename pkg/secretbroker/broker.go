@@ -1468,15 +1468,3 @@ func envKeyFromName(name string) string {
 	}
 	return out
 }
-
-// errIsDenial reports whether err is one of the denial sentinels, used to
-// pick the right severity when logging a lease outcome.
-func errIsDenial(err error) bool {
-	return errors.Is(err, ErrRepoDenied) ||
-		errors.Is(err, ErrHostDenied) ||
-		errors.Is(err, ErrNamespaceDenied) ||
-		errors.Is(err, ErrGrantExpired) ||
-		errors.Is(err, ErrGrantRevoked) ||
-		errors.Is(err, ErrGrantWithheld) ||
-		errors.Is(err, ErrMinimizedEmpty)
-}

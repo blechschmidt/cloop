@@ -120,25 +120,6 @@ func substringScore(text, query string) int {
 	return count
 }
 
-// matchesAny returns true if text contains any of the query words case-insensitively.
-func matchesAny(text, query string) bool {
-	if query == "" {
-		return true
-	}
-	lower := strings.ToLower(text)
-	// Try full query first.
-	if strings.Contains(lower, strings.ToLower(query)) {
-		return true
-	}
-	// Fall back to any word match (words > 3 chars).
-	for _, w := range strings.Fields(query) {
-		if len(w) > 3 && strings.Contains(lower, strings.ToLower(w)) {
-			return true
-		}
-	}
-	return false
-}
-
 // enabled returns true if the given source type is included in the filter list.
 func enabled(typ SourceType, types []SourceType) bool {
 	if len(types) == 0 {
@@ -515,7 +496,7 @@ func searchGlob(workDir, query, globPattern string, src SourceType) ([]Result, e
 		results = append(results, Result{
 			Source:    src,
 			ID:        filepath.Base(absPath),
-			Title:     fmt.Sprintf("%s: %s", strings.Title(string(src)), label),
+			Title:     fmt.Sprintf("%s: %s", sourceTitle(src), label),
 			Excerpt:   excerpt,
 			FilePath:  rel,
 			Timestamp: ts,
@@ -523,6 +504,18 @@ func searchGlob(workDir, query, globPattern string, src SourceType) ([]Result, e
 		})
 	}
 	return results, nil
+}
+
+// sourceTitle renders a source type for a result title: "retro" -> "Retro".
+// Source types are single lowercase ASCII words, so upper-casing the first byte
+// is all strings.Title ever did with them; it is deprecated (SA1019) for the
+// Unicode cases these never reach.
+func sourceTitle(src SourceType) string {
+	s := string(src)
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // searchSnapshots searches plan snapshot JSON files.

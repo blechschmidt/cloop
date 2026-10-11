@@ -54,9 +54,6 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("12"))
 
-	styleHelp = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241"))
-
 	stylePanelBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("240"))

@@ -55,8 +55,10 @@ import (
 // belongs in the default `go test ./...` a developer runs on every save.
 const enableEnv = "CLOOP_SOAK"
 
-// keepEnv leaves the soak root and any surviving containers in place for
-// post-mortem. Set it when a failure names something you want to go look at.
+// keepEnv leaves the soak root in place for post-mortem (soakRoot). Set it
+// when a failure names something you want to go look at. Containers are not
+// this suite's to remove either way: a container that survives a run is a
+// leak NoLeakedResources reports, and it is left where it is.
 const keepEnv = "CLOOP_SOAK_KEEP"
 
 // imageEnv overrides the sandbox image. The default is built by the suite

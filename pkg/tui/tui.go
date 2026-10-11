@@ -52,10 +52,6 @@ var (
 	styleHelp = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
-	styleError = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9")).
-			Bold(true)
-
 	// task status colours
 	statusColors = map[pm.TaskStatus]lipgloss.Color{
 		pm.TaskPending:    "243",
@@ -694,7 +690,7 @@ func runCloop(workdir string) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("cloop", "run")
 		cmd.Dir = workdir
-		cmd.Start() //nolint:errcheck — fire and forget
+		cmd.Start() //nolint:errcheck // fire and forget
 		return nil
 	}
 }

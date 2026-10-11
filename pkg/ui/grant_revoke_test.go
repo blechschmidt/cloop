@@ -69,18 +69,17 @@ func (e *revokeRecordingExec) asked() []executor.RevokeRequest {
 // two grants — a GitHub PAT delivered as files and an env secret — and the
 // Server serving it.
 type grantRevokeFixture struct {
-	dir       string
-	srv       *Server
-	ex        *revokeRecordingExec
-	sl        *secretLease
-	broker    *secretbroker.Broker
-	patGrant  secretbroker.Grant
-	envGrant  secretbroker.Grant
-	closeDB   func()
-	execID    string
-	pat, env  secretbroker.Secret
-	project   string
-	serverURL string
+	dir      string
+	srv      *Server
+	ex       *revokeRecordingExec
+	sl       *secretLease
+	broker   *secretbroker.Broker
+	patGrant secretbroker.Grant
+	envGrant secretbroker.Grant
+	closeDB  func()
+	execID   string
+	pat, env secretbroker.Secret
+	project  string
 }
 
 func newGrantRevokeFixture(t *testing.T, srv func(dir string) *Server) *grantRevokeFixture {

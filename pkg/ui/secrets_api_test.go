@@ -53,15 +53,6 @@ var secretsRevokeRoutes = []struct{ method, path string }{
 	{http.MethodDelete, "/api/grants/grant_nonexistent"},
 }
 
-// secretsFleetRoutes stayed at secret.grant/secret.revoke. A lease is live
-// fleet state — which executor holds which credential right now — with no
-// personal dimension to scope it by, so it keeps the maintainer floor the
-// whole panel used to have.
-var secretsFleetRoutes = []struct{ method, path string }{
-	{http.MethodGet, "/api/leases"},
-	{http.MethodPost, "/api/leases/lease_nonexistent/revoke"},
-}
-
 // requestNoBody issues a bodyless request and returns status plus body.
 func requestNoBody(t *testing.T, c *http.Client, method, url string) (int, string) {
 	t.Helper()

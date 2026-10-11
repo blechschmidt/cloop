@@ -59,19 +59,6 @@ func newLabeledCounter() *labeledCounter {
 	return &labeledCounter{values: make(map[string]*int64)}
 }
 
-func (c *labeledCounter) inc(labels map[string]string) {
-	key := labelKey(labels)
-	c.mu.Lock()
-	v, ok := c.values[key]
-	if !ok {
-		zero := int64(0)
-		v = &zero
-		c.values[key] = v
-	}
-	c.mu.Unlock()
-	atomic.AddInt64(v, 1)
-}
-
 func (c *labeledCounter) add(labels map[string]string, n int64) {
 	key := labelKey(labels)
 	c.mu.Lock()

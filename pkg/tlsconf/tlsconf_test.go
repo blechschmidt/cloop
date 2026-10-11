@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -693,4 +694,130 @@ func parseCertFile(t *testing.T, path string) *x509.Certificate {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return cert
+}
+
+// TestServerChoosesTheSuiteFromItsOwnList is what the threat model means by
+// "ECDHE+AEAD suites only, server cipher preference", checked by handshake
+// rather than by reading the config: a TLS 1.2 client gets a suite from
+// CipherSuites and nothing else, the order it lists them in does not steer the
+// choice, and a client offering nothing from the list is refused.
+//
+// Both server configs here used to set PreferServerCipherSuites to ask for the
+// second property. Go has ignored that field since 1.18 and orders suites
+// itself; Task 20411 removed it when staticcheck's SA1019 began gating CI, and
+// this pins that the handshake did not change with it.
+func TestServerChoosesTheSuiteFromItsOwnList(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if _, err := GenerateSelfSigned(certFile, keyFile, SelfSignedOptions{}); err != nil {
+		t.Fatalf("GenerateSelfSigned: %v", err)
+	}
+	fromFiles, _, err := LoadServerConfig(certFile, keyFile, "")
+	if err != nil {
+		t.Fatalf("LoadServerConfig: %v", err)
+	}
+	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perHandshake, err := ServerConfigFor(func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return &pair, nil
+	}, "")
+	if err != nil {
+		t.Fatalf("ServerConfigFor: %v", err)
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("the generated certificate did not parse as a root")
+	}
+
+	// handshake runs one TLS 1.2 handshake over an in-memory pipe and returns
+	// the suite the two sides agreed on.
+	handshake := func(t *testing.T, server *tls.Config, offered []uint16) (uint16, error) {
+		t.Helper()
+		sc, cc := net.Pipe()
+		defer sc.Close()
+		defer cc.Close()
+		deadline := time.Now().Add(10 * time.Second)
+		_ = sc.SetDeadline(deadline)
+		_ = cc.SetDeadline(deadline)
+		srv := tls.Server(sc, server)
+		cli := tls.Client(cc, &tls.Config{
+			RootCAs:      roots,
+			ServerName:   "localhost",
+			MinVersion:   tls.VersionTLS12,
+			MaxVersion:   tls.VersionTLS12,
+			CipherSuites: offered,
+		})
+		serverErr := make(chan error, 1)
+		go func() { serverErr <- srv.Handshake() }()
+		clientErr := cli.Handshake()
+		if clientErr != nil {
+			// Unblock the server's half before waiting for it.
+			_ = cc.Close()
+		}
+		if err := <-serverErr; err != nil && clientErr == nil {
+			return 0, err
+		}
+		if clientErr != nil {
+			return 0, clientErr
+		}
+		return cli.ConnectionState().CipherSuite, nil
+	}
+
+	ours := make(map[uint16]bool)
+	for _, id := range CipherSuites() {
+		ours[id] = true
+	}
+	const (
+		aes128 = tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+		aes256 = tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+		cbc128 = tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+		cbc256 = tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+	)
+	for name, server := range map[string]*tls.Config{
+		"LoadServerConfig": fromFiles,
+		"ServerConfigFor":  perHandshake,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Two orders of the same two suites: the server's choice must not
+			// follow the client's.
+			first, err := handshake(t, server, []uint16{aes256, aes128})
+			if err != nil {
+				t.Fatalf("handshake offering AES-256 first: %v", err)
+			}
+			second, err := handshake(t, server, []uint16{aes128, aes256})
+			if err != nil {
+				t.Fatalf("handshake offering AES-128 first: %v", err)
+			}
+			if first != second {
+				t.Errorf("the client's order chose the suite: %s offering AES-256 first, %s offering AES-128 first",
+					tls.CipherSuiteName(first), tls.CipherSuiteName(second))
+			}
+			if !ours[first] {
+				t.Errorf("negotiated %s, which CipherSuites does not list", tls.CipherSuiteName(first))
+			}
+
+			// A suite outside the list loses even as the client's first choice.
+			got, err := handshake(t, server, []uint16{cbc128, aes256})
+			if err != nil {
+				t.Fatalf("handshake offering CBC first, then AES-256-GCM: %v", err)
+			}
+			if got != aes256 {
+				t.Errorf("negotiated %s, want %s: the only listed suite the client offered",
+					tls.CipherSuiteName(got), tls.CipherSuiteName(aes256))
+			}
+
+			// And a client with nothing from the list gets no connection.
+			if got, err := handshake(t, server, []uint16{cbc128, cbc256}); err == nil {
+				t.Errorf("a client offering only CBC suites connected with %s", tls.CipherSuiteName(got))
+			}
+		})
+	}
 }

@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -309,28 +307,4 @@ func sqliteBusyProbe(dbPath string) func(context.Context) (Outcome, string) {
 		held := holder.Stop()
 		return OutcomeRecovered, fmt.Sprintf("write lock held for %s", held.Round(time.Millisecond))
 	}
-}
-
-// httptestRoundTripCount is exposed for tests that want to count synthetic
-// requests routed through a chaos transport-wrapped client.
-type httptestRoundTripCount struct {
-	atomic.Int64
-}
-
-// roundTripperFunc is a minimal RoundTripper used internally by testing
-// helpers; kept here so chaos_test.go does not need to redeclare it.
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// passthroughTransport is a benign default Base used in tests and probes that
-// don't wire a real upstream — it returns an empty 200 OK so callers can tell
-// "no fault" from "happy path".
-func passthroughTransport(srv *httptest.Server) http.RoundTripper {
-	if srv != nil {
-		return srv.Client().Transport
-	}
-	return roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return syntheticResponse(&http.Request{}, http.StatusOK, "{}"), nil
-	})
 }

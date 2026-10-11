@@ -81,7 +81,7 @@ func (d *DB) CreateVirtualExecutor(v VirtualExecutor) error {
 	if err != nil {
 		return fmt.Errorf("statedb: create virtual executor %q: begin: %w", v.ID, classifyDriverErr(err))
 	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 	if err := createVirtualExecutorOn(tx, v); err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func (d *DB) UpdateVirtualExecutor(id, name string, spec executor.VirtualSpec, b
 	if err != nil {
 		return fmt.Errorf("statedb: update virtual executor %q: begin: %w", id, classifyDriverErr(err))
 	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 	if err := updateVirtualExecutorOn(tx, cur, by); err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func (d *DB) DeleteVirtualExecutor(id string) error {
 	if err != nil {
 		return fmt.Errorf("statedb: delete virtual executor %q: begin: %w", id, classifyDriverErr(err))
 	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 	res, err := tx.Exec(`DELETE FROM virtual_executors WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("statedb: delete virtual executor %q: %w", id, classifyDriverErr(err))

@@ -78,10 +78,6 @@ func ParseSplitResponse(response string, parentTask *Task, nextID int) ([]*Task,
 		if item.Title == "" {
 			continue
 		}
-		priority := item.Priority
-		if priority == 0 {
-			priority = i + 1
-		}
 		t := &Task{
 			ID:          nextID + i,
 			Title:       item.Title,

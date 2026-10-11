@@ -552,7 +552,7 @@ func completeBaseline(db *sql.DB, m migration) error {
 	if err != nil {
 		return fmt.Errorf("adopt pre-framework database: begin: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck — ignored if Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // ignored if Commit succeeds
 	for i, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("adopt pre-framework database: statement %d of %s: %w\n--- SQL ---\n%s",
@@ -619,7 +619,7 @@ func applyOne(db *sql.DB, m migration) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck — ignored if Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // ignored if Commit succeeds
 
 	// Concurrent first-open protection: another process may have applied this
 	// migration between our currentVersion read and this transaction. Check

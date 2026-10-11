@@ -199,6 +199,16 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **`cloop task effort-calibrate` asks the model it resolved.** It looked up
+  the model from `--model`, then the provider's model in the configuration,
+  then the project's — and built its provider call from `--model` alone, so
+  without the flag the provider's built-in default answered instead of the
+  configured model. Found by the new lint gate's `ineffassign` (Task 20411).
+- **`CLOOP_SOAK_KEEP` keeps the soak root.** `docs/operations/soak.md`
+  documented it for post-mortems and nothing read it; the soak now leaves its
+  hub state, project databases and logs in a directory it names in the test
+  log (Task 20411).
+
 - **Three defects every interactive CLI user met.** (1) Every command whose
   stdout was a terminal asked it for its background colour (OSC 11 and a
   cursor-position request) in bubbletea's package init and waited up to five

@@ -236,10 +236,9 @@ func Run(ctx context.Context, workDir string, fw *Framework) (*Result, error) {
 // --- Go test parser ---
 
 var (
-	goFailRe  = regexp.MustCompile(`(?m)^--- FAIL: (\S+)`)
-	goPassRe  = regexp.MustCompile(`(?m)^--- PASS: (\S+)`)
-	goSkipRe  = regexp.MustCompile(`(?m)^--- SKIP: (\S+)`)
-	goFailBlk = regexp.MustCompile(`(?s)(--- FAIL: \S+ \([^)]+\)\n.*?)(?:--- (?:FAIL|PASS|SKIP):|^(?:ok|FAIL)\s)`)
+	goFailRe = regexp.MustCompile(`(?m)^--- FAIL: (\S+)`)
+	goPassRe = regexp.MustCompile(`(?m)^--- PASS: (\S+)`)
+	goSkipRe = regexp.MustCompile(`(?m)^--- SKIP: (\S+)`)
 )
 
 func parseGoResults(output string, r *Result) {
@@ -307,7 +306,6 @@ var (
 	jestFailRe    = regexp.MustCompile(`(?m)^\s*● (.+)`)
 	jestPassCntRe = regexp.MustCompile(`(?m)Tests:\s+(?:\d+ skipped, )?(?:(\d+) passed)?`)
 	jestFailCntRe = regexp.MustCompile(`(?m)Tests:\s+(\d+) failed`)
-	jestSkipCntRe = regexp.MustCompile(`(?m)Tests:\s+(\d+) skipped`)
 	vitestPassRe  = regexp.MustCompile(`(?m)(\d+) passed`)
 	vitestFailRe  = regexp.MustCompile(`(?m)(\d+) failed`)
 )

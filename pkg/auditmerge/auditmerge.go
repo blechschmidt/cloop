@@ -56,14 +56,6 @@ const (
 // String renders the source for a table cell or a --source filter.
 func (s Source) String() string { return string(s) }
 
-// home maps a source to the auditaction home whose events belong in it.
-func (s Source) home() auditaction.HomeDB {
-	if s == SourceControlPlane {
-		return auditaction.HomeControlPlane
-	}
-	return auditaction.HomeProject
-}
-
 // Chain is one database to read.
 type Chain struct {
 	// Source says which side of the split this is.

@@ -1149,8 +1149,6 @@ func lastLine(lines []string) string {
 	return lines[len(lines)-1]
 }
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
 // TestLogLinesJoinsChunksBeforeSplitting needs no cluster: it pins the parse
 // the end-to-end test reads the probe's results with.
 func TestLogLinesJoinsChunksBeforeSplitting(t *testing.T) {

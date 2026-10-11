@@ -246,7 +246,6 @@ type entryMeta struct {
 	key     string
 	path    string
 	modTime time.Time
-	hits    int
 }
 
 // listEntries returns metadata for all valid cache files sorted by LRU order

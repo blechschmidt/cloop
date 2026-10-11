@@ -25,11 +25,8 @@ package security
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
-	"io/fs"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
@@ -59,33 +56,29 @@ func TestEveryClaudeSpawnScopesItsEnvironment(t *testing.T) {
 	for _, pkgDir := range claudeSpawnPackages {
 		dir := filepath.Join(root, pkgDir)
 		fset := token.NewFileSet()
-		pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
-			return !strings.HasSuffix(fi.Name(), "_test.go")
-		}, 0)
+		files, err := parseNonTestGoFiles(fset, dir)
 		if err != nil {
 			t.Fatalf("parse %s: %v", dir, err)
 		}
-		for _, pkg := range pkgs {
-			for _, file := range pkg.Files {
-				ast.Inspect(file, func(n ast.Node) bool {
-					fn, ok := n.(*ast.FuncDecl)
-					if !ok || fn.Body == nil {
-						return true
-					}
-					if !spawnsClaude(fn) {
-						return true
-					}
-					checked[fn.Name.Name] = true
-					if !scopesEnv(fn) {
-						t.Errorf("%s: %s execs the claude binary but does not set Env from one of %v.\n"+
-							"An inherited CLAUDE_CODE_OAUTH_TOKEN outranks CLAUDE_CONFIG_DIR, so this "+
-							"invocation would authenticate as the host account no matter which user it "+
-							"is running for.",
-							fset.Position(fn.Pos()), fn.Name.Name, scopingHelpers)
-					}
+		for _, file := range files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				fn, ok := n.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
 					return true
-				})
-			}
+				}
+				if !spawnsClaude(fn) {
+					return true
+				}
+				checked[fn.Name.Name] = true
+				if !scopesEnv(fn) {
+					t.Errorf("%s: %s execs the claude binary but does not set Env from one of %v.\n"+
+						"An inherited CLAUDE_CODE_OAUTH_TOKEN outranks CLAUDE_CONFIG_DIR, so this "+
+						"invocation would authenticate as the host account no matter which user it "+
+						"is running for.",
+						fset.Position(fn.Pos()), fn.Name.Name, scopingHelpers)
+				}
+				return true
+			})
 		}
 	}
 

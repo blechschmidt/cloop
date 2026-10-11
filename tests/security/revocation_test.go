@@ -21,7 +21,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -366,10 +365,7 @@ func executorPackageRoot(t *testing.T) string {
 // yet.
 func executorMethods(t *testing.T, dir string) map[string]bool {
 	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	files, err := parseNonTestGoFiles(token.NewFileSet(), dir)
 	if err != nil {
 		// A directory that does not parse is not a silent pass: a driver
 		// hidden behind a syntax error would skip the gate entirely.
@@ -377,26 +373,49 @@ func executorMethods(t *testing.T, dir string) map[string]bool {
 	}
 
 	out := map[string]bool{}
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
-					continue
-				}
-				star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
-				if !ok {
-					continue
-				}
-				ident, ok := star.X.(*ast.Ident)
-				if !ok || ident.Name != "Executor" {
-					continue
-				}
-				out[fn.Name.Name] = true
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
 			}
+			star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			ident, ok := star.X.(*ast.Ident)
+			if !ok || ident.Name != "Executor" {
+				continue
+			}
+			out[fn.Name.Name] = true
 		}
 	}
 	return out
+}
+
+// parseNonTestGoFiles parses every .go file directly in dir except the tests,
+// build constraints aside: what go/parser.ParseDir returned for the filter both
+// callers gave it, before it was deprecated (Go 1.25, staticcheck SA1019).
+// Unlike ParseDir it stops at the first file that does not parse, which both
+// callers already treated as fatal, and it returns the files in name order.
+func parseNonTestGoFiles(fset *token.FileSet, dir string) ([]*ast.File, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, nil
 }
 
 // TestRevocableMaterialIsRefusedOnADriverThatCannotRevoke asserts the refusal

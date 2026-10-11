@@ -210,7 +210,9 @@ func (o *Orchestrator) recordRunOwner() {
 		"reexecs": rec.Reexecs,
 		"exe":     rec.Exe,
 	}
-	msg := "Run continued on " + rec.Build.Label()
+	// A resumed run has either a handoff or the reason it was lost
+	// (cmd/run_handoff.go), so one of these two always says which.
+	var msg string
 	if h != nil {
 		details["from"] = h.From
 		details["reason"] = h.Reason

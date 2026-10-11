@@ -204,12 +204,9 @@ func ParseResponse(raw string) *PRResult {
 		bodyLines = append(bodyLines, line)
 	}
 
+	// A response that is only a title yields an empty body, which is a valid
+	// pull request.
 	body := strings.TrimSpace(strings.Join(bodyLines, "\n"))
-
-	// If parsing resulted in no body sections, use the whole raw as body
-	if body == "" && title != "" {
-		// Nothing to do — the AI gave only a title
-	}
 	if title == "" {
 		title = "chore: update project"
 	}

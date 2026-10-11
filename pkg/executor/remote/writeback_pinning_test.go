@@ -849,7 +849,7 @@ func TestResultBudgetLimitsDefault(t *testing.T) {
 	if u := b.Usage(); u.Pinned != 0 || u.Executors != 0 || u.PerExecutorLimit != 1<<20 {
 		t.Errorf("an unused budget reports %+v", u)
 	}
-	if remote.DefaultResultBudget() != remote.DefaultResultBudget() {
+	if first, second := remote.DefaultResultBudget(), remote.DefaultResultBudget(); first != second {
 		t.Error("the process-wide budget is not one budget")
 	}
 }

@@ -77,11 +77,6 @@ var (
 			Background(lipgloss.Color("238")).
 			Padding(0, 1)
 
-	styleStatusBar = lipgloss.NewStyle().
-			Background(lipgloss.Color("235")).
-			Foreground(lipgloss.Color("250")).
-			Padding(0, 1)
-
 	priorityColors = []lipgloss.Color{
 		"196", // P1 red
 		"202", // P2 orange

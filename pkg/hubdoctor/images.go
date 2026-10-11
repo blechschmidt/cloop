@@ -367,12 +367,3 @@ func probe(ctx context.Context, opts Options, rawURL string) (int, error) {
 	}()
 	return resp.StatusCode, nil
 }
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}

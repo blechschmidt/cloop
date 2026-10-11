@@ -2169,21 +2169,6 @@ func (s *Server) broadcastStateDiff(workDir string, curr *state.ProjectState) {
 	s.broadcastToProject(workDir, wsMessage{Type: "state_diff", Data: raw})
 }
 
-// resetStateDiffCache forgets the cached snapshot for workDir so the next
-// broadcast emits a full-state diff. Called from the WebSocket connect path
-// for the connecting client's project so a reconnecting tab catches up via
-// state_diff rather than waiting for the next mutation to ship a partial
-// delta against a state it never saw.
-//
-// Single-shot drop — does not coordinate with concurrent broadcasts. If a
-// broadcast races in between, the next one will simply re-establish the
-// cache (worst case: one redundant full-state diff to other clients).
-func (s *Server) resetStateDiffCache(workDir string) {
-	if s.diffCache != nil {
-		s.diffCache.drop(workDir)
-	}
-}
-
 // broadcastToProject sends a WebSocket message only to clients connected to
 // the given project (identified by its resolved workDir path). Slow clients
 // receive a resync directive instead of silent event loss (see sendOrLag).
@@ -7902,10 +7887,6 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 
 	// ── 7. Latency histogram (from checkpoint history) ────────────────────────
 	// Scan .cloop/task-checkpoints/ for "complete" events with ElapsedSec.
-	type latHistEntry struct {
-		Provider string  `json:"provider"`
-		ElapsedS float64 `json:"elapsed_s"`
-	}
 	latByProvider := map[string][]float64{}
 
 	cpBase := filepath.Join(workDir, ".cloop", "task-checkpoints")

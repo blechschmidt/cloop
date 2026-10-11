@@ -140,7 +140,7 @@ func ParseActions(text string) []Action {
 func (sess *Session) applyActions(actions []Action) []ActionResult {
 	var results []ActionResult
 	for _, a := range actions {
-		r := ActionResult{Action: a}
+		var r ActionResult
 		switch a.Type {
 		case ActionTaskDone:
 			r = sess.applyTaskStatus(a, pm.TaskDone)

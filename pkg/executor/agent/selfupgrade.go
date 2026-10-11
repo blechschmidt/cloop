@@ -185,7 +185,7 @@ func (a *Agent) remoteUpgradeReadiness() (remoteUpgradeMode, install.Spec, insta
 	if err != nil {
 		return remoteUpgradeUnavailable, spec, out, err.Error()
 	}
-	mode := remoteUpgradeUnavailable
+	var mode remoteUpgradeMode
 	switch {
 	case out == install.OutputSystemd && (&install.Installer{}).HelperInstalled(spec):
 		// Installed is not armed: a path unit that was disabled, or stopped

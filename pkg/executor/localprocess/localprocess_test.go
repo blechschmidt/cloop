@@ -492,7 +492,7 @@ func TestStreamUnsubscribeDuringHeavyOutput(t *testing.T) {
 				case <-time.After(50 * time.Millisecond):
 				}
 				cancel()
-				for range lines { //nolint:revive — drain until the driver closes it
+				for range lines { //nolint:revive // drain until the driver closes it
 				}
 			}
 		}()
@@ -777,7 +777,7 @@ func TestEnsureIsIdempotent(t *testing.T) {
 	if ex.Kind() != executor.KindLocalProcess {
 		t.Fatalf("Resolve fell back to %q, want the host driver", ex.Kind())
 	}
-	if Shared() != Shared() {
+	if first, second := Shared(), Shared(); first != second {
 		t.Fatal("Shared() returned different singletons")
 	}
 }

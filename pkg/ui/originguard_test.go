@@ -76,15 +76,6 @@ func apiErrorCode(body []byte) string {
 	return env.Error.Code
 }
 
-// guardRefusal reports whether a response is one of the guards' refusals.
-func guardRefusal(body []byte) bool {
-	switch apiErrorCode(body) {
-	case "CROSS_ORIGIN", "UNSUPPORTED_MEDIA_TYPE", "MISDIRECTED_REQUEST":
-		return true
-	}
-	return false
-}
-
 // newGuardedHub serves a hub with no sign-in, or with a static token, through
 // its whole handler chain; configure, when given, runs before it serves. The
 // rate limiter is lifted: the sweep sends a few hundred requests from one

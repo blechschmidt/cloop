@@ -390,7 +390,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		return executor.Handle{}, err
 	}
 
-	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...) //nolint:gosec — argv is caller-supplied, never shell-interpreted
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...) //nolint:gosec // argv is caller-supplied, never shell-interpreted
 	cmd.Dir = spec.WorkDir
 	if spec.Env != nil {
 		cmd.Env = withRunnableEnv(env, spec.WorkDir)

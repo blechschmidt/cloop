@@ -222,13 +222,6 @@ func parseBriefFormat(s string) brief.Format {
 	}
 }
 
-func briefMin(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func init() {
 	planBriefCmd.Flags().StringVar(&briefFormat, "format", "markdown", "Output format: markdown, html, or slack")
 	planBriefCmd.Flags().StringVar(&briefProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")

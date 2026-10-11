@@ -39,7 +39,7 @@ func TestLoopbackAGrantedPayloadFindsAPerUserHarness(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(harness), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(harness, []byte("#!/bin/sh\necho stub\n"), 0o755); err != nil { //nolint:gosec — must be executable
+	if err := os.WriteFile(harness, []byte("#!/bin/sh\necho stub\n"), 0o755); err != nil { //nolint:gosec // must be executable
 		t.Fatal(err)
 	}
 

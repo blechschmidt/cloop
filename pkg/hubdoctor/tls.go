@@ -22,7 +22,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -336,13 +335,4 @@ func checkSANs(leaf *x509.Certificate, external string, add addFn) {
 		Check: "tls.san", Title: "Certificate names", Severity: SeverityPass,
 		Message: fmt.Sprintf("valid for %s (%s)", host, strings.Join(names, ", ")),
 	})
-}
-
-// hostPort is a small helper for registry probes elsewhere in the package; it
-// lives here because it is about network addressing, not about certificates.
-func hostPort(host string, defaultPort string) string {
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	return net.JoinHostPort(host, defaultPort)
 }

@@ -171,7 +171,7 @@ func parseComment(t *testing.T, line string, lineNo int, famFor func(string) *fa
 func parseSample(t *testing.T, line string, lineNo int) *sample {
 	t.Helper()
 
-	name, rest := line, ""
+	var name, rest string
 	labels := map[string]string{}
 
 	if brace := strings.IndexByte(line, '{'); brace >= 0 {

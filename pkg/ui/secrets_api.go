@@ -1607,6 +1607,10 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	// ID does not answer it.
 	s.auditLeaseRevoke(r, id, executorID, projectID, secretNames)
 	s.broadcastSecretsUpdate("lease_revoked", id)
+	// 200 even when the revocation reached only some holders: the operation
+	// ran, and its result is the payload. A 5xx would invite a retry of
+	// something that already happened, and would hide the one thing the
+	// operator needs to read — which device still has the credential.
 	jsonOK(w, map[string]any{
 		"ok": true, "id": id, "revoked": true,
 		"executor_id":   executorID,

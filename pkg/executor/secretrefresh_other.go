@@ -3,9 +3,15 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 )
+
+// errReplaceUnsupported is what a platform without directory-relative file
+// operations answers. It lives with the only code that returns it, so a linter
+// run for a unix target does not report it unused.
+var errReplaceUnsupported = errors.New("executor: replacing a credential file in place is not supported on this platform")
 
 // IdentityOf is unsupported off unix.
 func IdentityOf(path string) (FileIdentity, error) {

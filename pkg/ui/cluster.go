@@ -19,8 +19,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -664,9 +662,6 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 	}
 }
 
-// errNotClustered is returned by internal endpoints called on a standalone hub.
-var errNotClustered = errors.New("this hub is not a cluster member")
-
 // requirePeer refuses a request that did not come from a verified member. The
 // internal endpoints act on another member's behalf and must never be
 // reachable by a client, whatever its credentials.
@@ -681,14 +676,4 @@ func requirePeer(w http.ResponseWriter, r *http.Request) bool {
 // clusterLogf is the logger handed to pkg/hubcluster.
 func clusterLogf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
-}
-
-// marshalBusPayload is json.Marshal for payloads that cannot fail to encode;
-// a failure is a programming error and yields "null".
-func marshalBusPayload(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return json.RawMessage("null")
-	}
-	return b
 }

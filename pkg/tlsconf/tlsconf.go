@@ -109,7 +109,14 @@ func VersionName(v uint16) string {
 	}
 }
 
-// CipherSuites returns the TLS 1.2 suites cloop offers, in preference order.
+// CipherSuites returns the TLS 1.2 suites cloop enables.
+//
+// The order is not a preference. Since Go 1.17 crypto/tls orders the suites
+// itself, server-side, from the ones a config enables — which is why the
+// PreferServerCipherSuites flag these configs used to set was ignored, and is
+// gone since Task 20411 (TestServerChoosesTheSuiteFromItsOwnList pins the
+// result: the server's choice, from this list only, whatever order a client
+// offers).
 //
 // Only AEAD suites with forward secrecy are listed: ECDHE key agreement plus
 // AES-GCM or ChaCha20-Poly1305. Everything Go still supports for
@@ -169,11 +176,10 @@ func LoadServerConfig(certFile, keyFile, minVersion string) (cfg *tls.Config, pe
 		return nil, "", fmt.Errorf("tlsconf: load key pair (cert=%s key=%s): %w", certFile, keyFile, err)
 	}
 	return &tls.Config{
-		Certificates:             []tls.Certificate{pair},
-		MinVersion:               min,
-		CipherSuites:             CipherSuites(),
-		PreferServerCipherSuites: true,
-		NextProtos:               []string{"h2", "http/1.1"},
+		Certificates: []tls.Certificate{pair},
+		MinVersion:   min,
+		CipherSuites: CipherSuites(),
+		NextProtos:   []string{"h2", "http/1.1"},
 	}, CheckKeyPermissions(keyFile), nil
 }
 
@@ -191,11 +197,10 @@ func ServerConfigFor(getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate
 		return nil, err
 	}
 	return &tls.Config{
-		GetCertificate:           getCertificate,
-		MinVersion:               min,
-		CipherSuites:             CipherSuites(),
-		PreferServerCipherSuites: true,
-		NextProtos:               []string{"h2", "http/1.1"},
+		GetCertificate: getCertificate,
+		MinVersion:     min,
+		CipherSuites:   CipherSuites(),
+		NextProtos:     []string{"h2", "http/1.1"},
 	}, nil
 }
 

@@ -393,7 +393,10 @@ func extractArchive(archivePath, destDir string) error {
 			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)|0o700); err != nil {
 				return fmt.Errorf("mkdir %s: %w", target, err)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		// No case for TypeRegA, the pre-POSIX regular-file flag: tar.Reader
+		// reports it as TypeReg, or TypeDir when the name ends in a slash
+		// (TestExtractArchiveRestoresLegacyTypeflags).
+		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return fmt.Errorf("mkdir parent %s: %w", target, err)
 			}

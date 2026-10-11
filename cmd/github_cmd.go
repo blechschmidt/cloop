@@ -458,7 +458,7 @@ func runGitHubPRs(cmd *cobra.Command, args []string) error {
 						allPass = false
 					}
 				}
-				ciStr := dim.Sprint(summary)
+				var ciStr string
 				if allPass {
 					ciStr = green.Sprint("CI: " + summary)
 				} else if anyFail {

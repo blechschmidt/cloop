@@ -2997,7 +2997,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			taskOutputTokens += gateOut.workOut
 			taskThinkingTokens += gateOut.workThinking
 			if len(gateOut.steps) > 0 {
-				taskOutput, taskBackground, taskSessionID = gateOut.output, gateOut.background, gateOut.sessionID
+				// The fix turns' session is not kept: the gate was the last
+				// thing in this attempt that resumes one.
+				taskOutput, taskBackground = gateOut.output, gateOut.background
 				task.Result = truncate(taskOutput, 500)
 				signal = applyBackgroundOutcome(task, taskBackground, gateOut.signal)
 			}
@@ -3811,13 +3813,12 @@ func (o *Orchestrator) recoverStaleQueueEntries() {
 
 // taskResult holds the output of a single parallel task execution.
 type taskResult struct {
-	task        *pm.Task
-	result      *provider.Result
-	err         error
-	duration    time.Duration
-	bufferedOut string
-	timedOut    bool   // true when the task's per-task budget was exceeded
-	partialOut  string // partial output captured before timeout
+	task       *pm.Task
+	result     *provider.Result
+	err        error
+	duration   time.Duration
+	timedOut   bool   // true when the task's per-task budget was exceeded
+	partialOut string // partial output captured before timeout
 	// continued is how many times the agent's turn was handed back because
 	// it ended waiting on its own work (Task 20349).
 	continued int
@@ -5560,42 +5561,6 @@ func (o *Orchestrator) tokenLimit() int {
 		return o.config.ContextTokenLimit
 	}
 	return 100000
-}
-
-// pruneStepHistory applies token-budget pruning to a step slice.
-// It collects the step outputs as strings, calls pm.PruneToTokenBudget, then
-// reconstructs the []state.StepResult slice for the entries that were retained.
-// Returns (prunedSteps, originalCount, keptCount).
-func pruneStepHistory(steps []state.StepResult, budgetTokens int) ([]state.StepResult, int, int) {
-	n := len(steps)
-	if n == 0 {
-		return steps, 0, 0
-	}
-	texts := make([]string, n)
-	for i, step := range steps {
-		texts[i] = step.Output
-	}
-	pruned := pm.PruneToTokenBudget(texts, budgetTokens)
-	if len(pruned) == n {
-		return steps, n, n
-	}
-	// Reconstruct the StepResult slice that corresponds to the pruned text slice.
-	// PruneToTokenBudget always keeps index 0 and the last two; it drops oldest
-	// intermediates from index 1 forward. The drop count equals n - len(pruned).
-	dropCount := n - len(pruned)
-	result := make([]state.StepResult, 0, len(pruned))
-	result = append(result, steps[0])
-	if n >= 3 {
-		// Middle: steps[1:n-2]; kept = steps[1+dropCount:n-2]
-		middleStart := 1 + dropCount
-		if middleStart < n-2 {
-			result = append(result, steps[middleStart:n-2]...)
-		}
-		result = append(result, steps[n-2:]...)
-	} else if n == 2 {
-		result = append(result, steps[1])
-	}
-	return result, n, len(result)
 }
 
 // prunePlanForPrompt returns a shallow copy of plan with the Result field of older

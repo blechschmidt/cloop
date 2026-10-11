@@ -254,7 +254,7 @@ func (m liveModel) View() string {
 		if t.Status == pm.TaskInProgress {
 			if start, ok := m.startTimes[t.ID]; ok && !start.IsZero() {
 				d := m.now.Sub(start).Truncate(time.Second)
-				elapsed = " " + lgNodeInProgress.Copy().Faint(true).Render(fmt.Sprintf("(%s)", d))
+				elapsed = " " + lgNodeInProgress.Faint(true).Render(fmt.Sprintf("(%s)", d))
 			}
 		}
 
@@ -269,7 +269,7 @@ func (m liveModel) View() string {
 				depIDs[i] = fmt.Sprintf("#%d", d)
 			}
 			depLine := "     needs: " + strings.Join(depIDs, ", ")
-			sb.WriteString(style.Copy().Faint(true).Render(depLine) + "\n")
+			sb.WriteString(style.Faint(true).Render(depLine) + "\n")
 		}
 
 		// Dependency arrows to children

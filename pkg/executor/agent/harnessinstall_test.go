@@ -703,7 +703,7 @@ func TestFetchRefusesAnEmptyOrFailedResponse(t *testing.T) {
 func writeStubBinary(t *testing.T, path, version string) {
 	t.Helper()
 	body := "#!/bin/sh\necho \"" + version + "\"\n"
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec — a test stub that must be executable
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // a test stub that must be executable
 		t.Fatalf("write stub %s: %v", path, err)
 	}
 }

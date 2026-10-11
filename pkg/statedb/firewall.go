@@ -233,7 +233,7 @@ func (d *DB) UpdateFirewalls(fn func(*FirewallTx) error) error {
 	if err != nil {
 		return fmt.Errorf("statedb: firewall update: begin: %w", classifyDriverErr(err))
 	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 	if err := fn(&FirewallTx{tx: tx}); err != nil {
 		return err
 	}

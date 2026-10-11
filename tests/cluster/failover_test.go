@@ -82,7 +82,7 @@ func TestFailedOverRunOnAHubCluster(t *testing.T) {
 
 	// The replacement is started on the second agent by B — the only member
 	// that can reach it — which follows it as the project's run.
-	st = w.waitStatusLong("the run to fail over to edge-two and be followed by B", func(s clusterStatus) bool {
+	w.waitStatusLong("the run to fail over to edge-two and be followed by B", func(s clusterStatus) bool {
 		return s.owner("run", w.projDir) == b.id
 	})
 	w.waitStubStarts(2)

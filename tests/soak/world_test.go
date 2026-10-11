@@ -229,6 +229,23 @@ type world struct {
 	startedAt time.Time
 }
 
+// soakRoot is the directory the world lives in: the test's own temporary
+// directory, removed when it ends, or with CLOOP_SOAK_KEEP set one that is left
+// in place — hub state, project databases, logs — for a post-mortem of the
+// failure that made someone ask for it.
+func soakRoot(t *testing.T) string {
+	t.Helper()
+	if os.Getenv(keepEnv) == "" {
+		return t.TempDir()
+	}
+	root, err := os.MkdirTemp("", "cloop-soak-")
+	if err != nil {
+		t.Fatalf("create the soak root: %v", err)
+	}
+	t.Logf("%s set: leaving the soak root in place: %s", keepEnv, root)
+	return root
+}
+
 // newWorld boots a hub with flagTenants identities, each owning
 // flagProjectsPerTenant projects bound to a real container executor.
 func newWorld(t *testing.T) *world {
@@ -236,7 +253,7 @@ func newWorld(t *testing.T) *world {
 
 	rt := detectRuntime(t)
 	w := &world{
-		root:    t.TempDir(),
+		root:    soakRoot(t),
 		runtime: rt,
 		image:   ensureImage(t, rt),
 		// Unique per run so container inventory can attribute a container to

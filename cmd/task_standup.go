@@ -238,7 +238,7 @@ Examples:
 
 		// Post to Slack.
 		if standupTaskSlack && len(allSlackText) > 0 {
-			title := "cloop micro-standup"
+			var title string
 			if len(allCards) == 1 {
 				title = fmt.Sprintf("cloop micro-standup: Task #%d", allCards[0].TaskID)
 			} else {

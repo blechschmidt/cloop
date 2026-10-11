@@ -195,13 +195,6 @@ func closeRunEgress(handleID, reason string) {
 	liveEgress.byHandle(handleID).close(reason)
 }
 
-// closeAllRunEgress closes every session this hub holds.
-func closeAllRunEgress(reason string) {
-	for _, egr := range liveEgress.snapshot() {
-		egr.close(reason)
-	}
-}
-
 // suspendAllRunEgress suspends every durable session this hub holds and closes
 // the rest — what a hub stopping gracefully does, so the process that adopts
 // each run restores its session with its counters rather than finding it

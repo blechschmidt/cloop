@@ -312,8 +312,7 @@ func colorCount(n int, c color.Attribute) string {
 // ---------- workspace run-all ----------
 
 var (
-	runAllParallel   bool
-	runAllExtraFlags []string
+	runAllParallel bool
 )
 
 var workspaceRunAllCmd = &cobra.Command{

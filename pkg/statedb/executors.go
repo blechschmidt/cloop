@@ -270,7 +270,7 @@ func (d *DB) DeleteExecutor(id string) error {
 	if err != nil {
 		return fmt.Errorf("statedb: delete executor %q: begin: %w", id, classifyDriverErr(err))
 	}
-	defer tx.Rollback() //nolint:errcheck — no-op once Commit succeeds
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 
 	if _, err := tx.Exec(`DELETE FROM project_executors WHERE executor_id = ?`, id); err != nil {
 		return fmt.Errorf("statedb: delete executor %q bindings: %w", id, classifyDriverErr(err))
