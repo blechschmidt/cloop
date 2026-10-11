@@ -132,6 +132,11 @@ var rootCommandGroups = map[string]string{
 	"mcp":       groupHub,
 	"workspace": groupHub,
 	"session":   groupHub,
+	// A terminal on a hub with single sign-on (Task 20412).
+	"login":  groupHub,
+	"logout": groupHub,
+	"whoami": groupHub,
+	"remote": groupHub,
 
 	// Secrets, access and spend — credentials, the audit trail, and budgets.
 	"secret":    groupAccess,

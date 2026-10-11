@@ -35,6 +35,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"github.com/blechschmidt/cloop/pkg/hubclient"
 )
 
 var (
@@ -63,6 +65,7 @@ Examples:
   cloop task attach 41                        # read-only shell in task 41's sandbox
   cloop task attach 41 -- ps aux              # run one command and exit
   cloop task attach 41 --write                # interactive session (needs the permission)
+  cloop task attach 41 --hub https://hub:8888 # with the session from ` + "`cloop login https://hub:8888`" + `
   cloop task attach 41 --hub https://hub:8888 --token "$CLOOP_API_TOKEN"`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -83,21 +86,33 @@ func runTaskAttach(ctx context.Context, taskID int, command []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	endpoint, err := attachEndpoint(taskID, command)
+	target, err := resolveAttachHub()
+	if err != nil {
+		return err
+	}
+	if target.byDefault {
+		fmt.Fprintf(os.Stderr, "Attaching on %s, the default hub `cloop login` recorded (--hub names another).\n", target.base)
+	}
+	endpoint, err := attachEndpoint(target.base, taskID, command)
 	if err != nil {
 		return err
 	}
 	hdr := http.Header{}
-	if tok := attachAuthToken(); tok != "" {
-		hdr.Set("Authorization", "Bearer "+tok)
+	if target.credential != "" {
+		hdr.Set("Authorization", "Bearer "+target.credential)
+	}
+	opts := &websocket.DialOptions{HTTPHeader: hdr}
+	if target.client != nil {
+		// The hub's own CA, when `cloop login --ca-file` named one.
+		opts.HTTPClient = target.client
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	conn, resp, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: hdr})
+	conn, resp, err := websocket.Dial(ctx, endpoint, opts)
 	if err != nil {
-		return attachDialError(err, resp)
+		return attachDialError(err, resp, target.fromLogin)
 	}
 	defer conn.CloseNow()
 	// No read limit beyond the default is needed for control messages, but the
@@ -120,15 +135,92 @@ func runTaskAttach(ctx context.Context, taskID int, command []string) error {
 	return relayOutput(ctx, conn)
 }
 
-// attachEndpoint builds the hub WebSocket URL.
-func attachEndpoint(taskID int, command []string) (string, error) {
+// attachHub is where a terminal session is opened and with what.
+type attachHub struct {
+	base       string
+	credential string
+	// client trusts the hub's CA, for a session `cloop login --ca-file` made.
+	client *http.Client
+	// fromLogin marks a credential that came from `cloop login`, so a
+	// refusal can name the right remedy.
+	fromLogin bool
+	// byDefault marks a hub nothing named: the default `cloop login`
+	// recorded, which the person is told before anything is typed into it.
+	byDefault bool
+}
+
+// localHub is where `cloop task attach` goes when nothing names a hub.
+const localHub = "http://127.0.0.1:8080"
+
+// resolveAttachHub picks the hub and the credential (Task 20412). The hub:
+// --hub, CLOOP_HUB_URL, the default hub `cloop login` recorded, or a local
+// one. The credential: --token, or the session `cloop login` stored for that
+// hub — so on a hub with single sign-on, a developer who signed in needs no
+// token at all — or CLOOP_API_TOKEN where that is the hub's.
+//
+// CLOOP_API_TOKEN names no hub of its own. Beside CLOOP_HUB_URL it is that
+// hub's token and no other's; alone, it is the local hub's when nothing names
+// a hub, as it was before terminals had sessions, and otherwise used only for
+// a hub this terminal holds no session for — never sent to a hub named with
+// --hub in place of the session made for it, nor to a hub other than the one
+// CLOOP_HUB_URL pairs it with.
+func resolveAttachHub() (attachHub, error) {
+	envHub := strings.TrimSpace(os.Getenv("CLOOP_HUB_URL"))
 	base := strings.TrimSpace(attachHubURL)
 	if base == "" {
-		base = strings.TrimSpace(os.Getenv("CLOOP_HUB_URL"))
+		base = envHub
+	}
+	if tok := strings.TrimSpace(attachToken); tok != "" {
+		if base == "" {
+			base = localHub
+		}
+		return attachHub{base: base, credential: tok}, nil
+	}
+	envToken := strings.TrimSpace(os.Getenv("CLOOP_API_TOKEN"))
+	switch {
+	case envToken == "":
+	case envHub != "" && sameHub(base, envHub):
+		return attachHub{base: base, credential: envToken}, nil
+	case base == "":
+		return attachHub{base: localHub, credential: envToken}, nil
+	}
+
+	// A stored session, if this terminal has one for the hub. A credential
+	// file is only read when it would be used, and a file other users can
+	// read is refused outright rather than presented.
+	path, err := hubclient.DefaultPath()
+	if err != nil {
+		return attachHub{}, err
+	}
+	f, err := hubclient.Load(path)
+	if err != nil {
+		return attachHub{}, err
+	}
+	byDefault := false
+	if base == "" && f.Default != "" {
+		base, byDefault = f.Default, true
 	}
 	if base == "" {
-		base = "http://127.0.0.1:8080"
+		base = localHub
 	}
+	h, ok := f.Lookup(base)
+	if !ok {
+		if envToken != "" && envHub == "" {
+			return attachHub{base: base, credential: envToken}, nil
+		}
+		// An unauthenticated attempt: a local hub without sign-in, or one
+		// whose refusal will say what to present.
+		return attachHub{base: base}, nil
+	}
+	c, err := hubclient.New(h.URL, h.CAFile, h.Credential)
+	if err != nil {
+		return attachHub{}, err
+	}
+	return attachHub{base: h.URL, credential: h.Credential, client: c.HTTPClient(), fromLogin: true, byDefault: byDefault}, nil
+}
+
+// attachEndpoint builds the hub WebSocket URL.
+func attachEndpoint(base string, taskID int, command []string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("hub url %q: %w", base, err)
@@ -163,18 +255,10 @@ func attachEndpoint(taskID int, command []string) (string, error) {
 	return u.String(), nil
 }
 
-// attachAuthToken resolves the bearer credential.
-func attachAuthToken() string {
-	if t := strings.TrimSpace(attachToken); t != "" {
-		return t
-	}
-	return strings.TrimSpace(os.Getenv("CLOOP_API_TOKEN"))
-}
-
 // attachDialError turns a failed upgrade into something actionable. The bare
 // library error says only "expected handshake response status code 101", which
 // is true and useless.
-func attachDialError(err error, resp *http.Response) error {
+func attachDialError(err error, resp *http.Response, fromLogin bool) error {
 	if resp == nil {
 		return fmt.Errorf("connect to hub: %w", err)
 	}
@@ -186,7 +270,11 @@ func attachDialError(err error, resp *http.Response) error {
 	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return fmt.Errorf("hub rejected the credential: pass --token or set CLOOP_API_TOKEN")
+		if fromLogin {
+			return fmt.Errorf("the hub refused this terminal's session (%s): run `cloop login` again", msg)
+		}
+		return fmt.Errorf("hub rejected the credential: run `cloop login <hub-url>` on a hub with single sign-on, " +
+			"or pass --token / set CLOOP_API_TOKEN")
 	case http.StatusForbidden:
 		return fmt.Errorf("attach refused: %s", msg)
 	case http.StatusNotFound:
@@ -342,9 +430,9 @@ func enterRawMode() (restore func(), interactive bool) {
 
 func init() {
 	taskAttachCmd.Flags().StringVar(&attachHubURL, "hub", "",
-		"Hub base URL (default http://127.0.0.1:8080, or CLOOP_HUB_URL)")
+		"Hub base URL (default: CLOOP_HUB_URL, the default hub from `cloop login`, or http://127.0.0.1:8080)")
 	taskAttachCmd.Flags().StringVar(&attachToken, "token", "",
-		"API token (also reads CLOOP_API_TOKEN)")
+		"API token (without one: the session `cloop login` stored for the hub, or CLOOP_API_TOKEN for CLOOP_HUB_URL's hub)")
 	taskAttachCmd.Flags().IntVar(&attachProjectIdx, "project-idx", 0,
 		"Project index on a multi-project hub")
 	taskAttachCmd.Flags().BoolVar(&attachWrite, "write", false,

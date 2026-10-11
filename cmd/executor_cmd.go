@@ -488,6 +488,22 @@ func recoversItsDatabase(cmd *cobra.Command) bool {
 	return cmd == dbRestoreCmd || cmd == hubKeyEscrowImportCmd
 }
 
+// talksOnlyToAHub reports whether a command is a client of a remote hub and
+// nothing else (Task 20412): `cloop login`, `logout`, `whoami` and the `cloop
+// remote` family read the credential file and make HTTP calls, so reconciling
+// executors against — and creating a state.db in — whatever directory the
+// developer happened to run them from would be work for nobody, and a
+// database left behind in it.
+func talksOnlyToAHub(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c {
+		case loginCmd, logoutCmd, whoamiCmd, remoteCmd:
+			return true
+		}
+	}
+	return false
+}
+
 // wantsPodReconcile reports whether a command is long-running enough to be
 // worth paying the startup orphan sweep for. These are the entry points a
 // control plane actually restarts as; everything else is a short CLI call

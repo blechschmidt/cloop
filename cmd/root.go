@@ -176,7 +176,7 @@ func init() {
 				// credentials are brokered from — permanently unused. It
 				// also saves a redundant SQLite open and key derivation on
 				// every server start.
-				if !hostsControlPlane(cmd.Name()) && !recoversItsDatabase(cmd) {
+				if !hostsControlPlane(cmd.Name()) && !recoversItsDatabase(cmd) && !talksOnlyToAHub(cmd) {
 					reconcileExecutors(cwd, cfg, wantsPodReconcile(cmd.Name()))
 				}
 			}
