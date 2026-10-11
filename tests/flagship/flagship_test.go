@@ -21,6 +21,11 @@
 //  3. the commit the sandbox produced came back to the hub; and
 //  4. the lease material is gone from the host afterwards.
 //
+// It also checks how the GitHub grant arrived. Bootstrap turns the git proxy
+// on with a certificate the hub issues itself (tls: auto), so the sandbox gets
+// a proxy credential rather than the token, and its git trusts the hub's CA
+// for the proxy's URL and nowhere else.
+//
 // # What "came back" means for this driver
 //
 // The container driver reports SupportsWriteBack: false, and that is a design
@@ -69,6 +74,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -114,6 +120,15 @@ const root = "/var/tmp/cloop-flagship"
 // hubPort is the port the hub under test listens on. High and fixed, for the
 // same reason root is fixed.
 const hubPort = 18099
+
+// gitProxyPort and kubeGuardPort are where the bootstrapped hub's credential
+// monitors listen. They are set explicitly because bootstrap's defaults (8443,
+// 8444) are often taken on a developer machine, and fixed for the same reason
+// hubPort is.
+const (
+	gitProxyPort  = 18443
+	kubeGuardPort = 18444
+)
 
 // alpineDigest pins the sandbox image's base.
 //
@@ -180,6 +195,11 @@ type sandboxEvidence struct {
 	LeaseFiles    string
 	SecretKeySeen string
 	UITokenSeen   string
+	GitProxyURL   string
+	SSLCAInfoEnv  string
+	HubCAFile     string
+	ProxyCA       string
+	ForgeCA       string
 }
 
 func TestFlagshipCircuit(t *testing.T) {
@@ -451,13 +471,17 @@ func seedRepos(ctx context.Context, t *testing.T, w *world) {
 // executors.allow_host_process=false. That setting is what makes the container
 // executor the registry default: under strict mode the localprocess driver is
 // refused registration, so no project can fall back to the host even by
-// accident, and no explicit project→executor binding is needed.
+// accident, and no explicit project→executor binding is needed. It is also
+// what turns the git proxy and the kube guard on, with tls: auto, at the
+// external URL's host.
 func bootstrapHub(ctx context.Context, t *testing.T, w *world) {
 	t.Helper()
 	mustRun(ctx, t, "hub bootstrap", w.cloop(ctx, w.hubDir,
 		"hub", "bootstrap", "--behind-proxy",
 		"--port", strconv.Itoa(hubPort),
-		"--external-url", fmt.Sprintf("http://127.0.0.1:%d", hubPort)))
+		"--external-url", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--git-proxy-port", strconv.Itoa(gitProxyPort),
+		"--kube-guard-port", strconv.Itoa(kubeGuardPort)))
 
 	for _, kv := range [][2]string{
 		{"executors.container.enabled", "true"},
@@ -492,6 +516,11 @@ func bootstrapHub(ctx context.Context, t *testing.T, w *world) {
 // hub's master sealing key and its RBAC-bypassing dashboard token; both used
 // to be forwarded into every sandbox that held any grant, and recording their
 // absence here is what stops that regressing.
+//
+// It also asks git which CA it would trust at the proxy's URL and at
+// github.com's. git's own answer is the one that counts, because it is the
+// result of whatever configuration reached the sandbox. /etc/cloop/hub-ca is
+// where the container driver binds the hub's CA.
 const hookScript = `set -eu
 cd /workspace
 mkdir -p evidence
@@ -507,6 +536,11 @@ mkdir -p evidence
   echo "lease_files=$(ls -1 "${CLOOP_LEASE_DIR:-/nonexistent}" 2>/dev/null | sort | tr '\n' ' ')"
   echo "secret_key_present=$([ -n "${CLOOP_SECRET_KEY:-}" ] && echo yes || echo no)"
   echo "ui_token_present=$([ -n "${CLOOP_UI_TOKEN:-}" ] && echo yes || echo no)"
+  echo "git_proxy_url=${CLOOP_GIT_PROXY_URL:-none}"
+  echo "git_ssl_cainfo=${GIT_SSL_CAINFO:-none}"
+  echo "hub_ca_file=$([ -s /etc/cloop/hub-ca/ca.crt ] && echo yes || echo no)"
+  echo "proxy_ca=$(git config --get-urlmatch http.sslCAInfo "${CLOOP_GIT_PROXY_URL:-https://none.invalid}/acme/tool" || echo none)"
+  echo "forge_ca=$(git config --get-urlmatch http.sslCAInfo https://github.com/acme/tool || echo none)"
 } > evidence/sandbox.txt
 export HOME=/tmp
 export GIT_AUTHOR_NAME=sandbox GIT_AUTHOR_EMAIL=sandbox@cloop.invalid
@@ -568,8 +602,10 @@ func seedProject(ctx context.Context, t *testing.T, w *world) {
 //     sandbox reaches the throwaway remote at all; and
 //   - github_pat is delivered as *files* staged on the host and bound
 //     read-only into the sandbox, which is the material whose destruction is
-//     the fourth assertion. A local_repo grant alone stages no files, so
-//     "nothing is left behind" would be vacuously true.
+//     the fourth assertion. Behind the git proxy that bootstrap turns on, the
+//     files are a proxy credential and the helper that presents it, and the
+//     PAT itself stays on the hub. A local_repo grant alone stages no files,
+//     so "nothing is left behind" would be vacuously true.
 func grantCredentials(ctx context.Context, t *testing.T, w *world) {
 	t.Helper()
 
@@ -682,12 +718,21 @@ func runCircuit(t *testing.T, w *world) {
 			t.Errorf("CLOOP_LOCAL_REPOS is %q, want %q — the repository-scoped grant did not arrive",
 				evidence.LocalRepos, filepath.Base(w.origin))
 		}
-		// The github_pat grant is delivered as files. All three, or the git
-		// credential helper the sandbox would use is incomplete.
-		for _, want := range []string{"git-credential-cloop", "gitconfig", "github-token"} {
-			if !strings.Contains(evidence.LeaseFiles, want) {
+		// The github_pat grant is delivered as files. Behind the git proxy that
+		// is a proxy credential and the helper that presents it. All three, or
+		// the git the sandbox would use is incomplete.
+		files := strings.Fields(evidence.LeaseFiles)
+		for _, want := range []string{"git-credential-cloop", "gitconfig", "git-proxy-credential"} {
+			if !slices.Contains(files, want) {
 				t.Errorf("lease delivered %q, missing %q", evidence.LeaseFiles, want)
 			}
+		}
+		// The token itself is not delivered: with the proxy in front, the PAT
+		// never leaves the hub.
+		if slices.Contains(files, "github-token") {
+			t.Errorf("lease delivered %q: the PAT itself reached the sandbox although the "+
+				"bootstrapped hub runs the git proxy, which holds it on the sandbox's behalf",
+				evidence.LeaseFiles)
 		}
 		// The regression guard. Both of these were forwarded into every sandbox
 		// holding any grant, which handed model-authored code the key that
@@ -699,6 +744,35 @@ func runCircuit(t *testing.T, w *world) {
 		if evidence.UITokenSeen != "no" {
 			t.Error("CLOOP_UI_TOKEN is set inside the sandbox: an RBAC-bypassing dashboard token " +
 				"leaked across the isolation boundary")
+		}
+	})
+
+	t.Run("the sandbox trusts the hub's CA for the git proxy and nowhere else", func(t *testing.T) {
+		// This checks configuration, not a connection, because the sandbox has
+		// no network here. pkg/executor/container's gitca e2e makes the
+		// connection, and is refused by a second server the same CA signed.
+		if want := fmt.Sprintf("https://127.0.0.1:%d", gitProxyPort); evidence.GitProxyURL != want {
+			t.Errorf("CLOOP_GIT_PROXY_URL is %q, want %q: the grant was not routed through "+
+				"the proxy bootstrap turned on", evidence.GitProxyURL, want)
+		}
+		// The image carries no CA, so if the file is missing nothing delivered one.
+		if evidence.HubCAFile != "yes" {
+			t.Error("no hub CA at /etc/cloop/hub-ca/ca.crt: the proxy's certificate is one " +
+				"the sandbox's git cannot verify")
+		}
+		if evidence.ProxyCA != "/etc/cloop/hub-ca/ca.crt" {
+			t.Errorf("git's http.sslCAInfo for the proxy's URL is %q, want the hub CA the "+
+				"driver bound", evidence.ProxyCA)
+		}
+		// Per-URL trust is the point. A CA trusted everywhere would let anyone
+		// holding a certificate it signed pass as any host.
+		if evidence.ForgeCA != "none" {
+			t.Errorf("git's http.sslCAInfo for github.com is %q: the hub's CA is trusted "+
+				"beyond the proxy's URL", evidence.ForgeCA)
+		}
+		if evidence.SSLCAInfoEnv != "none" {
+			t.Errorf("GIT_SSL_CAINFO is %q in the sandbox: a CA set that way replaces the "+
+				"trust store for every host git talks to", evidence.SSLCAInfoEnv)
 		}
 	})
 
@@ -728,6 +802,15 @@ func runCircuit(t *testing.T, w *world) {
 		// by name — so this is not vacuous.
 		waitFor(t, wipeTimeout, "the host lease staging directories to be wiped", func() (bool, string) {
 			left := leaseStagingDirs()
+			if len(left) == 0 {
+				return true, ""
+			}
+			return false, "still present: " + strings.Join(left, ", ")
+		})
+		// The hub CA's directory holds a certificate, not a credential. The
+		// driver still made it for this run, so it should remove it.
+		waitFor(t, wipeTimeout, "the hub CA staging directories to be removed", func() (bool, string) {
+			left := caStagingDirs()
 			if len(left) == 0 {
 				return true, ""
 			}
@@ -1214,10 +1297,16 @@ func isContainerized(procDir, selfMountNS string) bool {
 // directory otherwise. Both are checked because which one is used depends on
 // the machine, and a test that only looked at /dev/shm would pass on a host
 // without it by looking in the wrong place.
-func leaseStagingDirs() []string {
+func leaseStagingDirs() []string { return stagingDirs("cloop-lease-*") }
+
+// caStagingDirs lists the directories the driver binds the hub's CA from, in
+// the same places (pkg/executor/container's gitCADirPrefix).
+func caStagingDirs() []string { return stagingDirs("cloop-ca-*") }
+
+func stagingDirs(pattern string) []string {
 	var out []string
 	for _, base := range []string{"/dev/shm", os.TempDir()} {
-		matches, err := filepath.Glob(filepath.Join(base, "cloop-lease-*"))
+		matches, err := filepath.Glob(filepath.Join(base, pattern))
 		if err != nil {
 			continue
 		}
@@ -1261,6 +1350,11 @@ func readEvidenceFromRemote(ctx context.Context, t *testing.T, w *world) sandbox
 		LeaseFiles:    fields["lease_files"],
 		SecretKeySeen: fields["secret_key_present"],
 		UITokenSeen:   fields["ui_token_present"],
+		GitProxyURL:   fields["git_proxy_url"],
+		SSLCAInfoEnv:  fields["git_ssl_cainfo"],
+		HubCAFile:     fields["hub_ca_file"],
+		ProxyCA:       fields["proxy_ca"],
+		ForgeCA:       fields["forge_ca"],
 	}
 }
 

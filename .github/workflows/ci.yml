@@ -1648,7 +1648,8 @@ jobs:
           # Task 20409: both credential monitors on, the hub issuing their
           # certificates, at the external URL's host — and the summary says
           # which ports executors must reach.
-          [ "$(grep -c 'tls: auto' .cloop/config.yaml)" = 2 ] || {
+          # Key lines only: the template's own comment mentions tls: auto too.
+          [ "$(grep -cE '^[[:space:]]+tls: auto$' .cloop/config.yaml)" = 2 ] || {
             echo "bootstrap did not turn both credential monitors on with tls: auto"; exit 1; }
           grep -q 'advertise_url: https://hub.example.com:8443' .cloop/config.yaml
           grep -q 'Ports executors must reach' out.txt
@@ -1762,7 +1763,7 @@ jobs:
               --set executor.monitorTLS.auto=true "$@"
           }
           acfg=$(auto --show-only templates/configmap.yaml)
-          [ "$(grep -c 'tls: auto' <<<"$acfg")" = 2 ] || { echo "::error::chart: auto does not render tls: auto for both monitors"; exit 1; }
+          [ "$(grep -cE '^[[:space:]]+tls: auto$' <<<"$acfg")" = 2 ] || { echo "::error::chart: auto does not render tls: auto for both monitors"; exit 1; }
           if grep -qE 'cert_file|ca_file|git_ca_bundle' <<<"$acfg"; then
             echo "::error::chart: auto still renders certificate files or a CA bundle"; exit 1
           fi
