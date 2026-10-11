@@ -3,19 +3,20 @@ package arch_test
 // Retired dependencies stay retired (Task 20411).
 //
 // nhooyr.io/websocket carried every WebSocket the hub speaks: the dashboard's,
-// the hub-to-agent transport, hub-cluster traffic and the sandbox attach — all
-// of them parsing frames from browsers and remote devices the threat model
-// treats as hostile. It was deprecated when its maintainer handed the project
-// to Coder, and only github.com/coder/websocket receives fixes now, so a
-// frame-parsing bug found upstream would never reach the old path.
+// both ends of the hub-to-agent transport, and sandbox attach from a browser,
+// the CLI and to a Kubernetes API server — parsing frames from browsers and
+// remote devices the threat model treats as hostile. It was deprecated when
+// its maintainer handed the project to Coder, and only
+// github.com/coder/websocket receives fixes now, so a frame-parsing bug
+// found upstream would never reach the old path.
 //
 // The move was one import path in 29 files, and so is the way back. An
 // editor's auto-import, a snippet copied from an old answer, or a dependency
 // that requires the old module would compile, vet and pass every test while
 // quietly putting the hub's most exposed parser back on code nobody maintains.
-// Nothing else in CI can see that. staticcheck's SA1019 reports a deprecated
-// import, but only while the deprecated module still says so in a release this
-// module resolves; this gate does not depend on what any release says.
+// The Lint job's SA1019 reports a deprecated import only while the release
+// this module resolves still carries the deprecation notice; this gate does
+// not depend on what any release says.
 //
 // So no Go file in the module may import a retired module, test files and the
 // tests/ harnesses included, and go.mod may not name one — as a requirement

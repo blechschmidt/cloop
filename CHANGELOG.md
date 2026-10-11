@@ -165,8 +165,9 @@ schema and the hub's HTTP API may change in any release.
 
 - **WebSockets run on `github.com/coder/websocket` v1.8.15.**
   `nhooyr.io/websocket` v1.8.17 — the library behind the dashboard's sockets,
-  the hub-to-agent transport, hub-cluster traffic and the sandbox attach — is
-  deprecated and receives no fixes; its maintained successor has the same API.
+  both ends of the hub-to-agent transport, and sandbox attach from the
+  browser, the CLI and to a Kubernetes API server — is deprecated and
+  receives no fixes; its maintained successor has the same API.
   Three of its changes reach the hub. A socket the hub closes because access
   was withdrawn now ends in the browser with its 1008 and reason: the old
   library answered the browser's close reply with a second close frame, which
