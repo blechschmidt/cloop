@@ -1995,19 +1995,19 @@
           <div id="secRequestsEmpty" class="audit-empty" style="display:none">
             No access requests.
           </div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secRequestsTable" style="display:none">
               <thead>
                 <tr>
-                  <th style="width:150px">Requested by</th>
-                  <th style="width:150px">Secret</th>
-                  <th style="width:170px">Subject</th>
+                  <th>Requested by</th>
+                  <th>Secret</th>
+                  <th>Subject</th>
                   <th class="sec-hide-sm">Constraints</th>
-                  <th style="width:110px">Wants</th>
+                  <th style="width:90px">Wants</th>
                   <th class="sec-hide-sm">Justification</th>
-                  <th style="width:100px">State</th>
-                  <th style="width:120px">Deadline</th>
-                  <th style="width:250px"></th>
+                  <th style="width:80px">State</th>
+                  <th style="width:90px">Deadline</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="secRequestsBody"></tbody>
@@ -2020,7 +2020,7 @@
           <div id="secSecretsEmpty" class="audit-empty" style="display:none">
             No secrets stored. Add one, then grant it to a project or executor.
           </div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secSecretsTable" style="display:none">
               <thead>
                 <tr>
@@ -2045,7 +2045,7 @@
             </label>
           </div>
           <div id="secGrantsEmpty" class="audit-empty" style="display:none">No grants.</div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secGrantsTable" style="display:none">
               <thead>
                 <tr>
@@ -2081,7 +2081,7 @@
           <div id="secLeasesEmpty" class="audit-empty" style="display:none">
             No leases outstanding. Nothing on this hub is holding a brokered credential.
           </div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secLeasesTable" style="display:none">
               <thead>
                 <tr>
@@ -2117,7 +2117,7 @@
           <div id="secTokensEmpty" class="audit-empty" style="display:none">
             No API tokens. Mint one to give CI or an edge device a credential narrower than the whole hub.
           </div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secTokensTable" style="display:none">
               <thead>
                 <tr>
@@ -2148,7 +2148,7 @@
           <div id="secSessionsEmpty" class="audit-empty" style="display:none">
             Nobody is signed in right now.
           </div>
-          <div style="overflow-x:auto">
+          <div class="table-scroll" style="overflow-x:auto">
             <table class="audit-table" id="secSessionsTable" style="display:none">
               <thead>
                 <tr>

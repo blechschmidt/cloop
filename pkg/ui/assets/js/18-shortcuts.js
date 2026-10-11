@@ -529,9 +529,11 @@ window.toggleTheme = function() {
   const next = current === 'light' ? 'dark' : 'light';
   localStorage.setItem('cloop-theme', next);
   _applyTheme(next);
-  // Re-render timeline if it's the active tab so SVG colors update.
+  // Redraw the timeline if it's the active tab so SVG colors update. Loaded,
+  // not re-rendered: renderTimeline takes the response it draws, and called
+  // bare it threw on every theme toggle made on this tab (Task 20407).
   if (typeof activeTab !== 'undefined' && activeTab === 'timeline') {
-    renderTimeline();
+    loadTimeline();
   }
 };
 

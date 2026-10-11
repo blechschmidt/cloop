@@ -73,9 +73,9 @@
       </div>
     </div>
     <!-- Project breadcrumb (kept for compatibility; hidden since selector replaces it) -->
-    <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;flex-shrink:0">
+    <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;min-width:0;max-width:100%">
       <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
-      <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
+      <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
     </div>
     <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
     <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
@@ -653,7 +653,7 @@
         <h3>No activity yet</h3>
         <p>Once cloop runs a task, heal retry, or evolve cycle, it will appear here.</p>
       </div>
-      <div class="section" style="overflow-x:auto">
+      <div class="section table-scroll" style="overflow-x:auto">
         <table id="queueTable" style="display:none;border-collapse:collapse;width:100%;font-size:13px">
           <thead>
             <tr>
@@ -843,7 +843,7 @@
         <p style="font-size:11px;color:var(--muted);margin-top:8px">Tip: Run <code>cloop task ai-risk-matrix --apply</code> to refresh scores.</p>
       </div>
       <!-- Table -->
-      <div id="rmTable" style="display:none;margin-top:18px;overflow-x:auto">
+      <div id="rmTable" class="table-scroll" style="display:none;margin-top:18px;overflow-x:auto">
         <table style="border-collapse:collapse;width:100%;font-size:13px">
           <thead>
             <tr>
@@ -1023,7 +1023,7 @@
           <h3>No provider calls yet</h3>
           <p>Trigger a task or use any AI command. Calls appear here in real time.</p>
         </div>
-        <div id="pcTableWrap" style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:6px">
+        <div id="pcTableWrap" class="table-scroll" style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:6px">
           <table id="pcTable" style="width:100%;border-collapse:collapse;font-size:12px">
             <thead style="position:sticky;top:0;background:var(--bg-elev);z-index:1">
               <tr>
@@ -1052,7 +1052,7 @@
 
           <div id="pcModalMeta" style="font-size:12px;color:var(--text-dim);padding:6px 14px;display:flex;flex-wrap:wrap;gap:14px"></div>
 
-          <div style="padding:0 14px;display:flex;gap:8px;border-bottom:1px solid var(--border)" role="tablist">
+          <div style="padding:0 14px;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border)" role="tablist">
             <button class="tab-btn pc-subtab active" data-pc-sub="prompt"   onclick="pcSwitchSub('prompt')">Prompt</button>
             <button class="tab-btn pc-subtab"        data-pc-sub="response" onclick="pcSwitchSub('response')">Response</button>
             <button class="tab-btn pc-subtab"        data-pc-sub="headers"  onclick="pcSwitchSub('headers')">Headers</button>
@@ -1260,7 +1260,7 @@
     <!-- ════════════════════════════════════════════════════════ EXECUTORS -->
     <div id="tab-executors" class="tab-panel">
       <div class="section">
-        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+        <div class="section-title" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
           Executors
           <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; shared by every project</span>
           <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadExecutors()" title="Refresh executor list">&#8635; Refresh</button>

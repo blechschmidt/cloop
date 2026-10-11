@@ -10,6 +10,7 @@
 const _quotaLabels = {
   max_projects: 'Projects',
   max_concurrent_tasks: 'Concurrent runs',
+  max_concurrent_reproductions: 'Reproductions',
   max_executors: 'Executors',
   max_sessions: 'Sessions',
   daily_token_budget: 'Tokens / day',

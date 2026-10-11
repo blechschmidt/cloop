@@ -105,9 +105,11 @@
       table.style.display = '';
 
       head.innerHTML =
-        '<tr><th style="min-width:200px">Identity</th>' +
+        '<tr><th style="min-width:140px">Identity</th>' +
+        // Sized by their labels, which may wrap: a fixed width per column put
+        // the Save button past the edge of a 1280px screen (Task 20407).
         resources.map(r =>
-          '<th style="width:130px" title="' + esc(q.label(r)) + ' (' + esc(r) + ')">' +
+          '<th style="white-space:normal" title="' + esc(q.label(r)) + ' (' + esc(r) + ')">' +
             esc(q.label(r)) + '</th>').join('') +
         '<th style="width:110px"></th></tr>';
 
@@ -251,7 +253,7 @@
         <div id="quotaBanner" class="sec-banner" style="display:none"></div>
         <div id="quotaEmpty" class="audit-empty" style="display:none"></div>
 
-        <div style="overflow-x:auto">
+        <div class="table-scroll" style="overflow-x:auto">
           <table class="audit-table quota-table" id="quotaTable" style="display:none">
             <thead id="quotaHead"></thead>
             <tbody id="quotaBody"></tbody>

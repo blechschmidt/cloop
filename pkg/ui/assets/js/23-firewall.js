@@ -161,8 +161,8 @@ function _pfwState(d) {
 function _pfwRender(d, note) {
   const body = document.getElementById('projectFirewallBody');
   if (!body) return;
-  body.innerHTML = '<div class="form-row"><div id="pfwGov" style="flex:1;min-width:220px">' + _pfwGoverning(d) + '</div>'
-    + '<div style="flex:2;min-width:280px"><div id="pfwState">' + _pfwState(d) + '</div>'
+  body.innerHTML = '<div class="form-row"><div id="pfwGov" style="flex:1;min-width:min(220px,100%)">' + _pfwGoverning(d) + '</div>'
+    + '<div style="flex:2;min-width:min(280px,100%)"><div id="pfwState">' + _pfwState(d) + '</div>'
     + note + '<div id="pfwWarn"></div>' + _fwForm('pfw', d.configured ? d.rules : (d.governing || {}))
     + '<div class="modal-footer">'
     + (d.configured ? '<button class="btn danger" onclick="clearProjectFirewall()">Remove rules</button>' : '')

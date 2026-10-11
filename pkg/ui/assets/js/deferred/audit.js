@@ -524,7 +524,7 @@
         <div id="auditUnrecorded" class="exec-banner warn" role="status" style="display:none;white-space:pre-line;margin-bottom:10px"></div>
         <div id="auditSummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
         <div id="auditEmpty" class="audit-empty" style="display:none">No audit events match these filters.</div>
-        <div style="overflow-x:auto">
+        <div class="table-scroll" style="overflow-x:auto">
           <table class="audit-table" id="auditTable" style="display:none">
             <thead>
               <tr>

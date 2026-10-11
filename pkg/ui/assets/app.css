@@ -45,7 +45,22 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 14px;
     line-height: 1.5;
+    /* A word that does not fit its line breaks rather than widening its box
+       (Task 20407). break-word, not anywhere: it leaves min-content alone,
+       so a squeezed flex row still overflows where the layout sweep can see
+       it instead of quietly breaking a short word in two. */
+    overflow-wrap: break-word;
   }
+  /* What holds names, paths and URLs in a flex, grid or table cell, whose
+     min-content break-word cannot shrink: these may break anywhere. In a
+     wrapping row that only ever breaks an item wider than the row itself;
+     everything else wraps to the next line first. */
+  td, .goal-text, .stat-card, .task-meta, .task-link-item, .kb-card, .exec-name, .exec-chips, .exec-actions,
+  .exec-banner, .sec-banner, .td-meta, .td-header h2, .dc-header h2, .sec-own-opt, .replay-row,
+  #pcModalMeta { overflow-wrap: anywhere; }
+  /* An empty chart canvas keeps the 300px every canvas starts at. */
+  canvas { max-width: 100%; }
+  .replay-row > div { flex-wrap: wrap; }
 
   /* ── Layout ── */
   .layout { display: flex; flex-direction: column; min-height: 100vh; }
@@ -284,8 +299,10 @@
 
   /* ── Card ── */
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
-  .goal-card { display: flex; align-items: flex-start; gap: 16px; }
-  .goal-text { flex: 1; font-size: 15px; font-weight: 500; line-height: 1.4; }
+  /* Wraps, so that on a phone the status and Edit sit under the goal rather
+     than squeezing it into a column a word wide. */
+  .goal-card { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; }
+  .goal-text { flex: 1 1 260px; font-size: 15px; font-weight: 500; line-height: 1.4; }
   .goal-text.empty { color: var(--muted); font-style: italic; }
 
   /* ── Badge ── */
@@ -360,7 +377,7 @@
     font-size:12px; padding:8px 10px; margin-bottom:6px; border-radius:var(--radius);
     border:1px solid var(--yellow, #d29922); background:rgba(210,153,34,.08); color:var(--yellow, #d29922);
   }
-  .exec-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; }
+  .exec-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap:12px; }
 
   /* ── Audit trail (Task 20167) ───────────────────────────────────────── */
   /* The integrity badge is the first thing an auditor looks at, so it is
@@ -503,7 +520,7 @@
   .sec-chip {
     display:inline-block; font-family:var(--mono, monospace); font-size:11px;
     padding:1px 6px; border-radius:9px; border:1px solid var(--border);
-    color:var(--muted); white-space:nowrap; margin:1px 3px 1px 0;
+    color:var(--muted); max-width:100%; margin:1px 3px 1px 0;
   }
   .sec-chip.kind { border-color:var(--accent); color:var(--accent); }
   /* Revocation state. "ok" is the only one that means the credential is
@@ -705,7 +722,7 @@
   .voice-modal .voice-status { font-size:13px; color:var(--muted); margin-bottom:12px; min-height:20px; }
   .voice-modal .voice-transcript { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-size:13px; min-height:40px; margin-bottom:12px; white-space:pre-wrap; }
   .voice-modal .voice-output { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; min-height:60px; max-height:200px; overflow-y:auto; margin-bottom:12px; white-space:pre-wrap; }
-  .voice-modal-btns { display:flex; gap:8px; justify-content:flex-end; }
+  .voice-modal-btns { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
 
   /* ── Advanced grid (still used by the new-project modal) ── */
   .adv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
@@ -728,7 +745,7 @@
   .task-body { flex:1; min-width:0; }
   .task-title { font-weight:500; font-size:13px; }
   .task-desc { font-size:12px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .task-meta { font-size:11px; color:var(--muted); margin-top:3px; display:flex; gap:10px; }
+  .task-meta { font-size:11px; color:var(--muted); margin-top:3px; display:flex; flex-wrap:wrap; gap:2px 10px; }
 
   /* Background work an agent left running after claiming the task was done
      (Task 20205). Given its own line rather than a chip in .task-meta: a task
@@ -1096,7 +1113,7 @@
   #modal-overlay.open { display:flex; }
   #modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:440px; max-width:92vw; }
   #modal h2 { font-size:15px; font-weight:600; margin-bottom:16px; }
-  .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
+  .modal-footer { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; margin-top:16px; }
 
   /* The replay-diff and provider-call dialogs are the only two that style
      themselves by class rather than by id, and neither class had a rule — so
@@ -1819,6 +1836,7 @@
 
   /* ── Analytics tab ── */
   .analytics-card {
+    min-width: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -2174,7 +2192,8 @@
 
     /* Project selector: constrain width */
     .proj-selector-wrap { max-width: 160px; }
-    .proj-selector-btn  { max-width: 140px; }
+    .proj-selector-wrap > div { min-width: 0; }
+    .proj-selector-btn  { max-width: 100%; }
 
     /* The dropdown hangs off a button sitting mid-header, and its own
        min-width is wider than the room left to the right of it: at 390px it
@@ -2246,7 +2265,7 @@
   }
 
 /* Parallel features (Task 20341) */
-.feat-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.feat-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; max-width:100%; }
 .feat-chip { display:inline-flex; align-items:center; gap:5px; max-width:100%; font-size:11px; padding:3px 9px; border:1px solid var(--border); border-radius:12px; background:var(--bg); color:var(--text); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .feat-chip:hover { border-color:var(--accent); }
 .feat-chip-meta { color:var(--muted); }

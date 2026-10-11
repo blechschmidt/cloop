@@ -319,7 +319,7 @@
 
         <div style="font-size:12px;font-weight:600;margin:14px 0 6px">Recent sessions</div>
         <div id="telemetrySessionsEmpty" class="audit-empty" style="display:none">No sessions recorded yet.</div>
-        <div style="overflow-x:auto">
+        <div class="table-scroll" style="overflow-x:auto">
           <table class="audit-table" id="telemetrySessionsTable" style="display:none">
             <thead>
               <tr>
@@ -338,7 +338,7 @@
         <div style="font-size:12px;font-weight:600;margin:18px 0 6px">Events</div>
         <div id="telemetrySummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
         <div id="telemetryEmpty" class="audit-empty" style="display:none">No telemetry events match these filters.</div>
-        <div style="overflow-x:auto">
+        <div class="table-scroll" style="overflow-x:auto">
           <table class="audit-table" id="telemetryTable" style="display:none">
             <thead>
               <tr>

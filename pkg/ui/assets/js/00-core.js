@@ -115,8 +115,15 @@ function clearProjectScopedPanels() {
   const badge = document.getElementById('taskCountBadge');
   if (badge) badge.textContent = '';
 
-  const board = document.getElementById('kanbanBoard');
-  if (board) board.innerHTML = loading;
+  // Column by column: renderKanban fills the columns by id, so a board
+  // replaced wholesale stayed "Loading…" until the page was reloaded — after
+  // every project switch (Task 20407).
+  ['pending', 'in_progress', 'done', 'failed'].forEach(col => {
+    const body = document.getElementById('kb-body-' + col);
+    if (body) body.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:8px 0;text-align:center">Loading…</div>';
+    const cnt = document.getElementById('kb-cnt-' + col);
+    if (cnt) cnt.textContent = '';
+  });
 
   const steps = document.getElementById('stepList');
   if (steps) steps.innerHTML = loading;
