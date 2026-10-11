@@ -94,7 +94,49 @@ Without it the first `mint` stops with `CLOOP_SECRET_KEY is not set`. It belongs
 in `hub.env` at mode `0600` and never in a repository — see
 [installation](../getting-started/installation.md) for generating it and the
 [runbook](../operations/runbook.md) for backup and rotation. Losing it loses
-every stored secret, grants included.
+every stored secret, grants included — and, under `tls: auto` below, the hub's
+CA, which every sandbox trusts for the proxy's URL.
+
+### Keep forge and cluster credentials on the hub
+
+A GitHub token or a kubeconfig granted to a project is, by default, delivered
+into the sandbox: a `github_pat` as a token file a git credential helper
+releases, a `github_app` grant as its installation token. A hostile workload
+then holds a credential it can use against GitHub's REST API, or to push
+wherever the token reaches. The [git interception proxy](../git-interception-proxy.md)
+and the [Kubernetes access monitor](../architecture/kubernetes-access.md) keep
+both on the hub: the sandbox gets a session token worth one grant's repositories
+and branches, or its verbs and namespaces, decided outside the sandbox on every
+push and every API request.
+
+`cloop hub bootstrap` turns both on (Task 20409):
+
+```bash
+cloop hub bootstrap --external-url https://hub.internal:8080
+#   git_proxy:  tls: auto, listen 0.0.0.0:8443, advertised https://hub.internal:8443
+#   kube_guard: tls: auto, listen 0.0.0.0:8444, advertised https://hub.internal:8444
+```
+
+`--git-proxy-port` and `--kube-guard-port` move the ports. `tls: auto` needs no
+certificate: the hub mints a CA the first time it starts, seals its key under
+`CLOOP_SECRET_KEY` in its own database, and serves each monitor a short-lived
+leaf for the advertised name, renewed before it expires. Every sandbox — a
+container on this host, a Pod, an edge device or a virtual executor on one — is
+told to trust that CA **for those two URLs only**, so no image needs it baked in
+and nothing else the sandbox talks to is affected. A device's agent must speak
+protocol v21 or later; an older one is refused the workloads that would talk to
+the proxy, with the upgrade named.
+
+What you have to provide is a route. Executors must reach TCP 8443 and 8444 on
+the hub at the advertised name, and both terminate their own TLS, so route them
+to the hub directly rather than through a TLS-terminating proxy. A container
+executor's `network: none` reaches nothing, and a firewall or egress filter
+needs the hub's address and both ports in its allow lists — see
+[the network between sandbox and proxy](../architecture/git-proxy.md#the-network-between-sandbox-and-proxy).
+`cloop hub doctor` checks the certificates (`gitproxy.tls`, `kubeguard.tls`),
+dials both ports, and on a hub with `allow_host_process: false` and no proxy
+names every GitHub grant it delivers into sandboxes
+(`gitproxy.forge_credentials`).
 
 ## 1. Per-project repository access
 
@@ -164,10 +206,19 @@ cloop secret grant gh-internal \
   --ttl 24h
 ```
 
-The token is not exported as `GITHUB_TOKEN`. cloop installs a git credential
-helper that releases it only for paths matching the allowlist, so a harness that
-tries to clone an unlisted repository gets an authentication failure rather than
-a checkout. See [the secrets guide](secrets.md) for the full mechanism, and
+With the [git proxy](#keep-forge-and-cluster-credentials-on-the-hub) on, the
+token stays on the hub: the sandbox's git is pointed at the proxy with a session
+token for `acme-internal/api-*`, and the proxy presents the PAT upstream only for
+those repositories and only for the pushes its policy allows. (The workload's own
+git reaches `github.com` this way; cloop's provisioning fetch of a project's
+checkout goes to that checkout's own `https` origin, whatever forge it is,
+verified against the hub host's trust store — `SSL_CERT_FILE` or `SSL_CERT_DIR`
+for a private CA.) Without the proxy, the token is not exported as
+`GITHUB_TOKEN`: cloop installs a git
+credential helper that releases it only for paths matching the allowlist, so a
+harness that tries to clone an unlisted repository gets an authentication
+failure rather than a checkout — but the token file itself is in the sandbox.
+See [the secrets guide](secrets.md) for the full mechanism, and
 [the git interception proxy](../git-interception-proxy.md) for restricting which
 branches a sandbox may push to.
 

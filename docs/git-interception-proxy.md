@@ -653,14 +653,19 @@ listening on loopback — that is the whole premise of running the workload in o
 `Proxy.Serve(ln)` takes a listener rather than a certificate path, so the
 caller configures TLS through [`pkg/tlsconf`](../pkg/tlsconf/tlsconf.go) exactly
 as the hub does, and a TLS listener drops straight in — which is what the hub
-does with `cert_file`, `key_file` and `min_tls_version`. `Options.Transport`
+does with `cert_file`, `key_file` and `min_tls_version`, or, under `tls: auto`,
+with a certificate it issues itself and chooses per handshake
+([`pkg/hubca`](../pkg/hubca/hubca.go)). `Options.Transport`
 exists for the other leg: an operator whose forge sits behind a private CA
 supplies a `RoundTripper`, instead of the package growing a flag that weakens
 the default.
 
-An enabled section with no `cert_file` and `key_file` does not start a cleartext
-proxy: the pair is required when `enabled` is true, and a section that has one
-without the other is reported and switched **off** at load. Disabling is the
+An enabled section with neither `tls: auto` nor both of `cert_file` and
+`key_file` does not start a cleartext proxy: it is reported and switched **off**
+at load. `tls: auto` is never inferred from the files being missing — a section
+that has said `enabled: true` without them has always been switched off, and the
+upgrade that introduced `tls: auto` must not start interposing a proxy on its
+behalf. Disabling is the
 safe repair precisely because the proxy is not a fallback — with it off a
 workspace is provisioned the way it was before interception existed, which is a
 documented behaviour rather than a new failure mode.
@@ -683,17 +688,21 @@ working directory, put it in the overlay of the hub that should run the proxy,
 executors:
   git_proxy:
     enabled: true
+    tls: auto                                      # the hub issues the certificate
     listen_addr: "0.0.0.0:8443"                    # where the proxy binds
     advertise_url: "https://hub.internal:8443"     # what the SANDBOX connects to
-    cert_file: /etc/cloop/tls/git-proxy.crt
-    key_file: /etc/cloop/tls/git-proxy.key
     min_tls_version: "1.2"                         # or "1.3"; empty means 1.2
     session_minutes: 60                            # 0 means 60; ceiling is 720
     allowed_refs: ["refs/heads/cloop/**"]          # the default; widen deliberately
     allow_delete: false
 ```
 
-`enabled`, `cert_file` and `key_file` are the only keys with no useful default.
+`cloop hub bootstrap` writes this section — and the Kubernetes monitor's — with
+`advertise_url` on the host of `--external-url` (Task 20409). `enabled` and the
+certificate source — `tls: auto`, or `cert_file` and `key_file` with an
+operator's pair — are the only keys with no useful default. `tls: auto` needs
+`CLOOP_SECRET_KEY`, which the hub's CA is sealed under; see
+[the certificate the sandbox has to trust](#the-certificate-the-sandbox-has-to-trust).
 An empty `listen_addr` binds an ephemeral loopback port, and an empty
 `advertise_url` falls back to the bound address — a pair that is correct only
 when the sandbox shares the hub's network namespace.
@@ -710,10 +719,12 @@ token to in cleartext, missing TLS material — switch `enabled` **off** rather
 than starting one anyway.
 
 A hub that started the proxy says so, once, naming the bind address, what
-sandboxes will be pointed at, and the allowlist in force:
+sandboxes will be pointed at, and the allowlist in force — and, under
+`tls: auto`, the certificate it serves:
 
 ```
 ui: git interception proxy on 0.0.0.0:8443, advertised as https://hub.internal:8443; pushes limited to refs/heads/cloop/**
+ui: git proxy serves a certificate the hub issued (tls: auto) for hub.internal, valid until 2026-10-14T09:12:40Z; sandboxes are told to trust the hub CA for https://hub.internal:8443 only
 ```
 
 A hub that could not start it comes up anyway, and says exactly what is not in
@@ -776,14 +787,49 @@ Two consequences follow from that:
 ### The certificate the sandbox has to trust
 
 The proxy's certificate is validated by **the sandbox's git**, not by the hub's
-HTTP client. This is the deployment step most often missed, because everything on
-the hub side works before it is done and the failure surfaces as a clone that
-cannot verify the peer.
+HTTP client. This was the deployment step most often missed, because everything
+on the hub side works before it is done and the failure surfaces as a clone that
+cannot verify the peer. `tls: auto` removes it (Task 20409).
 
-A certificate from a public CA needs nothing further. A self-signed or private-CA
-certificate — the ordinary case for a `hub.internal` name — needs its CA in the
-sandbox's trust store, which in practice means installing it in the sandbox
-image. Alternatively, `pkg/executor/gitprovision` forwards `GIT_SSL_CAINFO`,
+**Under `tls: auto` the hub is the CA, and tells every sandbox so.** The CA is
+minted once per control plane — by whichever hub process first starts a monitor
+under `tls: auto`; another starting at the same moment adopts it rather than
+minting a second — and its private key is sealed under the KEK registry in the
+control-plane database (`hub_tls`), never written to a file. Every
+[hub-cluster member](architecture/hub-cluster.md) therefore serves the same
+identity, a database backup carries it, `cloop hub key rotate` rewraps it, and
+key retirement counts it. The proxy serves a leaf from it, for the host of
+`advertise_url` and of a specific `listen_addr`, valid 72 hours; the cluster
+leader replaces it with 48 hours left, and every member re-reads it each minute
+and serves it per handshake, so nothing is interrupted — a push in flight keeps
+its connection, and the next one verifies the new leaf against the same CA.
+
+Each dispatch carries the CA's certificate (`executor.Spec.GitCA`, public
+material), and each driver makes the workload trust it for the proxy's URL and
+nothing else — `http.<advertise_url>.sslCAInfo`, joined to the
+`GIT_CONFIG_COUNT` block git reads from the environment, never `GIT_SSL_CAINFO`:
+
+| Sandbox | Where the CA lands |
+| --- | --- |
+| host process (`localprocess`) | a file in a private directory of the run's own, removed when it ends |
+| container | `/etc/cloop/hub-ca/ca.crt`, bind-mounted read-only |
+| Pod | the run's lease Secret, projected read-only at `/etc/cloop/hub-ca/ca.crt` in the harness and in the workspace provisioner — unless `executors.kubernetes.git_ca_bundle` already names the proxy's URL |
+| edge device, host or container mode, and its virtual executors | the start frame's Spec; the agent's provisioning fetch and write-back push trust it, and its inner driver places it as above. Agents speaking protocol v21 or later; an older one is refused a workload that would talk to the proxy, naming the upgrade — never sent the forge credential instead |
+
+Per URL is the point. `GIT_SSL_CAINFO` would replace the image's trust store,
+breaking every other host the workload reaches, and would trust **any** server
+whose certificate the hub's CA signed — the Kubernetes monitor's, for one. With
+the setting scoped, a second https server holding a leaf from the same CA is
+verified against the image's own store and refused;
+`TestContainerGitTrustsTheHubCAForTheProxyOnly` proves it in a real container,
+`TestLoopbackDeviceTrustsTheHubCAForTheProxyOnly` through a real agent, and
+[`tests/kube`](../tests/kube/README.md) in a Pod. The CA's private key reaches no
+sandbox and no agent: `GitCA` refuses any PEM block that is not a certificate.
+
+**With `cert_file` and `key_file` the operator is the CA.** A certificate from a
+public CA needs nothing further. A self-signed or private-CA certificate needs
+its CA in the sandbox's trust store, which in practice means installing it in the
+sandbox image. Alternatively, `pkg/executor/gitprovision` forwards `GIT_SSL_CAINFO`,
 `GIT_SSL_CAPATH`, `SSL_CERT_FILE` and `SSL_CERT_DIR` from the machine git runs
 on, so an operator who owns the image or the device can point at a bundle instead
 of installing one. `GIT_SSL_NO_VERIFY` is deliberately not on that list:

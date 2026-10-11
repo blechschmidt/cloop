@@ -528,11 +528,13 @@ One section in the hub's `.cloop/config.yaml`:
 executors:
   kube_guard:
     enabled: true
+    tls: auto                                    # the hub issues the certificate
     listen_addr: "0.0.0.0:8444"                  # where the monitor binds
     advertise_url: "https://hub.internal:8444"   # what the SANDBOX connects to
-    cert_file: /etc/cloop/tls/kube-guard.crt
-    key_file: /etc/cloop/tls/kube-guard.key
-    ca_file: /etc/cloop/tls/kube-guard-ca.pem    # empty falls back to cert_file
+    # or, instead of tls: auto, an operator's pair:
+    # cert_file: /etc/cloop/tls/kube-guard.crt
+    # key_file: /etc/cloop/tls/kube-guard.key
+    # ca_file: /etc/cloop/tls/kube-guard-ca.pem  # empty falls back to cert_file
     min_tls_version: "1.2"                       # or "1.3"; empty means 1.2
     session_minutes: 60                          # 0 means 60; ceiling is 720
     # A hub-wide ceiling. Empty lets each grant speak for itself.
@@ -542,10 +544,12 @@ executors:
     audit_allowed: false                         # true: audit forwarded requests too
 ```
 
-With the Helm chart this is `executor.kubeGuard.enabled=true` beside a
-certificate from `executor.monitorTLS`: the chart advertises the monitor at the
-hub's Service name, adds the port to the Pod and the Service, and points
-`ca_file` at the CA it generated or was given — see
+`cloop hub bootstrap` writes this section with `tls: auto`, beside the git
+proxy's, at `--external-url`'s host (Task 20409). With the Helm chart it is
+`executor.kubeGuard.enabled=true` beside a certificate source from
+`executor.monitorTLS` — `auto`, or a Secret: the chart advertises the monitor
+at the hub's Service name, adds the port to the Pod and the Service, and, for a
+Secret, points `ca_file` at the CA it generated or was given — see
 [deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
 
 Resource patterns name the resource, never a subresource: `pods` already admits
@@ -558,14 +562,22 @@ the string a pattern is matched against is `resource` for the core group and
   config file acquires on upgrade.
 - **TLS is required.** The session token rides an `Authorization` header on
   every request, and cleartext would publish it rather than deliver it. An
-  enabled section without both `cert_file` and `key_file` is switched **off** at
-  load rather than serving tokens in the clear.
-- **`ca_file` is the one place this is easier to deploy than the git proxy.** A
-  kubeconfig can carry its own trust anchor, so the PEM is embedded into the
-  delivered document as `certificate-authority-data` and a self-signed hub
-  certificate needs no change to the sandbox image. Empty falls back to
-  `cert_file`, which is the right answer for a self-signed certificate and
-  harmless for a publicly-signed one.
+  enabled section with neither `tls: auto` nor both of `cert_file` and
+  `key_file` is switched **off** at load rather than serving tokens in the
+  clear — never read as `tls: auto`, which is an explicit choice.
+- **`tls: auto` issues the certificate from the hub's own CA** — the one the
+  [git proxy's](git-proxy.md) comes from, minted once per control plane and
+  sealed under `CLOOP_SECRET_KEY` — as a 72-hour leaf for the host of
+  `advertise_url` (and of a specific `listen_addr`), renewed by the cluster
+  leader with two days to spare. The CA is what every kubeconfig the monitor
+  issues carries as `certificate-authority-data`. Needs `CLOOP_SECRET_KEY`;
+  excludes `cert_file`, `key_file` and `ca_file`.
+- **`ca_file` is the one place this is easier to deploy than the git proxy**
+  with an operator's pair. A kubeconfig can carry its own trust anchor, so the
+  PEM is embedded into the delivered document as `certificate-authority-data`
+  and a self-signed hub certificate needs no change to the sandbox image. Empty
+  falls back to `cert_file`, which is the right answer for a self-signed
+  certificate and harmless for a publicly-signed one.
 - **`advertise_url` must be reachable from where `kubectl` runs**, which is
   frequently not where the hub sees itself: a Kubernetes Service name for the Pod
   backend, `host.docker.internal` / `host.containers.internal` for a
@@ -623,7 +635,7 @@ appear to be wrong. A hub with the monitor off leases, dispatches and runs
 | Check | What it catches |
 | --- | --- |
 | `kubeguard.enabled` | The monitor is off while Kubernetes access is configured, so grants deliver the cluster credential and enforce nothing. A pass states the policy and session length actually in force. |
-| `kubeguard.tls` | `cert_file`, `key_file` or `ca_file` missing or unreadable — the monitor will not start and every kubeconfig lease will be refused. |
+| `kubeguard.tls` | `cert_file`, `key_file` or `ca_file` missing or unreadable — the monitor will not start and every kubeconfig lease will be refused. Under `tls: auto`: no `CLOOP_SECRET_KEY` (the monitor will not start), or a leaf that does not chain to the hub CA, has less than a day left — the leader renews with two — or does not name the host of `advertise_url`. Passes before the hub has first started, when there is nothing issued yet. |
 | `kubeguard.advertise_url` | Unset, or loopback, so `kubectl` inside a Pod or an edge device cannot connect. This is the most common misconfiguration, because the wrong value works perfectly on the machine it was written on. |
 | `kubeguard.advertise_reachable` | Nothing is listening at the advertised address. Reported, never failed: the hub is not on the sandbox's network, so a Service name that does not resolve here is frequently correct. |
 | `kubeguard.verbs` | The deployment floor permits writing, so a grant on this hub may be given authority to change a cluster. |
@@ -865,7 +877,12 @@ rate(cloop_kubeguard_denials_total{reason="dangerous_subresource"}[5m]) > 0
 authority`** — the delivered kubeconfig's `certificate-authority-data` does not
 match what the monitor presents. Set `ca_file` to the issuing CA's PEM; with it
 empty the hub embeds `cert_file` itself, which is right for a self-signed
-certificate but not for one signed by a private CA whose chain matters.
+certificate but not for one signed by a private CA whose chain matters. Under
+`tls: auto` the two cannot disagree; the matching failure there is
+**`x509: certificate is valid for …, not …`** — the leaf does not name the host
+the kubeconfig's `server:` points at. The hub issues a leaf for the
+`advertise_url` it starts with, so restart it after changing that, and run
+`cloop hub doctor` (`kubeguard.tls`).
 
 **`Unable to connect to the server: dial tcp … connect: connection refused`** —
 `advertise_url` names an address the sandbox cannot reach. The hub logged what it

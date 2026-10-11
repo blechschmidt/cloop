@@ -229,6 +229,15 @@ This writes two files:
   systemd's `EnvironmentFile=`, `docker compose --env-file`, or
   `set -a; . .cloop/hub.env; set +a`.
 
+The hosted profile turns on the [git interception proxy](../docs/architecture/git-proxy.md)
+and the [Kubernetes access monitor](../docs/architecture/kubernetes-access.md)
+with `tls: auto` (Task 20409): a GitHub token or a kubeconfig granted to a
+project stays on the hub, and the hub issues both monitors' certificates from a
+CA of its own, sealed under `CLOOP_SECRET_KEY`, which every sandbox is told to
+trust for those two URLs only. Their advertise URLs are `--external-url`'s host
+on ports 8443 and 8444, and the summary lists them: executors must reach both,
+directly rather than through a TLS-terminating proxy.
+
 It then prints a systemd unit configured for that directory. It is printed and
 not installed because writing to `/etc/systemd/system` needs root, and a
 bootstrap command that silently acquired a system service would be a poor
@@ -246,6 +255,7 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 | `--behind-proxy` | Leave `ui.tls` empty; a proxy or Ingress terminates TLS. **The proxy must set `X-Forwarded-Proto: https`**, and the hub believes it only from loopback or an address in `ui.trusted_proxies` — add the proxy's address there when it runs on another host. That header is what tells the hub the browser's connection was encrypted: without it `/install.sh` is refused and enrollment offers no one-line installer. |
 | `--oidc-issuer`, `--oidc-client-id` | Enable SSO. A client *secret* is optional — without one the hub is a public client and PKCE authenticates the code exchange. Where one is used it is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
 | `--admin-email` | Break-glass admin, matched on the email claim. Repeatable. |
+| `--git-proxy-port`, `--kube-guard-port` | Where the two monitors listen, and the port of the URL sandboxes reach them at on `--external-url`'s host. `8443` and `8444` by default; each must differ from `--port` and from the other. |
 | `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. |
 
 ### About `CLOOP_SECRET_KEY`
@@ -503,13 +513,14 @@ sandbox does not hold it: the [git interception proxy](../docs/architecture/git-
 for GitHub tokens, and the [Kubernetes access monitor](../docs/architecture/kubernetes-access.md)
 ("kube guard") for kubeconfigs. Each is a TLS listener on its own port, on the
 hub Pod and on its Service. Both are off by default — turning one on changes
-the URL a sandbox's git or kubectl talks to — and both need a certificate.
+the URL a sandbox's git or kubectl talks to — and both need a certificate. The
+zero-configuration one is the hub's own (`executor.monitorTLS.auto`, Task 20409):
 
 ```bash
 helm upgrade cloop deploy/helm/cloop-hub --reuse-values \
   --set executor.gitProxy.enabled=true \
   --set executor.kubeGuard.enabled=true \
-  --set executor.monitorTLS.selfSigned=true
+  --set executor.monitorTLS.auto=true
 ```
 
 That is the whole evaluation setup, and it is what CI runs end to end on kind
@@ -527,7 +538,8 @@ monitor, read-only.
 | `executor.gitProxy.sessionMinutes`, `executor.kubeGuard.sessionMinutes` | `0` (60) | At most 720. The deadline that bounds a sandbox's access. |
 | `executor.kubeGuard.verbs`, `.namespaces`, `.resources` | `[]` | A hub-wide ceiling on every grant. Empty lets each grant decide; a grant with no verbs is read-only. |
 | `executor.kubeGuard.auditAllowed` | `false` | Record every forwarded request in the audit trail, not only refusals. |
-| `executor.monitorTLS.existingSecret` | `""` | A `kubernetes.io/tls` Secret for the Service's names — what cert-manager writes. The production path. |
+| `executor.monitorTLS.auto` | `false` | The hub issues both certificates itself (`tls: auto`): a CA minted the first time it starts, its key sealed under `CLOOP_SECRET_KEY` in the hub's database — every replica serves the same identity, and a backup of the volume carries it — and a 72-hour leaf per monitor, renewed by the cluster leader. Nothing to create or rotate, no ConfigMap and no `git_ca_bundle`: each workload Pod gets the CA from its run's lease Secret. |
+| `executor.monitorTLS.existingSecret` | `""` | A `kubernetes.io/tls` Secret for the Service's names — what cert-manager writes. For a cluster that already runs cert-manager. |
 | `executor.monitorTLS.selfSigned` | `false` | The chart generates a CA and a certificate, and keeps them across `helm upgrade` by reading its Secret back. A renderer without cluster access (Argo CD, `helm template`) gets a new CA every render, so use `existingSecret` there. |
 | `executor.monitorTLS.caBundle` | `""` | With `existingSecret`: the CA as PEM. The chart delivers it to the Pods, and the kube guard embeds it in the kubeconfigs it issues. |
 | `executor.monitorTLS.workloadCAConfigMap`, `.workloadCAKey` | `""`, `ca.crt` | With `existingSecret`: a ConfigMap you maintain in the workload namespace — what trust-manager produces — instead of `caBundle`. |
@@ -537,8 +549,11 @@ monitor, read-only.
 
 **How the Pods trust the proxy.** A sandbox's git verifies the proxy's
 certificate, and an in-cluster name like `cloop-hub.cloop.svc` is one no
-public CA will certify. So the chart writes the CA into a ConfigMap in the
-workload namespace (`<fullname>-monitor-ca`), and
+public CA will certify. Under `monitorTLS.auto` the hub hands each workload Pod
+its CA in the run's own lease Secret, mounted at `/etc/cloop/hub-ca/ca.crt` and
+trusted for the proxy's URL only — the chart renders nothing for it. Otherwise
+the chart writes the CA into a ConfigMap in the workload namespace
+(`<fullname>-monitor-ca`), and
 `executors.kubernetes.git_ca_bundle` has the driver mount it into every
 workload Pod at `/etc/cloop/git-ca/ca.crt` and point git at it for the proxy's
 URL only (`http.<url>.sslCAInfo`). Every other host keeps the image's own trust
@@ -591,7 +606,8 @@ disappears exactly when someone turns that file off.
 | More than one replica (or `strategy.type=RollingUpdate`) without persistence | Each Pod would run on its own emptyDir — separate hubs with separate databases behind one Service. |
 | More than one replica with `persistence.accessMode=ReadWriteOncePod` | Only one Pod could mount the volume; the others would never start. |
 | `ingress.host` ≠ the host in `config.externalURL` | Produces a login that silently loops back to the sign-in page. |
-| A monitor with no certificate, or two certificate sources | The session token rides every request; the hub will not start a monitor without TLS, and exactly one source decides which certificate it serves. |
+| A monitor with no certificate, or two certificate sources (`auto`, `existingSecret`, `selfSigned`) | The session token rides every request; the hub will not start a monitor without TLS, and exactly one source decides which certificate it serves. |
+| `auto` with `caBundle`, `workloadCAConfigMap` or `publiclyTrusted` | The hub issues the certificate and delivers its own CA; each would describe one that is not in use. |
 | A monitor's `advertiseURL` that is not a bare `https://` URL | http would publish the session token; a path would be read as part of every repository's. |
 | Both monitors on one port, or either on 8080 | One listener per port; 8080 is the dashboard's. |
 | `sessionMinutes` outside 0–720 | A session longer than a working day is the credential itself, handed over. |
@@ -651,7 +667,9 @@ So it boots the things:
    `CLOOP_UI_TOKEN` and asserts it refuses to listen on every interface,
    saying why, rather than serving the network open.
 3. Runs `cloop hub bootstrap` and asserts the generated config still contains
-   `allow_host_process: false`, `default_role: none`, and a 0600 `hub.env`.
+   `allow_host_process: false`, `default_role: none`, and a 0600 `hub.env`
+   (and `cmd`'s golden test pins the whole file, both monitors on with
+   `tls: auto` included).
 4. `helm lint` across the interesting value sets, and asserts the chart's guard
    rails still refuse every configuration in the table above — and that the
    chart renders with the defaults `helm upgrade --reuse-values` sees on a
@@ -672,10 +690,13 @@ So it boots the things:
    workload's environment resolves from the run's lease Secret and is never a
    value in the Pod object, and a harness whose Secret is gone fails by name.
 8. Renders the credential monitors and asserts the hub's config, the Service
-   ports, the certificate's names and the workload namespace's CA; then runs
-   [`tests/kube`](../tests/kube/README.md): a Pod clones and pushes through the
-   git proxy and runs `kubectl` through the Kubernetes access monitor, and the
-   forge, the audit trail and the cluster are checked afterwards.
+   ports, the certificate's names and the workload namespace's CA — and, under
+   `monitorTLS.auto`, `tls: auto` with no certificate Secret, CA ConfigMap or
+   `git_ca_bundle`; then runs [`tests/kube`](../tests/kube/README.md) on a
+   release with `monitorTLS.auto`: a Pod clones and pushes through the git proxy
+   trusting the hub's CA for its URL only, runs `kubectl` through the Kubernetes
+   access monitor, and the forge, the audit trail and the cluster are checked
+   afterwards.
 
 ---
 

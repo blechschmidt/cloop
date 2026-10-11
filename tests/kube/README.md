@@ -35,7 +35,9 @@ minted their sessions and are forwarded.
 4. Creates `cloop-e2e-target-<stamp>` and a ServiceAccount that may *edit* it, so a
    refused write can only have been refused by the monitor.
 5. `helm upgrade --reuse-values` with `executor.gitProxy`, `executor.kubeGuard`
-   (with `auditAllowed`), a self-signed `executor.monitorTLS`, the harness
+   (with `auditAllowed`), `executor.monitorTLS.auto` — the hub issues both
+   certificates from its own CA, and no `git_ca_bundle` is rendered (checked
+   against the release's config) — the harness
    image, a per-Pod egress filter opening only the monitors' ports,
    `hostAliases` pointing github.com at the forge and `extraCACerts` trusting
    its CA.
@@ -51,7 +53,7 @@ minted their sessions and are forwarded.
 | --- | --- |
 | H1 | the lease's `git-credential-cloop` is mode 0550 in the Pod |
 | T1 | no GitHub token is in the environment, the lease directory or the workspace's git config |
-| C1 | the chart's CA is mounted at `/etc/cloop/git-ca/ca.crt` and trusted for the proxy's URL only — no `GIT_SSL_CAINFO` |
+| C1 | the hub's CA came from the run's lease Secret to `/etc/cloop/hub-ca/ca.crt` and is trusted for the proxy's URL only — the one `sslCAInfo` in the block, no `GIT_SSL_CAINFO` — and the kube guard, whose leaf the same CA signed, is refused by git |
 | WS1, WS2 | the init container provisioned the workspace through the proxy (the `cloop-ws-<handle>` Secret's session username at work), and its `.git/config` holds no credential |
 | S1 | the repository tracks no `.cloop/`, the workspace holds the project the hub sent, and git ignores it, so a write-back cannot commit it |
 | P1 | `git clone https://github.com/acme/granted` works, through the proxy |

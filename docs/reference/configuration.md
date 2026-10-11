@@ -484,6 +484,13 @@ own provisioning and write-back git, which run with a closed environment,
 import exactly these keys (`http.<https-url>.sslCAInfo` and `.sslCAPath`) and
 nothing else from it.
 
+A hub whose git proxy runs under `tls: auto` needs none of this: each Pod gets
+the hub's own CA from its run's lease Secret, mounted read-only at
+`/etc/cloop/hub-ca/ca.crt` in both containers and trusted the same way, for the
+proxy's URL only (Task 20409). A `git_ca_bundle` that already names the proxy's
+URL keeps it — two `sslCAInfo` values for one URL would leave git with whichever
+came last — and the hub's CA is delivered for the URLs the bundle leaves.
+
 The kubelet fetches the ConfigMap on the Pod's behalf, so the executor's Role
 needs no rule for it; a missing one holds the Pod at `ContainerCreating` with an
 event naming it. `config_map` without `urls` is refused, as are URLs that are not
@@ -934,24 +941,55 @@ the allowlist before presenting the credential upstream.
 executors:
   git_proxy:
     enabled: true
+    tls: auto                                      # the hub issues the certificate
     listen_addr: "0.0.0.0:8443"                    # where it binds
     advertise_url: "https://hub.internal:8443"     # what the SANDBOX connects to
-    cert_file: /etc/cloop/tls/git-proxy.crt
-    key_file: /etc/cloop/tls/git-proxy.key
     min_tls_version: "1.2"                         # or "1.3"
     session_minutes: 60                            # 0 means 60; ceiling is 720
     allowed_refs: ["refs/heads/cloop/**"]          # the default
     allow_delete: false
 ```
 
+`cloop hub bootstrap` writes exactly this, with `advertise_url` derived from
+`--external-url` (Task 20409).
+
 - **Off by default.** Interposing a proxy changes the URL sandboxes push to, so
   it is an operator's decision rather than something a config file acquires on
-  upgrade. With it off, workspaces are provisioned exactly as before.
-- **TLS is required**, and the certificate is validated by *the sandbox's* git,
-  not by the hub — a self-signed one needs its CA in the sandbox image, or on
-  Kubernetes in [`executors.kubernetes.git_ca_bundle`](#on-kubernetes-the-git-proxys-ca-for-its-url-only).
-  An enabled section without both `cert_file` and `key_file` is switched off at
-  load rather than serving session tokens in cleartext.
+  upgrade. With it off, workspaces are provisioned exactly as before — and a
+  GitHub grant delivers the forge credential itself into the sandbox, which
+  `cloop hub doctor` names as `gitproxy.forge_credentials` on a hub with
+  `allow_host_process: false`.
+- **TLS is required**, because the session token rides every request, and the
+  certificate is validated by *the sandbox's* git, not by the hub. There are two
+  ways to supply it:
+  - **`tls: auto`** has the hub issue it. A CA is minted the first time any hub
+    process serving this control plane starts a monitor under `tls: auto`; its
+    private key is sealed under the KEK registry in the control-plane database
+    (never a loose file), so every [hub-cluster](../architecture/hub-cluster.md)
+    member serves the same identity, a database backup carries it, and `cloop
+    hub key rotate` rewraps it. The proxy serves a leaf from that CA naming the
+    host of `advertise_url` and of `listen_addr` (when it names one), valid for
+    72 hours; the cluster leader replaces it with 48 hours left, and every
+    member serves the new one within a minute, per handshake, so a push in
+    flight is not interrupted. Every sandbox the hub dispatches is told to trust
+    the CA **for `advertise_url` only** — `http.<advertise_url>.sslCAInfo`
+    through the `GIT_CONFIG_COUNT` block, never `GIT_SSL_CAINFO`, which would
+    replace the image's trust store and trust every host the CA signed. No
+    image needs the CA baked in: a host process and a container get a read-only
+    file, a Pod gets it from its run's lease Secret, and an edge device gets it
+    in the start frame (agents speaking protocol v21 or later; an older agent
+    is refused a workload that would talk to the proxy, with the upgrade named,
+    rather than handed the forge credential). Needs `CLOOP_SECRET_KEY`;
+    excludes `cert_file` and `key_file`.
+  - **`cert_file` and `key_file`**, an operator's pair. A self-signed one needs
+    its CA in the sandbox image, or on Kubernetes in
+    [`executors.kubernetes.git_ca_bundle`](#on-kubernetes-the-git-proxys-ca-for-its-url-only).
+
+  `tls: auto` is an explicit choice, never inferred: an enabled section with
+  neither is switched off at load, as it always was, rather than starting to
+  interpose a proxy on the upgrade that introduced `tls: auto`. `tls: auto`
+  beside `cert_file`/`key_file` is refused by `cloop config validate` and, at
+  load, dropped in favour of the files.
 - **`advertise_url` must be reachable from where git runs** — a Kubernetes
   Service for the Pod backend, the hub's address on the link for an edge device,
   or `host.docker.internal` / `host.containers.internal` for a containerised
@@ -997,11 +1035,13 @@ before the credential is attached.
 executors:
   kube_guard:
     enabled: true
+    tls: auto                                    # the hub issues the certificate
     listen_addr: "0.0.0.0:8444"                  # where it binds
     advertise_url: "https://hub.internal:8444"   # what the SANDBOX connects to
-    cert_file: /etc/cloop/tls/kube-guard.crt
-    key_file: /etc/cloop/tls/kube-guard.key
-    ca_file: /etc/cloop/tls/kube-guard-ca.pem    # empty falls back to cert_file
+    # or, instead of tls: auto:
+    # cert_file: /etc/cloop/tls/kube-guard.crt
+    # key_file: /etc/cloop/tls/kube-guard.key
+    # ca_file: /etc/cloop/tls/kube-guard-ca.pem  # empty falls back to cert_file
     min_tls_version: "1.2"                       # or "1.3"
     session_minutes: 60                          # 0 means 60; ceiling is 720
     verbs: [get, list, watch]                    # a hub-wide ceiling; omit to let grants decide
@@ -1015,11 +1055,16 @@ executors:
   config file acquires on upgrade. With it off, kubeconfigs are minimised and
   delivered exactly as before.
 - **TLS is required.** The session token rides an `Authorization` header on every
-  request. An enabled section without both `cert_file` and `key_file` is switched
-  off at load rather than publishing tokens in cleartext. Unlike the git proxy,
-  the trust anchor needs no change to the sandbox image: `ca_file` (or
-  `cert_file`) is embedded into the delivered kubeconfig as
-  `certificate-authority-data`.
+  request. `tls: auto` has the hub issue the certificate from the same CA as the
+  [git proxy's](#git-interception-proxy), for the host of `advertise_url` and of
+  `listen_addr`, and embed the CA in every kubeconfig the monitor issues; it
+  needs `CLOOP_SECRET_KEY` and excludes `cert_file`, `key_file` and `ca_file`.
+  Otherwise an enabled section without both `cert_file` and `key_file` is
+  switched off at load rather than publishing tokens in cleartext. Either way the
+  trust anchor needs no change to the sandbox image: the hub's CA, or `ca_file`
+  (else `cert_file`), is embedded into the delivered kubeconfig as
+  `certificate-authority-data` — trusted by that kubeconfig's `kubectl`, for that
+  server, and by nothing else in the sandbox.
 - **`advertise_url` must be reachable from where `kubectl` runs**, and must be a
   bare `https://` base with no path — it becomes the kubeconfig's `server:`.
   Empty falls back to the bound address, which is right only when the sandbox

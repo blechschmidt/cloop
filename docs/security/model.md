@@ -1365,8 +1365,22 @@ Three properties make this a boundary rather than a redirection:
 What does *not* change: the four absences below, the origin-scoped delivery, the
 `owner/name` shape a grant is matched against (`Minted.RepoURL` preserves it, so
 `Workspace.RepoPath` returns the same string), and every audit row that names a
-repository or a grant. The proxy is off by default, so an un-configured hub is
-described by the paragraphs above, not by this one.
+repository or a grant. The proxy is off unless configured, so an un-configured
+hub is described by the paragraphs above, not by this one — though `cloop hub
+bootstrap` turns it on.
+
+**Under `tls: auto` (Task 20409) the sandbox's trust in the proxy is the hub's
+to give, and it is given for one URL.** The proxy's certificate is a short-lived
+leaf from a CA the hub mints once per control plane and whose private key it
+seals under the KEK registry, beside every brokered credential. Each dispatch
+carries the CA's certificate — and, by `GitCA.Validate`, nothing but
+certificates — and each driver installs it as `http.<advertise_url>.sslCAInfo`
+in the workload's `GIT_CONFIG_COUNT` block, never as `GIT_SSL_CAINFO`. So the
+workload's git, and cloop's own provisioning fetch and write-back push, verify
+the proxy against the hub's CA and every other host against the image's own
+store: a server holding another leaf from the same CA — the Kubernetes
+monitor's, say — is refused. A device agent too old to place the CA is refused
+the workload, naming the upgrade; the fallback is never the PAT.
 
 ### The four absences
 
@@ -3888,6 +3902,12 @@ not installed.
 | End to end: a real `git push` to a branch inside the hub's allowlist but outside the grant's branches is refused, and one inside both lands | `pkg/gitproxy: TestPushOutsideAGrantsBranchesIsRefused` |
 | Both halves of a session carry the grant's branches — the lease's (`guardPolicy`) and the workspace's (`gitproxycreds`) — without narrowing the hub's shared policy for the next session | `pkg/ui: TestGuardMintsASessionNarrowedToTheGrantsBranches`, `pkg/executor/gitproxycreds: TestTheSessionIsNarrowedToTheGrantsBranches` |
 | Where no proxy guards a branch-restricted grant, its push is withheld, never delivered unrestricted: an App token is minted read-only, a PAT is not delivered, and a write token minted for a guard that then declines is destroyed at GitHub | `pkg/secretbroker: TestUnguardedAppWithBranchesIsMintedReadOnly`, `TestUnguardedPATWithBranchesIsNotDelivered`, `TestDecliningGuardDestroysAWriteTokenMintedForBranches` |
+| `tls: auto`: the hub's CA is minted once per control plane — members starting together adopt one — and its private key is sealed under the KEK registry, bound to its row and serial, rewrapped by key rotation and counted by retirement | `pkg/hubca: TestConcurrentMembersAgreeOnOneCA`, `TestThePrivateKeysAreSealed`, `TestASealedKeyMovedToAnotherRowDoesNotOpen`, `TestKeyRotationRewrapsTheCA`; `pkg/secretstore: TestRetirementChecksEverySetThatRotates` |
+| `tls: auto`: a leaf verifies for the advertised hosts and nothing else; the leader replaces it with days to spare, every member adopts the replacement, and a TLS connection open across the swap keeps working | `pkg/hubca: TestTheLeafVerifiesForItsNamesOnly`, `TestRenewalOverlapsAndAMemberPicksItUp`, `TestAHandshakeAcrossARenewal` |
+| `tls: auto`: a sandbox's git trusts the hub CA for the proxy's URL only — an image carrying no CA clones and pushes through the proxy, and a second https server with a leaf from the same CA is refused — in a container and on a device through a real agent (and in a Pod, `tests/kube` C1) | `pkg/executor/container: TestContainerGitTrustsTheHubCAForTheProxyOnly`, `pkg/executor/remote: TestLoopbackDeviceTrustsTheHubCAForTheProxyOnly`, `pkg/executor/localprocess: TestHostProcessTrustsTheHubCAForTheProxyOnly` |
+| The CA bundle a dispatch carries admits CA certificates and nothing else, so the CA's private key cannot reach a sandbox or an agent through it | `pkg/executor: TestGitCAValidate` |
+| A device whose agent cannot place the CA is refused a workload that would talk to the proxy, naming the upgrade — never handed the forge credential instead — and still runs everything else | `pkg/executor/remote: TestAnOlderAgentIsRefusedTheProxysCA`, `TestAnOlderAgentStillRunsWhatNeedsNoCA` |
+| `tls: auto` without a sealing key starts no proxy, so git workspaces and GitHub leases fail closed; an enabled section with no certificate is still switched off at load — `tls: auto` is never inferred from the files being missing | `pkg/ui: TestAutoTLSWithoutAKeyFailsClosed`; `pkg/config: TestAMissingCertificateIsNotReadAsAuto` |
 | The dashboard's verdict on a branch list matches what the broker will do on this hub | `pkg/ui: TestBranchEnforcementTellsTheTruthAboutThisHub` |
 | Live, opt-in: a grant assigned through the panel's endpoint, leased and materialised as a dispatch does, pushes through the proxy to a real GitHub repository — outside its branches refused, inside them landed, the installation token nowhere in the sandbox | `pkg/ui: TestLiveBranchRestrictionThroughTheGitProxy` |
 | Only `cloop ui` runs the proxy, and every other process that registers the Kubernetes driver with the section enabled refuses git workspaces rather than handing a Pod the forge credential | `pkg/executor/reconcile: TestWorkspaceSourceFailsClosedWithoutTheProxy`, `TestWorkspaceSourceRoutesThroughTheCallersProxy` |

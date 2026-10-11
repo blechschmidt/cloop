@@ -78,6 +78,7 @@ Three facts carry most of it:
 | --- | --- | --- |
 | `executors.git_proxy` | `pkg/config/gitproxy.go` | The section. `GitProxyConfig.Policy()` turns it into the hub's policy: `allowed_refs` (default `refs/heads/cloop/**`), create and update, delete only with `allow_delete`, fetch always. Read once, at startup, from the hub's effective configuration: `.cloop/config.yaml` with the hub's per-instance `config.ui-<port>.yaml` overlay merged in (Task 20364), so one of two dashboards sharing a directory can run the proxy without the other. There is no dashboard setting for it. See [turning it on](../git-interception-proxy.md#turning-it-on). |
 | `ensureGitProxy`, `startGitProxy` | `pkg/ui/gitproxy.go` | Start the proxy once per process. Record separately whether the configuration *asked* for one (`gitProxyRequired`), so "wanted" and "running" are never the same fact. |
+| the hub CA, `tls: auto` | `pkg/hubca`, `pkg/ui/hubtls.go` | The certificate authority the hub issues the proxy's (and the Kubernetes monitor's) certificate from when the section says `tls: auto` (Task 20409): minted once per control plane, its key sealed under the KEK registry in `hub_tls`, a 72-hour leaf per monitor renewed by the cluster leader (`watchMonitorCertificates`) and re-read by every member each minute. `SandboxGitCA` is what each dispatch is told to trust, and for which URL. |
 | `gitproxy.Registry` | `pkg/gitproxy/session.go` | Sessions keyed by id, each holding `sha256(token)` — never the token — beside the upstream credential and the policy. No HTTP in it. |
 | upstream credential generations | `pkg/gitproxy/refresh.go` | A session minted with `MintRequest.Refresh` renews its upstream credential — a GitHub App token — from its own request path before it expires, single-flight, and retires the one it replaced once no request presents it (Task 20375). |
 | App token slots | `pkg/secretbroker/apprefresh.go` | One per App grant a lease carries: the token's current and superseded generations and the scope it was minted at, which a refresh replays exactly. |
@@ -354,6 +355,15 @@ workload, and where git runs relative to the proxy:
 | `remote`, host mode | the agent fetches on the device before the harness starts, holding the session credential in its memory | the start frame's `secret_files`; the agent writes them into its own `cloop-lease-*` tmpfs and relocates the paths | on the device, as the agent's user | the device |
 | `remote`, container mode, and every virtual executor | as host mode: the fetch runs on the device **host**, never inside the container | as host mode, then bind-mounted read-only into the container | inside the container on the device | from inside that container: its network or firewall must admit the proxy |
 
+Under [`tls: auto`](../git-interception-proxy.md#the-certificate-the-sandbox-has-to-trust)
+every row also carries the hub's CA, which the hub attaches to each dispatch
+(`applyGitProxyTrust`) and each driver puts where the workload's git reads it,
+trusted for `advertise_url` only: a private file for `localprocess`,
+`/etc/cloop/hub-ca/ca.crt` read-only for a container and a Pod (from the run's
+lease Secret), and the start frame's Spec for a device — whose provisioning
+fetch and write-back push trust it too, and whose agent must speak protocol v21
+or the workload is refused with the upgrade named.
+
 A few consequences follow from that table.
 
 - **The `container` driver never touches the workspace path, but its sandboxes
@@ -505,7 +515,7 @@ grant's kind, and on whether the grant restricts branches.
 | --- | --- | --- | --- |
 | **Runs the proxy** | a scoped session; read-only unless the grant has `contents:write` | an installation token minted for the lease and held by the hub; a scoped session in the sandbox | enforced by the proxy, outside the sandbox |
 | **Has a valid `enabled: true` section, but no proxy running** | not delivered (`ErrGuardUnavailable`); the rest of the lease still is, and the run starts without GitHub access | the same, and the minted token is revoked at GitHub | not delivered |
-| **Has no proxy** | the PAT itself in `github-token`, released by an in-sandbox helper for allowlisted repositories only | the installation token itself in `github-token`, which GitHub has already scoped to the grant | `github_app`: minted **read-only**, with the reason in `CLOOP_GITHUB_WRITE_WITHHELD`. `github_pat`: **not delivered** (`ErrBranchesUnenforced`) |
+| **Has no proxy** | the PAT itself in `github-token`, released by an in-sandbox helper for allowlisted repositories only — usable by the workload against GitHub's REST API, and for any push the PAT reaches | the installation token itself in `github-token`, which GitHub has already scoped to the grant | `github_app`: minted **read-only**, with the reason in `CLOOP_GITHUB_WRITE_WITHHELD`. `github_pat`: **not delivered** (`ErrBranchesUnenforced`) |
 
 **The workspace path** — cloop's own fetch:
 
@@ -524,12 +534,19 @@ on a hub with none. `branchEnforcement` renders the same rule for the dashboard,
 and `TestBranchEnforcementTellsTheTruthAboutThisHub` holds the two together.
 
 "Valid" is doing work in those tables. A section that is `enabled: true` but
-cannot produce a usable proxy — no `cert_file` or `key_file`, an unusable
-`listen_addr` or `advertise_url` — is switched **off** when the configuration is
-loaded, with a `warning: config executors.git_proxy.…` line, and the hub then
-behaves as one with no proxy: credentials are delivered into sandboxes. Only a
-section that loads cleanly and whose proxy then fails to start fails closed. See
-[how it fails](#how-it-fails).
+cannot produce a usable proxy — neither `tls: auto` nor both of `cert_file` and
+`key_file`, an unusable `listen_addr` or `advertise_url` — is switched **off**
+when the configuration is loaded, with a `warning: config executors.git_proxy.…`
+line, and the hub then behaves as one with no proxy: credentials are delivered
+into sandboxes. Only a section that loads cleanly and whose proxy then fails to
+start fails closed — including `tls: auto` on a hub with no `CLOOP_SECRET_KEY`
+to seal its CA under. See [how it fails](#how-it-fails).
+
+The "Has no proxy" row is the one Task 20409 set out to make rare. `cloop hub
+bootstrap` turns the proxy on with `tls: auto`, which needs no certificate files
+and no CA in any image, and `cloop hub doctor` names every GitHub grant a hub
+with `allow_host_process: false` delivers into sandboxes without one
+(`gitproxy.forge_credentials`).
 
 The one row that is not a boundary is a hub with no proxy and a grant with no
 branch list: the credential is in the sandbox, and a PAT's allowlist is then
@@ -567,11 +584,14 @@ and nothing about the sandbox's route to it. The only check of the sandbox's sid
 is a clone from inside one.
 
 The sandbox's git validates the proxy's certificate, not the hub's HTTP client.
-For the workspace fetch that is the trust store of the machine the fetch runs on
-— the device host, or the harness image in a Pod's init container — plus the
+Under `tls: auto` it validates it against the hub's CA, which every dispatch
+carries and every driver installs for the proxy's URL alone — so neither the
+device host nor any image needs to trust anything in advance. Otherwise, for the
+workspace fetch it is the trust store of the machine the fetch runs on — the
+device host, or the harness image in a Pod's init container — plus the
 transport variables `pkg/executor/gitprovision` forwards: `GIT_SSL_CAINFO`,
 `GIT_SSL_CAPATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and the `HTTPS_PROXY` /
-`ALL_PROXY` / `NO_PROXY` family. For the lease path it is the sandbox image's
+`ALL_PROXY` / `NO_PROXY` family; for the lease path it is the sandbox image's
 trust store. See
 [the certificate the sandbox has to trust](../git-interception-proxy.md#the-certificate-the-sandbox-has-to-trust).
 
@@ -841,13 +861,16 @@ named for adoption, since nothing presents it again. See
 | What happened | What the hub says | Workspace path | Lease path |
 | --- | --- | --- | --- |
 | No section, or `enabled: false` | nothing | the forge credential goes to the one fetching git child | the token goes into the sandbox, helper-scoped |
-| `enabled: true`, but no TLS pair or an unusable `listen_addr` / `advertise_url` | `warning: config executors.git_proxy.…` at load; the section is switched off | as if there were no section | as if there were no section |
+| `enabled: true`, but neither `tls: auto` nor a TLS pair, or an unusable `listen_addr` / `advertise_url` | `warning: config executors.git_proxy.…` at load; the section is switched off | as if there were no section | as if there were no section |
+| `tls: auto` on a hub with no `CLOOP_SECRET_KEY` | `ui: git interception proxy NOT started: git proxy TLS (tls: auto): hubca: the hub's certificate authority needs CLOOP_SECRET_KEY …` | refused with `ErrWorkspaceUnavailable` | GitHub material not delivered (`ErrGuardUnavailable`) |
+| `tls: auto`, a device whose agent speaks a protocol older than v21 | the dispatch is refused: the device's protocol, v21, and the upgrade path | refused | refused — the workload would talk to the proxy without its CA, and the forge credential is never the fallback |
+| `tls: auto`, a leaf the leader failed to renew | `ui: the git proxy's certificate could not be renewed: …`; `cloop hub doctor` fails `gitproxy.tls` with less than a day left | — until it lapses, when the sandbox's git refuses it | the same |
 | A valid section whose proxy did not start — port taken, certificate unreadable | `ui: git interception proxy NOT started: …` | refused with `ErrWorkspaceUnavailable`; on Kubernetes every git workspace, public ones included | GitHub material not delivered (`ErrGuardUnavailable`); the run starts without it; App tokens revoked |
 | One executor could not be wrapped | `ui: executor <id> is NOT routed through the git proxy: …` | that executor's workspaces refused | unaffected |
 | The audit database would not open | `ui: git proxy decisions will go to stderr, not the audit trail: …` | enforced; the evidence is on stderr, prefixed `git-proxy:` | the same |
 | A session could not be minted at dispatch | the dispatch error names the repository | dispatch fails, inner lease released | that GitHub material fails, as above |
 | The sandbox cannot reach `advertise_url` | git: `Could not resolve host`, `Failed to connect`, or a timeout behind a dropping firewall | the fetch fails | the workload's git fails |
-| The sandbox does not trust the certificate | git: `SSL certificate problem` | the fetch fails | the workload's git fails |
+| The sandbox does not trust the certificate — an operator's private pair whose CA is in no image, or an `advertise_url` the hub's leaf does not name | git: `SSL certificate problem` | the fetch fails | the workload's git fails |
 | The session lapsed or was closed | git: an authentication failure (HTTP 401); a `gitproxy.rejected` row — naming the expiry if the reaper has not swept the session yet, and only `unauthenticated` once it is gone | a late push fails | late git fails — see [how long a session lives](#how-long-a-session-lives) |
 | An App token's renewal was refused: grant revoked or expired, installation suspended, repository removed | git: HTTP 401 on the request that found it due; the session's `gitproxy.session_closed` row says *upstream credential will not be renewed* and why; a denied `secret.renew` | that session's git ends | that session's git ends; the grant's tokens are destroyed |
 | An App token's renewal failed for a reason that may pass — GitHub unreachable, rate limiting | a denied `secret.renew` saying it will retry | git carries on with the held token while it is valid; past its expiry, HTTP 502 naming why, until a retry succeeds | the same |
@@ -920,7 +943,14 @@ The `gitproxy` checks read the same configuration the hub does:
 `gitproxy.advertise_reachable` (the bounded dial from the hub), `gitproxy.allowed_refs`
 (patterns outside `refs/heads/cloop/`), `gitproxy.allow_delete`, and — with the
 proxy off — `gitproxy.branch_grants`, which counts the grants whose branch list
-this hub therefore delivers read-only or not at all. `--smoke` brokers a real
+this hub therefore delivers read-only or not at all, and on a hub with
+`allow_host_process: false` `gitproxy.forge_credentials`, which names every
+GitHub grant delivered into sandboxes as the credential itself. Under
+`tls: auto`, `gitproxy.tls` reads the CA and the leaf from `hub_tls`: it passes
+before the hub has first started, fails without `CLOOP_SECRET_KEY`, and fails a
+leaf that does not chain to the hub CA, has less than a day left (the leader
+renews with two), or does not name the host of `advertise_url`; `hubca.expiry`
+warns a year before the CA itself expires. `--smoke` brokers a real
 lease from a process that has no proxy, so on a hub with the section enabled it
 attaches an `UnavailableGitGuard` and refuses GitHub material rather than writing
 a token into its smoke sandbox.
@@ -953,6 +983,9 @@ all of it is reconnaissance.
 | Conformance | a guarded PAT never reaches either delivery shape; a broken guard never delivers the token | `tests/security/gitguard_test.go` |
 | Workspace credentials in a Pod | the session id reaches the init container through the run's Secret, the helper is projected executable, and the lease behind the token lives as long as that Secret | `pkg/executor/kubernetes` `workspace_test.go`, `secretfiles_test.go` |
 | The proxy's CA in a Pod | the bundle is mounted in both containers and trusted for the proxy's URL only, joining any `GIT_CONFIG_COUNT` block already there; a real git fetch through a closed environment trusts a CA scoped to its remote and not one scoped elsewhere | `pkg/executor/kubernetes` `cabundle_test.go`; `pkg/executor/gitprovision` `TestProvisionTrustsACertificateScopedToTheRemote` |
+| The hub's own CA (`tls: auto`) | minted once by racing members, its key sealed and bound to its row, rewrapped by key rotation and counted by retirement; leaves for the advertised names, renewed by the leader with overlap and adopted by followers, a TLS connection open across a renewal kept; the hub serving it to both monitors and shipping it to each dispatch for the proxy's URL only; a Pod taking it from its lease Secret; an older agent refused with the upgrade named | `pkg/hubca`; `pkg/ui` `hubtls_test.go`; `pkg/executor/kubernetes` `hubca_test.go`; `pkg/executor/remote` `gitca_test.go`; `pkg/executor/localprocess` `gitca_test.go` |
+| `tls: auto` in a real sandbox | an image carrying no CA clones and pushes through an auto-TLS proxy, and the same git refuses a second https server whose leaf the same CA signed — in a container (`CLOOP_GITCA_CONTAINER_E2E=1`, a CI step) and on a device through a real hub and agent, whose provisioning fetch trusts the CA from the start frame | `pkg/executor/container` `TestContainerGitTrustsTheHubCAForTheProxyOnly`; `pkg/executor/remote` `TestLoopbackDeviceTrustsTheHubCAForTheProxyOnly` |
+| Bootstrap and doctor | `cloop hub bootstrap` turns both monitors on with `tls: auto` (a golden file); `cloop hub doctor --smoke` passes on the hub it writes; the doctor's `tls: auto`, near-expiry, wrong-name and forge-credential findings | `cmd` `hub_bootstrap_monitors_test.go`; `pkg/hubdoctor` `monitortls_test.go` |
 | A Pod on a real cluster | the Helm chart's hub on kind: a workload Pod provisioned through a pinned session, the lease's helper run at 0550, a clone and pushes through the proxy with the grant's repository and branch limits enforced and audited, no token in the Pod, and the run's objects gone afterwards — on every CI run | [`tests/kube`](../../tests/kube/README.md) |
 | Session and lease lifetimes | a pinned session releases its lease exactly once when it ends, an unused one is closed on release, a lease is extended only while its grants hold and its run is live | `pkg/gitproxy` `session_test.go`, `pkg/executor/gitproxycreds`, `pkg/secretbroker` `extend_test.go`, `pkg/ui` `secrets_keepalive_test.go` |
 | Live GitHub, opt-in | a grant assigned through the panel's endpoint pushes through the proxy to a real repository — outside its branches refused, inside them landed, no token in the sandbox | `TestLiveBranchRestrictionThroughTheGitProxy` in `pkg/ui` |
@@ -984,11 +1017,14 @@ the proxy, a provisioned workspace and host mode.
 backend (Task 20385), and it runs on every CI run against the hub the Helm chart
 installs on kind — once as installed, one replica, and once after the job scales
 it to a hub cluster of three, where a workload's git reaches members that did not
-mint its session and is forwarded: the chart's `executor.gitProxy` with a
-certificate it generated, a forge in the cluster standing in for github.com, a
+mint its session and is forwarded: the chart's `executor.gitProxy` with
+`executor.monitorTLS.auto` — the hub issuing the certificate, no
+`git_ca_bundle`, each Pod taking the CA from its run's lease Secret — a forge in
+the cluster standing in for github.com, a
 `github_pat` grant for one repository and one branch pattern, and a task whose
 workload is the same stand-in harness. Its checks are the device kit's that apply to a Pod —
-`H1` (the helper runs, at 0550), `T1`, `C1` (the proxy's CA, for its URL only),
+`H1` (the helper runs, at 0550), `T1`, `C1` (the hub's CA, for the proxy's URL
+only — the kube guard, whose leaf the same CA signed, is refused),
 `WS1`–`WS2`, `P1`, `B1`–`B2`, `R1` — plus the forge's refs, the
 `gitproxy.push_denied` row, and that the run's Pod and Secrets are gone. Two of
 Task 20347's seven gaps were Kubernetes-only and found by reading; its first live

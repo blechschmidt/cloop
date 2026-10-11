@@ -929,21 +929,26 @@ including one that scans *every* row rendering rather than a sample.
 
 ## The git interception proxy
 
-Off by default. With it on, a sandbox that fetches and pushes the project's
-source never holds the forge PAT — it gets a session token for a proxy the hub
-runs, which enforces the branch allowlist on the push's own ref-update list. The
-design is in [git interception proxy](../git-interception-proxy.md); this is the
-operational part.
+Off unless configured; `cloop hub bootstrap` turns it on with `tls: auto`. With
+it on, a sandbox that fetches and pushes the project's source never holds the
+forge PAT — it gets a session token for a proxy the hub runs, which enforces the
+branch allowlist on the push's own ref-update list. The design is in
+[git interception proxy](../git-interception-proxy.md); this is the operational
+part.
 
 ### Turning it on
 
-1. **Give it a certificate the sandbox will accept.** This is the step that gets
-   missed: the certificate is validated by *the sandbox's* git, not by the hub.
-   A public-CA certificate needs nothing further; a self-signed or private-CA one
-   needs its CA in the sandbox image's trust store, or in a bundle named by
-   `SSL_CERT_FILE` / `GIT_SSL_CAINFO` on the machine git runs on. A Pod gives you
-   neither, so on Kubernetes the driver mounts the CA from a ConfigMap and trusts
-   it for the proxy's URL only:
+1. **Give it a certificate the sandbox will accept.** The certificate is
+   validated by *the sandbox's* git, not by the hub. The simplest answer is
+   `tls: auto` (Task 20409): the hub issues the certificate from a CA of its
+   own, sealed under `CLOOP_SECRET_KEY`, and every sandbox it dispatches — host
+   process, container, Pod, edge device — is told to trust that CA for the
+   proxy's URL only, so nothing in any image changes. Otherwise, with
+   `cert_file` and `key_file`: a public-CA certificate needs nothing further; a
+   self-signed or private-CA one needs its CA in the sandbox image's trust
+   store, or in a bundle named by `SSL_CERT_FILE` / `GIT_SSL_CAINFO` on the
+   machine git runs on, and on Kubernetes the driver mounts it from a ConfigMap
+   and trusts it for the proxy's URL only:
    [`executors.kubernetes.git_ca_bundle`](../reference/configuration.md#on-kubernetes-the-git-proxys-ca-for-its-url-only).
 2. **Decide what the sandbox can reach.** `listen_addr` is the bind address;
    `advertise_url` is what becomes the sandbox's remote, and it has to route
@@ -957,29 +962,38 @@ operational part.
    executors:
      git_proxy:
        enabled: true
+       tls: auto
        listen_addr: "0.0.0.0:8443"
        advertise_url: "https://hub.internal:8443"
-       cert_file: /etc/cloop/tls/git-proxy.crt
-       key_file: /etc/cloop/tls/git-proxy.key
        session_minutes: 60
    ```
 
 4. **Confirm it came up.** One line on stderr names the bind address, what
-   sandboxes are pointed at, and the allowlist:
+   sandboxes are pointed at, and the allowlist — and under `tls: auto` a second
+   names the certificate:
 
    ```
    ui: git interception proxy on 0.0.0.0:8443, advertised as https://hub.internal:8443; pushes limited to refs/heads/cloop/**
+   ui: git proxy serves a certificate the hub issued (tls: auto) for hub.internal, valid until …; sandboxes are told to trust the hub CA for https://hub.internal:8443 only
    ```
+
+   `cloop hub doctor` checks it from then on: `gitproxy.tls` fails a leaf with
+   less than a day left (the cluster leader renews it with two) or one that does
+   not name `advertise_url`'s host. A renewal that fails prints
+   `ui: the git proxy's certificate could not be renewed: …`. A device whose
+   agent speaks a protocol older than v21 is refused the runs that would use the
+   proxy, naming the upgrade; upgrade it from the Executors panel.
 
 5. **Run one task on the executor** and check the audit trail for the session and
    the fetch: `cloop audit-log list --entity gitproxy --since 1h`.
 
 **With the Helm chart** the steps above are values: `executor.gitProxy.enabled`
-and a certificate from `executor.monitorTLS` (`selfSigned`, or an
+and a certificate from `executor.monitorTLS` (`auto`; or `selfSigned`, or an
 `existingSecret` from cert-manager plus a way for the Pods to trust its CA). The
-chart advertises the proxy at the hub's Service name, adds the port to the Pod
-and the Service, and renders `git_ca_bundle` with the CA in a ConfigMap in the
-workload namespace; see
+chart advertises the proxy at the hub's Service name and adds the port to the
+Pod and the Service; for a Secret it also renders `git_ca_bundle` with the CA in
+a ConfigMap in the workload namespace, and under `auto` nothing — each Pod gets
+the hub's CA from its run's lease Secret; see
 [deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
 That configuration is what CI's kind cluster runs a Pod through on every push
 ([`tests/kube`](../../tests/kube/README.md)).
@@ -996,8 +1010,9 @@ smaller: the proxy still refuses what it should, the evidence just is not in the
 database.
 
 The failure to watch hardest for prints no `ui:` line at all. A section with
-`enabled: true` that the configuration loader cannot use — no `cert_file` or
-`key_file`, an unusable `listen_addr` or `advertise_url` — is switched off at
+`enabled: true` that the configuration loader cannot use — neither `tls: auto`
+nor `cert_file` and `key_file`, an unusable `listen_addr` or `advertise_url` —
+is switched off at
 load with a `warning: config executors.git_proxy.…` line, and the hub then runs
 exactly as one with no proxy: credentials are delivered into sandboxes as
 before. After enabling the section, the `ui: git interception proxy on …` line
@@ -1099,7 +1114,8 @@ branch protection, a non-fast-forward — not that the proxy did.
 
 ## The Kubernetes access monitor
 
-Off by default. With it on, a kubeconfig granted to a project stays in the hub:
+Off unless configured; `cloop hub bootstrap` turns it on with `tls: auto`. With
+it on, a kubeconfig granted to a project stays in the hub:
 the sandbox's `kubectl` gets a kubeconfig naming the monitor and a session token,
 and every request is decided against the grant's verbs and namespaces before the
 cluster credential is attached. A grant with no verbs is read-only. The design is
@@ -1108,9 +1124,10 @@ operational part.
 
 ### Turning it on
 
-1. **Certificate.** Unlike the git proxy, nothing has to change in the sandbox
-   image: the monitor embeds its CA (`ca_file`, else `cert_file`) in every
-   kubeconfig it issues.
+1. **Certificate.** `tls: auto` has the hub issue it from its own CA, as for
+   the git proxy (`cloop hub bootstrap` writes both). Either way nothing has to
+   change in the sandbox image: the monitor embeds its CA — the hub's, or
+   `ca_file`, else `cert_file` — in every kubeconfig it issues.
 2. **Reachability.** `advertise_url` becomes the kubeconfig's `server:`, so it
    has to route from where `kubectl` runs — the hub's Service for Pods.
 3. **Write the section** (`executors.kube_guard`; the
@@ -1184,12 +1201,18 @@ comma-separated pin set precisely so the two can overlap:
 Reversing steps 2 and 3 locks every agent out. `cloop hub tls-init` generates a
 self-signed certificate for development only.
 
-The [git proxy](#the-git-interception-proxy) has its own `cert_file` and
-`key_file` and is not covered by any of the above. Nothing pins it, but its
-certificate is validated by every sandbox's git, so a rotation onto a new CA has
-to reach the sandbox image's trust store *before* the hub starts serving it —
-otherwise the first symptom is every provisioning fetch failing to verify the
-peer.
+The [git proxy](#the-git-interception-proxy) has its own certificate and is not
+covered by any of the above. Under `tls: auto` there is nothing to rotate by
+hand: the cluster leader replaces each monitor's leaf two days before it
+expires, every member serves the new one within a minute, and sandboxes trust
+the hub's CA rather than the leaf, so a run in progress is not interrupted —
+`cloop hub doctor` fails `gitproxy.tls` and `kubeguard.tls` if that has stopped
+happening. The CA itself lives ten years and is not rotated automatically:
+replacing it changes what every sandbox trusts. With an operator's `cert_file`
+and `key_file`, nothing pins the certificate, but it is validated by every
+sandbox's git, so a rotation onto a new CA has to reach the sandbox image's
+trust store *before* the hub starts serving it — otherwise the first symptom is
+every provisioning fetch failing to verify the peer.
 
 ### Dashboard token (`CLOOP_UI_TOKEN`) — retire the old value, deploy a new one
 
