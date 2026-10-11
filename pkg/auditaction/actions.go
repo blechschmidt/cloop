@@ -411,6 +411,15 @@ const (
 	// ActionSealingKeyRetired records a superseded sealing key being retired.
 	ActionSealingKeyRetired Action = "sealing_key.retired"
 
+	// ── hub_ca ─────────────────────────────────────────────────────────────
+
+	// ActionHubCAMinted records the hub minting its own certificate authority
+	// (tls: auto, Task 20409).
+	ActionHubCAMinted Action = "hub_ca.minted"
+	// ActionHubCALeafIssued records the hub issuing a credential monitor's
+	// serving certificate from its CA.
+	ActionHubCALeafIssued Action = "hub_ca.leaf_issued"
+
 	// ── oidc ───────────────────────────────────────────────────────────────
 
 	// ActionOIDCConfigUpdated records the hub's single sign-on configuration

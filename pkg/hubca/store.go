@@ -6,8 +6,10 @@ package hubca
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -134,6 +136,37 @@ type Options struct {
 	Now func() time.Time
 	// Actor names the hub process issuing, for the row's issued_by.
 	Actor string
+	// Audit receives one record per certificate this process minted or
+	// issued — never one it adopted from another process. Nil drops them.
+	Audit func(Issued)
+}
+
+// Issued describes a certificate this process put in the store: the CA, or a
+// monitor's leaf. Certificates only — nothing here is secret.
+type Issued struct {
+	// CA is true for the CA itself, false for a monitor's leaf.
+	CA bool
+	// Monitor is the leaf's monitor; empty for the CA.
+	Monitor Monitor
+	Serial  string
+	// Fingerprint is the SHA-256 of the certificate's DER, in hex: what an
+	// operator compares against the PEM a sandbox was given.
+	Fingerprint string
+	Names       []string
+	NotAfter    time.Time
+	// Replaced is the serial of the leaf this one replaced, if any.
+	Replaced string
+}
+
+func (o Options) audit(i Issued) {
+	if o.Audit != nil {
+		o.Audit(i)
+	}
+}
+
+func certFingerprint(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func (o Options) now() time.Time {
@@ -224,6 +257,7 @@ func OpenAuthority(s *Store, sealer Sealer, o Options) (*Authority, error) {
 			return nil, fmt.Errorf("hubca: store the hub CA: %w", ierr)
 		}
 		if inserted {
+			o.audit(Issued{CA: true, Serial: serial, Fingerprint: certFingerprint(cert), NotAfter: cert.NotAfter})
 			return &Authority{cert: cert, certPEM: certPEM, signer: key}, nil
 		}
 		// Another process minted first. Its CA is the hub's.
@@ -341,6 +375,10 @@ func issueLeaf(s *Store, sealer Sealer, ca *Authority, m Monitor, sans []string,
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("hubca: store the %s's certificate: %w", m.Label(), err)
+	}
+	if stored {
+		o.audit(Issued{Monitor: m, Serial: serial, Fingerprint: certFingerprint(cert), Names: certSANs(cert),
+			NotAfter: cert.NotAfter, Replaced: replace})
 	}
 	return &Leaf{
 		Monitor: m, Serial: serial, Cert: cert, CertPEM: certPEM, IssuedBy: o.Actor,

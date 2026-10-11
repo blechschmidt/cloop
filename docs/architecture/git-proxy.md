@@ -909,6 +909,15 @@ field that could hold one. A request that presented no credential at all is
 counted rather than audited; see
 [audit events](../git-interception-proxy.md#audit-events).
 
+Under `tls: auto` the certificates are on the trail too:
+[`hub_ca.minted`](../reference/audit-events.md#hub_ca) when a hub process mints
+the control plane's CA — with its SHA-256, the value to compare against the PEM
+a sandbox was given — and [`hub_ca.leaf_issued`](../reference/audit-events.md#hub_ca)
+for every leaf, naming the monitor, the names it carries and the serial it
+replaced. A second `hub_ca.minted` for one control plane means its `hub_tls`
+table was lost or restored without it, and sandboxes holding the first CA will
+refuse the next leaf.
+
 Three joins answer most questions:
 
 - **Session → everything it did.** The session id is on its mint, on every

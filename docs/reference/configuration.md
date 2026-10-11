@@ -1008,7 +1008,8 @@ executors:
 - Every decision lands in the hash-chained audit log as
   `gitproxy.push_denied`, `gitproxy.push_allowed`, `gitproxy.session_minted`,
   `gitproxy.session_closed`, `gitproxy.fetch` and `gitproxy.rejected`. Alert on
-  the first.
+  the first. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
+  the CA and every certificate issued from it.
 
 The proxy runs inside the hub process — sessions are in memory, so the process
 that mints them must be the one that serves them — and there is deliberately no

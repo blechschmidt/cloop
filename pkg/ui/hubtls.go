@@ -17,6 +17,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -91,13 +93,48 @@ func openHubCA(dir string) (*hubCA, error) {
 	if err != nil {
 		return fail(err)
 	}
-	ca, err := hubca.OpenAuthority(store, kr, hubca.Options{Actor: monitorCertActor()})
+	ca, err := hubca.OpenAuthority(store, kr, hubCAOptions(db))
 	if err != nil {
 		return fail(err)
 	}
 	c := &hubCA{db: db, store: store, keyring: kr, ca: ca}
 	hubCAs[dir] = c
 	return c, nil
+}
+
+// hubCAOptions is how this hub process issues: under its own name, with every
+// certificate it mints or issues written to the control plane's audit trail
+// (hub_ca.minted, hub_ca.leaf_issued). A CA minted twice for one control plane
+// is the row an operator needs, because every sandbox trusts the first.
+func hubCAOptions(db *statedb.DB) hubca.Options {
+	actor := monitorCertActor()
+	return hubca.Options{Actor: actor, Audit: func(i hubca.Issued) {
+		var action auditaction.Action = auditaction.ActionHubCALeafIssued
+		entity := i.Serial
+		payload := map[string]any{"serial": i.Serial, "not_after": i.NotAfter.UTC().Format(time.RFC3339)}
+		if i.CA {
+			action = auditaction.ActionHubCAMinted
+			payload["fingerprint"] = i.Fingerprint
+			fmt.Fprintf(os.Stderr, "ui: minted the hub CA %s (sha256 %s), valid until %s\n",
+				i.Serial, i.Fingerprint, payload["not_after"])
+		} else {
+			payload["monitor"] = string(i.Monitor)
+			payload["names"] = i.Names
+			if i.Replaced != "" {
+				payload["replaced"] = i.Replaced
+			}
+		}
+		blob, err := json.Marshal(payload)
+		if err != nil {
+			blob = []byte(`{}`)
+		}
+		if err := db.AppendAuditEvent(&statedb.AuditEvent{
+			Timestamp: time.Now().UTC(), Actor: actor, EventType: string(action),
+			EntityType: "hub_ca", EntityID: entity, Payload: string(blob),
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "ui: %s for %s not written to the audit trail: %v\n", action, entity, err)
+		}
+	}}
 }
 
 // monitorCertActor names this hub process on the rows it issues.
@@ -130,7 +167,7 @@ func startMonitorCertificate(m hubca.Monitor, dir, baseURL, listenAddr string) (
 	}
 	srv, err := hubca.NewServer(hubca.ServerConfig{
 		Monitor: m, Store: c.store, Sealer: c.keyring, Authority: c.ca, Want: want,
-		Options: hubca.Options{Actor: monitorCertActor()},
+		Options: hubCAOptions(c.db),
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
 		},

@@ -14,10 +14,13 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/statedbtest"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // autoTLSDir is a control plane with a sealing key, which tls: auto needs.
@@ -168,5 +171,45 @@ func TestDispatchIsToldToTrustTheProxyOnly(t *testing.T) {
 	gitProxySingleton.Store(nil)
 	if got := applyGitProxyTrust(executor.Spec{Argv: []string{"true"}}); got.GitCA != nil {
 		t.Fatal("a hub with no proxy shipped a CA")
+	}
+}
+
+// TestAutoTLSIssuanceIsAudited: the CA a control plane's sandboxes trust, and
+// every leaf issued from it, is on the hash-chained trail — a second
+// hub_ca.minted for one control plane is the row an operator needs to see.
+func TestAutoTLSIssuanceIsAudited(t *testing.T) {
+	dir := autoTLSDir(t)
+	svc, err := startGitProxy(autoTLSConfig(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, _, err := db.ListAuditEvents(statedb.AuditFilter{EntityType: "hub_ca"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var minted, issued int
+	for _, r := range rows {
+		switch r.EventType {
+		case string(auditaction.ActionHubCAMinted):
+			minted++
+		case string(auditaction.ActionHubCALeafIssued):
+			issued++
+			if !strings.Contains(r.Payload, `"monitor":"git_proxy"`) || !strings.Contains(r.Payload, "127.0.0.1") {
+				t.Errorf("leaf row payload = %s", r.Payload)
+			}
+		}
+		if strings.Contains(r.Payload, "PRIVATE") || strings.Contains(r.Payload, "BEGIN") {
+			t.Errorf("an audit row carries PEM: %s", r.Payload)
+		}
+	}
+	if minted != 1 || issued != 1 {
+		t.Fatalf("audit rows: %d hub_ca.minted, %d hub_ca.leaf_issued; want 1 and 1 (%+v)", minted, issued, rows)
 	}
 }

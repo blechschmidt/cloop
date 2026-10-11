@@ -1392,6 +1392,32 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 
+	// ── hub_ca ─────────────────────────────────────────────────────────────
+	// The certificate authority the hub issues its credential monitors'
+	// certificates from under tls: auto (Task 20409). Certificates only: the
+	// private keys are sealed in hub_tls and appear in no payload.
+	{
+		Action:    ActionHubCAMinted,
+		Home:      HomeControlPlane,
+		Entity:    "hub_ca",
+		Trigger:   "A hub process mints the control plane's certificate authority, the first time any starts a credential monitor under `tls: auto`.",
+		Payload:   []string{"serial", "not_after", "fingerprint"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Every sandbox is told to trust this CA for the monitors' URLs, so a second `hub_ca.minted` row " +
+			"for one control plane — its `hub_tls` table lost or restored without it — means sandboxes " +
+			"holding the previous CA will refuse the next certificate the monitors serve.",
+	},
+	{
+		Action:    ActionHubCALeafIssued,
+		Home:      HomeControlPlane,
+		Entity:    "hub_ca",
+		Trigger:   "A hub process issues a credential monitor's serving certificate from the hub CA: at its first start, when the cluster leader renews one, or when a member needs a name the stored one lacks.",
+		Payload:   []string{"monitor", "serial", "names", "not_after", "replaced"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+	},
+
 	// ── oidc ───────────────────────────────────────────────────────────────
 	{
 		Action:  ActionOIDCConfigUpdated,
