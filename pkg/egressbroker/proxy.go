@@ -179,20 +179,24 @@ func (p *Proxy) ListenAndServe() error {
 
 // Serve serves on an existing listener and returns when it is closed.
 func (p *Proxy) Serve(ln net.Listener) error {
+	endpoint := strings.TrimSpace(p.opts.Endpoint)
+	if endpoint == "" {
+		endpoint = ln.Addr().String()
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		_ = ln.Close()
 		return http.ErrServerClosed
 	}
+	// The broker learns the endpoint before Addr reports the proxy bound.
+	// That is what a caller waits on before it redeems a session, and a
+	// session redeemed in between had no URL to hand out: "proxy endpoint is
+	// not configured". SetEndpoint takes only the broker's lock, and the
+	// broker never calls back into the proxy.
+	p.broker.SetEndpoint(endpoint)
 	p.listener = ln
 	p.mu.Unlock()
-
-	endpoint := strings.TrimSpace(p.opts.Endpoint)
-	if endpoint == "" {
-		endpoint = ln.Addr().String()
-	}
-	p.broker.SetEndpoint(endpoint)
 
 	p.mu.Lock()
 	if !p.closed {
