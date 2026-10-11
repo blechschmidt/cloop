@@ -33,11 +33,26 @@ historically grown subtle data races.
 ### Keeping the suite fast
 
 CI's race step is the slowest job, and its wall clock is set by the longest
-packages (`pkg/ui`, `pkg/orchestrator`, `pkg/statedb`, `tests/security`).
+packages (`pkg/orchestrator`, `pkg/statedb`, `tests/security`).
 `go test` starts packages in the order they are named, so the step (and
 `make test-unit`) names them through `scripts/race-packages.sh`, longest first;
-a package that grows into the minutes belongs in its `slow` list. A few costs
-dominate, and each has a fix already in place that new tests should reuse:
+a package that grows into the minutes belongs in its `slow` list.
+
+`pkg/ui` is too big for one job and runs in CI's **Test pkg/ui** shard jobs
+instead, each a share of its top-level tests (`scripts/test-shards.py`). A new
+test needs nothing: one the duration table `scripts/test-durations/pkg-ui.txt`
+does not name is placed by a hash of its name, and the shards' first step fails
+if any test is selected by no shard, or by two. When the shards' times drift
+apart, refresh the table (`scripts/test-durations.py ./pkg/ui/ >
+scripts/test-durations/pkg-ui.txt`); when they all grow, add a shard to the
+matrix. `make test-unit` still runs the package whole.
+
+Every package has a time budget: the race step and each shard fail when a
+package takes more than 60% of its 30-minute `-timeout`, naming it, long before
+it would time out (`scripts/test-budget.py`). When it names yours,
+`scripts/test-durations.py ./pkg/<name>/ | head -20` shows where the time goes.
+A few costs dominate, and each has a fix already in place that new tests should
+reuse:
 
 - **Creating a project database.** `statedb.Open` applies every migration in
   `pkg/statedb/migrations` to a new database, which costs ~1.5 s under `-race`

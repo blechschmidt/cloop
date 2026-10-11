@@ -261,6 +261,10 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    env:
+      # Read by the race step and by the budget gate after it, so that the
+      # gate's 60% is always of the timeout the packages actually ran under.
+      RACE_TIMEOUT: 30m
 
     steps:
       - name: Checkout code
@@ -276,28 +280,14 @@ jobs:
         run: go build ./...
 
       - name: The test suite does not depend on a clean home directory
-        # cloop keeps per-user state outside the working tree (the
-        # multi-project registry at ~/.cloop/projects.json, budgets and ledgers
-        # under ~/.config/cloop). A test that writes there passes on a fresh
-        # runner and fails on a developer's machine once enough state has
-        # accumulated — which is exactly what happened: one dashboard test
-        # appended an entry per run to a real registry until project index 99
-        # resolved and three authorization tests began failing, for that
-        # developer only. CI could not see it, because CI always starts empty.
-        #
-        # So dirty the home directory first, and make the suite prove it does
-        # not care. Without this step every other run here is the clean case.
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.cloop" "$HOME/.config/cloop"
-          python3 - <<'PY'
-          import json, os
-          entries = [{"name": f"ci-decoy-{i}", "path": f"/nonexistent/ci-decoy-{i}"}
-                     for i in range(150)]
-          with open(os.path.expanduser("~/.cloop/projects.json"), "w") as f:
-              json.dump({"projects": entries}, f)
-          PY
-          echo "seeded $HOME/.cloop/projects.json with 150 unresolvable projects"
+        # cloop keeps per-user state outside the working tree, and a test that
+        # writes there passes on a fresh runner and fails on a developer's
+        # machine once enough has accumulated — it happened, to one developer
+        # only, because CI always starts empty. So dirty the home directory
+        # first and make the suite prove it does not care; the last step but
+        # one checks it was left alone. The full story is in the script, which
+        # the pkg/ui shard jobs run too.
+        run: ./scripts/home-decoys.sh seed
 
       - name: Every package that reads $HOME isolates it in TestMain
         # The structural half of the same guarantee. The seeding above only
@@ -306,31 +296,13 @@ jobs:
         # on the day it is added.
         run: go test -v ./tests/hermetic/
 
-      - name: Warm the browser the dashboard tests drive
-        # pkg/ui runs first in the race step, so its first browser test starts
-        # Chrome in the step's busiest minute — three other race-instrumented
-        # test binaries running beside it — and on a fresh runner that start
-        # also reads Chrome in from a cold disk. Once it outlasted the drivers'
-        # bound (Task 20372). Starting Chrome here, while nothing competes for
-        # the machine, leaves the race step a warm start. Best effort: a runner
-        # without Chrome skips the browser tests anyway.
-        run: |
-          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
-          if [ -n "$chrome" ]; then
-            timeout 60 "$chrome" --headless=new --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
-            echo "warmed $chrome"
-          else
-            echo "no Chrome on this runner; the browser tests will skip"
-          fi
-
       - name: Test with race detector and coverage
+        id: race
         # -timeout, because `go test`'s default is a per-package 10 minutes and
-        # pkg/ui is a large instrumented package that lands within a factor of
-        # two of it. It has already gone over once: every handler that shells
-        # out to a cloop subcommand was forking the test binary instead (see
-        # pkg/ui/main_test.go), which put the package at ~10m and failed this
-        # step outright. That is fixed, and the cliff should not be somewhere a
-        # merely slower runner can fall off.
+        # the big packages land within a factor of two of it. pkg/ui went over
+        # once: every handler that shells out to a cloop subcommand was forking
+        # the test binary instead (see pkg/ui/main_test.go), which put the
+        # package at ~10m and failed this step outright.
         #
         # 30m since Task 20361. By then pkg/ui took ~17.5 min here (1034 s at
         # d033caa) and 20m was no margin at all. Migration 0054 then added
@@ -341,17 +313,43 @@ jobs:
         # once per new project. internal/statedbtest is how a test takes that
         # cost back out: it copies a database migrated once per test binary.
         #
+        # pkg/ui is not tested here any more (Task 20414): it runs in the
+        # "Test pkg/ui" shard jobs below. It took 1,397 s of this step's 30m on
+        # 1417b88f, 1,637 s on 41d5bf19 and 1,787 s on 73de7f62, timed out on
+        # 8f3bc424 (run 38119330983), and gains tests with every dashboard
+        # feature. This job took 1,605 s on 1417b88f (job 114529512887),
+        # 1,347-2,039 s across the four green runs before the split, of which
+        # this step was 1,226-1,890 s; the next slowest packages were
+        # pkg/orchestrator (575-971 s) and pkg/statedb (318-553 s).
+        #
         # The packages come from scripts/race-packages.sh, which is go list's
         # set in a different order: the few packages that take minutes first.
         # go test starts packages in the order they are named, so in go list's
         # alphabetical order pkg/ui and pkg/orchestrator started last and this
         # step waited on them alone (Task 20372). Assigned first, so that a
         # failing script fails the step instead of leaving go test an empty
-        # list, which would test the root package and pass.
+        # list, which would test the root package and pass. The output is kept
+        # for the budget gate; pipefail so tee cannot hide go test's verdict.
         run: |
-          pkgs=$(./scripts/race-packages.sh)
+          set -o pipefail
+          pkgs=$(./scripts/race-packages.sh --without pkg/ui)
           # shellcheck disable=SC2086 # one word per package, on purpose
-          go test -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $pkgs
+          go test -race -timeout "$RACE_TIMEOUT" -coverprofile=coverage.out -covermode=atomic $pkgs 2>&1 | tee race.log
+
+      - name: Every package stayed within 60% of its -timeout
+        # The cliff pkg/ui went over had been in its "ok" line for weeks —
+        # 1,034 s of a 20m timeout on d033caa — and nothing read it, so it
+        # surfaced as a timeout on 8f3bc424, whose one more browser test was
+        # merely the last straw. This reads it: a package past 60% of
+        # RACE_TIMEOUT fails here, by name, with its time and the command that
+        # shows its slowest tests, while 40% of the timeout is still left —
+        # room for a slow runner (the same package has taken 54% longer on one
+        # than another) and for whoever acts on it. Within budget it lists the
+        # five closest, so the log always shows the headroom. Not skipped when
+        # the tests fail: a timeout is a failure too, and this is what names
+        # the package that is drifting towards one.
+        if: ${{ !cancelled() && steps.race.outcome != 'skipped' }}
+        run: ./scripts/test-budget.py --timeout "$RACE_TIMEOUT" race.log
 
       - name: End-to-end integration tests
         # Includes the hub-restart circuit (Task 20382, hubrestart_test.go): a
@@ -365,39 +363,149 @@ jobs:
           go test -v -timeout 300s ./tests/e2e/
 
       - name: The seeded home directory was left untouched
-        # The assertion that makes the seeding meaningful, and it has to run
-        # after the suite. If a test wrote to the real registry the entry count
-        # changes here — failing at the leak, rather than at whichever
-        # unrelated test the accumulated entries eventually break.
-        #
         # if: always() so that a suite which fails *because* it polluted the
         # home directory still reports the actual cause.
         if: always()
+        run: ./scripts/home-decoys.sh verify
+
+      - name: Upload this job's coverage
+        # One part of the report: the Coverage report job merges it with the
+        # pkg/ui shards' and uploads the whole as coverage-report.
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-part-race
+          path: coverage.out
+          retention-days: 1
+          if-no-files-found: error
+
+  ui-shards:
+    name: Test pkg/ui (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # pkg/ui under -race, split across parallel jobs by its top-level tests
+    # (Task 20414). It is one test binary that every dashboard feature adds
+    # to, and in Build and Test's race step it went from 1,034 s to 1,787 s
+    # of a 30-minute -timeout and then over it; see that step. Here each job
+    # runs a share of its tests with the same flags and timeout, on a runner
+    # of its own.
+    #
+    # Who runs what is scripts/test-shards.py: the package's own test list,
+    # the tests in scripts/test-durations/pkg-ui.txt handed out longest first
+    # to the shard with the least time so far, any test the table does not
+    # name placed by a stable hash of its name — so a new test needs no table
+    # edit, and every job computes the same plan. Each shard is an anchored
+    # -run regex. Its first step is the gate: every test the package lists is
+    # selected by exactly one shard's regex, asked of Go's own matching, so a
+    # test can never silently go unrun and none runs twice.
+    #
+    # More shards: add one to the matrix — the count is strategy.job-total, so
+    # there is nothing else to change. Uneven shards: refresh the table, as
+    # its header says. Locally, `make test-unit` still tests the whole
+    # package in one binary.
+    #
+    # The shards' coverage profiles are merged with the race step's by the
+    # Coverage report job, which uploads what Build and Test used to.
+    timeout-minutes: 40 # the -timeout below fires first, and says which test
+    strategy:
+      fail-fast: false # a red shard should not hide the other two's verdicts
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      RACE_TIMEOUT: 30m
+      # Listing the tests builds the same binary the shard then runs, so the
+      # run finds it in the build cache.
+      UI_GO_FLAGS: -race -cover -covermode=atomic
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The test suite does not depend on a clean home directory
+        # pkg/ui is where the leak this guards against lived; see Build and Test.
+        run: ./scripts/home-decoys.sh seed
+
+      - name: Warm the browser the dashboard tests drive
+        # A browser test's first Chrome start reads Chrome in from a cold disk,
+        # and once outlasted the drivers' bound in the race step's busiest
+        # minute (Task 20372). Starting it here, while nothing competes for the
+        # machine, leaves the tests a warm start. Best effort: a runner without
+        # Chrome skips the browser tests anyway.
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, sys
-          p = os.path.expanduser("~/.cloop/projects.json")
-          n = len(json.load(open(p))["projects"])
-          if n != 150:
-              sys.exit(f"::error::the test suite modified {p}: 150 entries before, "
-                       f"{n} after — a test is writing to the user's home directory")
-          print(f"{p} still has {n} entries; nothing wrote to it")
-          PY
-          # Nothing should have appeared beside it, or in the other per-user
-          # state directory: pkg/globalbudget and pkg/cost write budget.yaml,
-          # costs.jsonl and global.db under ~/.config/cloop, and an entry-count
-          # check on the registry alone would not notice.
-          unexpected=$(
-            find "$HOME/.cloop" -mindepth 1 ! -name projects.json
-            find "$HOME/.config/cloop" -mindepth 1
-          )
-          if [ -n "$unexpected" ]; then
-            echo "::error::the test suite created files under the home directory:"
-            echo "$unexpected"
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+          if [ -n "$chrome" ]; then
+            timeout 60 "$chrome" --headless=new --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
+            echo "warmed $chrome"
+          else
+            echo "no Chrome on this runner; the browser tests will skip"
+          fi
+
+      - name: Every pkg/ui test is in exactly one shard
+        run: ./scripts/test-shards.py ./pkg/ui/ --shards ${{ strategy.job-total }} --go-flags "$UI_GO_FLAGS" check
+
+      - name: Test this shard with race detector and coverage
+        id: shard
+        run: |
+          set -o pipefail
+          run=$(./scripts/test-shards.py ./pkg/ui/ --shards ${{ strategy.job-total }} --go-flags "$UI_GO_FLAGS" regex ${{ matrix.shard }})
+          # shellcheck disable=SC2086 # the flags are words, on purpose
+          go test $UI_GO_FLAGS -timeout "$RACE_TIMEOUT" -coverprofile=coverage.out -run "$run" ./pkg/ui/ 2>&1 | tee shard.log
+
+      - name: The shard stayed within 60% of its -timeout
+        # The same budget as Build and Test's race step.
+        if: ${{ !cancelled() && steps.shard.outcome != 'skipped' }}
+        run: |
+          ./scripts/test-budget.py --timeout "$RACE_TIMEOUT" shard.log \
+            --note "This is shard ${{ matrix.shard }} of ${{ strategy.job-total }}: add a shard to the matrix, or refresh scripts/test-durations/pkg-ui.txt if the shards have drifted apart."
+
+      - name: The seeded home directory was left untouched
+        if: always()
+        run: ./scripts/home-decoys.sh verify
+
+      - name: Upload this shard's coverage
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-part-ui-${{ matrix.shard }}
+          path: coverage.out
+          retention-days: 1
+          if-no-files-found: error
+
+  coverage:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    # The race step's profile and the pkg/ui shards', merged into the one
+    # report Build and Test uploaded before pkg/ui was split out of it (Task
+    # 20414). A block several shards ran is one block with their counts added,
+    # so pkg/ui's coverage reads as if it had run in one binary.
+    needs: [build-and-test, ui-shards]
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download the parts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: coverage-part-*
+          path: coverage-parts
+
+      - name: Merge them
+        # Every part is there: this job needs both jobs to have succeeded, and
+        # each of them fails rather than upload nothing (if-no-files-found).
+        run: |
+          shopt -s nullglob
+          ui=(coverage-parts/coverage-part-ui-*/coverage.out)
+          race=coverage-parts/coverage-part-race/coverage.out
+          if [ ! -f "$race" ] || [ "${#ui[@]}" -eq 0 ]; then
+            echo "::error::the race step's profile or every pkg/ui shard's is missing:" coverage-parts/*/*
             exit 1
           fi
-          echo "no per-user state was written"
+          ./scripts/merge-coverage.sh "$race" "${ui[@]}" > coverage.out
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v5
@@ -441,8 +549,8 @@ jobs:
           node-version: 22
 
       - name: Warm the browser
-        # Best effort, as in Build and Test: a runner without Chrome is caught
-        # by the next step, whose tests then skip and so never print PASS.
+        # Best effort, as in the pkg/ui shards: a runner without Chrome is
+        # caught by the next step, whose tests then skip and so never print PASS.
         run: |
           chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
           if [ -n "$chrome" ]; then

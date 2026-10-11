@@ -44,6 +44,11 @@ dist/
 !*.tfvars.example
 crash.log
 
+# Python bytecode, written beside any script that is imported rather than
+# run (tests/ciscripts imports scripts/test-shards.py, with -B, but a hand run
+# need not).
+__pycache__/
+
 # OS
 .DS_Store
 Thumbs.db

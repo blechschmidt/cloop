@@ -3,6 +3,16 @@
 # Print the packages the race step tests (CI's "Test with race detector and
 # coverage", and `make test-unit`), one per line, the longest-running first.
 #
+#   scripts/race-packages.sh                     # every package: make test-unit
+#   scripts/race-packages.sh --without pkg/ui    # all but pkg/ui: CI's race step
+#
+# --without leaves a package out for a caller that tests it some other way.
+# CI's race step does that for pkg/ui, which runs in shard jobs of its own
+# (scripts/test-shards.py, Task 20414); make test-unit still tests the whole
+# package in one binary. A package named by --without must exist, like one in
+# the slow list, so that a renamed package fails here instead of quietly
+# coming back into the step it was taken out of.
+#
 # # Why the order matters
 #
 # `go test` runs up to -p test binaries at once but starts them strictly in the
@@ -47,17 +57,40 @@ slow=(
 	pkg/executor/projectseed
 )
 
+without=()
+while [ $# -gt 0 ]; do
+	case $1 in
+	--without)
+		[ $# -ge 2 ] || { echo "race-packages.sh: --without needs a package, like pkg/ui" >&2; exit 2; }
+		rel=${2#./}
+		without+=("${rel%/}")
+		shift 2
+		;;
+	*)
+		echo "usage: race-packages.sh [--without <package>]..." >&2
+		exit 2
+		;;
+	esac
+done
+
 module=$("$go" list -m)
 all=$("$go" list ./... | grep -v 'tests/e2e')
 
-named=()
-for rel in "${slow[@]}"; do
-	pkg="$module/$rel"
-	if ! grep -qxF "$pkg" <<<"$all"; then
-		echo "race-packages.sh: $pkg is not a package any more — update the slow list" >&2
+for rel in "${slow[@]}" "${without[@]}"; do
+	if ! grep -qxF "$module/$rel" <<<"$all"; then
+		echo "race-packages.sh: $module/$rel is not a package any more — update the slow list or --without" >&2
 		exit 1
 	fi
-	named+=("$pkg")
+done
+for rel in "${without[@]}"; do
+	all=$(grep -vxF "$module/$rel" <<<"$all")
+done
+
+named=()
+for rel in "${slow[@]}"; do
+	if grep -qxF "$module/$rel" <<<"$all"; then
+		named+=("$module/$rel")
+	fi
 done
 
 printf '%s\n' "${named[@]}"
