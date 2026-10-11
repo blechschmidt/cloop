@@ -67,6 +67,9 @@ type stagedFile struct {
 	// host is the path on this machine. It is inside a dir bind-mounted into
 	// the container, so unlinking it here is what the workload sees.
 	host string
+	// sandbox is the path the workload reads it at, which is what a lease's
+	// bindings name.
+	sandbox string
 	// leaseID and grantID attribute the file, copied from executor.SecretFile.
 	leaseID string
 	grantID string
@@ -145,20 +148,31 @@ func (s *secretStage) remove() {
 // Errors are joined and returned rather than logged, because this one runs
 // with an operator waiting for an answer. A wipe that failed must not be
 // reported as a revocation that succeeded.
-func (s *secretStage) revoke(req executor.RevokeRequest) (int, error) {
+//
+// also names further files of the lease the revocation takes, by the path the
+// workload reads them at: the files the revoked grant's binding lists. A file
+// is attributed to one grant here, and one several grants went into — the
+// kubeconfig a lease's kubeconfig grants are merged into — belongs to each
+// grant whose binding names it (Task 20413), which only the binding can say.
+func (s *secretStage) revoke(req executor.RevokeRequest, also ...string) (int, error) {
 	if s == nil {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	named := make(map[string]bool, len(also))
+	for _, p := range also {
+		named[filepath.Clean(p)] = true
+	}
 	var (
 		errs    []error
 		removed int
 		kept    []stagedFile
 	)
 	for _, f := range s.files {
-		if !req.Matches(executor.SecretBinding{LeaseID: f.leaseID, GrantID: f.grantID}) {
+		listed := f.sandbox != "" && named[f.sandbox] && f.leaseID == strings.TrimSpace(req.LeaseID)
+		if !listed && !req.Matches(executor.SecretBinding{LeaseID: f.leaseID, GrantID: f.grantID}) {
 			kept = append(kept, f)
 			continue
 		}
@@ -333,6 +347,7 @@ func stageSecretFiles(spec executor.Spec, user string) (*secretStage, error) {
 		// error path has to know about it.
 		stage.files = append(stage.files, stagedFile{
 			host:    path,
+			sandbox: filepath.Clean(f.Path()),
 			leaseID: f.LeaseID,
 			grantID: f.GrantID,
 		})

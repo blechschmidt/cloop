@@ -174,13 +174,19 @@ func withdrawnDescription(s Secret, g Grant) string {
 // RefusedCredential is a grant a lease was aimed at and could not honour
 // because of something done elsewhere (Task 20400): the secret behind it was
 // destroyed, or the grant was withdrawn when the secret's owner was offboarded.
+// Or, since Task 20413, a grant whose secret and grant both stand and whose
+// material the broker could not build (Delivery): a Kubernetes monitor or git
+// proxy the hub requires and is not running, a payload or constraint that no
+// longer parses, an exec-plugin kubeconfig the monitor will not hold.
 //
 // A lease refuses grants for other reasons too — expiry, an operator's
 // revocation, a withholding — and every one of those lands in the audit trail.
-// This one is also handed back to the caller, because it is the refusal the
-// people running the project can do nothing about from inside it and cannot
-// see the cause of: often the person who owned the credential left. The
-// dispatcher puts it in front of them.
+// These are also handed back to the caller, because they are the refusals the
+// people running the project cannot see the cause of from inside it: often the
+// person who owned the credential left, or the hub is misconfigured. Either
+// way the run starts without a credential it was granted, and the failure it
+// meets — git refusing to authenticate, a cluster answering 401 — names
+// neither. The dispatcher puts the refusal in front of them.
 //
 // Metadata only, like every field on Event.
 type RefusedCredential struct {
@@ -192,6 +198,11 @@ type RefusedCredential struct {
 	DeletedAt  time.Time `json:"deleted_at,omitempty"`
 	// Reason is the refusal as the lease's audit row records it.
 	Reason string `json:"reason"`
+	// Delivery marks a refusal made while the material was being built: the
+	// grant and its secret stand, so what refused it may pass — a monitor
+	// started, a payload replaced — and every run it affects is told, where a
+	// destroyed secret is told once (Task 20413).
+	Delivery bool `json:"delivery,omitempty"`
 }
 
 // deletedSecretRefusal explains a grant whose secret is gone, naming it when

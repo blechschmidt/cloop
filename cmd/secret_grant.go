@@ -735,8 +735,45 @@ denial reasons, never payloads.
 				fmt.Printf("    files:       %s\n", files)
 			}
 		}
-		return nil
+		return printRenderedLease(lease)
 	},
+}
+
+// printRenderedLease says what the workload is actually handed when that is
+// not the sum of the materials above: several GitHub grants install their
+// helpers through one gitconfig (Task 20349), and several kubeconfig grants are
+// merged into one kubeconfig with a context each (Task 20413). Names only. A
+// lease that cannot be rendered is reported, since its dispatch would fail the
+// same way.
+func printRenderedLease(lease *secretbroker.Lease) error {
+	d, err := lease.Deliver(secretbroker.SandboxLeaseDir(lease.ID))
+	if err != nil {
+		color.New(color.FgYellow).Printf("\n✗ the lease cannot be rendered for a workload: %v\n", err)
+		return nil
+	}
+	defer d.Close()
+	var each, rendered []string
+	for _, m := range lease.Materials {
+		for _, f := range m.Files {
+			each = append(each, f.Name)
+		}
+	}
+	for _, f := range d.Files() {
+		rendered = append(rendered, f.Name)
+	}
+	if strings.Join(sortedStrings(each), ",") == strings.Join(sortedStrings(rendered), ",") {
+		return nil
+	}
+	env := make([]string, 0, len(d.Env()))
+	for _, kv := range d.Env() {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			env = append(env, k)
+		}
+	}
+	fmt.Printf("\n  delivered as one directory\n")
+	fmt.Printf("    files:       %s\n", strings.Join(sortedStrings(rendered), ", "))
+	fmt.Printf("    env:         %s\n", strings.Join(sortedStrings(env), ", "))
+	return nil
 }
 
 // materialEnvNames lists the variable *names* a material would set. Values

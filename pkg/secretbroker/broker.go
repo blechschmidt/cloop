@@ -863,6 +863,16 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		mat, merr := b.materialFor(ctx, s, g, r, actor, id, &rec)
 		if merr != nil {
 			_ = b.denyErr(ev, merr)
+			// The grant stands and its secret exists, and the run still goes
+			// without it: a monitor the hub requires and is not running, a
+			// payload or constraint that no longer parses, an exec-plugin
+			// kubeconfig the monitor will not hold. Told to the project as a
+			// destroyed secret is (Task 20413) — the lease is still issued,
+			// and nothing else would say a credential is missing from it.
+			refused = append(refused, RefusedCredential{
+				GrantID: g.ID, SecretID: s.ID, SecretName: s.Name, Kind: s.Kind, Owner: s.Owner,
+				Reason: RedactString(merr.Error()), Delivery: true,
+			})
 			continue
 		}
 

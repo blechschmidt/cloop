@@ -576,11 +576,13 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 		}
 	}
 
+	// One file under a fixed name. A lease carrying several kubeconfig grants
+	// merges their documents into one at render (kubemulti.go).
 	mat.Files = []File{{
-		Name:    "kubeconfig",
+		Name:    kubeconfigFileName,
 		Content: delivered,
 		Mode:    0o600,
-		EnvVar:  "KUBECONFIG",
+		EnvVar:  kubeconfigEnvVar,
 	}}
 	if ns := firstConcreteNamespace(mat.Constraints.Namespaces); ns != "" {
 		mat.Env["CLOOP_K8S_NAMESPACE"] = ns

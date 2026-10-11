@@ -806,10 +806,12 @@ func (b *Broker) RefreshLeaseFiles(ctx context.Context, lease *Lease) (*LeaseFil
 
 // tokenFileNames maps each unguarded GitHub material's grant to the name its
 // token file has in the rendered lease: "github-token" for the first, suffixed
-// for the rest (githubmulti.go), exactly as render named them at dispatch.
+// for the rest (githubmulti.go), exactly as render named them at dispatch —
+// through the same coalesceLease, so a lease render could not deliver has no
+// names to refresh either.
 func tokenFileNames(materials []Material) map[string]string {
 	out := map[string]string{}
-	coalesced, err := coalesceGitHub(materials)
+	coalesced, _, err := coalesceLease(materials)
 	if err != nil {
 		return out
 	}

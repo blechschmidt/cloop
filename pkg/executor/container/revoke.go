@@ -235,7 +235,7 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	}
 
 	var errs []error
-	if removed, err = rec.secretStage.revoke(req); err != nil {
+	if removed, err = rec.secretStage.revoke(req, bindingFiles(bindings)...); err != nil {
 		errs = append(errs, fmt.Errorf("handle %s: %w", handleID, err))
 	}
 
@@ -318,6 +318,16 @@ func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
 		rec.bus.AddRedactions(values...)
 	}
 	return true
+}
+
+// bindingFiles lists the files bindings name, by the path the workload reads
+// them at.
+func bindingFiles(bindings []executor.SecretBinding) []string {
+	var out []string
+	for _, b := range bindings {
+		out = append(out, b.Files...)
+	}
+	return out
 }
 
 // bindingsCarryFiles reports whether any binding delivered a credential file.

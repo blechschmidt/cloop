@@ -788,8 +788,9 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 	}
 	// A credential the project was granted and whose secret is gone — often
 	// a colleague's, destroyed when they were offboarded — is refused by
-	// name; say so where the people running the project will look.
-	journalRefusedCredentials(workDir, lease.Refused)
+	// name, and so is one the broker could not deliver (Task 20413); say so
+	// where the people running the project will look.
+	journalRefusedCredentials(workDir, runID, lease.Refused)
 	if lease.Empty() {
 		broker.Release(lease.ID)
 		closeDB()
@@ -1394,7 +1395,7 @@ func repoEnvKey(name string) string {
 	return b.String()
 }
 
-// refusalsJournaled remembers the refused credentials this process has
+// refusalsJournaled remembers the destroyed credentials this process has
 // already put in front of a project (Task 20400).
 //
 // A destroyed secret leaves revoked grants behind for good — revocation is a
@@ -1403,6 +1404,9 @@ func repoEnvKey(name string) string {
 // first run after the loss, because a row per run naming a credential nobody
 // on the project can bring back would bury every other row. Bounded: past the
 // cap the set starts again, which costs one repeated row per refused grant.
+//
+// A credential the broker could not deliver (Task 20413) is not remembered
+// here: the cause may pass, so each run it affects is told.
 var refusalsJournaled = struct {
 	sync.Mutex
 	seen map[string]bool
@@ -1411,39 +1415,59 @@ var refusalsJournaled = struct {
 const refusalsJournaledMax = 4096
 
 // journalRefusedCredentials writes one credential_refused row per refused
-// credential this process has not yet reported for workDir.
-func journalRefusedCredentials(workDir string, refused []secretbroker.RefusedCredential) {
+// credential, into the project's event history: a credential whose secret is
+// gone once per hub process, and one whose material the broker could not
+// build (RefusedCredential.Delivery, Task 20413) on every run it affects,
+// naming that run — what refused it may pass, and each run that started
+// without the credential is a run whose failures it explains.
+func journalRefusedCredentials(workDir, runID string, refused []secretbroker.RefusedCredential) {
 	if workDir == "" || len(refused) == 0 {
 		return
 	}
 	for _, rc := range refused {
-		key := workDir + "\x00" + rc.GrantID
-		refusalsJournaled.Lock()
-		if refusalsJournaled.seen[key] {
+		if !rc.Delivery {
+			key := workDir + "\x00" + rc.GrantID
+			refusalsJournaled.Lock()
+			if refusalsJournaled.seen[key] {
+				refusalsJournaled.Unlock()
+				continue
+			}
+			if len(refusalsJournaled.seen) >= refusalsJournaledMax {
+				refusalsJournaled.seen = map[string]bool{}
+			}
+			refusalsJournaled.seen[key] = true
 			refusalsJournaled.Unlock()
-			continue
 		}
-		if len(refusalsJournaled.seen) >= refusalsJournaledMax {
-			refusalsJournaled.seen = map[string]bool{}
-		}
-		refusalsJournaled.seen[key] = true
-		refusalsJournaled.Unlock()
 
 		what := "a credential"
 		if rc.SecretName != "" {
 			what = strings.TrimSpace(string(rc.Kind) + " " + strconv.Quote(rc.SecretName))
 		}
-		state.LogEventDetails(workDir, state.EventRow{
-			Type:    state.EventCredentialRefused,
-			Step:    state.NoStep,
-			Message: "This run goes without " + what + ", which the project was granted: " + rc.Reason,
-		}, map[string]any{
+		message := "This run goes without " + what + ", which the project was granted: " + rc.Reason
+		if rc.Delivery {
+			// The broker's own prefix says where the sentence came from, which
+			// is the hub's business; the project needs what it says.
+			message = "This run goes without " + what + ", which the project was granted, because the hub " +
+				"could not deliver it: " + strings.TrimPrefix(rc.Reason, "secretbroker: ")
+		}
+		details := map[string]any{
 			"grant_id":    rc.GrantID,
 			"secret_id":   rc.SecretID,
 			"secret_name": rc.SecretName,
 			"kind":        string(rc.Kind),
 			"owner":       rc.Owner,
 			"deleted_at":  rc.DeletedAt,
-		})
+		}
+		if rc.Delivery {
+			details["delivery"] = true
+		}
+		if runID != "" {
+			details["run_id"] = runID
+		}
+		state.LogEventDetails(workDir, state.EventRow{
+			Type:    state.EventCredentialRefused,
+			Step:    state.NoStep,
+			Message: message,
+		}, details)
 	}
 }

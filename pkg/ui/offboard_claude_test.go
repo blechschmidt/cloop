@@ -271,8 +271,8 @@ func TestARefusedCredentialIsJournaledOncePerProcess(t *testing.T) {
 	refused := []secretbroker.RefusedCredential{{GrantID: "grant_x", SecretID: "sec_x", SecretName: "alice-pat",
 		Kind: secretbroker.KindGitHubPAT, Owner: "alice@example.com",
 		Reason: `grant revoked at T: github_pat "alice-pat", a personal credential of alice@example.com, was destroyed on 2026-10-10 when its owner was offboarded`}}
-	journalRefusedCredentials(dir, refused)
-	journalRefusedCredentials(dir, refused)
+	journalRefusedCredentials(dir, "run-1", refused)
+	journalRefusedCredentials(dir, "run-2", refused)
 
 	rows, _, err := state.ListEvents(dir, 0, 100)
 	if err != nil {

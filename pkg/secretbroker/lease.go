@@ -137,6 +137,13 @@ type File struct {
 	// EnvIsDir points EnvVar at the containing directory rather than the
 	// file, which is what DOCKER_CONFIG expects.
 	EnvIsDir bool
+
+	// shared marks a file several grants' material went into — the one
+	// kubeconfig a lease's kubeconfig grants are merged into (kubemulti.go).
+	// It belongs to owners, never empty, rather than to the material that
+	// carries it: their bindings name it, and withdrawing any of them takes it.
+	shared bool
+	owners []string
 }
 
 // Lease is a time-boxed bundle of materials issued to one requester.
@@ -317,7 +324,10 @@ type LeaseBinding struct {
 	Kind Kind
 	// EnvKeys are the variables this grant contributed, by name.
 	EnvKeys []string
-	// Files are the absolute paths written for this grant.
+	// Files are the absolute paths written for this grant: the files whose
+	// removal withdrawing it requires. A file several grants went into is
+	// named by each grant it belongs to (kubemulti.go), which need not include
+	// the grant whose material carried it.
 	Files []string
 	// Dir is the lease directory holding Files.
 	Dir string
@@ -419,12 +429,18 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 	envMap := make(map[string]string)
 	sensitive := make(map[string]struct{})
 
-	// Several GitHub grants would otherwise render the same files at the same
-	// paths; see githubmulti.go.
-	materials, err := coalesceGitHub(l.Materials)
+	// Several GitHub grants, or several kubeconfig grants, would otherwise
+	// render the same files at the same paths; see githubmulti.go and
+	// kubemulti.go.
+	materials, leaseEnv, err := coalesceLease(l.Materials)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, err
 	}
+	// What a shared file adds to its owners' bindings, by grant: they are
+	// attributed after every binding exists, since an owner's material may
+	// come after the one that carries the file.
+	sharedFiles := map[string][]string{}
+	sharedKeys := map[string][]string{}
 
 	for _, mat := range materials {
 		binding := LeaseBinding{
@@ -447,7 +463,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 				return nil, nil, nil, nil, nil, nil, nerr
 			}
 			path := filepath.Join(dir, name)
-			files = append(files, placedFile{
+			placed := placedFile{
 				GrantID:    mat.GrantID,
 				SecretName: mat.SecretName,
 				Kind:       mat.Kind,
@@ -455,15 +471,34 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 				Path:       path,
 				Mode:       leaseFileMode(f),
 				Content:    f.Content,
-			})
-			binding.Files = append(binding.Files, path)
+			}
+			if f.shared {
+				// Attributed to its owners, the first of them speaking for it
+				// to a driver that tracks one grant per file.
+				if len(f.owners) == 0 {
+					return nil, nil, nil, nil, nil, nil, wrapf(ErrInvalidSecret,
+						"lease file %s is shared by no grant, so no withdrawal could take it", name)
+				}
+				placed.GrantID, placed.owners = f.owners[0], append([]string(nil), f.owners...)
+				for _, g := range f.owners {
+					sharedFiles[g] = append(sharedFiles[g], path)
+					if f.EnvVar != "" {
+						sharedKeys[g] = append(sharedKeys[g], f.EnvVar)
+					}
+				}
+			} else {
+				binding.Files = append(binding.Files, path)
+			}
+			files = append(files, placed)
 			if f.EnvVar != "" {
 				if f.EnvIsDir {
 					envMap[f.EnvVar] = filepath.Dir(path)
 				} else {
 					envMap[f.EnvVar] = path
 				}
-				binding.EnvKeys = append(binding.EnvKeys, f.EnvVar)
+				if !f.shared {
+					binding.EnvKeys = append(binding.EnvKeys, f.EnvVar)
+				}
 			}
 		}
 		// Mounts need no writing — the path is already there and the grant
@@ -500,14 +535,28 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 			binding.Interfaces = append(binding.Interfaces, gi)
 			ifaces = append(ifaces, gi)
 		}
+		bindings = append(bindings, binding)
+	}
+	for i := range bindings {
+		b := &bindings[i]
+		b.Files = append(b.Files, sharedFiles[b.GrantID]...)
+		for _, k := range sharedKeys[b.GrantID] {
+			if !hasString(b.EnvKeys, k) {
+				b.EnvKeys = append(b.EnvKeys, k)
+			}
+		}
 		// Sorted so the binding — which ends up in an audit row and in a
 		// revoke frame — is stable across runs rather than reflecting Go's
 		// randomised map order.
-		sort.Strings(binding.EnvKeys)
-		bindings = append(bindings, binding)
+		sort.Strings(b.EnvKeys)
 	}
 
 	mergeGitHubEnv(envMap, orderedGitMaterials(l.Materials))
+	// The variables describing several kubeconfig grants at once. Set for the
+	// lease, attributed to no grant: see kubemulti.go.
+	for k, v := range leaseEnv {
+		envMap[k] = v
+	}
 
 	// CLOOP_LEASE_DIR lets a workload find its own credential directory
 	// without having to be told out of band.
@@ -552,6 +601,14 @@ type placedFile struct {
 	Path       string
 	Mode       os.FileMode
 	Content    []byte
+	// owners are the grants a shared file belongs to (File.owners), any of
+	// which takes it when withdrawn. Nil for a file of one grant's.
+	owners []string
+}
+
+// heldFor reports whether withdrawing grantID takes f.
+func (f placedFile) heldFor(grantID string) bool {
+	return f.GrantID == grantID || hasString(f.owners, grantID)
 }
 
 // leaseFileName validates and returns the bare name a credential file gets.
@@ -832,9 +889,10 @@ func (d *Delivery) Files() []DeliveredFile {
 // Withdraw zeroes and drops the file contents grantID contributed, and reports
 // how many files there were: one grant of a lease taken back while the others
 // stay (Task 20403). A refresh never re-delivers them, and a heap dump taken
-// later does not contain them.
+// later does not contain them. A file several grants went into goes with any of
+// its owners (kubemulti.go).
 func (d *Delivery) Withdraw(grantID string) int {
-	if d == nil {
+	if d == nil || strings.TrimSpace(grantID) == "" {
 		return 0
 	}
 	d.mu.Lock()
@@ -847,7 +905,7 @@ func (d *Delivery) Withdraw(grantID string) int {
 		removed int
 	)
 	for _, f := range d.files {
-		if f.GrantID != grantID {
+		if !f.heldFor(grantID) {
 			kept = append(kept, f)
 			continue
 		}
@@ -1070,9 +1128,12 @@ func (m *Mount) Close() error {
 // others stay (Task 20403). The directory stays, holding the other grants'
 // files; Close removes it with them. A file shared with another grant — the
 // gitconfig several GitHub grants install their helpers through — belongs to
-// the first grant's binding and goes with it, which errs toward less access.
+// the first grant's binding and goes with it, which errs toward less access;
+// the kubeconfig several kubeconfig grants are merged into belongs to every
+// grant whose cluster credential it carries, and goes with any of them
+// (kubemulti.go).
 func (m *Mount) Withdraw(grantID string) (int, error) {
-	if m == nil {
+	if m == nil || strings.TrimSpace(grantID) == "" {
 		return 0, nil
 	}
 	m.mu.Lock()

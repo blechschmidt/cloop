@@ -60,7 +60,11 @@ import (
 // would hand over the broad credential at precisely the moment the boundary
 // meant to narrow it was broken — the one circumstance in which it must not.
 // Callers fail the lease instead. See githubMaterial.
-var ErrGuardUnavailable = errors.New("secretbroker: git guard unavailable")
+//
+// The Kubernetes monitor's refusals wrap it too (kubeMaterial), which is why
+// its text names neither guard: since Task 20413 it reaches the project whose
+// run went without the credential, and "git guard" on a kubeconfig misleads.
+var ErrGuardUnavailable = errors.New("secretbroker: credential guard unavailable")
 
 // GitGuard interposes an out-of-sandbox proxy between a workload and GitHub.
 //
