@@ -120,8 +120,16 @@ func provisionBranch(ctx context.Context, r Request) error {
 		}
 	}()
 
+	// The hub's CA, for a base fetched through a git proxy that serves a
+	// certificate the hub issued (Task 20409).
+	trust, cleanupTrust, err := GitCAConfig(r.GitCA)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer cleanupTrust()
+
 	step := func(name string, authenticated bool, args ...string) error {
-		return runStep(ctx, dir, w, cred, executor.GitStep{
+		return runStep(ctx, dir, w, cred, trust, executor.GitStep{
 			Name:          name,
 			Argv:          append([]string{"git", "-C", dir}, args...),
 			Authenticated: authenticated,
@@ -131,7 +139,7 @@ func provisionBranch(ctx context.Context, r Request) error {
 	// init names its initial branch explicitly: git otherwise prints a
 	// paragraph of advice about choosing one into the run's log, and the
 	// branch is replaced by the shipped one a moment later anyway.
-	if err := runStep(ctx, dir, w, cred, executor.GitStep{Name: "init", Argv: []string{
+	if err := runStep(ctx, dir, w, cred, trust, executor.GitStep{Name: "init", Argv: []string{
 		"git", "-c", "init.defaultBranch=cloop-provision", "init", "--quiet", "--", dir,
 	}}, hostName, secrets, emit); err != nil {
 		return fail("%v", err)

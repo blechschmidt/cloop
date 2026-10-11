@@ -1103,6 +1103,26 @@ jobs:
             exit 1
           }
 
+      - name: Hub CA trusted for the git proxy only, in a container
+        timeout-minutes: 5 # observed locally: 1s once the image layer is cached
+        env:
+          CLOOP_GITCA_CONTAINER_E2E: "1"
+        # Task 20409: a git proxy serving a certificate the hub issued itself
+        # (tls: auto), and a sandbox image that carries no CA. The driver binds
+        # the hub CA in and names it with http.<proxy URL>.sslCAInfo, so the
+        # workload's git clones and pushes through the proxy — and refuses a
+        # second https server whose certificate the same CA signed. Same image
+        # as the step above, so the layer is cached; same PASS-line assertion.
+        run: |
+          set -euo pipefail
+          go test ./pkg/executor/container/ -run '^TestContainerGitTrustsTheHubCAForTheProxyOnly$' \
+            -v -count=1 -timeout 4m 2>&1 | tee /tmp/gitca-container.log
+          grep -qE '^--- PASS: TestContainerGitTrustsTheHubCAForTheProxyOnly \(' /tmp/gitca-container.log || {
+            echo "::error::go test succeeded but TestContainerGitTrustsTheHubCAForTheProxyOnly did" \
+                 "not pass — it was skipped (docker unavailable, or CLOOP_GITCA_CONTAINER_E2E lost)."
+            exit 1
+          }
+
       - name: Circuit diagnostics on failure
         timeout-minutes: 3 # observed: <1s; bounded because it shells out too
         # A failure here is a failure of an eight-step circuit, and the step
@@ -1724,6 +1744,25 @@ jobs:
             echo "::error::chart: the generated certificate does not name the Service"; exit 1
           }
           echo "the monitors render the config, the ports, the certificate and the CA they need"
+          # monitorTLS.auto (Task 20409): the hub issues both certificates, so
+          # the chart renders tls: auto, no certificate Secret, no CA
+          # ConfigMap and no git_ca_bundle — each Pod gets the hub's CA from
+          # its run's lease Secret.
+          auto() {
+            helm template cloop deploy/helm/cloop-hub --namespace cloop \
+              --set secrets.existingSecret=external --set executor.kubernetes.enabled=true \
+              --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
+              --set executor.monitorTLS.auto=true "$@"
+          }
+          acfg=$(auto --show-only templates/configmap.yaml)
+          [ "$(grep -c 'tls: auto' <<<"$acfg")" = 2 ] || { echo "::error::chart: auto does not render tls: auto for both monitors"; exit 1; }
+          if grep -qE 'cert_file|ca_file|git_ca_bundle' <<<"$acfg"; then
+            echo "::error::chart: auto still renders certificate files or a CA bundle"; exit 1
+          fi
+          if auto | grep -qE 'name: cloop-cloop-hub-monitor-(tls|ca)'; then
+            echo "::error::chart: auto renders the monitors' certificate Secret or CA ConfigMap"; exit 1
+          fi
+          echo "monitorTLS.auto renders tls: auto and nothing for the hub to read from a file"
 
       - name: The chart renders with the defaults an upgrade from 0.2.0 sees
         # `helm upgrade --reuse-values` — which deploy/README.md itself uses —
@@ -1746,6 +1785,9 @@ jobs:
           helm template cloop "$old/cloop-hub" "${base[@]}" \
             --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
             --set executor.monitorTLS.selfSigned=true | grep -q 'listen_addr: ":8443"'
+          helm template cloop "$old/cloop-hub" "${base[@]}" \
+            --set executor.gitProxy.enabled=true --set executor.kubeGuard.enabled=true \
+            --set executor.monitorTLS.auto=true | grep -q 'tls: auto'
           echo "the chart renders with the defaults an upgrade from 0.2.0 sees, monitors off and on"
 
       - name: Chart guard rails refuse what they should
@@ -1828,6 +1870,14 @@ jobs:
             --set executor.kubernetes.egressFilter.ports[0]=443
           refuses "a monitor whose config never reaches the hub" "${mon[@]}" \
             --set executor.monitorTLS.selfSigned=true --set config.fromConfigMap=false
+          # tls: auto (Task 20409): the hub issues the certificate and hands
+          # its CA to every Pod, so no other source may claim to.
+          refuses "auto beside a generated certificate" "${mon[@]}" \
+            --set executor.monitorTLS.auto=true --set executor.monitorTLS.selfSigned=true
+          refuses "auto beside a named certificate" "${mon[@]}" \
+            --set executor.monitorTLS.auto=true --set executor.monitorTLS.existingSecret=t
+          refuses "auto described as publicly trusted" "${mon[@]}" \
+            --set executor.monitorTLS.auto=true --set executor.monitorTLS.publiclyTrusted=true
 
       - name: Create a kind cluster
         # kubectl needs a cluster even for --dry-run=client: it resolves REST

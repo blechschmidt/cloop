@@ -16,7 +16,8 @@ workload namespace, where the Kubernetes executor mounts it for the Pods' git
 ConfigMap — which the kubelet fetches on a Pod's behalf, with no new rule in
 the executor's Role — is the right object for it.
 */ -}}
-{{- if include "cloop-hub.monitorsEnabled" . }}
+{{- /* Under monitorTLS.auto the hub issues and delivers its own: nothing here. */ -}}
+{{- if include "cloop-hub.monitorTLSFromFiles" . }}
 {{- $t := include "cloop-hub.monitorTLS" . | fromJson }}
 {{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
 {{- $caPEM := "" }}

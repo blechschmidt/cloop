@@ -426,7 +426,8 @@ executor:
   #
   # Both are off by default: turning one on changes the URL a sandbox's git or
   # kubectl talks to, which is an operator's decision rather than something an
-  # upgrade should do. Both need monitorTLS below.
+  # upgrade should do. Both need monitorTLS below — monitorTLS.auto=true is the
+  # zero-configuration choice.
 
   # The git interception proxy. With it on, a GitHub token granted to a
   # project stays in the hub: the workload's git gets a session token worth
@@ -478,9 +479,19 @@ executor:
     # discovery requests and a watch never ends, so the rows bury denials.
     auditAllowed: false
 
-  # TLS for both monitors: one certificate, whose names cover both advertise
-  # URLs (they differ only in port). Exactly one source when a monitor is on.
+  # TLS for both monitors. Exactly one source when a monitor is on.
   monitorTLS:
+    # Have the hub issue both certificates itself (executors.*.tls: auto,
+    # Task 20409). A CA is minted the first time the hub starts, its private
+    # key sealed under CLOOP_SECRET_KEY in the hub's database — so every
+    # replica serves the same identity and a backup of the volume carries it —
+    # and each monitor serves a short-lived leaf from it, renewed by the
+    # cluster leader. Nothing to create, rotate or deliver: every workload
+    # Pod gets the CA from its run's own lease Secret and trusts it for the
+    # proxy's URL only, and the kube guard embeds it in the kubeconfigs it
+    # issues. No caBundle, workloadCAConfigMap or publiclyTrusted with it.
+    auto: false
+
     # A kubernetes.io/tls Secret in the release namespace — tls.crt and
     # tls.key for <fullname>.<namespace>.svc (and any advertiseURL host).
     # cert-manager writes exactly this shape. The production path.

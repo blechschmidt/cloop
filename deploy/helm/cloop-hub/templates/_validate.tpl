@@ -98,11 +98,18 @@ Everything here fails the render rather than warning. A warning during
 {{- if not .Values.config.fromConfigMap }}
 {{- fail "executor.gitProxy or executor.kubeGuard is enabled but config.fromConfigMap is false, so neither section reaches the hub: it would start with no monitor and this chart would report one.\nSet config.fromConfigMap=true." }}
 {{- end }}
-{{- if and $mt.existingSecret $mt.selfSigned }}
-{{- fail "executor.monitorTLS.existingSecret and executor.monitorTLS.selfSigned are mutually exclusive: one names your certificate, the other has the chart generate one. Pick one." }}
+{{- $sources := 0 }}
+{{- range $on := list $mt.auto (ne (toString $mt.existingSecret) "") $mt.selfSigned }}
+{{- if $on }}{{- $sources = add1 $sources }}{{- end }}
 {{- end }}
-{{- if not (or $mt.existingSecret $mt.selfSigned) }}
-{{- fail "executor.gitProxy or executor.kubeGuard is enabled but has no certificate. The session token a sandbox presents rides every request, and cleartext would publish it rather than deliver it — the hub refuses to start a monitor without TLS.\nSet executor.monitorTLS.existingSecret to a kubernetes.io/tls Secret for the Service's names (cert-manager), or executor.monitorTLS.selfSigned=true." }}
+{{- if gt $sources 1 }}
+{{- fail "executor.monitorTLS.auto, existingSecret and selfSigned are mutually exclusive: the hub issues the certificate, your Secret names one, or the chart generates one. Pick one." }}
+{{- end }}
+{{- if eq $sources 0 }}
+{{- fail "executor.gitProxy or executor.kubeGuard is enabled but has no certificate. The session token a sandbox presents rides every request, and cleartext would publish it rather than deliver it — the hub refuses to start a monitor without TLS.\nSet executor.monitorTLS.auto=true to have the hub issue it from its own CA, executor.monitorTLS.existingSecret to a kubernetes.io/tls Secret for the Service's names (cert-manager), or executor.monitorTLS.selfSigned=true." }}
+{{- end }}
+{{- if and $mt.auto (or $mt.caBundle $mt.workloadCAConfigMap $mt.publiclyTrusted) }}
+{{- fail "executor.monitorTLS.auto has the hub issue the monitors' certificates from its own CA and hand it to every workload Pod, so caBundle, workloadCAConfigMap and publiclyTrusted would each describe a certificate that is not the one in use. Unset them, or use existingSecret." }}
 {{- end }}
 {{- if and $mt.selfSigned (or $mt.caBundle $mt.workloadCAConfigMap $mt.publiclyTrusted) }}
 {{- fail "executor.monitorTLS.selfSigned has the chart generate and deliver its own CA, so caBundle, workloadCAConfigMap and publiclyTrusted would each describe a certificate that is not the one in use. Unset them, or use existingSecret." }}
@@ -133,7 +140,7 @@ Everything here fails the render rather than warning. A warning during
 {{- if and $gp.enabled $kg.enabled (eq (int $gp.port) (int $kg.port)) }}
 {{- fail (printf "executor.gitProxy.port and executor.kubeGuard.port are both %d; each monitor needs its own port." (int $gp.port)) }}
 {{- end }}
-{{- if and $gp.enabled $mon.kubernetes.enabled (not (include "cloop-hub.workloadGitCA" .)) (not $mt.publiclyTrusted) }}
+{{- if and $gp.enabled $mon.kubernetes.enabled (not (include "cloop-hub.workloadGitCA" .)) (not $mt.publiclyTrusted) (not $mt.auto) }}
 {{- fail "executor.gitProxy is enabled for the Kubernetes executor, but nothing delivers the proxy's CA to the workload Pods, so every Pod's git would refuse its certificate at the first clone.\nWith executor.monitorTLS.existingSecret, set one of:\n  executor.monitorTLS.caBundle             the CA as PEM; the chart delivers it\n  executor.monitorTLS.workloadCAConfigMap  a ConfigMap you maintain in the workload namespace (trust-manager)\n  executor.monitorTLS.publiclyTrusted=true the certificate chains to a CA the workload image already trusts" }}
 {{- end }}
 {{- if and $mon.kubernetes.enabled $mon.kubernetes.egressFilter.enabled }}

@@ -36,9 +36,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -66,11 +68,19 @@ so this command sets the hosted defaults explicitly rather than leaving them
 to be noticed:
 
   executors.allow_host_process: false   no run ever forks on the hub host
+  executors.git_proxy, kube_guard       on, tls: auto — forge and cluster
+                                        credentials stay on the hub
   ui.oidc.default_role: none            deny-by-default; no claim, no access
   ui.tls.*                              TLS paths filled in and required
   ui.allowed_ws_origins                 WebSocket origin pinned to the URL
   CLOOP_SECRET_KEY                      256 bits from crypto/rand, mode 0600
   CLOOP_UI_TOKEN                        so the dashboard is never open
+
+The git interception proxy and the Kubernetes access monitor are enabled with
+tls: auto: the hub issues their certificates from a CA of its own, minted at
+first start and sealed under CLOOP_SECRET_KEY, and tells every sandbox to trust
+it for those two URLs only. Their advertise URLs are derived from
+--external-url; executors must be able to reach both ports there.
 
 Secrets are written to .cloop/hub.env (mode 0600), never into config.yaml —
 so the config can be committed and the env file cannot. The env file is
@@ -91,14 +101,21 @@ type hubBootstrapOpts struct {
 	CloopDir    string
 	ExternalURL string
 	Port        int
-	TLSCert     string
-	TLSKey      string
-	BehindProxy bool
-	OIDCIssuer  string
-	OIDCClient  string
-	AdminEmails []string
-	ServiceUser string
-	Force       bool
+	// GitProxyPort and KubeGuardPort are where the two credential monitors
+	// listen, and GitProxyURL and KubeGuardURL where sandboxes reach them:
+	// --external-url's host on those ports.
+	GitProxyPort  int
+	KubeGuardPort int
+	GitProxyURL   string
+	KubeGuardURL  string
+	TLSCert       string
+	TLSKey        string
+	BehindProxy   bool
+	OIDCIssuer    string
+	OIDCClient    string
+	AdminEmails   []string
+	ServiceUser   string
+	Force         bool
 }
 
 func runHubBootstrap(cmd *cobra.Command, _ []string) error {
@@ -175,6 +192,8 @@ func resolveHubBootstrapOpts(cmd *cobra.Command) (*hubBootstrapOpts, error) {
 	o.Dir, _ = cmd.Flags().GetString("dir")
 	o.ExternalURL, _ = cmd.Flags().GetString("external-url")
 	o.Port, _ = cmd.Flags().GetInt("port")
+	o.GitProxyPort, _ = cmd.Flags().GetInt("git-proxy-port")
+	o.KubeGuardPort, _ = cmd.Flags().GetInt("kube-guard-port")
 	o.TLSCert, _ = cmd.Flags().GetString("tls-cert")
 	o.TLSKey, _ = cmd.Flags().GetString("tls-key")
 	o.BehindProxy, _ = cmd.Flags().GetBool("behind-proxy")
@@ -219,6 +238,29 @@ func resolveHubBootstrapOpts(cmd *cobra.Command) (*hubBootstrapOpts, error) {
 			"travel in the clear. Use https, or terminate TLS at a proxy and pass its https URL here",
 			o.ExternalURL)
 	}
+
+	// The credential monitors' ports, and the URLs sandboxes reach them at:
+	// the external URL's host, because that is the name this hub is known by.
+	// Each monitor speaks TLS itself with a certificate the hub issues
+	// (tls: auto), so these are always https, whatever scheme the dashboard
+	// is served with.
+	for _, p := range []struct {
+		flag string
+		port int
+	}{{"--git-proxy-port", o.GitProxyPort}, {"--kube-guard-port", o.KubeGuardPort}} {
+		if p.port < 1 || p.port > 65535 {
+			return nil, fmt.Errorf("%s must be between 1 and 65535 (got %d)", p.flag, p.port)
+		}
+		if p.port == o.Port {
+			return nil, fmt.Errorf("%s %d is the dashboard's --port; each listener needs its own", p.flag, p.port)
+		}
+	}
+	if o.GitProxyPort == o.KubeGuardPort {
+		return nil, fmt.Errorf("--git-proxy-port and --kube-guard-port are both %d; each monitor needs its own port",
+			o.GitProxyPort)
+	}
+	o.GitProxyURL = "https://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(o.GitProxyPort))
+	o.KubeGuardURL = "https://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(o.KubeGuardPort))
 
 	if o.BehindProxy {
 		if strings.TrimSpace(o.TLSCert) != "" || strings.TrimSpace(o.TLSKey) != "" {
@@ -309,6 +351,35 @@ executors:
   #   image: ghcr.io/blechschmidt/cloop:latest
   #   cpu_limit: "2"
   #   memory_limit: 4Gi
+
+  # ── Credential monitors ───────────────────────────────────────────────────
+  # With these two on, a GitHub token or a kubeconfig granted to a project
+  # stays on this hub. The sandbox gets a session token worth nothing anywhere
+  # else, and a process it does not control decides every push (branch and
+  # repository allowlists) and every Kubernetes API request (verbs,
+  # namespaces). With them off, the credential itself is delivered into the
+  # sandbox and its limits are enforced by code the sandbox runs.
+  #
+  # tls: auto has the hub issue both certificates from a CA of its own,
+  # minted at first start and sealed under CLOOP_SECRET_KEY in the
+  # control-plane database: short-lived leaves for the advertised names,
+  # renewed before they expire. Every sandbox is told to trust that CA for
+  # these two URLs and nothing else, so no image needs it baked in.
+  #
+  # Executors must reach both ports at the advertised name: a container on
+  # this host through its network or firewall, an edge device over its link.
+  # Both terminate their own TLS — route them to this host directly, not
+  # through a TLS-terminating reverse proxy.
+  git_proxy:
+    enabled: true
+    tls: auto
+    listen_addr: 0.0.0.0:{{.GitProxyPort}}
+    advertise_url: {{.GitProxyURL}}
+  kube_guard:
+    enabled: true
+    tls: auto
+    listen_addr: 0.0.0.0:{{.KubeGuardPort}}
+    advertise_url: {{.KubeGuardURL}}
 
   # Scoped egress: lease the hub's Internet connection to sandboxes that have
   # none, per host and with byte quotas, instead of giving them a network.
@@ -554,6 +625,7 @@ func printHubBootstrapSummary(o *hubBootstrapOpts, configPath, envPath string, l
 
 	fmt.Println("Applied:")
 	fmt.Println("  ✔ host execution disabled — no run can fork a harness on this host")
+	fmt.Println("  ✔ git proxy and Kubernetes monitor on (tls: auto) — forge and cluster credentials stay on the hub")
 	fmt.Println("  ✔ RBAC deny-by-default — an authenticated user with no mapping gets nothing")
 	fmt.Println("  ✔ WebSocket origin pinned to the external URL")
 	fmt.Println("  ✔ CLOOP_SECRET_KEY generated (256 bits, crypto/rand)")
@@ -576,6 +648,18 @@ func printHubBootstrapSummary(o *hubBootstrapOpts, configPath, envPath string, l
 		warn.Printf("  ! %s does not exist yet — the hub will not start until it does.\n", o.TLSCert)
 		dim.Printf("    Development: cloop hub tls-init --dir %s\n", filepath.Dir(o.TLSCert))
 		dim.Println("    Production:  point ui.tls at a certificate your clients already trust.")
+	}
+	fmt.Println()
+
+	header.Println("Ports executors must reach")
+	fmt.Printf("  git proxy            %s   (TCP %d on this host)\n", o.GitProxyURL, o.GitProxyPort)
+	fmt.Printf("  Kubernetes monitor   %s   (TCP %d on this host)\n", o.KubeGuardURL, o.KubeGuardPort)
+	dim.Println("  Both serve a certificate the hub issues itself; sandboxes are told to trust its CA for")
+	dim.Println("  these URLs only. Open them to your executors' networks, and route them to this host")
+	dim.Println("  directly rather than through a TLS-terminating proxy.")
+	if u, err := url.Parse(o.ExternalURL); err == nil && isLoopbackHost(u.Hostname()) {
+		warn.Printf("  ! %s is a loopback name: only a sandbox sharing this host's network namespace\n", u.Hostname())
+		warn.Println("    reaches the monitors there. Re-run with --external-url set to a name your executors resolve.")
 	}
 	fmt.Println()
 
@@ -627,6 +711,10 @@ func registerHubBootstrapFlags(cmd *cobra.Command) {
 	f.String("external-url", "",
 		"public URL browsers reach the hub at (default: https://localhost:<port>)")
 	f.Int("port", 8080, "port the hub listens on")
+	f.Int("git-proxy-port", 8443,
+		"port the git interception proxy listens on; sandboxes reach it at the external URL's host")
+	f.Int("kube-guard-port", 8444,
+		"port the Kubernetes access monitor listens on; sandboxes reach it at the external URL's host")
 	f.String("tls-cert", "",
 		"TLS certificate path to record in the config (default: .cloop/tls/cert.pem)")
 	f.String("tls-key", "",

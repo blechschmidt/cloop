@@ -754,6 +754,15 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	cl.push("secret "+secret.ID, func(c context.Context) error {
 		return broker.DeleteSecret(c, secret.ID, "hub-doctor-smoke")
 	})
+	// The same rule for kubeconfigs (Task 20409): the lease below would also
+	// deliver any real kubeconfig granted to this executor, and on a hub with
+	// executors.kube_guard enabled the cluster credential is supposed to stay
+	// in the hub's monitor, which this process does not run. Only the smoke's
+	// own throwaway — a token for 127.0.0.1:1 — is delivered as a document;
+	// any other kubeconfig refuses the lease rather than reach the sandbox.
+	if smokeKubeGuardRequired(dir) {
+		broker.KubeGuard = smokeKubeGuard{throwaway: secret.ID}
+	}
 
 	grant, err := broker.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: secret.ID,
@@ -868,6 +877,42 @@ func smokeGitProxyRequired(dir string) bool {
 		}
 	}
 	return false
+}
+
+// smokeKubeGuardRequired is smokeGitProxyRequired for executors.kube_guard.
+func smokeKubeGuardRequired(dir string) bool {
+	cfg, err := config.Load(dir)
+	if err != nil || cfg == nil || cfg.Executors.KubeGuard.Enabled {
+		return true
+	}
+	ports, err := config.UIInstancePorts(dir)
+	if err != nil {
+		return true
+	}
+	for _, port := range ports {
+		hub, _, err := config.LoadUIInstance(dir, port)
+		if err != nil || hub == nil || hub.Executors.KubeGuard.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// smokeKubeGuard stands in for the hub's Kubernetes monitor in the smoke run:
+// it lets the run's own throwaway kubeconfig through as a document, and
+// refuses every other, which on a hub with the monitor enabled must not leave
+// the hub.
+type smokeKubeGuard struct{ throwaway string }
+
+func (g smokeKubeGuard) GuardKubeconfig(ctx context.Context, req secretbroker.KubeGuardRequest) (secretbroker.KubeGuardResult, error) {
+	if req.SecretID == g.throwaway {
+		return secretbroker.KubeGuardResult{}, nil
+	}
+	return secretbroker.UnavailableKubeGuard{
+		Reason: "cloop hub doctor runs outside the hub process and has no Kubernetes monitor to hold " +
+			"kubeconfig " + req.SecretName + "; executors.kube_guard is enabled, so it is refused rather " +
+			"than written into the smoke sandbox",
+	}.GuardKubeconfig(ctx, req)
 }
 
 // smokeKubeconfig renders the throwaway credential.

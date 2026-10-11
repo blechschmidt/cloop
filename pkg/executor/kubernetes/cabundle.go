@@ -38,8 +38,6 @@ package kubernetes
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -133,35 +131,14 @@ func (b GitCABundle) Normalize() (GitCABundle, error) {
 }
 
 // normalizeGitCAURL checks one URL and renders it the way git matches
-// http.<url>.* keys: scheme, host, port, and a path ending in "/" so that
-// https://hub:8443/ matches every repository beneath it and nothing at
-// https://hub:8443.evil.example.
+// http.<url>.* keys; see executor.NormalizeGitCAURL, which the hub's own CA
+// (executor.GitCA) is held to as well.
 func normalizeGitCAURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if strings.ContainsAny(s, " \t\r\n") {
-		return "", fmt.Errorf("git_ca_bundle url %q contains whitespace", s)
-	}
-	u, err := url.Parse(s)
+	u, err := executor.NormalizeGitCAURL(raw)
 	if err != nil {
-		return "", fmt.Errorf("git_ca_bundle url %q is not a URL: %v", s, err)
+		return "", fmt.Errorf("git_ca_bundle: %w", err)
 	}
-	switch {
-	case u.Scheme != "https":
-		// http:// carries no certificate to verify; a bundle for it is a
-		// misunderstanding of what the proxy needs.
-		return "", fmt.Errorf("git_ca_bundle url %q must be https", s)
-	case u.Host == "" || u.Hostname() == "":
-		return "", fmt.Errorf("git_ca_bundle url %q has no host", s)
-	case u.User != nil:
-		return "", fmt.Errorf("git_ca_bundle url %q must not embed credentials", s)
-	case u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
-		return "", fmt.Errorf("git_ca_bundle url %q must be a base URL with no query or fragment", s)
-	}
-	path := u.EscapedPath()
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
-	return "https://" + strings.ToLower(u.Host) + path, nil
+	return u, nil
 }
 
 // gitConfigPairs is the configuration that scopes the bundle: one
@@ -194,34 +171,63 @@ func (b GitCABundle) mount() volumeMount {
 	return volumeMount{Name: gitCAVolume, MountPath: PodGitCADir, ReadOnly: true}
 }
 
-// withGitConfig adds pairs to the GIT_CONFIG_COUNT block in env (K=V strings),
-// after any entries already there, and returns the new list.
-//
-// The count is one variable for the whole environment, so appending a second
-// block would silently replace the first — a lease's or the review gate's —
-// rather than join it. A count that does not parse is refused rather than
-// overwritten: whoever set it meant something by the entries it numbers.
+// withGitConfig adds pairs to the GIT_CONFIG_COUNT block in env; see
+// executor.WithGitConfig.
 func withGitConfig(env []string, pairs [][2]string) ([]string, error) {
-	if len(pairs) == 0 {
-		return env, nil
+	return executor.WithGitConfig(env, pairs)
+}
+
+// The hub's own CA (Spec.GitCA, Task 20409), for a hub whose git proxy serves a
+// certificate it issued itself. It travels in the run's lease Secret — public
+// material, but the Secret already exists per run and is deleted with the Pod,
+// where a ConfigMap would be one more object this driver needs authority over —
+// and is projected read-only at executor.SandboxGitCAFile in both containers.
+const (
+	// hubCAKey is the lease Secret entry holding the hub's CA.
+	hubCAKey = "hub-ca.crt"
+	// hubCAVolume projects it.
+	hubCAVolume = "hub-ca"
+)
+
+// podGitCA returns the part of the hub's CA this Pod takes from its lease
+// Secret: the URLs the operator's git_ca_bundle does not already name. A URL
+// the bundle covers keeps the operator's answer — two sslCAInfo values for one
+// URL would leave git using whichever came last. Nil when nothing remains.
+func podGitCA(ca *executor.GitCA, bundle GitCABundle) *executor.GitCA {
+	if ca == nil {
+		return nil
 	}
-	out := make([]string, 0, len(env)+1+2*len(pairs))
-	n := 0
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "GIT_CONFIG_COUNT="); ok {
-			c, err := strconv.Atoi(strings.TrimSpace(v))
-			if err != nil || c < 0 {
-				return nil, fmt.Errorf("%w: GIT_CONFIG_COUNT %q in the workload's environment is not a count",
-					executor.ErrInvalidSpec, v)
-			}
-			n = c
-			continue
+	covered := map[string]bool{}
+	if bundle.Enabled() {
+		for _, u := range bundle.URLs {
+			covered[u] = true
 		}
-		out = append(out, kv)
 	}
-	for i, kv := range pairs {
-		idx := strconv.Itoa(n + i)
-		out = append(out, "GIT_CONFIG_KEY_"+idx+"="+kv[0], "GIT_CONFIG_VALUE_"+idx+"="+kv[1])
+	out := &executor.GitCA{PEM: append([]byte(nil), ca.PEM...)}
+	for _, u := range ca.URLs {
+		if !covered[u] {
+			out.URLs = append(out.URLs, u)
+		}
 	}
-	return append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(n+len(pairs))), nil
+	if len(out.URLs) == 0 {
+		return nil
+	}
+	return out
+}
+
+// hubCAVolumeFor projects the lease Secret's hubCAKey as one read-only file.
+func hubCAVolumeFor(leaseSecret string) volume {
+	return volume{
+		Name: hubCAVolume,
+		Secret: &secretSource{
+			SecretName:  leaseSecret,
+			Items:       []keyToPath{{Key: hubCAKey, Path: executor.SandboxGitCAFileName}},
+			DefaultMode: &gitCAFileMode,
+			Optional:    boolPtr(false),
+		},
+	}
+}
+
+func hubCAMount() volumeMount {
+	return volumeMount{Name: hubCAVolume, MountPath: executor.SandboxGitCADir, ReadOnly: true}
 }

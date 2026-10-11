@@ -33,6 +33,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/sessionstore"
@@ -420,7 +421,15 @@ func openHubKeyring(workdir string, readOnly bool) (*hubKeyring, error) {
 		closer()
 		return nil, err
 	}
-	rot, err := secretbroker.NewRotator(kr, store, sessions.WithKeyring(kr))
+	// The hub CA's private keys (Task 20409) are sealed under the same
+	// registry, so "rotate everything" has to include them — and retirement
+	// counts them, or it would shred the key every sandbox's trust rests on.
+	tlsKeys, err := hubca.NewStore(db)
+	if err != nil {
+		closer()
+		return nil, err
+	}
+	rot, err := secretbroker.NewRotator(kr, store, sessions.WithKeyring(kr), tlsKeys)
 	if err != nil {
 		closer()
 		return nil, err

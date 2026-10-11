@@ -560,6 +560,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	// The hub's CA for its git proxy's URL, when the proxy serves a
+	// certificate the hub issued (Task 20409): after the lease and the
+	// workspace, the two things that point a sandbox's git at the proxy.
+	spec = applyGitProxyTrust(spec)
 	// A feature's branch, bundled for the executor to build its tree from
 	// (Task 20367). The driver has read it by the time Start returns.
 	if f := spec.BranchBundleFile; f != "" {
@@ -882,6 +886,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if f := spec.BranchBundleFile; f != "" {
 		defer os.Remove(f)
 	}
+	spec = applyGitProxyTrust(spec)
 	// The ceilings apply here too. A subcommand is a smaller workload than a
 	// harness, not an exempt one — `cloop suggest` on a repository whose
 	// sandbox.yaml asks for 900g would otherwise be the way around a cap that

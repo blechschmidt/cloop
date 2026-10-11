@@ -389,6 +389,9 @@ type record struct {
 	// they can be wiped when it is terminal. Nil for a workload with no
 	// file-backed grants, which is the common case.
 	secretStage *secretStage
+	// gitCADir holds the hub CA bound into this container (Spec.GitCA, Task
+	// 20409), removed when it is terminal. Empty when the Spec carried none.
+	gitCADir string
 	// interfaces are the host network interfaces moved into this container's
 	// network namespace, kept so a graceful stop can return them to the host
 	// before the kernel's own teardown rules apply — which destroy a veth
@@ -705,6 +708,22 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 			stage.remove()
 		}
 	}()
+	// The hub's CA for its git proxy's URL (Task 20409), bound read-only at
+	// executor.SandboxGitCAFile and named by http.<url>.sslCAInfo in the
+	// container's environment — so an image that carries no CA clones through
+	// the proxy, and still verifies every other host against its own store.
+	spec, caMount, caDir, err := e.stageGitCA(spec)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	defer func() {
+		if !started {
+			removeGitCA(caDir)
+		}
+	}()
+	if caMount != nil {
+		extraMounts = append(append([]mount(nil), extraMounts...), *caMount)
+	}
 
 	// A feature workload runs in a standalone checkout of its branch, staged
 	// here, rather than in the project directory; see feature.go.
@@ -932,6 +951,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// by finish, which every terminal path funnels through, rather than by
 		// the deferred cleanup above.
 		secretStage: stage,
+		gitCADir:    caDir,
 		// Retained where Spec.Env is not: an interface list is a set of
 		// handles and host device names with no credential in it, and
 		// without it a graceful stop could not return the interfaces.
@@ -2371,6 +2391,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// that survives one of those is a credential that survives on the host
 	// until the next reboot.
 	rec.secretStage.remove()
+	removeGitCA(rec.gitCADir)
 	// A feature workload's tree and output wait for the hub to collect them,
 	// but not forever. See feature.go.
 	if rec.feature != nil && state.Terminal() {

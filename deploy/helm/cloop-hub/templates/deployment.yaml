@@ -160,7 +160,7 @@ spec:
             # os.CreateTemp and anything shelling out needs one.
             - name: tmp
               mountPath: /tmp
-            {{- if include "cloop-hub.monitorsEnabled" . }}
+            {{- if include "cloop-hub.monitorTLSFromFiles" . }}
             # The credential monitors' certificate and key.
             - name: monitor-tls
               mountPath: /etc/cloop/monitor-tls
@@ -210,7 +210,7 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
-        {{- if include "cloop-hub.monitorsEnabled" . }}
+        {{- if include "cloop-hub.monitorTLSFromFiles" . }}
         - name: monitor-tls
           secret:
             secretName: {{ include "cloop-hub.monitorTLSSecretName" . }}

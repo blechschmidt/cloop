@@ -41,6 +41,12 @@ func ValidateGitProxyConfig(g GitProxyConfig) error {
 			return fmt.Errorf("executors.git_proxy.min_tls_version: %w", err)
 		}
 	}
+	if err := validateMonitorTLS("executors.git_proxy", g.TLS); err != nil {
+		return err
+	}
+	if g.AutoTLS() && (strings.TrimSpace(g.CertFile) != "" || strings.TrimSpace(g.KeyFile) != "") {
+		return autoTLSConflict("executors.git_proxy", "cert_file and key_file")
+	}
 	// The allowlist is validated through the same code the proxy enforces
 	// with, so a pattern that would silently match nothing is refused here
 	// rather than read as a working allowlist that denies everything.
@@ -57,12 +63,13 @@ func ValidateGitProxyConfig(g GitProxyConfig) error {
 	// Only when enabled: TLS material that does not exist yet is an ordinary
 	// state for a section an operator is still writing, and refusing to load
 	// the whole config over it would be worse than starting without a proxy.
-	if g.Enabled {
+	if g.Enabled && !g.AutoTLS() {
 		cert, key := strings.TrimSpace(g.CertFile), strings.TrimSpace(g.KeyFile)
 		if cert == "" || key == "" {
 			return fmt.Errorf("executors.git_proxy is enabled but cert_file and key_file are " +
 				"not both set; the session token rides an Authorization header on every " +
-				"request and cleartext would publish it rather than deliver it")
+				"request and cleartext would publish it rather than deliver it — set both, " +
+				"or set tls: auto to have the hub issue the proxy's certificate itself")
 		}
 	}
 	return nil
@@ -158,9 +165,14 @@ func clampGitProxyConfig(g *GitProxyConfig) []string {
 		g.AdvertiseURL = ""
 		g.Enabled = false
 	}
-	if g.Enabled && (strings.TrimSpace(g.CertFile) == "" || strings.TrimSpace(g.KeyFile) == "") {
+	changed = append(changed, clampMonitorTLS("executors.git_proxy", &g.TLS, g.CertFile, g.KeyFile)...)
+	// Not inferred from the missing files: a section that said enabled: true
+	// with neither has always been switched off here, and turning it into a
+	// running proxy on upgrade would change the URL every sandbox's git talks
+	// to without anyone deciding it. tls: auto is how an operator decides.
+	if g.Enabled && !g.AutoTLS() && (strings.TrimSpace(g.CertFile) == "" || strings.TrimSpace(g.KeyFile) == "") {
 		changed = append(changed, "executors.git_proxy.cert_file: enabled without TLS material, "+
-			"which would carry every session token in cleartext")
+			"which would carry every session token in cleartext (set tls: auto to have the hub issue it)")
 		g.Enabled = false
 	}
 	return changed

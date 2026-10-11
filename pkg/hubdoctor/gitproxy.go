@@ -29,6 +29,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -188,18 +189,21 @@ func checkGitProxy(ctx context.Context, dir string, cfg *config.Config, opts Opt
 			Message: "disabled while executors that clone the project source, or GitHub grants, " +
 				"are configured, so a sandbox is handed the forge credential and the cloop/ branch " +
 				"rule is enforced only by code the sandbox itself runs",
-			Remediation: "Set executors.git_proxy.enabled: true with cert_file, key_file and " +
-				"advertise_url, so the credential stays on the hub and the branch allowlist " +
-				"is enforced on the push. See docs/git-interception-proxy.md",
+			Remediation: "Set executors.git_proxy.enabled: true with tls: auto and an advertise_url " +
+				"your executors reach (or a cert_file and key_file), so the credential stays on the " +
+				"hub and the branch allowlist is enforced on the push. See docs/git-interception-proxy.md",
 		})
 		return
 	}
 
 	// --- enabled: does it start, and where does it point sandboxes? ---------
 
-	starts := proxyTLS("gitproxy.tls", "Git proxy TLS material", "executors.git_proxy",
-		g.CertFile, g.KeyFile, g.MinTLSVersion,
-		"every dispatch that needs a git workspace is refused rather than handed the forge credential", add)
+	refusal := "every dispatch that needs a git workspace is refused rather than handed the forge credential"
+	starts := true
+	if !g.AutoTLS() {
+		starts = proxyTLS("gitproxy.tls", "Git proxy TLS material", "executors.git_proxy",
+			g.CertFile, g.KeyFile, g.MinTLSVersion, refusal, add)
+	}
 
 	// The advertised base is the single most common way this is
 	// misconfigured, because the wrong value works perfectly on the machine
@@ -223,6 +227,12 @@ func checkGitProxy(ctx context.Context, dir string, cfg *config.Config, opts Opt
 			consequence: "their clone and write-back push will fail to connect",
 			example:     "https://cloop-gitproxy.cloop.svc:8443",
 		}, add)
+		// tls: auto (Task 20409): the certificate is the hub's own, so what
+		// is checked is the CA and the leaf it is serving.
+		if g.AutoTLS() {
+			starts = autoMonitorTLS(dir, hubca.GitProxy, "gitproxy.tls", "Git proxy TLS (tls: auto)", ep,
+				g.ListenAddr, refusal, opts.now(), add) && starts
+		}
 	}
 
 	// A widened allowlist is legitimate and deliberate, and worth saying out

@@ -1442,6 +1442,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// keeps a leader change from skipping or doubling one. See
 	// audit_checkpoints.go.
 	s.runLeaderDuty(watcherCtx, "audit-checkpoints", s.watchAuditCheckpoints)
+	// Renews the certificates the hub issued its git proxy and Kubernetes
+	// monitor (tls: auto, Task 20409) two days before they expire. One member
+	// renews; every member serves the result. See hubtls.go.
+	s.runLeaderDuty(watcherCtx, "monitor-certificates", s.watchMonitorCertificates)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential

@@ -696,6 +696,19 @@ type podRequest struct {
 	// GitCABundle is the CA bundle both containers' git verifies particular
 	// URLs against — the hub's git proxy, typically. See cabundle.go.
 	GitCABundle GitCABundle
+
+	// GitCA is the hub's own CA for the URLs GitCABundle does not already
+	// name (Spec.GitCA through podGitCA, Task 20409). The bytes travel in the
+	// Secret named by LeaseSecretName under hubCAKey; only the URLs are read
+	// here.
+	GitCA *executor.GitCA
+}
+
+// gitCAPairs is every URL-scoped trust setting both containers' git gets: the
+// operator's bundle, then the hub's own CA for the URLs the bundle leaves.
+func (req podRequest) gitCAPairs() [][2]string {
+	pairs := req.GitCABundle.gitConfigPairs()
+	return append(pairs, req.GitCA.ConfigPairs(executor.SandboxGitCAFile)...)
 }
 
 // egressLabelValue renders DisableNetwork for LabelEgress.
@@ -728,7 +741,7 @@ func buildPod(req podRequest) (*pod, error) {
 	// Those two are the only plain values in the harness's environment. Every
 	// variable of the Spec's own is a reference into the lease Secret, so no
 	// credential it carries is in the object anyone with `get pods` can read.
-	harnessGit := append([][2]string{{"safe.directory", PodWorkspace}}, req.GitCABundle.gitConfigPairs()...)
+	harnessGit := append([][2]string{{"safe.directory", PodWorkspace}}, req.gitCAPairs()...)
 	env, err := harnessEnv(req.LeaseSecretName, req.Env, harnessGit)
 	if err != nil {
 		return nil, err
@@ -963,6 +976,14 @@ func buildPod(req podRequest) (*pod, error) {
 		spec.Volumes = append(spec.Volumes, req.GitCABundle.volume())
 		mounts = append(mounts, req.GitCABundle.mount())
 	}
+	// And the hub's own CA, from the run's lease Secret (Task 20409).
+	if req.GitCA != nil {
+		if strings.TrimSpace(req.LeaseSecretName) == "" {
+			return nil, fmt.Errorf("%w: the hub's CA has no lease Secret to travel in", executor.ErrInvalidSpec)
+		}
+		spec.Volumes = append(spec.Volumes, hubCAVolumeFor(req.LeaseSecretName))
+		mounts = append(mounts, hubCAMount())
+	}
 
 	// The harness argv, possibly wrapped so the work it produces — the files it
 	// changed, the project state it recorded — survives the Pod. See
@@ -1128,7 +1149,7 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 	// The fetch is the first thing to reach the git proxy, so it needs the
 	// bundle as much as the harness does. Plain values: a CA path and the URLs
 	// it is for are not credentials.
-	if pairs := req.GitCABundle.gitConfigPairs(); len(pairs) > 0 {
+	if pairs := req.gitCAPairs(); len(pairs) > 0 {
 		caEnv, err := withGitConfig(nil, pairs)
 		if err != nil {
 			return nil, err
@@ -1137,7 +1158,12 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 			k, v, _ := strings.Cut(kv, "=")
 			env = append(env, envVar{Name: k, Value: v})
 		}
-		mounts = append(mounts, req.GitCABundle.mount())
+		if req.GitCABundle.Enabled() {
+			mounts = append(mounts, req.GitCABundle.mount())
+		}
+		if req.GitCA != nil {
+			mounts = append(mounts, hubCAMount())
+		}
 	}
 
 	return &container{

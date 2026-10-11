@@ -204,7 +204,10 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		"executor.gitProxy.enabled=true",
 		"executor.kubeGuard.enabled=true",
 		"executor.kubeGuard.auditAllowed=true",
-		"executor.monitorTLS.selfSigned=true",
+		// The hub issues both certificates from its own CA (Task 20409):
+		// no certificate Secret, no CA ConfigMap, no git_ca_bundle — each
+		// workload Pod gets the CA from its run's lease Secret.
+		"executor.monitorTLS.auto=true",
 		"executor.kubernetes.image=" + harnessImage,
 		"executor.kubernetes.egressFilter.enabled=true",
 		"executor.kubernetes.egressFilter.cidrs[0]=" + nodeCIDR,
@@ -215,6 +218,13 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 		"hostAliases[0].ip=" + forgeIP,
 		"hostAliases[0].hostnames[0]=github.com",
 	})
+	// What the hub now runs: both monitors on tls: auto, and no CA bundle for
+	// the Pods to mount — the hub hands each its own CA (Task 20409).
+	hubCfg := x.out(ctx, "get", "configmap", "-n", ns, fullname+"-config", "-o", `jsonpath={.data.config\.yaml}`)
+	if strings.Count(hubCfg, "tls: auto") != 2 || strings.Contains(hubCfg, "git_ca_bundle") ||
+		strings.Contains(hubCfg, "cert_file") {
+		t.Fatalf("the release does not run both monitors on tls: auto without a CA bundle:\n%s", hubCfg)
+	}
 
 	// ── 6. The project: hub-side checkout and state, nothing in the repo ───
 	// The forge's acme/granted holds one commit and no .cloop/. Everything a

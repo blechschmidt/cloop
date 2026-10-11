@@ -119,6 +119,15 @@ certificate and its CA come from — is derived here once, because the
 ConfigMap, the Deployment, the Service and the CA ConfigMaps all have to agree.
 */}}
 
+{{/* "true" when the monitors' certificates come from files: a Secret the
+operator names or one the chart generates, rather than the hub (auto). */}}
+{{- define "cloop-hub.monitorTLSFromFiles" -}}
+{{- $t := include "cloop-hub.monitorTLS" . | fromJson -}}
+{{- if and (include "cloop-hub.monitorsEnabled" .) (not $t.auto) -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{/*
 The monitors' values, each merged over its defaults and returned as JSON (read
 with `include … | fromJson`). Templates read these, never
@@ -140,7 +149,7 @@ chart with those sections deleted to keep the two in step.
 {{- end -}}
 
 {{- define "cloop-hub.monitorTLS" -}}
-{{- $d := dict "existingSecret" "" "selfSigned" false "caBundle" "" "workloadCAConfigMap" "" "workloadCAKey" "ca.crt" "publiclyTrusted" false -}}
+{{- $d := dict "auto" false "existingSecret" "" "selfSigned" false "caBundle" "" "workloadCAConfigMap" "" "workloadCAKey" "ca.crt" "publiclyTrusted" false -}}
 {{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.executor.monitorTLS))) -}}
 {{- end -}}
 
@@ -208,12 +217,13 @@ true
 {{/*
 The ConfigMap in the workload namespace a Pod's git reads the proxy's CA from,
 as "name/key"; empty when nothing is delivered (a publicly trusted certificate,
-or no git proxy).
+no git proxy, or monitorTLS.auto, under which the hub hands each Pod its own CA
+through the run's lease Secret).
 */}}
 {{- define "cloop-hub.workloadGitCA" -}}
 {{- $t := include "cloop-hub.monitorTLS" . | fromJson -}}
 {{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}
-{{- if and $gp.enabled (not $t.publiclyTrusted) -}}
+{{- if and $gp.enabled (not $t.publiclyTrusted) (not $t.auto) -}}
 {{- if include "cloop-hub.monitorCAKnown" . -}}
 {{- printf "%s/ca.crt" (include "cloop-hub.monitorCAName" .) -}}
 {{- else if $t.workloadCAConfigMap -}}

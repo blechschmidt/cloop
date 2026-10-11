@@ -1452,6 +1452,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		WorkspaceSecretName:   workspaceSecret,
 		SecretFiles:           spec.SecretFiles,
 		GitCABundle:           e.opts.GitCABundle,
+		GitCA:                 podGitCA(spec.GitCA, e.opts.GitCABundle),
 		ProjectSeed:           len(spec.ProjectSeed) > 0,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
@@ -1515,7 +1516,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// from the same plans), so an environment of nothing but GIT_CONFIG_COUNT
 	// names a Secret nothing reads. A project seed is carried there too
 	// (projectresult.go).
-	if len(spec.SecretFiles) > 0 || len(spec.Env) > 0 || len(spec.ProjectSeed) > 0 {
+	if len(spec.SecretFiles) > 0 || len(spec.Env) > 0 || len(spec.ProjectSeed) > 0 || req.GitCA != nil {
 		req.LeaseSecretName = leaseSecretName(handleID)
 	}
 

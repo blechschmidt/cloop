@@ -121,8 +121,14 @@ data:
         enabled: true
         listen_addr: {{ printf ":%d" (int $gp.port) | quote }}
         advertise_url: {{ include "cloop-hub.gitProxyURL" . | quote }}
+        {{- if $mt.auto }}
+        # The hub issues the certificate from its own CA, and every workload
+        # is told to trust that CA for this URL only.
+        tls: auto
+        {{- else }}
         cert_file: /etc/cloop/monitor-tls/tls.crt
         key_file: /etc/cloop/monitor-tls/tls.key
+        {{- end }}
         {{- with $gp.sessionMinutes }}
         session_minutes: {{ . }}
         {{- end }}
@@ -139,11 +145,17 @@ data:
         enabled: true
         listen_addr: {{ printf ":%d" (int $kg.port) | quote }}
         advertise_url: {{ include "cloop-hub.kubeGuardURL" . | quote }}
+        {{- if $mt.auto }}
+        # The hub issues the certificate from its own CA, embedded in every
+        # kubeconfig the monitor issues.
+        tls: auto
+        {{- else }}
         cert_file: /etc/cloop/monitor-tls/tls.crt
         key_file: /etc/cloop/monitor-tls/tls.key
         {{- if include "cloop-hub.monitorCAKnown" . }}
         # Embedded in every kubeconfig the monitor issues.
         ca_file: /etc/cloop/monitor-ca/ca.crt
+        {{- end }}
         {{- end }}
         {{- with $kg.sessionMinutes }}
         session_minutes: {{ . }}

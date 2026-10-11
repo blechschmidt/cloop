@@ -441,6 +441,9 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// a cloud metadata service without naming it (Task 20397).
 	checkMetadataExposure(dir, cfg, add)
 	checkGitProxy(ctx, dir, cfg, opts, add)
+	// Which GitHub grants a strict hub with no proxy hands into sandboxes as
+	// the credential itself (Task 20409).
+	checkForgeCredentials(dir, cfg, add)
 	checkBranchRestrictedGrants(dir, cfg, add)
 	checkKubeGuard(ctx, dir, cfg, opts, add)
 	checkEgressBroker(ctx, dir, cfg, opts, add)

@@ -40,6 +40,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -63,6 +64,9 @@ type kubeGuardService struct {
 	listener    net.Listener
 	stopReaping context.CancelFunc
 	auditDB     *statedb.DB
+	// certs is the certificate the hub issued the monitor itself, under
+	// tls: auto (Task 20409); nil when it serves cert_file and key_file.
+	certs *monitorCert
 }
 
 var (
@@ -121,9 +125,13 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 	}
 	k := cfg.Executors.KubeGuard
 
-	tlsCfg, err := tlsconf.ServerConfig(k.CertFile, k.KeyFile, k.MinTLSVersion)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes monitor TLS: %w", err)
+	var tlsCfg *tls.Config
+	var err error
+	if !k.AutoTLS() {
+		tlsCfg, err = tlsconf.ServerConfig(k.CertFile, k.KeyFile, k.MinTLSVersion)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes monitor TLS: %w", err)
+		}
 	}
 
 	// Listen first: with no advertise URL the base is the bound address, and
@@ -142,8 +150,23 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		_ = ln.Close()
 		return nil, err
 	}
+	// tls: auto (Task 20409), issued once both names are known; see
+	// startGitProxy.
+	var certs *monitorCert
+	if k.AutoTLS() {
+		certs, err = startMonitorCertificate(hubca.KubeGuard, dir, baseURL, sansListenAddr(k.ListenAddr, ln.Addr()))
+		if err == nil {
+			tlsCfg, err = certs.srv.TLSConfig(k.MinTLSVersion)
+		}
+		if err != nil {
+			certs.close()
+			_ = ln.Close()
+			return nil, fmt.Errorf("kubernetes monitor TLS (tls: auto): %w", err)
+		}
+	}
 	reg, err := kubeguard.NewRegistry(baseURL)
 	if err != nil {
+		certs.close()
 		_ = ln.Close()
 		return nil, fmt.Errorf("kubernetes monitor registry: %w", err)
 	}
@@ -151,11 +174,17 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 	// The trust anchor the sandbox's kubectl will use. Unlike git, a
 	// kubeconfig can carry its own, so a self-signed hub certificate needs no
 	// change to the sandbox image — which is why this is read here rather
-	// than left to the operator.
+	// than left to the operator. Under tls: auto it is the hub's CA, which
+	// embedded as certificate-authority-data is trusted for this one server
+	// and nothing else.
 	bundle, err := k.CABundle()
 	if err != nil {
+		certs.close()
 		_ = ln.Close()
 		return nil, err
+	}
+	if certs != nil {
+		bundle = certs.caPEM()
 	}
 	reg.CABundle = bundle
 	// Every forwarded request becomes an audit row only when the operator asks
@@ -183,6 +212,7 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		Fallback: clusterProxyFallback(ownerKubeGuard, clusterAPIProxyKube),
 	})
 	if err != nil {
+		certs.close()
 		_ = ln.Close()
 		return nil, fmt.Errorf("kubernetes monitor: %w", err)
 	}
@@ -197,6 +227,7 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 		listener:    ln,
 		stopReaping: stopReaping,
 		auditDB:     auditDB,
+		certs:       certs,
 	}
 
 	go func() {
@@ -209,6 +240,13 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 	fmt.Fprintf(os.Stderr,
 		"ui: kubernetes access monitor on %s, advertised as %s; policy floor %s\n",
 		ln.Addr(), baseURL, svc.policy.Summary())
+	if certs != nil {
+		leaf := certs.srv.Current()
+		fmt.Fprintf(os.Stderr,
+			"ui: kubernetes monitor serves a certificate the hub issued (tls: auto) for %s, valid until %s; "+
+				"the kubeconfigs it issues carry the hub CA\n",
+			strings.Join(leaf.SANs(), ", "), leaf.Cert.NotAfter.UTC().Format(time.RFC3339))
+	}
 	return svc, nil
 }
 
@@ -254,6 +292,7 @@ func (s *kubeGuardService) Close() {
 	if s.proxy != nil {
 		_ = s.proxy.Close()
 	}
+	s.certs.close()
 	if s.auditDB != nil {
 		_ = s.auditDB.Close()
 	}

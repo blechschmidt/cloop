@@ -93,6 +93,14 @@ var sealedPopulations = []sealedPopulation{
 		             WHERE refresh_key_id = ? AND refresh_sealed IS NOT NULL
 		               AND length(refresh_sealed) > 0`,
 	},
+	{
+		// The hub CA's private key and its leaves' (Task 20409). Shredding the
+		// KEK under the CA would leave a hub whose every sandbox trusts a CA
+		// nothing can sign with any more.
+		set: "hub_tls",
+		countQuery: `SELECT COUNT(*) FROM hub_tls
+		             WHERE key_id = ? AND key_sealed IS NOT NULL AND length(key_sealed) > 0`,
+	},
 }
 
 // SealedSetNames returns the populations retirement checks, so a test can

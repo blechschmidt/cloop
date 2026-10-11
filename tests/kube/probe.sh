@@ -83,12 +83,35 @@ else
 	res T1 FAIL "a GitHub token is readable in:$leak"
 fi
 
-# ── The CA the chart delivered ────────────────────────────────────────────
-if [ -s /etc/cloop/git-ca/ca.crt ] && [ -z "${GIT_SSL_CAINFO:-}" ] &&
-	env | grep -q '^GIT_CONFIG_KEY_[0-9]*=http\.https://.*\.sslCAInfo$'; then
-	res C1 PASS "the proxy's CA is mounted at /etc/cloop/git-ca/ca.crt and trusted for $(env | sed -n 's/^GIT_CONFIG_KEY_[0-9]*=http\.\(https:.*\)\.sslCAInfo$/\1/p' | head -n 1) only (no GIT_SSL_CAINFO)"
+# ── The hub's CA, trusted for the proxy's URL only (Task 20409) ────────────
+# The release runs executor.monitorTLS.auto: the hub issued the proxy's
+# certificate from its own CA, and the run's lease Secret carried that CA to
+# /etc/cloop/hub-ca/ca.crt, named by http.<proxy URL>.sslCAInfo — the only
+# sslCAInfo in the block, no GIT_SSL_CAINFO. The kube guard serves a leaf from
+# the same CA at another URL, so git must refuse it: that is the scoping.
+CAFILE=""
+i=0
+while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+	eval "k=\${GIT_CONFIG_KEY_$i:-}; v=\${GIT_CONFIG_VALUE_$i:-}"
+	[ "$k" = "http.${CLOOP_GIT_PROXY_URL:-none}/.sslCAInfo" ] && CAFILE=$v
+	i=$((i + 1))
+done
+NCA=$(env | grep -c '^GIT_CONFIG_KEY_[0-9]*=http\.https://.*\.sslCAInfo$')
+GUARD=$(sed -n 's/^ *server: *//p' "${KUBECONFIG:-/nonexistent}" | head -n 1)
+if [ -z "$GUARD" ]; then
+	other="no kube guard URL to try"
+elif git ls-remote "$GUARD/acme/none" >"$W/c1.out" 2>&1; then
+	other=trusted
+elif grep -qi certificate "$W/c1.out"; then
+	other=refused
 else
-	res C1 FAIL "the CA bundle is not delivered as a URL-scoped sslCAInfo (ca=$(ls -l /etc/cloop/git-ca/ca.crt 2>&1 | cut -c1-60), GIT_SSL_CAINFO=${GIT_SSL_CAINFO:-unset})"
+	other="neither trusted nor refused on its certificate: $(brief "$W/c1.out")"
+fi
+if [ "$CAFILE" = /etc/cloop/hub-ca/ca.crt ] && [ -s "$CAFILE" ] && [ -z "${GIT_SSL_CAINFO:-}" ] &&
+	[ "$NCA" = 1 ] && [ "$other" = refused ]; then
+	res C1 PASS "the hub's CA is at $CAFILE and trusted for ${CLOOP_GIT_PROXY_URL:-?} only (no GIT_SSL_CAINFO); $GUARD, from the same CA, is refused"
+else
+	res C1 FAIL "the hub's CA is not trusted for the proxy's URL alone (file=${CAFILE:-none}, sslCAInfo keys=$NCA, GIT_SSL_CAINFO=${GIT_SSL_CAINFO:-unset}, $GUARD: $other)"
 fi
 
 # ── The workspace: fetched by the init container through the proxy ─────────

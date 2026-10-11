@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
@@ -62,9 +63,9 @@ func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Op
 			Message: "disabled while Kubernetes access is configured, so a kubeconfig grant " +
 				"delivers the cluster credential into the sandbox: its namespace list is only " +
 				"the default kubectl uses without -n, and its verbs are not enforced at all",
-			Remediation: "Set executors.kube_guard.enabled: true with cert_file, key_file and " +
-				"advertise_url, so the credential stays on the hub and every API request is " +
-				"decided before it reaches the cluster. See " +
+			Remediation: "Set executors.kube_guard.enabled: true with tls: auto and an advertise_url " +
+				"your executors reach (or a cert_file and key_file), so the credential stays on the " +
+				"hub and every API request is decided before it reaches the cluster. See " +
 				"docs/architecture/kubernetes-access.md",
 		})
 		return
@@ -73,12 +74,16 @@ func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Op
 	// --- enabled: does it start, and where does it point sandboxes? ---------
 
 	refusal := "every kubeconfig lease is refused rather than handed the cluster credential"
-	starts := proxyTLS("kubeguard.tls", "Kubernetes monitor TLS material", "executors.kube_guard",
-		k.CertFile, k.KeyFile, k.MinTLSVersion, refusal, add)
+	starts := true
+	if !k.AutoTLS() {
+		starts = proxyTLS("kubeguard.tls", "Kubernetes monitor TLS material", "executors.kube_guard",
+			k.CertFile, k.KeyFile, k.MinTLSVersion, refusal, add)
+	}
 	// The trust anchor a sandbox's kubectl is given, read by the method the
 	// hub reads it with: ca_file when set — a path that was typed and cannot
-	// be read is a mistake, not a choice — else the serving certificate.
-	if starts {
+	// be read is a mistake, not a choice — else the serving certificate. Under
+	// tls: auto it is the hub's CA, checked below with the leaf.
+	if starts && !k.AutoTLS() {
 		if _, err := k.CABundle(); err != nil {
 			starts = false
 			add(Finding{
@@ -116,6 +121,10 @@ func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Op
 			consequence: "kubectl inside the sandbox will fail to connect",
 			example:     "https://cloop-kubeguard.cloop.svc:8444",
 		}, add)
+		if k.AutoTLS() {
+			starts = autoMonitorTLS(dir, hubca.KubeGuard, "kubeguard.tls", "Kubernetes monitor TLS (tls: auto)", ep,
+				k.ListenAddr, refusal, opts.now(), add) && starts
+		}
 	}
 
 	// The verb ceiling is worth reporting either way, because both states are

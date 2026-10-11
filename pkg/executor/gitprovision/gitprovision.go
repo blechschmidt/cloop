@@ -103,6 +103,12 @@ type Request struct {
 	// the failure is looking at a fleet, and "this device" and "this workspace
 	// container" send them to different places.
 	Host string
+	// GitCA is the hub's own CA, trusted for the URLs it names and nothing
+	// else (Spec.GitCA, Task 20409): how a device's fetch through a git proxy
+	// serving a certificate the hub issued verifies it. Written to a private
+	// file for the length of the provisioning and named by
+	// http.<url>.sslCAInfo, beside the machine's own URL-scoped settings.
+	GitCA *executor.GitCA
 }
 
 // HostLabel renders how the machine provisioning runs on refers to itself.
@@ -179,6 +185,11 @@ func Provision(ctx context.Context, r Request) error {
 	if err != nil {
 		return fail("%v", err)
 	}
+	trust, cleanup, err := GitCAConfig(r.GitCA)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer cleanup()
 	// Create the target here rather than leaving it to each caller. The two
 	// production callers reach this from opposite directions — the agent has
 	// already made the directory as part of confining it beneath its root, the
@@ -220,7 +231,7 @@ func Provision(ctx context.Context, r Request) error {
 			// `remote add` would simply fail.
 			continue
 		}
-		if err := runStep(ctx, dir, w, cred, step, hostName, secrets, emit); err != nil {
+		if err := runStep(ctx, dir, w, cred, trust, step, hostName, secrets, emit); err != nil {
 			reuse.rollback(dir, emit)
 			return fail("%v", err)
 		}
@@ -366,6 +377,37 @@ func transportConfigKey(key string) bool {
 	return false
 }
 
+// GitCAConfig writes ca's bundle to a file in a fresh 0700 directory and
+// returns the http.<url>.sslCAInfo pairs naming it, and the cleanup that
+// removes it (Task 20409). A nil ca returns nothing and a no-op cleanup.
+//
+// For cloop's own git children — the provisioning fetch, the write-back push —
+// whose environment is closed: the same per-URL form TransportConfig imports,
+// so the hub's CA is trusted for the proxy's URL and every other host keeps the
+// machine's store. A directory of the call's own rather than a shared path,
+// because whoever can choose this file's contents chooses which certificate the
+// fetch accepts for the proxy.
+func GitCAConfig(ca *executor.GitCA) ([][2]string, func(), error) {
+	noop := func() {}
+	if ca == nil {
+		return nil, noop, nil
+	}
+	if err := ca.Validate(); err != nil {
+		return nil, noop, err
+	}
+	dir, err := os.MkdirTemp("", "cloop-ca-")
+	if err != nil {
+		return nil, noop, fmt.Errorf("create a directory for the hub CA: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	path := filepath.Join(dir, executor.SandboxGitCAFileName)
+	if err := os.WriteFile(path, ca.PEM, 0o600); err != nil {
+		cleanup()
+		return nil, noop, fmt.Errorf("write the hub CA: %w", err)
+	}
+	return ca.ConfigPairs(path), cleanup, nil
+}
+
 // childWaitDelay bounds how long Wait may block after the child has exited or
 // its context has been cancelled, before the pipes are closed by force.
 //
@@ -422,7 +464,7 @@ func BoundChild(cmd *exec.Cmd) {
 
 // runStep runs one command of a plan and reports its output.
 func runStep(ctx context.Context, dir string, w executor.Workspace, cred executor.GitCredential,
-	step executor.GitStep, hostName string, secrets []string, emit func(string)) error {
+	trust [][2]string, step executor.GitStep, hostName string, secrets []string, emit func(string)) error {
 
 	// A closed environment, not an inherited one: see executor.GitBaseEnv, plus
 	// the narrow transport allowlist this machine is permitted to contribute.
@@ -431,7 +473,7 @@ func runStep(ctx context.Context, dir string, w executor.Workspace, cred executo
 	//
 	// One configuration block (see executor.GitEnv): the machine's URL-scoped
 	// certificate settings, then the credential.
-	pairs := append(TransportConfig(), RootOwnedTrust(dir)...)
+	pairs := append(append(TransportConfig(), trust...), RootOwnedTrust(dir)...)
 	if step.Authenticated {
 		extra, err := executor.GitCredentialConfig(w, cred)
 		if err != nil {

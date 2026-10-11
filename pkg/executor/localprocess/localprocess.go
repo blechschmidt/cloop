@@ -120,6 +120,11 @@ type record struct {
 	// killTimer enforces Spec.TimeoutMinutes; nil when unbounded.
 	killTimer *time.Timer
 
+	// gitCADir is the private directory holding the hub CA this workload's
+	// git trusts for the proxy's URL (Spec.GitCA, Task 20409), removed when
+	// it finishes. Empty when the Spec carried none.
+	gitCADir string
+
 	// redactor removes this workload's own leased credentials from its
 	// output. Nil when it holds none.
 	//
@@ -374,10 +379,25 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		return executor.Handle{}, fmt.Errorf("localprocess: create output pipe: %w", err)
 	}
 
+	// The hub's CA for its git proxy's URL (Task 20409): a file in a private
+	// directory of this run's own, named by http.<url>.sslCAInfo — never
+	// GIT_SSL_CAINFO, which would replace the trust store every other host is
+	// verified against.
+	env, gitCADir, err := withGitCA(spec)
+	if err != nil {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+		return executor.Handle{}, err
+	}
+
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...) //nolint:gosec — argv is caller-supplied, never shell-interpreted
 	cmd.Dir = spec.WorkDir
 	if spec.Env != nil {
-		cmd.Env = withRunnableEnv(spec.Env, spec.WorkDir)
+		cmd.Env = withRunnableEnv(env, spec.WorkDir)
+	} else if env != nil {
+		// Inherited plus the CA's configuration: no PATH or HOME floor, which
+		// is for an explicit environment, not an inherited one.
+		cmd.Env = env
 	}
 	cmd.Stdout = pipeW
 	cmd.Stderr = pipeW
@@ -385,6 +405,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	if err := cmd.Start(); err != nil {
 		_ = pipeR.Close()
 		_ = pipeW.Close()
+		removeGitCA(gitCADir)
 		return executor.Handle{}, fmt.Errorf("localprocess: start %q: %w", spec.Argv[0], err)
 	}
 	// The parent never writes to the pipe; closing its end is what makes the
@@ -401,6 +422,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		state:       executor.StateRunning,
 		subscribers: make(map[*subscriber]struct{}),
 		redactor:    spec.Redactor(),
+		gitCADir:    gitCADir,
 	}
 
 	e.mu.Lock()
@@ -1028,6 +1050,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// outside rec.mu because handleStore() takes e.mu and the lock order in this
 	// driver is e.mu before rec.mu (see pruneLocked).
 	if final.Terminal() {
+		removeGitCA(rec.gitCADir)
 		executor.ForgetHandle(e.handleStore(), rec.id)
 		// And the lease attribution with it: the process is gone, so this
 		// handle must stop answering HoldsLease. Leaving it bound would make

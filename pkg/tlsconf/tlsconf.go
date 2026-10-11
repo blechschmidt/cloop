@@ -177,6 +177,28 @@ func LoadServerConfig(certFile, keyFile, minVersion string) (cfg *tls.Config, pe
 	}, CheckKeyPermissions(keyFile), nil
 }
 
+// ServerConfigFor returns the tls.Config ServerConfig would, around a
+// certificate chosen per handshake rather than loaded from files once: one the
+// hub issues itself and replaces while it serves (pkg/hubca, Task 20409). The
+// protocol floor and the cipher suites are the same ones every other listener
+// in the hub serves with, which is the point of building it here.
+func ServerConfigFor(getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error), minVersion string) (*tls.Config, error) {
+	if getCertificate == nil {
+		return nil, errors.New("tlsconf: a certificate source is required")
+	}
+	min, err := ParseMinVersion(minVersion)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		GetCertificate:           getCertificate,
+		MinVersion:               min,
+		CipherSuites:             CipherSuites(),
+		PreferServerCipherSuites: true,
+		NextProtos:               []string{"h2", "http/1.1"},
+	}, nil
+}
+
 // CheckKeyPermissions reports a warning string when a private key is readable
 // by anyone but its owner, or "" when the mode is acceptable. Windows has no
 // comparable bits, so it is skipped there.

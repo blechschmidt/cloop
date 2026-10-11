@@ -44,6 +44,13 @@ func ValidateKubeGuardConfig(k KubeGuardConfig) error {
 			return fmt.Errorf("executors.kube_guard.min_tls_version: %w", err)
 		}
 	}
+	if err := validateMonitorTLS("executors.kube_guard", k.TLS); err != nil {
+		return err
+	}
+	if k.AutoTLS() && (strings.TrimSpace(k.CertFile) != "" || strings.TrimSpace(k.KeyFile) != "" ||
+		strings.TrimSpace(k.CAFile) != "") {
+		return autoTLSConflict("executors.kube_guard", "cert_file, key_file and ca_file")
+	}
 	// The overrides are validated through the policy the monitor enforces
 	// with, so a verb nobody spells correctly or a glob that matches nothing
 	// is refused here rather than read as a working allowlist.
@@ -52,12 +59,13 @@ func ValidateKubeGuardConfig(k KubeGuardConfig) error {
 			return fmt.Errorf("executors.kube_guard: %w", err)
 		}
 	}
-	if k.Enabled {
+	if k.Enabled && !k.AutoTLS() {
 		cert, key := strings.TrimSpace(k.CertFile), strings.TrimSpace(k.KeyFile)
 		if cert == "" || key == "" {
 			return fmt.Errorf("executors.kube_guard is enabled but cert_file and key_file are " +
 				"not both set; the session token rides an Authorization header on every " +
-				"request and cleartext would publish it rather than deliver it")
+				"request and cleartext would publish it rather than deliver it — set both, " +
+				"or set tls: auto to have the hub issue the monitor's certificate itself")
 		}
 	}
 	return nil
@@ -148,9 +156,18 @@ func clampKubeGuardConfig(k *KubeGuardConfig) []string {
 		k.AdvertiseURL = ""
 		k.Enabled = false
 	}
-	if k.Enabled && (strings.TrimSpace(k.CertFile) == "" || strings.TrimSpace(k.KeyFile) == "") {
+	changed = append(changed, clampMonitorTLS("executors.kube_guard", &k.TLS, k.CertFile, k.KeyFile)...)
+	if k.AutoTLS() && strings.TrimSpace(k.CAFile) != "" {
+		// Under tls: auto the monitor's certificate chains to the hub's CA,
+		// so a kubeconfig trusting another one would refuse it.
+		changed = append(changed, "executors.kube_guard.ca_file: ignored under tls: auto, whose "+
+			"kubeconfigs carry the hub's own CA")
+		k.CAFile = ""
+	}
+	// Not inferred from missing files; see clampGitProxyConfig.
+	if k.Enabled && !k.AutoTLS() && (strings.TrimSpace(k.CertFile) == "" || strings.TrimSpace(k.KeyFile) == "") {
 		changed = append(changed, "executors.kube_guard.cert_file: enabled without TLS material, "+
-			"which would carry every session token in cleartext")
+			"which would carry every session token in cleartext (set tls: auto to have the hub issue it)")
 		k.Enabled = false
 	}
 	return changed
@@ -166,7 +183,13 @@ func clampKubeGuardConfig(k *KubeGuardConfig) []string {
 // The hub reads it here when it starts the monitor, and refuses to start it on
 // an error; `cloop hub doctor` calls the same method, so a directory or an
 // unreadable file is reported the way the hub meets it (Task 20387).
+//
+// Under tls: auto it returns nil: the bundle is the hub's own CA, which only
+// the hub process holds (pkg/hubca), and startKubeGuard embeds that instead.
 func (k KubeGuardConfig) CABundle() ([]byte, error) {
+	if k.AutoTLS() {
+		return nil, nil
+	}
 	path := strings.TrimSpace(k.CAFile)
 	label := "executors.kube_guard.ca_file"
 	if path == "" {

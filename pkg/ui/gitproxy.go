@@ -41,6 +41,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
@@ -72,6 +73,9 @@ type gitProxyService struct {
 	// guard mints. Empty — the forge is github.com — everywhere but in tests,
 	// which put a local forge behind the proxy; nothing reads it from config.
 	githubUpstream string
+	// certs is the certificate the hub issued the proxy itself, under
+	// tls: auto (Task 20409); nil when it serves cert_file and key_file.
+	certs *monitorCert
 }
 
 // gitProxySingleton is the process's proxy, or nil when none is configured.
@@ -148,9 +152,13 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	}
 	g := cfg.Executors.GitProxy
 
-	tlsCfg, err := tlsconf.ServerConfig(g.CertFile, g.KeyFile, g.MinTLSVersion)
-	if err != nil {
-		return nil, fmt.Errorf("git proxy TLS: %w", err)
+	var tlsCfg *tls.Config
+	var err error
+	if !g.AutoTLS() {
+		tlsCfg, err = tlsconf.ServerConfig(g.CertFile, g.KeyFile, g.MinTLSVersion)
+		if err != nil {
+			return nil, fmt.Errorf("git proxy TLS: %w", err)
+		}
 	}
 
 	// Listen first: with no advertise URL the base is the bound address, and
@@ -169,8 +177,24 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		_ = ln.Close()
 		return nil, err
 	}
+	// tls: auto (Task 20409): a leaf from the hub's own CA for the names the
+	// sandboxes reach the proxy at, which needs the bound address and the
+	// advertised one, so it is issued after both are known.
+	var certs *monitorCert
+	if g.AutoTLS() {
+		certs, err = startMonitorCertificate(hubca.GitProxy, dir, baseURL, sansListenAddr(g.ListenAddr, ln.Addr()))
+		if err == nil {
+			tlsCfg, err = certs.srv.TLSConfig(g.MinTLSVersion)
+		}
+		if err != nil {
+			certs.close()
+			_ = ln.Close()
+			return nil, fmt.Errorf("git proxy TLS (tls: auto): %w", err)
+		}
+	}
 	reg, err := gitproxy.NewRegistry(baseURL)
 	if err != nil {
+		certs.close()
 		_ = ln.Close()
 		return nil, fmt.Errorf("git proxy registry: %w", err)
 	}
@@ -201,6 +225,7 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		Fallback: clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
 	})
 	if err != nil {
+		certs.close()
 		_ = ln.Close()
 		return nil, fmt.Errorf("git proxy: %w", err)
 	}
@@ -215,6 +240,7 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		listener:    ln,
 		stopReaping: stopReaping,
 		auditDB:     auditDB,
+		certs:       certs,
 	}
 
 	go func() {
@@ -227,7 +253,28 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	fmt.Fprintf(os.Stderr,
 		"ui: git interception proxy on %s, advertised as %s; pushes limited to %s\n",
 		ln.Addr(), baseURL, strings.Join(svc.policy.AllowedRefs, ", "))
+	if certs != nil {
+		leaf := certs.srv.Current()
+		fmt.Fprintf(os.Stderr,
+			"ui: git proxy serves a certificate the hub issued (tls: auto) for %s, valid until %s; "+
+				"sandboxes are told to trust the hub CA for %s only\n",
+			strings.Join(leaf.SANs(), ", "), leaf.Cert.NotAfter.UTC().Format(time.RFC3339), baseURL)
+	}
 	return svc, nil
+}
+
+// sansListenAddr is the listen address a monitor's certificate names: the
+// configured one when there is one — an unspecified bind names nothing — and
+// otherwise the address the default loopback bind took, which is also the base
+// URL when nothing is advertised.
+func sansListenAddr(configured string, bound net.Addr) string {
+	if c := strings.TrimSpace(configured); c != "" {
+		return c
+	}
+	if bound == nil {
+		return ""
+	}
+	return bound.String()
 }
 
 // reap sweeps lapsed sessions until ctx ends.
@@ -320,6 +367,7 @@ func (s *gitProxyService) Close() {
 	if s.proxy != nil {
 		_ = s.proxy.Close()
 	}
+	s.certs.close()
 	if s.auditDB != nil {
 		_ = s.auditDB.Close()
 	}

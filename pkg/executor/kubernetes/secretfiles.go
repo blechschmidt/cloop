@@ -421,8 +421,31 @@ func (e *Executor) provisionLeaseSecret(ctx context.Context, spec executor.Spec,
 	handleID, namespace string) (*leaseSecretState, *pendingSecret, error) {
 
 	data, err := leaseSecretData(spec.SecretFiles, spec.Env, spec.ProjectSeed)
-	if err != nil || len(data) == 0 {
+	if err != nil {
 		return nil, nil, err
+	}
+	// The hub's own CA, for the URLs the operator's bundle leaves (Task
+	// 20409): the same podGitCA podRequestFor read, so the Pod mounts exactly
+	// the key this Secret carries.
+	if ca := podGitCA(spec.GitCA, e.opts.GitCABundle); ca != nil {
+		if data == nil {
+			data = map[string][]byte{}
+		}
+		if _, clash := data[hubCAKey]; clash {
+			return nil, nil, fmt.Errorf("%w: lease Secret key %q would carry two values", executor.ErrInvalidSpec, hubCAKey)
+		}
+		total := len(hubCAKey) + len(ca.PEM)
+		for k, v := range data {
+			total += len(k) + len(v)
+		}
+		if total > maxLeaseSecretBytes {
+			return nil, nil, fmt.Errorf("%w: this run's lease Secret would be %d bytes with the hub's CA, more "+
+				"than the %d a Kubernetes Secret can hold", executor.ErrInvalidSpec, total, maxLeaseSecretBytes)
+		}
+		data[hubCAKey] = ca.PEM
+	}
+	if len(data) == 0 {
+		return nil, nil, nil
 	}
 	plan, err := planSecretFiles(spec.SecretFiles)
 	if err != nil {

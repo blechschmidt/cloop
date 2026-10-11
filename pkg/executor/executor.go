@@ -506,6 +506,17 @@ type Spec struct {
 	// execution.
 	SandboxHash string `json:"sandbox_hash,omitempty"`
 
+	// GitCA is the hub's own certificate authority, which this workload's git
+	// — and cloop's provisioning and write-back git on its behalf — trusts
+	// for the URLs it names and nothing else (Task 20409). The hub sets it
+	// when its git proxy serves a certificate it issued itself
+	// (executors.git_proxy.tls: auto); each driver writes the bundle where
+	// the workload can read it and adds http.<url>.sslCAInfo to its
+	// GIT_CONFIG_COUNT block. A CA certificate is public, so unlike
+	// SecretFiles this travels in the Spec. nil delivers nothing. See
+	// gitca.go.
+	GitCA *GitCA `json:"git_ca,omitempty"`
+
 	// Secrets attributes parts of Env and the filesystem to the secret
 	// leases that produced them, so a driver can take an individual
 	// credential back mid-run. See SecretBinding.
@@ -673,6 +684,12 @@ func (s Spec) Validate() error {
 		return err
 	}
 	if err := ValidateInterfaces(s.Interfaces); err != nil {
+		return err
+	}
+	// The hub CA a driver is about to write into a sandbox (Task 20409):
+	// checked on the Spec every driver starts from, so a bundle holding
+	// anything but CA certificates reaches no filesystem.
+	if err := s.GitCA.Validate(); err != nil {
 		return err
 	}
 	// An interface and DisableNetwork are a contradiction, and refusing is the

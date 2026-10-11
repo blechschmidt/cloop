@@ -105,6 +105,15 @@ var (
 	// failure mode of this feature that nothing downstream could detect.
 	ErrSandboxModeUnsupported = errors.New("remote: agent does not support sandbox mode selection")
 
+	// ErrGitCAUnsupported: the agent speaks a protocol version older than
+	// MinGitCAVersion, so it would ignore Spec.GitCA and run a workload whose
+	// git reaches the hub's proxy without the CA that proxy's certificate
+	// chains to (Task 20409). Refused rather than dispatched: the failure
+	// would be an SSL error inside the sandbox, and the only alternative the
+	// hub has — handing the forge credential over instead — is the one the
+	// proxy exists to rule out.
+	ErrGitCAUnsupported = errors.New("remote: agent cannot trust the hub's git proxy certificate")
+
 	// ErrSandboxModeUnavailable: the control plane could not read this
 	// executor's configured sandbox mode, so it does not know whether the
 	// payload is supposed to be contained. Dispatch fails rather than

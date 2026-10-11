@@ -92,7 +92,7 @@ func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executo
 	}
 
 	started := a.cfg.now()
-	err := provisionWorkspaceFrom(provCtx, spec.WorkDir, spec.Workspace, cred, branchFile, emit)
+	err := provisionWorkspaceWith(provCtx, spec.WorkDir, spec.Workspace, cred, branchFile, spec.GitCA, emit)
 	took := a.cfg.now().Sub(started).Round(time.Millisecond)
 	if err != nil {
 		// Already redacted by the provisioner; logging it here is what puts the
@@ -122,6 +122,14 @@ func provisionWorkspace(ctx context.Context, dir string, w executor.Workspace,
 // shipped branch, whose bundle the control plane streamed to branchFile.
 func provisionWorkspaceFrom(ctx context.Context, dir string, w executor.Workspace,
 	cred executor.GitCredential, branchFile string, emit func(string)) error {
+	return provisionWorkspaceWith(ctx, dir, w, cred, branchFile, nil, emit)
+}
+
+// provisionWorkspaceWith is provisionWorkspaceFrom trusting the hub's CA for
+// the URLs it names (Spec.GitCA, Task 20409): how this device's fetch through
+// a git proxy serving a certificate the hub issued verifies it.
+func provisionWorkspaceWith(ctx context.Context, dir string, w executor.Workspace,
+	cred executor.GitCredential, branchFile string, ca *executor.GitCA, emit func(string)) error {
 
 	return gitprovision.Provision(ctx, gitprovision.Request{
 		Dir:              dir,
@@ -130,6 +138,7 @@ func provisionWorkspaceFrom(ctx context.Context, dir string, w executor.Workspac
 		BranchBundleFile: branchFile,
 		Emit:             emit,
 		Host:             deviceName(),
+		GitCA:            ca,
 	})
 }
 

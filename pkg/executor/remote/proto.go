@@ -222,7 +222,18 @@ const (
 	// driver refuses any disk limit outright, so the hub routes no
 	// disk-limited spec to it, and fills in no ceiling it would refuse. See
 	// MinDiskLimitVersion.
-	ProtocolVersion = 20
+	//
+	// v21 makes the agent honour Spec.GitCA (Task 20409): the hub's own CA,
+	// which a git proxy serving a certificate the hub issued
+	// (executors.git_proxy.tls: auto) chains to. The agent's provisioning
+	// fetch and write-back push trust it for the proxy's URL, and its inner
+	// drivers write it into the payload's sandbox and name it with
+	// http.<url>.sslCAInfo. No frame changes — the field rides inside the
+	// Spec. Gated on the hub side: an older agent ignores it and its
+	// workload's git would refuse the proxy's certificate, so the hub refuses
+	// a dispatch that would talk to the proxy and names the upgrade, rather
+	// than fall back to delivering the forge credential. See MinGitCAVersion.
+	ProtocolVersion = 21
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -432,6 +443,20 @@ const MinDiskLimitVersion = 20
 // SupportsDiskLimit reports whether an agent speaking this protocol version
 // holds a container workload to a disk limit.
 func SupportsDiskLimit(version int) bool { return version >= MinDiskLimitVersion }
+
+// MinGitCAVersion is the first version whose agents make a workload's git —
+// and their own provisioning and write-back git — trust Spec.GitCA for the
+// URLs it names (Task 20409).
+//
+// A placement rule for the workloads that would talk to the hub's git proxy
+// only: one whose lease rewrites GitHub to the proxy, or whose workspace is
+// fetched through it. Every other workload is dispatched to an older device
+// exactly as before, without the CA.
+const MinGitCAVersion = 21
+
+// SupportsGitCA reports whether an agent speaking this protocol version
+// honours Spec.GitCA.
+func SupportsGitCA(version int) bool { return version >= MinGitCAVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

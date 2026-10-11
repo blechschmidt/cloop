@@ -865,10 +865,24 @@ type KubeGuardConfig struct {
 	// whatever address the hub has on the link between them.
 	AdvertiseURL string `yaml:"advertise_url,omitempty"`
 
+	// TLS is "auto" to have the hub issue the monitor's certificate itself,
+	// from the hub's own CA (pkg/hubca, Task 20409): a leaf for the advertise
+	// URL's host and the listen address's, short-lived and renewed by the
+	// cluster leader, with the CA embedded in every kubeconfig the monitor
+	// issues. It needs CLOOP_SECRET_KEY, which the CA's key is sealed under,
+	// and excludes cert_file, key_file and ca_file. Empty means the files
+	// below.
+	//
+	// An explicit opt-in rather than the default for a section with no files:
+	// such a section is switched off at load today, and a config that has
+	// said enabled: true for months must not start interposing a monitor on
+	// the upgrade that adds this.
+	TLS string `yaml:"tls,omitempty"`
+
 	// CertFile and KeyFile are the monitor's TLS material. Both are required
-	// when Enabled: the session token rides an Authorization header on every
-	// request, and over cleartext that token is published rather than
-	// delivered.
+	// when Enabled without tls: auto: the session token rides an
+	// Authorization header on every request, and over cleartext that token is
+	// published rather than delivered.
 	CertFile string `yaml:"cert_file,omitempty"`
 	KeyFile  string `yaml:"key_file,omitempty"`
 
@@ -954,15 +968,32 @@ type GitProxyConfig struct {
 	// correct only when the sandbox shares the host's network namespace.
 	AdvertiseURL string `yaml:"advertise_url,omitempty"`
 
+	// TLS is "auto" to have the hub issue the proxy's certificate itself,
+	// from the hub's own CA (pkg/hubca, Task 20409): a leaf for the advertise
+	// URL's host and the listen address's, short-lived and renewed by the
+	// cluster leader. Every sandbox the hub dispatches is then told to trust
+	// that CA for the proxy's URL and nothing else — git's
+	// http.<advertise_url>.sslCAInfo, never GIT_SSL_CAINFO — so no image
+	// needs a CA baked in. It needs CLOOP_SECRET_KEY, which the CA's key is
+	// sealed under, and excludes cert_file and key_file. Empty means the
+	// files below.
+	//
+	// An explicit opt-in rather than the default for a section with no files:
+	// such a section is switched off at load today, and a config that has
+	// said enabled: true for months must not start interposing a proxy on the
+	// upgrade that adds this.
+	TLS string `yaml:"tls,omitempty"`
+
 	// CertFile and KeyFile are the proxy's TLS material. Both are required
-	// when Enabled: the session token rides an Authorization header on every
-	// request, and over cleartext that token is published rather than
-	// delivered. A loopback listener is not an exception — a sandbox is by
-	// construction something that may share a host with other listeners.
+	// when Enabled without tls: auto: the session token rides an
+	// Authorization header on every request, and over cleartext that token is
+	// published rather than delivered. A loopback listener is not an
+	// exception — a sandbox is by construction something that may share a
+	// host with other listeners.
 	//
 	// The certificate must be trusted by the *sandbox's* git, not by the
 	// hub's. A self-signed hub certificate needs its CA in the sandbox image,
-	// or git refuses the connection.
+	// or git refuses the connection — which is what tls: auto removes.
 	CertFile string `yaml:"cert_file,omitempty"`
 	KeyFile  string `yaml:"key_file,omitempty"`
 

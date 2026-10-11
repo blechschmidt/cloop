@@ -31,6 +31,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -840,8 +841,13 @@ func TestRetirementChecksEverySetThatRotates(t *testing.T) {
 
 	rotated := map[string]bool{}
 	// The sets a production hub registers, assembled the same way
-	// cmd/hub_key_cmd.go assembles them.
-	for _, set := range []secretbroker.SealedSet{h.store, h.session} {
+	// cmd/hub_key_cmd.go assembles them: the brokered secrets, the sessions'
+	// refresh tokens, and the hub CA's keys (Task 20409).
+	ca, err := hubca.NewStore(h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, set := range []secretbroker.SealedSet{h.store, h.session, ca} {
 		rotated[set.SealedSetName()] = true
 	}
 	checked := map[string]bool{}

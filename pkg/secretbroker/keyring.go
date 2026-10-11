@@ -109,6 +109,9 @@ const (
 const (
 	SetSecrets  = "secrets"
 	SetSessions = "sessions"
+	// SetHubTLS holds the private keys of the hub's own CA and of the
+	// certificates it issues its credential monitors (pkg/hubca, Task 20409).
+	SetHubTLS = "hub_tls"
 )
 
 // AADFor builds the associated data for one row of one sealed set. Every seal,

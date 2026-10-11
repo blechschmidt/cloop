@@ -132,6 +132,10 @@ type Request struct {
 	Host string
 	// Timeout bounds the whole write-back. 0 means DefaultTimeout.
 	Timeout time.Duration
+	// GitCA is the hub's own CA, trusted for the URLs it names and nothing
+	// else, for a push through a git proxy serving a certificate the hub
+	// issued (Task 20409). See gitprovision.Request.GitCA.
+	GitCA *executor.GitCA
 }
 
 // Result is what the write-back produced. It is the same shape the driver
@@ -223,7 +227,13 @@ func Produce(ctx context.Context, r Request) (Result, error) {
 		}
 		return fail("%s on %s has nothing to commit: %v", dir, hostName, err)
 	}
-	g := &gitRunner{dir: dir, host: hostName, secrets: secrets, emit: emit, env: env}
+	// The hub's CA for the push, on a file of this write-back's own.
+	trust, cleanupTrust, err := gitprovision.GitCAConfig(r.GitCA)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer cleanupTrust()
+	g := &gitRunner{dir: dir, host: hostName, secrets: secrets, emit: emit, env: env, trust: trust}
 
 	// --- the base --------------------------------------------------------
 	base := strings.TrimSpace(r.BaseSHA)
@@ -450,6 +460,8 @@ type gitRunner struct {
 	// env is the hardened environment every child runs with; see
 	// gitprovision.SandboxedRepoEnv.
 	env []string
+	// trust is the hub CA's http.<url>.sslCAInfo, for the push.
+	trust [][2]string
 }
 
 // run executes one git command in the repository.
@@ -478,6 +490,7 @@ func (g *gitRunner) run(ctx context.Context, name string, authenticated bool, r 
 		// And the machine's URL-scoped certificate settings: the push goes to
 		// the same git proxy the provisioning fetch did (Task 20385).
 		pairs = append(pairs, gitprovision.TransportConfig()...)
+		pairs = append(pairs, g.trust...)
 		authEnv, err := gitprovision.SandboxedRepoEnv(ctx, g.dir, pairs...)
 		if err != nil {
 			return "", err

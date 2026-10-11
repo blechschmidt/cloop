@@ -100,6 +100,7 @@ func (a *Agent) performWriteBack(ctx context.Context, wl *workload, sess *device
 		// on its own would shrink the range to exclude its own earlier work.
 		BaseSHA:    spec.baseSHA,
 		Credential: spec.credential,
+		GitCA:      spec.gitCA,
 		ExitCode:   wl.exitCode(),
 		// Every caller in the tree opts in: a harness that exited non-zero left
 		// the tree mid-edit, and a half-applied refactor merged into main is
@@ -256,6 +257,7 @@ func (a *Agent) planWriteBack(ctx context.Context, spec executor.Spec,
 		workDir:    spec.WorkDir,
 		baseSHA:    base,
 		credential: cred,
+		gitCA:      spec.GitCA.Clone(),
 	}, nil
 }
 
@@ -294,4 +296,7 @@ type writeBackPlan struct {
 	// is that this material is short-lived, and a token persisted on an edge
 	// device outlives every guarantee that makes it safe to lease.
 	credential executor.GitCredential
+	// gitCA is the hub's CA for its git proxy's URL, for a push through a
+	// proxy serving a certificate the hub issued (Task 20409). Public.
+	gitCA *executor.GitCA
 }

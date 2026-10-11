@@ -789,6 +789,26 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	}
 	cred := access.Credential
 
+	// The hub's CA for its git proxy (Task 20409), asked of the device only
+	// when this workload will talk to the proxy — its lease rewrites GitHub to
+	// it, or its workspace was just routed through it. An older agent ignores
+	// the field, and its workload's git would then refuse the proxy's
+	// certificate; refusing names the upgrade, where the only other fallback
+	// — the forge credential itself — is the one the proxy exists to keep out
+	// of a sandbox. A dispatch that never reaches the proxy carries no CA, so
+	// an older device keeps running it.
+	if spec.GitCA != nil {
+		if !spec.NeedsGitCA(access.Repo) {
+			spec.GitCA = nil
+		} else if !SupportsGitCA(sess.Version()) {
+			return executor.Handle{}, fmt.Errorf("%w: %s", ErrGitCAUnsupported, executor.NeedsProtocol(
+				e.subject(), sess.Version(), MinGitCAVersion,
+				"to have this workload's git trust the certificate the hub issued its git proxy "+
+					"(executors.git_proxy.tls: auto)",
+				"Or give executors.git_proxy a cert_file and key_file the device's sandbox images already trust."))
+		}
+	}
+
 	// The control plane names the handle, not the agent. If the start
 	// response is lost to a disconnect the workload is still addressable: we
 	// can ask about the ID we chose, and a repeated start for a known ID is a
