@@ -214,12 +214,14 @@ test follows a three-piece shape:
 3. `TestXxx_NoGoroutineLeak` — warm-up call → baseline → loop N happy-path
    lifecycles → re-sample → assert delta ≤ slack.
 
-Why not `goleak`? Several driver dependencies (`modernc.org/sqlite`,
-`nhooyr.io/websocket`) keep ambient background goroutines that goleak's
-default-ignore allowlist does not cover, forcing a per-package
-`IgnoreCurrent`/`IgnoreTopFunction` list. The macroscopic delta-vs-baseline
-assertion is robust to those drivers without any allowlist maintenance — a
-real leak scales with N, ambient noise does not.
+Why not `goleak`? Driver dependencies keep background goroutines that goleak's
+default-ignore allowlist does not cover — `modernc.org/sqlite` ambient ones,
+and the WebSocket library one per open connection until it moved from
+`nhooyr.io/websocket` to `github.com/coder/websocket` — forcing a per-package
+`IgnoreCurrent`/`IgnoreTopFunction` list that has to follow every dependency
+bump. The macroscopic delta-vs-baseline assertion is robust to those drivers
+without any allowlist maintenance — a real leak scales with N, ambient noise
+does not.
 
 Packages that currently ship a leak test: `pkg/orchestrator`, `pkg/ui`,
 `pkg/watchdog`, `pkg/statedb`, `pkg/filewatch`, `pkg/compare`,

@@ -8,6 +8,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/coder/websocket v1.8.15
 	github.com/fatih/color v1.18.0
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/google/uuid v1.6.0
@@ -23,7 +24,6 @@ require (
 	golang.org/x/tools v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.0
-	nhooyr.io/websocket v1.8.17
 )
 
 require (

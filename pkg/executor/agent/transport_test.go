@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )

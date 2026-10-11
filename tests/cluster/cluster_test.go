@@ -49,8 +49,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	_ "modernc.org/sqlite"
-	"nhooyr.io/websocket"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
 )

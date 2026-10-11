@@ -151,6 +151,19 @@ schema and the hub's HTTP API may change in any release.
 
 ### Changed
 
+- **WebSockets run on `github.com/coder/websocket` v1.8.15.**
+  `nhooyr.io/websocket` v1.8.17 — the library behind the dashboard's sockets,
+  the hub-to-agent transport, hub-cluster traffic and the sandbox attach — is
+  deprecated and receives no fixes; its maintained successor has the same API.
+  Three of its changes reach the hub. A socket the hub closes because access
+  was withdrawn now ends in the browser with its 1008 and reason: the old
+  library answered the browser's close reply with a second close frame, which
+  a browser reports as 1006 with the reason lost (the `access_withdrawn`
+  message still goes first). A connection no longer keeps a goroutine of its
+  own for read and write deadlines. A frame over a read limit fails with an
+  error wrapping `websocket.ErrMessageTooBig`, and still closes the connection
+  with 1009. `go test ./tests/arch/` fails if the old module is imported again
+  anywhere or named in `go.mod` (Task 20411).
 - **The Event History panel is pushed its rows instead of re-reading them.**
   Every `task_update`, `state_diff`, `task_added`, `task_deleted`,
   `task_mutation` and `run_state` message used to make the dashboard fetch

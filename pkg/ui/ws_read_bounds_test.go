@@ -8,8 +8,8 @@ package ui
 // from abuse:
 //
 //   - wsReadFrameLimit caps a single frame size. Without it, a relied-on
-//     nhooyr default could change upstream and let oversized frames slip
-//     through. On overshoot, nhooyr closes with StatusMessageTooBig.
+//     library default could change upstream and let oversized frames slip
+//     through. On overshoot, the library closes with StatusMessageTooBig.
 //   - wsMaxInboundMsgsPerSecond caps the *rate* of inbound frames. Without
 //     it, a client streaming many tiny frames keeps the drain goroutine
 //     hot forever (each Read returns immediately, the loop never yields).
@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // activeHubClientCount counts every registered hub client across every

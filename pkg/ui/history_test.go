@@ -22,7 +22,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // journalFixture writes steps and events into a project's database the way a

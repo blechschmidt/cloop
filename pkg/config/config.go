@@ -1805,7 +1805,7 @@ type UIConfig struct {
 	// MaxWebSocketConnsPerIP caps the number of concurrent WebSocket
 	// connections accepted from any single remote IP. A breached cap
 	// returns HTTP 429 with a Retry-After header; the connection is
-	// rejected before nhooyr.Accept hijacks the request.
+	// rejected before websocket.Accept hijacks the request.
 	// Zero substitutes WebSocketConnsPerIPDefault (8).
 	// Validated to WebSocketConnsPerIPLower..WebSocketConnsPerIPUpper.
 	MaxWebSocketConnsPerIP int `yaml:"max_websocket_conns_per_ip,omitempty"`

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 )

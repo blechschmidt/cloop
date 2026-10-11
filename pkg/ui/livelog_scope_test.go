@@ -42,7 +42,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // secretOutput is what project A's harness prints. Any appearance of this

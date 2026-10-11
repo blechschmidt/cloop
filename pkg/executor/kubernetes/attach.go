@@ -11,7 +11,8 @@ package kubernetes
 // endpoint since 1.6, and the rest of this driver is a hand-rolled REST client
 // precisely so that cloop does not carry client-go; adding a SPDY stack to
 // avoid adding client-go would trade one large dependency for a stranger one.
-// nhooyr.io/websocket is already here for the hub and the agent transport.
+// github.com/coder/websocket is already here for the hub and the agent
+// transport.
 //
 // # The channel framing
 //
@@ -39,7 +40,7 @@ import (
 	"strings"
 	"sync"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/redact"

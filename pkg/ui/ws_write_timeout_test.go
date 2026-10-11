@@ -9,8 +9,9 @@ package ui
 // by opening many stalled connections.
 //
 // The fix wraps each conn.Write in a context.WithTimeout(ctx, wsWriteTimeout).
-// On timeout, nhooyr's timeoutLoop closes the underlying conn, the writer
-// loop exits, and handleWS's deferred cleanup removes the hubClient.
+// On timeout, the websocket library closes the underlying conn (a
+// context.AfterFunc armed for the write), the writer loop exits, and
+// handleWS's deferred cleanup removes the hubClient.
 
 import (
 	"context"
@@ -21,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // TestWSWrite_StalledClientDisconnectsWithinDeadline verifies that a client

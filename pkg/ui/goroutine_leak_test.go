@@ -13,11 +13,11 @@ package ui
 // These tests are deliberately *macroscopic*: they open N short-lived
 // connections, close them, and assert that runtime.NumGoroutine returns
 // to within a small slack of the pre-test baseline. They don't try to pin
-// the exact count (the Go runtime, the test framework, and nhooyr's
-// internals all spawn ambient goroutines that flap by 1–2 between calls)
-// — they assert the difference does not scale with N. With N=20, a leak
-// of one goroutine per connection produces a delta of ~20–40, far above
-// the slack threshold; the noise floor is ~5.
+// the exact count (the Go runtime, the test framework, and the websocket
+// library's internals all spawn ambient goroutines that flap by 1–2
+// between calls) — they assert the difference does not scale with N. With
+// N=20, a leak of one goroutine per connection produces a delta of ~20–40,
+// far above the slack threshold; the noise floor is ~5.
 
 import (
 	"bufio"
@@ -30,12 +30,12 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // goroutineLeakSlack is the maximum acceptable goroutine-count delta after
 // N connections have been opened and closed. The number is large enough to
-// absorb runtime/scheduler/nhooyr ambient flapping but small enough that a
+// absorb runtime/scheduler/websocket ambient flapping but small enough that a
 // real per-connection leak (which scales with N) would clearly fail the
 // assertion. Tuned empirically: ambient delta on a single iteration is
 // typically 0–3.
@@ -72,7 +72,8 @@ func TestWSConnectionLifecycle_NoGoroutineLeak(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
 
 	// Warm up: dial once and disconnect so any one-time package init
-	// (e.g., nhooyr lazy-allocated buffers) doesn't pollute the baseline.
+	// (e.g., the websocket library's lazily allocated buffer pools) doesn't
+	// pollute the baseline.
 	{
 		dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		conn, _, err := websocket.Dial(dialCtx, wsURL, nil)

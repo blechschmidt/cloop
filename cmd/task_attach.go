@@ -32,9 +32,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	"nhooyr.io/websocket"
 )
 
 var (

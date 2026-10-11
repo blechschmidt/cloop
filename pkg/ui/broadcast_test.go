@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // TestBroadcast_LaggedHubClientGetsResyncSignal verifies the broadcast
@@ -200,8 +200,8 @@ func TestWebSocket_LaggedClientReceivesResyncDirective(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
 
-	// Use a long-lived ctx; nhooyr closes the connection if a Read context
-	// expires, so we cancel only at test shutdown.
+	// Use a long-lived ctx; the websocket library closes the connection if a
+	// Read context expires, so we cancel only at test shutdown.
 	testCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

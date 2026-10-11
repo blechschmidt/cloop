@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/artifact"
@@ -257,8 +257,9 @@ const hubClientBufferSize = 64
 // network stalled, half-open NAT entry) will pin the goroutine until the
 // OS-level TCP timeout — typically minutes — letting an attacker exhaust
 // goroutines by opening many stalled connections. 10s is generous for a
-// burst on a slow link while still bounding each frame; on timeout, nhooyr's
-// timeoutLoop closes the underlying conn so the writer loop exits cleanly.
+// burst on a slow link while still bounding each frame; on timeout, the
+// websocket library closes the underlying conn (a context.AfterFunc armed for
+// the write) so the writer loop exits cleanly.
 //
 // Declared as var (not const) so regression tests can shrink it; production
 // callers should treat it as immutable.
@@ -269,10 +270,11 @@ var wsWriteTimeout = 10 * time.Second
 // inbound payloads today (it is a bidirectional hook for future use), so
 // any client→server frame should be tiny; 4 KiB is generous headroom for
 // future ack/control messages while bounding accidental or malicious
-// jumbo frames. nhooyr's default is 32 KiB; setting this explicitly makes
-// the limit immune to upstream default changes and tightens it to a value
-// proportional to actual need. On overshoot, nhooyr closes the connection
-// with StatusMessageTooBig.
+// jumbo frames. The library's default is 32 KiB; setting this explicitly
+// makes the limit immune to upstream default changes and tightens it to a
+// value proportional to actual need. On overshoot, the library closes the
+// connection with StatusMessageTooBig, and the read fails with an error
+// wrapping websocket.ErrMessageTooBig.
 //
 // Declared as var (not const) so regression tests can shrink it; production
 // callers should treat it as immutable.
@@ -297,9 +299,10 @@ var wsMaxInboundMsgsPerSecond = 100
 // peer crashed without RST) holds the goroutine pair alive until the OS-
 // level TCP keepalive fires (default ~2 hours on Linux). Pinging every 30s
 // detects dead peers within wsPingInterval+wsPingTimeout, an order of
-// magnitude faster than relying on TCP timeouts. nhooyr handles the pong
-// dispatch internally via the active drain Read; the writer's Ping call
-// blocks on the matching pong (or ctx) so concurrent operation is safe.
+// magnitude faster than relying on TCP timeouts. The websocket library
+// handles the pong dispatch internally via the active drain Read; the
+// writer's Ping call blocks on the matching pong (or ctx) so concurrent
+// operation is safe.
 //
 // Tunable so regression tests can shrink it; production callers should treat
 // it as immutable. See wsPingIntervalNS for why it is an atomic rather than a
@@ -511,7 +514,7 @@ type Server struct {
 	// connections any single remote IP may hold. Zero substitutes
 	// config.WebSocketConnsPerIPDefault (8). Reaching the cap causes
 	// new upgrades from that IP to be rejected with HTTP 429 and a
-	// Retry-After header before nhooyr.Accept hijacks the response.
+	// Retry-After header before websocket.Accept hijacks the response.
 	MaxWebSocketConnsPerIP int
 
 	// MaxRequestBodyBytes caps any incoming POST/PUT/PATCH request body
@@ -1657,8 +1660,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // closeAllWebSocketsForShutdown sends a code-1001 (websocket.StatusGoingAway)
 // close frame to every registered WebSocket client and waits up to timeout
 // for the per-connection close handshakes to complete. Each Close call runs
-// in its own goroutine because nhooyr's Close blocks on the peer's close-ack
-// (capped at ~10s internally); a single wedged peer must not delay shutdown
+// in its own goroutine because the websocket library's Close blocks on the
+// peer's close-ack (capped at ~10s internally: 5s to write the close frame,
+// 5s for the reply); a single wedged peer must not delay shutdown
 // for the rest. Once all goroutines return — or the timeout fires — the
 // caller proceeds with http.Server.Shutdown so any non-WebSocket handlers
 // still draining can finish on their own clock.
@@ -1688,7 +1692,7 @@ func (s *Server) closeAllWebSocketsForShutdown(timeout time.Duration) {
 		go func(conn *websocket.Conn) {
 			defer wg.Done()
 			defer recoverGoroutine("closeAllWebSocketsForShutdown")
-			// nhooyr's Close sends the close frame and waits up to ~10s
+			// The library's Close sends the close frame and waits up to ~10s
 			// for the peer's ack; that's fine here because we cap the
 			// outer wait via the timeout select below. The error is
 			// ignored: on an already-closed conn it's a no-op, on a
@@ -3380,7 +3384,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// defensive bounds protect this goroutine from abuse:
 	//   - SetReadLimit(wsReadFrameLimit) caps any single frame, so an
 	//     oversized payload can't allocate unbounded memory before being
-	//     rejected (nhooyr closes with StatusMessageTooBig on overshoot).
+	//     rejected (the library closes with StatusMessageTooBig on overshoot).
 	//   - A 1-second sliding-window message counter caps the *rate* of
 	//     inbound frames; a client spamming many tiny frames would otherwise
 	//     keep this goroutine hot forever (each Read returns immediately,
@@ -3413,7 +3417,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if windowCount > wsMaxInboundMsgsPerSecond {
 				// Send a polite close frame with a rationale, but
 				// don't block this goroutine waiting for the peer's
-				// ack — nhooyr.Close holds for up to ~10s for the
+				// ack — websocket.Conn.Close holds for up to ~10s for the
 				// handshake. The deferred conn.CloseNow in handleWS
 				// is the unconditional fallback once the writer loop
 				// exits via the cancel() above.
@@ -3432,7 +3436,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Server-initiated keepalive ping. Detects dead/unresponsive peers
-	// faster than the OS-level TCP keepalive (~2h on Linux). nhooyr's
+	// faster than the OS-level TCP keepalive (~2h on Linux). The library's
 	// pong dispatch happens via the active drain Read, so it is safe to
 	// call Ping here concurrently.
 	pingTicker := time.NewTicker(wsPingInterval())

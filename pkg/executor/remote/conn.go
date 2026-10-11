@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // Conn is a bidirectional, ordered, message-framed connection.
@@ -43,7 +43,7 @@ type Conn interface {
 	Close(reason string) error
 }
 
-// wsConn adapts a nhooyr.io/websocket connection to Conn.
+// wsConn adapts a github.com/coder/websocket connection to Conn.
 type wsConn struct {
 	c *websocket.Conn
 

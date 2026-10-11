@@ -58,7 +58,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // memberWatchInterval is how often a hub re-reads the membership table on its
@@ -528,11 +528,15 @@ func (s *Server) evictWithdrawnStreams() {
 // closeWithdrawn ends a socket whose identity lost its project: an
 // access_withdrawn message saying so, then a 1008 close.
 //
-// The message is what the dashboard acts on, not the close code. nhooyr v1.8
-// answers the browser's reply to our close frame with a second close frame
-// when another goroutine is reading — handleWS's drain always is — and a
-// browser fails the connection on that, reporting 1006 with our reason lost.
-// A data frame sent first arrives intact either way.
+// The message is what the dashboard acts on, not the close code. The library
+// this hub used before github.com/coder/websocket (nhooyr.io/websocket, which
+// Task 20411 retired) answered the browser's reply to our close frame with a
+// second close frame when another goroutine was reading — handleWS's drain
+// always is — and a browser fails the connection on that, reporting 1006 with
+// our reason lost. coder/websocket v1.8.13 stopped answering a close it has
+// already sent (coder/websocket#476), so the 1008 and its reason now arrive
+// too; the data frame stays first because it does not depend on how any
+// client library handles a close handshake.
 func closeWithdrawn(ctx context.Context, conn *websocket.Conn, reason string) {
 	if raw, err := json.Marshal(map[string]string{"reason": reason}); err == nil {
 		if msg, err := json.Marshal(wsMessage{Type: "access_withdrawn", Data: raw}); err == nil {

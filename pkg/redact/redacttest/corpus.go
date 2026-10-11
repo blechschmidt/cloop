@@ -498,7 +498,7 @@ func negatives(r *rand.Rand) []Negative {
 		"+{\n+  \"kty\": \"RSA\",\n+  \"e\": \"AQAB\",\n+  \"n\": \""+
 			base64.RawURLEncoding.EncodeToString(randomBytes(r, 256))+"\"\n+}")
 	var gosum strings.Builder
-	for _, mod := range []string{"golang.org/x/crypto v0.31.0", "golang.org/x/net v0.33.0", "nhooyr.io/websocket v1.8.17", "modernc.org/sqlite v1.34.4"} {
+	for _, mod := range []string{"golang.org/x/crypto v0.31.0", "golang.org/x/net v0.33.0", "github.com/coder/websocket v1.8.15", "modernc.org/sqlite v1.34.4"} {
 		h := base64.StdEncoding.EncodeToString(randomBytes(r, 32))
 		gm := base64.StdEncoding.EncodeToString(randomBytes(r, 32))
 		gosum.WriteString(mod + " h1:" + h + "\n" + mod + "/go.mod h1:" + gm + "\n")

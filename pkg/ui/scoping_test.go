@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/state"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // Task IDs are partitioned by project so any leak is unambiguous: a 1xx ID on
@@ -301,15 +301,15 @@ func TestGlobalScopeStreamJoinsNoProjectRoom(t *testing.T) {
 	// would reach it too.
 	//
 	// Asserted first, while this connection is certain to be open. The read
-	// loop below ends on its deadline, and nhooyr's Read closes the connection
-	// when its context expires (Conn.timeoutLoop) — so by the time that loop
-	// returns, the server's drain goroutine is already unregistering this
-	// client. Checked after the loop, as it used to be, membership was a race
-	// against that teardown: the waiter saw the client only if it reached the
-	// map before the server noticed the close, and waiting longer could not
-	// help, because once the client was gone it was gone for good. That is
-	// why this failed about one run in three under -race, alone as well as in
-	// the full suite.
+	// loop below ends on its deadline, and the websocket library's Read closes
+	// the connection when its context expires (a context.AfterFunc armed for
+	// the read) — so by the time that loop returns, the server's drain
+	// goroutine is already unregistering this client. Checked after the loop,
+	// as it used to be, membership was a race against that teardown: the
+	// waiter saw the client only if it reached the map before the server
+	// noticed the close, and waiting longer could not help, because once the
+	// client was gone it was gone for good. That is why this failed about one
+	// run in three under -race, alone as well as in the full suite.
 	//
 	// Waited for rather than sampled: websocket.Dial returns once the HTTP
 	// handshake completes, and registration happens after it, on the

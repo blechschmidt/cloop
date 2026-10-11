@@ -11,8 +11,9 @@ package ui
 // triggering the deferred hubClient cleanup.
 //
 // This test simulates an unresponsive peer by dialling but never calling
-// Read on the client side: nhooyr's pong dispatch only happens during a
-// Read call, so the server's Ping never receives a pong and times out.
+// Read on the client side: the websocket library's pong dispatch only
+// happens during a Read call, so the server's Ping never receives a pong and
+// times out.
 
 import (
 	"context"
@@ -21,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // setWSPingTiming shrinks the ping cadence for one test and restores it after.
@@ -82,7 +83,7 @@ func TestWSPing_UnresponsivePeerDroppedViaPingTimeout(t *testing.T) {
 	// Defer CloseNow so the test cleans up even if assertions fail before the
 	// server detects the timeout. Deliberately do NOT call conn.Read — that
 	// is what makes the peer unresponsive at the WebSocket protocol layer
-	// (nhooyr dispatches pong frames inside Read; with no Read, no pong).
+	// (the library dispatches pong frames inside Read; with no Read, no pong).
 	defer conn.CloseNow() //nolint:errcheck
 
 	if got := waitForHubClients(srv, 1, 2*time.Second); got != 1 {
@@ -131,7 +132,7 @@ func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 	conn.SetReadLimit(-1)
 
 	// Started before the registration wait, and that ordering is the fix.
-	// nhooyr only dispatches pong frames from inside Read, so until this
+	// The library only dispatches pong frames from inside Read, so until this
 	// goroutine is running the peer is unresponsive at the protocol layer —
 	// exactly what the companion test above simulates deliberately. The
 	// server begins pinging the moment the client registers, so starting the
