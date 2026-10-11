@@ -166,8 +166,8 @@ type KubeGrantDescription struct {
 	// Verbs are the verbs the grant permits.
 	Verbs []string `json:"verbs"`
 	// Monitored reports whether the grant's contexts reach their cluster
-	// through the Kubernetes monitor, which enforces Namespace and Verbs;
-	// unmonitored, the cluster's own RBAC is all that does.
+	// through the Kubernetes monitor, which enforces AllowedNamespaces and
+	// Verbs; unmonitored, the cluster's own RBAC is all that bounds them.
 	Monitored bool `json:"monitored"`
 	// Session is a monitored grant's session id.
 	Session string `json:"session,omitempty"`

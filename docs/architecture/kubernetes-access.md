@@ -175,6 +175,82 @@ would be refused; it is not a control. `CLOOP_KUBEGUARD_SESSION` is how lease
 release finds the session again to revoke it, and the session id is not secret —
 it is the first half of the token and appears on every audit row.
 
+### Several grants, one document
+
+A lease can carry more than one kubeconfig grant — two clusters, one cluster
+granted twice with different namespaces or verbs, an edited assignment whose
+predecessor is not revoked yet. Every monitor-issued document names its cluster,
+user and context `cloop` and every grant renders its file as `kubeconfig`, so
+until Task 20413 two grants rendered two files at one path: a delivered lease
+was refused (`secret_files[N] repeats path …/kubeconfig`) on containers, devices
+and Pods, and on the hub one document overwrote the other. The broker now merges
+them (`pkg/secretbroker/kubemulti.go`) into **one** document with a context per
+grant:
+
+```yaml
+current-context: prod-kube                 # the narrowest grant's
+clusters:
+  - name: prod-kube                        # each grant's monitor endpoint …
+    cluster: { server: https://hub.internal:8444, certificate-authority-data: … }
+  - name: prod-kube-2                      # … the same cluster granted twice
+    cluster: { server: https://hub.internal:8444, certificate-authority-data: … }
+contexts:
+  - name: prod-kube
+    context: { cluster: prod-kube, user: prod-kube, namespace: team-a }
+  - name: prod-kube-2
+    context: { cluster: prod-kube-2, user: prod-kube-2, namespace: team-b }
+users:
+  - name: prod-kube
+    user: { token: <session-id>.<…> }      # each grant's own session
+  - name: prod-kube-2
+    user: { token: <session-id>.<…> }
+```
+
+**One document rather than one file per grant listed in `KUBECONFIG` with `:`**,
+because `KUBECONFIG` has to stay a path. kubectl and client-go merge a list, but
+a program that passes `$KUBECONFIG` to `clientcmd.BuildConfigFromFlags`, a
+script that opens it, an agent that `cat`s it and the hub doctor's own smoke
+workload (`[ -f "$KUBECONFIG" ]`) read it as one file name; and an edge agent
+relocates a lease's files by rewriting each variable's leading directory, which
+would move only a list's first entry — on every agent already deployed — and
+kubectl skips a missing file without a word. One document also states
+`current-context` instead of leaving it to kubectl's first-file-wins rule.
+
+- **Names** come from each grant's secret, sanitised to lower-case letters,
+  digits and `-`, with `-2`, `-3` on a collision. Every reference is renamed
+  through its own document, so a context that named a user its document did not
+  define names nothing in the merged one either — never another grant's user
+  that happened to share the name.
+- **`current-context`** is the narrowest grant's: every namespace named before a
+  pattern, before cluster-wide; read-only before read-write; fewer namespaces;
+  then secret name and grant id. The order is total, so the document is a
+  function of the grants: whatever order the materials arrive in, at dispatch or
+  in the process that adopts the run, it renders the same.
+- **Monitored and unmonitored grants mix.** A grant the monitor holds is an entry
+  pointing at the monitor with its session token; one it declined is its
+  minimised document's own clusters, users and contexts.
+- **The environment.** One grant renders exactly the variables above. With
+  several, those describe the grant behind `current-context`, and
+  `CLOOP_K8S_CONTEXTS` (every context, current first), `CLOOP_K8S_GRANTS` (a JSON
+  array: each grant's contexts, secret, namespaces, verbs, and whether and under
+  which session the monitor holds it) and `CLOOP_KUBEGUARD_SESSIONS` describe
+  them all. These belong to the lease, not to any one grant, so withdrawing a
+  grant does not scrub a description the others still need.
+- **Withdrawing one grant** ([Task 20403](../guides/secrets.md#revoking-a-grant))
+  takes exactly its access when the monitor holds it: its entry is a session
+  token, and closing the session is the withdrawal — the document stays. An
+  unmonitored grant's entry is the cluster credential itself, and no path can
+  cut one entry out of a file a workload may have open, so the document is filed
+  under every unmonitored grant and goes with any of them. With every grant
+  monitored it is filed under the narrowest, whose withdrawal takes it too: some
+  grant's binding has to name the file, or no delivery path would know the
+  workload needs one. Both err toward less access.
+- **A restart.** The monitor is given each grant's minimised document under the
+  grant's own names, before the merge renames anything, and records the
+  session's context by that name. The process that adopts the run re-derives
+  exactly that document from the grant ([below](#a-hub-restarted-mid-run)), so
+  each session is restored under the token the merged document already holds.
+
 ### What the hub holds
 
 A `kubeguard.Session` per delivery, in memory: the parsed cluster credential
@@ -669,8 +745,16 @@ its session and are forwarded:
   `kubectl get pods` — discovery and the list, forwarded with the cluster
   credential — and `kubectl create configmap`, refused as read-only before the
   API server sees it (`K0`–`K2`);
+- the same kubeconfig is granted a second time, for a second namespace the
+  ServiceAccount may also edit, with `create` (Task 20413): the Pod receives one
+  kubeconfig with a context for each grant, `current-context` the read-only one,
+  and `kubectl --context` reaches each grant's own namespace through the monitor
+  and is refused in the other's and in `kube-system` — the cluster credential
+  could read both, so only the monitor stood between — while the second
+  context's `create configmap` lands in its namespace (`K4`);
 - the trail holds a `kubeguard.request_allowed` row for the list and a
-  `kubeguard.request_denied` row for the create, both naming the run's project;
+  `kubeguard.request_denied` row for the create, both naming the run's project,
+  and the second grant's write allowed in its namespace;
 - no configmap was created, and the cluster credential reached no part of the
   Pod;
 - and the project the Pod runs is not in the repository at all: `acme/granted`
@@ -928,7 +1012,13 @@ deliberately not distinguished to the caller; the session's
 
 **A lease fails with `executors.kube_guard is enabled but the Kubernetes access
 monitor is not running`** — the section is on and start-up failed. The hub
-printed why at boot. This is a refusal, not a fallback, on purpose.
+printed why at boot. This is a refusal, not a fallback, on purpose. The run
+starts without the kubeconfig, and since Task 20413 says so on the project's
+Activity tab as a `credential_refused` event naming the run.
+
+**`secret_files[N] repeats path …/kubeconfig`** — a hub from before Task 20413
+delivering two kubeconfig grants to one project. A current hub merges them into
+one document ([several grants, one document](#several-grants-one-document)).
 
 **`grant … cannot be honoured under this hub's kube_guard policy …`** — the
 hub-wide floor and the grant have nothing in common on some dimension. The tail

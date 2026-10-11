@@ -224,7 +224,11 @@ project with a git workspace — or of a feature — exercises it.
 **It is safe against production.** The workload touches no network, clones no
 repository and calls no model. The credential it mints is a kubeconfig pointing
 at `127.0.0.1:1`, its TTL is measured in seconds, and it is destroyed and
-*verified destroyed* before the command exits. Everything else — container,
+*verified destroyed* before the command exits. Its lease carries that credential
+and nothing else: every other grant aimed at the executor — a real kubeconfig, a
+PAT, anything — is withheld before its payload is opened, one audit row each, so
+none reaches the smoke sandbox whatever `kube_guard` or `git_proxy` say (Task
+20413). Everything else — container,
 workspace, lease directory, and the secret and grant rows — is removed on every
 exit path, including ctrl-C. Anything it could not remove is named in the report
 and exits 5.

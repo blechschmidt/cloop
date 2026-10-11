@@ -722,6 +722,85 @@ With the monitor on, the delivered `kubeconfig` points at the monitor and
 carries a short-lived session token instead of the cluster credential, and
 `CLOOP_KUBEGUARD_SESSION` names the session so an operator can revoke it.
 
+### Several kubeconfig grants on one project
+
+A project can hold more than one kubeconfig grant: two clusters, one cluster
+granted twice for different namespaces or verbs, or an edited assignment whose
+predecessor is not revoked yet. They are delivered together, as **one merged
+kubeconfig** with a context per grant (Task 20413):
+
+```console
+$ cloop secret grant prod-kube --to project:/srv/app --namespaces team-a --ttl 12h
+$ cloop secret grant prod-kube --to project:/srv/app --namespaces team-b \
+    --verbs get,list,watch,create --ttl 2h
+$ cloop secret grant staging-kube --to project:/srv/app --contexts staging --ttl 12h
+```
+
+```
+files:  kubeconfig   0600            one document, three contexts
+env:    KUBECONFIG=<lease dir>/kubeconfig
+        CLOOP_K8S_CONTEXTS=prod-kube,prod-kube-2,staging-kube
+        CLOOP_K8S_GRANTS=[{"contexts":["prod-kube"],"secret":"prod-kube","namespace":"team-a",…},…]
+        CLOOP_KUBEGUARD_SESSIONS=<session id>,<session id>,<session id>
+        CLOOP_K8S_NAMESPACE=team-a          the grant behind current-context
+        CLOOP_K8S_ALLOWED_NAMESPACES=team-a
+        CLOOP_K8S_VERBS=get,list,watch
+        CLOOP_KUBEGUARD_SESSION=<session id>
+```
+
+- **Names.** Each grant's cluster, user and context are named after its secret —
+  lower-case letters, digits and `-`, so `kubectl --context prod-kube` needs no
+  quoting — and suffixed `-2`, `-3` when another grant took the name first, as
+  the second grant of `prod-kube` above did. A grant whose kubeconfig keeps
+  several contexts (no monitor, several allowed) names each after its own:
+  `corp-staging`, `corp-production`.
+- **`current-context` is the narrowest grant's**, so a `kubectl` that names no
+  context reaches the least it can: grants whose namespaces are all named come
+  before ones a pattern admits, before cluster-wide ones; then read-only before
+  read-write; then fewer namespaces first; then by secret name.
+- **The variables.** With one grant they are exactly as above. With several,
+  the single-grant ones describe the grant behind `current-context`, and three
+  more describe every grant: `CLOOP_K8S_CONTEXTS` lists the contexts,
+  `current-context` first; `CLOOP_K8S_GRANTS` is a JSON array with each grant's
+  contexts, secret, pinned and allowed namespaces, verbs, and whether the
+  monitor holds it and under which session; `CLOOP_KUBEGUARD_SESSIONS` lists the
+  sessions. None is a credential.
+- **Revoking one of them** takes back that grant's access and leaves the others
+  working whenever the monitor holds it: its context in the document carries
+  only a session token, and revoking the grant closes that session. A grant the
+  monitor does not hold has its cluster credential *in* the document, which no
+  delivery path can cut out of a file the workload may have open, so revoking
+  it takes the whole document — the run is without Kubernetes until its next
+  dispatch — and so does revoking the one grant the document is filed under when
+  every grant is monitored (the narrowest). Both err toward less access. On a
+  container or Pod the revocation of a grant that set variables removes the
+  workload, as [below](#revoking-a-grant).
+
+Until Task 20413 every kubeconfig was written to the same `kubeconfig` path, so
+a project holding two could not run on any executor that receives files
+(`secret_files[N] repeats path …/kubeconfig`), and on the hub one document
+silently replaced the other. `cloop secret lease` now adds a **delivered as one
+directory** section whenever the grants are merged, naming the one file and
+every variable the workload is handed.
+
+### When a run goes without a kubeconfig it was granted
+
+A grant can stand, and its secret exist, and the broker still not deliver it:
+the Kubernetes monitor is required (`executors.kube_guard.enabled: true`) and is
+not running, the monitor refuses a kubeconfig whose user runs an `exec` plugin
+(AKS `kubelogin`, EKS, GKE) or an `auth-provider`, the payload no longer parses
+as YAML, or no context survives the grant's `--contexts` and `--namespaces`.
+The run starts without it either way. Since Task 20413 the refusal is named on
+the lease and written to the project's **Activity** tab as a
+`credential_refused` event on every run it affects, naming the run — `This run
+goes without kubeconfig "aks-kube", which the project was granted, because the
+hub could not deliver it: credential guard unavailable: … exec credential
+plugin …`. The same holds for every other kind the broker refuses this way: a
+GitHub token the git proxy could not take, an App token GitHub would not mint.
+A credential whose secret was destroyed is told once per hub process instead
+([below](#when-the-owner-of-a-personal-secret-leaves)), since nothing will
+bring it back.
+
 ---
 
 ## Container registries
@@ -1702,9 +1781,13 @@ is removed instead, because its runtime keeps a copy that only removing the
 workload destroys — the outcome says the workload was *terminated*, and the
 panel's confirmation names those workloads before you press it. A repository
 bound in by `local_repo`, a `host_device` and a `network_interface` stay in the
-sandbox until it exits (their sections below say why). When the credential
-itself is compromised, rotate it at the source as well, and revoke the run's
-lease with `action=kill`.
+sandbox until it exits (their sections below say why). Of several kubeconfig
+grants merged into one document, revoking a monitored one closes its session
+and leaves the document; revoking one whose cluster credential is in the
+document takes the document
+([several kubeconfig grants](#several-kubeconfig-grants-on-one-project)). When
+the credential itself is compromised, rotate it at the source as well, and
+revoke the run's lease with `action=kill`.
 
 **Editing is not always revoking.** Changing a project's repository assignment
 in the panel, or granting a Claude credential again for longer, files a new
