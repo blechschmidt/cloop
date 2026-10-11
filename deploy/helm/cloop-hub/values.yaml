@@ -282,9 +282,10 @@ secrets:
   # CLOOP_SECRET_KEY is the master passphrase for the secret broker: every
   # key-encryption key is derived from it, and those keys seal the data keys
   # that seal each brokered kubeconfig, PAT and egress credential. Losing it
-  # makes them permanently unopenable — there is no escrow. Back it up wherever
-  # you keep root credentials, and never let Helm generate it for a cluster you
-  # care about.
+  # makes them permanently unopenable unless it was escrowed: once the hub is
+  # up, run "cloop hub key escrow export --output <file>" in its Pod and keep
+  # the file with your root credentials. Never let Helm generate it for a
+  # cluster you care about.
   #
   # Rolling the sealing keys does NOT require changing this value: run
   # "cloop hub key rotate" against the hub. It rewraps every data key onto a

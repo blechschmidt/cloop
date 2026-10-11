@@ -262,8 +262,16 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 
 It is the passphrase protecting every payload in the secret broker — brokered
 kubeconfigs, GitHub PATs, egress credentials. Losing it makes them permanently
-unopenable; there is no escrow and no recovery path. Changing it has the same
-effect. Back it up wherever you keep root credentials.
+unopenable, and changing it has the same effect — unless it was escrowed. Once
+the hub has started, seal it under a passphrase into a file you keep with your
+root credentials, off the host:
+
+```bash
+cloop hub key escrow export --output /secure/cloop-hub.escrow
+```
+
+`cloop hub doctor` warns until an escrow is recorded, and `cloop hub key escrow
+verify` rehearses recovery. See the [runbook](../docs/operations/runbook.md#escrowing-the-sealing-key).
 
 ---
 

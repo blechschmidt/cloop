@@ -95,7 +95,9 @@ in `hub.env` at mode `0600` and never in a repository — see
 [installation](../getting-started/installation.md) for generating it and the
 [runbook](../operations/runbook.md) for backup and rotation. Losing it loses
 every stored secret, grants included — and, under `tls: auto` below, the hub's
-CA, which every sandbox trusts for the proxy's URL.
+CA, which every sandbox trusts for the proxy's URL — unless it was escrowed
+(`cloop hub key escrow export`, see the
+[runbook](../operations/runbook.md#escrowing-the-sealing-key)).
 
 ### Keep forge and cluster credentials on the hub
 

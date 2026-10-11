@@ -1,7 +1,7 @@
 # Operator runbook
 
-Backup and restore, audit verification, key rotation, upgrade and rollback for a
-hosted cloop hub.
+Backup, escrow and restore, audit verification, key rotation, upgrade and
+rollback for a hosted cloop hub.
 
 Command output below is real. Where a procedure has a sharp edge — an
 unrecoverable key, a one-way migration — it is called out at the point where you
@@ -356,25 +356,42 @@ tasks are executing.
 $ cloop db backup
 cloop db backup
   source: /srv/cloop/.cloop/state.db
-  output: /srv/cloop/.cloop/backups/state-20260822T095227Z.db
+  output: /srv/cloop/.cloop/backups/state-20261011T112707Z.db
 
   WAL checkpoint:  TRUNCATE log_frames=0 checkpointed=0
-  size:            320.0 KB
-  duration:        19ms
-  sha256:          bbedb9d5f45fd4bf8fb368b60c29c7cb7cb60d3dac608229cf1bcee5d63292ed
-  schema version:  15
-  metadata:        /srv/cloop/.cloop/backups/state-20260822T095227Z.db.meta.json
+  size:            892.0 KB
+  duration:        32ms
+  sha256:          0495b530781c1654129e99b9b3d9e5e569beb584fb9cdd57eac9c39514408063
+  schema version:  65
+  audit head:      id 9 (212d86cf4c7e…)
+  sealing keys:    1, sealing 1 row(s)
+  metadata:        /srv/cloop/.cloop/backups/state-20261011T112707Z.db.meta.json
+  sidecar seal:    under CLOOP_SECRET_KEY a9a0a761a2b0ee6e
 
 Backup complete.
 ```
 
 `--output <path>` overrides the destination. The `.meta.json` sidecar records the
-SHA-256, size, source, schema version and duration; restore checks the digest
-against it. Keep the sidecar with the backup — losing it costs you the integrity
-check, and restore will then need `--skip-checksum`.
+SHA-256, size, source, schema version and duration, and the **manifest** a
+restore checks before it touches anything: the sealing keys the backup's secrets,
+sessions and hub CA keys are sealed under, with how many rows each seals, and
+where its audit chain ends — read back from the copy, not the live database.
+
+The whole sidecar is **sealed**: an HMAC under a key derived from
+`CLOOP_SECRET_KEY` with a label of its own — the construction the audit
+checkpoints use — stamped with the key's fingerprint, the one every checkpoint
+and escrow of the same key carries. Nothing in a database, and nothing an
+attacker holding only the backup can compute, produces that seal, so a backup
+edited and its SHA-256 recomputed is refused at restore. Without
+`CLOOP_SECRET_KEY` the sidecar is written unsealed and the backup says so;
+restoring it then needs `--allow-unsealed`. A hub's `backup.auto_backup` seals
+its backups the same way.
+
+Keep the sidecar with the backup: restoring without one needs
+`--skip-checksum`, which checks nothing.
 
 A backup contains **sealed** secrets. It is not plaintext, but it is one half of
-a plaintext secret store; the other half is `hub.env`.
+a plaintext secret store; the other half is `hub.env` — or its escrow.
 
 Nightly, with retention:
 
@@ -383,34 +400,188 @@ cloop db backup --output /var/backups/cloop/state-$(date -u +%Y%m%dT%H%M%SZ).db
 find /var/backups/cloop -name 'state-*.db*' -mtime +30 -delete
 ```
 
-### Restore
+### Escrowing the sealing key
+
+Every key-encryption key derives from `CLOOP_SECRET_KEY`, so rotating them does
+nothing for the one value whose loss is unrecoverable: lose `hub.env` and every
+sealed secret, session and hub CA key goes with it. Escrow it once the hub has
+started:
 
 ```console
-$ cloop db verify                                   # check the live db first
-$ cloop db restore /var/backups/cloop/state-20260822T095227Z.db --force
+$ cloop hub key escrow export --output /mnt/root-credentials/cloop-hub.escrow
+Escrow passphrase:
+Again:
+Escrowed CLOOP_SECRET_KEY
+  file:          /mnt/root-credentials/cloop-hub.escrow (opened again to check it)
+  escrow:        esc_881bc88ef57b3a35
+  key:           a9a0a761a2b0ee6e
+  derivation:    argon2id t=3 m=64MiB p=4, then aes-256-gcm
+  recorded in the hub: the escrow id and key fingerprint, nothing secret
 ```
 
-`--force` is required when a live database is present. Before overwriting,
-restore moves the existing file aside as `.pre-restore.<UTC>` — so a restore of
-the wrong backup is itself reversible. `--skip-checksum` proceeds without the
-metadata sidecar.
+The file holds the key sealed under your passphrase — argon2id with RFC 9106's
+second recommended parameters, then AES-256-GCM, every header field bound into
+the cipher's associated data — and is read back and opened before the command
+says so. It is exactly as strong as the passphrase: one under 15 characters is
+refused, and five or six random words is the right shape. Keep the file where
+you keep root credentials, off this host (a path inside `.cloop/` is refused),
+and the passphrase somewhere else again. The key never touches disk on the way
+out. `--passphrase-file <file>` (or `-` for stdin) replaces the prompt.
 
-Restore validates with `PRAGMA integrity_check`, the SHA-256, and a schema sanity
-check before it writes anything.
+The command refuses a `CLOOP_SECRET_KEY` that does not open this hub's sealing
+keys: escrowing the wrong key is worse than escrowing none. The hub records the
+escrow's id and the key's fingerprint and nothing else, and `cloop hub doctor`
+reports `secret_key.escrow`: a warning while no escrow is recorded, a **failure**
+when the one on record holds a different key from the one in use.
 
-**Restoring a hub is a two-part operation.** Restoring `state.db` alone gives you
-a database full of secrets you cannot unseal. Restore the matching `hub.env`
-(specifically `CLOOP_SECRET_KEY`) too, or every stored secret is lost.
+### Restore
 
-Order of operations for a full restore:
+Stop the hub first, then check the backup before restoring it:
+
+```console
+$ cloop db restore /var/backups/cloop/state-20261011T112707Z.db --check
+…
+  SEALING KEY                   STATE    SEALED ROWS  OPENS
+  kek_814ca52cd82fe6c050dc0ae2  primary  secrets=1    yes
+
+PASS — this backup restores under this key.
+$ cloop db restore /var/backups/cloop/state-20261011T112707Z.db --force --reason "disk failure on hub-1"
+```
+
+`--reason` is required; it is recorded. Before anything is touched a read-only
+preflight asks every question a restore depends on, and refuses — changing
+nothing — on any "no", each refusal naming the flag that overrides it:
+
+| Refusal | Means | Overridden by |
+| --- | --- | --- |
+| integrity, schema | `PRAGMA integrity_check` fails, or the backup's schema is newer than this binary | — |
+| no sidecar | there is no `.meta.json` beside the backup | `--skip-checksum`, which checks nothing |
+| checksum mismatch | the file is not the one its sidecar describes | `--skip-checksum` |
+| seal does not verify | the backup and its SHA-256 were changed after it was taken, or the sidecar was | `--skip-checksum` |
+| seal cannot be checked | the sidecar is unsealed (taken before sidecars were sealed, or without a key), sealed under another key, or there is no `CLOOP_SECRET_KEY` here | `--allow-unsealed`; the digest is still checked |
+| sealing keys | the `CLOOP_SECRET_KEY` here cannot derive a key the backup's secrets, sessions or hub CA keys are sealed under | `--accept-secret-loss` |
+
+```console
+Refused — nothing was changed:
+  • the CLOOP_SECRET_KEY here (key 8260957539fa2819) cannot open the backup's sealing keys
+    kek_814ca52cd82fe6c050dc0ae2 (1 secrets): every secret, session and hub CA key sealed under
+    them would be unreadable, and the hub would refuse to start on them. Restore the key they
+    were sealed under (`cloop hub key escrow import`)
+    --accept-secret-loss proceeds anyway
+```
+
+The key check is the one the hub makes when it starts, made before the swap
+instead of after it. The answer to it is the escrow, not a flag. `--accept-secret-loss`
+is deliberately not `--force` — which only allows overwriting a live database —
+and is for when there is no escrow: it restores anyway and **retires** the keys
+it cannot open in the restored database — every one the hub would refuse to
+start on — so the hub can start and mint a fresh one, and every secret sealed
+under them then reports that its key was retired. It is recorded on the
+restore's audit row and in its restore record. The backup file keeps the keys:
+restore it again under the right key to get them back. It needs a
+`CLOOP_SECRET_KEY` — the new one the hub will run on — because a variable
+missing from a shell is not a lost key: with none set the refusal stands.
+
+`--force` moves the existing database aside as `.pre-restore.<UTC>` first —
+with its `-wal` and `-shm`, which would otherwise be replayed into the restored
+file — so a restore of the wrong backup is itself reversible. It does not take a database
+from under a hub still serving it: while a hub holds the control-plane lease, or
+a cluster member is live, the restore is refused — a hub writing to the file
+moved aside would lose everything it wrote after the swap. The backup is hashed
+as it is copied, and a file that changed between the preflight and the copy is
+not restored. Exit codes: 0 restored and
+recorded; 1 refused or failed, nothing changed; 2 the restore could not run; 3
+restored, but the record of it is incomplete — the output says what is missing.
+
+#### What a restore records
+
+To the audit checkpoints, a restore looks exactly like a tail deleted while the
+hub kept writing: the rows the newest checkpoints saw are gone, and new rows take
+their ids. So a restore records itself twice, each where the other cannot reach:
+
+- an `audit.restored` row, appended to the restored chain: the backup's SHA-256
+  and time, the head the chain was restored to, the newest checkpoint superseded
+  and the events lost, who, and why;
+- a **restore record**, sealed under the checkpoint key and written to
+  `audit.checkpoints.file` (or `--checkpoints <file>`) and stderr, saying the
+  same and pinning that row's hash.
+
+`cloop hub audit verify --checkpoints` accepts the restore record as the
+explanation for the checkpoints sealed before it that saw past the restored head,
+reports the restore, and exits 0:
+
+```console
+RESTORED      control-plane /srv/cloop/.cloop/state.db — acknowledged
+  3 checkpoint(s) agree with the chain; the newest, at 2026-10-11T11:28:04.819549679Z, saw id 13
+  restored (acknowledged): 5 events lost between 2026-10-11T11:27:07.34123538Z and 2026-10-11T11:27:30.227423779Z, by cli:root, reason "disk failure on hub-1"
+    restore record on line 3, sealed under key a9a0a761a2b0ee6e; backup sha256 0495b530781c… taken 2026-10-11T11:27:07.406627001Z, restored to id 9; 2 checkpoint(s) superseded
+```
+
+The window runs from the newest event the backup holds to the newest checkpoint
+that saw what came after; events written after that checkpoint, which nothing
+off the database recorded, are not counted. A restore of a backup whose sidecar
+was not checked — `--skip-checksum`, `--allow-unsealed` — is acknowledged the
+same way and says so: "from a backup nothing vouched for". `cloop hub doctor` reports the same
+restore as a warning on `audit.checkpoints.chain` for as long as it is among the
+50 newest checkpoints it reads.
+
+Only a record sealed under the key the verifier holds explains anything, because
+database or file write access must never be enough to explain a truncation away:
+a hand-written or unsigned restore record is refused, one under another key
+explains nothing, one dated ahead of the verifier's clock is refused, and a
+record whose own head — or the head it says the chain was restored to — the
+chain no longer holds fails as `restore-mismatch`. A record
+accounts only for checkpoints sealed before it, so a tail deleted after the
+restore while the hub keeps writing is still a finding.
+
+A project's database is restored with the same command, run in the project's
+directory. Its configuration does not name the hub's checkpoint file, so pass it:
+`--checkpoints /var/log/cloop/audit-checkpoints.jsonl`.
+
+### Disaster recovery drill
+
+A backup nobody has restored is a hope. Rehearse the whole recovery — including
+the day `hub.env` is gone — on a scratch directory, not the live hub:
+
+```bash
+# 1. The escrow still opens, its passphrase is still known, and it holds the
+#    key this hub runs on. Run it where the hub's environment is loaded.
+cloop hub key escrow verify /mnt/root-credentials/cloop-hub.escrow
+#    → OPENS, IN USE, OPENS THE HUB, ON RECORD
+
+# 2. A fresh directory with no hub.env, as after losing the host.
+mkdir -p /tmp/cloop-drill/.cloop && cd /tmp/cloop-drill
+env -u CLOOP_SECRET_KEY cloop db restore /var/backups/cloop/state-<UTC>.db --check
+#    → Refused: there is no CLOOP_SECRET_KEY here to open the backup's sealing keys …
+
+# 3. Recover the key from escrow into this directory's hub.env.
+env -u CLOOP_SECRET_KEY cloop hub key escrow import /mnt/root-credentials/cloop-hub.escrow
+set -a; . .cloop/hub.env; set +a
+
+# 4. The backup now restores under it, and its credentials deliver.
+cloop db restore /var/backups/cloop/state-<UTC>.db --check            # → PASS
+cloop db restore /var/backups/cloop/state-<UTC>.db --reason "DR drill" \
+    --checkpoints /tmp/cloop-drill-checkpoints.jsonl
+cloop secret lease --project <a project holding a grant>              # → its materials
+cloop hub audit verify --hub . --project .                            # → OK
+
+# 5. Clean up: the directory holds the hub's key and its secrets.
+cd / && rm -rf /tmp/cloop-drill /tmp/cloop-drill-checkpoints.jsonl
+```
+
+For the real thing, in order:
 
 1. stop the hub (do not restore under a running process)
-2. restore `hub.env` — the matching `CLOOP_SECRET_KEY`
-3. `cloop db restore <backup> --force`
-4. `cloop db verify`
-5. start the hub, confirm `/readyz`
-6. `cloop audit-log verify`
-7. `cloop executor ls` — enrolled agents reconnect on their own backoff
+2. if `hub.env` is lost: `cloop hub key escrow import <file>`, and load it
+3. `cloop db restore <backup> --check`
+4. `cloop db restore <backup> --force --reason "…"`
+5. `cloop db verify`
+6. start the hub, confirm `/readyz`
+7. `cloop hub audit verify --checkpoints <file>` — the restore is reported as
+   acknowledged, with the window it lost, and exits 0
+8. `cloop hub doctor` — `secret_key.escrow` passes; if the backup predates the
+   escrow, record it again with `cloop hub key escrow verify <file> --record`
+9. `cloop executor ls` — enrolled agents reconnect on their own backoff
 
 ---
 
@@ -782,7 +953,13 @@ each an exit 2:
 | `anchor-missing`, `anchor-rewritten` | A prune anchor a checkpoint saw is gone or altered. |
 | `archive-mismatch` | A checkpointed row was pruned, and the archive its anchor sealed no longer matches the anchor's digest, or is not the intact chain the anchor's boundary ends in — every archived row is re-hashed and linked, so a file holding only the right hash on the right id does not pass. |
 | `prune-unproven` | A checkpointed row is covered by a prune anchor whose archive cannot be read here, and no trusted checkpoint records the hub verifying that archive. Whoever can delete rows can also write an anchor over the hole, so until the archive is checked this is indistinguishable from a deletion. Run the command where the archive is. |
-| `refused` | A record's seal does not verify under the key it claims: the file was edited or the record forged. It is not used as evidence. |
+| `refused` | A record's seal does not verify under the key it claims: the file was edited or the record forged. Also an unsigned restore record when the verifier holds a key. It is not used as evidence. |
+| `restore-mismatch` | A sealed restore record whose own head, or the head it says the chain was restored to, the chain no longer holds: the chain was cut back or rewritten after the restore it records. |
+
+A checkpoint that disagrees with the chain *because the database was restored*
+is not a finding when a restore record sealed under the hub's key accounts for
+it: `cloop db restore` writes one, and verify reports `restored (acknowledged)`
+with the events lost and exits 0 — see [What a restore records](#what-a-restore-records).
 
 A prune is not truncation. A checkpoint below a prune anchor is checked against
 the archive the anchor sealed — its digest, as `verify-seals` would, and then
@@ -1347,6 +1524,8 @@ If you must change the passphrase:
 5. `cloop secret mint` each secret with its new value
 6. `cloop secret grant` to reconstruct the grants from `grants.txt`
 7. `cloop secret lease --project <p>` to confirm delivery
+8. `cloop hub key escrow export --output <file>` — the escrow on record holds
+   the old key, and `cloop hub doctor` fails until the new one is escrowed
 
 Because step 3 is required regardless, treat *passphrase* rotation as credential
 rotation. For everything short of that — a scheduled key roll, a suspected key

@@ -1053,6 +1053,74 @@ These subcommands write to the state database directly rather than through the
 HTTP API, so they require filesystem access to it — the same root-shell caveat
 as `cloop hub token`.
 
+#### `cloop hub key escrow`
+
+Every key-encryption key derives from `CLOOP_SECRET_KEY`, so rotation cannot
+help if that value is lost. An escrow file holds it sealed under a passphrase
+you choose (argon2id, 64 MiB, then AES-256-GCM); the hub records only the
+escrow's id and the key's fingerprint.
+
+```bash
+cloop hub key escrow export --output /secure/cloop-hub.escrow   # seal the key in this environment
+cloop hub key escrow verify /secure/cloop-hub.escrow            # rehearse: does it open, and open this hub?
+cloop hub key escrow verify /secure/cloop-hub.escrow --record   # record it again after an older restore
+cloop hub key escrow import /secure/cloop-hub.escrow            # recover it into .cloop/hub.env
+cloop hub key escrow import /secure/cloop-hub.escrow --stdout   # print CLOOP_SECRET_KEY=… instead
+```
+
+| Flag | Applies to | Default | Description |
+|------|-----------|---------|-------------|
+| `--output` | `export` | — | Where to write the escrow file (required). A path inside a `.cloop/` directory is refused |
+| `--force` | `export` | `false` | Replace an existing escrow file at `--output` |
+| `--force` | `import` | `false` | Replace a different key already in the env file; the old file is kept as `<file>.pre-import.<UTC>` |
+| `--passphrase-file` | all | the terminal | Read the passphrase from a file, or `-` for stdin. One trailing newline is stripped |
+| `--record` | `verify` | `false` | Record this escrow as the hub's, once it is proven to open the hub's sealing keys |
+| `--env-file` | `import` | `.cloop/hub.env` | The env file to put the key into; every other line is kept |
+| `--stdout` | `import` | `false` | Print the assignment instead of writing a file |
+| `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
+
+`export` refuses a key that does not open the hub's sealing keys and a
+passphrase under 15 characters, and reads the file back and opens it before it
+reports success. `verify` exits 1 when the file does not open or does not open
+the hub. `cloop hub doctor` reports `secret_key.escrow`: a warning while no
+escrow is recorded, a failure when the one on record holds another key than the
+one in use. See the [runbook](../operations/runbook.md#escrowing-the-sealing-key).
+
+### `cloop db backup` and `cloop db restore`
+
+Hot backups of `.cloop/state.db`, and a restore that checks a backup before it
+swaps anything.
+
+```bash
+cloop db backup                                              # .cloop/backups/state-<UTC>.db
+cloop db backup --output /var/backups/cloop/state-<UTC>.db
+cloop db restore <backup> --check                            # the preflight alone; writes nothing
+cloop db restore <backup> --force --reason "disk failure"    # restore over a live database
+```
+
+The backup's sidecar (`<backup>.meta.json`) records the SHA-256, the sealing
+keys the backup's secrets depend on and where its audit chain ends, all sealed
+under a key derived from `CLOOP_SECRET_KEY`. A restore refuses — changing
+nothing — a backup that fails its integrity check, does not match its sidecar,
+carries a seal that does not verify, or holds secrets the `CLOOP_SECRET_KEY` it
+runs with cannot open, and any restore while a hub still serves the database;
+then it records itself as an `audit.restored` row and a sealed restore record
+the audit checkpoints accept.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--reason` | — | Why (required); recorded with the restore |
+| `--check` | `false` | Run the preflight only |
+| `--force` | `false` | Overwrite a live database; the old file is kept as `.pre-restore.<UTC>` |
+| `--skip-checksum` | `false` | Do not check the sidecar at all — for a backup whose sidecar was lost |
+| `--allow-unsealed` | `false` | Accept a sidecar whose seal cannot be checked here; the digest is still checked |
+| `--accept-secret-loss` | `false` | Restore although the key cannot open the backup's sealing keys; retires them, losing what they seal (recorded). Needs a `CLOOP_SECRET_KEY` |
+| `--checkpoints` | `audit.checkpoints.file` | Where to look for superseded checkpoints and append the restore record |
+
+Exit codes: 0 restored and recorded, 1 refused or failed, 2 could not run, 3
+restored but not fully recorded. The procedure and a drill to rehearse it are in
+the [runbook](../operations/runbook.md#backup-and-restore).
+
 ### `cloop hub token static`
 
 The deprecated static `--token` / `CLOOP_UI_TOKEN`: whether running hubs still
