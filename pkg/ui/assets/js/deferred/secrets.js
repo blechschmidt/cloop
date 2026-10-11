@@ -1504,8 +1504,8 @@
       el.innerHTML = '<span aria-hidden="true">&#9888;</span><span>' +
         '<strong>This hub still accepts the static <code>--token</code>.</strong><br>' +
         'It bypasses RBAC, sees every project, and cannot be revoked for one caller without ' +
-        'breaking the rest. Mint scoped tokens for each caller, then drop ' +
-        '<code>--token</code> / <code>CLOOP_UI_TOKEN</code>.</span>';
+        'breaking the rest. Mint scoped tokens for each caller, then retire it (Settings &rarr; ' +
+        'Static admin token) and drop <code>--token</code> / <code>CLOOP_UI_TOKEN</code>.</span>';
     }
 
     function _tokRender() {

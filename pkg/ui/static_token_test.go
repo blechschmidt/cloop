@@ -199,7 +199,23 @@ func TestStaticToken_RetiredIsRefusedOnTheRetiringMember(t *testing.T) {
 func TestStaticToken_TokenOnlyHubStaysClosedAfterRetirement(t *testing.T) {
 	srv, ts := newStaticHub(t, "", staticTok20406)
 	admin := mintAdminToken(t, srv)
+	tokensBanner := func() any {
+		t.Helper()
+		code, body, _ := staticCall(t, ts.URL, http.MethodGet, "/api/tokens", bearerHeader(admin.Plaintext), "")
+		if code != http.StatusOK {
+			t.Fatalf("GET /api/tokens = %d", code)
+		}
+		return body["static_token_active"]
+	}
+	if got := tokensBanner(); got != true {
+		t.Fatalf("static_token_active before retirement = %v, want true", got)
+	}
 	retireViaRoute(t, ts.URL, bearerHeader(staticTok20406), false)
+	// The Tokens panel's banner says the hub still accepts it; after
+	// retirement it does not, though the token is still configured.
+	if got := tokensBanner(); got != false {
+		t.Fatalf("static_token_active after retirement = %v, want false", got)
+	}
 
 	if code, _, _ := staticCall(t, ts.URL, http.MethodGet, "/api/state", nil, ""); code != http.StatusUnauthorized {
 		t.Fatalf("GET /api/state with no credential after retirement = %d, want 401: the hub opened", code)

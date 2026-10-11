@@ -151,6 +151,18 @@ func (s *Server) staticTokenConfigured() bool {
 	return s.staticToken != ""
 }
 
+// staticTokenAccepted reports whether a request presenting this hub's static
+// token would be admitted: one is configured and it is not retired. For what
+// the dashboard tells people only — an authentication or bind decision reads
+// staticTokenConfigured, because a retired token is still configured.
+func (s *Server) staticTokenAccepted() bool {
+	if !s.staticTokenConfigured() {
+		return false
+	}
+	_, retired := s.ownStaticTokenRetirement()
+	return !retired
+}
+
 // staticTokenFingerprint is the configured token's fingerprint, or "" when
 // none is configured.
 func (s *Server) staticTokenFingerprint() string {

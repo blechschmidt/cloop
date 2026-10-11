@@ -392,8 +392,9 @@ type tokensListResponse struct {
 	// Projects the caller may scope a token to, by registry name.
 	Projects []string `json:"projects"`
 
-	// StaticTokenActive reports whether the deprecated --token is configured,
-	// so the panel can say so where an operator will act on it.
+	// StaticTokenActive reports whether the deprecated --token is configured
+	// and still accepted — not retired (Task 20406) — so the panel can say so
+	// where an operator will act on it.
 	StaticTokenActive bool `json:"static_token_active"`
 }
 
@@ -456,7 +457,7 @@ func (s *Server) handleTokensList(w http.ResponseWriter, r *http.Request) {
 		Tokens:            views,
 		GrantableRoles:    s.grantableRoles(r),
 		Projects:          s.scopableProjects(r),
-		StaticTokenActive: s.staticTokenConfigured(),
+		StaticTokenActive: s.staticTokenAccepted(),
 	})
 }
 
