@@ -1391,6 +1391,18 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 	},
+	{
+		Action: ActionSealingKeyEscrowed,
+		Home:   HomeControlPlane,
+		Entity: "sealing_key",
+		Trigger: "`cloop hub key escrow export` wraps CLOOP_SECRET_KEY under an operator's passphrase, or " +
+			"`cloop hub key escrow verify --record` records a verified escrow again after a restore.",
+		Payload:   []string{"escrow_id", "key_fingerprint", "kdf", "created_at", "recorded", "via"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Carries the key's fingerprint, never the key or the passphrase. `cloop hub doctor` compares " +
+			"the escrow on record against the key in use and fails when they differ.",
+	},
 
 	// ── hub_ca ─────────────────────────────────────────────────────────────
 	// The certificate authority the hub issues its credential monitors'
@@ -1737,6 +1749,27 @@ var registry = []Entry{
 			"`recorded` says what wrote the row (recovery, flush, shutdown, exit) and " +
 			"`adopted_from` names processes that exited owing it. `cloop hub audit verify` " +
 			"reports a chain holding gap rows as intact with gaps and exits 3.",
+	},
+	{
+		Action: ActionAuditRestored,
+		Home:   HomeEither,
+		Entity: "audit",
+		Trigger: "`cloop db restore` puts a backup in place of a database, recorded in the chain it restored " +
+			"as that chain's next row.",
+		Payload: []string{
+			"backup", "backup_sha256", "backup_time", "sidecar", "restored_id", "restored_row_hash",
+			"restored_time", "superseded_id", "superseded_row_hash", "superseded_time", "lost_events",
+			"reason", "accepted_loss", "lost_keys", "key_fingerprint", "checkpoint_record",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Home is whichever chain was restored: the control plane's, or a project's restored with the " +
+			"same command — the record has to sit in the history it interrupts. The row takes the id after " +
+			"the restored head, an id the superseded checkpoints saw with another hash; the restore record " +
+			"`cloop db restore` seals to the checkpoint sinks pins it, and is what lets `cloop hub audit " +
+			"verify --checkpoints` report the restore as acknowledged rather than as a truncation. " +
+			"`accepted_loss` is true when the restore went ahead under --accept-secret-loss, and " +
+			"`lost_keys` lists the sealing keys whose material it gave up, each with the rows sealed under it.",
 	},
 }
 

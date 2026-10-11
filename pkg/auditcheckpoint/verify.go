@@ -58,18 +58,38 @@ const (
 	// Rows deleted and an anchor written over them look exactly like this, so
 	// it fails until the archive is checked.
 	ResultPruneUnproven Result = "prune-unproven"
-	// ResultRefused: the record's seal does not verify; it was not used.
+	// ResultRefused: the record's seal does not verify, or it is a restore
+	// record nothing vouches for; it was not used.
 	ResultRefused Result = "refused"
+	// ResultAcknowledged: the chain no longer holds what the record saw, and
+	// a restore record sealed after it accounts for that: the database was
+	// restored from a backup that ends before the record's head (Task 20410).
+	ResultAcknowledged Result = "acknowledged"
+	// ResultRestoreMismatch: a sealed restore record whose head, or the head
+	// it says the chain was restored to, the chain no longer holds — it was
+	// cut back or rewritten after the restore it records.
+	ResultRestoreMismatch Result = "restore-mismatch"
 )
 
 // Failing reports whether the result is a finding against the chain (or, for
 // ResultRefused, against the checkpoint file).
 func (r Result) Failing() bool {
 	switch r {
-	case ResultConsistent, ResultPruned, ResultPrunedUnverified:
+	case ResultConsistent, ResultPruned, ResultPrunedUnverified, ResultAcknowledged:
 		return false
 	}
 	return true
+}
+
+// supersedable reports whether a result is what restoring an older backup
+// does to a record of the history after it: the ids it saw are gone, or
+// written again by different rows, or its prune anchor is.
+func (r Result) supersedable() bool {
+	switch r {
+	case ResultRestored, ResultTruncated, ResultRewritten, ResultAnchorMissing, ResultAnchorRewritten:
+		return true
+	}
+	return false
 }
 
 // Checked is one record and its verdict.
@@ -95,16 +115,66 @@ type ChainReport struct {
 	Consistent       int
 	Pruned           int
 	PrunedUnverified int
+	// Acknowledged counts records a restore record accounts for.
+	Acknowledged int
+	// RestoreRecords counts restore records; UntrustedRestores those that
+	// account for nothing here, because they are not sealed under the key
+	// this verifier holds — or it holds none.
+	RestoreRecords    int
+	UntrustedRestores int
 
 	// Newest is the newest record used; nil when none was.
 	Newest *Checked
 	// Failures lists every failing record, oldest first.
 	Failures []Checked
+	// Restores lists the restores the chain agrees with, oldest first.
+	Restores []RestoreFinding
 	// Finding names what the earliest failure means for the chain, in one
 	// sentence; "" when there is none. Hint adds the reading it cannot rule
 	// out, where there is one.
 	Finding string
 	Hint    string
+}
+
+// RestoreFinding is a restore the chain agrees with, and what it gave up.
+type RestoreFinding struct {
+	// Record is the restore record.
+	Record Checked
+	// Superseded counts the records sealed before it that it accounts for.
+	Superseded int
+	// The history lost: ids LostFromID through LostThroughID, LostEvents of
+	// them, written between From and To — from the newest row the backup
+	// holds to the newest checkpoint that saw what came after. The record
+	// names the newest checkpoint the restore found; one the verifier finds
+	// later still widens the window.
+	LostFromID, LostThroughID int64
+	LostEvents                int64
+	From, To                  string
+}
+
+// Summary is the restore in one line.
+func (f RestoreFinding) Summary() string {
+	x := f.Record.Restore
+	if x == nil {
+		return ""
+	}
+	line := fmt.Sprintf("restored (acknowledged): %d events lost between %s and %s, by %s, reason %q",
+		f.LostEvents, orDash(f.From), orDash(f.To), orDash(x.Actor), x.Reason)
+	if f.LostEvents == 0 {
+		line = fmt.Sprintf("restored (acknowledged): no checkpoint saw an event after %s, by %s, reason %q",
+			orDash(f.From), orDash(x.Actor), x.Reason)
+	}
+	if !f.Vouched() {
+		line += fmt.Sprintf(" — from a backup nothing vouched for (its sidecar %s)", orDash(x.Sidecar))
+	}
+	return line
+}
+
+// Vouched reports whether the restored backup's sealed sidecar verified: the
+// restore accounts for what it lost either way, but only a vouched-for backup
+// says what was put back.
+func (f RestoreFinding) Vouched() bool {
+	return f.Record.Restore != nil && f.Record.Restore.Sidecar == "sealed"
 }
 
 // OK reports whether no record found anything against the chain.
@@ -120,7 +190,8 @@ func (r ChainReport) OK() bool { return len(r.Failures) == 0 }
 // or that cannot be checked here, are still judged for what they say against
 // the chain: their seal is not what makes a head they saw wrong. But only a
 // trusted record — sealed under the key when there is one — vouches for
-// anything, which matters for prunes: see checkArchive.
+// anything, which matters for prunes (see checkArchive) and for restores (see
+// acknowledgeRestores).
 func VerifyChain(db *statedb.DB, path, chain string, recs []Located, key *Key) (ChainReport, error) {
 	rep := ChainReport{Path: path, Chain: chain}
 	recs = append([]Located(nil), recs...)
@@ -153,6 +224,15 @@ func VerifyChain(db *statedb.DB, path, chain string, recs []Located, key *Key) (
 			checked = append(checked, c)
 			continue
 		}
+		if r.IsRestore() {
+			rep.RestoreRecords++
+			if why := v.refuseRestore(c); why != "" {
+				rep.Refused++
+				c.Result, c.Detail = ResultRefused, why
+				checked = append(checked, c)
+				continue
+			}
+		}
 		anchor, err := v.judge(&c)
 		if err != nil {
 			return rep, err
@@ -169,6 +249,12 @@ func VerifyChain(db *statedb.DB, path, chain string, recs []Located, key *Key) (
 		checkArchive(a, v.boundaryBefore(a), vouched[id], checked, idx)
 	}
 
+	restores, err := v.acknowledgeRestores(checked, vouched)
+	if err != nil {
+		return rep, err
+	}
+	rep.Restores = restores
+
 	for i := range checked {
 		c := checked[i]
 		switch c.Result {
@@ -178,6 +264,11 @@ func VerifyChain(db *statedb.DB, path, chain string, recs []Located, key *Key) (
 			rep.Pruned++
 		case ResultPrunedUnverified:
 			rep.PrunedUnverified++
+		case ResultAcknowledged:
+			rep.Acknowledged++
+		}
+		if c.IsRestore() && c.Result != ResultRefused && c.Seal != SealValid {
+			rep.UntrustedRestores++
 		}
 		if c.Result != ResultRefused {
 			cc := c
@@ -613,28 +704,59 @@ func name(rep ChainReport, checked []Checked, head statedb.AuditHead) (string, s
 		}
 	}
 
+	msg, hint := first.Detail, ""
 	switch first.Result {
 	case ResultTruncated:
-		return fmt.Sprintf("tail truncated after id %d although a checkpoint at %s saw id %d",
-				head.LastID, at, r.LastID),
-			"the database was restored from a backup taken before then, and nothing has been written since"
+		msg = fmt.Sprintf("tail truncated after id %d although a checkpoint at %s saw id %d",
+			head.LastID, at, r.LastID)
+		hint = "the database was restored from a backup taken before then, and nothing has been written since"
 	case ResultRestored, ResultAnchorMissing:
-		msg := fmt.Sprintf("the database was restored from a backup older than %s", at)
+		msg = fmt.Sprintf("the database was restored from a backup older than %s", at)
 		if agreed != nil {
 			msg += fmt.Sprintf(": it still agrees with the checkpoint at %s (id %d), and has been written to since",
 				FormatTime(agreed.At()), agreed.LastID)
 		}
-		hint := "its tail was deleted while the hub kept writing; either way, history after that point was replaced"
+		hint = "its tail was deleted while the hub kept writing; either way, history after that point was replaced"
 		if first.Result == ResultAnchorMissing {
 			hint = first.Detail
 		}
-		return msg, hint
+		if len(rep.Restores) == 0 && rep.RestoreRecords == 0 {
+			hint += " — and no restore record accounts for it"
+		}
 	case ResultRewritten:
-		return first.Detail, "the chain verifies only because every hash after the change was recomputed"
+		hint = "the chain verifies only because every hash after the change was recomputed"
 	case ResultRefused:
-		return fmt.Sprintf("checkpoint refused: %s", first.Detail), ""
+		msg = fmt.Sprintf("checkpoint refused: %s", first.Detail)
+	case ResultRestoreMismatch:
+		hint = "the chain was cut back, or rewritten, after the restore it records"
 	}
-	return first.Detail, ""
+	if first.Result.supersedable() {
+		if line, why, ok := untrustedRestoreAfter(checked, first); ok {
+			hint = fmt.Sprintf("a restore record on line %d would account for it, but %s", line, why)
+		}
+	}
+	return msg, hint
+}
+
+// untrustedRestoreAfter finds a restore record sealed after c that would have
+// accounted for it had anything vouched for it, and says why nothing does.
+func untrustedRestoreAfter(checked []Checked, c Checked) (int, string, bool) {
+	for _, r := range checked {
+		if !r.IsRestore() || r.Restore == nil || !r.At().After(c.At()) || c.LastID <= r.Restore.RestoredID {
+			continue
+		}
+		switch {
+		case r.Result == ResultRefused:
+			return r.Line, "it was refused: " + r.Detail, true
+		case r.Seal == SealForeignKey:
+			return r.Line, "it is sealed under another key than this " + EnvKey + " derives", true
+		case r.Seal == SealUnchecked:
+			return r.Line, "there is no " + EnvKey + " here to check its seal", true
+		case r.Seal == SealUnsigned:
+			return r.Line, "it is unsigned, and a restore record counts only under the hub's seal", true
+		}
+	}
+	return 0, "", false
 }
 
 // sameHash compares two hex hashes. Neither is secret — they are public row

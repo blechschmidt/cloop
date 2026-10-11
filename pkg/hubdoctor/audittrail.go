@@ -301,6 +301,25 @@ func checkAuditCheckpoints(dir string, cfg *config.Config, db *statedb.DB, opts 
 		})
 		return
 	}
+	if n := len(rep.Restores); n > 0 {
+		// A restore the chain agrees with, sealed under the hub's key: not an
+		// incident, and not something to stop seeing either. It stays in the
+		// window until enough new checkpoints push it out.
+		newest := rep.Restores[n-1]
+		add(Finding{
+			Check: "audit.checkpoints.chain", Title: "Audit chain against its checkpoints", Severity: SeverityWarn,
+			Message: newest.Summary() + fmt.Sprintf(" — the restore record accounts for %d checkpoint(s), and the "+
+				"newest %d agree with the chain", newest.Superseded, rep.Records-rep.Acknowledged),
+			Remediation: "Nothing to repair if the restore was yours; if it was not, treat it as an incident and run " +
+				"`cloop hub audit verify --checkpoints " + cp.File + "`",
+			Details: map[string]any{
+				"restored_to": newest.Record.Restore.RestoredID, "lost_events": newest.LostEvents,
+				"from": newest.From, "to": newest.To, "actor": newest.Record.Restore.Actor,
+				"backup_sha256": newest.Record.Restore.BackupSHA256,
+			},
+		})
+		return
+	}
 	var notes []string
 	if rep.ForeignKey > 0 {
 		notes = append(notes, fmt.Sprintf("%d sealed under another key", rep.ForeignKey))

@@ -293,7 +293,11 @@ func hubAuditCheckpointRecords(groups map[string][]auditcheckpoint.Located, o au
 // hubAuditPrintCheckpointReport renders one chain's checkpoint verdict.
 func hubAuditPrintCheckpointReport(w io.Writer, o auditmerge.Opened, rep auditcheckpoint.ChainReport, red, yellow, dim *color.Color) {
 	if rep.OK() {
-		color.New(color.FgGreen, color.Bold).Fprintf(w, "OK            %-13s %s\n", o.Source, o.Path)
+		if len(rep.Restores) > 0 {
+			yellow.Fprintf(w, "RESTORED      %-13s %s — acknowledged\n", o.Source, o.Path)
+		} else {
+			color.New(color.FgGreen, color.Bold).Fprintf(w, "OK            %-13s %s\n", o.Source, o.Path)
+		}
 		agree := rep.Consistent + rep.Pruned + rep.PrunedUnverified
 		line := fmt.Sprintf("  %d checkpoint(s) agree with the chain", agree)
 		if rep.Newest != nil {
@@ -316,6 +320,21 @@ func hubAuditPrintCheckpointReport(w io.Writer, o auditmerge.Opened, rep auditch
 			}
 			fmt.Fprintf(w, "    line %-6d %-16s %s\n", f.Line, f.Result, f.Detail)
 		}
+	}
+	for _, r := range rep.Restores {
+		x := r.Record.Restore
+		fmt.Fprintf(w, "  %s\n", r.Summary())
+		dim.Fprintf(w, "    restore record on line %d, sealed under key %s; backup sha256 %s taken %s, "+
+			"restored to id %d; %d checkpoint(s) superseded\n", r.Record.Line, r.Record.KeyFingerprint,
+			shortHex(x.BackupSHA256), orDash(x.BackupTime), x.RestoredID, r.Superseded)
+		if len(x.SecretLoss) > 0 {
+			yellow.Fprintf(w, "    it went ahead without sealing key(s) %s (--accept-secret-loss)\n",
+				strings.Join(x.SecretLoss, ", "))
+		}
+	}
+	if rep.UntrustedRestores > 0 {
+		yellow.Fprintf(w, "  %d restore record(s) account for nothing here: not sealed under the key %s derives\n",
+			rep.UntrustedRestores, auditcheckpoint.EnvKey)
 	}
 	if rep.PrunedUnverified > 0 {
 		yellow.Fprintf(w, "  %d checkpoint(s) fall in a pruned prefix whose archive cannot be read here; "+

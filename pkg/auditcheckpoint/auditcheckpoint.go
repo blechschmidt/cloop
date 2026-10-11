@@ -36,6 +36,17 @@
 // The seal cannot stop records being deleted from the file. That is what
 // keeping the file off the box, or shipping the stderr copy, is for; the
 // doctor reports a newest checkpoint that has gone stale.
+//
+// # Restores
+//
+// Restoring a backup does to a chain what deleting its tail while the hub
+// keeps writing does, so `cloop db restore` writes a restore record (Task
+// 20410): a record sealed like any other, with a canonical form of its own,
+// naming the backup, the head the chain was restored to, the newest checkpoint
+// superseded, who and why, and pinning the audit.restored row the restore
+// appended. A verifier holding the key accepts it as the explanation for the
+// checkpoints sealed before it that saw past the restored head — see
+// restore.go — and nothing else does: an unsigned or forged record is refused.
 package auditcheckpoint
 
 import (
@@ -72,6 +83,9 @@ const (
 	ReasonInterval = "interval"
 	// ReasonShutdown: the leader shutting down cleanly.
 	ReasonShutdown = "shutdown"
+	// ReasonRestore: `cloop db restore` put a backup in place of the
+	// database; the record carries a Restore (Task 20410).
+	ReasonRestore = "restore"
 )
 
 // Chain roles, as the records name them.
@@ -122,10 +136,98 @@ type Record struct {
 	Time   string `json:"time"`
 	Member string `json:"member,omitempty"`
 
+	// Restore says what a restore record records; nil on every other record.
+	Restore *Restore `json:"restore,omitempty"`
+
 	// KeyFingerprint names the key Seal was computed under. Both are empty
 	// on an unsigned record.
 	KeyFingerprint string `json:"key_fingerprint,omitempty"`
 	Seal           string `json:"seal,omitempty"`
+}
+
+// Restore is what a restore record says happened (Task 20410): which backup
+// replaced the database, the head its chain was restored to, the newest
+// checkpoint that saw history the backup does not hold, and who did it and
+// why.
+//
+// `cloop db restore` writes it after the restore has appended its own
+// audit.restored row, so the record's head — Record.LastID and LastRowHash — is
+// that row. A chain cut back to the restored head afterwards, or rebuilt from
+// it with other rows, disagrees with the record exactly as it would with any
+// checkpoint.
+//
+// Only a record sealed under the key the verifier holds accounts for anything:
+// it is what turns "the chain lost the rows these checkpoints saw" from a
+// finding into an acknowledged restore, so whoever can write the database or
+// the checkpoint file must not be able to write one. The seal is computed under
+// the checkpoint key, which nothing in state.db can produce.
+type Restore struct {
+	// BackupSHA256 is the restored file's digest; BackupTime when the backup
+	// was taken, from its sidecar ("" when it had none). Sidecar says what
+	// vouched for the file: "sealed" when its sidecar's seal verified under
+	// the hub's key, "unchecked" when it was restored with --allow-unsealed,
+	// "skipped" with --skip-checksum.
+	BackupSHA256 string `json:"backup_sha256"`
+	BackupTime   string `json:"backup_time,omitempty"`
+	Sidecar      string `json:"sidecar"`
+
+	// RestoredID, RestoredRowHash and RestoredTime are the newest row the
+	// backup holds: where the chain was restored to. All zero for a backup
+	// whose chain was empty.
+	RestoredID      int64  `json:"restored_id"`
+	RestoredRowHash string `json:"restored_row_hash,omitempty"`
+	RestoredTime    string `json:"restored_time,omitempty"`
+
+	// SupersededID, SupersededRowHash and SupersededTime are the newest
+	// checkpoint the restore found that saw an id past RestoredID: the far end
+	// of the history the restore gave up, as far as any checkpoint recorded
+	// it. Zero when none did.
+	SupersededID      int64  `json:"superseded_id,omitempty"`
+	SupersededRowHash string `json:"superseded_row_hash,omitempty"`
+	SupersededTime    string `json:"superseded_time,omitempty"`
+
+	// Actor restored it, for Reason, which the command requires.
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+
+	// SecretLoss names the sealing keys the restore went ahead without,
+	// under --accept-secret-loss: whatever the backup holds sealed under them
+	// can no longer be opened.
+	SecretLoss []string `json:"secret_loss,omitempty"`
+}
+
+// LostEvents is how many events the superseded checkpoint saw past the
+// restored head — the history the restore gave up, as far as a checkpoint saw
+// it. Events written after that checkpoint and before the restore are not
+// counted: nothing outside the database recorded them.
+func (x Restore) LostEvents() int64 {
+	if x.SupersededID > x.RestoredID {
+		return x.SupersededID - x.RestoredID
+	}
+	return 0
+}
+
+// IsRestore reports whether r claims to be a restore record. A record that
+// claims it by its reason without carrying a Restore, or carries one under
+// another reason, was not written by `cloop db restore`.
+func (r Record) IsRestore() bool { return r.Reason == ReasonRestore || r.Restore != nil }
+
+// RestoreRecord is the unsealed restore record for path's chain, whose head —
+// read after the restore appended its audit.restored row — is head.
+func RestoreRecord(head statedb.AuditHead, chain, path, member string, at time.Time, x Restore) Record {
+	r := HeadRecord(head, chain, path, ReasonRestore, 0, member, at)
+	valid := func(s string) string { return strings.ToValidUTF8(s, "\uFFFD") }
+	x.Actor, x.Reason, x.Sidecar = valid(x.Actor), valid(x.Reason), valid(x.Sidecar)
+	loss := make([]string, len(x.SecretLoss))
+	for i, k := range x.SecretLoss {
+		loss[i] = valid(k)
+	}
+	if len(loss) == 0 {
+		loss = nil
+	}
+	x.SecretLoss = loss
+	r.Restore = &x
+	return r
 }
 
 // At parses Time, returning the zero time when it does not parse.
@@ -177,9 +279,18 @@ func FormatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 // order, strings quoted so no field can bleed into the next. JSON is not used
 // because its encoding is not unique — a reordered or re-escaped object would
 // be the same record with a different seal.
+//
+// A restore record has a canonical form of its own, with a different first
+// line: a seal over a checkpoint can never verify as a restore record's, or the
+// other way round, so neither can be made by adding or stripping a Restore.
+// Every other record's form is unchanged since version 1.
 func (r Record) canonical() []byte {
 	var b strings.Builder
-	b.WriteString("cloop-audit-checkpoint/v1\n")
+	if r.Restore != nil {
+		b.WriteString("cloop-audit-restore/v1\n")
+	} else {
+		b.WriteString("cloop-audit-checkpoint/v1\n")
+	}
 	str := func(name, v string) {
 		b.WriteString(name)
 		b.WriteByte('=')
@@ -211,6 +322,23 @@ func (r Record) canonical() []byte {
 	num("anchor_verified", verified)
 	str("time", r.Time)
 	str("member", r.Member)
+	if x := r.Restore; x != nil {
+		str("restore.backup_sha256", x.BackupSHA256)
+		str("restore.backup_time", x.BackupTime)
+		str("restore.sidecar", x.Sidecar)
+		num("restore.restored_id", x.RestoredID)
+		str("restore.restored_row_hash", x.RestoredRowHash)
+		str("restore.restored_time", x.RestoredTime)
+		num("restore.superseded_id", x.SupersededID)
+		str("restore.superseded_row_hash", x.SupersededRowHash)
+		str("restore.superseded_time", x.SupersededTime)
+		str("restore.actor", x.Actor)
+		str("restore.reason", x.Reason)
+		num("restore.secret_loss", int64(len(x.SecretLoss)))
+		for _, k := range x.SecretLoss {
+			str("restore.secret_loss.key", k)
+		}
+	}
 	str("key_fingerprint", r.KeyFingerprint)
 	return []byte(b.String())
 }

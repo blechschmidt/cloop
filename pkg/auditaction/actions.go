@@ -410,6 +410,10 @@ const (
 	ActionSealingKeyRotated Action = "sealing_key.rotated"
 	// ActionSealingKeyRetired records a superseded sealing key being retired.
 	ActionSealingKeyRetired Action = "sealing_key.retired"
+	// ActionSealingKeyEscrowed records CLOOP_SECRET_KEY being escrowed under
+	// an operator's passphrase, or an escrow being recorded again after a
+	// restore (Task 20410).
+	ActionSealingKeyEscrowed Action = "sealing_key.escrowed"
 
 	// ── hub_ca ─────────────────────────────────────────────────────────────
 
@@ -509,4 +513,8 @@ const (
 	// chain it is written in: how many, of which actions, when and why
 	// (Task 20404).
 	ActionAuditGap Action = "audit.gap"
+	// ActionAuditRestored records a database restored from a backup, in the
+	// chain that was restored: the history it gave up, who and why
+	// (Task 20410).
+	ActionAuditRestored Action = "audit.restored"
 )
