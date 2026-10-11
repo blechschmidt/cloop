@@ -477,6 +477,17 @@ func hostsControlPlane(cmdName string) bool {
 	return false
 }
 
+// recoversItsDatabase reports whether cmd exists to put the working
+// directory's state database back — `cloop db restore`, and `cloop hub key
+// escrow import` ahead of it (Task 20410). Reconciliation opens that database,
+// and in a directory that has none yet creates it, so on a replacement host a
+// restore found an empty database where there was none and asked for --force
+// to replace it. A command recovering the database must not be the one that
+// makes it up.
+func recoversItsDatabase(cmd *cobra.Command) bool {
+	return cmd == dbRestoreCmd || cmd == hubKeyEscrowImportCmd
+}
+
 // wantsPodReconcile reports whether a command is long-running enough to be
 // worth paying the startup orphan sweep for. These are the entry points a
 // control plane actually restarts as; everything else is a short CLI call

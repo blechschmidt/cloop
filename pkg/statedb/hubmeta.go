@@ -58,6 +58,29 @@ func (d *DB) HubMeta(key string) (string, bool, error) {
 	return value, true, nil
 }
 
+// ReadHubMeta is HubMeta through a bare connection: one OpenConn opened,
+// typically ReadOnly, so that reading a hub's record neither migrates its
+// database nor, when the file is missing, creates one (Task 20410). A database
+// without the metadata table holds no value.
+func ReadHubMeta(conn *sql.DB, key string) (string, bool, error) {
+	full, err := hubMetaKey(key)
+	if err != nil {
+		return "", false, err
+	}
+	if ok, err := tableExists(conn, "metadata"); err != nil || !ok {
+		return "", false, err
+	}
+	var value string
+	err = conn.QueryRow(`SELECT value FROM metadata WHERE key = ?`, full).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("statedb: hub meta %s: %w", key, classifyDriverErr(err))
+	}
+	return value, true, nil
+}
+
 // SetHubMeta writes a hub-scoped metadata value, replacing any previous one.
 func (d *DB) SetHubMeta(key, value string) error {
 	full, err := hubMetaKey(key)

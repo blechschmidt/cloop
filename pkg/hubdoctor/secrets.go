@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/keyescrow"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -129,7 +130,81 @@ func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 	}
 
 	checkKeyOpensKeyring(dir, add)
+	checkKeyEscrow(dir, key, add)
 	_ = cfg
+}
+
+// checkKeyEscrow reports whether the key is escrowed, and whether the escrow
+// on record still holds it (Task 20410).
+//
+// Every sealing key derives from CLOOP_SECRET_KEY, so losing .cloop/hub.env
+// loses everything sealed, however often the keys were rotated — unless the
+// key itself was escrowed. And an escrow of a key the hub no longer runs on is
+// worse than none: it recovers nothing sealed now, while looking like a
+// recovery plan. The hub records only the escrow's id and the key's
+// fingerprint, which is all this compares.
+func checkKeyEscrow(dir, key string, add addFn) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return // checkStorage reports a database that will not open
+	}
+	defer func() { _ = db.Close() }()
+
+	const exportHint = "`cloop hub key escrow export --output <file off this host>`, and keep the passphrase " +
+		"apart from the file"
+	rec, ok, err := keyescrow.LoadRecord(db)
+	switch {
+	case err != nil:
+		add(Finding{
+			Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityWarn,
+			Message:     "the hub's escrow record could not be read: " + err.Error(),
+			Remediation: "Escrow the key again: " + exportHint,
+		})
+		return
+	case !ok:
+		add(Finding{
+			Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityWarn,
+			Message: "no escrow of " + secretbroker.EnvPassphraseKey + " is recorded: lose .cloop/hub.env and every " +
+				"sealed secret, session and hub CA key is lost with it — no rotation can help, since every key derives from it",
+			Remediation: exportHint + ". After restoring a backup taken before an existing escrow, record it again: " +
+				"`cloop hub key escrow verify <file> --record`",
+		})
+		return
+	}
+	fingerprint, err := keyescrow.Fingerprint([]byte(key))
+	if err != nil {
+		add(Finding{
+			Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityWarn,
+			Message:     "the key's fingerprint could not be computed to compare with the escrow on record: " + err.Error(),
+			Remediation: "Run `cloop hub key escrow verify <file>` against the escrow file",
+		})
+		return
+	}
+	who := rec.CreatedAt
+	if rec.CreatedBy != "" {
+		who += " by " + rec.CreatedBy
+	}
+	if fingerprint != rec.KeyFingerprint {
+		add(Finding{
+			Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityFail,
+			Message: fmt.Sprintf("the escrow on record (%s, made %s) holds key %s, and the %s in use is %s: "+
+				"recovering from it would restore a key that opens nothing sealed now",
+				rec.ID, who, rec.KeyFingerprint, secretbroker.EnvPassphraseKey, fingerprint),
+			Remediation: "Escrow the key in use: " + exportHint,
+			Details:     map[string]any{"escrow_id": rec.ID, "escrowed_key": rec.KeyFingerprint, "active_key": fingerprint},
+		})
+		return
+	}
+	add(Finding{
+		Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityPass,
+		Message: fmt.Sprintf("escrowed as %s (%s), made %s; it holds the key in use, %s — rehearse recovery "+
+			"with `cloop hub key escrow verify <file>`", rec.ID, rec.KDF, who, fingerprint),
+		Details: map[string]any{"escrow_id": rec.ID, "key_fingerprint": fingerprint},
+	})
 }
 
 // checkKeyOpensKeyring asks the hub's own keyring whether the key opens this
