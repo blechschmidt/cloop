@@ -1332,6 +1332,32 @@ jobs:
             exit 1
           }
 
+      - name: Project directories confined on a container sandbox
+        timeout-minutes: 8 # observed locally: 57s once the image layer is cached
+        env:
+          CLOOP_CONFINE_CONTAINER_E2E: "1"
+          CLOOP_FLAGSHIP_BIN: /tmp/cloop-flagship-bin
+        # Task 20418: a strict hub whose only executor is a container that
+        # bind-mounts the project's directory. A maintainer's token cannot
+        # register the projects root's parent, the root, a directory outside
+        # it or the hub's own; a project by name is initialised in the
+        # container; and a row inside the hub's directory, written to the
+        # registry as a registry from before the rule holds it, is flagged,
+        # refused at dispatch without reaching Docker, and fails `cloop hub
+        # doctor`. Same image as the feature step, so the layer is cached; same
+        # PASS-line assertion, because the test skips without docker.
+        run: |
+          set -euo pipefail
+          # tests/e2e runs the hub from ./cloop; the static build serves.
+          cp /tmp/cloop-flagship-bin ./cloop
+          go test ./tests/e2e/ -run '^TestE2EProjectConfinementInAContainer$' -v -count=1 -timeout 6m \
+            2>&1 | tee /tmp/confine-container.log
+          grep -qE '^--- PASS: TestE2EProjectConfinementInAContainer \(' /tmp/confine-container.log || {
+            echo "::error::go test succeeded but TestE2EProjectConfinementInAContainer did not pass — it" \
+                 "was skipped (docker unavailable, or CLOOP_CONFINE_CONTAINER_E2E lost); see the log."
+            exit 1
+          }
+
       - name: Circuit diagnostics on failure
         timeout-minutes: 3 # observed: <1s; bounded because it shells out too
         # A failure here is a failure of an eight-step circuit, and the step

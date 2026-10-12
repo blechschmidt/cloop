@@ -356,3 +356,60 @@ func TestRemoteInitWarnsWhenTheDefaultExecutorWouldRefuse(t *testing.T) {
 		t.Fatalf("init did not warn %q:\n%s", want, out)
 	}
 }
+
+// TestRemoteInitDirOutsideTheRootIsAnAdministratorsDecision: a maintainer
+// names a --dir outside the hub's projects root and is refused before anything
+// is made, in the dashboard's words, with how to create it instead (Task
+// 20418). The same --dir is an administrator's to choose, and a --dir inside
+// the root is the maintainer's.
+func TestRemoteInitDirOutsideTheRootIsAnAdministratorsDecision(t *testing.T) {
+	w := newRemoteWorld(t)
+	w.as(t, alexEmail, ssohubtest.GroupMaintainers)
+	storeSecret(t, w, "alex-pat", "github_pat", patPayload, true)
+	checkoutOf(t, "https://github.com/acme/gizmos")
+
+	outside := filepath.Join(t.TempDir(), "gizmos")
+	out, err := runRemoteCLI(t, "init", "--goal", "Gizmos", "--dir", outside, "--repo-secret", "alex-pat")
+	if err == nil {
+		t.Fatalf("a maintainer created a project outside the projects root:\n%s", out)
+	}
+	root := filepath.Join(w.hub.Home, "projects")
+	for _, want := range []string{"only an administrator places a project outside the hub's projects root",
+		"HTTP 403", "needs:      executor.manage (hub-wide)", "your role:  maintainer",
+		"leave out --dir and it goes under " + root} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "binds a project to an executor") {
+		t.Errorf("the refusal explains an executor binding nobody asked for:\n%v", err)
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("the refused init made %s: %v", outside, err)
+	}
+
+	// The root itself and its parent — here the hub's home — are nobody's
+	// project.
+	for dir, want := range map[string]string{root: "is the hub's projects root",
+		filepath.Join(root, ".."): "the hub user's home directory"} {
+		if _, err := runRemoteCLI(t, "init", "--goal", "Gizmos", "--dir", dir, "--repo-secret", "alex-pat"); err == nil ||
+			!strings.Contains(err.Error(), want) {
+			t.Fatalf("init --dir %s = %v, want a refusal saying %q", dir, err, want)
+		}
+	}
+
+	// Inside the root, the maintainer's own choice of directory.
+	inside := filepath.Join(root, "gizmos-here")
+	if out, err := runRemoteCLI(t, "init", "--goal", "Gizmos", "--dir", inside, "--repo-secret", "alex-pat", "--json"); err != nil {
+		t.Fatalf("init --dir inside the root: %v\n%s", err, out)
+	} else if v := decodeInit(t, out); v.Project.Path != inside {
+		t.Fatalf("created at %s, want %s", v.Project.Path, inside)
+	}
+
+	// And outside it, an administrator's.
+	w.as(t, rootEmail)
+	storeSecret(t, w, "root-pat", "github_pat", patPayload, true)
+	if out, err := runRemoteCLI(t, "init", "--goal", "Gizmos", "--dir", outside, "--repo-secret", "root-pat", "--json"); err != nil {
+		t.Fatalf("an administrator's init --dir outside the root: %v\n%s", err, out)
+	}
+}
