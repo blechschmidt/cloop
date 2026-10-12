@@ -77,10 +77,27 @@ type PeerOptions struct {
 	// ServerName overrides the name certificates are verified against, for
 	// members advertised by IP whose certificate names the public host.
 	ServerName string
-	// Timeout bounds a Call. Forwarded requests are not bounded: they may be
-	// WebSockets or event streams that live as long as the client wants.
+	// Timeout bounds a Call. Forwarded requests are not bounded as a whole:
+	// they may be WebSockets or event streams that live as long as the client
+	// wants.
 	Timeout time.Duration
+	// HeaderTimeout bounds how long a forwarded request waits for the owner's
+	// response headers (Task 20419): how long a caller can be held by a member
+	// that accepted the request and never answers it. Once the headers arrive
+	// the body streams for as long as it lasts. Zero is
+	// DefaultPeerHeaderTimeout.
+	HeaderTimeout time.Duration
 }
+
+// DefaultPeerHeaderTimeout is how long a forwarded request waits for the
+// owner's response headers. It has to outlast the slowest request a member
+// answers only once its work is done — a voice transcription or a project's
+// `cloop init` run on an edge agent, each bounded at five minutes — or the
+// caller is told the member could not be reached while the work goes on
+// there. A member that stops answering altogether is not left to this bound:
+// the probe judges it unresponsive within its window, and the requests
+// waiting on it are failed then (see probe.go).
+const DefaultPeerHeaderTimeout = 6 * time.Minute
 
 type peerChannel struct {
 	n         *Node
@@ -90,10 +107,20 @@ type peerChannel struct {
 
 	mu     sync.Mutex
 	nonces map[string]time.Time
+
+	// inflight are the forwarded requests and calls waiting on each member,
+	// by member id, so that judging a member unresponsive fails them at once
+	// rather than at their own timeouts. Guarded by mu.
+	inflight  map[string]map[uint64]context.CancelCauseFunc
+	inflightN uint64
 }
 
 func newPeerChannel(n *Node, key []byte, opts PeerOptions) (*peerChannel, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.RootCAs, ServerName: opts.ServerName}
+	headerTimeout := opts.HeaderTimeout
+	if headerTimeout <= 0 {
+		headerTimeout = DefaultPeerHeaderTimeout
+	}
 	tr := &http.Transport{
 		Proxy:                 nil, // peers are reached directly, never via HTTP_PROXY
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -102,13 +129,52 @@ func newPeerChannel(n *Node, key []byte, opts PeerOptions) (*peerChannel, error)
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 		ForceAttemptHTTP2:     false,
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &peerChannel{n: n, key: key, transport: tr, timeout: timeout, nonces: map[string]time.Time{}}, nil
+	return &peerChannel{
+		n: n, key: key, transport: tr, timeout: timeout,
+		nonces:   map[string]time.Time{},
+		inflight: map[string]map[uint64]context.CancelCauseFunc{},
+	}, nil
+}
+
+// track registers a request waiting on member, cancelled with a cause should
+// the member be judged unresponsive. The returned func deregisters it.
+func (p *peerChannel) track(member string, cancel context.CancelCauseFunc) func() {
+	p.mu.Lock()
+	p.inflightN++
+	id := p.inflightN
+	if p.inflight[member] == nil {
+		p.inflight[member] = map[uint64]context.CancelCauseFunc{}
+	}
+	p.inflight[member][id] = cancel
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		delete(p.inflight[member], id)
+		if len(p.inflight[member]) == 0 {
+			delete(p.inflight, member)
+		}
+		p.mu.Unlock()
+	}
+}
+
+// failInflight cancels every request waiting on member with cause, and
+// reports how many there were.
+func (p *peerChannel) failInflight(member string, cause error) int {
+	p.mu.Lock()
+	waiting := p.inflight[member]
+	delete(p.inflight, member)
+	p.mu.Unlock()
+	for _, cancel := range waiting {
+		cancel(cause)
+	}
+	return len(waiting)
 }
 
 // loadPeerKey returns the control plane's peer secret, creating it on first
@@ -364,6 +430,17 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 		writePeerError(w, http.StatusBadGateway, err.Error())
 		return err
 	}
+	// A member judged unresponsive is not asked at all (Task 20419): the
+	// request would wait on it for the header timeout and fail anyway.
+	if err := n.unresponsiveErr(to.ID); err != nil {
+		writePeerError(w, http.StatusBadGateway,
+			fmt.Sprintf("the hub member that owns this request (%s) is not answering: %v", to.ID, err))
+		return err
+	}
+	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
+	defer n.peer.track(to.ID, cancel)()
+	r = r.WithContext(ctx)
 	var proxyErr error
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -392,6 +469,9 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 		Transport:     n.peer.transport,
 		FlushInterval: -1,
 		ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, err error) {
+			if cause := context.Cause(ctx); errors.Is(cause, ErrMemberUnresponsive) {
+				err = cause
+			}
 			proxyErr = err
 			writePeerError(rw, http.StatusBadGateway,
 				fmt.Sprintf("the hub member that owns this request (%s) could not be reached: %v", to.ID, err))
@@ -402,14 +482,27 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 }
 
 // Call makes a JSON request to a peer's internal API: in is sent as the body
-// (nil for none) and a 2xx response is decoded into out (nil to discard).
+// (nil for none) and a 2xx response is decoded into out (nil to discard). A
+// member judged unresponsive is not asked: Call fails at once with an error
+// wrapping ErrMemberUnresponsive (Task 20419).
 func (n *Node) Call(ctx context.Context, to Member, method, path string, in, out any) error {
+	return n.call(ctx, to, method, path, in, out, false)
+}
+
+// call is Call; probe marks the probe's own request, which asks a member
+// judged unresponsive exactly to learn whether it answers again.
+func (n *Node) call(ctx context.Context, to Member, method, path string, in, out any, probe bool) error {
 	if n == nil || n.peer == nil {
 		return errors.New("hubcluster: not a cluster member")
 	}
 	target, err := n.memberURL(to)
 	if err != nil {
 		return err
+	}
+	if !probe {
+		if err := n.unresponsiveErr(to.ID); err != nil {
+			return fmt.Errorf("hubcluster: call %s %s on %s: %w", method, path, to.ID, err)
+		}
 	}
 	var body io.Reader
 	if in != nil {
@@ -418,6 +511,11 @@ func (n *Node) Call(ctx context.Context, to Member, method, path string, in, out
 			return fmt.Errorf("hubcluster: encode call: %w", err)
 		}
 		body = bytes.NewReader(b)
+	}
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+	if !probe {
+		defer n.peer.track(to.ID, cancelCause)()
 	}
 	ctx, cancel := context.WithTimeout(ctx, n.peer.timeout)
 	defer cancel()
@@ -436,6 +534,9 @@ func (n *Node) Call(ctx context.Context, to Member, method, path string, in, out
 	n.peer.sign(req, to.ID, "")
 	resp, err := (&http.Client{Transport: n.peer.transport}).Do(req)
 	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, ErrMemberUnresponsive) {
+			err = cause
+		}
 		return fmt.Errorf("hubcluster: call %s %s on %s: %w", method, path, to.ID, err)
 	}
 	defer resp.Body.Close()

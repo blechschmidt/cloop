@@ -57,6 +57,10 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*
 		Version:      Version(),
 		Endpoints:    endpoints,
 		Peer:         peer,
+		// Ask every peer whether it answers, not only whether it heartbeats
+		// (Task 20419): a member that heartbeats while its requests hang has
+		// its runs adopted and is no longer forwarded to.
+		ProbeInterval: hubcluster.DefaultProbeInterval,
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "cluster: "+format+"\n", args...)
 		},

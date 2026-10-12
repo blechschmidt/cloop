@@ -40,7 +40,10 @@ type Owner struct {
 	Member Member
 	// Self reports that this member is the owner.
 	Self bool
-	// Alive reports whether the owner is alive.
+	// Alive reports whether the owner serves: heartbeating, and not judged
+	// unresponsive by this member (Serving). An owner that heartbeats but
+	// does not answer is not alive here (Task 20419): what it holds is
+	// adopted and nothing is forwarded to it, as if it had died.
 	Alive bool
 	// Row is the stored claim, needed to adopt or drop it.
 	Row statedb.HubOwnerRow
@@ -87,7 +90,7 @@ func (n *Node) ownerFrom(row statedb.HubOwnerRow) Owner {
 	if m, ok := n.Member(row.InstanceID); ok {
 		o.Member = m
 	}
-	o.Alive = o.Self || n.IsAlive(row.InstanceID)
+	o.Alive = o.Self || n.Serving(row.InstanceID)
 	return o
 }
 

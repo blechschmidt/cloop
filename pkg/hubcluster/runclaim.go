@@ -30,10 +30,21 @@ const DefaultOrphanRunGrace = 2 * time.Minute
 // The hub's own run metadata embeds it, so the field is written and read under
 // one name.
 type RunClaimMeta struct {
-	// Dispatching marks a claim taken before its workload exists. A member
-	// that dies inside that window leaves a claim with nothing behind it,
-	// which the leader clears rather than tries to adopt.
+	// Dispatching marks a claim taken before its workload is on record. A
+	// member that dies inside that window leaves a claim the leader clears
+	// rather than tries to adopt — once it has stopped whatever workload the
+	// dispatch started (RunID, Task 20419).
 	Dispatching bool `json:"dispatching,omitempty"`
+	// RunID names the run the dispatch is starting, set as soon as its
+	// executor is asked (Task 20419). A dispatching claim with one may have a
+	// workload behind it, which the dispatch intent of that run names.
+	RunID string `json:"run_id,omitempty"`
+}
+
+// MayHaveWorkload reports whether a claim may have a workload behind it: one
+// past dispatch, or one whose dispatch got as far as its executor.
+func (m RunClaimMeta) MayHaveWorkload() bool {
+	return !m.Dispatching || m.RunID != ""
 }
 
 // RunClaimLive reports whether o, a claim on a project's run held by a member
@@ -42,16 +53,18 @@ type RunClaimMeta struct {
 // A live owner is conclusive. A dead owner's claim fails closed for grace after
 // the owner was last seen: the run may be adopted by the member its agent
 // reconnects to, and acting on the project in that window would reset tasks
-// under a run that is about to resume. A claim the owner took before it had
-// dispatched anything has nothing behind it once the owner is gone, and does
-// not count. Metadata that cannot be decoded is judged as a claim with a
-// workload, the reading that fails closed.
+// under a run that is about to resume. A claim the owner took before it asked
+// any executor for anything has nothing behind it once the owner is gone, and
+// does not count; one whose dispatch reached an executor may have started a
+// workload, and counts until the grace runs out (Task 20419) — the leader
+// stops that workload in the meantime. Metadata that cannot be decoded is
+// judged as a claim with a workload, the reading that fails closed.
 func RunClaimLive(o Owner, now time.Time, grace time.Duration) bool {
 	if o.Alive {
 		return true
 	}
 	var meta RunClaimMeta
-	if err := o.Meta(&meta); err == nil && meta.Dispatching {
+	if err := o.Meta(&meta); err == nil && !meta.MayHaveWorkload() {
 		return false
 	}
 	since := o.Member.HeartbeatAt

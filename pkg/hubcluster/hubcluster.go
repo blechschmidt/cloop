@@ -158,6 +158,19 @@ type Options struct {
 	// Peer configures the channel members forward requests over.
 	Peer PeerOptions
 
+	// ProbeInterval, when positive, has this member ask every live peer over
+	// the peer channel whether it is answering, that often (Task 20419; see
+	// probe.go). Zero disables probing, which is right only where peers serve
+	// no HTTP at all — this package's own tests — since every peer would then
+	// be judged unresponsive.
+	ProbeInterval time.Duration
+	// ProbeTimeout bounds one probe. Zero is DefaultProbeTimeout.
+	ProbeTimeout time.Duration
+	// UnresponsiveAfter is how long a peer must fail every probe before it is
+	// judged unresponsive. Zero is MemberTTL: a member that heartbeats but
+	// does not answer is treated as down as soon as a crashed one would be.
+	UnresponsiveAfter time.Duration
+
 	// Logf receives operational messages. Nil discards them.
 	Logf func(format string, args ...any)
 
@@ -183,6 +196,12 @@ type Member struct {
 	LeftAt       time.Time         `json:"left_at,omitzero"`
 	// Alive is the verdict at the time the member list was read.
 	Alive bool `json:"alive"`
+	// Unresponsive reports that the member reading the list judged this one
+	// unresponsive: it heartbeats, and has failed every probe since
+	// UnresponsiveSince (Task 20419). Such a member is treated as down for
+	// adoption and forwarding while Alive stays true.
+	Unresponsive      bool      `json:"unresponsive,omitempty"`
+	UnresponsiveSince time.Time `json:"unresponsive_since,omitzero"`
 	// Leader reports whether this member held the leader lease then.
 	Leader bool `json:"leader"`
 	// Self marks the member reading the list.
@@ -225,6 +244,10 @@ type Node struct {
 	lead leadership
 	bus  *bus
 
+	// probes is what this member learned from asking its peers whether they
+	// answer (probe.go).
+	probes probes
+
 	// refreshKick asks the heartbeat loop to re-read the member table now,
 	// rather than at the next beat: a member joined or left.
 	refreshKick chan struct{}
@@ -256,6 +279,12 @@ func Join(opts Options) (*Node, error) {
 	}
 	if opts.Campaign <= 0 {
 		opts.Campaign = DefaultCampaign
+	}
+	if opts.ProbeTimeout <= 0 {
+		opts.ProbeTimeout = DefaultProbeTimeout
+	}
+	if opts.UnresponsiveAfter <= 0 {
+		opts.UnresponsiveAfter = opts.MemberTTL
 	}
 
 	store, owns, err := resolveStore(opts)
@@ -471,6 +500,10 @@ func (n *Node) Start(ctx context.Context) {
 	n.wg.Add(2)
 	go n.heartbeatLoop(runCtx)
 	go n.campaignLoop(runCtx)
+	if n.opts.ProbeInterval > 0 {
+		n.wg.Add(1)
+		go n.probeLoop(runCtx)
+	}
 	n.announce(memberJoined)
 }
 
@@ -560,10 +593,15 @@ func (n *Node) Members() []Member {
 		return nil
 	}
 	n.mu.RLock()
-	defer n.mu.RUnlock()
 	out := make([]Member, 0, len(n.members))
 	for _, m := range n.members {
 		out = append(out, m)
+	}
+	n.mu.RUnlock()
+	for i := range out {
+		if since := n.unresponsiveSince(out[i].ID); !since.IsZero() {
+			out[i].Unresponsive, out[i].UnresponsiveSince = true, since
+		}
 	}
 	sortMembers(out)
 	return out
@@ -641,8 +679,10 @@ func (n *Node) IsAlive(id string) bool {
 }
 
 // OnMembership registers fn to run after every refresh that changed which
-// members are alive. fn receives the live members, this one included. It runs
-// on the heartbeat goroutine and must not block.
+// members are alive, and after every probe that changed which of them answer
+// (Task 20419). fn receives the members that serve — alive and not judged
+// unresponsive — this one included. It runs on the heartbeat or the probe
+// goroutine and must not block.
 func (n *Node) OnMembership(fn func(live []Member)) {
 	if n == nil || fn == nil {
 		return
@@ -757,21 +797,10 @@ func (n *Node) refresh() error {
 	n.mu.Lock()
 	changed := liveSetChanged(n.members, next)
 	n.members = next
-	hooks := append([]func([]Member){}, n.onMembers...)
 	n.mu.Unlock()
 
 	if changed {
-		live := n.LiveMembers()
-		for _, fn := range hooks {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						n.logf("hubcluster: membership hook panicked: %v", r)
-					}
-				}()
-				fn(live)
-			}()
-		}
+		n.runMembershipHooks()
 	}
 	return nil
 }
