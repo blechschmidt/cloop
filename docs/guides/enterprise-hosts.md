@@ -547,8 +547,16 @@ that states no `disk:` at all. The executor's card shows `disk: enforced
 Pin what may run with an image trust policy (`sandbox.image_policy`:
 `allowed_registries`, `require_digest`, signature verification) so a repo cannot
 name an arbitrary image. It sits at the top level rather than under an executor
-because it governs every image any project names, whichever driver runs it. See
-[configuration](../reference/configuration.md).
+because it governs every image any project names, whichever driver runs it. On a
+critical host enrolled as a device that includes the host itself: its agent
+applies no policy of its own, so the hub checks a project's image before it
+dispatches, and under `require_signature` resolves a tag at its registry,
+verifies the digest with cosign *on the hub*, and sends the device that digest —
+so the hub needs `cosign`, and a route to the registries the policy names, even
+when no executor on it runs an image. The image you configure for the device's
+own sandbox is yours, and exempt. See
+[configuration](../reference/configuration.md) and
+[what is not mitigated](../security/model.md#what-is-not-mitigated).
 
 ## 4. Hardware and network devices
 
@@ -868,7 +876,8 @@ executors:
       resolvers: ["9.9.9.9:53"]
 
 # image trust is hub-wide, not per executor: one policy governs every image
-# any project may name, whichever driver ends up running it.
+# any project may name, whichever driver ends up running it — a device's
+# included, which the hub verifies before dispatch (cosign runs on the hub).
 sandbox:
   image_policy:
     # Registries are hosts. An entry containing "/" fails validation —

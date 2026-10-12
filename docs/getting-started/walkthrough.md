@@ -95,12 +95,15 @@ Each card's buttons are the executor's whole administration:
 - **Limits** — the most CPU, memory, disk and processes any one workload here
   may be given.
 - **Access** — which users and groups may place work on this executor at all.
-- **Cordon** stops new placements without disturbing what is running; **Drain**
+- **Cordon** stops new placements without disturbing what is running, and on
+  an enrolled device takes back the credentials the device holds; **Drain**
   retires it and waits for in-flight work to finish.
 - **Upgrade** / **Revoke** — enrolled devices only.
 
 Cordon and Drain are the pair to reach for before anything destructive: a
-cordoned executor keeps its running work and takes no more.
+cordoned executor keeps its running work and takes no more. `cloop executor
+cordon` and `drain` do the same from a terminal, and report which hub member
+took the device's credentials back.
 
 ---
 

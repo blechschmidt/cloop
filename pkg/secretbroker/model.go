@@ -30,11 +30,14 @@
 //   - registry credentials are filtered to the allowed registries;
 //   - env secrets are filtered to the allowed keys.
 //
-// github_pat is enforced at the point of use rather than by construction:
-// GitHub has no API to narrow an already-issued PAT, so instead of exporting
-// a bare GITHUB_TOKEN the broker emits a git credential helper that releases
-// the token only for paths matching the allowlist (see githubpat.go). A bare
-// GITHUB_TOKEN is exported only when the allowlist is explicitly "*".
+// github_pat never reaches the sandbox when a GitGuard is configured — the
+// hub's git proxy (executors.git_proxy) holds the token and the workload gets
+// a session scoped to the grant (see gitguard.go). Without one it is enforced
+// at the point of use rather than by construction: GitHub has no API to narrow
+// an already-issued PAT, so instead of exporting a bare GITHUB_TOKEN the broker
+// emits a git credential helper that releases the token only for paths
+// matching the allowlist (see githubpat.go). A bare GITHUB_TOKEN is exported
+// only when the allowlist is explicitly "*".
 //
 // egress_proxy carries its allowlist to the executor, whose network policy is
 // the enforcement point; in-process callers gate on Constraints.AllowsHost.

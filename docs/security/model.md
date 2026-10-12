@@ -273,6 +273,13 @@ the host kernel does not see into. What used to be one kernel bug becomes a
 guest-kernel bug **plus** a hypervisor escape, and the executor advertises the
 difference as `Capabilities().Virtualized`, which placement can require.
 
+gVisor's `runsc` moves it differently, without a hypervisor: the workload's
+system calls are served by gVisor's own userspace kernel rather than the host's,
+so a host-kernel bug has to be reached through it. The executor advertises that
+as `Capabilities().KernelIsolated` — which Kata also sets, and placement can
+require — and not as `Virtualized`. Everything below about a trusted runtime name
+applies to it equally.
+
 Four things it deliberately does not change, because a boundary that is
 misdescribed is worse than one that is merely weaker:
 
@@ -633,7 +640,8 @@ three-hour task is a fifteen-minute *label* on three hours of access.
 `POST /api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to
 every executor holding the lease; a TTL janitor sweeps live sessions once a
 minute — on the cluster leader, also the leases a stopped hub process left
-behind (Task 20382); cordon/drain scrubs everything a device is holding; and
+behind (Task 20382); cordon/drain scrubs everything a device is holding, from
+the dashboard or — announced on the hub bus — from the CLI (Task 20424); and
 revoking a *grant* scrubs that grant from every lease carrying it (below). All
 of them go through one path, so they cannot drift apart.
 
@@ -3989,6 +3997,8 @@ an image the operator's policy admits, or does not start.
 | An accepted tag is resolved to a digest and pinned, so a tag repointed between check and pull cannot change what runs (TOCTOU) | `TestAuthorizePinsAnAcceptedTag`, `TestSandboxImage_PinsTheOverride` |
 | The pinned digest lands in the Kubernetes container spec, where a kubelet would otherwise resolve the tag itself | `TestPinnedDigestLandsInTheContainerSpec`, `TestPolicyReachesTheExecutorThatRunsTheImage` |
 | `require_signature` with no `cosign` installed **refuses** rather than skipping verification | `TestSignatureRequirementNeverDegradesToASkip`, `TestCosignMissingFailsClosed` |
+| A device or virtual executor whose sandbox runs a container runs a project's image only once the hub has verified its signature, and is sent the digest it verified; an unsigned image, an unresolvable tag or a missing `cosign` refuses with nothing sent (Task 20424) | `TestADeviceRunsOnlyASignatureVerifiedImage`, `TestLoopbackDeviceRunsOnlyTheDigestTheHubVerified`, `TestDeviceRefusesATagTheHubCannotResolve`, `TestDeviceRefusesWithoutCosign`, `TestVirtualExecutorVerifiesTheProjectImage` |
+| A hub whose configuration will not load refuses a project's image — at the early check and on the device path — rather than checking it against the zero policy | `TestAnUnreadableHubConfigRefusesAProjectImage`, `TestDeviceRefusesWhenTheHubCannotReadItsPolicy` |
 | An image that cannot be pinned cannot be signature-verified, and is refused rather than passed | `TestUnpinnableImageCannotBeSignatureVerified` |
 | The shipped Helm chart default actually denies something | `TestChartDefaultPolicyIsRestrictive` |
 | An unconfigured hub allows any image — asserted, so the day it changes in either direction is visible | `TestNoPolicyIsNotSilentlyAPolicy` |
@@ -4277,10 +4287,19 @@ that a deliberate act.
 
 Stated plainly, because a security document that only lists wins is marketing.
 
+Every paragraph below cites the test or code that pins its residual, and
+`TestEveryResidualRiskCitesEvidence` in `tests/docs` fails CI when a paragraph
+cites nothing that exists. A fix that retires a residual changes the test that
+pinned it, so the fix cannot land until its paragraph is rewritten with it.
+
 **Key rotation does not rotate the passphrase.** Every KEK is derived from
-`CLOOP_SECRET_KEY`, so `cloop hub key rotate` limits the lifetime of a *key*,
-not of the secret the key comes from. Someone who has read `hub.env` can still
-derive every non-retired KEK. Changing the passphrase remains a re-mint, and the
+`CLOOP_SECRET_KEY` and a salt stored beside it in the state database, so `cloop
+hub key rotate` limits the lifetime of a *key*, not of the secret the key comes
+from. Someone who has read `hub.env` and can read the database can still derive
+every non-retired KEK: a second process holding nothing but the passphrase
+adopts every key a rotation minted (`TestKeyringAdoptsKeysMintedByAnotherProcess`),
+and only retiring a key destroys its salt (`TestReloadDropsRetiredKeys`).
+Changing the passphrase remains a re-mint, and the
 [runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says so
 plainly rather than letting the new command imply otherwise.
 
@@ -4288,160 +4307,237 @@ plainly rather than letting the new command imply otherwise.
 hub's.** Returned work is bounded per handle, per executor and per process
 (Task 20399), but within its budget — 256 MiB by default — a device can hold
 transfers open for as long as it keeps its runs open, and devices that do so
-together can fill the process ceiling. Past it every device's write-backs are
-refused, journaled with the limit, until work is collected or the devices are
-revoked: a denial of delivery rather than an out-of-memory. Revoking a device
-frees what it holds at once; cordoning it does not, because the frames of runs
-already out are still accepted. `cloop_writeback_pinned_bytes_max` shows which
-side of its budget the busiest device is on.
+together can fill the process ceiling (`TestWriteBackProcessCeilingSpansExecutors`).
+Past it every device's write-backs are refused, journaled with the limit, until
+work is collected or the devices are revoked: a denial of delivery rather than
+an out-of-memory. Revoking a device frees what it holds at once
+(`TestRevokeAndDeregisterGiveTheBytesBack`); cordoning it does not, because the
+frames of runs already out are still accepted. `cloop_writeback_pinned_bytes_max`
+shows which side of its budget the busiest device is on.
 
-**Draining an executor revokes only the leases it can name.** Cordon and drain
-enumerate `Leases()` and revoke each one, and `Leases()` deliberately lists only
-what is *known* — there is no honest way to name a lease an unaccounted workload
-might be holding. So an executor drained while running a workload whose bindings
-could not be rebuilt is reported as drained, and the per-lease revocation path is
-the one that reports the doubt (see [What it is worth after a hub
-restart](#what-it-is-worth-after-a-hub-restart)). The window is at most one
-upgrade wide and closes when that workload exits; until then, an operator
-decommissioning a device should rotate its credentials at the source rather than
-treat the drain as proof.
+**A cordon or a drain takes back only an edge device's credentials.**
+Cordoning or draining an enrolled device — from the dashboard, or since Task
+20424 with `cloop executor cordon` or `drain` — revokes, with a scrub, every
+lease its session lists and every lease recorded as issued to it or to a
+virtual executor running through it. The hub member holding its connection
+takes them back at once; with no hub serving, the revocations wait in the store
+and the next hub to start enforces them when the device reconnects
+(`TestCLICordonTakesTheDevicesLeaseBack`,
+`TestACLICordonWithNoHubServingIsEnforcedByTheNextHub`). A cordon of an
+executor on the hub itself — its container runtime, a Kubernetes cluster, the
+host — takes nothing back: its running workloads keep their credentials until
+they end, because taking a container's environment back means killing it, and a
+cordon promises that in-flight work continues
+(`TestACordonOfAnExecutorOnTheHubIsNotAnnounced`). Revoke the lease or the grant
+to take a hub-local workload's material. A scrub also leaves environment
+variables in the running process (below), and a workload whose bindings a hub
+could not rebuild is named by neither list: the per-lease revocation reports that
+doubt rather than claiming success (`TestAHubThatCannotRebuildABindingSaysSo`).
 
 **Output redaction is a known-value match, and the hub half is only partly
 rebuilt after a restart.** It removes the material a lease actually delivered,
 so a credential the workload *derives* — a session cookie exchanged using the
 PAT, a token minted from the kubeconfig — is not covered. And the hub-side half
 is built from the dispatched `Spec`, which is stored with its leased variables
-replaced by a placeholder, so a workload reattached after a hub restart streams
-through a driver that cannot name its credentials. Since Task 20382 the process
-that adopts the run re-derives them from the grants of the lease it takes over
-and hands them to the driver (`executor.HandleRedactor`) — the delivered keys of
-env secrets and the token of a personal access token — but not a GitHub App
-token the stopped process minted (the pattern scrubbers recognise its shape), not
-a kubeconfig's contents, and nothing for a run whose lease could not be taken
-over. The in-sandbox half still applies, because that process still holds its
-own lease, so what is exposed is narrowly that remainder of the output a
-workload produced outside the provider path between a restart and the task
-ending. Closing it entirely would mean persisting plaintext to survive a
-restart, which is the thing the store exists not to do.
+replaced by a placeholder (`TestDispatchedSpecNeverPersistsLeasedCredentials`),
+so a workload reattached after a hub restart streams through a driver that
+cannot name its credentials. Since Task 20382 the process that adopts the run
+re-derives them from the grants of the lease it takes over and hands them to the
+driver (`executor.HandleRedactor`) — the delivered keys of env secrets and the
+token of a personal access token (`TestRedactionValuesAreWhatTheLeaseDelivered`)
+— but not a GitHub App token the stopped process minted, not a kubeconfig's
+contents, and nothing for a run whose lease could not be taken over. No shape
+matcher runs on the stream to catch them: the credential registry's detectors
+serve `cloop audit` afterwards, not the live output. The in-sandbox half still
+applies, because that process still holds its own lease, so what is exposed is
+narrowly that remainder of the output a workload produced outside the provider
+path between a restart and the task ending. Closing it entirely would mean
+persisting plaintext to survive a restart, which is the thing the store exists
+not to do.
 
 **DEKs live in process memory.** The suite asserts that a plaintext DEK never
-reaches disk or a log. It cannot assert that the kernel never paged one out of
-the heap, and does not try — that is a deployment property (encrypted swap,
-memory limits, no core dumps), not something a test in this repository can
-reach.
+reaches disk or a log (`TestPlaintextDataKeysNeverReachDiskOrLogs`). It cannot
+assert that the kernel never paged one out of the heap of
+`pkg/secretbroker/keyring.go`, and does not try — that is a deployment property
+(encrypted swap, memory limits, no core dumps), not something a test in this
+repository can reach.
 
-**A workload can disclose its own credentials.** The suite asserts non-disclosure
-by *cloop's* surfaces. It cannot assert that a workload never prints its own
-token to stdout — the workload holds the plaintext by design. Task output is
-redacted of the values a lease delivered, not of a credential the workload
-obtained some other way or derived from a leased one; `cloop audit` reports the
-shapes it recognises in artifacts afterwards, which is detection, not
-prevention. Scope grants so that the blast radius of such a disclosure is a
-single repo for a few hours.
+**A workload can disclose its own credentials.** The suite asserts
+non-disclosure by *cloop's* surfaces (`TestLeakedCredentialNeverReachesTheRunRecord`).
+It cannot assert that a workload never prints its own token to stdout — the
+workload holds the plaintext by design. Task output is redacted of the values a
+lease delivered, not of a credential the workload obtained some other way or
+derived from a leased one; `cloop audit` reports the shapes it recognises in
+artifacts afterwards (`TestArtifactScanReportsShapesAndConfiguredValuesSeparately`),
+which is detection, not prevention. Scope grants so that the blast radius of
+such a disclosure is a single repo for a few hours.
 
 **Shape matching knows only the shapes it was given.** A credential format the
 registry has not heard of — a new vendor's key, or a reshaped token like
 GitHub's long form before the registry learned it — passes every pattern
-scanner until a detector and a fixture are added. The registry is the place
-to add it, once; the corpus is what proves all four scanners then agree.
+scanner until a detector and a fixture are added. The registry is the place to
+add it, once; the corpus is what proves all four scanners then agree
+(`TestEveryScannerCoversEveryCredential`, `TestEveryDetectorIsHeldToTheCorpus`).
 
 **A daily budget bounds honest overspend, not a hostile workload.** The hub
 charges the identity it resolved at dispatch, which the workload cannot
-influence — but the *amount* it charges is whatever the run reported, and the
-provider call happens inside the sandbox. A workload that under-reports its own
-tokens spends past its cap, and no accounting in the control plane can see it.
-`daily_token_budget` and `daily_cost_usd` are cost controls against runaway
-plans and honest overruns; containment is the
-[isolation model's](#the-no-host-execution-guarantee) job, not the ledger's.
+influence (`TestBillingIgnoresTheIdentityWrittenInsideTheSandbox`) — but the
+*amount* it charges is whatever the run reported, and the provider call happens
+inside the sandbox. A workload that under-reports its own tokens spends past its
+cap, and no accounting in the control plane can see it: only a negative amount
+is refused (`TestNegativeAmountsCannotCancelABatch`). `daily_token_budget` and
+`daily_cost_usd` are cost controls against runaway plans and honest overruns;
+containment is the [isolation model's](#the-no-host-execution-guarantee) job,
+not the ledger's.
 
-**`egress_proxy` constraints are enforced outside the broker.** For kubeconfig,
-registry and env secrets the broker *rewrites the payload* before delivery, so a
-narrower credential cannot be widened by its holder. `egress_proxy` is different:
-the allowlist travels to the executor and the enforcement point is the network
-policy there (`pkg/secretbroker/model.go`). The
-[egress broker's proxy](../guides/secrets.md#egress-leases) does enforce it for
-traffic that goes through it; a workload with an unrelated route out is bound
-only by whatever the executor's
+**An `egress_proxy` secret's allowlist is enforced outside the broker.** For
+kubeconfig, registry and env secrets the broker *rewrites the payload* before
+delivery, so a narrower credential cannot be widened by its holder. An
+`egress_proxy` secret's payload is a proxy URL, which has nothing to narrow: the
+allowlist travels beside it to the sandbox as `CLOOP_EGRESS_ALLOW`
+(`pkg/secretbroker/material.go`), and what enforces it is the proxy the secret
+names — the operator's own — and the executor's network policy. A workload that
+ignores the proxy is bound only by whatever the executor's
 [IP-layer filter](#the-network-the-sandbox-sits-on) allows, and by nothing at
-all if that filter is not configured.
+all if that filter is not configured. A
+[`cloop egress` grant](../guides/secrets.md#egress-leases) is the enforced
+alternative: the hub's own proxy refuses the hosts, ports and methods its grant
+does not list (`TestPolicyRefusals`).
 
 **A host allowlist cannot be enforced by a packet filter.** `--hosts
 '*.github.com'` compiles to *"every public address on port 443"* at layer 3,
-because layer 3 has no hostnames. cloop refuses to reach that quietly — the
-widening is opt-in and every rendering of the policy carries a warning naming
-what it widened — but it is a fact about IP, not a gap that a later release
-closes. Route the sandbox through the broker if the host allowlist is the
-control you are relying on.
+because layer 3 has no hostnames (`TestPublicInternetAllowNeverReachesTheBlockSet`).
+cloop refuses to reach that quietly — the widening is opt-in and every rendering
+of the policy carries a warning naming what it widened — but it is a fact about
+IP, not a gap that a later release closes. Route the sandbox through the broker
+if the host allowlist is the control you are relying on.
 
 **The egress filter is off unless configured.** Both `egress_filter` sections
-default to disabled, so an upgrade never firewalls a running deployment. An
-unconfigured hub with a networked executor has exactly the unrestricted
-outbound access it had before the filter existed. Preflight says so as a
-warning rather than staying silent, because a driver that says nothing about
-egress reads as one that constrains it.
+default to disabled, so an upgrade never firewalls a running deployment
+(`TestEgressFilterDefaultsToOff`). An unconfigured hub with a networked executor
+has exactly the unrestricted outbound access it had before the filter existed.
+Preflight says so as a warning rather than staying silent, because a driver that
+says nothing about egress reads as one that constrains it
+(`TestPreflightWarnsAboutUnfilteredEgress`).
 
-**`github_pat` is enforced at the point of use, not by construction.** GitHub has
-no API to narrow an already-issued PAT, so the broker ships a git credential
-helper that releases the token only for allowlisted paths. That binds `git`. It
-does not bind a workload that reads the token file and calls the REST API
-directly. A bare `GITHUB_TOKEN` is exported only when the allowlist is explicitly
-`*`. `github_app` does not have this limitation — see
+**Without the git proxy, `github_pat` is enforced at the point of use, not by
+construction.** GitHub has no API to narrow an already-issued PAT. With
+`executors.git_proxy` on, no PAT reaches a sandbox at all: the hub's proxy
+holds it, and the workload gets a session that pushes only where the grant
+allows (`TestGuardedPATNeverReachesTheSandbox`). The proxy is off by default, and
+without it the broker delivers the token as a file with a git credential helper
+that releases it only for allowlisted paths
+(`TestGitHubPATReachesAContainerSandboxAsFiles`). That binds `git`. It does not
+bind a workload that reads the token file and calls the REST API directly. A
+bare `GITHUB_TOKEN` is exported only when the allowlist is explicitly `*`
+(`TestNoGuardIsUnchanged`), and a grant that limits pushes to branches is
+refused rather than delivered without the proxy, because nothing in a sandbox
+can hold that line. `github_app` does not have this limitation — see
 [`github_pat` versus `github_app`](#github_pat-versus-github_app) — and is the
 kind to prefer where the choice is available.
 
-**A revoked environment variable stays in the running process.** Scrubbing
-removes the agent's copies; the child keeps its own, because nothing can reach
-into another process's memory. Files and egress are genuinely revoked; env is
-not. Use `action=kill`, and prefer credential delivery that lands in a file.
+**A revoked environment variable stays in a running host process or device
+task.** Scrubbing removes the agent's and the driver's copies; the child keeps
+its own, because nothing can reach into another process's memory. A container
+on the hub and a Kubernetes Pod holding a revoked variable are terminated
+instead, because their runtime keeps a copy only removing the workload destroys
+(`TestRevokeLease_EnvOnlyMaterialIsStillKillOnly`) — a revoked lease since Task
+20231, a revoked or lapsed grant since Task 20403. A host process, and a device's
+task in either sandbox mode, keep the variable until they exit
+(`TestLoopbackRevokeScrubsMaterialMidRun`, `TestScrubEnvClearsBothRetainedCopies`).
+Files and egress are genuinely revoked everywhere. Use `action=kill` for the
+others, and prefer credential delivery that lands in a file.
 
 **A revocation cannot reach an offline agent.** It is queued and replayed on
-reconnect, and reported as `unreachable` in the meantime — but the material is
-on that machine until it returns. Rotate at the source when it matters.
+reconnect, and reported as `unreachable` in the meantime
+(`TestRevokeOnOfflineAgentIsUnreachableNotRevoked`, `TestRevocationIsReplayedOnReconnect`)
+— but the material is on that machine until it returns. An agent whose
+credential is revoked while it is away never returns: the leases recorded as
+issued to it are recorded revoked, which ends the hub-side sessions they fed,
+but the files on the device are the device's to destroy. Rotate at the source
+when it matters.
 
 **A Pod's credentials are readable by whoever may read Secrets in its
 namespace.** Since Task 20401 no environment value is in the Pod object — `get
 pods` shows each variable's name and the `cloop-lease-<handle>` key it is read
-from — but the values are in that Secret for the run, so an identity that may
-read Secrets in the workload namespace, or create a Pod there that mounts one,
-can read them. The node's container runtime also holds the resolved environment
-in the container's config. Run workloads in a dedicated namespace with its own
-RBAC.
+from — but the values are in that Secret for the run
+(`TestStart_EnvTravelsInTheLeaseSecret`), so an identity that may read Secrets in
+the workload namespace, or create a Pod there that mounts one, can read them.
+The node's container runtime also holds the resolved environment in the
+container's config. Run workloads in a dedicated namespace with its own RBAC.
 
 **A per-run Secret outlives a hub that dies mid-dispatch until its Pod goes.** A
 control plane killed after creating `cloop-ws-<handle>` or `cloop-lease-<handle>`
-leaves them behind. Nothing sweeps a Secret — sweeping needs `list secrets`, and
-the executor Role deliberately has no read access to Secrets at all — but each
-names its Pod in an `ownerReference`, so the cluster's garbage collector deletes
-it when the Pod is deleted: by the hub that adopts the run, by the orphan sweep,
-or by an operator. The material inside is short-lived on the broker's own TTL
+leaves them behind (`TestOwnerReference_HubKilledMidProvisionLeavesNothing`).
+Nothing sweeps a Secret — sweeping needs `list secrets`, and the executor Role
+deliberately has no read access to Secrets at all
+(`TestExecutorRoleNeverReadsSecretsOrMutatesWhatItCreated`) — but each names its
+Pod in an `ownerReference`, so the cluster's garbage collector deletes it when
+the Pod is deleted: by the hub that adopts the run, by the orphan sweep, or by
+an operator. The material inside is short-lived on the broker's own TTL
 regardless.
 
-**A workspace credential is scoped by the grant, not by GitHub.** The broker
-refuses to lease a PAT whose repository allowlist excludes the repository being
-fetched, so a run cannot clone what it was not granted. The *token* is still
-whatever GitHub issued — see `github_pat` above. What bounds it here is that it
-never enters the harness's environment: it is handed to one `git fetch` child and
-to nothing else, so the workload that the model controls cannot spend it.
+**A workspace credential is scoped by the grant, not by GitHub, and a push
+write-back keeps it for the whole run.** The broker refuses to lease a PAT whose
+repository allowlist excludes the repository being fetched, so a run cannot
+clone what it was not granted (`TestMissingGrantIsRefusedByName`). The *token*
+is still whatever GitHub issued — see `github_pat` above — unless the git proxy
+holds it, when the sandbox fetches through a proxy session and never sees it
+(`TestForWorkspaceKeepsTheForgePATOnTheHub`). What bounds a token that is
+handed over is where it goes. For a fetch, one `git fetch` child, and the lease
+is released once the start is confirmed. Under `write_back: push` the lease
+stays open until the run ends (`TestWorkspaceLeaseOutlivesTheStartForAPushWriteBack`):
+a device's agent holds the token in its own memory for the push it makes after
+the workload exits (`pkg/executor/agent/writeback.go`), and in a Pod it reaches
+the harness container's environment. There `cloop workspace writeback` takes it
+out of its own copy before starting the harness and — since Task 20424 — makes
+itself non-dumpable, because the kernel went on serving the token at
+`/proc/1/environ` to the harness it wraps
+(`TestAWrappedHarnessCannotReadTheWorkspaceToken`). A harness holding
+`CAP_SYS_PTRACE` is not bounded by that, and on a device in host mode the
+workload runs as the agent's own user, bounded from the agent's memory by
+nothing but the kernel's ptrace policy.
 
-**No image signature verification.** `--pull=never` prevents surprise pulls at
-task time, but cloop does not verify image signatures or digests. Pin by digest
-and verify upstream.
+**Image signatures are verified only where a policy asks for them, and never
+on the operator's own images.** `sandbox.image_policy.require_signature` has
+the hub verify, with cosign, the digest a project's image runs from — on the
+container and Kubernetes executors, and since Task 20424 for a device or a
+virtual executor too, whose tag the hub resolves at its registry and dispatches
+by the digest it verified (`TestADeviceRunsOnlyASignatureVerifiedImage`). Three
+things it leaves. The policy is off unless configured: an unconfigured hub runs
+any image a project names (`TestNoPolicyIsNotSilentlyAPolicy`). An operator's
+own image — `executors.*.image`, a device's or a virtual executor's configured
+sandbox image — is chosen beside the policy and exempt from it
+(`TestDeviceLeavesTheOperatorsImageAlone`,
+`TestOperatorImageIsNotGovernedByThePolicy`). And Kubernetes cannot pin a tag:
+the hub has no image store to resolve one in, so a tag reaches the kubelet as a
+tag, resolved whenever a node pulls it, unless `require_digest` or
+`require_signature` refuses it (`TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo`,
+`TestATagCannotBeSignatureVerifiedWithoutAResolver`).
 
 **The container runtime socket is trusted implicitly.** Anyone who can reach the
-Docker/Podman socket the hub uses is root-equivalent on that host. Isolation is
-protecting the host from workloads, not the socket from the hub.
+Docker/Podman socket the hub uses is root-equivalent on that host
+(`pkg/executor/container/runtime.go`). Isolation is protecting the host from
+workloads — the socket never reaches one
+(`TestContainerArgvNeverBreaksItsOwnSandbox`) — not the socket from the hub.
 
-**A workload shares the executing machine's kernel unless you configure Kata.**
-The default sandbox is namespaces and seccomp on the host kernel, so a kernel LPE
-is a host compromise. `executors.container.oci_runtime` and
-`executors.kubernetes.runtime_class` change that; the
-[section above](#the-kernel-underneath-the-sandbox) is explicit about what they buy and
-what they leave exactly where it was — including that `Virtualized` is derived
-from a runtime *name* and is therefore a claim cloop trusts rather than one it
-verifies.
+**A workload shares the executing machine's kernel unless you configure Kata or
+gVisor.** The default sandbox is namespaces and seccomp on the host kernel
+(`TestBuildRunArgs_OCIRuntimeAbsentByDefault`), so a kernel LPE is a host
+compromise. `executors.container.oci_runtime` and
+`executors.kubernetes.runtime_class` change that — Kata puts the workload behind
+a hypervisor, gVisor's `runsc` serves its system calls from a userspace kernel —
+and the [section above](#the-kernel-underneath-the-sandbox) is explicit about
+what they buy and what they leave exactly where it was — including that
+`Virtualized` and `KernelIsolated` are derived from a runtime *name*
+(`TestIsVirtualizedRuntime`) and are therefore a claim cloop trusts rather than
+one it verifies.
 
 **Rotation is partly manual.** See [key rotation](../operations/runbook.md#key-rotation)
-for what rotates automatically and what does not.
+for what rotates automatically and what does not: the certificates the hub
+issues its git proxy and Kubernetes monitor renew themselves
+(`TestRenewalOverlapsAndAMemberPicksItUp`), and the CA they chain to is minted
+once and never replaced (`TestTheCAIsMintedOnceAndAdoptedAfter`).
 
 ---
 

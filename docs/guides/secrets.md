@@ -1388,8 +1388,10 @@ gets the repository — but the run already holding the bind keeps it until it
 exits.
 
 To cut access to a repository *now*, stop the workload: the dashboard's Stop
-button, or [cordon the executor](../architecture/executors.md#placement). There
-is no top-level `cloop stop` command.
+button, or revoke the run's lease with `action=kill` from the Secrets panel.
+[Cordoning the executor](../architecture/executors.md#placement) does not: it
+stops new work and leaves running work alone. There is no top-level `cloop stop`
+command.
 
 ### Containment
 
@@ -1694,9 +1696,9 @@ The devices are recorded on the lease for the audit trail rather than for
 revocation, which is the honest reading of what the hub can and cannot do.
 
 Narrowing that window means revoking and then stopping the workload — from the
-dashboard's Stop button, or by
-[cordoning the executor](../architecture/executors.md#placement). There is no
-top-level `cloop stop`:
+dashboard's Stop button, or by revoking the run's lease with `action=kill`;
+[cordoning the executor](../architecture/executors.md#placement) leaves running
+work alone. There is no top-level `cloop stop`:
 
 ```console
 $ cloop secret revoke grant_7f3a1c
@@ -2154,11 +2156,16 @@ Revocation is driven from four places, all through the same path:
    was consulted only by the caller that *minted* the lease, so a fifteen-minute
    credential handed to a three-hour task simply stayed there for three hours.
 3. **Cordon and drain** — taking a device out of rotation scrubs everything it
-   is holding. It scrubs rather than kills, because draining explicitly waits
-   for in-flight work to finish and killing it would contradict the operation
-   you asked for. When the hub member holding the device's connection cannot be
-   asked, every lease issued to the device is recorded revoked and revoked from
-   the member you cordoned it on.
+   is holding, from the dashboard or from `cloop executor cordon` and `drain`,
+   which tell the running hubs on the hub bus and print which member held the
+   device's connection and which leases are still pending (Task 20424). It
+   scrubs rather than kills, because draining explicitly waits for in-flight
+   work to finish and killing it would contradict the operation you asked for.
+   When the hub member holding the device's connection cannot be asked, or no
+   hub is serving, every lease issued to the device is recorded revoked: the
+   member you cordoned it on revokes it from there, and the next hub to start
+   enforces what is left. A cordon of an executor on the hub itself — its
+   container runtime, a cluster, the host — takes nothing back.
 4. **Grant revocation** — [revoking a grant](#revoking-a-grant), or deleting
    the secret it points at, scrubs that grant from every lease carrying it and
    leaves the lease's other grants in place.

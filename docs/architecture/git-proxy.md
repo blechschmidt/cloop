@@ -719,7 +719,7 @@ first:
 | --- | --- |
 | The workload reaches a terminal state and its lease is wiped | `wipeLeaseOnExit`, `pkg/ui/executor.go` |
 | The dispatch fails after the lease was taken | every early return in `startWorkloadAs` |
-| An operator revokes the lease, or cordons or drains the executor holding it | `revokeLeaseEverywhere`, `pkg/ui/secrets_revoke.go` |
+| An operator revokes the lease, or cordons, drains or revokes the edge device holding it — from the dashboard or the CLI | `revokeLeaseEverywhere`, `pkg/ui/secrets_revoke.go`; the CLI's announcement in `pkg/ui/executor_revocation.go` |
 | The identity whose credential it is gets offboarded | the offboarding lease release, `pkg/ui/offboard_api.go` |
 | **The lease lapses** — the lease janitor sweeps expired leases every minute; a live run's lease is extended before it can | `sweepExpiredLeases`, `pkg/ui/secrets_revoke.go` |
 | The session's own TTL runs out | the proxy refuses it at authentication |

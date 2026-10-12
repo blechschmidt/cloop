@@ -140,7 +140,7 @@ What it checks, and what each one catches that nothing else does:
 | `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one. `ui.static_token`: **warn** while a static token is accepted — exported in the doctor's shell, or reported by a running hub — beside single sign-on with an enforced role policy, saying how long it has gone unused; **pass** once it is retired. Silent without SSO, where the token is the sign-in, and without a policy, where `rbac.enforced` is the finding |
 | `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
 | `rbac` | **whether a role policy is in force at all** (`rbac.enforced`: `authz.Enforced`, the answer the request gate acts on — a failure, naming the issuer, for single sign-on with no `role_mappings` and no `default_role`, where every identity the issuer authenticates holds every permission but executor administration; see [when RBAC is in force](../security/model.md#when-rbac-is-in-force)); the mappings parse; the default role's blast radius, reported only where a policy makes it mean something; group bindings with no `groups` scope; and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's; and, where a policy is in force, every live API token it suspends — owner-less, minted while no policy was in force or before the hub recorded how, and not approved since (`api_tokens.unapproved`, a failure naming each; approve the ones you can vouch for, revoke the rest) |
-| `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable where the container or Kubernetes executor verifies signatures — and a warning that enrolled devices do not — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names |
+| `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable wherever signatures are verified — the container and Kubernetes executors, and the hub itself for a device or virtual executor whose sandbox runs a container (Task 20424) — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names, which a device fleet needs from the hub too: the hub resolves a device's tag there before verifying it |
 | `executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`); and each device that follows releases whose build carries no sequence — every release before v0.0.5 — with the way to cover it (`executors.rollback_protection`) |
 | `gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
 | `kubeguard` | whether kubeconfig grants are brokered at all; whether the monitor would start — its TLS material and CA bundle read as the hub reads them, its base judged by `kubeguard.NormalizeBaseURL` — where sandboxes are pointed and whether only this machine can reach it, plus a bounded dial; and the verb ceiling |
@@ -1414,9 +1414,19 @@ minute, so their count is a floor.
 
 ## Key rotation
 
-Three different keys, three different procedures. The sealing key rotates
-online with `cloop hub key rotate`; the TLS key rotates in a staged overlap; the
-dashboard token rotates by replacement and causes a logout.
+Six credentials, six procedures, one subsection each below. The TLS key
+rotates in a staged overlap; the dashboard token rotates by replacement and
+causes a logout; an enrollment token or agent credential is revoked and the
+device re-enrolled; the sealing key rotates online with `cloop hub key rotate`;
+grants rotate by expiry rather than by procedure; SCIM credentials rotate with an
+overlap.
+
+Not among them, because nothing has to be done: the certificates the hub issues
+its git proxy and Kubernetes monitor under `tls: auto` renew themselves two days
+before they expire (see
+[the git interception proxy](#the-git-interception-proxy)). The CA they chain to
+is minted once, valid for ten years, and never replaced — `cloop hub key rotate`
+re-seals its key under the new sealing key without reissuing it.
 
 ### TLS certificate and agent pins — supported, staged
 
@@ -1672,8 +1682,11 @@ helm upgrade cloop deploy/helm/cloop-hub --namespace cloop \
 
 `--wait` returns only once the readiness probe passes, which means the PVC
 mounted, the ConfigMap landed, and SQLite opened under `readOnlyRootFilesystem`
-and `runAsNonRoot`. Pin images by **digest** in production — cloop does not
-verify image signatures.
+and `runAsNonRoot`. Pin the hub's own image by **digest** in production: nothing
+in cloop verifies the image the chart deploys. The published hub images carry
+build provenance and an SBOM, not a cosign signature, and
+`sandbox.image_policy.require_signature` governs the images *projects* name for
+their sandboxes, never the hub's own.
 
 Enrolled agents reconnect on their own backoff (1 s → 2 min); they do not need
 upgrading in lockstep, but check `cloop executor ls` afterwards. Confirm
@@ -1904,6 +1917,15 @@ $ cloop executor uncordon edge-01                          # back to whatever th
 
 `uncordon` does not optimistically mark the node ready — it returns it to the
 state its probes justify.
+
+On an edge device, `cordon` and `drain` also take back the leases the device
+holds, with a scrub, as the dashboard's buttons do (Task 20424). The CLI reaches
+no device itself: it records the revocations, tells the running hubs on the hub
+bus, and prints each member's answer — which one holds the device's connection,
+what each lease came to — and the leases still pending. With no hub serving, it
+says so, and the next hub to start takes the recorded leases back when the
+device reconnects. A cordon of the hub's own container, Kubernetes or host
+executor takes no credential back.
 
 If a node dies rather than draining, the supervisor does it for you: three missed
 heartbeats (~45 s) mark it `unreachable` and in-flight sessions are re-placed on
@@ -2824,8 +2846,12 @@ the holding hub learns of by re-reading the grant every minute of a run.
 **An executor is compromised.**
 `cloop executor revoke <agent-id>` (cascades to the credential; the agent is told
 not to reconnect), then `cloop executor cordon` any peer that shared its grants.
-Audit-log `--entity executor` for what it was given. Assume every secret ever
-leased to it is disclosed and rotate accordingly.
+Read what both print: the revocation names the hub member that held the agent's
+connection, the leases it scrubbed off the device before dropping it, and any
+still pending; a cordon names the leases it took back from the peer. An agent
+that was offline is refused when it next connects, but what its device already
+holds stays there. Audit-log `--entity executor` for what it was given. Assume
+every secret ever leased to it is disclosed and rotate accordingly.
 
 **`cloop audit-log verify` exits 2.**
 Do not vacuum or maintain — that rewrites pages. Snapshot the file, `cloop db

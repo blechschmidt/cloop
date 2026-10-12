@@ -2307,8 +2307,8 @@ below is unit-testable without waiting for wall-clock time.
 | `ready` | yes | continues |
 | `degraded` | yes, but ranked below ready | continues |
 | `unreachable` | no | **failed over** |
-| `cordoned` | no | continues untouched |
-| `draining` | no | continues; the node is being retired |
+| `cordoned` | no | continues; an edge device's leases are taken back |
+| `draining` | no | continues; the node is being retired, and an edge device's leases are taken back |
 
 Probes run every 30 s with ±20 % jitter, at most 8 concurrently, each bounded by
 `ProbeTimeout`. A failing node backs off `5s × 2^(failures-1)`, capped at 5 min.
@@ -2319,6 +2319,18 @@ state the probes justify rather than assuming ready.
 Operator commands: `cloop executor cordon|drain|uncordon|ls`. `drain` plus
 `WaitForDrain` blocks until in-flight work reaches zero or the deadline expires,
 returning the remaining count.
+
+A cordon or drain of an edge device — or of a virtual executor running through
+one — also takes back the leases the device holds, with a scrub: every lease its
+session lists and every lease recorded as issued to it. The dashboard does it on
+the hub member it was asked on, handing over to the member holding the device's
+connection; the CLI holds no connection, so it records the revocations and
+announces the change on the hub bus, and the member holding the connection takes
+the leases back and answers (Task 20424). The CLI prints each member's answer and
+the leases still pending. With no hub serving, the revocations wait in the store
+for the next hub to start. An executor on the hub itself keeps its workloads'
+credentials through a cordon: taking a container's environment back means
+killing it. See [what is not mitigated](../security/model.md#what-is-not-mitigated).
 
 ### Failover (Task 20162)
 

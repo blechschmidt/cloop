@@ -324,6 +324,15 @@ reference to an API server and some kubelet resolves it later, on a node, when
 it schedules. **On Kubernetes, `require_digest: true` is the only thing that
 closes that window**, which is why the shipped Helm chart sets it.
 
+A device in container mode, and a virtual executor, run images from the device's
+own store, which the hub cannot read either. Without `require_signature` the hub
+sends the reference the policy read — qualified with `default_registry` where it
+applied one — and the device's container driver pins a tag in its own store, as
+the container executor does. Under `require_signature` the hub resolves a tag
+*at its registry* and sends the device the digest it verified (below). The
+device's engine never pulls, so it runs those bytes or refuses naming the
+`pull` of that digest.
+
 An accepted digest reference is reduced to its canonical `repo@sha256:…` form.
 A `repo:tag@sha256:…` resolves identically, but then the same artifact would
 appear under two spellings in Pod specs, audit rows and artifacts depending only
@@ -337,6 +346,17 @@ against `cosign_public_keys` (`cosign verify --key`) or `cosign_identities`
 (keyless, `--certificate-oidc-issuer` + `--certificate-identity-regexp`). Any
 one configured key or identity is enough — listing two describes a rotation or
 two trusted publishers, not a quorum.
+
+Signatures are verified with the cosign on the hub's PATH, wherever the image
+runs: the container and Kubernetes executors verify their own workloads' images,
+and the hub verifies a device's or a virtual executor's project image before it
+dispatches (Task 20424), because the agent applies no policy. A hub fronting a
+fleet of devices therefore needs cosign even when no executor on it runs an
+image, and a route to the registries the policy names: to verify a tag it first
+asks the registry what the tag names, with the login the Docker configuration of
+the hub's user holds for it (`$DOCKER_CONFIG/config.json` or
+`~/.docker/config.json`, `$REGISTRY_AUTH_FILE`, podman's `auth.json`). A
+credential helper is not run. An image pinned by digest needs no resolution.
 
 Two properties are worth stating because their opposites are the usual bugs:
 
@@ -374,16 +394,25 @@ aimed at whoever can act on it:
 | `signature-required` | `require_signature` is on and verification did not pass |
 | `policy-configuration` | the policy itself is unusable |
 
-The check runs in three places, and all three apply the same rules:
+The check runs in four places, and all four apply the same rules:
 
 1. **`.cloop/sandbox.yaml` validation** — so a bad image is a config error
    surfaced in the UI before a run starts, not a container that fails to launch.
+   A hub whose configuration will not load refuses the image here
+   (`policy-configuration`) rather than checking it against no policy.
 2. **The container executor**, before the image is pulled, inspected or run.
 3. **The Kubernetes pod builder**, before the reference becomes a field the API
    server accepts.
+4. **The hub's driver for a device or a virtual executor**, before the start
+   frame is sent: its own container driver on the device applies no policy, so
+   this is where a device's image is admitted, signature included. It reads the
+   policy per dispatch and refuses when the configuration will not load.
 
 The executors are the authority — they are what runs the image — and the
 validation pass exists so the error arrives early and reads as a file problem.
+An image the operator configured for an executor — `executors.*.image`, a
+device's or a virtual executor's sandbox image — is the operator's choice, made
+beside the policy, and none of the four applies the policy to it.
 
 Every denial is written to the audit trail as `sandbox.image_denied`, carrying
 the project, the reference *as written* (not normalized — that would hide the
@@ -402,14 +431,14 @@ is never partially applied.
 
 | | `container` | `kubernetes` | `remote` | `localprocess` |
 | --- | --- | --- | --- | --- |
-| `image` | ✅ | ✅ | ❌ | ❌ |
-| `setup` | ✅ | ❌ | ❌ | ❌ |
+| `image` | ✅ | ✅ | ✅ in container mode | ❌ |
+| `setup` | ✅ | ❌ | ✅ in container mode | ❌ |
 | `mounts` | ✅ (bind) | ✅ (`subPath`) | ❌ | ❌ |
-| `resources` | ✅ | ✅ (no `pids`) | ❌ | ❌ |
+| `resources` | ✅ | ✅ (no `pids`) | ✅ in container mode | ❌ |
 | `resources.disk` | ✅ sampled | ✅ eviction | ✅ sampled, in container mode on agent ≥ v20 | ❌ |
 | `capabilities.network` off | ✅ enforced | ⚠️ label only | ❌ | ❌ |
-| `capabilities.virtualized` | ✅ with `oci_runtime` | ✅ with `runtime_class` | ❌ | ❌ |
-| `capabilities.kernel_isolated` | ✅ with `oci_runtime` (`runsc` or kata) | ✅ with `runtime_class` | ❌ | ❌ |
+| `capabilities.virtualized` | ✅ with `oci_runtime` | ✅ with `runtime_class` | ✅ in container mode with a kata runtime, on a device with `/dev/kvm` | ❌ |
+| `capabilities.kernel_isolated` | ✅ with `oci_runtime` (`runsc` or kata) | ✅ with `runtime_class` | ✅ in container mode with `runsc` or kata | ❌ |
 | `capabilities.egress: public` | ✅ own bridge + nft table | ❌ | ❌ | ❌ |
 | `capabilities.egress: none` | ✅ enforced | ⚠️ label only | ❌ | ❌ |
 | `capabilities.devices` | ✅ `--device` | ❌ | ❌ | ❌ |

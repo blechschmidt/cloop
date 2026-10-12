@@ -171,12 +171,12 @@ cloop executor list              # what is registered, and what it isolates
 cloop executor ls                # fleet health: state, in-flight work, last seen
 cloop executor test <id>         # preflight + run `cloop version` inside it
 cloop executor reap <id>         # remove containers/Pods left by a killed control plane
-cloop executor cordon <id>       # stop new placement; in-flight work continues
+cloop executor cordon <id>       # stop new placement; in-flight work continues; a device's leases come back
 cloop executor uncordon <id>     # back in rotation, at the health its probes justify
-cloop executor drain <id>        # stop placement, wait for in-flight to reach zero
+cloop executor drain <id>        # as cordon, then wait for in-flight to reach zero
 cloop executor enroll            # mint a token for a remote device
 cloop executor agent --server …  # run *on* the device
-cloop executor revoke <id>       # kill a leaked token or a decommissioned device
+cloop executor revoke <id>       # kill a leaked token or a decommissioned device; drops it at once
 ```
 
 ### The Executors panel
