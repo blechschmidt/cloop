@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // TestIsolateRedirectsHomeAndClearsOverrides covers the whole contract in one
@@ -67,6 +69,42 @@ func TestIsolateRedirectsHomeAndClearsOverrides(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		t.Errorf("cleanup() left the sandbox %q behind (stat err = %v)", home, err)
+	}
+}
+
+// An agent running this suite inherits its hub's root key (Task 20425): as a
+// variable, a key file, a previous key or a systemd credentials directory. Each
+// is cleared for the run — a test meeting one would seal under the hub's key,
+// or have its own refused as disagreeing with it — and given back afterwards.
+func TestIsolateClearsEveryRootKeySource(t *testing.T) {
+	inherited := map[string]string{
+		rootkey.EnvKey:                  "the-hubs-own-key-0123456789",
+		rootkey.EnvKeyFile:              "/srv/hub/cloop-secret-key",
+		rootkey.EnvPrevious:             "the-hubs-previous-key-012345",
+		rootkey.EnvPreviousFile:         "/srv/hub/cloop-secret-key.old",
+		rootkey.EnvCredentialsDirectory: "/run/credentials/cloop-hub.service",
+	}
+	for k, v := range inherited {
+		t.Setenv(k, v)
+	}
+	restore, cleanup, err := isolate()
+	if err != nil {
+		t.Fatalf("isolate: %v", err)
+	}
+	defer cleanup()
+	for k := range inherited {
+		if _, ok := os.LookupEnv(k); ok {
+			t.Errorf("isolate() left %s set", k)
+		}
+	}
+	if r, err := rootkey.Resolve(); err != nil || r.Current.Set() || r.Previous.Set() {
+		t.Errorf("a key still resolves under isolation: %+v, %v", r.Current.Source, err)
+	}
+	restore()
+	for k, v := range inherited {
+		if got := os.Getenv(k); got != v {
+			t.Errorf("after restore, %s was not given back", k)
+		}
 	}
 }
 

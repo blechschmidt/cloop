@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // EnvRoot must match multiui.EnvRoot. It is duplicated as a literal rather than
@@ -62,6 +64,19 @@ var redirectedVars = []string{"HOME", "USERPROFILE"}
 // fixtures and failed on every commit, for a reason that was never the change
 // under test (Task 20349). A test that wants either sets it with t.Setenv.
 var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+
+// rootKeyVars are every source of the hub's root key (pkg/rootkey), unset for
+// the same reason: an agent running this suite inherits its hub's. With the
+// variable alone that meant a test's first seal minted a key under the hub's
+// key in the test's fresh database, and the test's own passphrase was then
+// refused; with the key file and the systemd credential directory a hub may
+// read it from instead (Task 20425), a test setting CLOOP_SECRET_KEY would meet
+// an inherited source holding a different key, which the resolver refuses
+// outright. CI has none of them, so clearing them makes a run here a run there.
+// They are kept apart from clearedVars because they are secrets, not paths:
+// verify and Guard print and judge those.
+var rootKeyVars = []string{rootkey.EnvKey, rootkey.EnvKeyFile, rootkey.EnvPrevious, rootkey.EnvPreviousFile,
+	rootkey.EnvCredentialsDirectory}
 
 // Isolate points every per-user state path at a fresh temporary directory for
 // the lifetime of the whole test binary, runs m, and removes the directory.
@@ -103,7 +118,7 @@ func isolate() (restore func(), cleanup func(), err error) {
 		dir = resolved
 	}
 
-	prev := make(map[string]*string, len(redirectedVars)+len(clearedVars))
+	prev := make(map[string]*string, len(redirectedVars)+len(clearedVars)+len(rootKeyVars))
 	remember := func(k string) {
 		if v, ok := os.LookupEnv(k); ok {
 			prev[k] = &v
@@ -115,6 +130,9 @@ func isolate() (restore func(), cleanup func(), err error) {
 		remember(k)
 	}
 	for _, k := range clearedVars {
+		remember(k)
+	}
+	for _, k := range rootKeyVars {
 		remember(k)
 	}
 
@@ -140,6 +158,11 @@ func isolate() (restore func(), cleanup func(), err error) {
 		}
 	}
 	for _, k := range clearedVars {
+		if uerr := os.Unsetenv(k); uerr != nil {
+			return fail("unset %s: %w", k, uerr)
+		}
+	}
+	for _, k := range rootKeyVars {
 		if uerr := os.Unsetenv(k); uerr != nil {
 			return fail("unset %s: %w", k, uerr)
 		}
