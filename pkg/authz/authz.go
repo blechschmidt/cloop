@@ -451,10 +451,32 @@ const (
 	// is an opaque identifier, not a human-readable name). Useful when the
 	// IdP does not release email.
 	ClaimSub ClaimKind = "sub"
+
+	// ClaimUsername matches the preferred_username claim, case-insensitively
+	// (Task 20415). It is the login an administrator controls at Entra ID,
+	// Okta, Auth0 and Keycloak, and what a SCIM directory sends as userName —
+	// so a provisioning hub matching on ui.oidc.scim.match_claim:
+	// preferred_username can deny exactly the account the identity provider
+	// deactivated, rather than an email that may belong to somebody else.
+	ClaimUsername ClaimKind = "username"
+
+	// ClaimOID matches Microsoft Entra ID's oid claim, the directory object id
+	// of the account, case-insensitively (it is a GUID). Unlike Entra's sub,
+	// which is pairwise per application, oid is the same value the directory
+	// provisions over SCIM as externalId when the operator maps objectId to it
+	// (Task 20415).
+	ClaimOID ClaimKind = "oid"
+
+	// ClaimSCIMGroup matches a group the identity provider provisioned to this
+	// hub over SCIM, by display name or external id (Task 20415). It is not a
+	// token claim: the provisioning directory supplies it at every decision
+	// (Config.Directory), so removing a member at the identity provider
+	// demotes them on their next request rather than at the next claim refresh.
+	ClaimSCIMGroup ClaimKind = "scim_group"
 )
 
 // AllClaimKinds lists the claim kinds a binding may use.
-var AllClaimKinds = []ClaimKind{ClaimGroup, ClaimRole, ClaimEmail, ClaimSub}
+var AllClaimKinds = []ClaimKind{ClaimGroup, ClaimRole, ClaimEmail, ClaimSub, ClaimUsername, ClaimOID, ClaimSCIMGroup}
 
 // Valid reports whether c is a known claim kind.
 func (c ClaimKind) Valid() bool {
@@ -574,6 +596,18 @@ type Subject struct {
 
 	// Roles holds the values of the role claim, likewise flattened.
 	Roles []string
+
+	// Username is the preferred_username claim and OID Entra ID's oid claim,
+	// when released (Task 20415). Both identify the account at the provider,
+	// and are what a SCIM directory is matched against.
+	Username string
+	OID      string
+
+	// SCIMGroups are the groups the provisioning directory says this subject
+	// belongs to. Never read off a token: the Resolver fills it from
+	// Config.Directory for each decision, on a copy, and anything a caller
+	// put here is replaced.
+	SCIMGroups []string
 }
 
 // released reports whether the identity provider supplied anything at all
@@ -591,6 +625,12 @@ func (s *Subject) released(kind ClaimKind) bool {
 		return strings.TrimSpace(s.Email) != ""
 	case ClaimSub:
 		return strings.TrimSpace(s.Sub) != ""
+	case ClaimUsername:
+		return strings.TrimSpace(s.Username) != ""
+	case ClaimOID:
+		return strings.TrimSpace(s.OID) != ""
+	case ClaimSCIMGroup:
+		return len(s.SCIMGroups) > 0
 	}
 	return false
 }
@@ -948,6 +988,24 @@ type Config struct {
 	// these change while the process runs. The Resolver stays immutable — the
 	// reference is fixed at New — and the source owns its own freshness.
 	Runtime RuntimeSource
+
+	// Directory supplies what the identity provider provisioned about a
+	// subject over SCIM — the groups it belongs to — at every decision (Task
+	// 20415). Nil on a hub that is not provisioned, which costs nothing.
+	Directory DirectorySource
+}
+
+// DirectorySource answers which provisioned groups a subject belongs to.
+//
+// Called once per authorization decision, like RuntimeSource, so the same
+// contract holds: cheap, safe for concurrent use, and serving its last good
+// answer when its storage is briefly unreachable. Returning nil means "no
+// provisioned groups", which is also the answer for a subject the directory
+// does not know, one it has deactivated, and one it cannot match to a single
+// provisioned user — a group grants nothing to an account the directory
+// cannot vouch for.
+type DirectorySource interface {
+	DirectoryGroups(subject *Subject) []string
 }
 
 // RuntimeSource yields the runtime role bindings currently in force.
@@ -971,6 +1029,7 @@ type Resolver struct {
 	defaultRole Role
 	bindings    []Binding
 	runtime     RuntimeSource
+	directory   DirectorySource
 	configured  bool
 }
 
@@ -1049,6 +1108,7 @@ func New(cfg Config) (*Resolver, error) {
 		defaultRole: def,
 		bindings:    bindings,
 		runtime:     cfg.Runtime,
+		directory:   cfg.Directory,
 		// Whether an operator wrote a policy, which Enforced turns into
 		// whether RBAC is in force. Deliberately not influenced by Runtime or
 		// AdminEmails; Enforced says why.
@@ -1194,6 +1254,10 @@ func (r *Resolver) Resolve(subject *Subject, scope Scope) Decision {
 	if subject == nil {
 		return Deny(SourceUnauthenticated, "", scope)
 	}
+	// The provisioned groups are read once per decision too, for the same
+	// reason, and onto a copy: the caller's subject may be shared by a stream
+	// re-checking concurrently.
+	subject = r.withDirectory(subject)
 
 	// Read the runtime layer once. It is a live source, so two reads in one
 	// decision could disagree and produce a resolution that matches neither
@@ -1346,6 +1410,31 @@ func (r *Resolver) runtimeBindings() []Binding {
 	return r.runtime.RuntimeBindings()
 }
 
+// withDirectory returns subject with SCIMGroups set to what the provisioning
+// directory says now — a copy, never the caller's value. Whatever the caller
+// put in SCIMGroups is discarded: a group only the directory can vouch for
+// must not be assertable by anything else that builds a Subject.
+func (r *Resolver) withDirectory(subject *Subject) *Subject {
+	if subject == nil {
+		return nil
+	}
+	if r == nil || r.directory == nil {
+		if len(subject.SCIMGroups) == 0 {
+			return subject
+		}
+		cp := *subject
+		cp.SCIMGroups = nil
+		return &cp
+	}
+	cp := *subject
+	cp.SCIMGroups = r.directory.DirectoryGroups(subject)
+	return &cp
+}
+
+// HasDirectory reports whether a provisioning directory takes part in this
+// resolver's decisions.
+func (r *Resolver) HasDirectory() bool { return r != nil && r.directory != nil }
+
 // DeniedBy returns the runtime deny binding that withdraws subject's authority
 // within scope, or nil.
 //
@@ -1363,7 +1452,21 @@ func (r *Resolver) DeniedBy(subject *Subject, scope Scope) *Binding {
 	if r == nil || subject == nil || r.runtime == nil {
 		return nil
 	}
-	b := firstDeny(r.runtime.RuntimeBindings(), subject, scope)
+	runtime := r.runtime.RuntimeBindings()
+	if len(runtime) == 0 {
+		return nil
+	}
+	// A deny may name a provisioned group (scim_group), so the directory is
+	// consulted — but only when one does: this runs on every request of a hub
+	// with any runtime binding.
+	subj := subject
+	for i := range runtime {
+		if runtime[i].Deny && runtime[i].Claim == ClaimSCIMGroup {
+			subj = r.withDirectory(subject)
+			break
+		}
+	}
+	b := firstDeny(runtime, subj, scope)
 	if b == nil {
 		return nil
 	}
@@ -1408,6 +1511,11 @@ func (r *Resolver) UnsatisfiableBindings(subject *Subject) []Binding {
 	}
 	var out []Binding
 	for _, b := range r.bindings {
+		// A provisioned group is not a token claim: the directory supplies
+		// it, so a token that carries none says nothing about the binding.
+		if b.Claim == ClaimSCIMGroup {
+			continue
+		}
 		if !subject.released(b.Claim) {
 			out = append(out, b)
 		}
@@ -1469,10 +1577,17 @@ func (b Binding) matches(s *Subject) bool {
 	case ClaimSub:
 		// Subjects are opaque identifiers, so compare exactly.
 		return s.Sub != "" && b.Value == strings.TrimSpace(s.Sub)
+	case ClaimUsername:
+		return strings.TrimSpace(s.Username) != "" && strings.EqualFold(b.Value, strings.TrimSpace(s.Username))
+	case ClaimOID:
+		// A GUID, whose case carries nothing.
+		return strings.TrimSpace(s.OID) != "" && strings.EqualFold(b.Value, strings.TrimSpace(s.OID))
 	case ClaimGroup:
 		return containsFold(s.Groups, b.Value)
 	case ClaimRole:
 		return containsFold(s.Roles, b.Value)
+	case ClaimSCIMGroup:
+		return containsFold(s.SCIMGroups, b.Value)
 	}
 	return false
 }

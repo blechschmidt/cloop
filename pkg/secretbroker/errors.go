@@ -44,6 +44,10 @@ var (
 	ErrGrantExpired = errors.New("secretbroker: grant expired")
 	// ErrGrantRevoked: the grant was revoked.
 	ErrGrantRevoked = errors.New("secretbroker: grant revoked")
+	// ErrGrantSuspended: the grant's owner was deactivated at the identity
+	// provider, and the grant is refused until they are reactivated (Task
+	// 20415).
+	ErrGrantSuspended = errors.New("secretbroker: grant suspended")
 	// ErrGrantWithheld: the grant matched, and the requester asked for it not
 	// to be delivered (Requester.Withhold). A denial like the two above, so
 	// the lease's trail says which credential a run did not get, and why.

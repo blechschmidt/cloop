@@ -265,12 +265,19 @@ func (s brokerSecrets) Owned(ownerKeys []string) ([]PersonalSecretRef, []Persona
 		byID[sec.ID] = ref
 	}
 
-	grants, err := s.b.ListGrants(secretbroker.GrantFilter{ActiveOnly: true})
+	grants, err := s.b.ListGrants(secretbroker.GrantFilter{})
 	if err != nil {
 		return secrets, nil, fmt.Errorf("list grants: %w", err)
 	}
+	now := time.Now()
 	var out []PersonalGrantRef
 	for _, g := range grants {
+		// Standing rather than active: a grant suspended when the identity
+		// provider deactivated its owner (Task 20415) is not usable, and is
+		// still a grant this run has to revoke.
+		if !g.Standing(now) {
+			continue
+		}
 		sec, overMine := byID[g.SecretID]
 		// The owner on the grant row as well as the secret it points at: a
 		// live grant whose personal secret is already gone still names whose

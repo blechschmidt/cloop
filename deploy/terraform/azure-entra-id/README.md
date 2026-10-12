@@ -39,6 +39,10 @@ token, and the ones that are not obvious are the reason this exists.
 | `azuread_application_password` | The client secret — **only** when `client_type = "confidential"` |
 | `time_rotating` | Its rotation schedule, held still between rotations so plans do not churn |
 | `azuread_app_role_assignment` | One per (role, group-or-user) pair you declare |
+| `azuread_application_from_template` | The provisioning application, **only** with `scim_provisioning` — see [Provisioning](#provisioning-scim) |
+| `azuread_synchronization_secret` | Its connection: the hub's `/scim/v2` URL, the hub's SCIM credential, and the scope |
+| `azuread_synchronization_job` | The provisioning job itself, created started |
+| `azuread_app_role_assignment` (provisioning) | One per principal in the job's scope |
 
 ---
 
@@ -230,6 +234,143 @@ credentials to a sandbox and attach to a running one.
 
 ---
 
+## Provisioning (SCIM)
+
+Sign-in alone leaves a gap: a person disabled in Entra keeps a working hub
+session until cloop next re-asks Entra, keeps their API tokens until someone
+revokes them, and keeps any sandbox lease they hold. Provisioning closes it.
+Entra's provisioning service tells the hub about every account in scope, and
+when one is disabled, deleted or unassigned it sends `active: false` — on which
+the hub suspends the person in one request: a deny binding on their identity,
+and their sessions, API tokens, glasses links, sandbox leases and running tasks
+ended. Nobody has to notice, and nobody has to run anything.
+
+```hcl
+module "cloop_sso" {
+  source        = "github.com/blechschmidt/cloop//deploy/terraform/azure-entra-id"
+  hub_base_urls = ["https://cloop.example.com"]
+
+  role_assignments  = { operator = { group_object_ids = [data.azuread_group.engineering.object_id] } }
+  scim_provisioning = {}
+  scim_secret_token = var.cloop_scim_token
+}
+```
+
+It takes two applies, because the credential comes from the hub:
+
+1. Apply without provisioning, configure the hub from `cloop_config_yaml`, and
+   start it.
+2. On the hub, `cloop hub scim credential create entra` prints the credential
+   once (Settings → Provisioning does the same from the dashboard). Apply again
+   with it as `scim_secret_token`, and merge the `scim:` block that now
+   appears in `cloop_config_yaml`.
+
+The hub must be reachable from Microsoft's provisioning service, which calls it
+over the internet — unlike sign-in, where only users' browsers do.
+
+### Why a second application
+
+Entra runs a provisioning job only on an enterprise application instantiated
+from a template; the sign-in registration is a plain app registration, and
+re-instantiating it would replace it — client ID, assignments and all. So the
+module instantiates Entra's non-gallery template a second time. That
+application signs nobody in. It carries the job, the connection, and the
+assignments that are the job's scope: the scope is **Sync only assigned users
+and groups** (`SyncAll = false`), and by default everyone in
+`role_assignments` is assigned — the people who can sign in are the people to
+deprovision. `scim_provisioning.group_object_ids` and `user_object_ids` add
+more.
+
+### What Entra sends, and what the hub does
+
+| In Entra | Sent | On the hub |
+| --- | --- | --- |
+| Account assigned (directly or through a group) | `POST /Users` | A provisioned user; no access by itself |
+| Sign-in blocked, account deleted, unassigned, or out of a scoping filter | `PATCH active: false` | **Suspended**: deny binding, sessions, API tokens, glasses links, leases and running tasks end; grants over their personal secrets suspend. Memberships and stored credentials are kept |
+| Re-enabled, restored or reassigned | `PATCH active: true` | The suspension's deny binding and grant suspensions are lifted. What ended stays ended: they sign in again |
+| Hard-deleted — 30 days after deletion, or purged from the recycle bin | `DELETE /Users/{id}` | Full offboarding, as `cloop hub user offboard` — unless a legal hold keeps their credentials |
+| Group assigned; members added or removed | `POST /Groups`, `PATCH members` | Membership becomes the `scim_group` claim, read at every authorization decision |
+
+Two consequences worth knowing. Entra sends a `DELETE` only for a user it still
+manages, so a user who was **unassigned** stays suspended indefinitely —
+`scim_provisioning.offboard_after_days` runs the full offboarding for anyone
+kept deactivated that long. And Entra works in **cycles, about every 40
+minutes**: a disable reaches the hub at the next one, not the moment it is
+made. **Provision on demand** on the provisioning application pushes one user
+now; the dashboard's offboarding is still the tool for the next five minutes.
+
+### Matching a provisioned user to a person
+
+The hub has to know which signed-in identity a provisioned user is. The
+rendered `ui.oidc.scim.match_claim` says how:
+
+- **`preferred_username`** (the default) — Entra's default mapping provisions
+  `userName` from the `userPrincipalName`, which is what the ID token's
+  `preferred_username` carries. No portal changes, and guests work: Entra
+  strips the `#EXT#` suffix from a guest's UPN before provisioning it.
+- **`oid`** — the object ID, which never changes or gets reused. Entra's
+  default mapping sends `mailNickname` as `externalId`, though, so this needs
+  one step the provider cannot take: on the provisioning application,
+  **Provisioning → Attribute mapping → Provision Microsoft Entra ID Users →
+  externalId**, change the source attribute to `objectId`, save. Until then the
+  hub counts every user as unmatchable, and `cloop hub doctor` says so.
+- **`email`** — the `mail` attribute, sent as the work email. Users with no
+  mailbox have none, and cannot be matched.
+
+A user two hub identities could be is refused rather than guessed — the hub
+denies the claim value alone and grants neither identity the user's groups.
+
+### Binding roles to provisioned groups
+
+Provisioned groups become a claim role mappings can name, without
+`emit_group_claims` and without the 200-group overage:
+
+```hcl
+cloop_extra_role_mappings = [
+  { claim = "scim_group", value = "Payments", role = "maintainer", project = "payments" },
+]
+```
+
+The value is the group's display name or its object ID (Entra's default group
+mapping sends the object ID as `externalId`). Membership is read at every
+decision, so removing someone from the group in Entra demotes them at the next
+cycle, on their next request. Only assigned groups are provisioned, so assign
+the group to the provisioning application (`scim_provisioning.group_object_ids`)
+as well.
+
+### What the provider cannot set
+
+Set these on the provisioning application in the portal if you want them;
+Terraform leaves them alone:
+
+- **Notification email** (Provisioning → Overview → Properties): an address to
+  hear from when the job goes into quarantine — which is how a revoked or
+  expired hub credential shows up.
+- **Accidental deletions prevention** (same place): pauses the job when one
+  cycle would deactivate more than a threshold of users, which is what
+  unassigning the wrong group looks like.
+- **Visible to users** (Properties): the provisioning application has no
+  sign-in of its own, so its tile in My Apps leads nowhere; set it to No.
+
+The module's synchronization secret holds the endpoint, the credential and the
+scope. Entra stores those as one set and the provider writes them as one, so
+change the scope here, not in the portal.
+
+### Rotating the credential
+
+```console
+$ cloop hub scim credential rotate entra --grace 1h    # on the hub
+$ TF_VAR_cloop_scim_token=cloop_scim_… terraform apply  # within the hour
+```
+
+The old credential keeps working for the grace period, so a cycle in flight
+does not fail. The credential is in Terraform state — Entra never returns it —
+so the state backend must encrypt. `cloop hub scim credential revoke entra
+--reason "…"` stops provisioning at once; the next cycle fails with 401 and the job goes into
+quarantine.
+
+---
+
 ## Inputs
 
 | Name | Type | Default | |
@@ -253,6 +394,8 @@ credentials to a sandbox and attach to a running one.
 | `cloop_default_role` | `string` | `"none"` | |
 | `cloop_admin_emails` | `list(string)` | `[]` | Break-glass; prefer the `admin` app role |
 | `cloop_extra_role_mappings` | `list(object)` | `[]` | Project- and executor-scoped grants |
+| `scim_provisioning` | `object` | `null` | Turns on [provisioning](#provisioning-scim); `{}` takes every default |
+| `scim_secret_token` | `string` (sensitive) | `null` | The credential `cloop hub scim credential create` printed |
 
 ## Outputs
 
@@ -261,7 +404,10 @@ credentials to a sandbox and attach to a running one.
 `redirect_url`, `redirect_uris`, `tenant_id`, `application_object_id`,
 `service_principal_object_id`, `app_role_ids`, `admin_consent_url`,
 `app_role_assignment_required` — are either fields of it or things you need
-when a sign-in does not work. `terraform output` describes each.
+when a sign-in does not work. With provisioning, `scim_base_address`,
+`provisioning_service_principal_object_id`, `provisioning_job_id` and
+`provisioning_app_role_id` say where Entra provisions and what it was given.
+`terraform output` describes each.
 
 ---
 
@@ -272,7 +418,7 @@ The module has a suite that needs no Azure tenant:
 ```console
 $ terraform init -backend=false
 $ terraform test
-Success! 17 passed, 0 failed.
+Success! 26 passed, 0 failed.
 ```
 
 It mocks the provider, so it proves nothing about what Entra accepts — only an
@@ -292,8 +438,11 @@ The joins to cloop itself are checked from Go, in
 where both sides are visible: that the callback path is a route `pkg/ui` still
 serves, that the four app roles are `pkg/authz`'s ladder, that the rendered
 YAML keys are fields of `config.OIDCConfig`, that the environment variable is
-the one `pkg/config` reads, and that every scope the config requests is a
-permission the registration was granted.
+the one `pkg/config` reads, that every scope the config requests is a
+permission the registration was granted — and, for provisioning, that the
+SCIM path is where the hub serves SCIM, that the credential pattern accepts
+exactly what the hub's parser does, and that every match claim is one the hub
+starts with.
 
 `make terraform-test` runs both, and CI runs that.
 
@@ -311,7 +460,11 @@ permission the registration was granted.
 | Hub refuses to start, names the issuer | `curl` the `discovery_url` output from the hub. cloop's startup preflight fetches exactly that, so a failure here is DNS, egress or a proxy — not cloop |
 | Sign-in works, everything is read-only | The user holds no app role and got `default_role`. Check the `roles` claim at <https://jwt.ms> |
 | Sign-out lands on a Microsoft page | The bare origin (with trailing slash) is not a registered redirect URI |
-| Disabling a user does not end their session | No refresh token: `offline_access` missing from `ui.oidc.scopes`, or `CLOOP_SECRET_KEY` unset |
+| Disabling a user does not end their session | No refresh token: `offline_access` missing from `ui.oidc.scopes`, or `CLOOP_SECRET_KEY` unset — or no provisioning, which ends it at the next cycle without one |
+| Provisioning job in quarantine, logs show 401 | The hub refused the credential: revoked, or rotated and the grace period ran out. Rotate, apply, then **Restart provisioning** |
+| Provisioning job in quarantine, logs show 404 on every request | The hub serves `/scim/v2` only with `ui.oidc` enabled — or `scim_base_address` is not the hub's external URL |
+| Provisioning logs show 429 | The credential's rate limit (`ui.oidc.scim.rate_limit_per_minute`, default 600/min). Entra paces on `Retry-After`; raise the limit for a large first cycle |
+| A disabled user keeps working after a cycle | Not matched: `cloop hub scim status` counts unmatchable and ambiguous users — usually `match_claim: oid` without the `objectId` → `externalId` mapping |
 
 ## See also
 

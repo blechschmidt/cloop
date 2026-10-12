@@ -270,6 +270,10 @@ func (s *Server) bodyTypeAccepted(r *http.Request, ct string) bool {
 		return true
 	case p == ciMountPath || strings.HasPrefix(p, ciMountPath+"/"):
 		return true
+	case p == scimMountPath || strings.HasPrefix(p, scimMountPath+"/"):
+		// SCIM's own JSON type (Task 20415), which no form can send either;
+		// every request there carries a bearer as well.
+		return jsonbody.IsMediaType(ct, scimMediaTypes...)
 	case p == cspReportPath:
 		// The two JSON types a browser sends its policy reports as, and
 		// neither one a form can (Task 20408).

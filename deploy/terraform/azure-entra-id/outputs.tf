@@ -32,6 +32,23 @@ locals {
     [for e in var.cloop_admin_emails : "      - ${jsonencode(e)}"],
   )
 
+  # ui.oidc.scim, when provisioning is on. The credential is not in it: the
+  # hub minted it and keeps its hash in its own database, so there is nothing
+  # for the config file to carry.
+  scim_lines = !local.provision ? [] : concat(
+    [
+      "",
+      "    # SCIM provisioning: Entra's provisioning service creates, deactivates",
+      "    # and deletes this hub's users at ${local.scim_base_address}.",
+      "    # A deactivation suspends the matching identity in one request.",
+      "    scim:",
+      "      match_claim: ${var.scim_provisioning.match_claim}",
+    ],
+    var.scim_provisioning.offboard_after_days == null ? [] : [
+      "      offboard_after_days: ${var.scim_provisioning.offboard_after_days}",
+    ],
+  )
+
   # How the rendered config explains its own missing credential. On a public
   # client there is nothing to supply, which is the point and is worth saying
   # outright — an operator who has seen an OIDC config before will otherwise
@@ -87,6 +104,7 @@ locals {
     local.app_role_mappings,
     local.extra_role_mappings,
     local.admin_email_lines,
+    local.scim_lines,
     [""],
   ))
 }
@@ -165,4 +183,24 @@ output "admin_consent_url" {
 output "app_role_assignment_required" {
   description = "Whether Entra refuses a token to users holding no app role. True means an unassigned user is stopped with AADSTS50105 instead of reaching an empty dashboard."
   value       = azuread_service_principal.cloop.app_role_assignment_required
+}
+
+output "scim_base_address" {
+  description = "The Tenant URL Entra's provisioning service calls — the hub's SCIM endpoint. Null without scim_provisioning."
+  value       = local.provision ? local.scim_base_address : null
+}
+
+output "provisioning_service_principal_object_id" {
+  description = "Object ID of the provisioning enterprise application: open it in the portal for the provisioning logs, Provision on demand, and the attribute mappings the provider cannot set. Null without scim_provisioning."
+  value       = try(azuread_application_from_template.provisioning[0].service_principal_object_id, null)
+}
+
+output "provisioning_job_id" {
+  description = "ID of the synchronization job. Null without scim_provisioning."
+  value       = try(azuread_synchronization_job.provisioning[0].id, null)
+}
+
+output "provisioning_app_role_id" {
+  description = "The provisioning application's role its principals were assigned: its \"User\" role, \"msiam_access\", or default access (all zeros). Null without scim_provisioning."
+  value       = local.provisioning_role_id
 }

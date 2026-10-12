@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/configdiff"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provision"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -614,6 +615,34 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		default:
 			return fmt.Errorf("ui.oidc.require_rbac: expected true/false, got %q", value)
 		}
+	// SCIM provisioning (Task 20415). The match claim is checked by the
+	// function `cloop ui` refuses to start on, so the two cannot disagree.
+	case "ui.oidc.scim.match_claim":
+		claim, err := provision.ParseMatchClaim(value)
+		if err != nil {
+			return err
+		}
+		cfg.UI.OIDC.SCIM.MatchClaim = string(claim)
+	case "ui.oidc.scim.offboard_after_days":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.scim.offboard_after_days: expected integer, got %q", value)
+		}
+		if n < 0 || n > config.SCIMOffboardAfterDaysUpper {
+			return fmt.Errorf("ui.oidc.scim.offboard_after_days must be between 0 (never) and %d (got %d)",
+				config.SCIMOffboardAfterDaysUpper, n)
+		}
+		cfg.UI.OIDC.SCIM.OffboardAfterDays = n
+	case "ui.oidc.scim.rate_limit_per_minute":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.scim.rate_limit_per_minute: expected integer, got %q", value)
+		}
+		if n != 0 && (n < config.SCIMRateLimitPerMinuteLower || n > config.SCIMRateLimitPerMinuteUpper) {
+			return fmt.Errorf("ui.oidc.scim.rate_limit_per_minute must be between %d and %d (0 for the default %d) (got %d)",
+				config.SCIMRateLimitPerMinuteLower, config.SCIMRateLimitPerMinuteUpper, config.SCIMRateLimitDefault, n)
+		}
+		cfg.UI.OIDC.SCIM.RateLimitPerMinute = n
 
 	// Container executor (Task 20157). Each case assigns into a copy that is
 	// validated as a whole before being committed, because these fields

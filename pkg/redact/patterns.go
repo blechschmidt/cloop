@@ -513,6 +513,13 @@ var specs = []spec{
 		keywords: []string{"cloop_glasses_"},
 	},
 	{
+		name:       "cloop-scim-credential",
+		label:      "cloop SCIM provisioning credential",
+		recognises: "`cloop_scim_<id>_<secret>`, the bearer an identity provider presents to `/scim/v2` (Task 20415).",
+		pattern:    `(?P<kind>cloop_scim_)[0-9a-f]{16}_[0-9a-f]{8,}`,
+		keywords:   []string{"cloop_scim_"},
+	},
+	{
 		name:       "cloop-ci-token",
 		label:      "cloop CI relay session token",
 		recognises: "`cloop_ci_<id>.<secret>`, the session token a CI job presents to the Claude relay.",

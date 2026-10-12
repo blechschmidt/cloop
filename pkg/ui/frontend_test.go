@@ -849,6 +849,9 @@ func TestDashboard_APIEndpoints_AllRegistered(t *testing.T) {
 		// truncates the call at the interpolated id, so the truncated form is
 		// what has to be listed here.
 		"/api/leases/{id}",
+		// POST /api/scim/credentials/{id}/rotate and …/revoke (Task 20415),
+		// truncated the same way.
+		"/api/scim/credentials/{id}",
 	}
 	for _, r := range knownDynamic {
 		routes[r] = struct{}{}

@@ -499,6 +499,56 @@ const (
 	// ActionUserOffboardHold records an offboarding run under a legal hold,
 	// and what it kept.
 	ActionUserOffboardHold Action = "user.offboard_hold"
+	// ActionUserHoldPlace records a legal hold placed on an identity, which
+	// every later offboarding of it honours (Task 20415).
+	ActionUserHoldPlace Action = "user.hold_place"
+	// ActionUserHoldRelease records a legal hold released.
+	ActionUserHoldRelease Action = "user.hold_release"
+
+	// ── scim ───────────────────────────────────────────────────────────────
+
+	// ActionSCIMCredentialCreate records a SCIM bearer credential minted for
+	// an identity provider (Task 20415).
+	ActionSCIMCredentialCreate Action = "scim.credential_create"
+	// ActionSCIMCredentialRotate records a SCIM credential's secret replaced.
+	ActionSCIMCredentialRotate Action = "scim.credential_rotate"
+	// ActionSCIMCredentialRevoke records a SCIM credential revoked.
+	ActionSCIMCredentialRevoke Action = "scim.credential_revoke"
+	// ActionSCIMRequestRefused records a request to /scim/v2 refused before it
+	// reached the directory: no credential, a wrong or revoked one, the rate
+	// limit, or a hub without single sign-on.
+	ActionSCIMRequestRefused Action = "scim.request_refused"
+	// ActionSCIMUserCreate records a user provisioned.
+	ActionSCIMUserCreate Action = "scim.user_create"
+	// ActionSCIMUserUpdate records a provisioned user's attributes changed.
+	ActionSCIMUserUpdate Action = "scim.user_update"
+	// ActionSCIMUserSuspend records a user deactivated at the identity
+	// provider, and everything the hub severed in the same transaction.
+	ActionSCIMUserSuspend Action = "scim.user_suspend"
+	// ActionSCIMUserSuspendIncomplete records a part of a suspension that
+	// could not join its transaction and failed: a lease, a task.
+	ActionSCIMUserSuspendIncomplete Action = "scim.user_suspend_incomplete"
+	// ActionSCIMUserReactivate records a user reactivated at the identity
+	// provider, and what the lift restored.
+	ActionSCIMUserReactivate Action = "scim.user_reactivate"
+	// ActionSCIMUserDelete records a user deleted at the identity provider.
+	ActionSCIMUserDelete Action = "scim.user_delete"
+	// ActionSCIMUserOffboardExpired records the full offboarding of a user
+	// inactive for ui.oidc.scim.offboard_after_days.
+	ActionSCIMUserOffboardExpired Action = "scim.user_offboard_expired"
+	// ActionSCIMMatchAmbiguous records a provisioned user who matches more
+	// than one hub identity, and that the hub refused to choose.
+	ActionSCIMMatchAmbiguous Action = "scim.match_ambiguous"
+	// ActionSCIMGroupCreate records a group provisioned.
+	ActionSCIMGroupCreate Action = "scim.group_create"
+	// ActionSCIMGroupUpdate records a provisioned group renamed or otherwise
+	// changed.
+	ActionSCIMGroupUpdate Action = "scim.group_update"
+	// ActionSCIMGroupMembers records members added to or removed from a
+	// provisioned group.
+	ActionSCIMGroupMembers Action = "scim.group_members"
+	// ActionSCIMGroupDelete records a provisioned group deleted.
+	ActionSCIMGroupDelete Action = "scim.group_delete"
 
 	// ── project ────────────────────────────────────────────────────────────
 

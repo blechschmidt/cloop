@@ -92,6 +92,10 @@ const (
 	// invalidateStaticToken: a static admin token was retired (Task 20406);
 	// each member re-reads the retired set and ends what the token opened.
 	invalidateStaticToken = "static_token"
+	// invalidateSCIM: the identity provider changed the provisioned directory
+	// through a member (Task 20415); each re-reads it at once rather than at
+	// its next version check, so a removal from a group demotes everywhere.
+	invalidateSCIM = "scim"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -612,6 +616,9 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		// 20406). The payload names it, but the set is re-read whole: the
 		// table, not the notice, is what a member refuses by.
 		s.onStaticTokenRetired()
+	case invalidateSCIM:
+		// The directory changed through another member (Task 20415).
+		s.onSCIMInvalidate()
 	case invalidateAgent:
 		var p agentInvalidation
 		if err := ev.Decode(&p); err == nil {

@@ -171,6 +171,16 @@ func withdrawnDescription(s Secret, g Grant) string {
 		s.Kind, s.Name, s.Owner, g.RevokedAt.UTC().Format("2006-01-02"))
 }
 
+// suspendedDescription is what a project is told about a grant suspended
+// because the secret's owner was deactivated at the identity provider (Task
+// 20415). Nothing about who did it or why: the project learns only that the
+// credential is unavailable and that it may come back.
+func suspendedDescription(s Secret) string {
+	return fmt.Sprintf("%s %q, a personal credential of %s, is suspended while its owner is deactivated at "+
+		"the identity provider; it returns if they are reactivated — grant this project a credential that "+
+		"somebody active on this hub owns", s.Kind, s.Name, s.Owner)
+}
+
 // RefusedCredential is a grant a lease was aimed at and could not honour
 // because of something done elsewhere (Task 20400): the secret behind it was
 // destroyed, or the grant was withdrawn when the secret's owner was offboarded.

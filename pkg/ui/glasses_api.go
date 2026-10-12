@@ -553,11 +553,13 @@ func ownerFromIdentity(id *oidcauth.Identity) *apitoken.Owner {
 		return nil
 	}
 	return &apitoken.Owner{
-		Sub:    id.Sub,
-		Email:  id.Email,
-		Name:   id.Name,
-		Groups: id.Groups,
-		Roles:  id.Roles,
+		Sub:      id.Sub,
+		Email:    id.Email,
+		Name:     id.Name,
+		Groups:   id.Groups,
+		Roles:    id.Roles,
+		Username: id.Username,
+		OID:      id.OID,
 	}
 }
 

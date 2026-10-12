@@ -1353,6 +1353,54 @@ on where the trail has to say what a sandbox *read*; expect a burst of rows per
 
 ---
 
+## SCIM provisioning
+
+The identity provider keeps the hub's directory current at `/scim/v2` and
+suspends a person it deactivates without an operator
+([guide](../guides/scim-provisioning.md)). Operating it is mostly noticing when
+it stopped working, because a provisioning job that fails does so quietly — at
+the provider.
+
+`cloop hub doctor` checks it (`scim.config`, `scim.directory`): a live
+credential on a hub without single sign-on — which serves no `/scim/v2` — and
+provisioned users who carry no value for `ui.oidc.scim.match_claim` or share
+one, whose deactivation would reach nobody. `cloop hub scim status` shows the
+credentials, when each was last used, and the same counts.
+
+### Alert on `scim.user_suspend_incomplete`
+
+```console
+$ cloop audit-log list --type scim.user_suspend_incomplete --since 7d
+```
+
+The suspension's transaction committed — the person is denied, their sessions
+and tokens are gone — but a lease or a running task could not be ended
+afterwards, and the row's `warnings` say which. Revoke the lease under
+**Secrets → Leases** and stop the task; a lease whose holder is unreachable
+still lapses within 15 minutes, because its grant is suspended and cannot be
+renewed.
+
+### Alert on `scim.match_ambiguous`
+
+The provider deactivated a user whose match value more than one hub identity
+carries. The hub denied the value itself rather than guess which person was
+meant — so whoever else carries it is refused too, which is the visible
+symptom. Fix the mapping at the provider or choose a claim that is unique
+(`oid`, `sub`); then `cloop hub role list --identity` shows what the suspension
+wrote.
+
+### Watch `scim.request_refused`
+
+A steady stream with `reason: unknown` or `revoked` is the provider's job
+about to go into quarantine — a rotation whose new secret never reached it.
+`sso_disabled` is a hub whose single sign-on was turned off under a working
+provider, and `rate_limited` a first cycle larger than
+`ui.oidc.scim.rate_limit_per_minute`. A burst from an address the provider does not use is somebody
+probing `/scim/v2`; the sign-in lockout applies to it as to any failed
+credential. The rows are bounded per minute, so their count is a floor.
+
+---
+
 ## Key rotation
 
 Three different keys, three different procedures. The sealing key rotates
@@ -1555,6 +1603,23 @@ rotation guarantee, and `status` will keep saying so.
 
 Short TTLs mean grants rotate themselves. See
 [choosing TTLs](../guides/secrets.md#choosing-ttls).
+
+### SCIM credentials — rotate with an overlap
+
+The identity provider's credential for `/scim/v2` rotates in place, keeping its
+name, so its audit actor (`scim:<name>`) does not change:
+
+```console
+$ cloop hub scim credential rotate entra --grace 1h --reason "yearly rotation"
+```
+
+The new secret is printed once, and the old one is still accepted for the
+grace period (at most seven days): paste the new one into the provider within
+it — with the Terraform module, set `scim_secret_token` and apply. Without
+`--grace` the old secret stops working at once, and the provider's next cycle
+fails with 401 until the new one is in. A leaked credential is revoked rather
+than rotated: `cloop hub scim credential revoke entra --reason "…"` ends both
+secrets now. See [the credential](../guides/scim-provisioning.md#the-credential).
 
 ---
 
@@ -2446,6 +2511,20 @@ Four more are what they *keep* here rather than hold open:
 `cloop hub user offboard` severs all seven, destroys all four, and reports one
 more — the projects they own — without touching it.
 
+**With SCIM provisioning the identity provider does the severing itself**
+([guide](../guides/scim-provisioning.md)). Disabling, deleting or unassigning
+the person there suspends them here at the provider's next cycle: the deny
+binding, sessions, API tokens and glasses links in one transaction, then their
+leases and running tasks, and every grant over their personal secrets
+suspended — the first six of the seven, without anyone running anything. A
+suspension keeps their memberships and stored credentials, because a disabled
+account is often a temporary one. The provider's `DELETE`, or
+`ui.oidc.scim.offboard_after_days` of deactivation, runs this command's full
+offboarding as `scim:<credential>`. So with provisioning, run it by hand for
+the minutes before the provider's next cycle (about 40 on Entra; or use its
+*Provision on demand*), or to finish what a suspension keeps without waiting.
+`cloop hub audit --entity-type scim_user` shows what the provider did.
+
 ```bash
 # 1. Look first. Nothing is changed, and the set printed is exactly the set
 #    the write acts on.
@@ -2527,7 +2606,13 @@ being extended, so it lapses within 15 minutes, and the dry run names it with
 the time. Revoke the lease under **Secrets → Leases** to end it sooner.
 
 **A legal hold** (`--keep-credentials`, or *Legal hold* in the dashboard) keeps
-their personal secrets and Claude Code homes exactly as they are. Access is
+their personal secrets and Claude Code homes exactly as they are. A hold can
+also be placed *before* anyone offboards — `cloop hub user hold place
+alice@example.com --reason "LH-17"` — and then every offboarding of that
+identity honours it, including the ones the identity provider triggers through
+SCIM, where nobody is at a prompt to pass `--keep-credentials`. `cloop hub user
+hold list` shows the holds in force; `release` lifts one and destroys nothing
+by itself. Access is
 still severed: the grants are revoked, the requests withdrawn and a login in
 flight cancelled — a hold preserves evidence, it does not keep a departed
 person's credential in use. The report lists what was kept, and

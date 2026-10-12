@@ -173,6 +173,11 @@ func (a *Authenticator) userinfoIdentity(ctx context.Context, accessToken string
 		Name:   name,
 		Groups: claims.groupValues(),
 		Roles:  claims.roleValues(a.cfg.ClientID),
+		// The account's identifiers at the provider (Task 20415). A
+		// revalidation narrows only groups and roles (RefreshResult), so
+		// a provider that omits these here changes nothing stored.
+		Username: claims.username(),
+		OID:      claims.oid(),
 	}, nil
 }
 

@@ -95,6 +95,14 @@ type Target struct {
 	// from a decoding bug.
 	Subjects []string `json:"subjects"`
 	Emails   []string `json:"emails"`
+
+	// Usernames and OIDs are preferred_username and Entra oid values that
+	// address this person too (Task 20415). Only a SCIM directory matching on
+	// one of those claims puts them here: they are what the identity provider
+	// deactivated, and a deny binding on them refuses a sign-in that carries
+	// neither a known subject nor a known email. Lowercased.
+	Usernames []string `json:"usernames,omitempty"`
+	OIDs      []string `json:"oids,omitempty"`
 }
 
 // OwnerKeys returns every owner-key spelling this identity may be stored under.
@@ -130,6 +138,12 @@ func (t Target) Label() string {
 	if len(t.Subjects) > 0 {
 		return "sub:" + t.Subjects[0]
 	}
+	if len(t.Usernames) > 0 {
+		return t.Usernames[0]
+	}
+	if len(t.OIDs) > 0 {
+		return "oid:" + t.OIDs[0]
+	}
 	return t.Input
 }
 
@@ -144,6 +158,10 @@ type SessionRef struct {
 	// Kind is browser or cli: a terminal signed in with `cloop login` holds a
 	// session like a browser does, and is severed with it (Task 20412).
 	Kind string `json:"kind,omitempty"`
+	// Username and OID are the preferred_username and oid claims the session
+	// signed in with (Task 20415).
+	Username string `json:"username,omitempty"`
+	OID      string `json:"oid,omitempty"`
 }
 
 // TokenRef is one API token or glasses link.
@@ -244,10 +262,24 @@ type Plan struct {
 	// Destroyed after the transaction, or kept under a legal hold.
 	Credentials Credentials `json:"credentials"`
 
+	// Hold is the legal hold placed on this identity, when there is one
+	// (Task 20415): it keeps the stored credentials whatever the run was
+	// asked, so an offboarding nobody ran by hand — the identity provider
+	// deleting the account — honours it too.
+	Hold *HoldRef `json:"hold,omitempty"`
+
 	// Warnings name things the run cannot be sure about — most importantly
 	// tokens whose owner binding did not decode, which cannot be proven *not*
 	// to belong to this person.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// HoldRef is a legal hold an offboarding found placed on its identity.
+type HoldRef struct {
+	Identity string    `json:"identity"`
+	Reason   string    `json:"reason"`
+	PlacedAt time.Time `json:"placed_at"`
+	PlacedBy string    `json:"placed_by,omitempty"`
 }
 
 // Empty reports whether there is nothing to sever. A plan with only a deny
@@ -352,8 +384,15 @@ type Options struct {
 	// DB is the hub's control-plane database. Required.
 	DB *statedb.DB
 
-	// Identity is the email or subject the operator typed. Required.
+	// Identity is the email or subject the operator typed. Required, unless
+	// Target is set.
 	Identity string
+
+	// Target is an identity its caller already resolved (Task 20415): a SCIM
+	// directory, which knows the person by the claim it matches on and must
+	// not be widened past an ambiguous match by the expansion an operator's
+	// input gets. When set, Identity is only the label the trail records.
+	Target *Target
 
 	// Reason is recorded on every audit event. Required: an offboarding with
 	// no stated cause is not reviewable, and the reviewability is the point.
@@ -412,7 +451,7 @@ func Run(o Options) (Report, error) {
 	if o.DB == nil {
 		return Report{}, fmt.Errorf("offboard: nil database")
 	}
-	if strings.TrimSpace(o.Identity) == "" {
+	if strings.TrimSpace(o.Identity) == "" && o.Target == nil {
 		return Report{}, fmt.Errorf("offboard: identity is required")
 	}
 	// Only the write needs a reason. Demanding one for a dry run — which
@@ -428,6 +467,9 @@ func Run(o Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// A legal hold placed on the identity keeps what it stored, whatever
+	// this run was asked (BuildPlan decided it).
+	o.KeepCredentials = plan.Credentials.Keep
 
 	rep := Report{
 		Plan:   plan,
@@ -755,6 +797,12 @@ func plannedDenies(t Target) ([]DenyRef, []string) {
 	}
 	for _, s := range t.Subjects {
 		add(authz.ClaimSub, s)
+	}
+	for _, u := range t.Usernames {
+		add(authz.ClaimUsername, u)
+	}
+	for _, o := range t.OIDs {
+		add(authz.ClaimOID, o)
 	}
 	return out, warnings
 }

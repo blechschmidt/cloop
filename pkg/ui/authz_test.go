@@ -58,6 +58,15 @@ func isMutatingPermission(perm authz.Permission) bool {
 // authz.PermPublic. Making a route public is a security decision, so it
 // requires editing this list — a new unguarded route cannot appear by
 // accident or by copy-paste.
+// scimPublicReason is why the SCIM service declares no permission (Task 20415).
+const scimPublicReason = "SCIM 2.0 provisioning. The caller is an identity provider, which holds no " +
+	"session and must hold no other credential of the hub's: every route authenticates the " +
+	"cloop_scim_ bearer minted for it (scimEnter — an HMAC compared in constant time, revoked " +
+	"credentials refused, wrong ones counted toward the address's failure lockout) and accepts " +
+	"nothing else, not an API token and not the static token. Each credential is rate-limited on " +
+	"its own, every refusal and every change is audited as scim:<name>, and a hub without single " +
+	"sign-on answers 404. Served before authentication too (isSCIMEndpoint)"
+
 var publicRouteAllowlist = map[string]string{
 	"/":                  "the SPA shell; authMiddleware already gated whether this caller may load it",
 	"/assets/":           "content-hashed CSS/JS served same-origin for the CSP",
@@ -152,6 +161,26 @@ var publicRouteAllowlist = map[string]string{
 		"unknown, expired or revoked token is refused identically so probing learns nothing. The " +
 		"session's policy bounds which models, how many requests and how large a body, and the " +
 		"hub's own Anthropic credential is attached only after that policy has returned nil",
+
+	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
+	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,
+	"GET /scim/v2/ResourceTypes":         scimPublicReason,
+	"GET /scim/v2/ResourceTypes/{id}":    scimPublicReason,
+	"GET /scim/v2/Schemas":               scimPublicReason,
+	"GET /scim/v2/Schemas/{id}":          scimPublicReason,
+	"GET /scim/v2/Users":                 scimPublicReason,
+	"POST /scim/v2/Users":                scimPublicReason,
+	"GET /scim/v2/Users/{id}":            scimPublicReason,
+	"PUT /scim/v2/Users/{id}":            scimPublicReason,
+	"PATCH /scim/v2/Users/{id}":          scimPublicReason,
+	"DELETE /scim/v2/Users/{id}":         scimPublicReason,
+	"GET /scim/v2/Groups":                scimPublicReason,
+	"POST /scim/v2/Groups":               scimPublicReason,
+	"GET /scim/v2/Groups/{id}":           scimPublicReason,
+	"PUT /scim/v2/Groups/{id}":           scimPublicReason,
+	"PATCH /scim/v2/Groups/{id}":         scimPublicReason,
+	"DELETE /scim/v2/Groups/{id}":        scimPublicReason,
+	"/scim/v2/":                          scimPublicReason,
 
 	"GET /api/glasses/link": "reports whether the caller holds a display-glasses link, never the link " +
 		"itself (the secret is not stored). Scoped by construction: the owner is read off the session " +

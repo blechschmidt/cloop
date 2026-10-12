@@ -230,6 +230,10 @@ func (e *APIError) Is(target error) bool {
 	return e.Code == other.Code
 }
 
+// Status is the HTTP status the error is written with: HTTPStatus, or the
+// code's default.
+func (e *APIError) Status() int { return e.statusOrDefault() }
+
 // statusOrDefault returns HTTPStatus, falling back to defaultStatus(Code)
 // when unset. Used by WriteError before serialising the response.
 func (e *APIError) statusOrDefault() int {

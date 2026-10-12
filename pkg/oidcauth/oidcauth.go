@@ -397,6 +397,15 @@ type Identity struct {
 	Groups []string `json:"groups,omitempty"`
 	Roles  []string `json:"roles,omitempty"`
 
+	// Username is the preferred_username claim, and OID Microsoft Entra
+	// ID's oid claim — the account's login and directory object id at the
+	// provider (Task 20415). They are what a SCIM directory is matched
+	// against (ui.oidc.scim.match_claim), and what a deny binding written
+	// when the provider deactivates the account names. Empty when the
+	// provider released neither.
+	Username string `json:"username,omitempty"`
+	OID      string `json:"oid,omitempty"`
+
 	// AuthTime is the id_token's auth_time: when the person last actually
 	// authenticated at the provider, as opposed to when the token was minted.
 	// Read once, by an approval that demanded a fresh sign-in (device.go), and

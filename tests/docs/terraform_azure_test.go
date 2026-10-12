@@ -29,6 +29,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/provision"
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
@@ -215,6 +216,33 @@ func assertHCLRoleList(t *testing.T, src, what, shape string, want []string) {
 	}
 }
 
+// TestAzureModuleAcceptsEveryClaimKind keeps the extra role mappings'
+// validation on pkg/authz's claim kinds. A stale list refuses a binding the
+// hub would honour — scim_group, for one, which is what provisioning adds —
+// and a list with a kind the hub does not know renders a mapping that stops
+// the hub from starting.
+func TestAzureModuleAcceptsEveryClaimKind(t *testing.T) {
+	vars := azureModuleFile(t, "variables.tf")
+	m := regexp.MustCompile(`contains\(\[([^\]]*)\], m\.claim\)`).FindStringSubmatch(vars)
+	if m == nil {
+		t.Fatal("no role-mapping claim validation in the module — this check is disabled, not passing")
+	}
+	var got []string
+	for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+		got = append(got, q[1])
+	}
+	var want []string
+	for _, k := range authz.AllClaimKinds {
+		want = append(want, string(k))
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s/variables.tf accepts role-mapping claims %v, but pkg/authz's claim kinds are %v.\n"+
+			"  Update the cloop_extra_role_mappings validation.", azureModuleDir, got, want)
+	}
+}
+
 // TestAzureModuleCallbackPathIsARealRoute binds the redirect URI to the route
 // table.
 //
@@ -360,6 +388,119 @@ func TestAzureModuleGrantsEveryScopeItRequests(t *testing.T) {
 			"  Without a refresh token cloop can never re-ask the identity provider " +
 			"whether a user is still valid: ui.oidc.refresh_interval_minutes and " +
 			"max_claim_age_minutes both stop working and nothing reports it.")
+	}
+}
+
+// TestAzureModuleProvisionsTheRealSCIMEndpoint binds the module's
+// provisioning half to the hub (Task 20415).
+//
+// Entra's provisioning service is pointed at <hub><scim_path>, presents the
+// credential pasted into scim_secret_token, and the rendered config tells the
+// hub which claim to match on. Each is a claim about this codebase that
+// Terraform cannot check: a moved mount path is a job that quarantines on
+// 404s, a token pattern stricter than the hub's format refuses a real
+// credential at plan while a looser one waves through an API token the hub
+// answers 401, and a match claim the hub does not know keeps it from
+// starting.
+func TestAzureModuleProvisionsTheRealSCIMEndpoint(t *testing.T) {
+	main := azureModuleFile(t, "main.tf")
+	vars := azureModuleFile(t, "variables.tf")
+	outputs := azureModuleFile(t, "outputs.tf")
+
+	// Every call Entra's SCIM connector makes lands on a public route under
+	// the path the module configures. Public, because the SCIM handler
+	// authenticates the credential itself; a route behind the hub's own
+	// authentication would answer Entra with a sign-in redirect.
+	m := regexp.MustCompile(`scim_path\s*=\s*"([^"]+)"`).FindStringSubmatch(main)
+	if m == nil {
+		t.Fatal("no scim_path local in the module — this check is disabled, not passing")
+	}
+	path := m[1]
+	need := map[string]bool{}
+	for _, r := range []string{
+		"GET /Users", "POST /Users", "GET /Users/{id}", "PUT /Users/{id}", "PATCH /Users/{id}", "DELETE /Users/{id}",
+		"GET /Groups", "POST /Groups", "GET /Groups/{id}", "PATCH /Groups/{id}", "DELETE /Groups/{id}",
+		"GET /ServiceProviderConfig", "GET /Schemas", "GET /ResourceTypes",
+	} {
+		method, rest, _ := strings.Cut(r, " ")
+		need[method+" "+path+rest] = false
+	}
+	for _, r := range ui.APIRoutes() {
+		key := r.Method + " " + r.Path
+		if _, ok := need[key]; !ok {
+			continue
+		}
+		need[key] = true
+		if !r.Public {
+			t.Errorf("%s requires a hub session, but Entra's provisioning service presents only the SCIM credential", key)
+		}
+	}
+	for key, found := range need {
+		if !found {
+			t.Errorf("the module points Entra at %s, but the hub serves no %s.\n"+
+				"  Every provisioning cycle would fail and the job would go into quarantine.\n"+
+				"  Fix the scim_path local in %s/main.tf to match pkg/ui's route table.", path, key, azureModuleDir)
+		}
+	}
+
+	// The credential pattern agrees with the hub's parser, both ways.
+	tm := regexp.MustCompile(`can\(regex\("([^"]+)", var\.scim_secret_token\)\)`).FindStringSubmatch(vars)
+	if tm == nil {
+		t.Fatal("no scim_secret_token validation pattern in the module — this check is disabled, not passing")
+	}
+	pattern, err := regexp.Compile(strings.ReplaceAll(tm[1], `\\`, `\`))
+	if err != nil {
+		t.Fatalf("the module's scim_secret_token pattern does not compile: %v", err)
+	}
+	hex := func(n int) string { return strings.Repeat("0123456789abcdef", n/16+1)[:n] }
+	for _, c := range []string{
+		provision.CredentialPrefix + hex(16) + "_" + hex(64),
+		provision.CredentialPrefix + hex(15) + "_" + hex(64),
+		provision.CredentialPrefix + hex(16) + "_" + hex(63),
+		provision.CredentialPrefix + strings.ToUpper(hex(16)) + "_" + hex(64),
+		"cloop_tok_" + hex(16) + "_" + hex(64),
+		provision.CredentialPrefix + hex(16) + "-" + hex(64),
+	} {
+		_, _, hubTakes := provision.ParseCredential(c)
+		if moduleTakes := pattern.MatchString(c); moduleTakes != hubTakes {
+			t.Errorf("%s/variables.tf and provision.ParseCredential disagree about %q: the module says %v, the hub %v.\n"+
+				"  Update the scim_secret_token validation to the hub's format.", azureModuleDir, c, moduleTakes, hubTakes)
+		}
+	}
+
+	// Each match claim the module accepts is one the hub starts with.
+	cm := regexp.MustCompile(`contains\(\[([^\]]*)\], var\.scim_provisioning\.match_claim\)`).FindStringSubmatch(vars)
+	if cm == nil {
+		t.Fatal("no scim_provisioning.match_claim validation in the module — this check is disabled, not passing")
+	}
+	claims := regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(cm[1], -1)
+	if len(claims) == 0 {
+		t.Fatal("parsed no match claims out of the module's validation")
+	}
+	dm := regexp.MustCompile(`match_claim\s*=\s*optional\(string,\s*"([^"]+)"\)`).FindStringSubmatch(vars)
+	if dm == nil {
+		t.Fatal("no default match_claim in the module's scim_provisioning type — this check is disabled, not passing")
+	}
+	for _, c := range append(claims, []string{"", dm[1]}) {
+		if _, err := provision.ParseMatchClaim(c[1]); err != nil {
+			t.Errorf("%s/variables.tf accepts match_claim %q, but the hub refuses it: %v", azureModuleDir, c[1], err)
+		}
+	}
+
+	// The rendered keys are real: cloop decodes YAML leniently, so a renamed
+	// key would silently fall back to matching on email.
+	if !yamlKeys(reflect.TypeOf(config.OIDCConfig{}))["scim"] {
+		t.Error("the module renders ui.oidc.scim, but config.OIDCConfig has no scim key")
+	}
+	scimKeys := yamlKeys(reflect.TypeOf(config.SCIMConfig{}))
+	for _, key := range []string{"match_claim", "offboard_after_days"} {
+		if !scimKeys[key] {
+			t.Errorf("the module renders ui.oidc.scim.%s, which config.SCIMConfig does not have", key)
+		}
+		if !strings.Contains(outputs, key+": ") {
+			t.Errorf("%s/outputs.tf no longer renders `%s:` — this check names a key the module does not write",
+				azureModuleDir, key)
+		}
 	}
 }
 

@@ -817,6 +817,19 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 			if revoked {
 				sentinel = ErrGrantRevoked
 			}
+			// A grant suspended because its owner was deactivated at the
+			// identity provider (Task 20415) is told to the project by name,
+			// as an offboarding is: the run goes without a colleague's
+			// credential for a reason nobody on the project caused.
+			if !revoked && !g.SuspendedAt.IsZero() {
+				if s, serr := b.store.GetSecret(g.SecretID); serr == nil {
+					refuse(ev, g, ErrGrantSuspended, reason+": "+suspendedDescription(s), s.Name, s.Kind, s.Owner,
+						time.Time{}, true)
+					continue
+				}
+				_ = b.denyf(ev, ErrGrantSuspended, "%s", reason)
+				continue
+			}
 			// Told only when the cause on the grant says the project lost it
 			// to an offboarding or a deletion. One somebody revoked by hand,
 			// or one that had simply expired, its owner already knows about,

@@ -308,7 +308,19 @@ but not for anything reachable from a network.`,
 				if _, memberErr := srv.OpenMemberStore(); memberErr != nil {
 					return fmt.Errorf("could not open project memberships: %w", memberErr)
 				}
-				resolver, authzErr := authz.New(cfg.UI.OIDC.AuthzConfig(roleSource))
+				// SCIM provisioning (ui.oidc.scim — Task 20415): the directory
+				// the identity provider provisions, read at every decision for
+				// the groups a scim_group binding names. Fatal like the role
+				// store: a hub that came up without it would grant no
+				// provisioned group, and an invalid match_claim would leave it
+				// unable to tell whom a deactivation is about.
+				scimDir, scimErr := srv.OpenSCIM(cfg.UI.OIDC.SCIM)
+				if scimErr != nil {
+					return fmt.Errorf("could not open the SCIM directory: %w", scimErr)
+				}
+				authzCfg := cfg.UI.OIDC.AuthzConfig(roleSource)
+				authzCfg.Directory = scimDir
+				resolver, authzErr := authz.New(authzCfg)
 				if authzErr != nil {
 					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)
 				}

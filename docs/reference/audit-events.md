@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 156 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 174 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 135 |
+| `control-plane` | the hub's own state.db | 153 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-156 actions in 42 families. Every action is listed: this section is the whole
+174 actions in 43 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (14) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (16) · [`scim.*`](#scim) (16) · [`project.*`](#project) (1) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
 
 ### task.*
 
@@ -685,6 +685,8 @@ Payload keys, on every action above: `scope`
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
+| `user.hold_place` | `user` | control-plane | stable | A legal hold is placed on an identity, or its reason restated (`cloop hub user hold`). |
+| `user.hold_release` | `user` | control-plane | stable | A legal hold is released. |
 | `user.offboard` | `user` | control-plane | stable | An identity is offboarded, summarising every surface the operation touched. |
 | `user.offboard_claude` | `user` | control-plane | stable | Offboarding ends the identity's Claude Code logins on every hub member: cancels one in flight, logs each home out and removes it. |
 | `user.offboard_deny` | `user` | control-plane | stable | Offboarding writes deny bindings so a stale IdP mapping cannot re-admit the identity. |
@@ -702,6 +704,8 @@ Payload keys, on every action above: `scope`
 
 Payload keys:
 
+- `user.hold_place` — `identity`, `hold_reason`, `placed_at`, `reason`, `via`, `os_user`
+- `user.hold_release` — `identity`, `hold_reason`, `placed_at`, `placed_by`, `reason`, `via`, `os_user`
 - `user.offboard` — `sessions`, `tokens`, `glasses`, `denies`, `leases`, `tasks`, `projects`, `memberships`, `personal_secrets`, `personal_grants`, `grant_requests`, `claude_homes`, `legal_hold`, `warnings`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_claude` — `copies`, `removed`, `logged_out`, `logins_cancelled`, `unreached`, `kept`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_deny` — `count`, `bindings`, `claims`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
@@ -717,12 +721,64 @@ Payload keys:
 - `user.offboard_task` — `count`, `tasks`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_token` — `count`, `tokens`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 
+- `user.hold_place` — Every offboarding of the identity from then on — an operator's, the identity provider deleting the account, or ui.oidc.scim.offboard_after_days — keeps its personal secrets and Claude Code homes, as --keep-credentials does, and writes user.offboard_hold.
 - `user.offboard_claude` — `copies` names each home by member and directory with what became of it. `unreached` lists hub members that could not be asked — a copy there may still hold a refresh token.
 - `user.offboard_grant` — Each grant also has its own `secret.revoke` row from the broker, naming the reason. `grants` names each one with its secret and subject, which is where a shared project that loses the credential shows up.
 - `user.offboard_hold` — Written whether or not anything was found to keep, so whether a hold was in force does not depend on what the person had stored.
 - `user.offboard_project` — Deliberately a report rather than a mutation — picking a project's next owner is not a decision an offboarding script should make.
 - `user.offboard_request` — Each request also has a `secret.request_withdraw` row whose reason says it was withdrawn at offboarding rather than by its requester.
 - `user.offboard_secret` — Each secret also has its own `secret.delete` row. The sealed columns are overwritten before the row is deleted, and a tombstone keeps the name so a later lease can say which credential a project lost. Not written under a legal hold — `user.offboard_hold` says what was kept instead.
+
+### scim.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `scim.credential_create` | `scim_credential` | control-plane | stable | A SCIM bearer credential is minted for an identity provider. |
+| `scim.credential_revoke` | `scim_credential` | control-plane | stable | A SCIM credential is revoked, both its secrets at once. |
+| `scim.credential_rotate` | `scim_credential` | control-plane | stable | A SCIM credential's secret is replaced. |
+| `scim.group_create` | `scim_group` | control-plane | stable | The identity provider provisions a group. |
+| `scim.group_delete` | `scim_group` | control-plane | stable | The identity provider deletes a group. |
+| `scim.group_members` | `scim_group` | control-plane | stable | Members are added to or removed from a provisioned group. |
+| `scim.group_update` | `scim_group` | control-plane | stable | A provisioned group is renamed or its attributes change. |
+| `scim.match_ambiguous` | `scim_user` | control-plane | stable | A provisioned user's match value addresses more than one hub identity. |
+| `scim.request_refused` | `scim` | control-plane | stable | A request to /scim/v2 is refused before it reaches the directory. |
+| `scim.user_create` | `scim_user` | control-plane | stable | The identity provider provisions a user. |
+| `scim.user_delete` | `scim_user` | control-plane | stable | The identity provider deletes a user; the full offboarding runs first. |
+| `scim.user_offboard_expired` | `scim_user` | control-plane | stable | A user inactive for ui.oidc.scim.offboard_after_days is offboarded in full. |
+| `scim.user_reactivate` | `scim_user` | control-plane | stable | The identity provider reactivates a user (active: true). |
+| `scim.user_suspend` | `scim_user` | control-plane | stable | The identity provider deactivates a user (active: false). |
+| `scim.user_suspend_incomplete` | `scim_user` | control-plane | stable | A lease or task of a suspended user could not be ended after the suspension committed. |
+| `scim.user_update` | `scim_user` | control-plane | stable | The identity provider changes a provisioned user's attributes with PUT or PATCH. |
+
+Payload keys:
+
+- `scim.credential_create` — `id`, `name`, `reason`, `via`, `os_user`
+- `scim.credential_revoke` — `id`, `name`, `reason`, `via`, `os_user`
+- `scim.credential_rotate` — `id`, `name`, `grace_seconds`, `previous_valid_until`, `reason`, `via`, `os_user`
+- `scim.group_create` — `id`, `display_name`, `external_id`, `members`, `unknown_members`
+- `scim.group_delete` — `id`, `display_name`, `external_id`, `members`
+- `scim.group_members` — `id`, `display_name`, `added`, `removed`, `unknown_members`, `method`
+- `scim.group_update` — `id`, `display_name`, `previous_display_name`, `external_id`, `method`
+- `scim.match_ambiguous` — `id`, `user_name`, `match_claim`, `match_value`, `subjects`, `emails`, `operation`
+- `scim.request_refused` — `reason`, `method`, `path`, `ip`, `user_agent`, `client`, `suppressed`
+- `scim.user_create` — `id`, `user_name`, `external_id`, `email`, `active`, `match_claim`, `match_value`
+- `scim.user_delete` — `id`, `user_name`, `identity`, `legal_hold`, `failures`
+- `scim.user_offboard_expired` — `id`, `user_name`, `identity`, `deactivated_at`, `legal_hold`, `failures`
+- `scim.user_reactivate` — `id`, `user_name`, `denies_lifted`, `denies_kept`, `grants_resumed`, `offboarded_at`, `note`
+- `scim.user_suspend` — `id`, `user_name`, `identity`, `subjects`, `emails`, `usernames`, `oids`, `ambiguous`, `denies_written`, `denies_in_force`, `sessions`, `api_tokens`, `glasses`, `grants_suspended`, `leases`, `tasks`, `warnings`
+- `scim.user_suspend_incomplete` — `id`, `user_name`, `failures`
+- `scim.user_update` — `id`, `user_name`, `external_id`, `email`, `active`, `method`, `changed`, `match_claim`, `match_value`
+
+- `scim.credential_create` — The secret is shown once and stored only as an HMAC; no row carries it.
+- `scim.group_members` — A removal takes effect at the member's next authorization decision: provisioned groups are read at every decision, not at the next claim refresh.
+- `scim.group_update` — A rename changes what a scim_group role binding naming the old name grants.
+- `scim.match_ambiguous` — The hub does not choose among them: it acts on the matched claim alone — a deny binding on it, and what carries it — and grants the user's provisioned groups to nobody.
+- `scim.request_refused` — reason is unauthenticated, unknown, revoked, rate_limited or sso_disabled. At most 30 rows a minute; suppressed counts the ones the limit did not write.
+- `scim.user_create` — A user provisioned inactive is suspended at once, and gets a scim.user_suspend row too.
+- `scim.user_delete` — The offboarding writes its own user.offboard* rows, with via scim.
+- `scim.user_offboard_expired` — The offboarding writes its own user.offboard* rows, with via scim-expiry.
+- `scim.user_reactivate` — Lifts only what the suspension wrote: a deny an administrator wrote for the same identity stays (denies_kept). Sessions, tokens, leases and tasks the suspension ended are not restored, and after an offboarding nothing is lifted.
+- `scim.user_suspend` — Written in the transaction that writes the deny bindings, deletes the sessions, revokes the API tokens and glasses links and suspends the grants over the person's personal secrets. Leases and tasks are listed as planned; they end after the commit, and a failure there is scim.user_suspend_incomplete. Memberships and stored credentials are kept.
 
 ### project.*
 

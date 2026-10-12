@@ -180,6 +180,8 @@ func (s *Store) Put(rec oidcauth.SessionRecord) error {
 		ClaimsExpireAt:    rec.ClaimsExpireAt,
 		Kind:              rec.KindName(),
 		Client:            rec.Client,
+		Username:          rec.Identity.Username,
+		OID:               rec.Identity.OID,
 	})
 }
 
@@ -335,11 +337,13 @@ func (s *Store) toRecord(row statedb.SessionRow) oidcauth.SessionRecord {
 	return oidcauth.SessionRecord{
 		ID: row.ID,
 		Identity: oidcauth.Identity{
-			Sub:    row.Subject,
-			Email:  row.Email,
-			Name:   row.DisplayName,
-			Groups: row.Groups,
-			Roles:  row.Roles,
+			Sub:      row.Subject,
+			Email:    row.Email,
+			Name:     row.DisplayName,
+			Groups:   row.Groups,
+			Roles:    row.Roles,
+			Username: row.Username,
+			OID:      row.OID,
 		},
 		IP:               row.IP,
 		UserAgent:        row.UserAgent,

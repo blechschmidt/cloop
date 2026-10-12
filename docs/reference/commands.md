@@ -1317,6 +1317,49 @@ removed). Projects they own are reported, never deleted. Needs no
 `CLOOP_SECRET_KEY`. A partial run exits non-zero. See the
 [runbook](../operations/runbook.md#somebody-leaves).
 
+### `cloop hub user hold`
+
+Standing legal holds. Every offboarding of a held identity — this command's,
+the dashboard's, or one the identity provider triggers over SCIM — keeps the
+person's personal secrets and Claude Code homes, as `--keep-credentials` does,
+and records `user.offboard_hold`.
+
+```bash
+cloop hub user hold place alice@example.com --reason "litigation LH-17"
+cloop hub user hold list
+cloop hub user hold release alice@example.com --reason "LH-17 closed"
+```
+
+An identity is an email or `sub:<subject>`. `--reason` is required to place or
+release a hold (at least four characters to place one — it is what the next
+administrator reads). Releasing destroys nothing: run the offboarding again to
+finish what the hold kept. `--json` prints the list for scripting.
+
+### `cloop hub scim`
+
+SCIM 2.0 provisioning: the credential an identity provider presents to
+`/scim/v2`, and what it has provisioned. See the
+[guide](../guides/scim-provisioning.md).
+
+```bash
+cloop hub scim credential create entra                  # printed once
+cloop hub scim credential rotate entra --grace 1h --reason "yearly rotation"
+cloop hub scim credential revoke entra --reason "moving to the new tenant"
+cloop hub scim credential list
+cloop hub scim status                                   # credentials, directory counts, matching
+```
+
+| Command | Meaning |
+| --- | --- |
+| `credential create <name>` | Mint a credential. The name is the audit actor of every change the provider makes, `scim:<name>`. Accepted on `/scim/v2` only |
+| `credential rotate <name\|id>` | New secret, same name and id. `--grace` keeps the replaced secret working for that long, at most `168h`; without it the old one stops now |
+| `credential revoke <name\|id>` | Both secrets end at once. `--reason` is required |
+| `credential list` | Every credential, live and revoked, with when each was last used |
+| `status` | The credentials, the match claim, and the provisioned directory: users active and suspended, groups, and the users no hub identity matches or several do |
+
+Each takes `--workdir` and `--json`. The same operations are under
+**Settings → Provisioning (SCIM)** and `/api/scim`, gated on `user.manage`.
+
 ### `cloop hub quota`
 
 Per-identity quota overrides: the one-off cap applied to a single tenant. Most

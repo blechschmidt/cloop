@@ -1,0 +1,332 @@
+{
+  "name": "Microsoft Entra ID provisioning cycle",
+  "source": "The request sequence Entra ID's provisioning service sends a custom SCIM application (learn.microsoft.com: 'Tutorial: Develop and plan provisioning for a SCIM endpoint', the user and group test cases), recorded in the service's legacy dialect — capitalised ops, booleans as the strings True and False, member removal by value list, the ADSCIM group schema — followed by the same operations with its SCIM 2.0 compliance flag (aadOptscim062020) on.",
+  "match_claim": "email",
+  "steps": [
+    {
+      "name": "Get User by query - zero results",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName+eq+%22Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1%22",
+      "status": 200,
+      "expect": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": 0, "Resources": []}
+    },
+    {
+      "name": "Create User",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],
+        "externalId": "0a21f0f2-8d2a-4f8e-bf98-7363c4aed4ef",
+        "userName": "Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1",
+        "active": true,
+        "emails": [{"primary": true, "type": "work", "value": "Test_User_fd0ea19b-0777-472c-9f96-4f70d2226f2e@testuser.com"}],
+        "meta": {"resourceType": "User"},
+        "name": {"formatted": "givenName familyName", "familyName": "familyName", "givenName": "givenName"},
+        "roles": []
+      },
+      "status": 201,
+      "capture": {"user": "id"},
+      "expect": {
+        "externalId": "0a21f0f2-8d2a-4f8e-bf98-7363c4aed4ef",
+        "userName": "Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1",
+        "active": true,
+        "meta": {"resourceType": "User"},
+        "name": {"familyName": "familyName", "givenName": "givenName"},
+        "emails": [{"value": "Test_User_fd0ea19b-0777-472c-9f96-4f70d2226f2e@testuser.com", "type": "work", "primary": true}]
+      }
+    },
+    {
+      "name": "Get User",
+      "method": "GET",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 200,
+      "expect": {"id": "{{user}}", "userName": "Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1"}
+    },
+    {
+      "name": "Get User by query",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName%20eq%20%22Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1%22",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "Create User again - the provider retries after a lost response",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "externalId": "0a21f0f2-8d2a-4f8e-bf98-7363c4aed4ef",
+        "userName": "Test_User_ab6490ee-1e48-479e-a20b-2d77186b5dd1",
+        "active": true
+      },
+      "status": 409,
+      "expect": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "409", "scimType": "uniqueness"}
+    },
+    {
+      "name": "Update User [Multi-valued properties]",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [
+          {"op": "Replace", "path": "emails[type eq \"work\"].value", "value": "updatedEmail@microsoft.com"},
+          {"op": "Replace", "path": "name.familyName", "value": "updatedFamilyName"}
+        ]
+      },
+      "status": 200,
+      "expect": {"emails": [{"value": "updatedEmail@microsoft.com", "type": "work"}], "name": {"familyName": "updatedFamilyName", "givenName": "givenName"}}
+    },
+    {
+      "name": "Update User [Single-valued properties]",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Replace", "path": "userName", "value": "5b50642d-79fc-4410-9e90-4c077cdd1a59@testuser.com"}]
+      },
+      "status": 200,
+      "expect": {"userName": "5b50642d-79fc-4410-9e90-4c077cdd1a59@testuser.com"}
+    },
+    {
+      "name": "Update User [Add Manager]",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Add", "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager", "value": "OriginalManagerId"}]
+      },
+      "status": 200,
+      "expect": {"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"manager": {"value": "OriginalManagerId"}}}
+    },
+    {
+      "name": "Update User [Remove Manager]",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Remove", "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager"}]
+      },
+      "status": 200,
+      "absent": ["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User/manager"]
+    },
+    {
+      "name": "Create Group - with the ADSCIM schema the legacy service attaches",
+      "method": "POST",
+      "path": "/scim/v2/Groups",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group", "http://schemas.microsoft.com/2006/11/ResourceManagement/ADSCIM/2.0/Group"],
+        "externalId": "8aa1a0c0-c4c3-4bc0-b4a5-2ef676900159",
+        "displayName": "displayName",
+        "meta": {"resourceType": "Group"}
+      },
+      "status": 201,
+      "capture": {"group": "id"},
+      "expect": {"displayName": "displayName", "externalId": "8aa1a0c0-c4c3-4bc0-b4a5-2ef676900159", "meta": {"resourceType": "Group"}, "members": []}
+    },
+    {
+      "name": "Get Group",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}?excludedAttributes=members",
+      "status": 200,
+      "expect": {"id": "{{group}}", "displayName": "displayName"},
+      "absent": ["members"]
+    },
+    {
+      "name": "Get Group by displayName",
+      "method": "GET",
+      "path": "/scim/v2/Groups?excludedAttributes=members&filter=displayName+eq+%22displayName%22",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{group}}"}]},
+      "absent": ["Resources/0/members"]
+    },
+    {
+      "name": "Update Group [Non-member attributes]",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Replace", "path": "displayName", "value": "1879db59-3bdf-4490-ad68-ab880a269474updatedDisplayName"}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Update Group [Add Members]",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Add", "path": "members", "value": [{"$ref": null, "value": "{{user}}"}]}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Get Group - the member is there",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 200,
+      "expect": {"displayName": "1879db59-3bdf-4490-ad68-ab880a269474updatedDisplayName", "members": [{"value": "{{user}}"}]}
+    },
+    {
+      "name": "Update Group [Remove Members] - the legacy value list, which must not empty the group",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Remove", "path": "members", "value": [{"$ref": null, "value": "some-other-member"}]}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Get Group - an unrelated removal left the member",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 200,
+      "expect": {"members": [{"value": "{{user}}"}]}
+    },
+    {
+      "name": "Update Group [Remove Members]",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "Remove", "path": "members", "value": [{"$ref": null, "value": "{{user}}"}]}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Get Group - empty",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 200,
+      "expect": {"members": []}
+    },
+    {
+      "name": "Disable User - op Replace, path active, the string False",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "Operations": [{"op": "Replace", "path": "active", "value": "False"}],
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+      },
+      "status": 200,
+      "expect": {"active": false},
+      "denies": ["email=updatedemail@microsoft.com"]
+    },
+    {
+      "name": "Disable User again - a retry changes nothing",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "Operations": [{"op": "Replace", "path": "active", "value": "False"}],
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+      },
+      "status": 200,
+      "expect": {"active": false}
+    },
+    {
+      "name": "Enable User - the string True",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "Operations": [{"op": "Replace", "path": "active", "value": "True"}],
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+      },
+      "status": 200,
+      "expect": {"active": true},
+      "noDenies": ["email=updatedemail@microsoft.com"]
+    },
+    {
+      "name": "Compliance flag: attribute update as a path-less replace keyed by paths",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{
+          "op": "replace",
+          "value": {
+            "displayName": "Test User",
+            "name.givenName": "updatedGivenName",
+            "emails[type eq \"work\"].value": "compliant@microsoft.com",
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department": "Engineering"
+          }
+        }]
+      },
+      "status": 200,
+      "expect": {
+        "displayName": "Test User",
+        "name": {"givenName": "updatedGivenName", "familyName": "updatedFamilyName"},
+        "emails": [{"value": "compliant@microsoft.com", "type": "work"}],
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"department": "Engineering"}
+      }
+    },
+    {
+      "name": "Compliance flag: add the member back",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "add", "path": "members", "value": [{"value": "{{user}}"}]}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Compliance flag: remove a member by value path",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "remove", "path": "members[value eq \"{{user}}\"]"}]
+      },
+      "status": 204
+    },
+    {
+      "name": "Compliance flag: disable as a path-less replace with a boolean",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "value": {"active": false}}]
+      },
+      "status": 200,
+      "expect": {"active": false},
+      "denies": ["email=compliant@microsoft.com"]
+    },
+    {
+      "name": "Delete Group",
+      "method": "DELETE",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 204
+    },
+    {
+      "name": "Delete User - the full offboarding",
+      "method": "DELETE",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 204,
+      "denies": ["email=compliant@microsoft.com"]
+    },
+    {
+      "name": "Get User - gone",
+      "method": "GET",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 404,
+      "expect": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "404"}
+    },
+    {
+      "name": "Enable User after the delete - nothing a deletion destroyed comes back",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "Operations": [{"op": "Replace", "path": "active", "value": "True"}],
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+      },
+      "status": 404,
+      "denies": ["email=compliant@microsoft.com"]
+    },
+    {
+      "name": "Delete User again - a retry",
+      "method": "DELETE",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 404
+    }
+  ]
+}

@@ -147,6 +147,8 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 		Owner:           g.Owner,
 		RevokedCause:    string(g.RevokedCause),
 		SupersededBy:    g.SupersededBy,
+		SuspendedAt:     formatTime(g.SuspendedAt),
+		SuspendedBy:     g.SuspendedBy,
 	})
 }
 
@@ -261,6 +263,8 @@ func toGrant(row statedb.BrokerGrantRow) (secretbroker.Grant, error) {
 		Owner:        row.Owner,
 		RevokedCause: secretbroker.RevocationCause(row.RevokedCause),
 		SupersededBy: row.SupersededBy,
+		SuspendedAt:  parseTime(row.SuspendedAt),
+		SuspendedBy:  row.SuspendedBy,
 	}, nil
 }
 

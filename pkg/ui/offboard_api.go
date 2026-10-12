@@ -15,12 +15,15 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/offboard"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -104,7 +107,7 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 		DryRun:          req.DryRun,
 		Projects:        offboard.RegistryProjects(s.allProjectEntries()),
 		Tasks:           offboard.LocalTasks(),
-		Leases:          hubLeases{},
+		Leases:          hubLeases{s: s, actor: actor, reason: "offboarded: " + reason},
 		Sessions:        s.offboardSessions(),
 		Secrets:         secrets,
 		Claude:          s.offboardClaude(),
@@ -118,6 +121,20 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 		rep.Warnings = append(rep.Warnings, "the secret store could not be opened, so personal secrets, "+
 			"their grants and pending requests were not checked: "+serr.Error())
 	}
+	s.offboardAftermath(rep)
+
+	// A partial run is reported with 200 and failures attached rather than as
+	// an error status. The caller needs the report either way — it names what
+	// *was* severed, which an error body would not carry — and the frontend
+	// renders the failures prominently.
+	jsonOK(w, rep)
+}
+
+// offboardAftermath tells this hub, and the other members, what an
+// offboarding changed behind their caches. Shared by the dashboard's
+// offboarding and the identity provider's (Task 20415), which must leave the
+// hub in the same state.
+func (s *Server) offboardAftermath(rep offboard.Report) {
 	// The deny bindings went in the same transaction, behind the role
 	// store's cache: on this hub they hold from the next request rather than
 	// within its refresh interval (Task 20412). Other members still take up
@@ -150,12 +167,6 @@ func (s *Server) handleUserOffboard(w http.ResponseWriter, r *http.Request) {
 		s.broadcastAuditAppend(string(secretbroker.ActionDeleteSec))
 		s.broadcastSecretsUpdate("offboarded", "")
 	}
-
-	// A partial run is reported with 200 and failures attached rather than as
-	// an error status. The caller needs the report either way — it names what
-	// *was* severed, which an error body would not carry — and the frontend
-	// renders the failures prominently.
-	jsonOK(w, rep)
 }
 
 // selfOffboard reports whether the identity names the caller.
@@ -245,6 +256,8 @@ func (s authSessions) List() ([]offboard.SessionRef, error) {
 			IssuedAt:  rec.IssuedAt,
 			ExpiresAt: rec.ExpiresAt,
 			Kind:      rec.KindName(),
+			Username:  rec.Identity.Username,
+			OID:       rec.Identity.OID,
 		})
 	}
 	return out, nil
@@ -258,17 +271,25 @@ func (s authSessions) Revoke(id, actor, reason string) (bool, error) {
 // leases
 // ---------------------------------------------------------------------------
 
-// hubLeases adapts this process's live-lease registry.
+// hubLeases adapts the hub's live leases: this process's registry, and those
+// every other member of its cluster issued (Task 20415).
 //
 // The registry, not a freshly-constructed broker: a Broker's lease map is
 // per-instance, and openBrokers builds a new one per request, so asking it what
 // is leased would always answer "nothing". liveLeases is the set of leases this
-// hub actually materialised and still holds.
-type hubLeases struct{}
+// hub actually materialised and still holds — and on a control plane several
+// processes serve (Task 20354), the lease of somebody being offboarded may
+// live on another one, which is why the peers are asked too.
+type hubLeases struct {
+	s *Server
+	// actor and reason are what the revocation records.
+	actor, reason string
+}
 
-func (hubLeases) LiveLeases() []offboard.LeaseRef {
+func (h hubLeases) LiveLeases() []offboard.LeaseRef {
 	snap := liveLeases.snapshot()
 	out := make([]offboard.LeaseRef, 0, len(snap))
+	seen := map[string]bool{}
 	for _, sl := range snap {
 		if sl == nil || sl.lease == nil {
 			continue
@@ -277,6 +298,7 @@ func (hubLeases) LiveLeases() []offboard.LeaseRef {
 		for _, m := range sl.lease.Materials {
 			grants = append(grants, m.GrantID)
 		}
+		seen[sl.lease.ID] = true
 		out = append(out, offboard.LeaseRef{
 			ID:         sl.lease.ID,
 			ExecutorID: sl.lease.ExecutorID,
@@ -286,18 +308,50 @@ func (hubLeases) LiveLeases() []offboard.LeaseRef {
 			GrantIDs:   grants,
 		})
 	}
+	if h.s == nil {
+		return out
+	}
+	for _, v := range h.s.peerLeaseViews(context.Background()) {
+		if seen[v.ID] || v.Expired {
+			continue
+		}
+		seen[v.ID] = true
+		ref := offboard.LeaseRef{ID: v.ID, ExecutorID: v.ExecutorID, ProjectID: v.ProjectPath, ExpiresAt: v.ExpiresAt}
+		for _, m := range v.Materials {
+			ref.GrantIDs = append(ref.GrantIDs, m.GrantID)
+			if !slices.Contains(ref.Kinds, m.Kind) {
+				ref.Kinds = append(ref.Kinds, m.Kind)
+			}
+		}
+		out = append(out, ref)
+	}
 	return out
 }
 
-// Release closes the lease, which wipes the credential directory, clears its
-// durable row and releases it at the broker that issued it — the same teardown
-// a finishing task performs, rather than a second, partial one.
-func (hubLeases) Release(id string) {
-	for _, sl := range liveLeases.snapshot() {
-		if sl != nil && sl.lease != nil && sl.lease.ID == id {
-			sl.Close()
-			return
+// Release revokes the lease wherever it is held: this member's copy, the
+// executors holding it — a device is told to give the credential back — and
+// the other members'. The same revocation the Leases panel performs, rather
+// than a second, partial one.
+func (h hubLeases) Release(id string) {
+	if h.s == nil {
+		for _, sl := range liveLeases.snapshot() {
+			if sl != nil && sl.lease != nil && sl.lease.ID == id {
+				sl.Close()
+				return
+			}
 		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
+	defer cancel()
+	reason := h.reason
+	if reason == "" {
+		reason = "the identity holding it was offboarded"
+	}
+	out := h.s.revokeLeaseHere(ctx, id, "", reason, remote.RevokeScrub, h.actor)
+	h.s.mergePeerRevocations(ctx, &out, id, "", reason, remote.RevokeScrub, h.actor)
+	if out.WipedLocally || len(out.holders()) > 0 {
+		h.s.broadcastSecretsUpdate("lease_revoked", id)
 	}
 }
 

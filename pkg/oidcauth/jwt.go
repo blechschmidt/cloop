@@ -86,6 +86,12 @@ type idClaims struct {
 	Name              string   `json:"name"`
 	PreferredUsername string   `json:"preferred_username"`
 
+	// OID is Microsoft Entra ID's directory object id. Read for the SCIM
+	// directory (Task 20415), which Entra provisions with objectId as
+	// externalId when an operator matches on it; other providers do not send
+	// it, and an absent value matches nothing.
+	OID string `json:"oid"`
+
 	// Group and role claims drive pkg/authz role mappings. Several
 	// spellings are read because there is no interoperable standard:
 	// `groups` is the de-facto convention, Okta and Auth0 also emit
@@ -132,6 +138,21 @@ func (c *idClaims) emailAddress() string {
 		return strings.ToLower(u)
 	}
 	return ""
+}
+
+// username is the preferred_username claim as the account's login — what a
+// SCIM directory sends as userName — trimmed. Kept separate from Email even
+// when it is address-shaped: the email fallback above decides who a person is
+// called, this is what the identity provider calls their account, and a
+// directory matching on one must not be satisfied by the other (Task 20415).
+func (c *idClaims) username() string {
+	return strings.TrimSpace(c.PreferredUsername)
+}
+
+// oid is the directory object id, lowercased: a GUID, whose case carries
+// nothing, compared the way the SCIM directory stores externalId.
+func (c *idClaims) oid() string {
+	return strings.ToLower(strings.TrimSpace(c.OID))
 }
 
 // looksLikeEmail is a deliberately conservative shape check: exactly one "@",
@@ -247,11 +268,13 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 		name = claims.PreferredUsername
 	}
 	id := &Identity{
-		Sub:    claims.Sub,
-		Email:  claims.emailAddress(),
-		Name:   name,
-		Groups: claims.groupValues(),
-		Roles:  claims.roleValues(a.cfg.ClientID),
+		Sub:      claims.Sub,
+		Email:    claims.emailAddress(),
+		Name:     name,
+		Groups:   claims.groupValues(),
+		Roles:    claims.roleValues(a.cfg.ClientID),
+		Username: claims.username(),
+		OID:      claims.oid(),
 	}
 	if claims.AuthTime > 0 {
 		id.AuthTime = time.Unix(claims.AuthTime, 0)

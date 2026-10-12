@@ -165,6 +165,12 @@ type Owner struct {
 	Name   string   `json:"name,omitempty"`
 	Groups []string `json:"groups,omitempty"`
 	Roles  []string `json:"roles,omitempty"`
+	// Username and OID are the owner's preferred_username and Entra oid
+	// claims (Task 20415): what a SCIM directory matching on either finds the
+	// owner by, so a link outlives no deactivation the directory reports.
+	// Empty on a token minted before them.
+	Username string `json:"username,omitempty"`
+	OID      string `json:"oid,omitempty"`
 }
 
 // Key returns the stable per-user string, matching oidcauth.Identity.OwnerKey
@@ -558,6 +564,18 @@ func Parse(raw string) (id, secret string, ok bool) {
 // still decides.
 func LooksLikeToken(raw string) bool {
 	return strings.HasPrefix(strings.TrimSpace(raw), Prefix)
+}
+
+// DeriveHash derives the stored form of a fresh secret under a new random
+// salt: what Mint stores for a token, for another credential the hub verifies
+// the same way — the SCIM bearer credential (Task 20415). VerifyHash checks
+// it.
+func DeriveHash(secret string) (string, error) {
+	salt := make([]byte, saltBytes)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("apitoken: generate salt: %w", err)
+	}
+	return hashSecret(secret, salt), nil
 }
 
 // hashSecret derives the stored form of a secret under salt.

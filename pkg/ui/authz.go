@@ -111,10 +111,12 @@ func subjectFromIdentity(id *oidcauth.Identity) *authz.Subject {
 		return nil
 	}
 	return &authz.Subject{
-		Sub:    id.Sub,
-		Email:  id.Email,
-		Groups: id.Groups,
-		Roles:  id.Roles,
+		Sub:      id.Sub,
+		Email:    id.Email,
+		Groups:   id.Groups,
+		Roles:    id.Roles,
+		Username: id.Username,
+		OID:      id.OID,
 	}
 }
 
@@ -127,10 +129,12 @@ func subjectFromOwner(o *apitoken.Owner) *authz.Subject {
 		return nil
 	}
 	return &authz.Subject{
-		Sub:    o.Sub,
-		Email:  o.Email,
-		Groups: o.Groups,
-		Roles:  o.Roles,
+		Sub:      o.Sub,
+		Email:    o.Email,
+		Groups:   o.Groups,
+		Roles:    o.Roles,
+		Username: o.Username,
+		OID:      o.OID,
 	}
 }
 

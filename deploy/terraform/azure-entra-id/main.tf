@@ -383,3 +383,142 @@ resource "azuread_application_password" "cloop" {
     forced   = var.client_secret_rotation_token
   }
 }
+
+# -------------------------------------------------------------- provisioning
+
+# SCIM provisioning, when asked for. Entra's provisioning service keeps the
+# hub's users and groups in step with the directory, so an account disabled,
+# deleted or unassigned here is suspended on the hub at the next cycle — its
+# sessions, API tokens, leases and running tasks end within one request — with
+# no administrator in the loop.
+#
+# It takes a second enterprise application. Entra runs a provisioning job only
+# on an application instantiated from a template, and the registration above
+# is a plain one: re-creating it from the non-gallery template would replace
+# it, client ID and assignments included. The second application signs nobody
+# in. It holds the job, the hub's SCIM credential, and the assignments that
+# say who is in scope.
+
+locals {
+  provision = var.scim_provisioning != null
+
+  # Where the hub serves SCIM (pkg/ui's scimMountPath).
+  # tests/docs/terraform_azure_test.go asserts it is still a route there.
+  scim_path         = "/scim/v2"
+  scim_base_address = "${var.hub_base_urls[0]}${local.scim_path}"
+
+  # Who is in the job's scope. The scope is "Sync only assigned users and
+  # groups" (SyncAll below), so these assignments are the scope: everyone who
+  # can sign in by default, plus anyone named. A set of object IDs — one
+  # assignment per principal, however many roles it holds on the sign-in
+  # application.
+  scim_principals = local.provision ? toset(concat(
+    var.scim_provisioning.assign_role_holders ? [
+      for _, p in local.role_assignment_pairs : p.principal_object_id
+    ] : [],
+    var.scim_provisioning.group_object_ids,
+    var.scim_provisioning.user_object_ids,
+  )) : toset([])
+
+  # What Entra assigns on an application that declares no roles.
+  default_access_role_id = "00000000-0000-0000-0000-000000000000"
+}
+
+resource "azuread_application_from_template" "provisioning" {
+  count = local.provision ? 1 : 0
+
+  display_name = var.scim_provisioning.display_name
+  template_id  = var.scim_provisioning.application_template_id
+
+  lifecycle {
+    precondition {
+      condition     = var.scim_secret_token != null
+      error_message = "scim_provisioning needs scim_secret_token: mint it on the hub with `cloop hub scim credential create entra` and pass what it prints. Without it Entra's first cycle is refused with 401 and the job goes into quarantine."
+    }
+  }
+}
+
+# The instantiated application's roles. A non-gallery application declares a
+# "User" role (older instances "msiam_access" too), neither with a value — so
+# they are found by display name, not through app_role_ids, which is keyed by
+# value.
+data "azuread_service_principal" "provisioning" {
+  count = local.provision ? 1 : 0
+
+  object_id = azuread_application_from_template.provisioning[0].service_principal_object_id
+}
+
+locals {
+  provisioning_roles = local.provision ? data.azuread_service_principal.provisioning[0].app_roles : []
+
+  provisioning_role_id = local.provision ? coalesce(
+    var.scim_provisioning.app_role_id,
+    try([for r in local.provisioning_roles : r.id if r.enabled && r.display_name == "User"][0], null),
+    try([for r in local.provisioning_roles : r.id if r.enabled && r.display_name == "msiam_access"][0], null),
+    local.default_access_role_id,
+  ) : null
+}
+
+resource "azuread_app_role_assignment" "provisioning" {
+  for_each = local.scim_principals
+
+  app_role_id         = local.provisioning_role_id
+  principal_object_id = each.key
+  resource_object_id  = azuread_application_from_template.provisioning[0].service_principal_object_id
+}
+
+# The connection: the hub's SCIM endpoint and the credential it accepts there.
+#
+# Entra stores these as one set and the provider writes them as one, so the
+# set is authoritative. SyncAll is in it because the scope is a decision, not
+# a default to inherit: "false" provisions only the assigned principals above,
+# where "true" would copy every user in the tenant into the hub's directory —
+# no access, but every name, address and manager link, for nothing.
+resource "azuread_synchronization_secret" "provisioning" {
+  count = local.provision ? 1 : 0
+
+  # The resource ID (/servicePrincipals/<object id>), which is what the
+  # synchronization resources parse in azuread 3.x — not the object ID.
+  service_principal_id = azuread_application_from_template.provisioning[0].service_principal_id
+
+  credential {
+    key   = "BaseAddress"
+    value = local.scim_base_address
+  }
+
+  credential {
+    key   = "SecretToken"
+    value = var.scim_secret_token
+  }
+
+  credential {
+    key   = "SyncAll"
+    value = "false"
+  }
+}
+
+resource "azuread_synchronization_job" "provisioning" {
+  count = local.provision ? 1 : 0
+
+  service_principal_id = azuread_application_from_template.provisioning[0].service_principal_id
+
+  # The non-gallery application's SCIM 2.0 connector.
+  template_id = "scim"
+
+  # Created started: a hub deactivation that waits for someone to press Start
+  # in the portal is the administrator this exists to take out of the loop.
+  enabled = var.scim_provisioning.enabled
+
+  # The connection first. A job started without it fails its first cycle and
+  # goes into quarantine, where Entra retries once a day.
+  depends_on = [azuread_synchronization_secret.provisioning]
+}
+
+# A job with nobody in scope provisions nobody, and so deprovisions nobody.
+# A warning rather than an error: assignments made in the portal count too.
+check "provisioning_has_a_scope" {
+  assert {
+    condition     = !local.provision || length(local.scim_principals) > 0
+    error_message = "SCIM provisioning is on but no principal is assigned to the provisioning application, so Entra provisions — and deprovisions — nobody. Populate role_assignments or scim_provisioning.group_object_ids/user_object_ids, or assign users in the portal."
+  }
+}

@@ -373,6 +373,10 @@ func positives(r *rand.Rand) []Positive {
 	add(Positive{Name: "cloop-glasses-link/legacy-prefix", Detector: "cloop-glasses-link",
 		Text:    "401 for " + glasses + ", retrying",
 		Secrets: []string{glasses}, Keep: []string{"401 for ", ", retrying"}})
+	scimCred := "cloop_scim_" + pick(r, hexChars, 16) + "_" + pick(r, hexChars, 64)
+	add(Positive{Name: "cloop-scim-credential/entra-secret-token", Detector: "cloop-scim-credential",
+		Text:    "Tenant URL: https://hub.example.com/scim/v2\nSecret Token: " + scimCred + "\n",
+		Secrets: []string{scimCred}, Keep: []string{"Tenant URL: https://hub.example.com/scim/v2", "Secret Token: "}})
 	ci := "cloop_ci_" + pick(r, hexChars, 24) + "." + pick(r, hexChars, 64)
 	add(Positive{Name: "cloop-ci-token/relay-environment", Detector: "cloop-ci-token",
 		Text:    "ANTHROPIC_BASE_URL=https://hub.example.com/api/ci/claude\nANTHROPIC_AUTH_TOKEN=" + ci,

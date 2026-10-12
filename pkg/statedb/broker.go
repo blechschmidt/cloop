@@ -60,6 +60,13 @@ type BrokerGrantRow struct {
 	// SupersededBy names the grant that replaced a superseded one — see
 	// migration 0063.
 	SupersededBy string
+	// SuspendedAt and SuspendedBy record a grant suspended because its owner
+	// was deactivated at the identity provider (Task 20415, migration 0067).
+	// Written by the SCIM suspension and its lift and by nothing else:
+	// PutBrokerGrant sets them on insert and never on update, so a writer
+	// holding a copy read before the suspension cannot clear it by saving.
+	SuspendedAt string
+	SuspendedBy string
 }
 
 // PutBrokerSecret inserts or replaces a secret.
@@ -275,8 +282,8 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 	if _, err := d.conn.Exec(
 		`INSERT INTO broker_grants(id, secret_id, scope, subject_type, subject_value,
 		     constraints_json, expires_at, created_at, created_by, revoked_at, owner,
-		     revoked_cause, superseded_by)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		     revoked_cause, superseded_by, suspended_at, suspended_by)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   secret_id=excluded.secret_id, scope=excluded.scope,
 		   subject_type=excluded.subject_type, subject_value=excluded.subject_value,
@@ -287,6 +294,7 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 		row.ID, row.SecretID, row.Scope, row.SubjectType, row.SubjectValue,
 		defaultJSON(row.ConstraintsJSON), row.ExpiresAt, row.CreatedAt,
 		row.CreatedBy, row.RevokedAt, row.Owner, row.RevokedCause, row.SupersededBy,
+		row.SuspendedAt, row.SuspendedBy,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker grant %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -302,11 +310,11 @@ func (d *DB) GetBrokerGrant(id string) (BrokerGrantRow, error) {
 	err := d.conn.QueryRow(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
 		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
-		        superseded_by
+		        superseded_by, suspended_at, suspended_by
 		 FROM broker_grants WHERE id = ?`, id,
 	).Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType, &row.SubjectValue,
 		&row.ConstraintsJSON, &row.ExpiresAt, &row.CreatedAt, &row.CreatedBy, &row.RevokedAt,
-		&row.Owner, &row.RevokedCause, &row.SupersededBy)
+		&row.Owner, &row.RevokedCause, &row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy)
 	if err == sql.ErrNoRows {
 		return BrokerGrantRow{}, fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
 	}
@@ -328,7 +336,7 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 	rows, err := d.conn.Query(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
 		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
-		        superseded_by
+		        superseded_by, suspended_at, suspended_by
 		 FROM broker_grants ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker grants: %w", classifyDriverErr(err))
@@ -341,7 +349,7 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 		if err := rows.Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType,
 			&row.SubjectValue, &row.ConstraintsJSON, &row.ExpiresAt,
 			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt, &row.Owner, &row.RevokedCause,
-			&row.SupersededBy); err != nil {
+			&row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker grant: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)

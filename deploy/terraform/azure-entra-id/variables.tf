@@ -367,9 +367,13 @@ variable "cloop_extra_role_mappings" {
 
         cloop_extra_role_mappings = [
           { claim = "group", value = "8a1b...", role = "maintainer", project = "payments" },
+          { claim = "scim_group", value = "Payments", role = "operator", project = "payments" },
         ]
 
-    Left empty, the rendered config binds the four app roles and nothing else.
+    scim_group binds on a group Entra provisions (scim_provisioning): its
+    display name or object ID, read at every decision rather than from the
+    token, so it has no 200-group overage. Left empty, the rendered config
+    binds the four app roles and nothing else.
   EOT
   type = list(object({
     claim    = string
@@ -383,9 +387,9 @@ variable "cloop_extra_role_mappings" {
   validation {
     condition = alltrue([
       for m in var.cloop_extra_role_mappings :
-      contains(["group", "role", "email", "sub"], m.claim)
+      contains(["group", "role", "email", "sub", "username", "oid", "scim_group"], m.claim)
     ])
-    error_message = "role mapping claim must be one of: group, role, email, sub."
+    error_message = "role mapping claim must be one of: group, role, email, sub, username, oid, scim_group."
   }
 
   validation {
@@ -394,5 +398,106 @@ variable "cloop_extra_role_mappings" {
       contains(["none", "viewer", "operator", "maintainer", "admin"], m.role)
     ])
     error_message = "role mapping role must be one of: none, viewer, operator, maintainer, admin."
+  }
+}
+
+# --------------------------------------------------------------- provisioning
+
+variable "scim_provisioning" {
+  description = <<-EOT
+    Provision the hub over SCIM: Entra's provisioning service creates,
+    deactivates and deletes the hub's users and groups at <hub>/scim/v2, so
+    an account disabled, deleted or unassigned in the directory is suspended
+    on the hub at Entra's next cycle — without an administrator.
+
+    null (the default) creates nothing. An object — `{}` takes every default —
+    creates a second enterprise application from Entra's non-gallery template
+    to carry the provisioning job; set scim_secret_token alongside it. A
+    second application because Entra runs provisioning only on an application
+    instantiated from a template, and the sign-in registration above is a
+    plain one: instantiating it from a template would replace it, client ID
+    and all.
+
+      display_name             The provisioning application's name.
+      enabled                  false pauses the job; the hub keeps what it
+                               was sent.
+      match_claim              ui.oidc.scim.match_claim in the rendered
+                               config. preferred_username (the default) works
+                               with Entra's default mappings: userName is the
+                               userPrincipalName, which the ID token carries
+                               as preferred_username. oid never changes, but
+                               needs objectId mapped to externalId in the
+                               portal first (README). email matches `mail`.
+      offboard_after_days      ui.oidc.scim.offboard_after_days: run the full
+                               offboarding for an account kept deactivated
+                               this long. null leaves it to a DELETE, which
+                               Entra sends 30 days after a user is deleted —
+                               and never for one that was unassigned.
+      assign_role_holders      Put every principal in role_assignments in the
+                               job's scope: the people who can sign in are
+                               the people to deprovision.
+      group_object_ids         Further principals in scope: groups (Entra ID
+      user_object_ids          P1 or above) and users.
+      app_role_id              The role they hold on the provisioning
+                               application. null takes its "User" role, then
+                               "msiam_access", then default access.
+      application_template_id  The non-gallery template. The default is the
+                               global cloud's; US Government uses
+                               4602d0b4-76bb-404b-bca9-2652e1a39c6d, and
+                               21Vianet 5a532e38-1581-4918-9658-008dc27c1d68.
+  EOT
+  type = object({
+    display_name            = optional(string, "cloop hub provisioning")
+    enabled                 = optional(bool, true)
+    match_claim             = optional(string, "preferred_username")
+    offboard_after_days     = optional(number)
+    assign_role_holders     = optional(bool, true)
+    group_object_ids        = optional(list(string), [])
+    user_object_ids         = optional(list(string), [])
+    app_role_id             = optional(string)
+    application_template_id = optional(string, "8adf8e6e-67b2-4cf2-a259-e3dc5476c621")
+  })
+  default = null
+
+  # Conditionals rather than `||`: HCL evaluates both branches of one but
+  # reports only the chosen branch's errors, while `||` reads the attribute
+  # of a null object on Terraform versions where it does not short-circuit.
+  validation {
+    # sub is a valid cloop match claim — it is what Okta provisions — but
+    # Entra's sub is pairwise per application, so the provisioning
+    # application can never send the value the sign-in one's tokens carry.
+    condition     = var.scim_provisioning == null ? true : contains(["preferred_username", "email", "oid"], var.scim_provisioning.match_claim)
+    error_message = "scim_provisioning.match_claim must be preferred_username, email or oid. Entra's sub claim is pairwise per application, so no provisioned attribute can carry it."
+  }
+
+  validation {
+    condition = var.scim_provisioning == null ? true : (
+      var.scim_provisioning.offboard_after_days == null ? true : (
+        var.scim_provisioning.offboard_after_days >= 1 &&
+        var.scim_provisioning.offboard_after_days <= 3650 &&
+        floor(var.scim_provisioning.offboard_after_days) == var.scim_provisioning.offboard_after_days
+      )
+    )
+    error_message = "scim_provisioning.offboard_after_days must be a whole number of days from 1 to 3650, or null to offboard only on a DELETE."
+  }
+}
+
+variable "scim_secret_token" {
+  description = <<-EOT
+    The SCIM credential Entra presents to the hub, exactly as
+    `cloop hub scim credential create <name>` printed it — the hub shows it
+    once and keeps only its hash. Required with scim_provisioning.
+
+    Entra never returns it, so Terraform keeps it in state: the backend must
+    encrypt. To rotate, run `cloop hub scim credential rotate <name> --grace
+    1h` on the hub, set the new value here, and apply within the hour.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.scim_secret_token == null ? true : can(regex("^cloop_scim_[0-9a-f]{16}_[0-9a-f]{64}$", var.scim_secret_token))
+    error_message = "scim_secret_token is not a cloop SCIM credential (cloop_scim_<16 hex>_<64 hex>, as `cloop hub scim credential create` prints it). An API token or a session cookie does not open /scim/v2."
   }
 }

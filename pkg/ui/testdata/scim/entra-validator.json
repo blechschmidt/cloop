@@ -1,0 +1,281 @@
+{
+  "name": "Microsoft Entra SCIM Validator",
+  "source": "What Microsoft's SCIM Validator (scimvalidator.microsoft.com) sends on top of the provisioning service's own requests: it discovers the schema, invents a value for every attribute the schema advertises and expects each back verbatim, asks for attribute subsets, filters by externalId, probes ids that do not exist, re-creates a user to provoke a 409, and patches filtered multi-valued attributes that have no matching element yet.",
+  "match_claim": "email",
+  "steps": [
+    {
+      "name": "Discover: ServiceProviderConfig",
+      "method": "GET",
+      "path": "/scim/v2/ServiceProviderConfig",
+      "status": 200,
+      "expect": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
+        "patch": {"supported": true},
+        "bulk": {"supported": false},
+        "filter": {"supported": true, "maxResults": 200},
+        "etag": {"supported": true},
+        "authenticationSchemes": [{"type": "oauthbearertoken"}]
+      }
+    },
+    {
+      "name": "Discover: Schemas",
+      "method": "GET",
+      "path": "/scim/v2/Schemas",
+      "status": 200,
+      "expect": {
+        "totalResults": 3,
+        "Resources": [
+          {"id": "urn:ietf:params:scim:schemas:core:2.0:User", "attributes": [{"name": "userName", "required": true, "caseExact": false, "uniqueness": "server"}]},
+          {"id": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"},
+          {"id": "urn:ietf:params:scim:schemas:core:2.0:Group"}
+        ]
+      }
+    },
+    {
+      "name": "Discover: one schema by id",
+      "method": "GET",
+      "path": "/scim/v2/Schemas/urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+      "status": 200,
+      "expect": {"name": "EnterpriseUser"}
+    },
+    {
+      "name": "Discover: ResourceTypes",
+      "method": "GET",
+      "path": "/scim/v2/ResourceTypes",
+      "status": 200,
+      "expect": {"totalResults": 2, "Resources": [{"id": "User", "endpoint": "/Users", "schemaExtensions": [{"schema": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"}]}, {"id": "Group"}]}
+    },
+    {
+      "name": "Create a user with every attribute the schema advertises",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "header": {"Content-Type": "application/scim+json; charset=utf-8"},
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],
+        "userName": "OIUYOEOWEJEC@contoso.com",
+        "externalId": "THAGQSPYQVVA",
+        "active": true,
+        "displayName": "WOOCXXFHIOQV",
+        "nickName": "ZDRMMNUIYNYC",
+        "title": "XVMCRQSWWKSE",
+        "userType": "CVNLMNQDMHLE",
+        "preferredLanguage": "es-MX",
+        "locale": "ZNZFJCNNTNMM",
+        "timezone": "Asia/Hong_Kong",
+        "profileUrl": "https://profile.example.com/OIUYOEOWEJEC",
+        "name": {"givenName": "WLMSUPVMLPRS", "familyName": "MPVDTCRMNTGR", "formatted": "WLMSUPVMLPRS MPVDTCRMNTGR", "middleName": "FGHHQWXCEBGV", "honorificPrefix": "BHNUZUKRMEBL", "honorificSuffix": "YCNTKSNAHUMP"},
+        "emails": [{"type": "work", "value": "carlos@contoso.com", "primary": true}],
+        "phoneNumbers": [{"type": "work", "value": "16-207-8458", "primary": true}, {"type": "fax", "value": "12-357-5104"}],
+        "addresses": [{"type": "work", "formatted": "PDMYLTIMXGWZ", "streetAddress": "4581 West Ave", "locality": "SZYQNNPIRHOW", "region": "LJCVFSRCGXFC", "postalCode": "zw54 0rd", "country": "Malaysia", "primary": false}],
+        "roles": [{"primary": "True", "display": "QLWSAZMFZWCL", "value": "DMSCVNSFFRYZ", "type": "CNSWNDJTFOZS"}],
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+          "employeeNumber": "VXTMQNGTEGWT",
+          "costCenter": "ODWRWJCNDKQD",
+          "organization": "UCJBDOGSHIWY",
+          "division": "VGDXTEYFGWYC",
+          "department": "SVZWWAOCJNOW",
+          "manager": {"value": "TQPXRDDQIIUM"}
+        }
+      },
+      "status": 201,
+      "capture": {"user": "id"},
+      "expect": {
+        "userName": "OIUYOEOWEJEC@contoso.com",
+        "externalId": "THAGQSPYQVVA",
+        "displayName": "WOOCXXFHIOQV",
+        "nickName": "ZDRMMNUIYNYC",
+        "title": "XVMCRQSWWKSE",
+        "userType": "CVNLMNQDMHLE",
+        "preferredLanguage": "es-MX",
+        "locale": "ZNZFJCNNTNMM",
+        "timezone": "Asia/Hong_Kong",
+        "profileUrl": "https://profile.example.com/OIUYOEOWEJEC",
+        "name": {"middleName": "FGHHQWXCEBGV", "honorificPrefix": "BHNUZUKRMEBL", "honorificSuffix": "YCNTKSNAHUMP"},
+        "phoneNumbers": [{"type": "work", "value": "16-207-8458", "primary": true}, {"type": "fax", "value": "12-357-5104"}],
+        "addresses": [{"type": "work", "postalCode": "zw54 0rd", "country": "Malaysia", "primary": false}],
+        "roles": [{"primary": true, "value": "DMSCVNSFFRYZ"}],
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+          "employeeNumber": "VXTMQNGTEGWT", "costCenter": "ODWRWJCNDKQD", "organization": "UCJBDOGSHIWY",
+          "division": "VGDXTEYFGWYC", "department": "SVZWWAOCJNOW", "manager": {"value": "TQPXRDDQIIUM"}
+        },
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]
+      }
+    },
+    {
+      "name": "Create the same user again",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "header": {"Content-Type": "application/scim+json; charset=utf-8"},
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "OIUYOEOWEJEC@contoso.com", "active": true},
+      "status": 409,
+      "expect": {"status": "409", "scimType": "uniqueness"}
+    },
+    {
+      "name": "Get the user, attribute subset",
+      "method": "GET",
+      "path": "/scim/v2/Users/{{user}}?attributes=userName,emails,urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+      "status": 200,
+      "expect": {"id": "{{user}}", "userName": "OIUYOEOWEJEC@contoso.com", "emails": [{"value": "carlos@contoso.com"}], "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"department": "SVZWWAOCJNOW"}},
+      "absent": ["nickName", "phoneNumbers", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User/costCenter"]
+    },
+    {
+      "name": "Filter by userName in another case",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName+eq+%22oiuyoeowejec%40CONTOSO.com%22",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "Filter by externalId",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=externalId+eq+%22THAGQSPYQVVA%22",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "Filter by externalId - exact case only",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=externalId+eq+%22thagqspyqvva%22",
+      "status": 200,
+      "expect": {"totalResults": 0}
+    },
+    {
+      "name": "Get a user that does not exist",
+      "method": "GET",
+      "path": "/scim/v2/Users/a7f3b2c1-0000-4000-8000-000000000000",
+      "status": 404,
+      "expect": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "404"}
+    },
+    {
+      "name": "Patch a filtered multi-valued attribute with no matching element - it is created",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "header": {"Content-Type": "application/scim+json; charset=utf-8"},
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [
+          {"op": "add", "path": "phoneNumbers[type eq \"mobile\"].value", "value": "21-955-5361"},
+          {"op": "replace", "path": "addresses[type eq \"work\"].locality", "value": "NEWLOCALITY"},
+          {"op": "replace", "path": "nickName", "value": "NEWNICK"},
+          {"op": "replace", "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager", "value": {"value": "NEWMANAGER"}}
+        ]
+      },
+      "status": 200,
+      "expect": {
+        "phoneNumbers": [{"type": "work"}, {"type": "fax"}, {"type": "mobile", "value": "21-955-5361"}],
+        "addresses": [{"type": "work", "locality": "NEWLOCALITY", "country": "Malaysia"}],
+        "nickName": "NEWNICK",
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"manager": {"value": "NEWMANAGER"}, "department": "SVZWWAOCJNOW"}
+      }
+    },
+    {
+      "name": "Patch several attributes in one request, one of them a boolean as a string",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [
+          {"op": "Replace", "path": "title", "value": "NEWTITLE"},
+          {"op": "Replace", "path": "phoneNumbers[type eq \"work\"].primary", "value": "False"},
+          {"op": "Remove", "path": "phoneNumbers[type eq \"fax\"]"}
+        ]
+      },
+      "status": 200,
+      "expect": {"title": "NEWTITLE", "phoneNumbers": [{"type": "work", "primary": false}, {"type": "mobile"}]}
+    },
+    {
+      "name": "Create a second user",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "SECONDUSER@contoso.com", "externalId": "SECONDEXT", "active": true, "emails": [{"type": "work", "value": "second@contoso.com", "primary": true}]},
+      "status": 201,
+      "capture": {"user2": "id"}
+    },
+    {
+      "name": "Patch userName to one another user holds",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user2}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "userName", "value": "oiuyoeowejec@contoso.com"}]},
+      "status": 409,
+      "expect": {"scimType": "uniqueness"}
+    },
+    {
+      "name": "Patch the work email to one another user holds - an ambiguous match, refused",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user2}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "emails[type eq \"work\"].value", "value": "CARLOS@contoso.com"}]},
+      "status": 409,
+      "expect": {"scimType": "uniqueness"}
+    },
+    {
+      "name": "List users, paged",
+      "method": "GET",
+      "path": "/scim/v2/Users?startIndex=1&count=1",
+      "status": 200,
+      "expect": {"totalResults": 2, "itemsPerPage": 1, "startIndex": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "List users, second page",
+      "method": "GET",
+      "path": "/scim/v2/Users?startIndex=2&count=1",
+      "status": 200,
+      "expect": {"totalResults": 2, "itemsPerPage": 1, "startIndex": 2, "Resources": [{"id": "{{user2}}"}]}
+    },
+    {
+      "name": "A malformed filter",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName+eq",
+      "status": 400,
+      "expect": {"status": "400", "scimType": "invalidFilter"}
+    },
+    {
+      "name": "Create a group with a member",
+      "method": "POST",
+      "path": "/scim/v2/Groups",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "XVDPDBCKOWTO", "externalId": "EOLYFTSXHDNT", "members": [{"value": "{{user}}"}]},
+      "status": 201,
+      "capture": {"group": "id"},
+      "expect": {"displayName": "XVDPDBCKOWTO", "members": [{"value": "{{user}}", "display": "OIUYOEOWEJEC@contoso.com"}]}
+    },
+    {
+      "name": "The member's groups attribute names the group",
+      "method": "GET",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 200,
+      "expect": {"groups": [{"value": "{{group}}", "display": "XVDPDBCKOWTO"}]}
+    },
+    {
+      "name": "Filter groups by externalId",
+      "method": "GET",
+      "path": "/scim/v2/Groups?filter=externalId+eq+%22EOLYFTSXHDNT%22&excludedAttributes=members",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{group}}"}]}
+    },
+    {
+      "name": "Rename the group to a name another group holds",
+      "method": "POST",
+      "path": "/scim/v2/Groups",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "xvdpdbckowto"},
+      "status": 409,
+      "expect": {"scimType": "uniqueness"}
+    },
+    {
+      "name": "Delete the group",
+      "method": "DELETE",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 204
+    },
+    {
+      "name": "Delete the users",
+      "method": "DELETE",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 204
+    },
+    {
+      "name": "Delete the second user",
+      "method": "DELETE",
+      "path": "/scim/v2/Users/{{user2}}",
+      "status": 204
+    }
+  ]
+}

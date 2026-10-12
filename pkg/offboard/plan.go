@@ -24,7 +24,7 @@ func BuildPlan(o Options) (Plan, error) {
 		return Plan{}, fmt.Errorf("offboard: nil database")
 	}
 	input := strings.TrimSpace(o.Identity)
-	if input == "" {
+	if input == "" && o.Target == nil {
 		return Plan{}, fmt.Errorf("offboard: identity is required")
 	}
 
@@ -41,7 +41,18 @@ func BuildPlan(o Options) (Plan, error) {
 		return Plan{}, fmt.Errorf("list api tokens: %w", err)
 	}
 
-	target, warnings := resolve(input, sessions, tokens)
+	var (
+		target   Target
+		warnings []string
+	)
+	if o.Target != nil {
+		// Resolved by the caller (Task 20415): taken as it is, and only
+		// completed with the canonical key a plan needs.
+		target = o.Target.normalized(input)
+		warnings = unreadableOwnerWarnings(tokens)
+	} else {
+		target, warnings = resolve(input, sessions, tokens)
+	}
 	plan := Plan{Target: target, Warnings: warnings}
 
 	// Sessions. The live authenticator when there is one — it is the authority
@@ -53,7 +64,7 @@ func BuildPlan(o Options) (Plan, error) {
 			return Plan{}, fmt.Errorf("list live sessions: %w", err)
 		}
 		for _, s := range live {
-			if target.matchesIdentity(s.Subject, s.Email) {
+			if target.matchesIdentity(s.Subject, s.Email) || target.matchesAccount(s.Username, s.OID) {
 				plan.Sessions = append(plan.Sessions, s)
 			}
 		}
@@ -70,6 +81,8 @@ func BuildPlan(o Options) (Plan, error) {
 				IssuedAt:  row.IssuedAt,
 				ExpiresAt: row.ExpiresAt,
 				Kind:      defaultKind(row.Kind),
+				Username:  row.Username,
+				OID:       row.OID,
 			})
 		}
 	}
@@ -130,6 +143,19 @@ func BuildPlan(o Options) (Plan, error) {
 				})
 			}
 		}
+	}
+
+	// A legal hold placed on any spelling of the person (Task 20415) keeps
+	// what they stored, as --keep-credentials does. Unreadable holds keep it
+	// too: an offboarding that cannot tell whether evidence is under a hold
+	// must not destroy it, and severing access does not depend on knowing.
+	if h, held, err := o.DB.LegalHoldFor(target.OwnerKeys()); err != nil {
+		o.KeepCredentials = true
+		plan.Warnings = append(plan.Warnings, "legal holds could not be read, so this run keeps the stored "+
+			"credentials as if one were placed: "+err.Error())
+	} else if held {
+		o.KeepCredentials = true
+		plan.Hold = &HoldRef{Identity: h.Identity, Reason: h.Reason, PlacedAt: h.PlacedAt, PlacedBy: h.PlacedBy}
 	}
 
 	// What the identity keeps here (Task 20400): personal secrets and the
@@ -212,6 +238,99 @@ func BuildPlan(o Options) (Plan, error) {
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
+
+// ResolveTarget expands seeds — emails, and subjects spelt "sub:<subject>" —
+// into every identifier that addresses the same person, as an operator's input
+// is expanded (Task 20415). A SCIM directory calls it with the identifiers the
+// identity provider vouched for, and checks the result for an ambiguity before
+// acting on it.
+func ResolveTarget(db *statedb.DB, seeds []string) (Target, error) {
+	if db == nil {
+		return Target{}, fmt.Errorf("offboard: nil database")
+	}
+	sessions, err := db.ListSessions()
+	if err != nil {
+		return Target{}, fmt.Errorf("list sessions: %w", err)
+	}
+	store, err := apitoken.NewSQLStore(db)
+	if err != nil {
+		return Target{}, err
+	}
+	tokens, err := store.List()
+	if err != nil {
+		return Target{}, fmt.Errorf("list api tokens: %w", err)
+	}
+	var out Target
+	for i, seed := range seeds {
+		seed = strings.TrimSpace(seed)
+		if seed == "" {
+			continue
+		}
+		t, _ := resolve(seed, sessions, tokens)
+		if i == 0 || out.Input == "" {
+			out.Input = seed
+		}
+		out.Emails = mergeSorted(out.Emails, t.Emails)
+		out.Subjects = mergeSorted(out.Subjects, t.Subjects)
+	}
+	return out.normalized(out.Input), nil
+}
+
+// normalized completes a caller-resolved target: lowercased emails, usernames
+// and oids, sorted and deduplicated, and a canonical key.
+func (t Target) normalized(input string) Target {
+	lower := func(in []string) []string {
+		var out []string
+		for _, v := range in {
+			if v = strings.ToLower(strings.TrimSpace(v)); v != "" {
+				out = append(out, v)
+			}
+		}
+		return mergeSorted(nil, out)
+	}
+	exact := func(in []string) []string {
+		var out []string
+		for _, v := range in {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+		return mergeSorted(nil, out)
+	}
+	out := Target{
+		Input:     t.Input,
+		Emails:    lower(t.Emails),
+		Subjects:  exact(t.Subjects),
+		Usernames: lower(t.Usernames),
+		OIDs:      lower(t.OIDs),
+	}
+	if out.Input == "" {
+		out.Input = input
+	}
+	switch {
+	case len(out.Emails) > 0:
+		out.Key = out.Emails[0]
+	case len(out.Subjects) > 0:
+		out.Key = "sub:" + out.Subjects[0]
+	case t.Key != "":
+		out.Key = t.Key
+	default:
+		out.Key = out.Label()
+	}
+	return out
+}
+
+// mergeSorted returns the sorted union of a and b.
+func mergeSorted(a, b []string) []string {
+	seen := map[string]struct{}{}
+	for _, v := range a {
+		seen[v] = struct{}{}
+	}
+	for _, v := range b {
+		seen[v] = struct{}{}
+	}
+	return sortedKeys(seen)
+}
 
 // resolve expands what the operator typed into every identifier that addresses
 // the same person.
@@ -358,9 +477,25 @@ func (t Target) matchesIdentity(sub, email string) bool {
 	return false
 }
 
+// matchesAccount reports whether a preferred_username or oid is one this
+// identity was resolved with (Task 20415).
+func (t Target) matchesAccount(username, oid string) bool {
+	for _, u := range t.Usernames {
+		if username != "" && strings.EqualFold(strings.TrimSpace(username), u) {
+			return true
+		}
+	}
+	for _, o := range t.OIDs {
+		if oid != "" && strings.EqualFold(strings.TrimSpace(oid), o) {
+			return true
+		}
+	}
+	return false
+}
+
 // matchesSession reports whether a session row belongs to this identity.
 func (t Target) matchesSession(row statedb.SessionRow) bool {
-	if t.matchesIdentity(row.Subject, row.Email) {
+	if t.matchesIdentity(row.Subject, row.Email) || t.matchesAccount(row.Username, row.OID) {
 		return true
 	}
 	// owner_key is denormalised onto the row, so a session whose subject and
@@ -394,6 +529,9 @@ func (t Target) matchesOwner(o *apitoken.Owner) bool {
 		if o.Email != "" && strings.EqualFold(o.Email, e) {
 			return true
 		}
+	}
+	if t.matchesAccount(o.Username, o.OID) {
+		return true
 	}
 	if key := o.Key(); key != "" {
 		for _, k := range t.OwnerKeys() {

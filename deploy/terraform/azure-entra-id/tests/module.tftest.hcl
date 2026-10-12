@@ -33,6 +33,19 @@ mock_provider "azuread" {
     }
   }
 
+  # The provisioning application. Its two service principal IDs are different
+  # strings, and which one goes where is the thing worth pinning: the
+  # synchronization resources parse the resource ID, an app role assignment
+  # takes the bare object ID.
+  mock_resource "azuread_application_from_template" {
+    defaults = {
+      application_id              = "/applications/12121212-0000-1111-2222-343434343434"
+      application_object_id       = "12121212-0000-1111-2222-343434343434"
+      service_principal_id        = "/servicePrincipals/56565656-0000-1111-2222-787878787878"
+      service_principal_object_id = "56565656-0000-1111-2222-787878787878"
+    }
+  }
+
   mock_data "azuread_client_config" {
     defaults = {
       tenant_id = "11111111-2222-3333-4444-555555555555"
@@ -679,4 +692,212 @@ run "the_rendered_config_parses_as_yaml" {
     condition     = yamldecode(output.cloop_config_yaml).ui.oidc.admin_emails == ["first.last+cloop@example.com"]
     error_message = "admin_emails must decode as a list of strings."
   }
+}
+
+# ------------------------------------------------------------- provisioning
+
+run "provisioning_is_off_by_default" {
+  command = apply
+
+  assert {
+    condition     = length(azuread_application_from_template.provisioning) == 0 && length(azuread_synchronization_job.provisioning) == 0 && length(azuread_synchronization_secret.provisioning) == 0
+    error_message = "Provisioning must be opt-in: it needs a credential minted on the hub, which a first apply cannot have."
+  }
+
+  assert {
+    condition     = !can(yamldecode(output.cloop_config_yaml).ui.oidc.scim)
+    error_message = "The rendered config must not carry a scim block when nothing provisions the hub."
+  }
+
+  assert {
+    condition     = output.scim_base_address == null && output.provisioning_job_id == null
+    error_message = "The provisioning outputs must be null without provisioning."
+  }
+}
+
+run "provisioning_creates_a_scoped_started_job" {
+  command = apply
+
+  variables {
+    role_assignments = {
+      admin    = { group_object_ids = ["9a9a9a9a-0000-1111-2222-000000000001"] }
+      operator = { group_object_ids = ["9a9a9a9a-0000-1111-2222-000000000001"], user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000002"] }
+    }
+    scim_provisioning = { offboard_after_days = 30, user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  # Instantiated from the non-gallery template: provisioning is offered on
+  # nothing else.
+  assert {
+    condition     = azuread_application_from_template.provisioning[0].template_id == "8adf8e6e-67b2-4cf2-a259-e3dc5476c621"
+    error_message = "The provisioning application must be instantiated from Entra's non-gallery template."
+  }
+
+  assert {
+    condition     = azuread_synchronization_job.provisioning[0].template_id == "scim" && azuread_synchronization_job.provisioning[0].enabled == true
+    error_message = "The job must use the SCIM connector and be created started."
+  }
+
+  # Both synchronization resources take the resource ID; the assignments take
+  # the object ID. Swapping them fails at apply with a parse error.
+  assert {
+    condition     = azuread_synchronization_job.provisioning[0].service_principal_id == "/servicePrincipals/56565656-0000-1111-2222-787878787878" && azuread_synchronization_secret.provisioning[0].service_principal_id == "/servicePrincipals/56565656-0000-1111-2222-787878787878"
+    error_message = "The synchronization resources must name the provisioning service principal by its resource ID."
+  }
+
+  assert {
+    condition     = nonsensitive(azuread_synchronization_secret.provisioning[0].credential[0].key == "BaseAddress" && azuread_synchronization_secret.provisioning[0].credential[0].value == "https://cloop.example.com/scim/v2")
+    error_message = "Entra must be pointed at the hub's SCIM endpoint, <hub>/scim/v2."
+  }
+
+  assert {
+    condition     = nonsensitive(azuread_synchronization_secret.provisioning[0].credential[1].key == "SecretToken" && azuread_synchronization_secret.provisioning[0].credential[1].value == var.scim_secret_token)
+    error_message = "Entra must present the hub's SCIM credential."
+  }
+
+  assert {
+    condition     = nonsensitive(azuread_synchronization_secret.provisioning[0].credential[2].key == "SyncAll" && azuread_synchronization_secret.provisioning[0].credential[2].value == "false")
+    error_message = "The scope must be the assigned principals only; SyncAll would copy the whole tenant into the hub."
+  }
+
+  # One assignment per principal: the group holds two roles on the sign-in
+  # application but is in scope once, and the extra user is in scope too.
+  assert {
+    condition     = length(azuread_app_role_assignment.provisioning) == 3
+    error_message = "Every role holder and every named principal must be assigned once to the provisioning application."
+  }
+
+  assert {
+    condition = alltrue([
+      for a in azuread_app_role_assignment.provisioning :
+      a.resource_object_id == "56565656-0000-1111-2222-787878787878"
+    ])
+    error_message = "The scope assignments must be on the provisioning application, not on the sign-in one."
+  }
+
+  # The mocked service principal declares no roles, so default access.
+  assert {
+    condition     = output.provisioning_app_role_id == "00000000-0000-0000-0000-000000000000"
+    error_message = "An application declaring no roles must be assigned default access."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.scim.match_claim == "preferred_username"
+    error_message = "The rendered config must match on preferred_username by default — the claim Entra's default userName mapping carries."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.scim.offboard_after_days == 30
+    error_message = "offboard_after_days must render as a number under ui.oidc.scim."
+  }
+
+  assert {
+    condition     = output.scim_base_address == "https://cloop.example.com/scim/v2"
+    error_message = "The scim_base_address output must be the Tenant URL Entra calls."
+  }
+}
+
+run "provisioning_finds_the_user_role" {
+  command = apply
+
+  variables {
+    scim_provisioning = { user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  override_data {
+    target = data.azuread_service_principal.provisioning
+    values = {
+      app_roles = [
+        { allowed_member_types = ["User"], description = "msiam_access", display_name = "msiam_access", enabled = true, id = "b9632174-c057-4f7e-951b-be3adc52bfe6", value = "" },
+        { allowed_member_types = ["User"], description = "User", display_name = "User", enabled = true, id = "18d14569-c3bd-439b-9a66-3a2aee01d14f", value = "" },
+      ]
+    }
+  }
+
+  assert {
+    condition     = output.provisioning_app_role_id == "18d14569-c3bd-439b-9a66-3a2aee01d14f"
+    error_message = "The provisioning application's User role must be preferred to msiam_access and to default access."
+  }
+
+  assert {
+    condition     = alltrue([for a in azuread_app_role_assignment.provisioning : a.app_role_id == "18d14569-c3bd-439b-9a66-3a2aee01d14f"])
+    error_message = "The assignments must carry the role that was found."
+  }
+}
+
+run "provisioning_can_be_paused" {
+  command = apply
+
+  variables {
+    scim_provisioning = { enabled = false, match_claim = "oid", group_object_ids = ["9a9a9a9a-0000-1111-2222-000000000004"] }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  assert {
+    condition     = azuread_synchronization_job.provisioning[0].enabled == false
+    error_message = "enabled = false must pause the job rather than remove it."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.scim.match_claim == "oid" && !can(yamldecode(output.cloop_config_yaml).ui.oidc.scim.offboard_after_days)
+    error_message = "match_claim must render as given, and an unset offboard_after_days must be left out."
+  }
+}
+
+# Nobody in scope is legal — assignments made in the portal count — but it is
+# a job that deprovisions nobody, so the plan says so.
+run "an_empty_scope_is_warned_about" {
+  command = plan
+
+  variables {
+    scim_provisioning = { assign_role_holders = false }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  expect_failures = [check.provisioning_has_a_scope]
+}
+
+run "provisioning_without_a_credential_is_refused" {
+  command = plan
+
+  variables {
+    scim_provisioning = { user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+  }
+
+  expect_failures = [azuread_application_from_template.provisioning]
+}
+
+run "a_token_that_is_not_a_scim_credential_is_refused" {
+  command = plan
+
+  variables {
+    scim_provisioning = { user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+    scim_secret_token = "cloop_tok_0123456789abcdef_0123456789abcdef"
+  }
+
+  expect_failures = [var.scim_secret_token]
+}
+
+run "the_pairwise_sub_claim_is_refused" {
+  command = plan
+
+  variables {
+    scim_provisioning = { match_claim = "sub", user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  expect_failures = [var.scim_provisioning]
+}
+
+run "a_fractional_offboarding_delay_is_refused" {
+  command = plan
+
+  variables {
+    scim_provisioning = { offboard_after_days = 0.5, user_object_ids = ["9a9a9a9a-0000-1111-2222-000000000003"] }
+    scim_secret_token = "cloop_scim_0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+
+  expect_failures = [var.scim_provisioning]
 }

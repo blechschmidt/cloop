@@ -425,6 +425,9 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkExposure(ctx, dir, cfg, opts, add)
 	checkSecretKey(dir, cfg, add)
 	checkRBAC(cfg, add)
+	// Beside the policy it feeds: provisioned groups are a claim source the
+	// policy's bindings may name (Task 20415).
+	checkSCIM(dir, cfg, add)
 	// After the policy it would bypass: whether the static admin token is
 	// still accepted beside an enforced one, and how long it has gone unused
 	// (Task 20406).

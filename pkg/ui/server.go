@@ -842,6 +842,10 @@ type Server struct {
 	// value means this hub resolves from configured bindings alone.
 	roles roleStoreState
 
+	// scim is SCIM 2.0 provisioning (Task 20415): the directory the resolver
+	// reads provisioned groups from, and the service /scim/v2 drives.
+	scim scimState
+
 	// members holds the per-project membership store and its database handle
 	// (Task 20366). Opened when single sign-on is on; nil means no project on
 	// this hub can be shared, and every membership check answers "none".
@@ -1460,6 +1464,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// keeps a leader change from skipping or doubling one. See
 	// audit_checkpoints.go.
 	s.runLeaderDuty(watcherCtx, "audit-checkpoints", s.watchAuditCheckpoints)
+	// ui.oidc.scim.offboard_after_days (Task 20415): the full offboarding
+	// for users the identity provider has kept deactivated that long.
+	s.runLeaderDuty(watcherCtx, "scim-offboard", s.watchSCIMOffboards)
 	// Renews the certificates the hub issued its git proxy and Kubernetes
 	// monitor (tls: auto, Task 20409) two days before they expire. One member
 	// renews; every member serves the result. See hubtls.go.
@@ -1614,6 +1621,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And for the runtime role bindings, which are read only from the request
 	// path the listener has already stopped serving.
 	s.closeRoleStore()
+	s.closeSCIM()
 	// And the project memberships, read from the same path.
 	s.closeMemberStore()
 	// Stop the git interception proxy. A session nothing will restore is
@@ -1976,8 +1984,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
 	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
-		isDeviceGrantEndpoint(r)
+		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r)
 }
+
+// The SCIM service (Task 20415, isSCIMEndpoint) is the second kind too: an
+// identity provider presents the cloop_scim_ credential minted for it, which
+// scim_api.go checks, and holds no session and must hold no other credential
+// of the hub's — that credential can deactivate every administrator, and one
+// the dashboard's credentials could stand in for would let any leaked API token
+// drive it. Every path under /scim/v2 answers a SCIM error without it.
 
 // The terminal sign-in endpoints (Task 20412, isDeviceGrantEndpoint) are the
 // second kind as well: a terminal asking for a code, and polling for the

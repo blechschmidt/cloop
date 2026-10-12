@@ -66,6 +66,15 @@ human is present:
   scripts, and anything without a browser.
 - **Session cookie** — set by the OIDC login flow and used by the dashboard.
 
+A third is accepted on ` + "`/scim/v2`" + ` and nowhere else, and ` + "`/scim/v2`" + ` accepts
+nothing else: the **SCIM credential**, ` + "`Authorization: Bearer cloop_scim_…`" + `, minted
+for an identity provider with ` + "`cloop hub scim credential create`" + ` or under Settings →
+Provisioning (SCIM). Not an API token, not the static token, not a session. The
+SCIM routes answer in RFC 7644's own dialect — bodies as ` + "`application/scim+json`" + `
+(or ` + "`application/json`" + `), errors as SCIM error documents, ` + "`429`" + ` with ` + "`Retry-After`" + `
+past the credential's rate limit — and only on a hub with single sign-on. See the
+[SCIM provisioning guide](../guides/scim-provisioning.md).
+
 On a hub with single sign-on every ` + "`401`" + ` carries ` + "`X-Cloop-Sign-In: /auth/login`" + `: a
 browser answers it by sending the user through ` + "`GET /auth/login?return=<path>`" + `,
 which comes back to that path on this origin. A token-only hub's ` + "`401`" + ` carries

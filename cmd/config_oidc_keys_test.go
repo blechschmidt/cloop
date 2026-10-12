@@ -58,6 +58,12 @@ func TestApplyConfigKey_OIDCScalars(t *testing.T) {
 		{"ui.oidc.require_idp", "true", func(o config.OIDCConfig) bool { return o.RequireIdP }},
 		// Task 20395: refuse to start with SSO on and no role policy.
 		{"ui.oidc.require_rbac", "true", func(o config.OIDCConfig) bool { return o.RequireRBAC }},
+		// Task 20415: SCIM provisioning.
+		{"ui.oidc.scim.match_claim", "OID", func(o config.OIDCConfig) bool { return o.SCIM.MatchClaim == "oid" }},
+		{"ui.oidc.scim.offboard_after_days", "30", func(o config.OIDCConfig) bool { return o.SCIM.OffboardAfterDays == 30 }},
+		{"ui.oidc.scim.rate_limit_per_minute", "1200", func(o config.OIDCConfig) bool {
+			return o.SCIM.RateLimitPerMinute == 1200
+		}},
 	}
 
 	for _, tc := range cases {
@@ -107,6 +113,9 @@ func TestApplyConfigKey_OIDCRejectsOutOfRange(t *testing.T) {
 		{"ui.oidc.require_idp", "maybe"},
 		{"ui.oidc.require_rbac", "maybe"},
 		{"ui.oidc.cookie_secure", "sometimes"},
+		{"ui.oidc.scim.match_claim", "upn"},
+		{"ui.oidc.scim.offboard_after_days", "-1"},
+		{"ui.oidc.scim.rate_limit_per_minute", "5"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {

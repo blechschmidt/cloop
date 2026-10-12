@@ -23,6 +23,20 @@ terraform {
 
 provider "azuread" {}
 
+# The hub's SCIM credential, once the hub is up and has minted one:
+#
+#   cloop hub scim credential create entra       # on the hub; printed once
+#   TF_VAR_cloop_scim_token=cloop_scim_... terraform apply
+#
+# Unset, the module skips provisioning, so the first apply — before the hub
+# exists to mint anything — creates the sign-in application alone.
+variable "cloop_scim_token" {
+  description = "The SCIM credential `cloop hub scim credential create entra` printed. Null skips provisioning."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 # Groups that already exist in the directory. Read, not created: who belongs to
 # "Platform Engineering" is an HR-adjacent decision that does not belong in the
 # state file of a dashboard's SSO configuration.
@@ -99,6 +113,20 @@ module "cloop_sso" {
   client_secret_rotation_days = 180
   client_secret_grace_days    = 30
 
+  # Provisioning: everyone in role_assignments is in the job's scope, so
+  # disabling, deleting or unassigning any of them in the directory suspends
+  # them on the hub at Entra's next cycle. An account kept disabled for 30
+  # days is offboarded in full — unless a legal hold keeps its credentials.
+  # Conditional, so the second apply — the one with the token — is what turns
+  # it on. nonsensitive(): comparing a sensitive value is sensitive too, and
+  # the module derives a for_each and its outputs from this object, both of
+  # which Terraform refuses to take sensitive. Whether a token was given is
+  # no secret.
+  scim_provisioning = nonsensitive(var.cloop_scim_token == null) ? null : {
+    offboard_after_days = 30
+  }
+  scim_secret_token = var.cloop_scim_token
+
   tags = ["cloop", "terraform-managed", "production"]
 }
 
@@ -119,6 +147,11 @@ output "client_secret_expires_at" {
 output "service_principal_object_id" {
   description = "Attach Conditional Access policies here — require MFA, or restrict to compliant devices, for cloop specifically."
   value       = module.cloop_sso.service_principal_object_id
+}
+
+output "scim_base_address" {
+  description = "Where Entra provisions the hub. Null until cloop_scim_token is set."
+  value       = module.cloop_sso.scim_base_address
 }
 
 output "discovery_url" {

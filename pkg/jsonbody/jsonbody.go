@@ -67,10 +67,37 @@ type Options struct {
 // Decode reads r's JSON body into dst. It reports whether the handler may
 // continue; when it may not, the response has been written.
 func Decode(w http.ResponseWriter, r *http.Request, dst any, o Options) bool {
+	data, refusal := Read(w, r, o)
+	if refusal != nil {
+		apierror.WriteError(w, refusal)
+		return false
+	}
+	if len(data) == 0 {
+		return true // optional, and empty
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if o.Strict {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "invalid JSON body: "+err.Error()))
+		return false
+	}
+	return true
+}
+
+// Read applies Decode's rules — the media type, the size limit, a required
+// body — and returns the body undecoded, or the refusal Decode would have
+// written. An optional body that is empty is returned as nil.
+//
+// For a handler that answers its refusals in a dialect of its own: the SCIM
+// routes (Task 20415) speak RFC 7644's error document to identity providers,
+// and take application/scim+json, but read their bodies here like every other
+// handler, so the rules a cross-site form cannot satisfy hold for them too.
+func Read(w http.ResponseWriter, r *http.Request, o Options) ([]byte, *apierror.APIError) {
 	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
 	if ct != "" && !sameorigin.IsJSON(ct) && !IsMediaType(ct, o.MediaTypes...) {
-		writeMediaType(w, ct, o.MediaTypes...)
-		return false
+		return nil, apierror.New(apierror.CodeUnsupportedMediaType, MediaTypeMessage(ct, o.MediaTypes...))
 	}
 	limit := o.Limit
 	if limit <= 0 {
@@ -83,36 +110,23 @@ func Decode(w http.ResponseWriter, r *http.Request, dst any, o Options) bool {
 		if err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
-				apierror.WriteError(w, apierror.Newf(apierror.CodePayloadTooLarge,
-					"request body too large: the limit is %d bytes", limit))
-				return false
+				return nil, apierror.Newf(apierror.CodePayloadTooLarge,
+					"request body too large: the limit is %d bytes", limit)
 			}
-			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
-				"could not read the request body: "+err.Error()))
-			return false
+			return nil, apierror.New(apierror.CodeInvalidInput, "could not read the request body: "+err.Error())
 		}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		if o.Optional {
-			return true
+			return nil, nil
 		}
-		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
-			"a JSON request body is required (Content-Type: application/json)"))
-		return false
+		return nil, apierror.New(apierror.CodeInvalidInput,
+			"a JSON request body is required (Content-Type: application/json)")
 	}
 	if ct == "" {
-		writeMediaType(w, "", o.MediaTypes...)
-		return false
+		return nil, apierror.New(apierror.CodeUnsupportedMediaType, MediaTypeMessage("", o.MediaTypes...))
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if o.Strict {
-		dec.DisallowUnknownFields()
-	}
-	if err := dec.Decode(dst); err != nil {
-		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "invalid JSON body: "+err.Error()))
-		return false
-	}
-	return true
+	return data, nil
 }
 
 // MediaTypeMessage is the sentence a 415 carries: what was sent, what is
@@ -130,10 +144,6 @@ func MediaTypeMessage(sent string, also ...string) string {
 	return fmt.Sprintf("this endpoint takes a body only as %s, and the request sent %s. "+
 		"A page on another site can send form data and text/plain without asking first, "+
 		"so the hub accepts neither.", accepted, got)
-}
-
-func writeMediaType(w http.ResponseWriter, sent string, also ...string) {
-	apierror.WriteError(w, apierror.New(apierror.CodeUnsupportedMediaType, MediaTypeMessage(sent, also...)))
 }
 
 // IsMediaType reports whether contentType names one of types, parameters

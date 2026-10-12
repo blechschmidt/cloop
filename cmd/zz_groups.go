@@ -370,6 +370,7 @@ var hubCommandGroups = map[string]string{
 	"limits":  groupHubAccess,
 	"token":   groupHubAccess,
 	"key":     groupHubAccess,
+	"scim":    groupHubAccess,
 
 	"doctor":      groupHubOperate,
 	"healthcheck": groupHubOperate,

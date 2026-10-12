@@ -2516,6 +2516,72 @@ type OIDCConfig struct {
 	// credential, so it gets a sign-in that is recent, the way a forge's
 	// "sudo mode" does.
 	DeviceApprovalMaxAgeMinutes int `yaml:"device_approval_max_age_minutes,omitempty"`
+
+	// SCIM is SCIM 2.0 provisioning (Task 20415): the identity provider
+	// creating, deactivating and deleting this hub's users and groups at
+	// /scim/v2, authenticated by a credential minted with `cloop hub scim
+	// credential create`. Deactivating an account there suspends it here in
+	// one transaction — sessions, API tokens, glasses links, leases and
+	// running tasks end, and a deny binding refuses it — without an
+	// administrator.
+	SCIM SCIMConfig `yaml:"scim,omitempty"`
+}
+
+// SCIMConfig is ui.oidc.scim.
+type SCIMConfig struct {
+	// MatchClaim is the claim a provisioned user is matched against: email
+	// (the default) — the user's primary email against the email claim;
+	// preferred_username — userName against that claim; oid — externalId
+	// against Microsoft Entra ID's oid, for an Entra app that maps objectId to
+	// externalId; or sub — externalId against the subject, which is what Okta
+	// sends. A provisioned user whose value two hub identities carry is
+	// ambiguous, and the hub refuses to pick one.
+	MatchClaim string `yaml:"match_claim,omitempty"`
+
+	// OffboardAfterDays runs the full offboarding — `cloop hub user offboard`,
+	// honouring a legal hold — for a user the identity provider has kept
+	// deactivated this long. Zero (the default) never does: a suspension lasts
+	// until the provider reactivates or deletes the account. Clamped to
+	// 0..3650.
+	OffboardAfterDays int `yaml:"offboard_after_days,omitempty"`
+
+	// RateLimitPerMinute is each SCIM credential's request budget, refilled
+	// continuously, with bursts of a sixth of it. Zero uses the default (600);
+	// values are clamped to 10..60000. A provider that exceeds it is answered
+	// 429 with Retry-After, which Entra ID and Okta both pace on.
+	RateLimitPerMinute int `yaml:"rate_limit_per_minute,omitempty"`
+}
+
+// SCIM bounds.
+const (
+	SCIMOffboardAfterDaysUpper  = 3650
+	SCIMRateLimitDefault        = 600
+	SCIMRateLimitPerMinuteLower = 10
+	SCIMRateLimitPerMinuteUpper = 60000
+)
+
+// EffectiveOffboardAfterDays is OffboardAfterDays clamped to 0..3650.
+func (c SCIMConfig) EffectiveOffboardAfterDays() int {
+	switch {
+	case c.OffboardAfterDays < 0:
+		return 0
+	case c.OffboardAfterDays > SCIMOffboardAfterDaysUpper:
+		return SCIMOffboardAfterDaysUpper
+	}
+	return c.OffboardAfterDays
+}
+
+// EffectiveRateLimitPerMinute is RateLimitPerMinute, defaulted and clamped.
+func (c SCIMConfig) EffectiveRateLimitPerMinute() int {
+	switch {
+	case c.RateLimitPerMinute <= 0:
+		return SCIMRateLimitDefault
+	case c.RateLimitPerMinute < SCIMRateLimitPerMinuteLower:
+		return SCIMRateLimitPerMinuteLower
+	case c.RateLimitPerMinute > SCIMRateLimitPerMinuteUpper:
+		return SCIMRateLimitPerMinuteUpper
+	}
+	return c.RateLimitPerMinute
 }
 
 // RoleMapping is one claim→role binding in oidc.role_mappings. It mirrors

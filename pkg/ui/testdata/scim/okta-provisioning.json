@@ -1,0 +1,246 @@
+{
+  "name": "Okta provisioning cycle",
+  "source": "The request sequence Okta's SCIM 2.0 integration sends (developer.okta.com: 'SCIM 2.0 protocol reference' and the SCIM 2.0 test suite it ships for integrators): paged lookups by userName, a create carrying a password, profile updates with a full PUT, deactivation with a path-less PATCH and — on older integrations — with a PUT of active false, group renames that repeat the group's own id, member changes by value path, and the full-membership PUT of its group push.",
+  "match_claim": "sub",
+  "steps": [
+    {
+      "name": "Check the endpoint pages",
+      "method": "GET",
+      "path": "/scim/v2/Users?count=1&startIndex=1",
+      "status": 200,
+      "expect": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": 0, "startIndex": 1, "itemsPerPage": 0, "Resources": []}
+    },
+    {
+      "name": "Look the user up before creating it",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName%20eq%20%22test.user%40okta.local%22&startIndex=1&count=100",
+      "status": 200,
+      "expect": {"totalResults": 0, "Resources": []}
+    },
+    {
+      "name": "Create the user - with a password the hub must not keep",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "header": {"Content-Type": "application/scim+json; charset=utf-8"},
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "test.user@okta.local",
+        "name": {"givenName": "Test", "familyName": "User"},
+        "emails": [{"primary": true, "value": "test.user@okta.local", "type": "work"}],
+        "displayName": "Test User",
+        "locale": "en-US",
+        "externalId": "00ujl29u0le5T6Aj10h7",
+        "groups": [],
+        "password": "1mz050nq",
+        "active": true
+      },
+      "status": 201,
+      "capture": {"user": "id"},
+      "expect": {"userName": "test.user@okta.local", "active": true, "externalId": "00ujl29u0le5T6Aj10h7", "name": {"givenName": "Test"}},
+      "absent": ["password"]
+    },
+    {
+      "name": "Get the user",
+      "method": "GET",
+      "path": "/scim/v2/Users/{{user}}",
+      "status": 200,
+      "expect": {"id": "{{user}}", "displayName": "Test User"},
+      "absent": ["password"]
+    },
+    {
+      "name": "Look the user up",
+      "method": "GET",
+      "path": "/scim/v2/Users?filter=userName%20eq%20%22test.user%40okta.local%22&startIndex=1&count=100",
+      "status": 200,
+      "expect": {"totalResults": 1, "startIndex": 1, "itemsPerPage": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "Update the profile with a full PUT",
+      "method": "PUT",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": "{{user}}",
+        "userName": "test.user@okta.local",
+        "name": {"givenName": "Another", "familyName": "User"},
+        "emails": [{"primary": true, "value": "test.user@okta.local", "type": "work"}],
+        "displayName": "Another User",
+        "locale": "en-US",
+        "externalId": "00ujl29u0le5T6Aj10h7",
+        "groups": [],
+        "password": "1mz050nq",
+        "active": true
+      },
+      "status": 200,
+      "expect": {"name": {"givenName": "Another"}, "displayName": "Another User", "active": true},
+      "absent": ["password"]
+    },
+    {
+      "name": "Push a password change - accepted and discarded",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"password": "t1meMa$heen"}}]},
+      "status": 200,
+      "absent": ["password"]
+    },
+    {
+      "name": "Deactivate",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"active": false}}]},
+      "status": 200,
+      "expect": {"active": false},
+      "denies": ["sub=00ujl29u0le5T6Aj10h7"]
+    },
+    {
+      "name": "Reactivate",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"active": true}}]},
+      "status": 200,
+      "expect": {"active": true},
+      "noDenies": ["sub=00ujl29u0le5T6Aj10h7"]
+    },
+    {
+      "name": "Deactivate the way older integrations do - a PUT of active false",
+      "method": "PUT",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": "{{user}}",
+        "userName": "test.user@okta.local",
+        "name": {"givenName": "Another", "familyName": "User"},
+        "emails": [{"primary": true, "value": "test.user@okta.local", "type": "work"}],
+        "displayName": "Another User",
+        "locale": "en-US",
+        "externalId": "00ujl29u0le5T6Aj10h7",
+        "active": false
+      },
+      "status": 200,
+      "expect": {"active": false},
+      "denies": ["sub=00ujl29u0le5T6Aj10h7"]
+    },
+    {
+      "name": "A PUT with another id in the body is refused",
+      "method": "PUT",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "id": "someone-else", "userName": "test.user@okta.local"},
+      "status": 400,
+      "expect": {"scimType": "mutability"}
+    },
+    {
+      "name": "Reactivate with a PUT",
+      "method": "PUT",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": "{{user}}",
+        "userName": "test.user@okta.local",
+        "name": {"givenName": "Another", "familyName": "User"},
+        "emails": [{"primary": true, "value": "test.user@okta.local", "type": "work"}],
+        "displayName": "Another User",
+        "locale": "en-US",
+        "externalId": "00ujl29u0le5T6Aj10h7",
+        "active": true
+      },
+      "status": 200,
+      "expect": {"active": true},
+      "noDenies": ["sub=00ujl29u0le5T6Aj10h7"]
+    },
+    {
+      "name": "Import: list every user",
+      "method": "GET",
+      "path": "/scim/v2/Users?startIndex=1&count=100",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{user}}"}]}
+    },
+    {
+      "name": "Push a group",
+      "method": "POST",
+      "path": "/scim/v2/Groups",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Test SCIMv2", "members": []},
+      "status": 201,
+      "capture": {"group": "id"},
+      "expect": {"displayName": "Test SCIMv2", "members": []}
+    },
+    {
+      "name": "Get the group",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 200,
+      "expect": {"id": "{{group}}", "displayName": "Test SCIMv2"}
+    },
+    {
+      "name": "Look the group up",
+      "method": "GET",
+      "path": "/scim/v2/Groups?filter=displayName%20eq%20%22Test%20SCIMv2%22&startIndex=1&count=100",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{group}}"}]}
+    },
+    {
+      "name": "Rename the group - the value repeats the group's id",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"id": "{{group}}", "displayName": "Test SCIMv2 renamed"}}]},
+      "status": 204
+    },
+    {
+      "name": "Add a member",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "members", "value": [{"value": "{{user}}", "display": "test.user@okta.local"}]}]},
+      "status": 204
+    },
+    {
+      "name": "The member is there, by its id",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 200,
+      "expect": {"displayName": "Test SCIMv2 renamed", "members": [{"value": "{{user}}"}]}
+    },
+    {
+      "name": "Remove the member by value path",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "members[value eq \"{{user}}\"]"}]},
+      "status": 204
+    },
+    {
+      "name": "Remove the member again - a retry",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "members[value eq \"{{user}}\"]"}]},
+      "status": 204
+    },
+    {
+      "name": "Group push replaces the membership with a full PUT",
+      "method": "PUT",
+      "path": "/scim/v2/Groups/{{group}}",
+      "body": {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "id": "{{group}}", "displayName": "Test SCIMv2 renamed", "members": [{"value": "{{user}}", "display": "test.user@okta.local"}]},
+      "status": 200,
+      "expect": {"members": [{"value": "{{user}}"}]}
+    },
+    {
+      "name": "Import: list every group",
+      "method": "GET",
+      "path": "/scim/v2/Groups?startIndex=1&count=100",
+      "status": 200,
+      "expect": {"totalResults": 1, "Resources": [{"id": "{{group}}", "displayName": "Test SCIMv2 renamed"}]}
+    },
+    {
+      "name": "Delete the group",
+      "method": "DELETE",
+      "path": "/scim/v2/Groups/{{group}}",
+      "status": 204
+    },
+    {
+      "name": "Deactivate for good",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{{user}}",
+      "body": {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"active": false}}]},
+      "status": 200,
+      "expect": {"active": false},
+      "denies": ["sub=00ujl29u0le5T6Aj10h7"]
+    }
+  ]
+}

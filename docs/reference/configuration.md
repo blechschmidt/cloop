@@ -2043,6 +2043,41 @@ until a signed-in person approves it, polling held to the interval by
 session, not an API token, not the static token. See the
 [HTTP API](http-api.md) for each.
 
+### SCIM provisioning (`ui.oidc.scim`)
+
+The identity provider provisions the hub's users and groups at `/scim/v2`, and
+a deactivation there suspends the person here — sessions, API tokens, glasses
+links, leases and running tasks ended, a deny binding written — without an
+administrator. The provider authenticates with a credential minted by `cloop
+hub scim credential create` or under **Settings → Provisioning (SCIM)**; there
+is none in this file. `/scim/v2` is served only with `ui.oidc.enabled`. The
+walkthrough, Entra and Okta included, is
+[SCIM provisioning](../guides/scim-provisioning.md).
+
+```yaml
+ui:
+  oidc:
+    scim:
+      match_claim: email          # email | preferred_username | oid | sub
+      offboard_after_days: 0      # 0: only the provider's DELETE offboards
+      rate_limit_per_minute: 600  # per credential
+```
+
+| Key | Default | Range | What it decides |
+| --- | --- | --- | --- |
+| `match_claim` | `email` | `email`, `preferred_username`, `oid`, `sub` | Which signed-in identity a provisioned user is: the user's primary email against the `email` claim, `userName` against `preferred_username`, or `externalId` against `oid` (Entra, with `objectId` mapped to `externalId`) or `sub` (Okta). A value two identities carry is refused a guess. Any other value stops the hub starting. |
+| `offboard_after_days` | `0` | `0`–`3650` | Runs the full offboarding — honouring a legal hold — for a user the provider has kept deactivated this long. `0` never does; Entra sends no `DELETE` for an account that was only unassigned, so this is what finishes those. |
+| `rate_limit_per_minute` | `600` | `10`–`60000` | Each credential's request budget, refilled continuously, with bursts of a sixth. Past it, `429` with `Retry-After`. |
+
+Out-of-range values are clamped. All three are settable with `cloop config set
+ui.oidc.scim.<key>`, and take effect when the hub restarts.
+
+Provisioned groups are a claim kind, `scim_group`, that `role_mappings` and
+runtime bindings can name by the group's display name or `externalId`; the hub
+reads membership from its directory at every authorization decision, so it
+needs no group claim in the token. The provider's accounts add two more kinds
+a binding can name: `username` (`preferred_username`) and `oid`.
+
 ### Web UI (`cloop ui`)
 
 Where the dashboard listens depends on whether it can tell people apart

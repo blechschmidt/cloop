@@ -20,6 +20,15 @@ human is present:
   scripts, and anything without a browser.
 - **Session cookie** — set by the OIDC login flow and used by the dashboard.
 
+A third is accepted on `/scim/v2` and nowhere else, and `/scim/v2` accepts
+nothing else: the **SCIM credential**, `Authorization: Bearer cloop_scim_…`, minted
+for an identity provider with `cloop hub scim credential create` or under Settings →
+Provisioning (SCIM). Not an API token, not the static token, not a session. The
+SCIM routes answer in RFC 7644's own dialect — bodies as `application/scim+json`
+(or `application/json`), errors as SCIM error documents, `429` with `Retry-After`
+past the credential's rate limit — and only on a hub with single sign-on. See the
+[SCIM provisioning guide](../guides/scim-provisioning.md).
+
 On a hub with single sign-on every `401` carries `X-Cloop-Sign-In: /auth/login`: a
 browser answers it by sending the user through `GET /auth/login?return=<path>`,
 which comes back to that path on this origin. A token-only hub's `401` carries
@@ -84,11 +93,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-244 endpoints, by the permission each one requires:
+273 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 36 |
+| `public` (no permission) | 58 |
 | `audit.read` | 5 |
 | `config.write` | 15 |
 | `executor.manage` | 28 |
@@ -106,7 +115,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
 | `token.admin` | 5 |
-| `user.manage` | 12 |
+| `user.manage` | 19 |
 | `view.prefs` | 2 |
 
 | Method | Path | Permission | Scope |
@@ -287,6 +296,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/risk-matrix` | `project.read` | project |
 | POST | `/api/run` | `run.start` | project |
 | POST | `/api/run/adopt-build` | `run.start` | project |
+| GET | `/api/scim` | `user.manage` | global |
+| POST | `/api/scim/credentials` | `user.manage` | global |
+| POST | `/api/scim/credentials/{id}/revoke` | `user.manage` | global |
+| POST | `/api/scim/credentials/{id}/rotate` | `user.manage` | global |
 | GET | `/api/secrets` | `secret.own` | global |
 | POST | `/api/secrets` | `secret.own` | global |
 | GET | `/api/secrets/catalog` | `secret.request` | global |
@@ -334,6 +347,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/tokens` | `token.admin` | global |
 | DELETE | `/api/tokens/{id}` | `token.admin` | global |
 | POST | `/api/transcribe` | `task.mutate` | project |
+| GET | `/api/users/holds` | `user.manage` | global |
+| POST | `/api/users/holds` | `user.manage` | global |
+| POST | `/api/users/holds/release` | `user.manage` | global |
 | POST | `/api/users/offboard` | `user.manage` | global |
 | GET | `/api/version` | `public` | global |
 | POST | `/api/voice` | `task.mutate` | project |
@@ -355,6 +371,28 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | HEAD | `/install.sh` | `executor.manage` | global |
 | GET | `/manifest.webmanifest` | `public` | global |
 | GET | `/metrics` | `audit.read` | global |
+| GET | `/scim/v2/` *(subtree)* | `public` | global |
+| POST | `/scim/v2/` *(subtree)* | `public` | global |
+| PUT | `/scim/v2/` *(subtree)* | `public` | global |
+| PATCH | `/scim/v2/` *(subtree)* | `public` | global |
+| DELETE | `/scim/v2/` *(subtree)* | `public` | global |
+| GET | `/scim/v2/Groups` | `public` | global |
+| POST | `/scim/v2/Groups` | `public` | global |
+| GET | `/scim/v2/Groups/{id}` | `public` | global |
+| PUT | `/scim/v2/Groups/{id}` | `public` | global |
+| PATCH | `/scim/v2/Groups/{id}` | `public` | global |
+| DELETE | `/scim/v2/Groups/{id}` | `public` | global |
+| GET | `/scim/v2/ResourceTypes` | `public` | global |
+| GET | `/scim/v2/ResourceTypes/{id}` | `public` | global |
+| GET | `/scim/v2/Schemas` | `public` | global |
+| GET | `/scim/v2/Schemas/{id}` | `public` | global |
+| GET | `/scim/v2/ServiceProviderConfig` | `public` | global |
+| GET | `/scim/v2/Users` | `public` | global |
+| POST | `/scim/v2/Users` | `public` | global |
+| GET | `/scim/v2/Users/{id}` | `public` | global |
+| PUT | `/scim/v2/Users/{id}` | `public` | global |
+| PATCH | `/scim/v2/Users/{id}` | `public` | global |
+| DELETE | `/scim/v2/Users/{id}` | `public` | global |
 
 ## REST daemon API (`cloop serve`)
 

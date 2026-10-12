@@ -217,6 +217,14 @@ Seven pages in order, indexed at
   opting a device in on the device itself, the root helper that lets a hardened
   agent upgrade itself, why the dialog says a build is not offered, rolling
   back, and what the channel does not promise.
+- **[SCIM provisioning](guides/scim-provisioning.md)** — Microsoft Entra ID or
+  Okta keeping the hub's users and groups current at `/scim/v2`, so a person
+  disabled there is suspended here in one request — sessions, API tokens,
+  glasses links, leases and running tasks ended, a deny binding written —
+  without an administrator: matching provisioned users to signed-in identities,
+  what a suspension keeps, deletion and `offboard_after_days`, provisioned
+  groups as the `scim_group` claim, legal holds, the credential, and setting up
+  each provider.
 
 ## Operations
 

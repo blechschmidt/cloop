@@ -1511,7 +1511,9 @@ dashboard shell, the OIDC login endpoints, `/api/me`, `/api/session/logout-all`,
 `/healthz`, `/readyz`).
 
 Roles are granted by matching a claim from the ID token — `group`, `role`,
-`email` or `sub` — optionally scoped to a project. A static bearer token
+`email`, `sub`, `username` (`preferred_username`) or `oid` — or a group the
+identity provider [provisioned](../guides/scim-provisioning.md), `scim_group`,
+optionally scoped to a project. A static bearer token
 authenticates as `admin` with source `static_token`, which is why it belongs
 only in deployments that have no SSO. Every privileged decision, allow or deny,
 is written to the audit trail as [`authz.granted`](../reference/audit-events.md#authz) or
@@ -2770,12 +2772,19 @@ ui:
       - {claim: email, value: dana@example.com, role: admin, executor: edge-1}
 ```
 
-`claim` is `group`, `role`, `email`, or `sub`. Group and role values match
+`claim` is `group`, `role`, `email`, `sub`, `username`, `oid` or
+`scim_group`. Group and role values match
 case-insensitively and ignore a leading `/`, so Keycloak's `/cloop-admins`
 path form works as written. Group claims are read from `groups`; role claims
 from `roles`, Keycloak's `realm_access.roles`, and this client's entry under
-`resource_access`. `project` matches either a project's registry name or its
-filesystem path.
+`resource_access`. `username` is the `preferred_username` claim and `oid`
+Entra's object ID, both compared case-insensitively. `scim_group` is not in the
+token at all: it is a group the identity provider provisioned over
+[SCIM](../guides/scim-provisioning.md), matched by display name or
+`externalId` against the hub's own copy of the directory at every decision —
+so removing someone from the group at the provider demotes them at its next
+cycle, with no group overage and no claim for a client to forge.
+`project` matches either a project's registry name or its filesystem path.
 
 **Precedence.** Only mappings whose scope the request satisfies apply. Those
 are ranked by specificity — project+executor, then executor, then project,

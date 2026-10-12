@@ -1117,6 +1117,46 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/ci/sessions/{id}", Handler: s.handleCISessionRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		{Pattern: "GET /api/ci/exchanges", Handler: s.handleCIExchanges, Perm: secGrant, Scope: scopeGlobal},
 
+		// ── SCIM 2.0 provisioning (Task 20415) ───────────────────────
+		// The identity provider's routes are public for the reason the CI
+		// exchange is: the handler authenticates — a cloop_scim_ credential,
+		// and nothing else of the hub's — so the route gate has nothing to
+		// add, and servedBeforeAuth carries /scim/v2 past the hub's own
+		// authentication. Every one of them refuses without the credential,
+		// and refuses outright on a hub without single sign-on.
+		{Pattern: "GET /scim/v2/ServiceProviderConfig", Handler: s.handleSCIMServiceProviderConfig, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/ResourceTypes", Handler: s.handleSCIMResourceTypes, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/ResourceTypes/{id}", Handler: s.handleSCIMResourceType, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Schemas", Handler: s.handleSCIMSchemas, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Schemas/{id}", Handler: s.handleSCIMSchema, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Users", Handler: s.handleSCIMUsersList, Perm: public, Scope: scopeGlobal},
+		{Pattern: "POST /scim/v2/Users", Handler: s.handleSCIMUserCreate, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Users/{id}", Handler: s.handleSCIMUserGet, Perm: public, Scope: scopeGlobal},
+		{Pattern: "PUT /scim/v2/Users/{id}", Handler: s.handleSCIMUserReplace, Perm: public, Scope: scopeGlobal},
+		{Pattern: "PATCH /scim/v2/Users/{id}", Handler: s.handleSCIMUserPatch, Perm: public, Scope: scopeGlobal},
+		{Pattern: "DELETE /scim/v2/Users/{id}", Handler: s.handleSCIMUserDelete, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Groups", Handler: s.handleSCIMGroupsList, Perm: public, Scope: scopeGlobal},
+		{Pattern: "POST /scim/v2/Groups", Handler: s.handleSCIMGroupCreate, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /scim/v2/Groups/{id}", Handler: s.handleSCIMGroupGet, Perm: public, Scope: scopeGlobal},
+		{Pattern: "PUT /scim/v2/Groups/{id}", Handler: s.handleSCIMGroupReplace, Perm: public, Scope: scopeGlobal},
+		{Pattern: "PATCH /scim/v2/Groups/{id}", Handler: s.handleSCIMGroupPatch, Perm: public, Scope: scopeGlobal},
+		{Pattern: "DELETE /scim/v2/Groups/{id}", Handler: s.handleSCIMGroupDelete, Perm: public, Scope: scopeGlobal},
+		// Everything else under /scim/v2 — bulk, /Me, a mistyped path — is
+		// a SCIM error, never the dashboard's page.
+		{Pattern: "/scim/v2/", Handler: s.handleSCIMFallback, Methods: []string{"GET", "POST", "PUT", "PATCH", "DELETE"},
+			Perm: public, Scope: scopeGlobal},
+		// The credential and the legal holds, administered from Settings.
+		// user.manage: a credential that can deactivate every account is
+		// access administration, and so is deciding whose stored
+		// credentials an offboarding must keep.
+		{Pattern: "GET /api/scim", Handler: s.handleSCIMStatus, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/scim/credentials", Handler: s.handleSCIMCredentialCreate, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/scim/credentials/{id}/rotate", Handler: s.handleSCIMCredentialRotate, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/scim/credentials/{id}/revoke", Handler: s.handleSCIMCredentialRevoke, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "GET /api/users/holds", Handler: s.handleLegalHolds, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/users/holds", Handler: s.handleLegalHoldPlace, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/users/holds/release", Handler: s.handleLegalHoldRelease, Perm: userMgmt, Scope: scopeGlobal},
+
 		// ── API tokens ───────────────────────────────────────────────
 		// Global and admin-only. Minting a token provisions an identity
 		// that acts without a browser or an IdP session, which is the same

@@ -1498,6 +1498,149 @@
       });
     }
 
+    // ── Provisioning (SCIM) (Task 20415) ─────────────────────────────────────────
+    //
+    // The credential an identity provider presents to /scim/v2 — minted, rotated
+    // and revoked here as with `cloop hub scim credential` — what the directory
+    // holds, and the legal holds an automatic offboarding honours. The secret is
+    // in the mint and rotate responses and nowhere else; the page keeps it only
+    // as long as the input that shows it.
+
+    function loadSCIM() {
+      const panel = document.getElementById('scimPanel');
+      if (typeof canGlobal === 'function' && !canGlobal('user.manage')) {
+        if (panel) panel.style.display = 'none';
+        return Promise.resolve();
+      }
+      return api('/api/scim').then(d => { if (d && !d.error) renderSCIM(d); }).catch(() => {});
+    }
+
+    function renderSCIM(d) {
+      const body = document.getElementById('scimBody');
+      const badge = document.getElementById('scimStatus');
+      const holds = document.getElementById('scimHolds');
+      if (!body) return;
+      const live = (d.credentials || []).filter(c => !c.revoked_at);
+      if (badge) {
+        const cls = !d.enabled ? 'unknown' : live.length ? 'complete' : 'pending';
+        badge.innerHTML = '<span class="badge ' + cls + '" style="font-size:10px">' +
+          (!d.enabled ? 'needs sign-on' : live.length ? 'on' : 'no credential') + '</span>';
+      }
+      const when = t => t ? esc(new Date(t).toLocaleString()) : 'never';
+      let html = '';
+      if (!d.enabled) {
+        html += '<p>This hub serves SCIM only with single sign-on on: it matches provisioned users to the ' +
+          'identities that sign in.</p>';
+      }
+      html += '<div>Endpoint <code>' + esc(d.endpoint || '') + '</code> &middot; match claim <code>' +
+        esc(d.match_claim || 'email') + '</code> &middot; ' +
+        (d.offboard_after_days ? 'full offboarding after ' + d.offboard_after_days + ' day(s) suspended' +
+          (d.pending_offboards ? ' (' + d.pending_offboards + ' due)' : '')
+          : 'suspended users are offboarded only when the provider deletes them') +
+        ' &middot; ' + esc(String(d.rate_limit_per_minute || 0)) + ' requests/min per credential</div>';
+      const st = d.directory;
+      if (st) {
+        html += '<div style="margin-top:6px">' + st.users + ' user(s): ' + st.active + ' active, ' + st.inactive +
+          ' suspended &middot; ' + st.groups + ' group(s)' +
+          (st.ambiguous ? ' &middot; <strong class="du-warn">' + st.ambiguous + ' ambiguous</strong>' : '') +
+          (st.unmatchable ? ' &middot; ' + st.unmatchable + ' with no ' + esc(d.match_claim || 'email') : '') +
+          '</div>';
+      }
+      const rows = (d.credentials || []).map(c => {
+        const state = c.revoked_at ? 'revoked ' + when(c.revoked_at) + ' by ' + esc(c.revoked_by || '')
+          : c.previous_valid_until ? 'live; the previous secret works until ' + when(c.previous_valid_until)
+          : 'live';
+        const acts = c.revoked_at ? '' :
+          '<button class="btn" data-act="scimRotate" data-arg="' + esc(c.id) + '">Rotate</button> ' +
+          '<button class="btn danger" data-act="scimRevoke" data-arg="' + esc(c.id) + '">Revoke</button>';
+        return '<tr><td><strong>' + esc(c.name) + '</strong><br><code>' + esc(c.prefix) + '</code></td><td>' +
+          when(c.created_at) + '</td><td>' + when(c.last_used_at) + '</td><td>' + state + '</td><td>' + acts +
+          '</td></tr>';
+      }).join('');
+      html += rows ? '<table class="data-table" style="margin-top:8px;width:100%"><thead><tr><th>Credential</th>' +
+        '<th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<p style="margin-top:8px">No credential yet. Mint one and give it to the identity provider as its ' +
+          'secret token, with the endpoint above as its tenant URL.</p>';
+      body.innerHTML = html;
+      if (holds) {
+        const hs = d.holds || [];
+        holds.innerHTML = hs.length ? hs.map(x => '<div style="display:flex;gap:8px;align-items:center;' +
+          'flex-wrap:wrap;margin:4px 0"><code>' + esc(x.identity) + '</code><span>' + esc(x.reason) +
+          '</span><span style="color:var(--muted)">placed ' + when(x.placed_at) + ' by ' + esc(x.placed_by || '') +
+          '</span><button class="btn" data-act="holdRelease" data-arg="' + esc(x.identity) +
+          '">Release</button></div>').join('') : 'No legal holds.';
+      }
+    }
+
+    function _scimShowToken(d, verb) {
+      const box = document.getElementById('scimTokenBox');
+      const input = document.getElementById('scimToken');
+      if (box && input && d && d.token) {
+        input.value = d.token;
+        box.style.display = '';
+        input.focus();
+        input.select();
+      }
+      toast(verb + ' — copy the secret now, it is not shown again', 'ok');
+    }
+
+    function scimMint() {
+      const name = ((document.getElementById('scimCredName') || {}).value || '').trim();
+      if (!name) { toast('Name the credential after the identity provider, e.g. entra', 'err'); return; }
+      apiMethod('POST', '/api/scim/credentials', {name: name}).then(ok).then(d => {
+        const n = document.getElementById('scimCredName');
+        if (n) n.value = '';
+        _scimShowToken(d, 'Credential ' + name + ' minted');
+        loadSCIM();
+      }).catch(err => toast('Mint failed: ' + ((err && err.message) || err), 'err'));
+    }
+
+    function scimRotate(id) {
+      const raw = prompt('Keep accepting the old secret for how many minutes while you paste the new one ' +
+        'into the identity provider? (0 ends it now, at most 10080)', '60');
+      if (raw === null) return;
+      const grace = parseInt(raw, 10);
+      if (!(grace >= 0 && grace <= 10080)) { toast('Enter a number of minutes between 0 and 10080', 'err'); return; }
+      const reason = prompt('Why is it rotated? (recorded in the audit trail)', 'scheduled rotation');
+      if (!reason || reason.trim().length < 4) { toast('Say why: the rotation is recorded', 'err'); return; }
+      apiMethod('POST', '/api/scim/credentials/' + encodeURIComponent(id) + '/rotate',
+        {grace_minutes: grace, reason: reason.trim()}).then(ok).then(d => {
+        _scimShowToken(d, 'Credential rotated');
+        loadSCIM();
+      }).catch(err => toast('Rotate failed: ' + ((err && err.message) || err), 'err'));
+    }
+
+    function scimRevoke(id) {
+      const reason = prompt('Revoke this SCIM credential? The identity provider\'s provisioning fails until it ' +
+        'is given a new one. Why? (recorded in the audit trail)');
+      if (!reason || reason.trim().length < 4) return;
+      apiMethod('POST', '/api/scim/credentials/' + encodeURIComponent(id) + '/revoke',
+        {reason: reason.trim()}).then(ok).then(() => {
+        toast('Credential revoked', 'ok');
+        loadSCIM();
+      }).catch(err => toast('Revoke failed: ' + ((err && err.message) || err), 'err'));
+    }
+
+    function holdPlace() {
+      const who = ((document.getElementById('holdIdentity') || {}).value || '').trim();
+      const why = ((document.getElementById('holdReason') || {}).value || '').trim();
+      if (!who || why.length < 4) { toast('Name the identity and the matter the hold is for', 'err'); return; }
+      apiMethod('POST', '/api/users/holds', {identity: who, reason: why}).then(ok).then(d => {
+        ['holdIdentity', 'holdReason'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+        toast('Legal hold placed on ' + d.identity, 'ok');
+        loadSCIM();
+      }).catch(err => toast('Hold failed: ' + ((err && err.message) || err), 'err'));
+    }
+
+    function holdRelease(identity) {
+      const reason = prompt('Release the legal hold on ' + identity + '? Why? (recorded in the audit trail)');
+      if (!reason || reason.trim().length < 4) return;
+      apiMethod('POST', '/api/users/holds/release', {identity: identity, reason: reason.trim()}).then(ok).then(() => {
+        toast('Legal hold released', 'ok');
+        loadSCIM();
+      }).catch(err => toast('Release failed: ' + ((err && err.message) || err), 'err'));
+    }
+
     // ── Static admin token (Task 20406) ──────────────────────────────────────────
     //
     // Whether this hub still accepts --token / CLOOP_UI_TOKEN, its fingerprint and
@@ -1576,7 +1719,8 @@
 
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
-      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadStaticToken(); loadTelemetryPolicy(); loadCIPanel();
+      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadStaticToken(); loadTelemetryPolicy();
+      loadCIPanel();
       loadGitHubApps(); loadUSBSettings(); loadGlassesLink();
       window.loadHiddenProjects(); window.loadBuildInfo();
     }
@@ -1584,7 +1728,8 @@
     return h.mount({
       open, saveConfigField, saveAnthropicCfg, saveOpenAICfg, saveOllamaCfg, saveSTTCfg,
       clearSTTCfg, confirmReset, saveProvider, saveCCModel, loadOIDCSettings, oidcAddMapping,
-      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadStaticToken, retireStaticToken,
+      saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadSCIM, scimMint, scimRotate, scimRevoke,
+      holdPlace, holdRelease, loadStaticToken, retireStaticToken,
       loadTelemetryPolicy,
       onTelemetryPolicyToggle, saveTelemetryPolicy, ghAppDiscover, ghAppSaveInstallation,
       loadGitHubApps, loadCISettings, saveCISettings, copyCISnippet, loadCIRules, ciNewRule,
@@ -1813,6 +1958,42 @@
             <button class="btn settings-save" data-act="saveOIDCSettings">Save</button>
           </div>
           <div id="oidcStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <div class="settings-section" id="scimPanel" data-global-perm="user.manage" data-perm-hide>
+          <h3>Provisioning (SCIM) <span id="scimStatus"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            The identity provider creates, deactivates and deletes this hub's users over SCIM 2.0. Deactivating
+            an account there suspends it here at once &mdash; its sessions, API tokens, glasses links, leases and
+            running tasks end, and a deny binding refuses it &mdash; without an administrator. Deleting it runs the
+            full offboarding. A role mapping with <code>claim: scim_group</code> grants a provisioned group's
+            members a role, read at every request.
+          </p>
+          <div id="scimBody" style="font-size:12px">Loading…</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+            <input class="form-input" id="scimCredName" maxlength="64" autocomplete="off"
+              placeholder="Credential name, e.g. entra" style="flex:1;min-width:160px" data-enter="scimMint">
+            <button class="btn primary" data-act="scimMint">Mint credential</button>
+          </div>
+          <div id="scimTokenBox" style="display:none;margin-top:10px">
+            <label class="form-label">Secret token &mdash; shown once, copy it now</label>
+            <input class="form-input" id="scimToken" readonly data-action="selectText"
+              style="font-family:monospace;font-size:12px">
+          </div>
+          <h4 style="margin:14px 0 6px;font-size:13px">Legal holds</h4>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            An identity under a hold keeps its personal secrets and Claude Code homes through every offboarding
+            &mdash; the identity provider's, the offboard-after clock's and an operator's. Access is severed as
+            always.
+          </p>
+          <div id="scimHolds" style="font-size:12px"></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+            <input class="form-input" id="holdIdentity" autocomplete="off" placeholder="email or sub:subject"
+              style="flex:1;min-width:160px">
+            <input class="form-input" id="holdReason" autocomplete="off" maxlength="1000"
+              placeholder="The matter, e.g. LH-17" style="flex:1;min-width:160px" data-enter="holdPlace">
+            <button class="btn" data-act="holdPlace">Place hold</button>
+          </div>
         </div>
 
         <div class="settings-section" id="staticTokenPanel" data-global-perm="token.admin" data-perm-hide>

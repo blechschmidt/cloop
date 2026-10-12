@@ -681,6 +681,14 @@ type Grant struct {
 	// stands on the successor's authority — and on its successor's, should it
 	// be superseded in turn.
 	SupersededBy string `json:"superseded_by,omitempty"`
+	// SuspendedAt is when the grant was suspended because its owner was
+	// deactivated at the identity provider, and SuspendedBy which SCIM
+	// credential did it (Task 20415). A suspended grant is refused like a
+	// revoked one until the provider reactivates the owner, which lifts the
+	// suspension — unlike a revocation, which nothing lifts. Zero while the
+	// grant is not suspended.
+	SuspendedAt time.Time `json:"suspended_at,omitempty"`
+	SuspendedBy string    `json:"suspended_by,omitempty"`
 }
 
 // Personal reports whether this grant hands out a personally-owned credential.
@@ -710,12 +718,29 @@ func (g Grant) Active(now time.Time) bool {
 	return g.DenyReason(now) == ""
 }
 
+// Standing reports whether the grant is neither revoked nor expired at now —
+// usable, or suspended and able to be again (Task 20415). It is what severing
+// a grant has to find: an offboarding that read only the active ones would
+// leave a suspended grant standing, ready for nothing but a lift.
+func (g Grant) Standing(now time.Time) bool {
+	if !g.RevokedAt.IsZero() && !now.Before(g.RevokedAt) {
+		return false
+	}
+	return g.ExpiresAt.IsZero() || now.Before(g.ExpiresAt)
+}
+
 // DenyReason returns the audit-friendly reason this grant cannot be used at
 // now, or "" when it is usable. Returning the reason rather than a bool is
 // what lets every denial land in the audit log with a cause attached.
 func (g Grant) DenyReason(now time.Time) string {
 	if !g.RevokedAt.IsZero() && !now.Before(g.RevokedAt) {
 		return "grant revoked at " + g.RevokedAt.UTC().Format(time.RFC3339)
+	}
+	if !g.SuspendedAt.IsZero() {
+		// Whatever the clock says: a suspension holds until it is lifted,
+		// not from a moment a skewed clock could place in the future.
+		return "grant suspended at " + g.SuspendedAt.UTC().Format(time.RFC3339) +
+			": its owner was deactivated at the identity provider"
 	}
 	if !g.ExpiresAt.IsZero() && !now.Before(g.ExpiresAt) {
 		return "grant expired at " + g.ExpiresAt.UTC().Format(time.RFC3339)
