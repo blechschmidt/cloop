@@ -267,6 +267,16 @@ func (s *Server) scimBase(r *http.Request) string {
 
 // scimEnter authenticates a SCIM request and holds it to its credential's
 // rate limit. It reports the actor and the service, or has answered.
+//
+// The credential is verified before any lockout is consulted, and only a
+// failure is counted, in SCIM's own bucket (Task 20422). Consulting the lockout
+// first answered the identity provider's valid credential 429 whenever its
+// address was locked — and that address is the provider's shared egress, or,
+// behind a proxy the hub does not trust, every caller's: five wrong guesses a
+// minute from a neighbour, or a misconfigured client beside it, kept
+// provisioning — and with it every suspension the provider sends — locked out.
+// A wrong credential still meets the lockout, answered 429 instead of 401 while
+// it holds; the right one never does.
 func (s *Server) scimEnter(w http.ResponseWriter, r *http.Request) (provision.Actor, *provision.Service, bool) {
 	svc, verifier, limiter := s.scimOpen()
 	if svc == nil || !s.oidcEnabled() {
@@ -276,12 +286,6 @@ func (s *Server) scimEnter(w http.ResponseWriter, r *http.Request) (provision.Ac
 		return provision.Actor{}, nil, false
 	}
 	ip := s.clientIP(r)
-	if s.authLockoutActive(ip) {
-		w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
-		s.scimRefuse(w, r, "locked_out", "", scim.Errorf(http.StatusTooManyRequests, "",
-			"too many failed attempts from this address; try again later"))
-		return provision.Actor{}, nil, false
-	}
 	raw := scimBearer(r)
 	if raw == "" {
 		s.scimUnauthorized(w, r, "unauthenticated", "", "this endpoint takes a SCIM credential: "+
@@ -294,13 +298,24 @@ func (s *Server) scimEnter(w http.ResponseWriter, r *http.Request) (provision.Ac
 		// The secret was right: no lockout, and the provider's log says why.
 		s.scimUnauthorized(w, r, "revoked", "", "this SCIM credential was revoked")
 		return provision.Actor{}, nil, false
-	case err != nil:
-		if !errors.Is(err, provision.ErrNoCredential) && !errors.Is(err, provision.ErrBadCredential) {
-			s.log().Warn(logger.EventAuthz, 0, "SCIM credential could not be checked",
-				map[string]interface{}{"error": err.Error()})
+	case errors.Is(err, provision.ErrNoCredential), errors.Is(err, provision.ErrBadCredential):
+		if s.scimLockoutActive(ip) {
+			w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
+			s.scimRefuse(w, r, "locked_out", "", scim.Errorf(http.StatusTooManyRequests, "",
+				"too many failed attempts from this address; try again later"))
+			return provision.Actor{}, nil, false
 		}
-		s.recordAuthFailure(ip)
+		s.recordSCIMFailure(ip)
 		s.scimUnauthorized(w, r, "unknown", "", "the credential is not a valid SCIM credential for this hub")
+		return provision.Actor{}, nil, false
+	case err != nil:
+		// The hub could not check it — its database, not the caller. Not a
+		// failure of the caller's to count, and not a 401 the provider would
+		// read as a credential to replace: 503 is retried.
+		s.log().Warn(logger.EventAuthz, 0, "SCIM credential could not be checked",
+			map[string]interface{}{"error": err.Error()})
+		s.scimRefuse(w, r, "unavailable", "", scim.Errorf(http.StatusServiceUnavailable, "",
+			"the hub could not check the credential just now; try again"))
 		return provision.Actor{}, nil, false
 	}
 	if ok, wait := limiter.Allow(v.Actor.CredentialID); !ok {

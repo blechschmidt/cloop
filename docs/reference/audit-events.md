@@ -777,7 +777,7 @@ Payload keys:
 - `scim.group_members` — A removal takes effect at the member's next authorization decision: provisioned groups are read at every decision, not at the next claim refresh.
 - `scim.group_update` — A rename changes what a scim_group role binding naming the old name grants.
 - `scim.match_ambiguous` — The hub does not choose among them: it acts on the matched claim alone — a deny binding on it, and what carries it — and grants the user's provisioned groups to nobody.
-- `scim.request_refused` — reason is unauthenticated, unknown, revoked, rate_limited or sso_disabled. At most 30 rows a minute; suppressed counts the ones the limit did not write.
+- `scim.request_refused` — reason is unauthenticated, unknown, revoked, locked_out (a wrong credential past SCIM's own lockout), rate_limited, unavailable (the credential store could not be read) or sso_disabled. At most 30 rows a minute; suppressed counts the ones the limit did not write.
 - `scim.user_create` — A user provisioned inactive is suspended at once, and gets a scim.user_suspend row too.
 - `scim.user_delete` — The offboarding writes its own user.offboard* rows, with via scim.
 - `scim.user_offboard_expired` — The offboarding writes its own user.offboard* rows, with via scim-expiry.

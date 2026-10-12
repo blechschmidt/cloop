@@ -2069,17 +2069,37 @@ func isPublicShell(r *http.Request) bool {
 // authenticating. As a side effect it refreshes the entry's lastSeen and
 // resets the failure counter once an expired lockout window has passed
 // (preserving the pre-extraction inline semantics).
-func (s *Server) authLockoutActive(ip string) bool {
+func (s *Server) authLockoutActive(ip string) bool { return s.lockoutActive(ip) }
+
+// recordAuthFailure increments ip's auth failure counter and arms the
+// lockout once the threshold is crossed.
+func (s *Server) recordAuthFailure(ip string) { s.recordLockoutFailure(ip) }
+
+// scimLockoutKey is ip's bucket for SCIM credential failures (Task 20422).
+//
+// Its own, apart from the dashboard's sign-in bucket, in both directions: the
+// identity provider calls from a shared egress address — and behind a proxy
+// the hub does not trust, every caller shares the proxy's — so wrong static
+// tokens or API tokens from that address must not refuse provisioning, and a
+// SCIM client misconfigured beside it must not lock people out of signing in.
+func scimLockoutKey(ip string) string { return "scim\x00" + ip }
+
+// scimLockoutActive and recordSCIMFailure are the lockout of SCIM's bucket.
+func (s *Server) scimLockoutActive(ip string) bool { return s.lockoutActive(scimLockoutKey(ip)) }
+func (s *Server) recordSCIMFailure(ip string)      { s.recordLockoutFailure(scimLockoutKey(ip)) }
+
+// lockoutActive reports whether the bucket key names is locked out.
+func (s *Server) lockoutActive(key string) bool {
 	now := time.Now()
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
-	entry, ok := s.authFails[ip]
+	entry, ok := s.authFails[key]
 	if !ok {
 		if len(s.authFails) >= uiAuthFailsMaxEntries {
 			s.evictAuthFailsLocked(now)
 		}
 		entry = &authFailEntry{}
-		s.authFails[ip] = entry
+		s.authFails[key] = entry
 	}
 	entry.lastSeen = now
 	if entry.count >= authMaxFailures && now.Before(entry.lockedUntil) {
@@ -2092,16 +2112,16 @@ func (s *Server) authLockoutActive(ip string) bool {
 	return false
 }
 
-// recordAuthFailure increments ip's auth failure counter and arms the
-// lockout once the threshold is crossed. The entry created by
-// authLockoutActive may have been evicted by a concurrent request between
-// the two critical sections, so re-check and recreate rather than deref nil.
-func (s *Server) recordAuthFailure(ip string) {
+// recordLockoutFailure counts a failure in key's bucket and arms its lockout
+// once the threshold is crossed. The entry created by lockoutActive may have
+// been evicted by a concurrent request between the two critical sections, so
+// re-check and recreate rather than deref nil.
+func (s *Server) recordLockoutFailure(key string) {
 	s.authMu.Lock()
-	entry := s.authFails[ip]
+	entry := s.authFails[key]
 	if entry == nil {
 		entry = &authFailEntry{lastSeen: time.Now()}
-		s.authFails[ip] = entry
+		s.authFails[key] = entry
 	}
 	entry.count++
 	if entry.count >= authMaxFailures {

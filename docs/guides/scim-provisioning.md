@@ -241,8 +241,12 @@ too.
   Provisioning, `cloop hub scim credential create`, or
   `POST /api/scim/credentials`. Managing credentials needs `user.manage`.
 - **Accepted on `/scim/v2` only** — not as an API token, not on the dashboard
-  — and only in the `Authorization` header. A wrong one counts towards the
-  address's sign-in lockout like any failed credential.
+  — and only in the `Authorization` header. It is verified before anything
+  else is asked, so the right one is served whatever its address has been up
+  to. A wrong one counts against a lockout of SCIM's own — five a minute per
+  address, then `429` for a minute — kept apart from the dashboard's sign-in
+  lockout, so neither a neighbour on the provider's egress address nor a
+  misconfigured client beside the dashboard can lock out the other.
 - **Rate-limited per credential**: `ui.oidc.scim.rate_limit_per_minute`
   (default 600, bursts of a sixth). Past it, `429` with `Retry-After`, which
   Entra and Okta both pace on.

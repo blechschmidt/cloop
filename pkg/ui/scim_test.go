@@ -249,14 +249,18 @@ func TestSCIM_TheCredentialOpensSCIMAndNothingElse(t *testing.T) {
 			t.Errorf("%s: no WWW-Authenticate challenge", name)
 		}
 	}
-	// Wrong credentials count toward the address's failure lockout, and past
-	// it even the right one is turned away until it lifts.
+	// Wrong credentials count toward the address's SCIM lockout, which turns
+	// the next wrong one away with 429 — and never the right one (Task 20422,
+	// TestSCIM_ALockedOutAddressStillAdmitsTheProvider).
 	resetLockout()
 	for i := 0; i < authMaxFailures; i++ {
 		f.scimDo(t, "GET", "/scim/v2/Users", "", bearerHeader(pat.Plaintext))
 	}
-	if status, _ := f.scim(t, "GET", "/scim/v2/Users", ""); status != http.StatusTooManyRequests {
+	if status, _, _ := f.scimDo(t, "GET", "/scim/v2/Users", "", bearerHeader(pat.Plaintext)); status != http.StatusTooManyRequests {
 		t.Fatalf("after %d wrong credentials from one address: %d, want 429", authMaxFailures, status)
+	}
+	if status, _ := f.scim(t, "GET", "/scim/v2/Users", ""); status != http.StatusOK {
+		t.Fatalf("the right credential from the locked-out address: %d, want 200", status)
 	}
 	resetLockout()
 	// The root's browser session does not open it either.
@@ -282,6 +286,99 @@ func TestSCIM_TheCredentialOpensSCIMAndNothingElse(t *testing.T) {
 	status, out, h := f.scimDo(t, "GET", "/scim/v2/Bulk", "", nil)
 	if status != http.StatusUnauthorized || !strings.Contains(h.Get("Content-Type"), "scim+json") {
 		t.Fatalf("an unknown SCIM path without a credential: %d %v", status, out)
+	}
+}
+
+// scimWrongCredential is shaped like a SCIM credential and is nobody's.
+var scimWrongCredential = provision.CredentialPrefix + strings.Repeat("a", 16) + "_" + strings.Repeat("b", 64)
+
+// TestSCIM_ALockedOutAddressStillAdmitsTheProvider is the defect Task 20422
+// closed: SCIM answered 429 before it verified the bearer, so an address
+// locked by five wrong guesses — the identity provider's shared egress, or,
+// behind a proxy the hub does not trust, everybody's — kept provisioning out,
+// and every suspension the provider sent with it. The credential is verified
+// first now: the right one is served from a locked address, and serving it
+// neither counts nor lifts the lockout the wrong ones earned.
+func TestSCIM_ALockedOutAddressStillAdmitsTheProvider(t *testing.T) {
+	f := newSCIMFixture(t, authz.Config{})
+	wrong := bearerHeader(scimWrongCredential)
+	for i := 0; i < authMaxFailures; i++ {
+		if status, _, _ := f.scimDo(t, "GET", "/scim/v2/Users", "", wrong); status != http.StatusUnauthorized {
+			t.Fatalf("wrong credential %d: %d, want 401", i+1, status)
+		}
+	}
+	status, _, h := f.scimDo(t, "GET", "/scim/v2/Users", "", wrong)
+	if status != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
+		t.Fatalf("a wrong credential past the threshold: %d (Retry-After %q), want 429 with one", status, h.Get("Retry-After"))
+	}
+
+	// The provider, from the same address, provisions and deactivates.
+	id := f.provisionAlice(t)
+	status, out := f.scim(t, "PATCH", "/scim/v2/Users/"+id, `{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+		"Operations":[{"op":"Replace","path":"active","value":false}]}`)
+	if status != http.StatusOK || out["active"] != false {
+		t.Fatalf("the provider's deactivation from a locked address answered %d %v", status, out)
+	}
+	// The lockout still holds for the guesses.
+	if status, _, _ := f.scimDo(t, "GET", "/scim/v2/Users", "", wrong); status != http.StatusTooManyRequests {
+		t.Fatalf("the provider's requests lifted the lockout: a wrong credential got %d", status)
+	}
+	db, closer, _ := f.srv.openControlPlaneDB()
+	defer closer()
+	var lockedOut int
+	for _, r := range scimAuditRows(t, db, "scim.request_refused") {
+		if r["reason"] == "locked_out" {
+			lockedOut++
+			if r["client"] != "" && r["client"] != nil {
+				t.Errorf("a locked-out refusal names client %v: only a verified credential has one", r["client"])
+			}
+		}
+	}
+	if lockedOut != 2 {
+		t.Fatalf("%d locked_out refusals recorded, want the 2 wrong credentials past the threshold", lockedOut)
+	}
+}
+
+// TestSCIM_FailuresKeepTheirOwnBucket: SCIM's lockout and the dashboard's
+// sign-in lockout count apart (Task 20422). Wrong static tokens from the
+// provider's address neither lock SCIM nor refuse its credential, and a SCIM
+// client failing beside the dashboard locks nobody out of it.
+func TestSCIM_FailuresKeepTheirOwnBucket(t *testing.T) {
+	f := newSCIMFixture(t, authz.Config{})
+	pat := f.mintToken(t)
+	reset := func() {
+		f.srv.authMu.Lock()
+		f.srv.authFails = map[string]*authFailEntry{}
+		f.srv.authMu.Unlock()
+	}
+
+	// The dashboard's bucket, filled with wrong static tokens.
+	for i := 0; i < authMaxFailures; i++ {
+		f.call(t, http.DefaultClient, "GET", "/api/projects", bearerHeader("not-the-static-token"))
+	}
+	if status := f.call(t, http.DefaultClient, "GET", "/api/projects", bearerHeader(pat.Plaintext)); status != http.StatusTooManyRequests {
+		t.Fatalf("the dashboard's lockout did not engage: an API token got %d", status)
+	}
+	if status, _, _ := f.scimDo(t, "GET", "/scim/v2/Users", "", bearerHeader(scimWrongCredential)); status != http.StatusUnauthorized {
+		t.Fatalf("a wrong SCIM credential under the dashboard's lockout: %d, want 401 — SCIM counts its own", status)
+	}
+	if status, _ := f.scim(t, "GET", "/scim/v2/Users", ""); status != http.StatusOK {
+		t.Fatalf("the provider under the dashboard's lockout: %d", status)
+	}
+
+	// SCIM's bucket, filled, leaves the dashboard alone.
+	reset()
+	for i := 0; i <= authMaxFailures; i++ {
+		f.scimDo(t, "GET", "/scim/v2/Users", "", bearerHeader(scimWrongCredential))
+	}
+	if status, _, _ := f.scimDo(t, "GET", "/scim/v2/Users", "", bearerHeader(scimWrongCredential)); status != http.StatusTooManyRequests {
+		t.Fatalf("SCIM's own lockout did not engage: %d", status)
+	}
+	if status := f.call(t, http.DefaultClient, "GET", "/api/projects", bearerHeader(pat.Plaintext)); status != http.StatusOK {
+		t.Fatalf("an API token beside a failing SCIM client: %d, want 200", status)
+	}
+	if status := f.call(t, http.DefaultClient, "GET", "/api/projects", bearerHeader(credStaticToken)); status != http.StatusOK {
+		t.Fatalf("the static token beside a failing SCIM client: %d, want 200", status)
 	}
 }
 

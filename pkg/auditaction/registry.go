@@ -1793,8 +1793,9 @@ var registry = []Entry{
 		Payload:   []string{"reason", "method", "path", "ip", "user_agent", "client", "suppressed"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note: "reason is unauthenticated, unknown, revoked, rate_limited or sso_disabled. At most 30 " +
-			"rows a minute; suppressed counts the ones the limit did not write.",
+		Note: "reason is unauthenticated, unknown, revoked, locked_out (a wrong credential past SCIM's own " +
+			"lockout), rate_limited, unavailable (the credential store could not be read) or sso_disabled. " +
+			"At most 30 rows a minute; suppressed counts the ones the limit did not write.",
 	},
 	{
 		Action:    ActionSCIMUserCreate,

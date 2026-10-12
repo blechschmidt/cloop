@@ -287,10 +287,17 @@ func (v *Verifier) now() time.Time {
 	return time.Now()
 }
 
+// unknownCredentialHash stands in for the stored hash of an id that does not
+// exist, so an unknown id costs the HMAC a known one with the wrong secret
+// does (Task 20422).
+var unknownCredentialHash = "hmac-sha256$" + strings.Repeat("00", 16) + "$" + strings.Repeat("00", 32)
+
 // Verify authenticates a presented credential.
 //
 // The secret is compared before revocation is consulted, so a caller without
-// the secret cannot learn that an id exists, or that it was revoked.
+// the secret cannot learn that an id exists, or that it was revoked; and an id
+// that does not exist is compared against a stand-in, so its answer takes the
+// time a wrong secret's does.
 func (v *Verifier) Verify(raw string) (Verified, error) {
 	id, secret, ok := ParseCredential(raw)
 	if !ok {
@@ -299,6 +306,7 @@ func (v *Verifier) Verify(raw string) (Verified, error) {
 	c, err := v.DB.GetSCIMCredential(id)
 	if err != nil {
 		if errors.Is(err, statedb.ErrSCIMNotFound) {
+			apitoken.VerifyHash(unknownCredentialHash, secret)
 			return Verified{}, ErrBadCredential
 		}
 		return Verified{}, err

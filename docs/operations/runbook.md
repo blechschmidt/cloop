@@ -1396,8 +1396,11 @@ about to go into quarantine — a rotation whose new secret never reached it.
 `sso_disabled` is a hub whose single sign-on was turned off under a working
 provider, and `rate_limited` a first cycle larger than
 `ui.oidc.scim.rate_limit_per_minute`. A burst from an address the provider does not use is somebody
-probing `/scim/v2`; the sign-in lockout applies to it as to any failed
-credential. The rows are bounded per minute, so their count is a floor.
+probing `/scim/v2`; past five a minute its wrong credentials are answered
+`locked_out` (`429`) by SCIM's own lockout, while the provider's valid one is
+still served from the same address. `unavailable` is the hub failing to read
+the credential store — the provider retries it. The rows are bounded per
+minute, so their count is a floor.
 
 ---
 
