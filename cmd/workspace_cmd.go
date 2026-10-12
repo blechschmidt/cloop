@@ -224,6 +224,15 @@ func takeWorkspaceCredential() executor.GitCredential {
 	if token == "" {
 		return executor.GitCredential{}
 	}
+	// The unset above reaches Go's copy of the environment only. The kernel
+	// keeps serving the block this process started with at
+	// /proc/<pid>/environ, and the harness `cloop workspace writeback` runs is
+	// this process's child, as the same user: it read the forge token there
+	// (Task 20424). Made unreadable before anything is spawned.
+	if err := concealInitialEnvironment(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not hide this process's environment from the processes it "+
+			"starts: %v\n", err)
+	}
 	if user == "" {
 		// The same literal the broker pairs with a GitHub PAT, referenced
 		// rather than repeated so the two cannot disagree.
