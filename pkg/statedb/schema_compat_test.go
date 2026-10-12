@@ -583,7 +583,9 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// tls: auto, beside an older one that still serves the same database.
 	// 0066 (terminal sign-in, Task 20412) appends two columns to sessions,
 	// which the :8080 hub's binary reads on every request it authenticates.
-	for _, v := range []int{35, 36, 41, 65, 66} {
+	// 0068 (project claims, Task 20418) is written by the first creation on
+	// a hub sharing its control plane with an older one.
+	for _, v := range []int{35, 36, 41, 65, 66, 68} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

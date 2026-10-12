@@ -231,6 +231,9 @@ func bootstrapExecutors(dir string) {
 		}
 	}
 	registerBuiltinExecutors()
+	// The host driver refuses to fork in a directory containing this control
+	// plane, as under `cloop ui` (Task 20418).
+	localprocess.Shared().SetControlPlaneDir(dir)
 	if cfg == nil {
 		return
 	}
@@ -246,6 +249,8 @@ func bootstrapExecutors(dir string) {
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		ReconcileOrphans: true,
 		SweepInterval:    cfg.Executors.OrphanSweepInterval(),
+		// What the container driver must never bind over (Task 20418).
+		ControlPlaneDir: dir,
 		// `cloop serve` is not a hub cluster member (Task 20354), so it cannot
 		// tell a member's live workload from an orphan. It sweeps only while no
 		// `cloop ui` serves this control plane; while one does, the sweeps are

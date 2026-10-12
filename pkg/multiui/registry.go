@@ -666,6 +666,44 @@ func AddPathsOwned(paths []string, owner string) error {
 	return saveLocked(existing)
 }
 
+// AdmitOwned registers one project owned by owner, after admit has accepted
+// its path against the registry as it stands under the registry's own lock
+// (Task 20418). admit sees every entry already registered; an error from it
+// refuses the registration and is returned unchanged. A path already
+// registered is not added again, and keeps its owner.
+//
+// This is the hub's door into the registry: a project created through the
+// dashboard or `cloop remote init` is admitted here, so the confinement check
+// and the write cannot be separated by another writer. AddPaths and
+// AddPathsOwned are the operator's, for paths named on `cloop ui`'s command
+// line, which are registered as given and flagged — on the Projects tab and by
+// `cloop hub doctor` — rather than refused.
+func AdmitOwned(path, owner string, admit func(existing []ProjectEntry) error) error {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	existing, err := Load()
+	if err != nil {
+		return err
+	}
+	for _, e := range existing {
+		if e.Path == abs {
+			return nil
+		}
+	}
+	if admit != nil {
+		if err := admit(existing); err != nil {
+			return err
+		}
+	}
+	existing = append(existing, ProjectEntry{Name: filepath.Base(abs), Path: abs, Owner: owner})
+	return saveLocked(existing)
+}
+
 // RemovePath drops the entry with the given absolute path from the registry
 // and saves. Removal is by path (not by index) so a concurrent re-order or
 // addition does not cause the wrong project to be deleted. Unknown paths are
@@ -803,6 +841,12 @@ type ProjectStatus struct {
 	// — its tasks, its run, its options — is an ordinary project status.
 	Parent  string         `json:"parent,omitempty"`
 	Feature *FeatureStatus `json:"feature,omitempty"`
+
+	// Confinement says why the hub refuses to run this project, when its
+	// directory overlaps the hub's control plane, another hub or another
+	// project (Task 20418). Empty for every project the hub will run. The hub
+	// fills it in; GetStatus, which knows nothing of the hub, leaves it empty.
+	Confinement string `json:"confinement,omitempty"`
 
 	// HasGit reports that a (non-feature) project is the top of a git
 	// repository — the precondition for creating features of it, which the

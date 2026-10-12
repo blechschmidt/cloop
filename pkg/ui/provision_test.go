@@ -299,9 +299,10 @@ func TestProjectNewDoesNotGrantWhatTheCallerMayNotGrant(t *testing.T) {
 	t.Run("an ordinary creation is unaffected", func(t *testing.T) {
 		// The gating must be conditional on asking. A maintainer creating a
 		// plain project is doing something they are entitled to do, and a
-		// blanket check here would break it.
+		// blanket check here would break it. By name, under the projects
+		// root: a maintainer's project goes nowhere else (Task 20418).
 		code, resp := do(t, maintainer, http.MethodPost, ts.URL+"/api/projects/new",
-			`{"dir":`+quote(base+"-plain")+`,"goal":"ordinary project"}`)
+			`{"name":"escalation-plain","goal":"ordinary project"}`)
 		if code == http.StatusForbidden {
 			t.Fatalf("maintainer refused an ordinary project creation: %s", resp)
 		}

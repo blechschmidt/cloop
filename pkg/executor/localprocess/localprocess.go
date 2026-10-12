@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/projectconfine"
 	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
@@ -93,6 +94,22 @@ type Executor struct {
 	// revocations is the log of leases this executor has been told to give
 	// back, for the Secrets panel.
 	revocations *executor.RevocationLog
+
+	// controlPlaneDir is the hub's own directory (Task 20418): a work
+	// directory containing it, or inside its .cloop or another hub's, is
+	// refused before anything is forked in it (projectconfine.Backstop).
+	// Empty checks nothing. Guarded by mu, since the hub sets it on the
+	// shared executor after other entry points may already have used it.
+	controlPlaneDir string
+}
+
+// SetControlPlaneDir tells the executor which directory is the hub's own, so
+// that it refuses to fork in one that contains it (Task 20418). The hub's
+// bootstrap calls it on Shared(); empty switches the check off.
+func (e *Executor) SetControlPlaneDir(dir string) {
+	e.mu.Lock()
+	e.controlPlaneDir = dir
+	e.mu.Unlock()
 }
 
 // record is the driver's bookkeeping for one started process.
@@ -368,6 +385,15 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		}
 		if !info.IsDir() {
 			return executor.Handle{}, fmt.Errorf("%w: work_dir %q is not a directory", executor.ErrInvalidSpec, spec.WorkDir)
+		}
+		// Before the fork: a project directory that contains the control
+		// plane is never a harness's working directory (Task 20418). A
+		// feature is judged as its project.
+		e.mu.Lock()
+		cp := e.controlPlaneDir
+		e.mu.Unlock()
+		if err := projectconfine.Backstop(cp, executor.PolicyProjectPath(spec.WorkDir)); err != nil {
+			return executor.Handle{}, fmt.Errorf("%w: %w", executor.ErrInvalidSpec, err)
 		}
 	}
 

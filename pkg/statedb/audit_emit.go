@@ -911,3 +911,37 @@ func auditPlanTasks(d *DB, changed []taskAuditChange, deleted []int) {
 	// Counted and recorded by the append path on failure; see the file comment.
 	_ = d.AppendAuditEvents(evs)
 }
+
+// ProjectAuditInput carries one project.create or project.delete row (Task
+// 20418). Detail is the action's payload beside the path, keyed as the
+// registry lists it (pkg/auditaction).
+type ProjectAuditInput struct {
+	Action auditaction.Action
+	// Path is the project's directory, the entity the row is filed under.
+	Path   string
+	Actor  string
+	Detail map[string]any
+}
+
+// AuditProjectLifecycle records a project created, refused, removed or kept
+// in the control plane's chain. Best-effort, like every helper here.
+func AuditProjectLifecycle(d *DB, in ProjectAuditInput) {
+	if strings.TrimSpace(in.Path) == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"path": in.Path}
+	for k, v := range in.Detail {
+		payload[k] = v
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(in.Action),
+		EntityType: "project",
+		EntityID:   in.Path,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}

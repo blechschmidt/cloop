@@ -1818,13 +1818,23 @@ func TestProjectDelete_RemovesRegistryEntryOnly(t *testing.T) {
 // TestProjectDelete_DeleteRootRemovesFiles verifies that delete_root=true
 // recursively removes the project root directory.
 func TestProjectDelete_DeleteRootRemovesFiles(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	cloopDir := setupProjectDir(t, cloopGoal, nil)
-	sysmonDir := setupProjectDir(t, sysmonGoal, nil)
-	ts := newTestServer(t, cloopDir, []string{sysmonDir})
+	ts := newTestServer(t, cloopDir, nil)
 
-	req, _ := http.NewRequest("DELETE", ts.URL+"/api/projects/1", strings.NewReader(`{"delete_root":true}`))
+	// Only a directory the hub made itself is the hub's to delete (Task
+	// 20418): this one is, created by name under the projects root.
+	status, got := doJSON(t, ts.Client(), http.MethodPost, ts.URL+"/api/projects/new",
+		`{"name":"sysmon","goal":"`+sysmonGoal+`"}`)
+	made := filepath.Join(home, "projects", "sysmon")
+	if status != http.StatusOK || got["dir"] != made {
+		t.Fatalf("create = %d %v", status, got)
+	}
+	idx := int(got["project_idx"].(float64))
+
+	req, _ := http.NewRequest("DELETE", fmt.Sprintf("%s/api/projects/%d", ts.URL, idx), strings.NewReader(`{"delete_root":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1840,7 +1850,7 @@ func TestProjectDelete_DeleteRootRemovesFiles(t *testing.T) {
 		t.Errorf("expected root_deleted=true, got false")
 	}
 
-	if _, err := os.Stat(sysmonDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(made); !os.IsNotExist(err) {
 		t.Errorf("expected project dir to be removed; stat err=%v", err)
 	}
 }

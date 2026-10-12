@@ -42,6 +42,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
+	"github.com/blechschmidt/cloop/pkg/projectconfine"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -1774,6 +1775,22 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 	// their own, and both are checked before the placement case below because
 	// each names the specific repository and grant rather than the constraint
 	// they would otherwise be flattened into.
+	// The project's directory overlaps what the hub must never bind: its own
+	// control plane, another hub, another project (Task 20418). A 409 like the
+	// refusals above — the request is well formed, what conflicts is where the
+	// project lives — and the remedy is an administrator's.
+	var unconfined *confinementError
+	if errors.As(err, &unconfined) {
+		writeSandboxDenied(w, "project_unconfined", unconfined.Error(), unconfined.Remediation(), nil)
+		return
+	}
+	// The same refusal from a driver's own backstop, for a dispatch that
+	// reached it without the check above.
+	if v, ok := projectconfine.IsViolation(err); ok {
+		refused := &confinementError{Project: v.Path, V: v}
+		writeSandboxDenied(w, "project_unconfined", refused.Error(), refused.Remediation(), nil)
+		return
+	}
 	// A feature asked to run where its worktree cannot work (Task 20341).
 	var featureEx *featureExecutorError
 	if errors.As(err, &featureEx) {

@@ -193,6 +193,14 @@ but not for anything reachable from a network.`,
 			}
 		}
 
+		// Directories named here are the operator's to choose, so they are
+		// registered as given — but one that overlaps the control plane,
+		// another hub or another project is said to be one now, and the hub
+		// will not run it (Task 20418).
+		for _, w := range ui.OperatorProjectWarnings(workdir, cfg, projectPaths) {
+			fmt.Fprintf(os.Stderr, "warning: --projects %s\n", w)
+		}
+
 		// Persist newly discovered projects into the registry.
 		if len(projectPaths) > 0 {
 			if err := multiui.AddPaths(projectPaths); err != nil {

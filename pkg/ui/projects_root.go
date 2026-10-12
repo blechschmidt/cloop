@@ -12,8 +12,6 @@ package ui
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -46,25 +44,7 @@ func validProjectName(name string) error {
 
 // projectsRoot is the directory a project created by name is placed in.
 func (s *Server) projectsRoot() (string, error) {
-	cfg, err := s.loadHubConfig()
-	if err != nil {
-		return "", fmt.Errorf("this hub's configuration could not be read to find ui.projects_root: %v — "+
-			"name a directory instead", err)
-	}
-	root := strings.TrimSpace(cfg.UI.ProjectsRoot)
-	if root == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil || strings.TrimSpace(home) == "" {
-			return "", fmt.Errorf("this hub has no ui.projects_root and no home directory to keep projects in: " +
-				"set ui.projects_root, or name a directory")
-		}
-		root = filepath.Join(home, "projects")
-	}
-	if !filepath.IsAbs(root) {
-		return "", fmt.Errorf("ui.projects_root is %q, which is not an absolute path: fix it in the hub's "+
-			"configuration, or name a directory", root)
-	}
-	return filepath.Clean(root), nil
+	return projectsRootFrom(s.loadHubConfig())
 }
 
 // projectExistsAt reports whether dir already holds a cloop project: its

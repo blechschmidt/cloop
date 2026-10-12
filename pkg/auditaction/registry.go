@@ -1904,6 +1904,42 @@ var registry = []Entry{
 	},
 
 	// ── project ────────────────────────────────────────────────────────────
+	// A project's directory is what the hub binds into a sandbox and what
+	// ?delete_root=true removes, so where one was created, refused or deleted
+	// is a question about the host as much as about the project (Task 20418).
+	{
+		Action:  ActionProjectCreate,
+		Home:    HomeControlPlane,
+		Entity:  "project",
+		Trigger: "A project is created through the hub, or a creation is refused because of the directory it named.",
+		Payload: []string{
+			"outcome", "path", "requested", "name", "owner", "hub_made", "projects_root", "executor_id",
+			"rule", "reason",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is \"created\" or \"refused\". `path` is the canonical directory and `requested` " +
+			"what the caller sent. `hub_made` says this hub made the directory itself under " +
+			"`projects_root` — the only directories ?delete_root=true may remove. A refusal carries the " +
+			"`rule` it broke (pkg/projectconfine: control_plane, hub, project, projects_root, " +
+			"outside_projects_root, relocated, unsafe, unverifiable, unresolvable, or taken for a path another " +
+			"creation holds) and the full `reason`, which the caller may have been answered more " +
+			"vaguely than this: what exists at a path they cannot see is not theirs to learn.",
+	},
+	{
+		Action:  ActionProjectDelete,
+		Home:    HomeControlPlane,
+		Entity:  "project",
+		Trigger: "A project is removed from the hub, or the hub refuses to delete its directory.",
+		Payload: []string{
+			"outcome", "path", "name", "owner", "delete_root", "root_deleted", "hub_made", "reason",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is \"removed\" or \"refused\". `delete_root` is what the caller asked for and " +
+			"`root_deleted` what happened; a refused one names its `reason` — a directory the hub did not " +
+			"make, or one that now overlaps something it must not touch — and the project stays registered.",
+	},
 	{
 		Action:    ActionProjectFirewall,
 		Home:      HomeControlPlane,

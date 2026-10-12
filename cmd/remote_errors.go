@@ -42,7 +42,7 @@ func (e *remoteError) Error() string {
 // explainedDetails are the detail keys explainRefusal renders in its own
 // words; every other detail is listed as it came.
 var explainedDetails = map[string]bool{
-	"required_permission": true, "role": true, "scope": true,
+	"required_permission": true, "role": true, "scope": true, "projects_root": true,
 	"reason": true, "claim_age_seconds": true, "max_claim_age_seconds": true, "renewable": true,
 }
 
@@ -72,7 +72,14 @@ func explainRefusal(hub string, ae *hubclient.APIError) []string {
 			} else if ae.Detail("role") != "" {
 				lines = append(lines, "your role:  none"+describeScope(scope))
 			}
-			lines = append(lines, "to get it:  "+permissionRemedy(authz.Permission(perm), scope))
+			remedy := permissionRemedy(authz.Permission(perm), scope)
+			if root := ae.Detail("projects_root"); root != "" {
+				// Not a binding: a directory outside the hub's projects root,
+				// which only an administrator may choose (Task 20418).
+				remedy = "create the project by name — leave out --dir and it goes under " + root +
+					" — or give a --dir inside that root; only an administrator places a project elsewhere"
+			}
+			lines = append(lines, "to get it:  "+remedy)
 		}
 	}
 	keys := make([]string, 0, len(ae.Details))

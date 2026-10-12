@@ -94,6 +94,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/internal/diskwatch"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
+	"github.com/blechschmidt/cloop/pkg/projectconfine"
 )
 
 // DefaultID is the executor ID used when none is configured.
@@ -238,6 +239,16 @@ type Options struct {
 	// DefaultOrphanGracePeriod; see shouldReapRunningOrphan for why the window
 	// is a correctness condition rather than a courtesy.
 	OrphanGracePeriod time.Duration
+
+	// ControlPlaneDir is the hub's own directory (Task 20418). A work
+	// directory that contains it, or sits inside its .cloop or inside another
+	// hub's, is refused before anything is bound (projectconfine.Backstop):
+	// a bind mount of an ancestor of the control plane hands the sandbox the
+	// hub's secrets, its database and every project. The hub checks the whole
+	// invariant before it dispatches; this is the half a driver can check by
+	// itself, for any caller that reaches it another way. Empty checks
+	// nothing, which is what a device's agent and the CLI pass.
+	ControlPlaneDir string
 
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
@@ -684,6 +695,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	workDir, err := e.resolveWorkDir(spec.WorkDir)
 	if err != nil {
 		return executor.Handle{}, err
+	}
+	// Before the bind mount and before anything is staged for it: a project
+	// directory that contains the control plane is never mounted (Task 20418).
+	// A feature is judged as its project, whose tree it lives in.
+	if err := projectconfine.Backstop(e.opts.ControlPlaneDir, executor.PolicyProjectPath(workDir)); err != nil {
+		return executor.Handle{}, fmt.Errorf("%w: %w", executor.ErrInvalidSpec, err)
 	}
 
 	// Credentials before anything that can fail cheaply, and torn down on

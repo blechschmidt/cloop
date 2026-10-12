@@ -177,6 +177,11 @@ type runSpec struct {
 // run assembles the spec, dispatches it, and recovers the outcome.
 func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunOutcome, error) {
 	registerBuiltinExecutors()
+	// The project's directory against the confinement invariant, as every
+	// dispatch checks it (Task 20418).
+	if err := checkDispatchConfinement(rs.ProjectDir); err != nil {
+		return nil, err
+	}
 
 	ex, err := resolveIsolatingExecutor(rs.ProjectDir)
 	if err != nil {

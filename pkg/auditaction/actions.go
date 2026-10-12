@@ -552,6 +552,13 @@ const (
 
 	// ── project ────────────────────────────────────────────────────────────
 
+	// ActionProjectCreate records a project created through the hub — the
+	// dashboard's New Project, or `cloop remote init` — or a creation refused
+	// because of where it would have put the project (Task 20418).
+	ActionProjectCreate Action = "project.create"
+	// ActionProjectDelete records a project removed from the hub, whether its
+	// directory was deleted with it, and a ?delete_root=true the hub refused.
+	ActionProjectDelete Action = "project.delete"
 	// ActionProjectFirewall records a project's firewall rule set being set,
 	// cleared, or narrowed to fit a tightened executor (Task 20363) — the
 	// innermost level, which a project's maintainers edit and which may only

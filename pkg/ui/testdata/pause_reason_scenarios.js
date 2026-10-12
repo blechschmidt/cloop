@@ -105,6 +105,28 @@ const scenarios = {
     return {html: el ? (el.innerHTML || '') : '', clock: expectedClock()};
   },
 
+  // A project the hub will not run because of where it lives says so on its
+  // card (Task 20418) — flagged, not dropped — with the server's sentence
+  // escaped like every other string on the card.
+  async unconfined_card() {
+    await boot(PROJECT, {
+      multi_project: true,
+      stats: {total_projects: 2},
+      projects: [{
+        name: 'nested', path: '/srv/hub/nested', status: 'idle', health: 'idle', goal: 'g',
+        total_tasks: 0, done_tasks: 0, running: false,
+        confinement: "The hub will not run this project: its directory is inside the hub's control plane (/srv/<hub>). An administrator has to move it.",
+      }, {
+        name: 'fine', path: '/srv/projects/fine', status: 'idle', health: 'idle', goal: 'g',
+        total_tasks: 0, done_tasks: 0, running: false,
+      }],
+    });
+    window.switchTab('projects');
+    await globalThis.__settle(3);
+    const el = document.getElementById('projList');
+    return {html: el ? (el.innerHTML || '') : ''};
+  },
+
   // A pause with no known reset must not imply one — "resumes" with no time,
   // or a time invented from nothing, is worse than saying only the cause.
   async no_reset() {

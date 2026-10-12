@@ -260,6 +260,12 @@ type Options struct {
 	// caller say "no" explicitly.
 	Publish *bool
 
+	// ControlPlaneDir is the hub's own directory, handed to the drivers that
+	// bind or fork in a project's directory so each refuses one that contains
+	// it (Task 20418, projectconfine.Backstop). Empty — a CLI command
+	// reconciling for itself — checks nothing there; the hub always sets it.
+	ControlPlaneDir string
+
 	// SweepGate, when set, is asked before the startup sweep (periodic false)
 	// and before each periodic orphan sweep (periodic true); a pass it refuses
 	// is skipped. Nil runs every pass, which is right for a control plane
@@ -634,6 +640,9 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, store executor.
 	// governs every backend identically, so it is attached here rather than in
 	// DriverOptions, which only sees executors.container.
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
+	// The control plane the driver must never bind a project over (Task
+	// 20418). Set before Ensure for the same reason as the store below.
+	driverOpts.ControlPlaneDir = opts.ControlPlaneDir
 	// Set before Ensure, because New rehydrates from it: a store attached
 	// afterwards would leave a window in which the driver has been registered,
 	// can be dispatched to, and does not yet know about the containers it is

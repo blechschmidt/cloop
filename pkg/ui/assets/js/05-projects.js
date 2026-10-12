@@ -262,6 +262,7 @@ function renderProjects(projects, stats) {
         <div class="proj-name">${esc(p.name)}</div>
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
         ${pauseWhy ? `<div class="proj-pause" title="${esc(pauseWhy)}">&#9208; Paused: ${esc(pauseWhy)}</div>` : ''}
+        ${p.confinement ? `<div class="proj-pause">&#9888; ${esc(p.confinement)}</div>` : ''}
         <div class="proj-meta">
           <span class="badge ${health}" style="font-size:10px">${health}</span>
           <div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>

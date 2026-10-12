@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
@@ -47,6 +48,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/projectconfine"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
@@ -706,6 +708,9 @@ type Server struct {
 	// between the two reads appear in one and not the other.
 	projStatuses []multiui.ProjectStatus
 	projEntries  []multiui.ProjectEntry
+	// projFlags caches which rows break the confinement invariant, for the
+	// Projects tab (Task 20418, project_confine.go).
+	projFlags projectFlagCache
 
 	// Per-project chat conversation histories (keyed by resolved workDir path).
 	chatMu        sync.Mutex
@@ -989,6 +994,9 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// The process-wide supervisor hands each failover to the Server that
 	// follows the run, or serves this control plane (Task 20396).
 	registerRunServer(srv)
+	// Every dispatch re-checks its project against the projects this hub
+	// serves, which only the Server can list (Task 20418).
+	setProjectListSource(srv.allProjectEntries)
 	// And the broker hands it every grant revoked in this process, to take
 	// back from the workloads holding it (Task 20403).
 	ensureGrantRevocationHook()
@@ -3646,6 +3654,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// It is also cheap to be wrong about the order in the other direction: a
 	// caller who fails this gate consumed no slot, so there is nothing to give
 	// back on the way out.
+	// Where the project lives comes before who may run it (Task 20418): a
+	// directory the hub will not bind is refused whatever the caller holds,
+	// and no credential granted afterwards would change that.
+	if s.refuseUnconfined(w, s.resolveWorkDir(r)) {
+		return
+	}
 	if !s.admitExecutorAudienceForProject(w, r, s.resolveWorkDir(r)) {
 		return
 	}
@@ -5847,6 +5861,12 @@ func (s *Server) refreshProjectStatusesUsing(entries []multiui.ProjectEntry, liv
 		}
 		statuses = append(statuses, multiui.GetStatusUsing(e, running))
 	}
+	// Rows the hub will not run are flagged, never dropped: the list is the
+	// index space every /api/projects/{idx} call addresses (Task 20418).
+	flags := s.confinementFlags(entries)
+	for i := range statuses {
+		statuses[i].Confinement = flags[statuses[i].Path]
+	}
 
 	s.projMu.Lock()
 	s.projStatuses = statuses
@@ -6860,6 +6880,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	// executor's access list was refused by the Overview's Run and admitted by
 	// this one, and a tenant at its concurrency or daily-budget cap could
 	// start one more run here every time.
+	if s.refuseUnconfined(w, entry.Path) {
+		return
+	}
 	if !s.admitExecutorAudienceForProject(w, r, entry.Path) {
 		return
 	}
@@ -7102,36 +7125,65 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve to absolute path.
-	abs, err := filepath.Abs(req.Dir)
+	requested, err := filepath.Abs(req.Dir)
 	if err != nil {
 		releaseProject()
 		jsonErr(w, "invalid dir: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Confine the target before creating anything (Task 20188). A relative
-	// dir resolves against the *server's* cwd, so "../../../.." escaped
-	// freely; an absolute one landed wherever it pointed. The registered
-	// path then becomes the workdir for every later ?project_idx= call and
-	// the target of ?delete_root=true, so this is the moment to refuse.
-	if !isSafeProjectRoot(abs) {
+	// Confine the target before creating anything (Tasks 20188, 20418). The
+	// registered path becomes the directory every sandbox of this project is
+	// bound to, the workdir of every later ?project_idx= call and the target
+	// of ?delete_root=true, so this is the moment to refuse — and the same
+	// rule as a dispatch re-checks, decided on the directory the kernel would
+	// create rather than the string that was sent (project_confine.go).
+	place, ok := s.placeNewProject(w, r, requested)
+	if !ok {
 		releaseProject()
-		jsonErr(w, "refusing to create a project at "+strconv.Quote(abs)+
-			": system directories and bare top-level directories are not valid project roots",
-			http.StatusBadRequest)
 		return
 	}
+	abs := place.Path
+
+	// Claimed before anything exists, in the control plane, so a second
+	// creation of this path — or of one inside it or above it — is refused
+	// until this one has finished, instead of both running init and the
+	// loser's executor and grants landing on the winner's project.
+	releaseClaim, ok := s.claimNewProject(w, r, place)
+	if !ok {
+		releaseProject()
+		return
+	}
+	created := false
+	hubMade := hubMakes(place)
+	defer func() {
+		if created {
+			return
+		}
+		// A creation that did not finish gives its path back, and the
+		// directory too when it made it: an empty directory the hub made and
+		// then abandoned would make a retry find it "existing", and lose the
+		// right to delete it with the project later.
+		if hubMade {
+			if err := os.RemoveAll(abs); err != nil {
+				fmt.Fprintf(os.Stderr, "ui: remove %s after a failed creation: %v\n", abs, err)
+			}
+		}
+		releaseClaim()
+	}()
 
 	// A directory that already holds a project is not initialised again
 	// (Task 20417). `cloop init` overwrites the state it finds — the plan,
 	// the history, the settings — so creating a project where one exists
 	// was a way to wipe it: a re-run of `cloop remote init`, or a tenant
-	// naming a path whose project they cannot see.
+	// naming a path whose project they cannot see. Which of those it was is
+	// not theirs to learn (refuseNewProject).
 	if projectExistsAt(abs) {
 		releaseProject()
-		apierror.WriteError(w, apierror.New(apierror.CodeConflict,
-			"a cloop project already exists at "+abs+" — open that one, or create this one under another name or directory").
-			WithDetails(map[string]any{"dir": abs}))
+		hubMade = false
+		s.refuseNewProject(w, r, place, string(projectconfine.RuleProject),
+			"a cloop project already exists at "+abs+" — open that one, or create this one under another name or directory",
+			&projectconfine.Violation{Path: abs, Rule: projectconfine.RuleProject, Other: abs, Relation: projectconfine.Same})
 		return
 	}
 
@@ -7186,9 +7238,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	//
 	// A failure here rolls the access back and fails the request: "create a
 	// project with access to my cluster" is one intention, and half of it is
-	// not a useful thing to hand back. The directory stays, because this code
-	// may not have created it and deleting a developer's tree to tidy up a
-	// failed API call is worse than anything it would clean up after.
+	// not a useful thing to hand back. A directory that existed before this
+	// request stays — deleting a developer's tree to tidy up a failed API call
+	// is worse than anything it would clean up after — and one this request
+	// made goes with its claim (the deferred cleanup above).
+	rollbackAccess := func() {}
 	if access.requested() {
 		rollback, accessErr := s.applyProjectAccess(r, accessBrokers, abs, access)
 		if accessErr != nil {
@@ -7198,16 +7252,38 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 				"so it was rolled back: "+accessErr.Error(), http.StatusInternalServerError)
 			return
 		}
+		rollbackAccess = rollback
 	}
 
 	// Register the new project in the multi-project registry. With OIDC
 	// enabled the entry is stamped with the creating user's identity, making
 	// the project private to that user (plus admins); without OIDC the owner
-	// is empty and the project is shared, as before.
-	if regErr := multiui.AddPathsOwned([]string{abs}, s.sessionIdentity(r).OwnerKey()); regErr != nil {
-		// Non-fatal: project is created, just not registered.
-		_ = regErr
+	// is empty and the project is shared, as before. The invariant is checked
+	// once more under the registry's lock (admitToRegistry).
+	if regErr := s.admitToRegistry(r, place); regErr != nil {
+		releaseProject()
+		// The binding and grants made above belong to a project that is not
+		// going to exist.
+		rollbackAccess()
+		if v, isViolation := projectconfine.IsViolation(regErr); isViolation {
+			s.refuseNewProject(w, r, place, string(v.Rule), v.Error(), v)
+			return
+		}
+		jsonErr(w, "project initialised but could not be registered: "+regErr.Error(), http.StatusInternalServerError)
+		return
 	}
+	if err := s.completeNewProject(place, hubMade); err != nil {
+		// The project exists and is registered; what is lost is the record
+		// that this hub made its directory, which only ever withholds a
+		// later delete_root. Said, not fatal.
+		fmt.Fprintf(os.Stderr, "ui: record the creation of %s: %v\n", abs, err)
+	}
+	created = true
+	auditDetail := map[string]any{"outcome": "created", "hub_made": hubMade}
+	if id := strings.TrimSpace(access.ExecutorID); id != "" {
+		auditDetail["executor_id"] = id
+	}
+	s.auditProjectCreate(r, place, auditDetail)
 
 	// Optionally start a run immediately.
 	var autorunRefused map[string]any
@@ -7404,6 +7480,27 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Whether the directory may go too, decided before anything changes so a
+	// refusal leaves the project exactly as it was (Task 20418). Only a
+	// directory this hub made itself under its projects root, recorded when
+	// it made it: an adopted one — a checkout that existed first, a path an
+	// operator registered — is never the hub's to remove, whatever the
+	// caller's role.
+	hubMade := false
+	if deleteRoot {
+		claim, refusal := s.deletableRoot(entry.Path)
+		hubMade = claim.HubMade
+		if refusal != nil {
+			s.auditProjectLifecycle(r, auditaction.ActionProjectDelete, entry.Path, map[string]any{
+				"outcome": "refused", "name": entry.Name, "owner": entry.Owner,
+				"delete_root": true, "root_deleted": false, "hub_made": claim.HubMade, "reason": refusal.Error(),
+			})
+			apierror.WriteError(w, apierror.New(apierror.CodeConflict, refusal.Error()).
+				WithDetails(map[string]any{"path": entry.Path}))
+			return
+		}
+	}
+
 	// Its members first (Task 20366). Memberships are keyed by path, so a
 	// roster that outlived the project would admit those people to whatever is
 	// registered here next. Before the registry change, and fatal to the
@@ -7442,21 +7539,25 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	s.liveLogEvict(entry.Path)
 
 	rootDeleted := false
+	var removeErr error
 	if deleteRoot {
-		// Defensive path validation: refuse to recursively delete obviously
-		// dangerous targets (filesystem root, $HOME, an empty/relative path)
-		// even though the registry should only contain absolute project dirs.
-		if !isSafeProjectRoot(entry.Path) {
-			jsonErr(w, "refusing to delete unsafe path: "+entry.Path, http.StatusBadRequest)
-			return
+		// deletableRoot above established that this is a directory the hub
+		// made, still the one it made, and overlapping nothing it protects.
+		if removeErr = os.RemoveAll(entry.Path); removeErr == nil {
+			rootDeleted = true
 		}
-		if err := os.RemoveAll(entry.Path); err != nil {
-			// Registry entry is already gone; surface the disk error to the
-			// caller so they see why the dir is still on disk.
-			jsonErr(w, "registry entry removed, but failed to delete dir: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		rootDeleted = true
+	}
+	// The path is free to be created again: its project is gone.
+	s.releaseProjectClaim(entry.Path)
+	s.auditProjectLifecycle(r, auditaction.ActionProjectDelete, entry.Path, map[string]any{
+		"outcome": "removed", "name": entry.Name, "owner": entry.Owner,
+		"delete_root": deleteRoot, "root_deleted": rootDeleted, "hub_made": hubMade,
+	})
+	if removeErr != nil {
+		// Registry entry is already gone; surface the disk error to the
+		// caller so they see why the dir is still on disk.
+		jsonErr(w, "registry entry removed, but failed to delete dir: "+removeErr.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	// Notify all connected clients so the projects list refreshes.
@@ -7492,68 +7593,15 @@ func (s *Server) removeProjectsFlag(absPath string) {
 	s.Projects = filtered
 }
 
-// systemSubtrees are directories that are never a valid project root, at any
-// depth. Anything under them belongs to the OS or the container image.
-var systemSubtrees = []string{
-	"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
-	"/proc", "/run", "/sbin", "/sys", "/usr",
-}
-
-// isSafeProjectRoot reports whether path is an acceptable project root — and
-// therefore an acceptable target for `cloop init` and, with explicit
-// confirmation, for recursive deletion.
-//
-// It is used by both POST /api/projects/new and
-// DELETE /api/projects/{idx}?delete_root=true. Sharing one predicate across
-// creation and deletion is deliberate (Task 20188): previously only the
-// delete path was guarded, and only against "", relative paths, "/" and
-// $HOME. /etc, /usr and /var all passed as "safe". Because os.MkdirAll
-// returns nil for a directory that already exists, an unguarded create
-// followed by a guarded delete was an arbitrary-directory-deletion primitive
-// available to any caller holding project.write.
-//
-// The rules, in order:
-//   - must be an absolute, non-empty path;
-//   - never the filesystem root or $HOME itself;
-//   - never inside a system subtree (see systemSubtrees);
-//   - never a bare top-level directory. /var is refused while
-//     /var/lib/cloop/projects/demo is allowed — the latter is where the
-//     packaged hub image puts its state, so this must keep working.
+// isSafeProjectRoot reports whether path is a plausible project root at all —
+// the rules of pkg/projectconfine that do not depend on anything the hub has
+// registered (Task 20188). The whole invariant, which is what creation,
+// dispatch and deletion apply, is projectconfine.Policy (project_confine.go).
 func isSafeProjectRoot(path string) bool {
 	if path == "" || !filepath.IsAbs(path) {
 		return false
 	}
-	clean := filepath.Clean(path)
-	if clean == "/" || clean == "." {
-		return false
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if cleanHome := filepath.Clean(home); cleanHome != "" && clean == cleanHome {
-			return false
-		}
-	}
-	for _, sub := range systemSubtrees {
-		if clean == sub || strings.HasPrefix(clean, sub+"/") {
-			return false
-		}
-	}
-	// A bare top-level directory (/var, /home, /tmp, /opt, …) is a shared
-	// mount point, never one project's root. Depth is measured on the
-	// cleaned absolute path, so "/var" has one segment and "/var/x" two.
-	if len(strings.Split(strings.TrimPrefix(clean, "/"), "/")) < 2 {
-		return false
-	}
-	// Nothing inside a project's control directory is a project root. A
-	// directory under <project>/.cloop/features is a feature, which inherits
-	// its parent's executor, grants and roles (Task 20341) — so creating a
-	// project there would be a way to acquire another project's credentials,
-	// and deleting one would be deleting a worktree behind git's back.
-	for _, part := range strings.Split(clean, "/") {
-		if part == ".cloop" {
-			return false
-		}
-	}
-	return true
+	return projectconfine.UnsafeReason(filepath.Clean(path), hubHome()) == ""
 }
 
 // ── Knowledge Base handlers ──────────────────────────────────────────────────

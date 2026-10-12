@@ -18,5 +18,7 @@ func TestMain(m *testing.M) {
 	// The runs on the machine running the tests are not the tests' business:
 	// runs.build_lag reads them from /proc. Tests that exercise it set their own.
 	hostRuns = func() []hostRun { return nil }
+	// Nor are the hubs it runs: projects.confinement reads them from /proc.
+	hostHubs = func() []string { return nil }
 	os.Exit(hometest.Isolate(m))
 }

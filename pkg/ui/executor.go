@@ -143,6 +143,8 @@ func bootstrapExecutors(dir string, port int) {
 	// which is exactly what that mode is asking for.
 	registerBuiltinExecutors()
 	reconcileConfiguredExecutors(dir, cfg)
+	// The host driver's copy of the same backstop (Task 20418).
+	localprocess.Shared().SetControlPlaneDir(dir)
 	controlPlaneDirMu.Lock()
 	controlPlaneDirValue = dir
 	controlPlanePortValue = port
@@ -237,6 +239,8 @@ func reconcileConfiguredExecutors(dir string, cfg *config.Config) {
 		HandleStore: clusterScopedHandleStore(dir, node),
 		// And only one process sweeps. See reconcile.Options.SweepGate.
 		SweepGate: clusterSweepGate(node),
+		// What the container driver must never bind over (Task 20418).
+		ControlPlaneDir: dir,
 		// And keeps paying for it: a hub that stays up for weeks loses Pods to
 		// node evictions, which the startup sweep by definition never sees.
 		SweepInterval: cfg.Executors.OrphanSweepInterval(),
@@ -410,6 +414,14 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 // replacement passes every gate a run started by a person does.
 func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClearance, identity, workDir string, argv []string, labels map[string]string, options ...dispatchOption) (_ executor.Executor, _ executor.Handle, err error) {
 	registerBuiltinExecutors()
+	// The project's directory is what every driver binds or forks in, so it
+	// is re-checked against the confinement invariant first, before any
+	// executor is chosen or anything is minted (Task 20418): a row created
+	// before the rule existed, or named on `cloop ui`'s command line, is
+	// listed and flagged but never run.
+	if err := checkDispatchConfinement(workDir); err != nil {
+		return nil, executor.Handle{}, err
+	}
 	var opts dispatchOptions
 	for _, o := range options {
 		if o != nil {
@@ -797,6 +809,10 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 // harness credential as much as a run does. Nil for one that calls none.
 func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, clear *harnessClearance, labels map[string]string) ([]byte, error) {
 	registerBuiltinExecutors()
+	// Same re-check as startWorkloadAs, for the same reason (Task 20418).
+	if err := checkDispatchConfinement(workDir); err != nil {
+		return nil, err
+	}
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
