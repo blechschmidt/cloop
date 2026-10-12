@@ -1848,6 +1848,13 @@ type UIConfig struct {
 	// executor enroll` puts in enrollment bundles when --server is not passed.
 	ExternalURL string `yaml:"external_url,omitempty"`
 
+	// ProjectsRoot is where the hub creates a project it is asked for by
+	// name rather than by directory — what `cloop remote init` does from a
+	// checkout on another machine, which cannot know this hub's filesystem
+	// (Task 20417). An absolute path; empty means projects/ in the hub's
+	// home directory, which in the packaged image is /var/lib/cloop/projects.
+	ProjectsRoot string `yaml:"projects_root,omitempty"`
+
 	// TrustedProxies lists the peers — CIDR prefixes or addresses — whose
 	// X-Forwarded-Proto, X-Forwarded-Host and X-Forwarded-For the hub believes
 	// (Task 20394). Loopback is always trusted and needs no entry: a proxy on

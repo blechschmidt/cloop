@@ -2043,6 +2043,27 @@ until a signed-in person approves it, polling held to the interval by
 session, not an API token, not the static token. See the
 [HTTP API](http-api.md) for each.
 
+### Projects created by name (`ui.projects_root`)
+
+`cloop remote init` creates a hub project from a checkout on a developer's
+machine, which cannot know where this hub keeps projects. It asks for one by
+name, and the hub places it under its projects root (Task 20417):
+
+```yaml
+ui:
+  projects_root: /srv/cloop/projects   # absolute; default: projects/ in the hub's home
+```
+
+Unset, it is `projects/` in the home directory of the user the hub runs as —
+`/var/lib/cloop/projects` in the packaged image, whose `HOME` is its state volume.
+A name is one path segment of letters, digits, dots, hyphens and underscores,
+starting with a letter or digit; the dashboard's New Project dialog, which takes a
+directory, is unaffected. Either way, a directory that already holds a project is
+refused with `409 CONFLICT` rather than initialised again: `cloop init` overwrites
+the state it finds, so a second creation at the same place — a re-run of
+`cloop remote init`, or a path whose project the caller cannot see — would wipe it.
+A relative `projects_root` is refused at use, naming the setting.
+
 ### SCIM provisioning (`ui.oidc.scim`)
 
 The identity provider provisions the hub's users and groups at `/scim/v2`, and

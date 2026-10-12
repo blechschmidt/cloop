@@ -93,6 +93,12 @@ function applyProjects(d) {
   if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
     renderMultiProjectOverview();
   }
+  // The link `cloop remote init` prints, /?project=<path> (Task 20417): open
+  // that project once the list that indexes it is here, then drop the query
+  // so a reload lands on the list again.
+  const dl = new URLSearchParams(location.search).get('project'), di = projects.findIndex(p => p.path === dl);
+  if (dl) history.replaceState(null, '', location.pathname);
+  if (di >= 0) openProject(di, projects[di].name);
 }
 
 function loadProjects() {

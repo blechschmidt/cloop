@@ -23,6 +23,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/authz"
@@ -6988,6 +6989,10 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 // Body: { "dir": "/abs/or/relative/path", "goal": "...", "provider": "...",
 //
 //	"model": "...", "pmMode": false, "autoRun": false }
+//
+// "name" in place of "dir" puts the project under the hub's projects root
+// (Task 20417): a terminal creating a project from a checkout on another
+// machine has no way to know where this hub keeps them.
 func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	// Initialising the project is a workload on the executor it will be
 	// bound to, and an edge agent's is reachable only from the hub member
@@ -6996,7 +7001,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Dir      string `json:"dir"`
+		Dir string `json:"dir"`
+		// Name places the project at <projects root>/<name> when Dir is
+		// empty, and is ignored when it is not.
+		Name     string `json:"name"`
 		Goal     string `json:"goal"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
@@ -7014,12 +7022,25 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
 	req.Dir = strings.TrimSpace(req.Dir)
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Goal == "" {
 		jsonErr(w, "goal is required", http.StatusBadRequest)
 		return
 	}
+	if req.Dir == "" && req.Name != "" {
+		if err := validProjectName(req.Name); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+			return
+		}
+		root, err := s.projectsRoot()
+		if err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeConflict, err.Error()))
+			return
+		}
+		req.Dir = filepath.Join(root, req.Name)
+	}
 	if req.Dir == "" {
-		jsonErr(w, "dir is required", http.StatusBadRequest)
+		jsonErr(w, "dir is required (or name, to create the project under the hub's projects root)", http.StatusBadRequest)
 		return
 	}
 	if !provider.ValidEffort(req.Effort) {
@@ -7052,6 +7073,14 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := validateProjectAccess(accessBrokers, s.secretViewer(r), access); err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// The executor's access list, as POST /api/projects/{idx}/executor
+		// applies it (Task 20417): a binding made in the creation request
+		// must not be one the bind route would have refused. The run-time
+		// gate would refuse the first run anyway; this refuses before there
+		// is a project to clean up.
+		if id := strings.TrimSpace(access.ExecutorID); id != "" && !s.admitExecutorAudience(w, r, id) {
 			return
 		}
 	}
@@ -7090,6 +7119,19 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "refusing to create a project at "+strconv.Quote(abs)+
 			": system directories and bare top-level directories are not valid project roots",
 			http.StatusBadRequest)
+		return
+	}
+
+	// A directory that already holds a project is not initialised again
+	// (Task 20417). `cloop init` overwrites the state it finds — the plan,
+	// the history, the settings — so creating a project where one exists
+	// was a way to wipe it: a re-run of `cloop remote init`, or a tenant
+	// naming a path whose project they cannot see.
+	if projectExistsAt(abs) {
+		releaseProject()
+		apierror.WriteError(w, apierror.New(apierror.CodeConflict,
+			"a cloop project already exists at "+abs+" — open that one, or create this one under another name or directory").
+			WithDetails(map[string]any{"dir": abs}))
 		return
 	}
 

@@ -104,6 +104,12 @@ type requestView struct {
 	// would otherwise show an approve button that always fails.
 	Mine      bool `json:"mine"`
 	Decidable bool `json:"decidable"`
+
+	// Approvers says, for a pending request, who may approve it: the
+	// accounts and groups this hub's policy gives secret.grant, other than
+	// the requester (Task 20417). It is how a requester knows whom to ask —
+	// `cloop remote grants request` prints it.
+	Approvers []string `json:"approvers,omitempty"`
 }
 
 // requestUseView is one row of GET /api/grant-requests/{id}/uses.
@@ -206,11 +212,14 @@ func (s *Server) handleGrantRequestsList(w http.ResponseWriter, r *http.Request)
 	now := time.Now()
 	views := make([]requestView, 0, len(requests))
 	pending := 0
+	approvers := s.newApproverCache(actor)
 	for _, req := range requests {
-		views = append(views, requestViewOf(req, actor, canDecide, now))
+		v := requestViewOf(req, actor, canDecide, now)
 		if req.Pending(now) {
 			pending++
+			v.Approvers = approvers.forSubject(req.Subject)
 		}
+		views = append(views, v)
 	}
 	jsonOK(w, map[string]any{
 		"requests": views,
@@ -290,7 +299,9 @@ func (s *Server) handleGrantRequestCreate(w http.ResponseWriter, r *http.Request
 
 	s.broadcastAuditAppend(string(secretbroker.ActionRequestOpen))
 	s.broadcastSecretsUpdate("request_created", req.ID)
-	jsonOK(w, requestViewOf(req, actor, false, time.Now()))
+	v := requestViewOf(req, actor, false, time.Now())
+	v.Approvers = s.newApproverCache(actor).forSubject(req.Subject)
+	jsonOK(w, v)
 }
 
 // handleGrantRequestWithdraw serves POST /api/grant-requests/{id}/withdraw.

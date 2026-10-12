@@ -469,6 +469,20 @@ now also refuses system subtrees and bare top-level directories while leaving
 (`TestIsSafeProjectRootRejectsSystemPaths`,
 `TestProjectCreateRejectsSystemDirectories`).
 
+**Creating a project where one existed wiped it.** `POST /api/projects/new`
+ran `cloop init` in the directory it was given, and `cloop init` overwrites the
+state it finds — plan, history, settings. A maintainer who named the path of a
+colleague's project, which they could not even see, reset it, and the registry
+kept the entry under its owner, so nobody saw who did it; a re-run of `cloop
+remote init` would have done the same to the developer's own. Found while adding
+that command (Task 20417). Fixed by refusing, with `409 CONFLICT`, any directory
+that already holds a project (`TestProjectNewRefusesADirectoryThatHoldsAProject`).
+The same task found the creation request binding an executor without consulting
+its access list, which the bind route does: a user kept off a restricted executor
+could still create a project pinned to it. The run-time gate refused the run, so
+nothing executed there; creation now applies the list too
+(`TestProjectNewAppliesTheExecutorsAccessList`).
+
 **A 60-byte read request returned a 109 MB response.** `/api/analytics`
 validated that `?from=`/`?to=` *parsed* as dates but never how far apart they
 were, and `time.Parse` accepts years 0000–9999. The handler builds one label
