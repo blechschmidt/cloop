@@ -156,10 +156,10 @@ No driver imports `pkg/gitproxy`, and neither does `pkg/secretbroker`:
 | **Which grant** | a GitHub grant admitting the project's own repository — see [granting a PAT for workspace provisioning](../guides/secrets.md#granting-a-pat-for-workspace-provisioning) | every `github_pat` and `github_app` grant to the project — see [GitHub repositories and PATs](../guides/secrets.md#github-repositories-and-pats) |
 | **Minted by** | `gitproxycreds.Source.ForWorkspace`, in the driver, at dispatch | `gitGuard.GuardGitHub`, while the broker builds the run's lease, at dispatch |
 | **Session shape** | **pinned** — exactly the workspace's `owner/name` | **scoped** — the grant's `owner/name` glob allowlist |
-| **Upstream** | the workspace's own https origin, any forge | `https://github.com`, fixed |
+| **Upstream** | the grant's forge host and the workspace's `owner/name` — the origin must be on that host ([one route per forge host](#one-route-per-forge-host)) | the grant's forge host: `https://github.com`, or the GitHub Enterprise Server its secret names |
 | **Policy** | the hub's, with the grant's branch list as `RestrictRefs` | the hub's, narrowed by `guardPolicy` — see [below](#the-policy-a-session-carries) |
 | **Reaches git as** | a credential in the environment of **one git child**, as an origin-scoped `http.<origin>.extraHeader` — never on disk | three files in the lease directory and a few environment variables |
-| **How git finds the proxy** | the workspace's `Repo` is replaced by `Minted.RepoURL`, so the fetch and any push aim at it | the lease's gitconfig rewrites `https://github.com/`, `git@github.com:` and `ssh://git@github.com/` to it |
+| **How git finds the proxy** | the workspace's `Repo` is replaced by `Minted.RepoURL`, so the fetch and any push aim at it | the lease's gitconfig rewrites `https://<host>/`, `git@<host>:` and `ssh://git@<host>/` to the proxy's route for that host — its base for `github.com`, `/_forge/<host>` beneath it for any other |
 | **Ended by** | the driver handing it back once the run is done with it — after the fetch, or once the workload is terminal and its write-back has run — or its lease revoked; renewed `session_minutes` at a time until then, so its TTL ends it only once nothing renews it. The lease behind it is kept alive while it lives and released when it ends. A hub stopping suspends it; after a restart the adopting member renews it and ends it with the workload | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
 | **Session actor** | `ui` | the credential's owner for a personal secret, else the lease's actor |
 
@@ -171,7 +171,8 @@ hub, at dispatch                                 edge device / Pod
 the driver asks its credential source for the workspace
   gitproxycreds.Source.ForWorkspace
     ├─ inner source leases the grant, as held by a proxy
-    ├─ Registry.Mint  pinned to owner/name, upstream = the origin,
+    ├─ the origin must be on the grant's forge host, or nothing is minted
+    ├─ Registry.Mint  pinned to owner/name, upstream = https://<grant's host>/owner/name,
     │                 RestrictRefs = the grant's branches
     └─ WorkspaceAccess{ session id + token,
                         Repo = https://<proxy>/owner/name }
@@ -245,7 +246,7 @@ hub, at dispatch
                                         │   revocation before anything can fail
                                         ▼
              GitGuard.GuardGitHub ─▶ Registry.Mint  scoped: the grant's allowlist,
-                                                     upstream https://github.com,
+                                                     upstream https://<grant's host>,
                                                      policy guardPolicy(...)
              deliverGuardedGitHub ─▶ git-proxy-credential, git-credential-cloop, gitconfig
   the driver puts the files in the sandbox's lease directory
@@ -253,6 +254,7 @@ hub, at dispatch
 sandbox, while the lease is live
   git clone https://github.com/acme/tool
     ├─ gitconfig: url."https://<proxy>/".insteadOf https://github.com/
+    │             (a server's grant: url."https://<proxy>/_forge/<host>/".insteadOf https://<host>/)
     ├─ git asks the helper; it answers for the proxy's host and no other
     └─ GET https://<proxy>/acme/tool/info/refs?service=git-upload-pack
 proxy: authenticate ─ acme/tool inside the allowlist? ─ … ─ forward to
@@ -290,6 +292,59 @@ own fetch, the scoped one for everything the workload does. The device checks
 `WS2` and `WS3` in [the live kit](#on-a-real-device) assert the first half — the
 provisioned origin is the proxy and holds no credential — and `WS4` and `WS5`
 the second: the workload's pushes from it follow the grant.
+
+### One route per forge host
+
+A session presents its credential to one forge host, and it is the grant's
+(Task 20423): `github.com` for a `github_pat` unless the secret recorded a
+GitHub Enterprise Server host, and the web host of a `github_app`'s `base_url`
+— `https://ghes.example.com/api/v3` is `ghes.example.com`. `GitGuardRequest`
+carries it, `MintRequest.ForgeHost` records it on the session and in its
+durable record, and the session's upstream is on it. Before this, the lease
+path's upstream was the constant `https://github.com` and the workspace path's
+was the origin verbatim — so a project whose origin named
+`https://attacker.example/acme/tool` had a pinned session minted that presented
+the forge token there, and an enterprise App's token was presented to
+`github.com` whenever a workload cloned a `github.com` URL with the same
+`owner/name`.
+
+On the workspace path the origin must be on the grant's host — compared by
+`pkg/forgehost`, which folds case, a trailing dot, the default port, userinfo
+and an internationalised name's Unicode spelling, and nothing else — or no
+session is minted and the dispatch is refused naming both hosts. The upstream is
+then built from the grant's host and the repository's path, never from the
+origin's spelling of them.
+
+On the lease path every host gets its own rewrite to its own route through the
+proxy: `github.com` keeps the proxy's base, any other host is served beneath
+`/_forge/<host>/`.
+
+```
+url."https://<proxy>/".insteadOf                       https://github.com/
+url."https://<proxy>/_forge/ghes.example.com/".insteadOf https://ghes.example.com/
+```
+
+The proxy admits a request on a host's route only with a session for that host,
+and on the base only a pinned session (whose URL pins its repository and host
+already) or a scoped `github.com` one; anything else is refused before a byte is
+forwarded, and the rejection row names the session's host. With several GitHub
+grants in one lease, each credential helper answers only beneath its own host's
+route, so a lease holding a `github.com` grant and an enterprise grant for the
+same `owner/name` never presents either token to the other host. A route names
+its host exactly as `gitproxy.ForgeRoute` renders it — another spelling is not a
+route the proxy serves — and a guard that gives a non-`github.com` grant no route
+of its own fails the lease rather than share `github.com`'s.
+
+A durable session record written before hosts were recorded reads as what it was
+minted for — `github.com` for a scoped session, its upstream's host for a pinned
+one — and a restore holds it to the host the grant's secret names now
+(`Broker.GitHubGrantHost`, which reads the PAT's payload or the App token slot's
+recorded API base before anything is minted): a record, an origin or a slot that
+disagrees is refused, naming the hosts.
+
+Only `github.com` and GitHub Enterprise Server hosts receive brokered
+credentials through any path. A repository on another forge is fetched
+anonymously or refused.
 
 ---
 

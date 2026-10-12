@@ -197,10 +197,18 @@ Two things worth knowing:
 
 ### Repositories on an internal git server
 
-Grant a PAT constrained to the repositories it may reach:
+What cloop can authenticate depends on what the server is. **Only `github.com`
+and GitHub Enterprise Server hosts receive brokered credentials** (Task 20423):
+a GitHub credential is bound to the forge host its secret names, and is never
+presented to any other — however the other host's repository paths match the
+grant's allowlist.
+
+**A GitHub Enterprise Server.** Mint the PAT for the server, so the host is
+sealed with the token, and constrain it to the repositories it may reach:
 
 ```bash
-cloop secret mint gh-internal --kind github_pat --file ./pat.txt
+cloop secret mint gh-internal --kind github_pat \
+  --github-host git.acme.internal --file ./pat.txt
 cloop secret grant gh-internal \
   --to project:/srv/projects/api \
   --repos 'acme-internal/api-*' \
@@ -208,21 +216,42 @@ cloop secret grant gh-internal \
   --ttl 24h
 ```
 
+A GitHub App installed on the server works the same way, with
+`"base_url": "https://git.acme.internal/api/v3"` in its payload; its tokens are
+bound to `git.acme.internal`. Either is presented to `git.acme.internal` only —
+never to `github.com`, even for a repository with the same `owner/name` — and a
+`github.com` grant is never presented to the server. A project whose origin is
+on another host is refused, naming both hosts, rather than fetched with the
+token.
+
 With the [git proxy](#keep-forge-and-cluster-credentials-on-the-hub) on, the
-token stays on the hub: the sandbox's git is pointed at the proxy with a session
-token for `acme-internal/api-*`, and the proxy presents the PAT upstream only for
-those repositories and only for the pushes its policy allows. (The workload's own
-git reaches `github.com` this way; cloop's provisioning fetch of a project's
-checkout goes to that checkout's own `https` origin, whatever forge it is,
+token stays on the hub: the sandbox's git rewrites `https://git.acme.internal/`
+to the proxy's route for that host and presents a session token for
+`acme-internal/api-*`, and the proxy presents the PAT upstream — to
+`git.acme.internal` and nowhere else — only for those repositories and only for
+the pushes its policy allows. A lease that also holds a `github.com` grant gets
+a separate rewrite and route for it, so the two never meet. cloop's provisioning
+fetch of a project's checkout goes to that checkout's own `https` origin,
 verified against the hub host's trust store — `SSL_CERT_FILE` or `SSL_CERT_DIR`
-for a private CA.) Without the proxy, the token is not exported as
-`GITHUB_TOKEN`: cloop installs a git
-credential helper that releases it only for paths matching the allowlist, so a
-harness that tries to clone an unlisted repository gets an authentication
-failure rather than a checkout — but the token file itself is in the sandbox.
-See [the secrets guide](secrets.md) for the full mechanism, and
-[the git interception proxy](../git-interception-proxy.md) for restricting which
-branches a sandbox may push to.
+for a private CA — and only when the origin is on the grant's host does it carry
+the credential. Without the proxy, the token is not exported as `GITHUB_TOKEN`
+(a tool reading it would send it to `github.com`; a wildcard grant exports it as
+`GH_ENTERPRISE_TOKEN` instead): cloop installs a git credential helper that
+releases it only for `git.acme.internal` and only for paths matching the
+allowlist, so a harness that tries to clone an unlisted repository gets an
+authentication failure rather than a checkout — but the token file itself is in
+the sandbox. See [the secrets guide](secrets.md#github-enterprise-server) for the
+full mechanism, and [the git interception proxy](../git-interception-proxy.md)
+for restricting which branches a sandbox may push to.
+
+**Any other forge — GitLab, Gitea, Bitbucket, a plain `git-http-backend`.** No
+brokered credential is ever presented to it. Its repositories are fetched
+without one where no grant could apply — a path that is not `owner/name`, such
+as a GitLab subgroup, or a hub that does not run the secret broker — and are
+otherwise refused by name, with a refusal that says the host receives no
+brokered credential, rather than fetched with a GitHub token. To give a project
+such repositories, check them out on the host and grant them as [repositories
+checked out on the host](#repositories-checked-out-on-the-host) above.
 
 ## 2. Per-project firewall rules
 

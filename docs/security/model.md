@@ -850,7 +850,9 @@ key in raw, base64, hex and URL-encoded forms.
 
 **Choose `github_pat` when you cannot install an App.** A personal fork, a
 repository in an organisation you do not administer, or a GitHub Enterprise
-Server without App support leaves the PAT as the only option. It is a real
+Server without App support leaves the PAT as the only option — minted with
+`--github-host` for a server, so it is bound there and never sent to
+`github.com`. It is a real
 control — the helper genuinely withholds the token for repositories outside the
 allowlist, and `tests/security` proves it against `git` itself — it is simply a
 control cloop enforces rather than one GitHub does. Scope the PAT as narrowly as
@@ -1480,6 +1482,35 @@ The one allowlisted exception is transport (`HTTPS_PROXY`, `NO_PROXY`,
 repository or supply a credential. `GIT_SSL_NO_VERIFY` is not on that list:
 disabling certificate verification for a fetch carrying a brokered token is not
 a transport preference, it is handing the token to whoever answers.
+
+### Bound to the grant's host
+
+Scoping the header to the repository's origin keeps it at that origin; it says
+nothing about whether the origin is somewhere the credential may go. Until Task
+20423 nothing did. A grant's allowlist names `owner/name`, the host was thrown
+away wherever a credential was chosen, and so a project whose origin named
+`https://attacker.example/acme/tool` matched a grant for `acme/*` — and the
+header, scoped faithfully to `attacker.example`, delivered the token there.
+
+A repository is now (host, path) wherever a credential is chosen or bound. A
+grant is good on its secret's forge host only: `github.com` for a `github_pat`
+unless the secret recorded a GitHub Enterprise Server host — sealed with the
+token, so nothing that can edit a row can move it — and the web host of a
+`github_app`'s `base_url`. One helper, `pkg/forgehost`, decides host equality,
+folding only what reaches the same server: letter case, a trailing dot, the
+scheme's default port, userinfo, and an internationalised name's Unicode
+spelling. Another port, a suffix such as `github.com.attacker.example`, or a
+look-alike such as `gіthub.com` (a Cyrillic `і`) is another host. The check runs
+where the grant is chosen (the hub's picker), where it is leased
+(`pkg/executor/gitcreds`, for every driver), where it is held (the pinned proxy
+session's upstream is the grant's host and the repository's path, never the
+origin's spelling of them), where it is rendered (`GitCredentialConfig` refuses
+to scope a credential to a workspace on another host, on the hub and again on a
+device or in a Pod's init container, which receive the host beside the token),
+and where a session is restored after a hub restart. Each refuses with a
+`*WorkspaceGrantError` naming both hosts; none falls back to sending the token.
+Only `github.com` and GitHub Enterprise Server hosts receive brokered
+credentials: a repository on any other forge is fetched anonymously or refused.
 
 ### Refusal is the other half
 
@@ -3990,6 +4021,8 @@ where `git` or `git-http-backend` is not installed.
 | A rejected fetch — where git is most likely to quote the request back — redacts its error and its transcript, and carries `ErrWorkspaceUnavailable` so callers can tell a missing tree from a failing harness | `TestWorkspaceProvisioningRedactsItsFailure` |
 | A workspace no grant authorises is refused with a typed `*WorkspaceGrantError` naming the grant, the repository and a remediation naming both the repository and the executor | `TestMissingGrantIsRefusedByName` |
 | An executor that cannot fetch is refused at placement on `ConstraintWorkspace`, and on the binding path too — no credential involved, whatever the repository's visibility | `TestExecutorThatCannotFetchIsRefusedAtPlacement` |
+| A credential is chosen and bound by (host, path): an origin on another host with a matching owner/name — another domain, another port, a suffix, a Unicode look-alike — gets no credential on any delivery path and a refusal naming both hosts, and no credential is ever bound to a host other than its grant's | `pkg/executor/gitcreds: TestAnOriginOnAnotherHostGetsNoCredential`, `FuzzNoCredentialLeavesItsGrantsHost`; `pkg/executor/gitprovision: TestProvisionPresentsACredentialOnlyToItsHost`; `pkg/executor/gitproxycreds: TestAPinnedSessionIsNeverMintedForAnotherHost`; `pkg/executor/remote: TestADeviceIsSentNoCredentialForAnotherHost`; `pkg/executor/kubernetes: TestStart_AWorkspaceOnAnotherHostGetsNoSecret`; `pkg/ui: TestTheGrantPickerRefusesAGrantForAnotherHost`, `TestTheFeatureTokenIsNeverLeasedForAnotherHost`, `TestARestoredPinnedSessionIsHeldToTheGrantsHost` |
+| A GitHub Enterprise Server grant reaches its own server only — through a proxy route of its own, never presented to `github.com` for the same owner/name | `pkg/ui: TestAnEnterpriseAppGrantReachesOnlyItsServer`; `pkg/secretbroker: TestGuardedGrantsForTwoHostsGetOneRewriteEach`; `pkg/gitproxy: TestAnEnterpriseSessionIsServedOnItsOwnRouteOnly` |
 
 ### Git interception proxy — the package suites
 

@@ -111,9 +111,10 @@ token with pull-request access, found in this order:
    widens nothing: on a hub without sign-in, for a project on an executor that
    shares its host.
 
-A token from the environment or a config file (2, 3 and 6) is only sent to
-github.com, or to the host `--api-url` / `CLOOP_GITHUB_API_URL` names for
-GitHub Enterprise — never to whatever server a remote happens to point at.
+A token from the flag, the environment or a config file (1, 2, 3 and 6) is only
+sent to github.com, or to the host `--api-url` / `CLOOP_GITHUB_API_URL` names for
+GitHub Enterprise — never to whatever server a remote happens to point at, and an
+Enterprise token, whose `--api-url` is its server's, never to github.com.
 Only where the token came from is ever reported. A repository assigned to the
 project with **write** access (see [secrets and egress](secrets.md)) includes
 `pull_requests:write`.
@@ -123,7 +124,10 @@ hub publishes the feature itself, from the branch the runs' work was written
 back to: none of the sources above belong to the project there, so the token is
 the project's own GitHub grant for the repository — leased for the push and the
 API call and released straight after — or, on a hub without sign-in, the hub's
-`github.token`. A grant restricted to certain branches must include the feature's
+`github.token`. The grant must be for the origin's host — `github.com`, or the
+GitHub Enterprise Server its secret names — and the pull request is opened at
+that grant's API (`api.github.com`, or the server's `/api/v3`), never at one
+derived from the origin; an origin on another host is refused, naming both. A grant restricted to certain branches must include the feature's
 (`cloop/*` does): no git proxy stands between the hub and the forge, so the hub
 applies the list itself and refuses to push anywhere else.
 

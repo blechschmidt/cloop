@@ -67,7 +67,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 
 | Kind | Payload |
 | --- | --- |
-| `github_pat` | a GitHub personal access token |
+| `github_pat` | a GitHub personal access token — a `github.com` token unless minted with `--github-host` for a [GitHub Enterprise Server](#github-enterprise-server) |
 | `github_app` | GitHub App installation JSON: `app_id`, `installation_id`, `private_key`, optional `base_url`. The hub mints short-lived installation tokens from it and never delivers the key. The dashboard [discovers the installation ID for you](#connecting-a-github-app-from-the-dashboard) — [worked example](#github-repositories-and-pats) |
 | `kubeconfig` | a kubeconfig YAML document |
 | `registry` | docker `config.json`, or `user:password` |
@@ -571,7 +571,7 @@ $ cloop secret grant workspace-pat \
   expires:     2026-08-23T17:41:04Z (in 24h0m0s)
 ```
 
-Four things about that command are load-bearing:
+Five things about that command are load-bearing:
 
 - **The subject is the executor**, not the project. Either works — the grant is
   matched against a requester carrying both the executor id and the project path
@@ -581,6 +581,21 @@ Four things about that command are load-bearing:
 - **`--repos` must admit the repository being cloned**, matched as `owner/name`
   against the same globs documented above. This is the check that keeps a
   workspace fetch inside its grant.
+- **The origin must be on the secret's host.** An allowlist names `owner/name`
+  and nothing else, so the host comes from the secret: a `github_pat` is a
+  `github.com` token unless it was minted for a
+  [GitHub Enterprise Server](#github-enterprise-server), and a `github_app` is
+  good on the web host of its `base_url`. A project whose origin is
+  `https://git.example.org/acme/tool` is **not** authorised by a `github.com`
+  grant for `acme/*`, however its path matches: the run is refused, naming both
+  hosts, and the token goes nowhere (Task 20423). Host comparison folds what
+  reaches the same server — letter case, a trailing dot, the default port,
+  userinfo, an internationalised name's Unicode spelling — and nothing else: a
+  different port, `github.com.example.net`, or a look-alike such as `gіthub.com`
+  is a different host. Only `github.com` and GitHub Enterprise Server hosts
+  receive brokered credentials; a repository on any other forge is fetched
+  anonymously where no grant could apply (a path that is not `owner/name`, as
+  below) or refused, naming its host.
 - **The remote must be an `https://` URL of the shape `owner/name`.** cloop
   rewrites the scp form (`git@github.com:acme/tool.git`) and `ssh://` remotes
   automatically; `http://`, `git://` and local paths are refused, because a
@@ -627,6 +642,27 @@ project's repository, that one whatever the workload's git does — and each min
 its own session. See
 [two paths into one proxy](../architecture/git-proxy.md#two-paths-into-one-proxy).
 
+### GitHub Enterprise Server
+
+A PAT issued by a GitHub Enterprise Server says so when it is minted, and the
+host is sealed with the token — nothing that can edit a row can move it:
+
+```console
+$ cloop secret mint ghes-pat --kind github_pat --github-host ghes.example.com --file token.txt
+$ cloop secret grant ghes-pat --to executor:k8s-prod --repos 'acme/tool' --ttl 24h
+```
+
+(The payload is then the JSON document `{"token": "…", "host": "ghes.example.com"}`,
+which is also what the dashboard's Secrets panel accepts for one.) A `github_app`
+on an Enterprise Server names its API in `base_url` —
+`https://ghes.example.com/api/v3` — and its tokens are good on
+`ghes.example.com`. Either kind is presented to its own server and to no other:
+never to `github.com`, even for a repository with the same `owner/name`, and a
+`github.com` grant is never presented to the server. With the git proxy on, the
+server's URLs reach the proxy through a route of their own, so a lease holding
+grants for both hosts keeps them apart (see
+[the git proxy's forge routes](../architecture/git-proxy.md#one-route-per-forge-host)).
+
 ### When it is missing
 
 The run does not start, and it does not start *by name*. The refusal is an HTTP
@@ -648,6 +684,22 @@ workspace-pat is issued to this executor but its allowlist excludes repository
 acme/tool" — because the fixes are different. One is `cloop secret grant`, the
 other is widening `--repos` on the grant you already have; an operator told the
 wrong one goes looking in the wrong place.
+
+A grant whose `--repos` admits the path on *another host* reads differently
+again, and names both hosts:
+
+```
+executor: cannot provision the workspace for /srv/acme on executor k8s-prod:
+grant workspace-pat admits this repository's owner/name, but its credential is
+for github.com and the project's origin is on git.example.org — a brokered
+credential is never presented to a host other than its grant's — point the
+project's origin at github.com, or authorise git.example.org with a credential
+issued by it (…)
+```
+
+Widening `--repos` cannot fix that one: the host is the secret's, not the
+grant's. Either the origin is wrong — someone pointed it at another server — or
+the repository really lives elsewhere and needs a credential from there.
 
 Two more shapes of the same failure:
 
