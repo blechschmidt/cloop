@@ -204,24 +204,27 @@ func (s *Server) revokeLeasesOnAgentOwner(executorID, reason, actor string) bool
 
 // revokeRecordedLeasesOf records revoked, and revokes everywhere this member
 // can reach, every lease recorded as issued to executorID — and also, the
-// leases in also that are not — with a scrub (Task 20419).
-func (s *Server) revokeRecordedLeasesOf(ctx context.Context, executorID, reason, actor string, also []string) int {
+// leases in also that are not — with a scrub (Task 20419), and reports what
+// each came to (Task 20424).
+func (s *Server) revokeRecordedLeasesOf(ctx context.Context, executorID, reason, actor string, also []string) []LeaseTakeBack {
 	leases := append([]string(nil), also...)
 	for _, id := range recordedLeasesOf(executorID) {
 		if !slices.Contains(leases, id) {
 			leases = append(leases, id)
 		}
 	}
+	outcomes := make([]LeaseTakeBack, 0, len(leases))
 	for _, leaseID := range leases {
 		// Scrub, not kill: see revokeLeasesForExecutor.
 		rec := s.recordLeaseRevocation(leaseID, "", remote.RevokeScrub, reason, actor)
 		out := s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeScrub, actor)
 		s.concludeRevocation(rec, &out)
+		outcomes = append(outcomes, LeaseTakeBack{LeaseID: leaseID, State: out.State, Detail: revokeNote(out)})
 	}
 	if len(leases) > 0 {
 		s.broadcastSecretsUpdate("leases_revoked", executorID)
 	}
-	return len(leases)
+	return outcomes
 }
 
 // handleClusterAgentOp performs an agent operation another member routed here.
@@ -255,6 +258,19 @@ func (s *Server) handleClusterAgentOp(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// deregisterAgent drops agentID from this member's hub — with a "do not
+// reconnect" goodbye if its session is here — and its executor, and the
+// virtual executors that ran through it, from this member's registry.
+func (s *Server) deregisterAgent(hub *remote.Hub, agentID string) {
+	hub.Deregister(agentID)
+	executor.DefaultRegistry.Unregister(agentID)
+	for _, ex := range executor.List() {
+		if v, ok := ex.(interface{ ParentID() string }); ok && v.ParentID() == agentID {
+			executor.DefaultRegistry.Unregister(ex.ID())
+		}
+	}
+}
+
 // agentInvalidation tells other members that an agent changed in a way their
 // registries must reflect.
 type agentInvalidation struct {
@@ -262,6 +278,9 @@ type agentInvalidation struct {
 	// Event is "deleted" (drop it: its credential is revoked) or "enrolled"
 	// (a new device: register it so projects bound to it resolve here too).
 	Event string `json:"event"`
+	// Actor is who deleted it, for the revocations of the leases the member
+	// holding its session takes back (Task 20424).
+	Actor string `json:"actor,omitempty"`
 }
 
 const (
@@ -271,7 +290,12 @@ const (
 
 // publishAgentChange tells other members about an agent change.
 func (s *Server) publishAgentChange(agentID, event string) {
-	s.publishInvalidate(invalidateAgent, agentInvalidation{Agent: agentID, Event: event})
+	s.publishAgentChangeBy(agentID, event, "")
+}
+
+// publishAgentChangeBy is publishAgentChange naming who made the change.
+func (s *Server) publishAgentChangeBy(agentID, event, actor string) {
+	s.publishInvalidate(invalidateAgent, agentInvalidation{Agent: agentID, Event: event, Actor: actor})
 }
 
 // applyAgentInvalidation applies an agent change another member made.
@@ -282,16 +306,30 @@ func (s *Server) applyAgentInvalidation(p agentInvalidation) {
 	}
 	switch p.Event {
 	case agentEventDeleted:
+		// The device's leases first, while this member can still reach it
+		// (Task 20424): a member holding its session takes them back before
+		// the goodbye, on a goroutine of its own because a device can take
+		// most of a minute to answer and the bus delivers in order.
+		if acts, holds := s.actsForAgent(p.Agent); acts && holds {
+			actor := p.Actor
+			if actor == "" {
+				actor = "system"
+			}
+			go func() {
+				defer recoverGoroutine("take back a deleted agent's leases: " + p.Agent)
+				ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
+				defer cancel()
+				s.takeBackDeviceLeases(ctx, p.Agent, p.Agent,
+					executorRevocationReason(ExecutorOpRevoke, "the executor was deleted"), actor)
+				s.deregisterAgent(hub, p.Agent)
+				s.broadcastExecutorUpdateLocal(p.Event, p.Agent)
+			}()
+			return
+		}
 		// If the device is connected here, this drops it with a "do not
 		// reconnect" goodbye; either way its executor leaves this member's
 		// registry, with the virtual executors that ran through it.
-		hub.Deregister(p.Agent)
-		executor.DefaultRegistry.Unregister(p.Agent)
-		for _, ex := range executor.List() {
-			if v, ok := ex.(interface{ ParentID() string }); ok && v.ParentID() == p.Agent {
-				executor.DefaultRegistry.Unregister(ex.ID())
-			}
-		}
+		s.deregisterAgent(hub, p.Agent)
 	case agentEventEnrolled:
 		if err := hub.Restore(); err != nil {
 			fmt.Fprintf(os.Stderr, "ui: register agent %s enrolled on another hub member: %v\n", p.Agent, err)

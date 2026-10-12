@@ -432,6 +432,10 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 	// 20419): of a lease it holds that the revocation's fan-out did not reach,
 	// and — on the leader — of one whose holder is gone.
 	s.reconcileRecordedRevocations(ctx, now)
+	// And an agent connected here whose credential the store records revoked
+	// by something that told no member (Task 20424): its leases taken back,
+	// then its session dropped.
+	s.retireRevokedAgents(ctx)
 
 	var out []remote.ExpiredLease
 	for _, sl := range liveLeases.snapshot() {
@@ -519,14 +523,9 @@ func (s *Server) revokeLeasesForExecutor(executorID, reason, actor string) {
 		// a container runtime, a cluster — leaves its workloads their
 		// credentials, as it always has, because scrubbing a container's
 		// environment can only be done by killing it.
-		if s.agentForExecutorID(executorID) == "" {
+		agent := s.agentForExecutorID(executorID)
+		if agent == "" {
 			return
-		}
-		var leases []string
-		if hub, err := s.remoteHub(); err == nil && hub != nil {
-			if ex, ok := hub.Executor(executorID); ok {
-				leases = ex.Leases()
-			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
@@ -540,7 +539,7 @@ func (s *Server) revokeLeasesForExecutor(executorID, reason, actor string) {
 		// lists (Task 20419): a member that held its connection and has
 		// stopped took that list with it, and the revocation is recorded so
 		// the member adopting its runs does not take those leases over.
-		s.revokeRecordedLeasesOf(ctx, executorID, reason, actor, leases)
+		s.takeBackDeviceLeases(ctx, executorID, agent, reason, actor)
 	}()
 }
 

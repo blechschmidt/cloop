@@ -663,6 +663,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		// revoke` (Task 20403). Each member takes it back from what it holds
 		// and answers the announcer.
 		s.onBusGrantRevoked(ev)
+	case invalidateExecutorRevocation:
+		// A cordon, drain or agent revocation made by the CLI (Task 20424):
+		// the member holding the device's session takes its leases back,
+		// every member drops a revoked agent, and each answers.
+		s.onBusExecutorRevocation(ev)
 	case invalidateRunLost:
 		// The run this member follows was taken off its executor by a
 		// failover another member handled (Task 20396).

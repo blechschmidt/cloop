@@ -37,9 +37,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
 // drainPollInterval is how often a waiting drain re-reads the in-flight count.
@@ -47,7 +49,7 @@ import (
 // enough that a drain of an hour-long task is not a busy loop against SQLite.
 const drainPollInterval = 2 * time.Second
 
-// openScheduler opens the control plane's scheduling state and wires a
+// openSchedulerDB opens the control plane's scheduling state and wires a
 // supervisor over it, mirroring openExecutorStore's shape.
 //
 // Like enrollment, health and session rows live in the control plane's own
@@ -55,28 +57,88 @@ const drainPollInterval = 2 * time.Second
 // and its cordon must outlive whichever project happened to notice it was sick.
 //
 // The returned supervisor is deliberately not started. See the file comment.
-func openScheduler() (*executor.Supervisor, *executorstore.Scheduler, func(), error) {
+// The database is returned too, for the commands that audit and announce what
+// they changed.
+func openSchedulerDB() (*executor.Supervisor, *executorstore.Scheduler, *statedb.DB, func(), error) {
 	workdir, err := os.Getwd()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("determine working directory: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("determine working directory: %w", err)
 	}
 	db, err := statedb.Open(state.DBPath(workdir))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open control-plane database: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("open control-plane database: %w", err)
 	}
 	sched, err := executorstore.NewScheduler(db)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	sv := executor.NewSupervisor(executor.DefaultRegistry, executor.DefaultSupervisorConfig(),
+	sv := executor.NewSupervisor(schedulerRegistry(db), executor.DefaultSupervisorConfig(),
 		executor.WithHealthStore(sched),
 		executor.WithSessionStore(sched),
 		// "cli" rather than "supervisor": an audit entry for a cordon should
 		// say a human ordered it, not that a probe loop decided it.
 		executor.WithEventSink(sched.WithActor("cli")),
 	)
-	return sv, sched, func() { _ = db.Close() }, nil
+	return sv, sched, db, func() { _ = db.Close() }, nil
+}
+
+// schedulerRegistry is what the scheduling commands judge an executor ID
+// against: the backends this process registered from its configuration, and
+// every executor the control plane knows of that only a hub registers — each
+// enrolled, unrevoked device and each virtual executor running through one
+// (Task 20424).
+//
+// A CLI process holds no agent session, so no device is ever in its own
+// registry, and `cloop executor cordon <device>` failed with "not registered"
+// for exactly the executors whose credentials a cordon takes back. They are
+// added offline here: the scheduler only asks whether an ID names an
+// executor, and nothing in this process dispatches to one.
+func schedulerRegistry(db *statedb.DB) *executor.Registry {
+	reg := executor.NewRegistry()
+	for _, ex := range executor.List() {
+		_ = reg.Ensure(ex)
+	}
+	if id := executor.DefaultRegistry.DefaultID(); id != "" {
+		_ = reg.SetDefault(id)
+	}
+	store, err := executorstore.New(db)
+	if err != nil {
+		return reg
+	}
+	hub, err := remote.NewHub(remote.HubOptions{Store: store, Registry: reg})
+	if err != nil || hub.Restore() != nil {
+		return reg
+	}
+	virtuals, err := db.ListVirtualExecutors()
+	if err != nil {
+		return reg
+	}
+	for _, v := range virtuals {
+		parent, ok := hub.Executor(v.ParentID)
+		if !ok {
+			continue // its device is revoked or gone, and so is it
+		}
+		spec := v.Spec
+		vx, err := remote.NewVirtual(parent, v.ID, v.Name, func() (executor.VirtualSpec, error) { return spec, nil })
+		if err == nil {
+			_ = reg.Ensure(vx)
+		}
+	}
+	return reg
+}
+
+// auditSchedulingChange writes the executor.<action> row the dashboard writes
+// for the same change (Task 20424), attributed to the operator at the
+// terminal.
+func auditSchedulingChange(db *statedb.DB, action, id string, h executor.Health) {
+	detail := map[string]any{"state": string(h.State)}
+	if action != "uncordon" {
+		detail["reason"] = h.Reason
+	}
+	statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+		Action: action, ExecutorID: id, Actor: operatorActor(), Detail: detail,
+	})
 }
 
 // schedNode is one row of `cloop executor ls`, and the full record --json
@@ -135,7 +197,8 @@ each backend isolates). The states are:
   degraded     probes failing but not given up on; takes work as a last resort
   unreachable  probes failed past the threshold; takes no work, in-flight work
                is failed over to another node
-  cordoned     an operator took it out of rotation; in-flight work continues
+  cordoned     an operator took it out of rotation; in-flight work continues,
+               and an edge device's credentials were taken back
   draining     an operator is retiring it; done when in-flight reaches zero
 
 An executor that has never been probed by this control plane shows as ready
@@ -146,13 +209,13 @@ briefly unable to run anything.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
 
-		sv, sched, closeDB, err := openScheduler()
+		sv, sched, db, closeDB, err := openSchedulerDB()
 		if err != nil {
 			return err
 		}
 		defer closeDB()
 
-		nodes := collectSchedNodes(sv, sched)
+		nodes := collectSchedNodes(sv, sched, schedulerRegistry(db))
 
 		if asJSON {
 			enc := json.NewEncoder(os.Stdout)
@@ -203,11 +266,11 @@ briefly unable to run anything.`,
 // appear (as ready/never). A health row with no registration is a backend whose
 // config section was removed while it was cordoned; hiding it would make the
 // operator wonder where their cordon went.
-func collectSchedNodes(sv *executor.Supervisor, sched *executorstore.Scheduler) []schedNode {
+func collectSchedNodes(sv *executor.Supervisor, sched *executorstore.Scheduler, reg *executor.Registry) []schedNode {
 	byID := make(map[string]*schedNode)
 	defaultID := executor.DefaultRegistry.DefaultID()
 
-	for _, ex := range executor.List() {
+	for _, ex := range reg.List() {
 		id := ex.ID()
 		byID[id] = &schedNode{
 			// Supervisor.Health normalizes a missing row into "ready", which
@@ -259,6 +322,17 @@ the command for "something looks wrong with edge-1, stop giving it work while I
 look at it", and unlike revoking or deleting the executor it does not kill the
 task that is running there right now.
 
+An edge device's credentials are taken back, as the dashboard's cordon takes
+them: every lease recorded as issued to the device, or to a virtual executor
+running through it, is recorded revoked, and the hub member holding the
+device's connection scrubs its lease files there and then. This command tells
+the running hubs on the hub bus and prints which members answered and which
+leases are still pending. With no hub serving, the revocations wait in the
+store, and the next hub to start takes them back when the device reconnects.
+A cordon of an executor on the hub itself — its container runtime, a
+Kubernetes cluster, the host — takes no credential back: its running workloads
+keep their leases until they end.
+
 A cordon is admin-held: no probe result can lift it, so a node that answers a
 health check three seconds later does not silently re-enter rotation. Failures
 keep being counted while it is held, which is what lets ` + "`uncordon`" + ` restore the
@@ -271,7 +345,7 @@ too.`,
 		id := args[0]
 		reason, _ := cmd.Flags().GetString("reason")
 
-		sv, _, closeDB, err := openScheduler()
+		sv, _, db, closeDB, err := openSchedulerDB()
 		if err != nil {
 			return err
 		}
@@ -282,6 +356,7 @@ too.`,
 		if err != nil {
 			return err
 		}
+		auditSchedulingChange(db, "cordon", id, h)
 		dim := color.New(color.Faint)
 
 		if before == h.State {
@@ -289,11 +364,14 @@ too.`,
 			if h.Reason != "" {
 				dim.Printf("  reason: %s\n", h.Reason)
 			}
-			return nil
+		} else {
+			printStateChange(id, before, h)
+			dim.Printf("New work goes elsewhere; in-flight work continues. "+
+				"Return it to rotation with `cloop executor uncordon %s`.\n", id)
 		}
-		printStateChange(id, before, h)
-		dim.Printf("New work goes elsewhere; in-flight work continues. "+
-			"Return it to rotation with `cloop executor uncordon %s`.\n", id)
+		// Announced again on a repeat: a cordon made before the CLI took
+		// anything back, or one a member missed, is completed by it.
+		announceExecutorRevocation(db, id, ui.ExecutorOpCordon, h.Reason)
 		return nil
 	},
 }
@@ -313,7 +391,7 @@ operator just told the system to ignore.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
 
-		sv, _, closeDB, err := openScheduler()
+		sv, _, db, closeDB, err := openSchedulerDB()
 		if err != nil {
 			return err
 		}
@@ -324,6 +402,7 @@ operator just told the system to ignore.`,
 		if err != nil {
 			return err
 		}
+		auditSchedulingChange(db, "uncordon", id, h)
 		dim := color.New(color.Faint)
 		warn := color.New(color.FgYellow, color.Bold)
 
@@ -359,6 +438,9 @@ var executorDrainCmd = &cobra.Command{
 Draining differs from cordoning only in intent: somebody is waiting for the
 in-flight count to reach zero so the machine can be rebooted, reimaged, or
 unplugged. New placement is refused immediately; running work is left alone.
+An edge device's credentials are taken back at once, as ` + "`cordon`" + ` takes them,
+with the same report of which hub members answered and which leases are still
+pending.
 
 The node STAYS draining whether or not the wait succeeds — the timeout governs
 how long this command blocks, not whether the drain took effect. Put it back in
@@ -373,7 +455,7 @@ Exit codes:
 		timeout, _ := cmd.Flags().GetDuration("timeout")
 		force, _ := cmd.Flags().GetBool("force")
 
-		sv, sched, closeDB, err := openScheduler()
+		sv, sched, db, closeDB, err := openSchedulerDB()
 		if err != nil {
 			return err
 		}
@@ -384,6 +466,7 @@ Exit codes:
 		if err != nil {
 			return err
 		}
+		auditSchedulingChange(db, "drain", id, h)
 		ok := color.New(color.FgGreen, color.Bold)
 		warn := color.New(color.FgYellow, color.Bold)
 		dim := color.New(color.Faint)
@@ -393,6 +476,9 @@ Exit codes:
 		} else {
 			printStateChange(id, before, h)
 		}
+		// Before the wait, as the dashboard's drain does: the credentials
+		// come back now, whatever the in-flight count does.
+		announceExecutorRevocation(db, id, ui.ExecutorOpDrain, h.Reason)
 
 		remaining, waitErr := waitForDrain(cmd.Context(), sv, sched, id, timeout)
 		switch {

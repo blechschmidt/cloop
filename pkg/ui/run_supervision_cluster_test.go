@@ -260,8 +260,9 @@ func TestACordonWhoseAgentsMemberCannotBeAskedIsRecorded(t *testing.T) {
 	h.holder = "hub_other"
 
 	s := &Server{WorkDir: h.dir}
-	if n := s.revokeRecordedLeasesOf(context.Background(), ex.ID(), "cordoned: device stolen", "admin", nil); n != 1 {
-		t.Fatalf("revoked %d recorded leases of the agent, want 1", n)
+	if got := s.revokeRecordedLeasesOf(context.Background(), ex.ID(), "cordoned: device stolen", "admin", nil); len(got) != 1 ||
+		got[0].LeaseID != leaseID {
+		t.Fatalf("revoked %+v of the agent's recorded leases, want only %s", got, leaseID)
 	}
 	revs := recordedRevocations(t, h.dir, leaseID)
 	if len(revs) != 1 || revs[0].Reason == "" || !strings.Contains(revs[0].Reason, "device stolen") {

@@ -34,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
+	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -436,8 +437,16 @@ agent ID. Revoking an enrollment token ALSO revokes the agent it produced, if
 it was already redeemed — a token that leaked before the real device used it
 must not leave the attacker's credential live.
 
-A revoked agent's live connection is dropped immediately where the control
-plane is running; otherwise revocation takes effect on its next reconnect.`,
+The running hubs are told on the hub bus. The member holding a revoked agent's
+connection first takes back every lease the device holds — the device scrubs
+its lease files while the link is still up — and then drops the connection
+with a "do not reconnect" goodbye; every member drops the agent from its
+registry. Each member's answer is printed: which one held the connection,
+which leases came back, and which are still pending. A hub that reads no
+announcements (ui.cluster.exclusive) drops the agent at its lease janitor's
+next pass, within a minute. With no hub serving, the agent is refused when it
+next connects, and the leases recorded as issued to it are recorded revoked so
+no hub restores their sessions.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, db, err := openExecutorStore()
@@ -446,6 +455,11 @@ plane is running; otherwise revocation takes effect on its next reconnect.`,
 		}
 		defer db.Close()
 
+		// The agent a token minted, should the ID be a token's.
+		agentID := ""
+		if rec, err := store.GetEnrollment(args[0]); err == nil {
+			agentID = rec.RedeemedAgentID
+		}
 		kind, err := remote.Revoke(store, args[0], time.Now())
 		if err != nil {
 			return err
@@ -453,14 +467,27 @@ plane is running; otherwise revocation takes effect on its next reconnect.`,
 		ok := color.New(color.FgGreen, color.Bold)
 		switch kind {
 		case "enrollment+agent":
-			ok.Printf("Revoked enrollment token %s and the agent credential it minted.\n", args[0])
+			ok.Printf("Revoked enrollment token %s and the agent credential it minted (%s).\n", args[0], agentID)
 		case "enrollment":
 			ok.Printf("Revoked enrollment token %s (it had not been redeemed).\n", args[0])
 		default:
+			agentID = args[0]
 			ok.Printf("Revoked agent credential %s.\n", args[0])
 		}
-		color.New(color.Faint).Println(
-			"A connected agent is disconnected by the control plane; others are refused on reconnect.")
+		if agentID == "" {
+			return nil
+		}
+		// The executor.revoke row the dashboard writes for the same act.
+		detail := map[string]any{}
+		if row, err := db.GetExecutor(agentID); err == nil {
+			detail["name"], detail["kind"] = row.Name, string(row.Kind)
+		}
+		statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+			Action: "revoke", ExecutorID: agentID, Actor: operatorActor(), Detail: detail,
+		})
+		// This process reaches no device: the running hubs do, and are told
+		// (Task 20424).
+		announceExecutorRevocation(db, agentID, ui.ExecutorOpRevoke, "")
 		return nil
 	},
 }

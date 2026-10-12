@@ -103,6 +103,8 @@ type world struct {
 	lb      *loadBalancer
 	procs   []*exec.Cmd
 	mu      sync.Mutex
+	// agentExited closes when the enrolled agent's process exits.
+	agentExited chan struct{}
 }
 
 type hub struct {
@@ -301,6 +303,57 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	})
 	// And reports the shared gauges, whether or not it led before.
 	w.checkLeaderOnlyGauges("with one member left", []*hub{staying}, 1)
+
+	// ── 10. A cordon and a revocation typed at the terminal ────────────────
+	// Task 20424: the CLI is no member and holds no session, so it announces
+	// on the bus and every member answers. A second member joins, so one
+	// answer comes from the member holding the agent's connection and one
+	// from a member that does not; the revocation must drop the agent at
+	// once, on every member, rather than at its next reconnect.
+	joined := w.startHub()
+	st = w.waitClusterVia(staying, "a second live member", func(s clusterStatus) bool { return s.live() == 2 })
+	joined.id = w.memberFor(st, joined.port)
+	out := w.runOut(w.hubDir, "executor", "cordon", agentID, "--reason", "cluster e2e")
+	for _, want := range []string{
+		"hub member " + staying.id, "holds " + agentID + "'s connection",
+		"hub member " + joined.id, "does not hold " + agentID + "'s connection",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the cordon's report does not say %q:\n%s", want, out)
+		}
+	}
+	revoked := time.Now()
+	out = w.runOut(w.hubDir, "executor", "revoke", agentID)
+	if !strings.Contains(out, "and dropped the agent") || !strings.Contains(out, "the agent is out of its registry") {
+		t.Fatalf("the revocation's report does not name the member that dropped the agent and the one that "+
+			"forgot it:\n%s", out)
+	}
+	select {
+	case <-w.agentExited:
+		t.Logf("agent dropped %s after `cloop executor revoke`", time.Since(revoked).Round(time.Millisecond))
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the agent was still running 15s after `cloop executor revoke`")
+	}
+	for _, h := range []*hub{staying, joined} {
+		w.eventually("hub "+h.id+" to have the agent out of its registry", 10*time.Second, func() bool {
+			r := w.do(http.MethodGet, h.url(), "/api/executors", nil)
+			var list struct {
+				Executors []struct {
+					ID         string `json:"id"`
+					Registered bool   `json:"registered"`
+				} `json:"executors"`
+			}
+			if r.status != http.StatusOK || json.Unmarshal([]byte(r.body), &list) != nil {
+				return false
+			}
+			for _, e := range list.Executors {
+				if e.ID == agentID && e.Registered {
+					return false
+				}
+			}
+			return true
+		})
+	}
 }
 
 // ── world setup ─────────────────────────────────────────────────────────────
@@ -396,12 +449,20 @@ func (w *world) env() []string {
 // run executes a cloop subcommand to completion in dir.
 func (w *world) run(dir string, args ...string) {
 	w.t.Helper()
+	w.runOut(dir, args...)
+}
+
+// runOut is run, returning what the command printed.
+func (w *world) runOut(dir string, args ...string) string {
+	w.t.Helper()
 	cmd := exec.Command(w.bin, args...)
 	cmd.Dir = dir
 	cmd.Env = w.env()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		w.t.Fatalf("cloop %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+	return string(out)
 }
 
 func (w *world) initProjects() {
@@ -580,7 +641,7 @@ func (w *world) enrollAndStartAgent() string {
 		"PATH=" + w.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"NO_COLOR=1",
 	}
-	_, _ = w.spawn(w.root, filepath.Join(w.root, "agent.log"), env,
+	_, w.agentExited = w.spawn(w.root, filepath.Join(w.root, "agent.log"), env,
 		"executor", "agent", "--token-file", bundle,
 		"--credential", filepath.Join(agentHome, "agent.json"), "--workdir-root", work)
 	var id string

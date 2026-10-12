@@ -1146,6 +1146,17 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if hub, hubErr := s.remoteHub(); hubErr == nil && hub != nil {
+		// The device's leases first, while this member can still reach it
+		// (Task 20424): the goodbye below ends the only link a revocation
+		// travels over, and a device dropped holding its lease files keeps
+		// them. Only where its session is: the member holding it otherwise
+		// does the same when the deletion reaches it.
+		if acts, holds := s.actsForAgent(id); acts && holds {
+			ctx, cancel := context.WithTimeout(r.Context(), revokeFanoutTimeout)
+			s.takeBackDeviceLeases(ctx, id, id,
+				executorRevocationReason(ExecutorOpRevoke, "the executor was deleted"), s.auditActor(r))
+			cancel()
+		}
 		tearDownRevokedAgent(hub, id)
 	}
 	// DeleteExecutor also drops every project binding that pointed here, so
@@ -1179,7 +1190,7 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 	})
 	// The device may be connected to another hub member, and every member
 	// has it in its registry (Task 20354).
-	s.publishAgentChange(id, agentEventDeleted)
+	s.publishAgentChangeBy(id, agentEventDeleted, s.auditActor(r))
 	s.broadcastAuditAppend("revoke")
 	s.broadcastExecutorUpdate("revoked", id)
 	jsonOK(w, map[string]any{"ok": true, "id": id, "revoked": true})
