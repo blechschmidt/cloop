@@ -1,7 +1,9 @@
 package version
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,7 +81,14 @@ func TestPublishedReleaseSequencesMatchTheirTags(t *testing.T) {
 		t.Skip("a shallow checkout cannot count a tag's first-parent history")
 	}
 	for _, r := range PublishedReleases() {
+		// The newest release before it is tagged (Task 20421) is the commit
+		// under test: its entry is added in the commit that is then tagged.
+		rev := r.Tag
 		script, err := exec.Command(git, "-C", root, "show", r.Tag+":scripts/build-release.sh").Output()
+		if err != nil && untaggedNewest(t, git, root, r.Tag) {
+			rev = "HEAD"
+			script, err = os.ReadFile(filepath.Join(root, "scripts", "build-release.sh"))
+		}
 		if err != nil {
 			t.Errorf("%s: cannot read scripts/build-release.sh at the tag: %v", r.Tag, err)
 			continue
@@ -91,13 +100,17 @@ func TestPublishedReleaseSequencesMatchTheirTags(t *testing.T) {
 			}
 			continue
 		}
-		out, err := exec.Command(git, "-C", root, "rev-list", "--count", "--first-parent", r.Tag).Output()
+		out, err := exec.Command(git, "-C", root, "rev-list", "--count", "--first-parent", rev).Output()
 		if err != nil {
 			t.Errorf("%s: %v", r.Tag, err)
 			continue
 		}
 		want, _ := strconv.Atoi(strings.TrimSpace(string(out)))
-		if r.Sequence != want {
+		if r.Sequence != want && rev == "HEAD" {
+			t.Errorf("%s is listed with sequence %d but not tagged, and this commit is sequence %d on main: "+
+				"the entry belongs in the commit that is tagged, at that commit's count — tag the commit it was "+
+				"added in, or update the entry", r.Tag, r.Sequence, want)
+		} else if r.Sequence != want {
 			t.Errorf("%s is sequence %d on main, but the table lists %d", r.Tag, want, r.Sequence)
 		}
 	}

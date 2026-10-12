@@ -198,17 +198,17 @@ jobs:
         #
         # A missing section is not fatal: it degrades to the auto-generated
         # notes alone, because failing a release over a changelog heading
-        # would mean the artifacts are built and then thrown away.
+        # would mean the artifacts are built and then thrown away. Nor is a
+        # long one: GitHub refuses a body over 125,000 characters at the
+        # publish step below, so the script cuts a longer section at its last
+        # whole entry and links the rest in CHANGELOG.md at this tag (Task
+        # 20421).
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          # Print lines between this version's "## [x.y.z]" heading and the
-          # next "## " heading, dropping the heading itself.
-          awk -v v="$version" '
-            $0 ~ "^## \\[" v "\\]" { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md > release-body.md
+          python3 scripts/release-notes.py "$version" \
+            --link "https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md" \
+            > release-body.md
           if [ -s release-body.md ]; then
             echo "found a CHANGELOG section for $version:"
             cat release-body.md

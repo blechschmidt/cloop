@@ -148,6 +148,11 @@ func TestPublishedReleaseProtocolsMatchTheirTags(t *testing.T) {
 	line := regexp.MustCompile(`(?m)^\s*ProtocolVersion\s*=\s*([0-9]+)\s*$`)
 	for _, r := range PublishedReleases() {
 		out, err := exec.Command(git, "-C", root, "show", r.Tag+":pkg/executor/remote/proto.go").Output()
+		if err != nil && untaggedNewest(t, git, root, r.Tag) {
+			// Listed in the commit about to be tagged (Task 20421): it
+			// speaks what this tree speaks.
+			out, err = os.ReadFile(filepath.Join(root, "pkg", "executor", "remote", "proto.go"))
+		}
 		if err != nil {
 			t.Errorf("%s: cannot read pkg/executor/remote/proto.go at the tag: %v", r.Tag, err)
 			continue
@@ -182,4 +187,16 @@ func moduleRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// untaggedNewest reports whether tag is the newest release in the table and
+// not tagged in this checkout: the release whose entry is added in the commit
+// that is about to be tagged, as releases.go says to add it.
+func untaggedNewest(t *testing.T, git, root, tag string) bool {
+	t.Helper()
+	rels := PublishedReleases()
+	if len(rels) == 0 || rels[len(rels)-1].Tag != tag {
+		return false
+	}
+	return exec.Command(git, "-C", root, "rev-parse", "--verify", "--quiet", tag+"^{commit}").Run() != nil
 }

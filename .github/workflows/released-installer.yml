@@ -17,15 +17,28 @@ name: Released installer
 # so a job on the pull-request path could not have caught it and a job triggered
 # by a release could not either — the release predates the check.
 #
-# Hence a clock. This is the only job in the repository whose failure means
-# "ship something", not "fix your diff", which is also why it does not gate
-# pull requests: a contributor must not be blocked by a release they did not cut
-# and cannot re-cut.
+# Hence a clock. This is the only workflow in the repository whose failure
+# means "ship something", not "fix your diff", which is also why it does not
+# gate pull requests: a contributor must not be blocked by a release they did
+# not cut and cannot re-cut.
+#
+# The second job asks the same question of the changelog (Task 20421): a
+# security fix merged to main reaches no device until a release carries it, so
+# an [Unreleased] Security entry older than 14 days fails it. v0.0.4 stayed
+# current while sixteen of them piled up, a network-reachable hub without
+# sign-in and stored XSS among them.
 on:
   schedule:
     # 06:00 UTC daily. Cheap — four HTTP requests and one small container.
     - cron: '0 6 * * *'
   workflow_dispatch:
+  # And as soon as a release run finishes, against what it published: the
+  # release's own last step checks that the URLs resolve, not that the
+  # installer installs from them. A release published with GITHUB_TOKEN fires
+  # no release event, so this follows the workflow instead.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
 
 permissions:
   contents: read
@@ -63,3 +76,27 @@ jobs:
           the current release. Cut a new release from a commit whose \
           scripts/build-release.sh publishes unversioned asset names — the \
           fix is a tag, not a code change."
+
+  security-fixes-released:
+    name: No security fix waits more than 14 days for a release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The age of an entry is git blame's date for its oldest line, and a
+          # shallow clone dates every older line by its boundary commit — so
+          # every entry would look new. The script refuses a shallow clone.
+          fetch-depth: 0
+
+      - name: Every [Unreleased] Security entry is younger than 14 days
+        run: python3 scripts/unreleased-security-age.py --max-days 14
+
+      - name: Say what to do about it
+        if: failure()
+        run: |
+          echo "::error::A security fix has waited more than 14 days on main \
+          without a release, so no device, installer or release-channel upgrade \
+          has it. Cut a release: turn [Unreleased] into a version in \
+          CHANGELOG.md, add it to pkg/version/releases.go and tag that commit."
