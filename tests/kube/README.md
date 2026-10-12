@@ -1,5 +1,15 @@
 # Git proxy and kube guard on Kubernetes, end to end
 
+Two tests, on a real cluster:
+
+- [`TestGitProxyAndKubeGuardOnKubernetes`](#what-it-builds) runs a workload Pod
+  through both monitors on the hub the Helm chart installed — the rest of this
+  page;
+- [`TestKubeShareWithAnExecPlugin`](#sharing-a-cluster-whose-kubeconfig-runs-a-plugin)
+  shares the cluster with a hub running on the test host, through a kubeconfig
+  that signs in only with an exec credential plugin (Task 20416) — the last
+  section.
+
 `kube_test.go` runs a workload Pod through the git interception proxy and the
 Kubernetes access monitor on a hub that `deploy/helm/cloop-hub` installed, and
 checks what the Pod, the forge and the audit trail saw (Task 20385). It is the
@@ -110,3 +120,47 @@ CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
 
 A kind node image is about 1 GB on disk and the test images another few
 hundred MB, loaded twice; check free space before running it on a small host.
+
+## Sharing a cluster whose kubeconfig runs a plugin
+
+[`share_test.go`](share_test.go) needs only the cluster, not the chart: the hub
+runs on the test host (`cloop ui` with `executors.kube_guard` on, `tls: auto`,
+the host executor and the stand-in `claude`), as it would on a developer's
+machine. It:
+
+1. creates four namespaces — two to share, one for the ServiceAccount, one for a
+   "developer" ServiceAccount holding `admin` in the other three — and a
+   kubeconfig whose only credential is a fake exec plugin printing the
+   developer's token (`client.authentication.k8s.io/v1`, a relative command
+   path, `provideClusterInfo`);
+2. runs `cloop remote kube share --access write --sa-namespace … --ttl 10m` and
+   checks the plugin was told the cluster, the five objects and their RBAC, and
+   that RBAC alone *would* let the ServiceAccount create its own token;
+3. grants the share to the hub's project and dispatches a task running
+   [`share_probe.sh`](share_probe.sh);
+4. waits for the hub to renew the share, then for the first token to expire, and
+   has the same run use the cluster again;
+5. revokes the share and checks nothing labelled `cloop.dev/kube-share=<id>` is
+   left, the secret is gone and the run is cut off; then reads the audit trail.
+
+| id | passes when |
+| --- | --- |
+| P0 | the run's kubeconfig names the monitor and carries a session token — no JWT there or in the environment |
+| P1, P2 | `kubectl get` and `kubectl create configmap` work through the monitor |
+| P3 | `kubectl create token <the share's ServiceAccount>` is refused by the monitor, under a write grant whose namespaces include the ServiceAccount's |
+| P4 | a raw `POST …/serviceaccounts/default/token` is refused by the monitor |
+| P5 | `kube-system` is refused by the monitor |
+| P6 | after the token the run's session started with has expired, the run reads and writes again (the hub renewed the share; the session took the new token up) |
+| P7 | after `cloop remote kube revoke`, the run can no longer reach the cluster |
+
+```bash
+kind create cluster --name cloop-share
+kind get kubeconfig --name cloop-share > /tmp/kubeconfig
+CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig \
+  go test ./tests/kube/ -run TestKubeShareWithAnExecPlugin -count=1 -v -timeout 25m
+```
+
+About thirteen minutes, nearly all of it waiting: ten minutes is the shortest
+token the TokenRequest API issues, and the API server accepts one for a minute
+past its expiry. `CLOOP_KUBE_E2E_CLOOP_BIN` supplies the binary; unset, one is
+built. CI runs it in the `kube-share` job on a kind cluster of its own.

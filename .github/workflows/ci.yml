@@ -2405,3 +2405,54 @@ jobs:
           for ns in $(kubectl get ns -o name | grep cloop-e2e-forge- | cut -d/ -f2); do
             kubectl -n "$ns" logs deploy/forge --tail=100 || true
           done
+
+  kube-share:
+    name: Kubernetes share (exec plugin, renewal, revoke) on kind
+    runs-on: ubuntu-latest
+    # `cloop remote kube share` (Task 20416), end to end on a real cluster: a
+    # kubeconfig that signs in only through a fake exec credential plugin, a
+    # hub running here with the Kubernetes access monitor on, a share with
+    # write access and the shortest token the TokenRequest API issues, a run
+    # whose probe drives kubectl through the monitor — read, write, and the
+    # serviceaccounts/token refusal — across the hub's renewal and the first
+    # token's expiry, and a revoke that must leave no labelled object behind.
+    # See tests/kube/README.md.
+    #
+    # A job of its own, not a step of deploy-artifacts: it needs no chart, and
+    # most of its thirteen minutes are spent waiting for a token to expire,
+    # which would otherwise lengthen the longest job in the workflow.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: cloop-share
+
+      - name: Build cloop
+        timeout-minutes: 8
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/cloop" .
+
+      - name: Share a cluster, renew across a token's expiry, revoke
+        timeout-minutes: 27
+        run: |
+          set -euo pipefail
+          # 0600, or kubectl warns on every call that it is readable.
+          (umask 077 && kind get kubeconfig --name cloop-share > "$RUNNER_TEMP/kubeconfig")
+          CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
+            go test ./tests/kube/ -run TestKubeShareWithAnExecPlugin -count=1 -v -timeout 25m 2>&1 |
+            tee "$RUNNER_TEMP/kube-share.log"
+          # A skip is a pass to go test; here it would mean nothing was proven.
+          grep -qE '^--- PASS: TestKubeShareWithAnExecPlugin \(' "$RUNNER_TEMP/kube-share.log" || {
+            echo "::error::go test succeeded but TestKubeShareWithAnExecPlugin did not pass — it was skipped"
+            exit 1
+          }
