@@ -149,7 +149,7 @@ func sweepOrphanedLeaseDirs(controlPlaneDir string) leaseSweepResult {
 		}
 	}
 
-	reportLeaseSweep(db, controlPlaneDir, result, rows)
+	reportLeaseSweep(db, controlPlaneDir, result, rows, "from a previous run")
 	return result
 }
 
@@ -171,7 +171,10 @@ func dirExists(dir string) bool {
 // written to the audit trail, because "this hub found credentials a previous
 // run left on disk" is a security event an operator may have to account for
 // long after the log has rotated.
-func reportLeaseSweep(db *statedb.DB, controlPlaneDir string, res leaseSweepResult, rows []statedb.SecretLeaseDirRow) {
+//
+// source says whose directories they were: "from a previous run" for the
+// startup sweep, "of stopped hub members" for the one run on a member's death.
+func reportLeaseSweep(db *statedb.DB, controlPlaneDir string, res leaseSweepResult, rows []statedb.SecretLeaseDirRow, source string) {
 	if res.Wiped == 0 && res.Vanished == 0 && len(res.Errors) == 0 {
 		return
 	}
@@ -185,9 +188,9 @@ func reportLeaseSweep(db *statedb.DB, controlPlaneDir string, res leaseSweepResu
 	}
 
 	fmt.Fprintf(os.Stderr,
-		"ui: lease sweep: reconciled %d recorded credential director(ies) from a previous run "+
+		"ui: lease sweep: reconciled %d recorded credential director(ies) %s "+
 			"— %d wiped, %d already gone, %d still held, %d failed (%d had lapsed TTLs)\n",
-		res.Rows, res.Wiped, res.Vanished, res.Skipped, len(res.Errors), expired)
+		res.Rows, source, res.Wiped, res.Vanished, res.Skipped, len(res.Errors), expired)
 
 	// The payload names counts and, on failure, the directory that still holds
 	// plaintext. No lease contents and no environment: this trail records that
@@ -311,10 +314,6 @@ func wipeDeadMembersLeaseDirs(controlPlaneDir, leaseID string) (res leaseSweepRe
 			fmt.Fprintf(os.Stderr, "ui: clear record for %s: %v\n", row.Dir, err)
 		}
 	}
-	if res.Wiped > 0 || res.Vanished > 0 || len(res.Errors) > 0 {
-		fmt.Fprintf(os.Stderr, "ui: lease sweep: %d credential director(ies) of stopped hub members — %d wiped, "+
-			"%d already gone, %d failed\n", res.Rows, res.Wiped, res.Vanished, len(res.Errors))
-		reportLeaseSweep(db, controlPlaneDir, res, swept)
-	}
+	reportLeaseSweep(db, controlPlaneDir, res, swept, "of stopped hub members")
 	return res, allGone
 }
