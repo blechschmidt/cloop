@@ -1191,6 +1191,12 @@ and run 0.0.5's `cloop hub doctor` right after: it names most of what follows.
   carries one refused it unless forced — and, forced, was left with nothing to
   order its next upgrade by. The advised command now stamps the commit and its
   first-parent count, as release builds do (Task 20421).
+- **cloop's own git no longer leaves housekeeping running in the background.**
+  Since git 2.47 a fetch ends by starting `git maintenance run --auto`
+  detached; after a provisioning or write-back step that child escaped the
+  step's supervision and kept its environment — the leased credential's header
+  included — while it ran. cloop's git children now keep it in the foreground
+  (`gc.autoDetach` and `maintenance.autoDetach` off) (Task 20421).
 - **A host-mode device run's home is `.<dir>.home` beside its checkout**: for a
   project holding a grant it was the checkout, so Claude Code's `.claude/`
   (session transcripts) landed in the repository (Task 20371).
