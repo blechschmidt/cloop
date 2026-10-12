@@ -1071,6 +1071,11 @@ dashboard's button. A `<project>` is a name, an index or a path, as `cloop
 remote projects` lists them; an ambiguous name is refused with the candidates.
 
 ```bash
+cloop remote init [--goal <text>] [--executor <id|name>] [--repo owner/name]... [--grant <secret>[,key=value]...]... [--run] [--json]
+cloop remote executors [--json]
+cloop remote repos list|add|remove <project> ... [--json]
+cloop remote grants request|list|withdraw ... [--json]
+cloop remote features start|list|pr <project> ... [--json]
 cloop remote projects [--json]
 cloop remote tasks <project> [--status pending] [--json]
 cloop remote add <project> <title> [--description <text>] [--json]
@@ -1081,12 +1086,30 @@ cloop remote logs <project> [--follow]
 
 | Subcommand | Calls | Permission |
 |------------|-------|------------|
+| `init` | `POST /api/projects/new` (with the executor and the grants you may make), then the `repos add` calls, `POST /api/grant-requests` for what needs an approver, `GET`/`POST /api/projects/{idx}/harness-credential`, and with `--run` `POST /api/run` | `project.write`; `executor.manage` with `--executor`; each grant's own |
+| `executors` | `GET /api/executors`, narrowed to the executors whose access list admits you | `executor.read` |
+| `repos list` | `GET /api/projects/{idx}/repositories` | `project.read` |
+| `repos add` | `GET /api/projects/{idx}/repositories` and `/repositories/available`, then `POST /api/projects/{idx}/repositories` — or `POST /api/grant-requests` where the grant is refused for want of `secret.grant` | `secret.grant` on the project, else `secret.request` |
+| `repos remove` | `DELETE /api/projects/{idx}/repositories`, or a replacing `POST` when the grant keeps other repositories | `secret.revoke`, `secret.grant` on the project |
+| `grants request` | `POST /api/grant-requests` | `secret.request` |
+| `grants list` | `GET /api/grant-requests` | `secret.request` |
+| `grants withdraw` | `POST /api/grant-requests/{id}/withdraw` | `secret.request`, the requester |
+| `features start` | `POST /api/projects/{idx}/features` | `project.write` |
+| `features list` | `GET /api/projects/{idx}/features` | `project.read` |
+| `features pr` | `POST /api/projects/{idx}/features/{slug}/pr` | `project.write` |
 | `projects` | `GET /api/projects?indices=1` | `project.read` |
 | `tasks` | `GET /api/tasks` | `project.read` |
 | `add` | `POST /api/tasks` | `task.mutate` |
 | `run` | `POST /api/run` | `run.start` |
 | `stop` | `POST /api/stop` | `run.stop` |
 | `logs` | `GET /api/livelog`; with `--follow`, the dashboard's WebSocket `/api/ws` | `project.read` |
+
+**A refusal is rendered, not dumped.** The hub's message and code come first,
+then each detail it sent as a line; for a missing permission, the permission and
+the scope it was decided at, your role there, and how to get it — from a
+maintainer of the project (its Members card) or an administrator (the role
+mappings), or for `secret.grant` by filing a request. A refusal whose claims
+were merely too old says to sign in again with `cloop login`.
 
 `logs --follow` prints the run's output from the backlog the hub replays on
 connect onwards, notes on stderr when the run starts and stops, and runs until
@@ -1107,6 +1130,101 @@ else can read, and nothing prints a credential. [`cloop task attach`](../operati
 uses the stored session for the hub it targets — `--hub`, `CLOOP_HUB_URL` or the
 default hub — when no `--token` is given, on the same rule for
 `CLOOP_API_TOKEN`.
+
+### `cloop remote init`
+
+Creates a hub project from the git checkout it is run in (Task 20417). The
+walkthrough is [From a checkout to a running project](../getting-started/terminal.md#from-a-checkout-to-a-running-project).
+
+```bash
+cloop remote init --goal "Ship rate limiting for the public API"
+cloop remote init --goal "…" --executor edge-01 --access write --branch 'cloop/*' --run
+cloop remote init --goal "…" --repo acme/api-docs --grant staging-cluster,namespace=payments --json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--goal` | asked at a terminal | What the project should achieve; required otherwise |
+| `--executor` | the hub's default | Bind the project to this executor, by id or name — one whose access list admits you. Binding takes `executor.manage` |
+| `--repo` | — | Another repository the project works on, as `owner/name` (repeatable, or comma-separated); the origin's is always included |
+| `--grant` | — | Another stored credential to give the project: `<secret>[,key=value…]` with keys `repo`, `access`, `permission`, `branch`, `namespace`, `context`, `host`, `registry`, `env`, `scope`, `writable`, `ttl`; repeat a key for several values |
+| `--repo-secret` | chosen | The GitHub App or token the repositories are granted through |
+| `--access` | `read` | `read`, or `write` (push branches and open pull requests) |
+| `--branch` | — | With `--access write`, limit pushes to these branches (globs) |
+| `--name` | the repository's name | The project's name and its directory under the hub's projects root (`ui.projects_root`) |
+| `--dir` | — | The project's directory on the hub, instead of `--name` |
+| `--provider`, `--model`, `--effort` | the hub's | As the New Project dialog's |
+| `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox signs in to Claude with, on an executor that isolates |
+| `--justification` | the goal | The reason given for any credential requested from an approver |
+| `--run` | `false` | Start the project's first run once it is set up |
+| `--json` | `false` | Print what was created, granted and requested as one object |
+
+The origin remote is read in any of git's forms for GitHub — https, the scp form,
+`ssh://`, `ssh.github.com:443` — and refused, by name and without echoing it, when
+it is not on GitHub or embeds a credential. Before anything is created the executor
+is checked against your access lists, every `--grant` secret against what you can
+see or ask for, and the hub for some GitHub credential that could reach the
+repositories. The project is created with its binding and the grants you may make
+in one request, applied whole or not at all; a directory that already holds a
+project is refused (`CONFLICT`) rather than initialised again. Repositories are then
+granted through your GitHub App installation, the organisation's where you may grant
+it, or your own token where the hub's git proxy guards it — each App asked which
+repositories it reaches. What you may not grant is requested instead, and the
+request's id and approvers are printed. Exits non-zero when the project was created
+but a repository is unreached or `--run` could not start it.
+
+### `cloop remote executors`
+
+Lists the executors a project of yours may be bound to: every executor without an
+access list, and the restricted ones whose list admits you — each with its kind,
+isolation and status, the hub's default first, and why one that cannot run anything
+now cannot. `--json` prints them with the default's id.
+
+### `cloop remote repos`
+
+```bash
+cloop remote repos list <project> [--json]
+cloop remote repos add <project> <owner/name>... [--secret <name>] [--access read|write] [--branch <glob>]... [--ttl <d>] [--justification <text>] [--json]
+cloop remote repos remove <project> <owner/name|grant-id>... [--json]
+```
+
+`add` chooses the credential as `init` does unless `--secret` names one, leaves a
+repository the project already reaches alone, and turns a grant refused for want of
+`secret.grant` into a request (with `--justification`). `remove` by repository
+replaces a grant that covers others with one that does not, and revokes one that
+covers only it; a grant that reaches other projects too is refused, as the panel
+refuses it.
+
+### `cloop remote grants`
+
+```bash
+cloop remote grants request <secret> (--project <project> | --subject executor:<id>) --justification <text>
+    [--repo owner/name]... [--access read|write] [--branch <glob>]... [--permission <p>]...
+    [--namespace <ns>]... [--context <ctx>]... [--host <h>]... [--registry <r>]... [--env-key <K>]...
+    [--writable] [--ttl <d>] [--wait <d>] [--json]
+cloop remote grants list [--state pending|approved|denied|withdrawn|expired] [--mine] [--json]
+cloop remote grants withdraw <request-id> [--json]
+```
+
+A request names a stored credential and the narrowing its kind needs; asking
+confers nothing until an approver with `secret.grant` — never the requester —
+approves it. `request` and `list` print who can approve a pending request: the
+accounts and groups the hub's role policy gives `secret.grant` hub-wide (only
+administrators for a request aimed at every project or executor).
+
+### `cloop remote features`
+
+```bash
+cloop remote features start <project> <name> [--description <text>] [--base <branch>] [--task <text>]...
+    [--auto-evolve] [--innovate] [--parallel] [--max-parallel N] [--auto-pr] [--json]
+cloop remote features list <project> [--json]
+cloop remote features pr <project> <feature> [--title <t>] [--body <b>] [--draft] [--json]
+```
+
+A feature is a branch of the project with its own worktree and task list
+([parallel features](../guides/features.md)); `start` prints the index it runs under
+(`cloop remote run <index>`), and `pr` pushes its branch and opens its pull request
+into the branch it was cut from, or reports the one already open.
 
 ### `cloop remote kube`
 

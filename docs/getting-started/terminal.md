@@ -12,6 +12,7 @@ browser's, on the same rules.
 - [What the approval page is telling you](#what-the-approval-page-is-telling-you)
 - [What the terminal gets](#what-the-terminal-gets)
 - [Using it](#using-it)
+- [From a checkout to a running project](#from-a-checkout-to-a-running-project)
 - [Sharing a Kubernetes cluster](#sharing-a-kubernetes-cluster)
 - [Signing out](#signing-out)
 - [Where the session is kept](#where-the-session-is-kept)
@@ -168,6 +169,104 @@ session, or `CLOOP_API_TOKEN` — which is `CLOOP_HUB_URL`'s hub's token when th
 is set, and otherwise used only for a hub you hold no session for, so a token
 exported for one hub never travels to another.
 
+## From a checkout to a running project
+
+The first thing to do with a hub is give it a project, and `cloop remote init`
+does it from the checkout you are already in — the dashboard's New Project
+dialog, its Repositories panel, the Access Requests panel and the Claude
+credential card, in one command:
+
+```console
+$ cd ~/src/widgets
+$ cloop remote init --goal "Ship rate limiting for the public API" --executor edge-01 --access write --branch 'cloop/*' --run
+Created widgets on https://cloop.example.com at /var/lib/cloop/projects/widgets, bound to executor edge-01.
+Granted acme/widgets (write) through acme-github-app — grant grant_7f3a…, until 2026-10-13 09:14.
+Granted your Claude credential alice-claude to its sandbox.
+Dashboard: https://cloop.example.com/?project=%2Fvar%2Flib%2Fcloop%2Fprojects%2Fwidgets
+Started widgets. Follow it with: cloop remote logs widgets --follow
+```
+
+What it does, in order:
+
+1. **Reads the checkout's origin** — `git@github.com:acme/widgets.git`,
+   `https://github.com/acme/widgets`, an `ssh://` URL or GitHub's ssh-over-443
+   host all name `acme/widgets` — and adds every `--repo owner/name`. A remote
+   that is not on GitHub is refused (name the GitHub repositories with
+   `--repo`), and so is one that carries a credential, such as
+   `https://<token>@github.com/…`: take the token out of the remote and revoke
+   it. Nothing prints it.
+2. **Checks what it can before anything exists**: that `--executor` is one an
+   administrator has made available to you (`cloop remote executors` lists
+   exactly those), that every secret named with `--grant` exists, and that some
+   GitHub credential could reach the repositories. A mistake here costs nothing.
+3. **Creates the project** under the hub's projects root as `--name` (default:
+   the repository's name) — `ui.projects_root`, by default `projects/` in the
+   hub's home — bound to the executor and holding the `--grant` credentials you
+   may grant, in one request that is applied whole or not at all. A directory
+   that already holds a project is refused rather than initialised again, so
+   running `init` twice never wipes the first project.
+4. **Attaches the repositories** through a GitHub App installation the hub holds
+   — yours first, then the organisation's where you may grant it, each asked
+   which repositories it actually reaches — or a GitHub token of yours that the
+   hub's [git proxy](../git-interception-proxy.md) guards. `--repo-secret`
+   chooses one. Access is read-only unless `--access write`; `--branch` limits
+   where pushes may go.
+5. **Asks for what you may not grant yourself.** A credential that needs an
+   approver is requested instead, with `--justification` (default: the goal) as
+   the reason, and `init` prints the request's id and who can approve it.
+6. **Settles the Claude credential** a sandboxed run signs in with: on an
+   executor that isolates, your one complete personal credential is granted for
+   you, or name it with `--claude-secret`.
+7. **Prints the project's dashboard link** — `/?project=<path>` opens it, after
+   signing in if the browser is not — and with `--run` starts its first run.
+
+`--grant` gives the project any other stored credential, narrowed as its kind
+needs: `--grant staging-cluster,namespace=payments,namespace=staging`,
+`--grant shared-proxy,host=api.example.com`, `--grant npm,registry=npm.example.com`
+— repeat a key for several values; `ttl=` and `scope=` apply to any kind.
+
+`init` exits non-zero when the project was created but something it needs is
+missing — a repository no credential reaches, a run that could not start
+because a request still waits for its approver — and says which, with the
+command that adds it. With `--json` it prints everything it did as one object.
+
+The rest of what the dashboard does around a project has a command too:
+
+```console
+$ cloop remote executors                                   # where your projects may run
+$ cloop remote repos list widgets                          # what it reaches, and through what
+$ cloop remote repos add widgets acme/widgets-docs --access write
+$ cloop remote repos remove widgets acme/widgets-docs      # narrows or revokes the grant
+$ cloop remote grants request acme-github-app --project widgets --repo acme/infra \
+      --justification "Terraform for the rate limiter (API-412)"
+Requested acme-github-app (repos=acme/infra perms=contents:read) for project:/var/lib/cloop/projects/widgets — request req_9b1f…, waiting for an approver until 2026-10-19 09:14.
+  Who can approve it: root@example.com (admin); members of group platform (admin); members of group leads (maintainer).
+  Take it back with: cloop remote grants withdraw req_9b1f…
+$ cloop remote grants list                                 # your requests, and who can approve the pending ones
+$ cloop remote features start widgets "Rate limiting" --task "Token bucket" --task "429 with Retry-After"
+$ cloop remote features list widgets
+$ cloop remote features pr widgets rate-limiting           # push its branch and open the pull request
+```
+
+Every one of them takes `--json`, and each is the dashboard's own call made with
+your session, so the hub refuses it exactly when it would refuse the button. A
+refusal says what was needed and how to get it, rather than handing you the
+hub's JSON:
+
+```console
+$ cloop remote init --goal "Ship widgets"
+Error: your role does not permit this action (HTTP 403, FORBIDDEN)
+  needs:      project.write (hub-wide)
+  your role:  viewer (hub-wide)
+  to get it:  ask an administrator of this hub to map your account to the maintainer role (Settings → Single sign-on → role mappings)
+```
+
+Who may do what is the role ladder in the [security model](../security/model.md):
+creating a project and attaching repositories is a maintainer's; choosing the
+executor is an administrator's (`executor.manage`) — without it, leave out
+`--executor` and the project runs on the hub's default; asking for a credential
+is an operator's.
+
 ## Sharing a Kubernetes cluster
 
 If your cluster signs you in through a credential plugin — `kubelogin` on AKS,
@@ -253,6 +352,9 @@ credential: not `login`, not `whoami`, not an error about the file.
 | `x509: certificate signed by unknown authority` | The hub's certificate is from a private CA: `cloop login <hub> --ca-file ca.pem`. |
 | `warning: … is plain http to another machine` | The session credential would cross the network unencrypted. Use the hub's `https://` URL. |
 | `This kubeconfig cannot be stored: user … signs in through …` (the dashboard) | The kubeconfig runs a credential plugin. Share the cluster from here instead: [`cloop remote kube share`](#sharing-a-kubernetes-cluster) |
+| `a cloop project already exists at …` (from `cloop remote init`) | A project with that name is already on the hub — perhaps from an earlier `init`. Open it (`cloop remote projects`), or create this one with `--name`. |
+| `… predates creating a project by name` | The hub is older than `cloop remote init`. Say where on the hub the project goes with `--dir <path>`, or upgrade the hub. |
+| `executor "…" is restricted and your account is not on its access list` | An administrator has limited who may use that executor. Ask one to admit you, or choose one `cloop remote executors` lists. |
 | `answered with a sign-in code this terminal will not show` | The approval page the hub named is not an `http(s)://` URL, or the answer carried control characters. `cloop login` neither prints nor opens it — handed to the desktop, another scheme can start any program registered for it. Check the URL is a cloop hub's. |
 | `note: this hub keeps no refresh grant for the session` | The hub has no `CLOOP_SECRET_KEY`, or the provider issued no refresh token. Your roles are as of the approval, and actions above operator need a fresh `cloop login` once that is older than `max_claim_age_minutes`. |
 | The approval page says *not approved: you signed in at the identity provider as a different account* | The provider answered for another account than the one signed in to the dashboard. Nothing was approved; sign in to the provider as yourself and approve again. |
