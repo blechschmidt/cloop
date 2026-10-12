@@ -1152,7 +1152,7 @@ cloop remote init --goal "…" --repo acme/api-docs --grant staging-cluster,name
 | `--access` | `read` | `read`, or `write` (push branches and open pull requests) |
 | `--branch` | — | With `--access write`, limit pushes to these branches (globs) |
 | `--name` | the repository's name | The project's name and its directory under the hub's projects root (`ui.projects_root`) |
-| `--dir` | — | The project's directory on the hub, instead of `--name` |
+| `--dir` | — | The project's directory on the hub, instead of `--name`; inside the hub's projects root unless you hold `executor.manage` |
 | `--provider`, `--model`, `--effort` | the hub's | As the New Project dialog's |
 | `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox signs in to Claude with, on an executor that isolates |
 | `--justification` | the goal | The reason given for any credential requested from an approver |

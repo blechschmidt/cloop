@@ -2057,12 +2057,39 @@ ui:
 Unset, it is `projects/` in the home directory of the user the hub runs as —
 `/var/lib/cloop/projects` in the packaged image, whose `HOME` is its state volume.
 A name is one path segment of letters, digits, dots, hyphens and underscores,
-starting with a letter or digit; the dashboard's New Project dialog, which takes a
-directory, is unaffected. Either way, a directory that already holds a project is
-refused with `409 CONFLICT` rather than initialised again: `cloop init` overwrites
-the state it finds, so a second creation at the same place — a re-run of
-`cloop remote init`, or a path whose project the caller cannot see — would wipe it.
-A relative `projects_root` is refused at use, naming the setting.
+starting with a letter or digit. A relative `projects_root` is refused at use,
+naming the setting.
+
+The root is also where projects are confined (Task 20418). A project's directory
+is what every sandbox it runs in is bound to, read-write, so:
+
+- **Anyone without `executor.manage`** — maintainers creating in the dashboard's
+  New Project dialog, `cloop remote init --dir` — may create a project only
+  strictly inside the root, in no hidden directory. Outside it the answer is
+  `403 FORBIDDEN` naming `executor.manage` and the root; by name the question
+  never arises.
+- **Nobody** may create a project at the root itself or at a directory that
+  contains it; at, inside or above the hub's own directory or another hub's
+  (one holding `.cloop/hub.env`; at or above a running `cloop ui`'s);
+  overlapping another project; or anywhere the older rules refuse (system trees, `/`, top-level
+  directories, the hub user's home). The exception is a root you put inside the
+  hub's own directory, as the packaged image does: projects inside such a root
+  are fine. Symbolic links are resolved before any of this is decided.
+- A directory that already holds a project is not initialised again — `cloop
+  init` overwrites the state it finds. To anyone but an administrator or someone
+  who can see that project, that refusal is the same `409 CONFLICT`, in the same
+  words, as every other refusal that depends on what is on the host, so creating
+  projects cannot be used to find out what exists where.
+- `?delete_root=true` on a project's removal deletes its directory only when this
+  hub made that directory itself, inside the root; an adopted one — a checkout
+  that existed first, a path an operator registered — is refused with `409` and
+  stays, with its project.
+
+Projects registered before these rules, or named on `cloop ui --projects`, are
+listed but flagged on the Projects tab, refused at every run, and failed by `cloop
+hub doctor` (`projects.confinement`) until an administrator moves or removes
+them — nothing is moved or deleted for you. See
+[which directory a project may be](../architecture/executors.md#which-directory-a-project-may-be).
 
 ### SCIM provisioning (`ui.oidc.scim`)
 

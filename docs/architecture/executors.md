@@ -843,6 +843,68 @@ clamp or no clamp — it exists for the project that asked for nothing. How the
 container driver measures, and what a stop records, is in
 [`resources.disk` and the workspace](../reference/sandbox.md#resourcesdisk-and-the-workspace).
 
+### Which directory a project may be
+
+A project's directory is the one host path every sandbox it runs in is given:
+the container driver bind-mounts it read-write at `/workspace`, the host driver
+forks the harness in it, and `?delete_root=true` removes it. Which directory a
+project may be is therefore the same question as what model-authored code may
+read and write on the hub's host, and one predicate answers it everywhere
+(`pkg/projectconfine`, Task 20418).
+
+It decides on the directory the kernel would create, not the string that was
+sent: absolute, lexically cleaned (`..`, `.`, a trailing slash), with the
+symbolic links of the deepest existing ancestor resolved — so a link under the
+projects root that points at the hub is followed before any rule is applied.
+Then, for every caller:
+
+- not a system tree, not `/`, not a bare top-level directory, not the hub
+  user's home or anything containing it, nothing inside a `.cloop`;
+- not `ui.projects_root` and not a directory containing it — the root holds
+  every project created by name;
+- not equal to, inside or above the hub's own directory (its control plane),
+  with two exceptions: the hub's own entry, which is the operator's directory
+  rather than something registered through the API, and a directory inside a
+  projects root the operator put inside the hub's directory — the packaged
+  image's layout, where `HOME`, the control plane and the default root are all
+  under `/var/lib/cloop`;
+- not equal to, inside or above any other directory holding a hub's control
+  plane — one with `.cloop/hub.env` above the candidate or up to eight levels
+  below it (a tree too broad to search is refused as unverifiable) — and
+  neither equal to nor above the working directory of a `cloop ui` running on
+  the host, which need not keep a `hub.env`;
+- not overlapping another registered project, in either direction, and not one.
+  Features live in their project's `.cloop/features` and are never registry rows,
+  so a feature is judged as its project;
+- not a project whose `.cloop` is a link out of its directory.
+
+And for a caller without `executor.manage` — the administrator's permission over
+which machines run work, which this is the same kind of decision as — strictly
+inside `ui.projects_root`, with no hidden directory on the way.
+
+Where it is applied:
+
+| Where | What happens to a directory that breaks it |
+| --- | --- |
+| `POST /api/projects/new` (the dashboard, `cloop remote init`) | refused before anything exists. Host-dependent refusals — a project there the caller cannot see, the hub's directory, another hub's, a creation holding the path — are one identical `409` to anyone but an administrator; a path outside the root is a `403` naming `executor.manage` and the root |
+| the registry write ending a creation (`multiui.AdmitOwned`) | checked again under the registry's lock, so an operator's row added meanwhile cannot slip between |
+| `cloop ui --projects` / `--scan` | registered as given, with a warning per directory: the operator owns the host |
+| every dispatch (`startWorkloadAs`, `runWorkloadEnvFor`, a reproduction) and the run routes, before any other gate | `409 project_unconfined` naming the overlap — but never another tenant's path — before a lease is minted or anything is bound |
+| the container and host drivers (`projectconfine.Backstop`) | refuse a work directory that contains the hub's directory, or sits in its `.cloop` or another hub's, whoever dispatched it; `reconcile.Options.ControlPlaneDir` and `localprocess.Executor.SetControlPlaneDir` hand them the hub's directory |
+| the Projects tab | the row is listed — the list is the index space every project route addresses — with a line saying the hub will not run it |
+| `cloop hub doctor` | `projects.confinement` fails, listing every row with what it overlaps; nothing is moved or deleted |
+| a project's own state | an `active_session` that is not a plain name under `.cloop/sessions`, or a stored `workdir` naming another directory, is ignored: the hub reads and writes the registered directory |
+
+A creation also claims its directory in the control plane before it makes it
+(`project_claims`, migration 0068): the claim is refused while a live claim is
+the same path, inside it or above it, so two requests for one path — or for a
+path and its parent — cannot both run `cloop init`. The claim records whether
+the hub made the directory itself, inside the projects root; that record is the
+only thing that lets `?delete_root=true` remove a directory, and a deletion
+re-checks that it is still that directory and still overlaps nothing. Creations,
+their refusals and deletions are audited as `project.create` and
+`project.delete` in the control plane's chain.
+
 ---
 
 ## Placement
@@ -2843,6 +2905,20 @@ FromConfig
   │    └─ pruneWorktrees  → collect leaked worktrees, sparing those task IDs
   └─ StartPeriodicSweep   → and again every 15m, for the orphans a restart never sees
 ```
+
+The worktree pass runs `git` in repositories a sandbox can write, from the
+hub's own process, so its git runs the way every git cloop runs outside the
+sandbox that wrote a repository does (Task 20418): `executor.GitEnv`'s closed
+environment — nothing of the hub's, its secrets included — carrying
+`executor.HardenedGitConfig` (no hooks, fsmonitor, filters or signing), `.git`
+pinned to the project's own directory and any redirect (`commondir`,
+alternates) refused rather than followed, under a two-minute deadline with
+`gitprovision.BoundChild` killing the whole process group. The orchestrator's
+own worktree commands, which run as the task inside its sandbox, keep the
+repository's configuration. `tests/security` treats `reconcile` as audited code
+rather than a driver, and its call-graph gate follows the hub's background entry
+points — construction, `Run`, `Start` — as well as its handlers; the sweep's git
+is one of three listed doors (`sanctionedHostDoors`).
 
 ### The periodic sweep
 

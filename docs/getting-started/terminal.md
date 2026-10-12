@@ -204,7 +204,11 @@ What it does, in order:
    hub's home — bound to the executor and holding the `--grant` credentials you
    may grant, in one request that is applied whole or not at all. A directory
    that already holds a project is refused rather than initialised again, so
-   running `init` twice never wipes the first project.
+   running `init` twice never wipes the first project. `--dir <path>` names the
+   directory instead, and unless you administer the hub it has to be inside the
+   projects root too: a project's directory is what its sandboxes are given, so
+   only an administrator places one anywhere else, and nobody places one over the
+   hub's own directory, another project, or the root itself.
 4. **Attaches the repositories** through a GitHub App installation the hub holds
    — yours first, then the organisation's where you may grant it, each asked
    which repositories it actually reaches — or a GitHub token of yours that the
@@ -353,6 +357,9 @@ credential: not `login`, not `whoami`, not an error about the file.
 | `warning: … is plain http to another machine` | The session credential would cross the network unencrypted. Use the hub's `https://` URL. |
 | `This kubeconfig cannot be stored: user … signs in through …` (the dashboard) | The kubeconfig runs a credential plugin. Share the cluster from here instead: [`cloop remote kube share`](#sharing-a-kubernetes-cluster) |
 | `a cloop project already exists at …` (from `cloop remote init`) | A project with that name is already on the hub — perhaps from an earlier `init`. Open it (`cloop remote projects`), or create this one with `--name`. |
+| `… cannot hold a new project: the directory is in use or protected by this hub` | The directory is taken or overlaps something the hub protects — a project you cannot see, the hub's own directory, another creation in progress. The hub deliberately does not say which. Choose another `--name`. |
+| `only an administrator places a project outside the hub's projects root` | `--dir` named a directory outside `ui.projects_root`. Leave out `--dir` to create the project by name inside the root, or give a `--dir` inside it. |
+| `… is the hub's projects root` / `… contains the hub's projects root` | A project goes inside the root, never at it or above it. |
 | `… predates creating a project by name` | The hub is older than `cloop remote init`. Say where on the hub the project goes with `--dir <path>`, or upgrade the hub. |
 | `executor "…" is restricted and your account is not on its access list` | An administrator has limited who may use that executor. Ask one to admit you, or choose one `cloop remote executors` lists. |
 | `answered with a sign-in code this terminal will not show` | The approval page the hub named is not an `http(s)://` URL, or the answer carried control characters. `cloop login` neither prints nor opens it — handed to the desktop, another scheme can start any program registered for it. Check the URL is a cloop hub's. |

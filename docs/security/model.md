@@ -155,6 +155,16 @@ network may *reach* is a kernel ruleset on the host, installed on the sandbox
 bridge before any container can join it. See
 [the network the sandbox sits on](#the-network-the-sandbox-sits-on).
 
+Neither is the choice of the one host mount. *Which* directory is "the project
+directory" is decided before the argv exists, by the hub, against one invariant
+(Task 20418): never the projects root or above it, never at, inside or above
+the hub's own directory or another hub's, never overlapping another project,
+and inside `ui.projects_root` for anyone without `executor.manage`. Creation
+refuses a directory that breaks it, every dispatch re-checks it before a lease
+is minted, and the driver refuses a work directory containing the hub's own
+directory by itself. See
+[which directory a project may be](../architecture/executors.md#which-directory-a-project-may-be).
+
 ### ④ Hub ↔ Kubernetes cluster
 
 Credentials arrive as a [brokered kubeconfig lease](../guides/secrets.md#kubeconfig)
@@ -527,6 +537,15 @@ and the home is still removed, and with host execution allowed the same request
 does run it — so the proof cannot pass because the step never ran. Because the
 check is in the step, it also covers the dashboard's own offboarding, which
 reaches the step through an interface the reference graph does not follow.
+
+The hub also runs code no request asked for: its startup reconciliation, the
+fifteen-minute sweep, its watchers and its cluster bus. The same gate follows
+those from the hub's construction, `Run` and `Start` (Task 20418), with
+`pkg/executor/reconcile` audited rather than treated as a driver, and stops only
+at three doors, each with its reason and proof (`sanctionedHostDoors`): the
+worktree sweep's git and its repository probe, which run with a closed
+environment and `executor.HardenedGitConfig` under a deadline, and the cluster
+bus's half of offboarding, which is the gated step above.
 
 ### Git the hub runs for a feature
 
@@ -3402,6 +3421,9 @@ what it is looking for.
 | The gated-endpoint list and the gated-call-graph list cannot drift apart | `TestGatedListsAgree` |
 | A handler that touches the host in one step of an operation that must not be refused spawns nothing under strict mode, through the real handler, and does spawn it otherwise | `TestGatedStepsRunNothingUnderStrictMode` |
 | Every gated step has its proof, and every proof its exemption | `TestGatedStepListsAgree` |
+| The hub's background entry points — construction, `Run`, `Start`, and the sweeps and watchers they start — reach no process outside the executor boundary except through a listed door, and `reconcile` is audited rather than treated as a driver | `TestNoHandlerReachesProcessExecution` |
+| The background analysis finds a seeded spawn, stops at a door, and reaches the worktree sweep through `reconcile` | `TestBackgroundAnalysisDetectsASeededViolation` |
+| The background worktree sweep runs no hook, monitor or filter a repository configures, and hands git none of the hub's environment | `TestBackgroundSweepRunsNoRepositoryProgram` |
 
 ### Release provenance — `pkg/provenance`, `pkg/upgrade`, `pkg/executor/install`
 
