@@ -144,29 +144,35 @@ func stopExecutorSupervisor() {
 // ------------------------------------------------------------ session records
 
 // openSessionFor records a dispatched workload as in flight and returns its
-// session ID, or "" when session tracking is unavailable.
+// session ID — "" with no error when there is no control plane to record it in
+// (a Server built as a struct literal, a test).
 //
-// Session tracking is best-effort by design. If the control plane's database
-// cannot be written, the correct outcome is a run that starts and cannot be
-// failed over — not a run that refuses to start. Losing failover for one
-// workload is a worse-but-working system; refusing to dispatch is an outage.
-func openSessionFor(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec) string {
+// A session that cannot be written is an error (Task 20419). It used to be
+// best-effort, on the reasoning that a run which cannot be failed over is a
+// worse-but-working system; but such a run is not only beyond failover — no
+// member adopts it and nothing takes its credentials back after its member
+// dies — so the dispatch is refused, its workload stopped and its lease
+// released, and the storage error is what the run fails with.
+func openSessionFor(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec) (string, error) {
 	if dir == "" || ex == nil {
-		return ""
+		return "", nil
 	}
 	sched, db, err := newScheduler(dir)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("record the executor session: %w", err)
 	}
 	defer db.Close()
+	if testDispatchRecordHook != nil {
+		testDispatchRecordHook(db)
+	}
 
 	sessionID, err := executorstore.NewSessionID()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("record the executor session: %w", err)
 	}
 	token, err := executorstore.NewClaimToken()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("record the executor session: %w", err)
 	}
 	sess := executor.Session{
 		ID:          sessionID,
@@ -179,10 +185,9 @@ func openSessionFor(dir string, ex executor.Executor, handle executor.Handle, sp
 		Spec:        spec,
 	}
 	if err := sched.OpenSession(sess); err != nil {
-		fmt.Fprintf(os.Stderr, "ui: record executor session: %v\n", err)
-		return ""
+		return "", fmt.Errorf("record the executor session: %w", err)
 	}
-	return sessionID
+	return sessionID, nil
 }
 
 // closeSession marks a session terminal once its workload finishes.

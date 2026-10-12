@@ -119,7 +119,7 @@ func ciPresentedToken(r *http.Request) string {
 // is a live cluster member. A variable so tests can stand in for a cluster.
 var ciHolderAlive = func(holder string) bool {
 	n := currentCluster()
-	return n != nil && n.IsAlive(holder)
+	return n != nil && n.Serving(holder)
 }
 
 // ciRestoreFlights makes the restores of one session single-flight in this

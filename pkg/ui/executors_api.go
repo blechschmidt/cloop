@@ -1857,6 +1857,14 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		writeExecutorBlocked(w, "executor_unsupported", err.Error(), "")
 		return
 	}
+	// The dispatch could not be recorded (Task 20419): the hub's storage
+	// refused the write, and the run was refused — its workload stopped, its
+	// lease released — rather than left unsupervised. 503: the request was
+	// fine, and the same one succeeds once the control plane can be written.
+	if errors.Is(err, errDispatchUnrecorded) {
+		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	jsonErr(w, err.Error(), http.StatusInternalServerError)
 }
 

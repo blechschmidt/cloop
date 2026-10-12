@@ -478,6 +478,8 @@ func leaseExtensionIsFinal(err error) bool {
 		secretbroker.ErrLeaseExpired,
 		secretbroker.ErrInvalidGrant,
 		secretbroker.ErrLeaseMoved,
+		// Revoked on record (Task 20419): the janitor takes it back.
+		secretbroker.ErrLeaseRevoked,
 	} {
 		if errors.Is(err, final) {
 			return true

@@ -301,7 +301,13 @@ func (s *Server) followReplacement(workDir string, ev executor.FailoverEvent, ex
 	s.liveLogSetRunning(workDir, true)
 	s.broadcastLog(workDir, fmt.Sprintf("\n[cloop] executor %s stopped answering; the run failed over to %s (attempt %d)\n\n",
 		ev.From, ex.ID(), ev.Session.Attempt+1))
-	s.recordRunDispatch(workDir, "failover", ex, handle.ID)
+	// Logged rather than refused: the owner row was taken over above, and
+	// names the replacement already unless that failed too — in which case
+	// the replacement's dispatch intent stays, and a member that finds this
+	// one gone stops it rather than leave it unsupervised (Task 20419).
+	if err := s.recordRunDispatch(workDir, "failover", ex, handle.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: record the replacement run of %s: %v\n", workDir, err)
+	}
 	s.broadcastRunState(workDir, true, true)
 	s.publishRunState(workDir, true)
 
@@ -444,26 +450,29 @@ func asReplacementFor(target executor.Executor, replaces executor.Session) dispa
 }
 
 // openReplacementSession records a replacement's session as the next attempt
-// of prev's chain. Best-effort like openSessionFor, but loudly: a replacement
-// whose session is not recorded is one the cap no longer counts, and one a
-// later failover cannot find.
-func openReplacementSession(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec, prev executor.Session) string {
+// of prev's chain. A replacement whose session is not recorded is one the cap
+// no longer counts, and one a later failover cannot find — so, as for any
+// dispatch (openSessionFor, Task 20419), a session that cannot be written is
+// an error, and the replacement is refused.
+func openReplacementSession(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec, prev executor.Session) (string, error) {
 	if dir == "" || ex == nil {
-		return ""
+		return "", nil
 	}
 	sched, db, err := newScheduler(dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ui: record the replacement of session %s: %v\n", prev.ID, err)
-		return ""
+		return "", fmt.Errorf("record the replacement of session %s: %w", prev.ID, err)
 	}
 	defer db.Close()
+	if testDispatchRecordHook != nil {
+		testDispatchRecordHook(db)
+	}
 	sessionID, err := executorstore.NewSessionID()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("record the replacement of session %s: %w", prev.ID, err)
 	}
 	token, err := executorstore.NewClaimToken()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("record the replacement of session %s: %w", prev.ID, err)
 	}
 	next := executor.Session{
 		ID:          sessionID,
@@ -477,10 +486,9 @@ func openReplacementSession(dir string, ex executor.Executor, handle executor.Ha
 		Spec:        spec,
 	}
 	if err := sched.OpenRequeuedSession(next, prev.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "ui: record the replacement of session %s: %v\n", prev.ID, err)
-		return ""
+		return "", fmt.Errorf("record the replacement of session %s: %w", prev.ID, err)
 	}
-	return sessionID
+	return sessionID, nil
 }
 
 // ── the stranded run ────────────────────────────────────────────────────────

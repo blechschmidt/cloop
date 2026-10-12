@@ -430,7 +430,9 @@ func followTestRun(t *testing.T, s *Server, dir string, ex executor.Executor, h 
 	s.liveLogStartRun(dir)
 	streamCtx, cancel := context.WithCancel(context.Background())
 	s.trackRunWithCancel(dir, ex, h.ID, cancel)
-	s.recordRunDispatch(dir, "run", ex, h.ID)
+	if err := s.recordRunDispatch(dir, "run", ex, h.ID); err != nil {
+		t.Fatalf("record the run: %v", err)
+	}
 	s.broadcastRunState(dir, true, true)
 	s.publishRunState(dir, true)
 	lines, err := ex.Stream(streamCtx, h.ID)

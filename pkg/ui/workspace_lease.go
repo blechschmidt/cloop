@@ -181,6 +181,14 @@ func (s *Server) takeOverWorkspaceLease(workDir string, ex executor.Executor, ha
 	sl, err := restoreSecretLease(controlPlaneDir(), workDir, ws.Lease)
 	switch {
 	case err == nil:
+	case errors.Is(err, secretbroker.ErrLeaseRevoked):
+		// Revoked while no hub process held it (Task 20419). As for a
+		// refusal below, nothing of it is on the device: the record goes, the
+		// pinned session is not restored, and the revocation is enforced.
+		retireLeaseRecord(ws.Lease, "revoked while no hub process held it")
+		settleRevocationsOfLease(ws.Lease, "the hub process that adopted its run did not restore its session")
+		s.broadcastSecretsUpdate("lease_revoked", ws.Lease)
+		return
 	case leaseRefusedForGood(err):
 		// Nothing of it is on the device — its session token is the device's,
 		// and the session is not restored — so there is nothing to scrub:

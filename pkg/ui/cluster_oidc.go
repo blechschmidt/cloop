@@ -117,7 +117,7 @@ func (s *Server) routeOIDCCallback(w http.ResponseWriter, r *http.Request) bool 
 		return false
 	}
 	m, ok := n.Member(owner)
-	if !ok || !m.Alive {
+	if !ok || !m.Alive || !n.Responsive(owner) {
 		// The member that began this login is gone, and its nonce and
 		// verifier with it. Answering here produces the ordinary "this
 		// sign-in attempt has expired" page, which is the truth.

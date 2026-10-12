@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ func (s *Server) mergePeerRevocations(ctx context.Context, out *leaseRevocation,
 		// A member that could not be asked may hold a copy. Reported as an
 		// unreachable holder, which aggregateState ranks worst: the operator
 		// must not read "revoked" off a revocation that skipped a member.
+		out.unasked = append(out.unasked, member)
 		out.Remote = append(out.Remote, remote.RevokeResult{
 			LeaseID:    leaseID,
 			GrantID:    grantID,
@@ -164,7 +166,16 @@ const (
 )
 
 // revokeLeasesOnAgentOwner hands a cordon's lease revocation to the member
-// holding executorID's session, and reports whether it did.
+// holding executorID's session, and reports whether the revocation was taken
+// care of — handed over, or, when that member could not be asked, recorded and
+// revoked from here.
+//
+// A member that cannot be asked may be dead and not yet judged so (Task
+// 20419). Logging that and stopping, as this did, left the agent holding every
+// credential the cordon was meant to take back, with nothing recording that it
+// had been asked to: the member that adopted the agent's runs then took their
+// leases over. Each lease recorded as issued to the agent is recorded revoked
+// instead, and revoked everywhere this member can reach.
 func (s *Server) revokeLeasesOnAgentOwner(executorID, reason, actor string) bool {
 	n := s.clusterNode()
 	if n == nil {
@@ -183,9 +194,34 @@ func (s *Server) revokeLeasesOnAgentOwner(executorID, reason, actor string) bool
 	if err := n.Call(ctx, o.Member, http.MethodPost, clusterAPIAgentOp, clusterAgentOp{
 		Op: agentOpRevokeLeases, Agent: executorID, Reason: reason, Actor: actor,
 	}, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "ui: revoke leases of %s on hub member %s: %v\n", executorID, o.InstanceID, err)
+		fmt.Fprintf(os.Stderr, "ui: revoke leases of %s on hub member %s failed (%v); recording each of its "+
+			"leases revoked and revoking them from here\n", executorID, o.InstanceID, err)
+		s.revokeRecordedLeasesOf(ctx, executorID, fmt.Sprintf("%s (hub member %s, which holds the agent's "+
+			"connection, could not be asked: %v)", reason, o.InstanceID, err), actor, nil)
 	}
 	return true
+}
+
+// revokeRecordedLeasesOf records revoked, and revokes everywhere this member
+// can reach, every lease recorded as issued to executorID — and also, the
+// leases in also that are not — with a scrub (Task 20419).
+func (s *Server) revokeRecordedLeasesOf(ctx context.Context, executorID, reason, actor string, also []string) int {
+	leases := append([]string(nil), also...)
+	for _, id := range recordedLeasesOf(executorID) {
+		if !slices.Contains(leases, id) {
+			leases = append(leases, id)
+		}
+	}
+	for _, leaseID := range leases {
+		// Scrub, not kill: see revokeLeasesForExecutor.
+		rec := s.recordLeaseRevocation(leaseID, "", remote.RevokeScrub, reason, actor)
+		out := s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeScrub, actor)
+		s.concludeRevocation(rec, &out)
+	}
+	if len(leases) > 0 {
+		s.broadcastSecretsUpdate("leases_revoked", executorID)
+	}
+	return len(leases)
 }
 
 // handleClusterAgentOp performs an agent operation another member routed here.

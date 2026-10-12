@@ -67,17 +67,36 @@ type leaseRevocation struct {
 	// "unreachable", and an operator reading the panel should not have to
 	// work out which of the two a row came from.
 	Local []executor.RevokeOutcome `json:"local,omitempty"`
+	// Pending are the holders nothing could reach yet (Task 20419): the
+	// workload of a lease whose holder member stopped before it could be
+	// told. The revocation is recorded, and takes effect when that member's
+	// run is reached — adopted, or its workload rehydrated by the member that
+	// can reach it. Counted in State, so a revocation that reached nobody is
+	// never reported as done.
+	Pending []executor.RevokeOutcome `json:"pending,omitempty"`
 	// State is the weakest state across every holder, because a revocation
 	// is only as strong as the credential copy it failed to reach.
 	State remote.RevokeState `json:"state"`
+	// unasked are the hub members the fan-out could not ask, which Remote
+	// reports unreachable. A revocation on record reports them pending
+	// instead (concludeRevocation): the record binds them all the same.
+	unasked []string
 }
 
-// holders returns every outcome, remote and local, for aggregation.
+// holders returns every outcome — remote, local and pending — for
+// aggregation.
 func (lr leaseRevocation) holders() []executor.RevokeOutcome {
-	out := make([]executor.RevokeOutcome, 0, len(lr.Remote)+len(lr.Local))
+	out := make([]executor.RevokeOutcome, 0, len(lr.Remote)+len(lr.Local)+len(lr.Pending))
 	out = append(out, lr.Remote...)
 	out = append(out, lr.Local...)
+	out = append(out, lr.Pending...)
 	return out
+}
+
+// reached reports whether the revocation found any holder — this process's
+// own copy, or a workload that answered for the lease, whatever it answered.
+func (lr leaseRevocation) reached() bool {
+	return lr.WipedLocally || len(lr.Remote) > 0 || len(lr.Local) > 0
 }
 
 // aggregateState folds per-executor results into the one state the UI shows.
@@ -128,9 +147,30 @@ func (s *Server) revokeLeaseEverywhere(ctx context.Context, leaseID, grantID, re
 }
 
 // revokeLeaseHere is revokeLeaseEverywhere confined to this hub process: its
-// own copy, the agents connected to it, and its local drivers.
+// own copy, the agents connected to it, and its local drivers — and, on the
+// member that adopts what a dead member left (Task 20419), the workloads that
+// member left holding the lease, brought within reach first.
 func (s *Server) revokeLeaseHere(ctx context.Context, leaseID, grantID, reason string, action remote.RevokeAction, actor string) leaseRevocation {
+	return s.revokeLeaseHereReaching(ctx, leaseID, grantID, reason, action, actor, true)
+}
+
+// revokeLeaseHereReaching is revokeLeaseHere; reach false skips bringing a
+// dead member's workloads within reach, for the caller that is itself the
+// reach — a member enforcing a revocation on the run it is adopting.
+func (s *Server) revokeLeaseHereReaching(ctx context.Context, leaseID, grantID, reason string, action remote.RevokeAction, actor string, reach bool) leaseRevocation {
 	out := leaseRevocation{}
+	var answered map[string]bool
+	if reach {
+		// A dead member's container, Pod or host process holding the lease is
+		// no driver's here until it is adopted, and adoption waits for the
+		// next sweep — or for ever, for a run no member can adopt. Brought
+		// within reach now, so the drivers asked below answer for it — and
+		// what adopting the run took back already is this revocation's too.
+		s.reachOrphanedHolders(leaseID)
+		if prior, ok := adoptionEnforcements.take(leaseID); ok {
+			answered = mergeTakenBack(&out, prior)
+		}
+	}
 
 	// One grant of a lease that keeps others gives back only that grant's
 	// share of the hub's copy (Task 20403); the lease, its keepalive and its
@@ -192,10 +232,18 @@ func (s *Server) revokeLeaseHere(ctx context.Context, leaseID, grantID, reason s
 	} else {
 		s.auditRevokeSent(actor, leaseID, grantID, executorID, projectID, reason, action, secretNames,
 			hub.LeaseHolders(leaseID))
-		out.Remote = hub.RevokeLease(fanCtx, req)
+		for _, res := range hub.RevokeLease(fanCtx, req) {
+			if !answered[res.ExecutorID] {
+				out.Remote = append(out.Remote, res)
+			}
+		}
 	}
 
-	out.Local = s.revokeOnLocalDrivers(fanCtx, req)
+	for _, res := range s.revokeOnLocalDrivers(fanCtx, req) {
+		if !answered[res.ExecutorID] {
+			out.Local = append(out.Local, res)
+		}
+	}
 	out.State = aggregateState(out.holders(), out.WipedLocally)
 
 	for _, res := range out.holders() {
@@ -380,6 +428,10 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 	// back from the lease that carries it, which then goes on — rather than
 	// lapsing below with every other grant it carries.
 	s.reconcileWithdrawnGrants(ctx)
+	// And the revocations on record that this member has not enforced (Task
+	// 20419): of a lease it holds that the revocation's fan-out did not reach,
+	// and — on the leader — of one whose holder is gone.
+	s.reconcileRecordedRevocations(ctx, now)
 
 	var out []remote.ExpiredLease
 	for _, sl := range liveLeases.snapshot() {
@@ -427,6 +479,10 @@ func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 // staged files, a Pod's lease Secret (Task 20403).
 func (s *Server) revokeLapsedLeaseLocally(ctx context.Context, leaseID, reason string) leaseRevocation {
 	out := leaseRevocation{}
+	// A lapsed lease whose holder died is held by a workload no driver here
+	// tracks yet (Task 20419); brought within reach before the drivers are
+	// asked, as for a revocation.
+	s.reachOrphanedHolders(leaseID)
 	_, out.WipedLocally = liveLeases.revoke(leaseID)
 	s.auditRevokeSent("janitor", leaseID, "", "", "", reason, remote.RevokeScrub, nil, nil)
 	out.Local = s.revokeOnLocalDrivers(ctx, remote.RevokePayload{
@@ -459,31 +515,32 @@ func (s *Server) revokeLeasesForExecutor(executorID, reason, actor string) {
 		if s.revokeLeasesOnAgentOwner(executorID, reason, actor) {
 			return
 		}
-		hub, err := s.remoteHub()
-		if err != nil || hub == nil {
+		// Only an edge agent's leases: a cordon of an executor on this hub —
+		// a container runtime, a cluster — leaves its workloads their
+		// credentials, as it always has, because scrubbing a container's
+		// environment can only be done by killing it.
+		if s.agentForExecutorID(executorID) == "" {
 			return
 		}
-		ex, ok := hub.Executor(executorID)
-		if !ok {
-			return
-		}
-		leases := ex.Leases()
-		if len(leases) == 0 {
-			return
+		var leases []string
+		if hub, err := s.remoteHub(); err == nil && hub != nil {
+			if ex, ok := hub.Executor(executorID); ok {
+				leases = ex.Leases()
+			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
 		defer cancel()
-		for _, leaseID := range leases {
-			// Scrub, not kill. Cordoning is "stop giving this machine new
-			// work", and draining explicitly waits for in-flight work to
-			// finish — killing those tasks to reclaim a credential would
-			// contradict the operation the operator asked for. An operator
-			// who does want the tasks stopped has the lease panel's kill
-			// action.
-			s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeScrub, actor)
-		}
-		s.broadcastSecretsUpdate("leases_revoked", executorID)
+		// Scrub, not kill. Cordoning is "stop giving this machine new work",
+		// and draining explicitly waits for in-flight work to finish —
+		// killing those tasks to reclaim a credential would contradict the
+		// operation the operator asked for. An operator who does want the
+		// tasks stopped has the lease panel's kill action. And the leases
+		// recorded as issued to the agent besides the ones its session here
+		// lists (Task 20419): a member that held its connection and has
+		// stopped took that list with it, and the revocation is recorded so
+		// the member adopting its runs does not take those leases over.
+		s.revokeRecordedLeasesOf(ctx, executorID, reason, actor, leases)
 	}()
 }
 

@@ -111,7 +111,7 @@ func recordedSessionAwaitingRestore(db *statedb.DB, kind, id, token string) (sta
 		return statedb.ProxySessionRow{}, false
 	}
 	if row.Holder != "" && row.Holder != leaseHolderID() {
-		if n := currentCluster(); n != nil && n.IsAlive(row.Holder) {
+		if n := currentCluster(); n != nil && n.Serving(row.Holder) {
 			// Held by a live peer that does not claim to serve it: that
 			// peer's business, and nothing a wait here would change.
 			return statedb.ProxySessionRow{}, false

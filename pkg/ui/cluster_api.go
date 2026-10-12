@@ -11,6 +11,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -52,6 +53,11 @@ func (s *Server) clusterInternalBypass(next http.Handler) http.Handler {
 			return
 		}
 		switch {
+		case r.URL.Path == hubcluster.PingPath && r.Method == http.MethodGet:
+			// A peer asking whether this member answers (Task 20419). Served
+			// past every handler that could be the one stuck, so an answer
+			// means the listener and the router are working.
+			jsonOK(w, map[string]any{"ok": true, "member": s.hubInstanceID()})
 		case r.URL.Path == clusterAPIAutoResume && r.Method == http.MethodPost:
 			s.handleClusterAutoResume(w, r)
 		case r.URL.Path == clusterAPILeases && r.Method == http.MethodGet:
@@ -211,7 +217,17 @@ func (s *Server) fanOut(ctx context.Context, method, path string, in any, newOut
 		out any
 		err error
 	}
-	peers := n.Peers()
+	var peers []hubcluster.Member
+	for _, m := range n.Peers() {
+		// A member judged unresponsive is reported at once rather than
+		// waited on for the call's timeout (Task 20419): what it holds is
+		// out of reach, and the caller reports it as such.
+		if !n.Responsive(m.ID) {
+			errs[m.ID] = fmt.Errorf("hub member %s heartbeats but is not answering", m.ID)
+			continue
+		}
+		peers = append(peers, m)
+	}
 	ch := make(chan answer, len(peers))
 	for _, m := range peers {
 		go func(m hubcluster.Member) {

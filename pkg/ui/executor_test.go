@@ -72,6 +72,11 @@ func TestRunWorkloadHonoursContext(t *testing.T) {
 // is actually alive, or the Stop button can never find the run it started.
 func TestStartWorkloadReportsLivePID(t *testing.T) {
 	dir := t.TempDir()
+	// No control plane: this is about the handle a host dispatch returns, not
+	// about recording it. One left behind by an earlier test, whose directory
+	// is gone, would have the dispatch refused as one that cannot be recorded
+	// (Task 20419).
+	withControlPlaneDir(t, "")
 	ex, handle, err := startWorkload(dir, fixtureArgv(t), map[string]string{"handler": "test"})
 	if err != nil {
 		t.Fatalf("startWorkload: %v", err)

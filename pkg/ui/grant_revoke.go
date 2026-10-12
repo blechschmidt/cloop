@@ -98,7 +98,7 @@ func (r *grantRevocationResult) merge(other grantRevocationResult) {
 // finish computes the aggregate fields from the leases.
 func (r *grantRevocationResult) finish() {
 	r.WipedLocally = false
-	r.Remote, r.Local = nil, nil
+	r.Remote, r.Local, r.Pending = nil, nil, nil
 	sort.SliceStable(r.Leases, func(i, j int) bool {
 		if r.Leases[i].LeaseID != r.Leases[j].LeaseID {
 			return r.Leases[i].LeaseID < r.Leases[j].LeaseID
@@ -109,6 +109,7 @@ func (r *grantRevocationResult) finish() {
 		r.WipedLocally = r.WipedLocally || l.WipedLocally
 		r.Remote = append(r.Remote, l.Remote...)
 		r.Local = append(r.Local, l.Local...)
+		r.Pending = append(r.Pending, l.Pending...)
 	}
 	if r.Superseded || (len(r.Leases) == 0 && len(r.Remote) == 0) {
 		// Nothing held it, or nothing was taken back: there is no holder
@@ -242,17 +243,19 @@ func (s *Server) cascadeGrantRevocation(ctx context.Context, rev secretbroker.Gr
 			}
 		}
 		for member, err := range errs {
-			// A member that could not be asked may hold the grant. Reported as
-			// an unreachable holder, which the aggregate ranks worst: an
+			// A member that could not be asked may hold the grant, and an
 			// operator must not read "revoked" off a cascade that skipped one.
+			// Pending, not unreachable (Task 20419): the grant's revocation is
+			// in the store, which binds that member all the same — its lease
+			// janitor withdraws the grant if it is running, and the member
+			// that adopts its run takes the grant back if it stopped.
 			res.Leases = append(res.Leases, leaseWithdrawal{
 				GrantID: rev.GrantID, Member: member,
 				leaseRevocation: leaseRevocation{
-					State: remote.RevokeStateUnreachable,
-					Remote: []remote.RevokeResult{{
-						GrantID: rev.GrantID, ExecutorID: "hub member " + member,
-						State: remote.RevokeStateUnreachable, SentAt: time.Now(), Error: err.Error(),
-					}},
+					State: remote.RevokeStatePending,
+					Pending: []executor.RevokeOutcome{unaskedMemberOutcome(secretbroker.LeaseRevocation{
+						GrantID: rev.GrantID, Action: string(remote.RevokeScrub), Reason: grantRevokeReason(rev.GrantID, rev.GrantID, rev.Actor),
+					}, member, err.Error())},
 				},
 			})
 		}
@@ -350,8 +353,10 @@ func (s *Server) grantRevokedHere(ctx context.Context, req clusterGrantRequest) 
 	// Leases recorded by any member, for the holders connected here: an agent
 	// is connected to whichever member it reached, which need not be the one
 	// holding its lease.
+	records := map[string]secretbroker.LeaseRecord{}
 	if recs, rerr := broker.LeaseRecords(); rerr == nil {
 		for _, rec := range recs {
+			records[rec.ID] = rec
 			add(rec.ID, broker.RecordHeldOn(rec, req.GrantID))
 		}
 	}
@@ -368,7 +373,25 @@ func (s *Server) grantRevokedHere(ctx context.Context, req clusterGrantRequest) 
 				w.Kept = true
 			}
 			if !w.WipedLocally && len(w.holders()) == 0 {
-				continue // recorded, held by nobody here
+				// Held by nobody here. A lease a live member holds is that
+				// member's to answer for. One whose holder is gone, and whose
+				// workload nothing reached — not even the leader, which
+				// brought what that member left within reach above — is the
+				// leader's to report, as pending (Task 20419): the grant's
+				// revocation is on record, and the member that adopts the run
+				// or reaches its workload takes the credential back. Reported
+				// by the leader alone, so the cascade counts it once.
+				rec, recorded := records[leaseID]
+				if !recorded || !s.holderGone(rec.Holder) || !s.isLeader() {
+					continue
+				}
+				w.ExecutorID, w.ProjectPath = rec.Requester.ExecutorID, rec.Requester.ProjectID
+				w.Kept = len(rec.GrantIDs) > 1
+				w.Pending = append(w.Pending, pendingRevocationOutcome(secretbroker.LeaseRevocation{
+					LeaseID: leaseID, GrantID: held, Holder: rec.Holder, ExecutorID: rec.Requester.ExecutorID,
+					Action: string(remote.RevokeScrub), Reason: grantRevokeReason(req.GrantID, held, req.Actor),
+				}))
+				w.State = aggregateState(w.holders(), false)
 			}
 			res.Leases = append(res.Leases, w)
 		}
@@ -554,8 +577,13 @@ func (s *Server) reconcileWithdrawnGrants(ctx context.Context) {
 			if sl.isWithdrawn(w.GrantID) {
 				continue
 			}
-			s.revokeLeaseEverywhere(ctx, sl.lease.ID, w.GrantID,
+			out := s.revokeLeaseEverywhere(ctx, sl.lease.ID, w.GrantID,
 				w.Reason+" (found by the lease janitor)", remote.RevokeScrub, "janitor")
+			if out.State == remote.RevokeStateRevoked {
+				// A grant revoked on the lease itself (Task 20419) is settled;
+				// any other has no record, and this changes nothing.
+				settleRevocation(sl.lease.ID, w.GrantID, "taken back by the lease janitor")
+			}
 			s.broadcastSecretsUpdate("grant_revoked", w.GrantID)
 		}
 	}

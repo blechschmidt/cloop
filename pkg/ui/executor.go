@@ -604,9 +604,21 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		return nil, executor.Handle{}, err
 	}
 
+	// On record before the workload exists (Task 20419): a member that dies
+	// between starting it and recording the run leaves an intent naming it,
+	// and the member that would have adopted the run stops it instead of
+	// leaving it unsupervised. A dispatch that cannot be recorded is refused
+	// here, before there is anything to stop.
+	intent, err := recordDispatchIntent(runID, ex, workDir, lease.LeaseIDs())
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()
+		intent.forget()
 		// The executor enforces the image policy too, and it is the layer that
 		// verifies signatures — so a denial can surface here and not above.
 		auditImageDenial(workDir, err)
@@ -623,9 +635,19 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// And the workspace lease a driver kept for the run's push write-back,
 	// which the owner row names as the run's workspace (Task 20390).
 	bindWorkspaceLease(ex, handle.ID)
+	// The intent names the workload from here on (Task 20419) — completed
+	// before anything can retire it, so a workload that ends at once is not
+	// taken for one that could not be recorded.
+	if err := intent.started(handle.ID, liveEgress.idsForHandle(handle.ID)); err != nil {
+		return nil, executor.Handle{}, refuseUnrecordedDispatch(ex, handle.ID, lease, egress, "", err)
+	}
 	// Whom the run was started for, which its automatic resume acts for.
 	clear.started()
-	go wipeLeaseOnExit(ex, handle.ID, lease, egress)
+	go func() {
+		wipeLeaseOnExit(ex, handle.ID, lease, egress)
+		// The workload is over: nothing is left for the intent to name.
+		intent.forget()
+	}()
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
 	if len(spec.ProjectSeed) > 0 {
 		// The project went out as a copy, so its outcome has to come back:
@@ -645,11 +667,24 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}
 
-	// Record the dispatch so the supervisor can fail it over if this executor
-	// dies holding it. Best-effort: a session that cannot be recorded yields
-	// an empty ID and the run proceeds untracked rather than not at all.
-	if sessionID := opts.openSession(controlPlaneDir(), ex, handle, spec); sessionID != "" {
+	// The workload exists now, and it runs only if it is supervised (Task
+	// 20419): its intent completed with the handle (above), its session
+	// recorded so the supervisor can fail it over if this executor dies
+	// holding it, and — for a project's run — the run on the hub's books, so a
+	// member adopts it if this one dies. Any of them failing is a dispatch
+	// nothing would supervise: the workload is stopped, its lease released,
+	// and the run fails with the storage error.
+	sessionID, err := opts.openSession(controlPlaneDir(), ex, handle, spec)
+	if err != nil {
+		return nil, executor.Handle{}, refuseUnrecordedDispatch(ex, handle.ID, lease, egress, "", err)
+	}
+	if sessionID != "" {
 		go watchSessionExit(controlPlaneDir(), ex, handle.ID, sessionID)
+	}
+	if opts.record != nil {
+		if err := opts.record(ex, handle.ID); err != nil {
+			return nil, executor.Handle{}, refuseUnrecordedDispatch(ex, handle.ID, lease, egress, sessionID, err)
+		}
 	}
 	return ex, handle, nil
 }
@@ -667,6 +702,21 @@ type dispatchOptions struct {
 	// recorded as the next attempt of that one's chain — what the failover cap
 	// counts — instead of as a fresh first dispatch.
 	replaces *executor.Session
+	// record, when set, records the run on the hub's books once the workload
+	// exists — the project's run owner row (recordingRun) — and a failure to
+	// is a refusal like a session that cannot be written (Task 20419).
+	record func(ex executor.Executor, handleID string) error
+}
+
+// recordingRun has the dispatch record the project's run as handler started
+// it, before the dispatch returns: a run its member could not record is one
+// nothing would adopt, so it is refused rather than run.
+func (s *Server) recordingRun(workDir, handler string) dispatchOption {
+	return func(o *dispatchOptions) {
+		o.record = func(ex executor.Executor, handleID string) error {
+			return s.recordRunDispatch(workDir, handler, ex, handleID)
+		}
+	}
 }
 
 // resolve picks the dispatch's executor: the pinned target, under the same
@@ -695,7 +745,7 @@ func (o dispatchOptions) resolve(workDir string) (executor.Executor, error) {
 
 // openSession records the dispatch's session: a first dispatch's, or a
 // replacement's as the next attempt of the session it continues.
-func (o dispatchOptions) openSession(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec) string {
+func (o dispatchOptions) openSession(dir string, ex executor.Executor, handle executor.Handle, spec executor.Spec) (string, error) {
 	if o.replaces != nil {
 		return openReplacementSession(dir, ex, handle, spec, *o.replaces)
 	}
@@ -837,6 +887,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)
+	// The run id rides the Spec here too, so the workload can be found by it
+	// should this process die while it runs (Task 20419).
+	base.Labels[executor.LabelRunID] = runID
 	// Same translation as startWorkloadAs, and for the same reason: a helper
 	// subcommand is dispatched to the project's executor exactly like a
 	// harness is, so `cloop suggest` on an edge device needs the device's
@@ -911,6 +964,16 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
 
+	// On record for as long as it runs (Task 20419): a member that dies in
+	// the middle of a helper subcommand leaves its intent, and the member that
+	// would adopt its work stops the workload by its run id and takes its
+	// credentials back. The call is synchronous, so the intent's life is the
+	// call's.
+	intent, err := recordDispatchIntent(runID, ex, workDir, lease.LeaseIDs())
+	if err != nil {
+		return nil, err
+	}
+	defer intent.forget()
 	res, runErr := executor.Run(ctx, ex, spec)
 	if runErr != nil {
 		auditImageDenial(workDir, runErr)

@@ -124,7 +124,7 @@ func sweepOrphanedLeaseDirs(controlPlaneDir string) leaseSweepResult {
 		}
 		// Materialised by another hub process that is still serving
 		// (Task 20354): its run is reading from this directory right now.
-		if node != nil && row.InstanceID != "" && row.InstanceID != node.ID() && node.IsAlive(row.InstanceID) {
+		if node != nil && row.InstanceID != "" && row.InstanceID != node.ID() && node.Serving(row.InstanceID) {
 			result.Skipped++
 			continue
 		}
@@ -213,4 +213,108 @@ func reportLeaseSweep(db *statedb.DB, controlPlaneDir string, res leaseSweepResu
 		EntityID:  controlPlaneDir,
 		Payload:   payload,
 	})
+}
+
+// wipeDeadMembersLeaseDirs destroys the credential directories that hub
+// members which no longer serve materialised on this host, and clears their
+// rows (Task 20419). leaseID narrows it to one lease's directories, "" takes
+// every dead member's.
+//
+// The startup sweep above runs once, when a process starts, and so did every
+// wipe of a dead member's directories: a member that died while its peers kept
+// serving left its host-process runs' plaintext in /dev/shm, read by the run
+// that outlived it — a forked child is reparented, not killed — until some
+// member next started. Each member now runs this when it sees a member die, and
+// the member adopting a host-process run runs it for that run's lease before
+// it retires the lease's record.
+//
+// A directory is wiped by any member that can see it. One that is not there is
+// taken for gone — its row cleared — only when the dead member ran on this
+// machine, in this pid namespace: anywhere else the directory may simply be out
+// of this member's sight, and its row is left for a member, or a process
+// starting, where it is not.
+//
+// allGone reports whether no directory of the lease asked about is left on
+// record: wiped, or conclusively gone. With leaseID "" it is about them all.
+func wipeDeadMembersLeaseDirs(controlPlaneDir, leaseID string) (res leaseSweepResult, allGone bool) {
+	node := currentCluster()
+	if node == nil {
+		// A standalone hub's predecessor is the only process that could have
+		// left directories, and the startup sweep wiped what it left.
+		return res, true
+	}
+	if controlPlaneDir == "" {
+		return res, false
+	}
+	db, err := statedb.Open(state.DBPath(controlPlaneDir))
+	if err != nil {
+		return res, false
+	}
+	defer db.Close()
+	rows, err := db.ListSecretLeaseDirs()
+	if err != nil {
+		return res, false
+	}
+	self := node.Self()
+	held := make(map[string]bool)
+	for _, sl := range liveLeases.snapshot() {
+		if sl != nil && sl.dir != "" {
+			held[sl.dir] = true
+		}
+	}
+	allGone = true
+	var swept []statedb.SecretLeaseDirRow
+	for _, row := range rows {
+		if leaseID != "" && row.LeaseID != leaseID {
+			continue
+		}
+		switch {
+		case held[row.Dir], row.InstanceID == node.ID():
+			// This process's own: its registry wipes it.
+			res.Skipped++
+			allGone = false
+			continue
+		case row.InstanceID == "":
+			// Written before clustering, by a process the startup sweep
+			// accounts for.
+			allGone = false
+			continue
+		case node.Serving(row.InstanceID):
+			res.Skipped++
+			allGone = false
+			continue
+		}
+		res.Rows++
+		swept = append(swept, row)
+		if dirExists(row.Dir) {
+			if err := securewipe.Dir(row.Dir); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", row.Dir, err))
+				fmt.Fprintf(os.Stderr, "ui: FAILED to wipe credential directory %s that stopped hub member %s left "+
+					"(lease %s); the plaintext is still on this host: %v\n", row.Dir, row.InstanceID, row.LeaseID, err)
+				allGone = false
+				continue
+			}
+			res.Wiped++
+		} else {
+			m, known := node.Member(row.InstanceID)
+			sameHost := known && m.Hostname != "" && m.Hostname == self.Hostname &&
+				m.BootID != "" && m.BootID == self.BootID
+			if !sameHost {
+				// Not visible from here, which on another machine or in
+				// another pid namespace says nothing about whether it is gone.
+				allGone = false
+				continue
+			}
+			res.Vanished++
+		}
+		if err := db.DeleteSecretLeaseDir(row.Dir); err != nil {
+			fmt.Fprintf(os.Stderr, "ui: clear record for %s: %v\n", row.Dir, err)
+		}
+	}
+	if res.Wiped > 0 || res.Vanished > 0 || len(res.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "ui: lease sweep: %d credential director(ies) of stopped hub members — %d wiped, "+
+			"%d already gone, %d failed\n", res.Rows, res.Wiped, res.Vanished, len(res.Errors))
+		reportLeaseSweep(db, controlPlaneDir, res, swept)
+	}
+	return res, allGone
 }

@@ -240,7 +240,7 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 	// sweep logs it and tries again on its next tick, by when someone may have
 	// granted one.
 	ex, handle, err := startWorkloadAs(nil, newHarnessClearance(workDir, s.harnessWhoForResume(workDir), ""), payer, workDir,
-		[]string{exe, "run"}, map[string]string{"handler": "auto_resume"})
+		[]string{exe, "run"}, map[string]string{"handler": "auto_resume"}, s.recordingRun(workDir, "auto_resume"))
 	if err != nil {
 		s.releaseRunClaim(workDir)
 		return err
@@ -249,7 +249,6 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 	s.liveLogStartRun(workDir)
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	s.trackRunWithCancel(workDir, ex, handle.ID, cancelStream)
-	s.recordRunDispatch(workDir, "auto_resume", ex, handle.ID)
 	s.broadcastRunState(workDir, true, true)
 	s.publishRunState(workDir, true)
 

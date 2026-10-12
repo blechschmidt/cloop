@@ -72,11 +72,25 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			continue // already held here: this process adopted the run before
 		}
 		if ex.Capabilities().SecretFilesFromHostPath {
-			// The material was files in this host's tmpfs, which the startup
-			// sweep wiped with the stopped process's other lease directories
-			// (secrets_sweep.go). Keeping the lease alive would claim a
-			// credential the workload no longer has; end it instead.
-			retireLeaseRecord(id, "its credential files were wiped when the hub process holding them stopped")
+			// The material is files in a lease directory on the host of the
+			// process that held it — which alone could keep them current or
+			// wipe them — read by a run that outlived it: a forked child is
+			// reparented, not killed. They are wiped now, before the record
+			// goes (Task 20419); the run carries on without them. Death
+			// detection wipes them too (onMembershipChange); this is the
+			// adopter making sure, since retiring the record says they are
+			// gone.
+			if _, gone := wipeDeadMembersLeaseDirs(controlPlaneDir(), id); gone {
+				const why = "its credential files were wiped when the hub process holding them stopped"
+				retireLeaseRecord(id, why)
+				settleRevocationsOfLease(id, why)
+			} else {
+				// A directory not visible from here, or a wipe that failed: the
+				// record stays, so the lease lapses on schedule and the sweep
+				// takes the files back through the adopted handle's bindings.
+				fmt.Fprintf(os.Stderr, "ui: lease %s of the adopted run on %s: not every credential file it "+
+					"materialised could be wiped from this host; its record is kept until it lapses\n", id, ex.ID())
+			}
 			continue
 		}
 		sl, err := restoreSecretLease(controlPlaneDir(), workDir, id)
@@ -103,6 +117,11 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			// sessions, under the ids and tokens its workload holds, and the
 			// App tokens behind them (Task 20383).
 			restoreLeaseSessions(sl)
+		case errors.Is(err, secretbroker.ErrLeaseRevoked):
+			// Revoked while no hub process held it (Task 20419): the material
+			// is taken back from the workload this process can now reach, and
+			// nothing the lease fed is restored.
+			s.enforceRevokedTakeover(workDir, ex, handleID, id, err)
 		case errors.Is(err, secretbroker.ErrLeaseMoved), errors.Is(err, secretbroker.ErrLeaseNotFound):
 			// Held by the process that adopted the run first, or already
 			// released: either way not this process's to keep.
@@ -127,13 +146,24 @@ func (s *Server) withdrawOnAdoption(sl *secretLease) {
 	for _, w := range sl.lease.Withdrawn {
 		reason := w.Reason + " while no hub process held its lease; taken back by the process that adopted the run"
 		if testWithdrawGrantFanout != nil {
-			if err := sl.withdrawGrant(ctx, w.GrantID, reason); err != nil {
+			err := sl.withdrawGrant(ctx, w.GrantID, reason)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "ui: withdraw grant %s from lease %s: %v\n", w.GrantID, sl.lease.ID, err)
 			}
 			testWithdrawGrantFanout(sl.lease.ID, w.GrantID, reason)
+			if err == nil {
+				settleRevocation(sl.lease.ID, w.GrantID, "taken back by the hub process that adopted its run")
+			}
 			continue
 		}
-		s.revokeLeaseEverywhere(ctx, sl.lease.ID, w.GrantID, reason, remote.RevokeScrub, "janitor")
+		out := s.revokeLeaseEverywhere(ctx, sl.lease.ID, w.GrantID, reason, remote.RevokeScrub, "janitor")
+		adoptionEnforcements.record(sl.lease.ID, out)
+		// A grant revoked on the lease itself (Task 20419) is settled once
+		// it is taken back; for any other withdrawn grant there is no such
+		// record, and this changes nothing.
+		if out.State == remote.RevokeStateRevoked {
+			settleRevocation(sl.lease.ID, w.GrantID, "taken back by the hub process that adopted its run")
+		}
 	}
 	s.broadcastSecretsUpdate("grant_revoked", sl.lease.ID)
 }
@@ -168,12 +198,19 @@ func leaseRefusedForGood(err error) bool {
 func (s *Server) withdrawLapsedLease(leaseID, reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
 	defer cancel()
+	var out leaseRevocation
 	if testRevokeLapsedLease != nil {
 		testRevokeLapsedLease(leaseID, reason)
+		out.State = remote.RevokeStateRevoked
 	} else {
-		s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeScrub, "janitor")
+		out = s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeScrub, "janitor")
+		adoptionEnforcements.record(leaseID, out)
 	}
 	retireLeaseRecord(leaseID, reason)
+	// Taken back whole: a revocation of it on record is enforced (Task 20419).
+	if out.State == remote.RevokeStateRevoked {
+		settleRevocationsOfLease(leaseID, "taken back when the lease could not be taken over: "+reason)
+	}
 	s.broadcastSecretsUpdate("lease_expired", leaseID)
 }
 
@@ -246,7 +283,7 @@ func (s *Server) sweepOrphanedLeaseRecords(now time.Time) []remote.ExpiredLease 
 		if holder == self {
 			return false // this process's own: the registry decides, above
 		}
-		return holder == "" || !n.IsAlive(holder)
+		return holder == "" || !n.Serving(holder)
 	}
 	var due []statedb.SecretLeaseRow
 	for _, row := range rows {

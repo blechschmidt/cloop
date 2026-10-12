@@ -648,8 +648,8 @@ func TestEgressProxyURLIsNeverWrittenDown(t *testing.T) {
 	}
 
 	// The stored dispatch record.
-	if id := openSessionFor(dir, ex, executor.Handle{ID: "h-redact", StartedAt: time.Now()}, spec); id == "" {
-		t.Fatal("the session record was not written")
+	if id, err := openSessionFor(dir, ex, executor.Handle{ID: "h-redact", StartedAt: time.Now()}, spec); err != nil || id == "" {
+		t.Fatalf("the session record was not written: %v", err)
 	}
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {

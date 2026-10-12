@@ -131,11 +131,16 @@ func writeRunOwnedElsewhere(w http.ResponseWriter, o hubcluster.Owner) {
 
 // recordRunDispatch replaces the dispatching claim with what an adopter needs:
 // which executor and handle to reattach to, and for a seeded run the
-// provenance its result is merged under.
-func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor, handleID string) {
+// provenance its result is merged under. Once it has, the dispatch's intent is
+// retired: the run's own record names the workload now (Task 20419).
+//
+// It reports a run it could not record. A dispatch treats that as a refusal
+// (recordingRun): a run whose owner row does not name its workload is one no
+// member would adopt after this one died.
+func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor, handleID string) error {
 	n := s.clusterNode()
 	if n == nil || workDir == "" || ex == nil {
-		return
+		return nil
 	}
 	meta := runOwnerMeta{Executor: ex.ID(), Handle: handleID, Handler: handler, Started: time.Now().UTC()}
 	if d, ok := peekSeededDispatch(ex, handleID); ok {
@@ -146,19 +151,42 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 	meta.Leases = liveLeases.forHandle(ex.ID(), handleID)
 	meta.Egress = liveEgress.idsForHandle(handleID)
 	meta.Workspace = liveLeases.workspaceForHandle(ex.ID(), handleID)
-	if _, found, _ := n.Lookup(ownerRun, workDir); !found {
+	_, found, err := n.Lookup(ownerRun, workDir)
+	if err != nil {
+		s.log().Warn("cluster", 0, "could not read the run's owner row",
+			map[string]interface{}{"project": workDir, "error": err.Error()})
+		return fmt.Errorf("read the run's owner row: %w", err)
+	}
+	if !found {
 		// Standalone-era callers and adoption paths reach here without a
 		// prior claim; take one now so the run is visible cluster-wide.
-		if _, _, err := n.Claim(ownerRun, workDir, meta); err != nil {
+		o, ok, err := n.Claim(ownerRun, workDir, meta)
+		if err != nil {
 			s.log().Warn("cluster", 0, "could not record the run's owner",
 				map[string]interface{}{"project": workDir, "error": err.Error()})
+			return fmt.Errorf("record the run's owner: %w", err)
 		}
-		return
+		if !ok {
+			return fmt.Errorf("record the run's owner: hub member %s claimed the project's run meanwhile", o.InstanceID)
+		}
+	} else {
+		ok, err := n.UpdateMeta(ownerRun, workDir, meta)
+		if err != nil || !ok {
+			s.log().Warn("cluster", 0, "could not record the run's executor for adoption",
+				map[string]interface{}{"project": workDir, "still_owner": ok, "error": fmt.Sprint(err)})
+			if err != nil {
+				return fmt.Errorf("record the run's executor for adoption: %w", err)
+			}
+			return errors.New("record the run's executor for adoption: this hub member no longer holds the run's claim")
+		}
 	}
-	if ok, err := n.UpdateMeta(ownerRun, workDir, meta); err != nil || !ok {
-		s.log().Warn("cluster", 0, "could not record the run's executor for adoption",
-			map[string]interface{}{"project": workDir, "still_owner": ok, "error": fmt.Sprint(err)})
+	if err := forgetDispatchIntentForHandle(ex.ID(), handleID); err != nil {
+		// The run is on record, which is what an adopter reads; the intent is
+		// retired by the reaper, which finds its run recorded.
+		s.log().Warn("cluster", 0, "could not retire the dispatch intent of a recorded run",
+			map[string]interface{}{"project": workDir, "handle": handleID, "error": err.Error()})
 	}
+	return nil
 }
 
 // releaseRunClaim gives up workDir's run. Fenced on this member, so a member
@@ -457,6 +485,9 @@ func (s *Server) adoptOrphanedRuns() {
 	if n == nil {
 		return
 	}
+	// What a dead member's dispatches started without recording first: those
+	// workloads have no run to adopt (Task 20419).
+	s.reapOrphanedDispatches()
 	orphans, err := n.Orphans(ownerRun)
 	if err != nil {
 		s.log().Warn("cluster", 0, "list orphaned runs", map[string]interface{}{"error": err.Error()})
@@ -467,21 +498,27 @@ func (s *Server) adoptOrphanedRuns() {
 		_ = o.Meta(&meta)
 		workDir := o.Key
 		if meta.Dispatching || meta.Executor == "" || meta.Handle == "" {
-			// The owner died between claim and dispatch. Nothing to reattach
-			// to; the leader clears the claim so the project can start again.
-			if n.IsLeader() {
+			// The owner died between claim and recording the run. Nothing to
+			// reattach to — but a dispatch that got as far as its executor may
+			// have started a workload, which is stopped, and its credentials
+			// taken back, before the claim goes (Task 20419): clearing it
+			// first let the project start again beside a workload whose lease
+			// nobody kept or revoked. The leader clears the claim; the member
+			// that would have adopted the run does the stopping.
+			if !s.reapDispatchingClaim(o, meta) {
+				continue
+			}
+			if n.LeadsAdoption() {
 				if ok, _ := n.Drop(o); ok {
-					s.log().Info("cluster", 0, "cleared a run claim whose member died before dispatching",
-						map[string]interface{}{"project": workDir, "member": o.InstanceID})
+					s.log().Info("cluster", 0, "cleared a run claim whose member died before recording the run",
+						map[string]interface{}{"project": workDir, "member": o.InstanceID, "run": meta.RunID})
 				}
 			}
 			continue
 		}
-		if agent := s.agentForExecutorID(meta.Executor); agent != "" {
-			if !n.Owns(ownerAgent, agent) {
-				continue // the member holding the agent adopts it
-			}
-		} else if !n.IsLeader() {
+		// The member holding the agent adopts a run on an edge agent; the
+		// leader every other.
+		if !s.adoptsRun(meta) {
 			continue
 		}
 		s.adoptRun(o, meta, "its hub member stopped")
@@ -552,8 +589,10 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		}
 	}
 
-	// The previous owner, if alive, must stop streaming it.
-	if o.Alive && o.InstanceID != "" {
+	// The previous owner, if it still heartbeats, must stop streaming it — a
+	// member adopted from because it stopped answering may still read the
+	// bus (Task 20419).
+	if o.InstanceID != "" && n.IsAlive(o.InstanceID) {
 		n.PublishTo(o.InstanceID, busTopicInvalidate, invalidateRunMoved, map[string]string{"project": workDir})
 	}
 
@@ -649,7 +688,11 @@ func (s *Server) resumeRun(workDir string, ex executor.Executor, handleID string
 	}
 	s.liveLogSetRunning(workDir, true)
 	s.trackRunWithCancel(workDir, ex, handleID, cancel)
-	s.recordRunDispatch(workDir, "adopted", ex, handleID)
+	// The adoption itself is on record — the owner row is this member's —
+	// so a failure here leaves the dispatcher's account of the run, which
+	// names the same workload. Logged, not refused: the run is not this
+	// member's to stop over a write.
+	_ = s.recordRunDispatch(workDir, "adopted", ex, handleID)
 	s.broadcastRunState(workDir, true, true)
 	s.publishRunState(workDir, true)
 	go s.consumeRunOutput(workDir, ex, handleID, lines, nil)

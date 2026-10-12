@@ -76,14 +76,16 @@ func (c *clusterHandleStore) ListHandles(executorID string) ([]executor.HandleRe
 	}
 	out := rows[:0:0]
 	for _, r := range rows {
-		if !c.trackedByLivePeer(r) {
+		if c.mayAdopt(r) {
 			out = append(out, r)
 		}
 	}
 	return out, nil
 }
 
-// ListForeignHandles returns the rows a live peer tracks.
+// ListForeignHandles returns the rows this member may not adopt: the ones a
+// live peer tracks, and those of a stopped member that another member is to
+// adopt. An orphan sweep spares them.
 func (c *clusterHandleStore) ListForeignHandles(executorID string) ([]executor.HandleRecord, error) {
 	rows, err := c.inner.ListHandles(executorID)
 	if err != nil {
@@ -91,29 +93,88 @@ func (c *clusterHandleStore) ListForeignHandles(executorID string) ([]executor.H
 	}
 	var out []executor.HandleRecord
 	for _, r := range rows {
-		if c.trackedByLivePeer(r) {
+		if !c.mayAdopt(r) {
 			out = append(out, r)
 		}
 	}
 	return out, nil
 }
 
+// mayAdopt reports whether this member may adopt r: its own, one written
+// before clustering, an agent's — and one a stopped member left, when this
+// member is the one that adopts what stopped members leave (Task 20419): the
+// leader, or a member serving alone, which is a hub restarted in its own
+// directory. Every other member leaving a stopped member's rows alone is what
+// keeps one workload from being adopted by each member that starts after its
+// owner died; ClaimHandle settles the race between two that may.
+func (c *clusterHandleStore) mayAdopt(r executor.HandleRecord) bool {
+	if strings.TrimSpace(r.Driver) == executor.KindRemoteAgent {
+		return true
+	}
+	owner := strings.TrimSpace(r.Meta[handleMetaInstance])
+	if owner == "" || owner == c.node.ID() {
+		return true
+	}
+	if c.node.Serving(owner) {
+		return false
+	}
+	return c.node.LeadsAdoption() || !c.servingPeers()
+}
+
+// servingPeers reports whether any other member serves now.
+func (c *clusterHandleStore) servingPeers() bool {
+	for _, m := range c.node.Peers() {
+		if c.node.Responsive(m.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClaimHandle records this member as the one tracking rec, provided the row
+// still names the owner rec was read with (Task 20419; see
+// executor.HandleClaimer). An agent's rows belong to the agent and are not
+// claimed.
+func (c *clusterHandleStore) ClaimHandle(rec executor.HandleRecord) (bool, error) {
+	if strings.TrimSpace(rec.Driver) == executor.KindRemoteAgent {
+		return true, nil
+	}
+	claimer, ok := c.inner.(interface {
+		ClaimHandleMeta(handleID, key, expect, value string) (bool, error)
+	})
+	if !ok {
+		return true, nil
+	}
+	expect := strings.TrimSpace(rec.Meta[handleMetaInstance])
+	if expect == c.node.ID() {
+		return true, nil
+	}
+	return claimer.ClaimHandleMeta(rec.HandleID, handleMetaInstance, expect, c.node.ID())
+}
+
+// handleOwner returns the member recorded as tracking handleID's workload,
+// and whether the row exists.
+func handleOwner(handleID string) (string, bool) {
+	dir := controlPlaneDir()
+	if strings.TrimSpace(handleID) == "" || dir == "" {
+		return "", false
+	}
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		return "", false
+	}
+	defer db.Close()
+	row, err := db.GetExecutorHandle(handleID)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(statedb.UnmarshalHandleMeta(row.MetaJSON)[handleMetaInstance]), true
+}
+
 // DeleteHandle removes a row. Only rows ListHandles returned ever reach a
 // driver, so a member can only delete what it owns or adopted.
 func (c *clusterHandleStore) DeleteHandle(handleID string) error {
 	return c.inner.DeleteHandle(handleID)
-}
-
-// trackedByLivePeer reports whether r belongs to another live member.
-func (c *clusterHandleStore) trackedByLivePeer(r executor.HandleRecord) bool {
-	if strings.TrimSpace(r.Driver) == executor.KindRemoteAgent {
-		return false
-	}
-	owner := strings.TrimSpace(r.Meta[handleMetaInstance])
-	if owner == "" || owner == c.node.ID() {
-		return false
-	}
-	return c.node.IsAlive(owner)
 }
 
 // clusterScopedHandleStore returns the member-scoped handle store for the

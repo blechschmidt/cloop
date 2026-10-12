@@ -563,8 +563,15 @@ func (s *Server) onMembershipChange(live []hubcluster.Member) {
 	}
 	// A member that just joined knows nobody's presence; tell it ours.
 	s.republishPresence()
-	// Runs a dead member owned are up for adoption.
-	go s.adoptOrphanedRuns()
+	// The credential files a dead member materialised for its host-process
+	// runs, which outlive it — wiped now rather than when some member next
+	// starts (Task 20419). Before adoption, so the adopter finds them gone.
+	go func() {
+		defer recoverGoroutine("wipe dead members' lease directories")
+		wipeDeadMembersLeaseDirs(controlPlaneDir(), "")
+		// Runs a dead member owned are up for adoption.
+		s.adoptOrphanedRuns()
+	}()
 }
 
 func uniqueStrings(in []string) []string {

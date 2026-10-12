@@ -1619,8 +1619,18 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "revoked from the Secrets panel"
 	}
-	result := s.revokeLeaseEverywhere(r.Context(), id, strings.TrimSpace(req.GrantID),
-		reason, action, s.auditActor(r))
+	grantID := strings.TrimSpace(req.GrantID)
+	actor := s.auditActor(r)
+	// Recorded before any holder is asked (Task 20419). A lease whose holder
+	// member died is held by nobody the fan-out can reach; the record is what
+	// stops the member adopting its run from taking the lease over afterwards,
+	// and what has it take the material back instead.
+	recorded := s.recordLeaseRevocation(id, grantID, action, reason, actor)
+	if executorID == "" {
+		executorID, projectID = recorded.Rev.ExecutorID, recorded.Rev.ProjectID
+	}
+	result := s.revokeLeaseEverywhere(r.Context(), id, grantID, reason, action, actor)
+	s.concludeRevocation(recorded, &result)
 
 	if !result.WipedLocally && len(result.holders()) == 0 {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
@@ -1639,8 +1649,20 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	// ran, and its result is the payload. A 5xx would invite a retry of
 	// something that already happened, and would hide the one thing the
 	// operator needs to read — which device still has the credential.
-	jsonOK(w, map[string]any{
+	//
+	// 202 when a holder could not be reached at all because the member
+	// holding the lease is gone (Task 20419): the revocation is recorded and
+	// takes effect when that member's run is reached, which "pending" names
+	// per holder. It used to be a 404, which read as "nothing to revoke".
+	status := http.StatusOK
+	if len(result.Pending) > 0 {
+		status = http.StatusAccepted
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = writeJSONBody(w, map[string]any{
 		"ok": true, "id": id, "revoked": true,
+		"recorded":      recorded.Recorded,
 		"executor_id":   executorID,
 		"secrets":       secretNames,
 		"action":        string(action),
@@ -1652,8 +1674,9 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 		// folded into it. A container sandbox or an in-cluster Pod that gave
 		// the credential back is a holder the operator needs to see; omitting
 		// it would make a real revocation look like it reached nobody.
-		"local": result.Local,
-		"note":  revokeNote(result),
+		"local":   result.Local,
+		"pending": result.Pending,
+		"note":    revokeNote(result),
 	})
 }
 
@@ -1746,6 +1769,23 @@ func remoteRevocationGap(id string, ex *remote.Executor, known bool) string {
 // close an incident believing a token is dead when the task holding it is
 // still using it.
 func revokeNote(result leaseRevocation) string {
+	if len(result.Pending) > 0 {
+		// Said first: every other sentence describes holders that answered,
+		// and this one is about the holder nothing could reach yet.
+		if len(result.unasked) > 0 {
+			// Not known to be gone: a member that could not be asked may have
+			// stopped a moment ago, or only be cut off from this one.
+			return "Recorded; takes effect when the hub member that could not be asked answers, or when its run " +
+				"is reached if it stopped. The revocation binds what that member holds all the same: the lease " +
+				"janitor asks it again until it answers, the member that adopts its run, or reaches its workload, " +
+				"takes the credential back instead of taking the lease over, and no hub process will keep the lease " +
+				"alive. Until then a workload it holds keeps what it was given."
+		}
+		return "Recorded; takes effect when the stopped hub member's run is reached. The member holding the " +
+			"lease is gone, so no hub process holds its credential to revoke: the member that adopts the run, " +
+			"or reaches its workload, takes the credential back instead of taking the lease over, and no hub " +
+			"process will keep it alive. Until then the workload keeps what it was given."
+	}
 	switch result.State {
 	case remote.RevokeStateUnreachable:
 		return "The hub's copy is wiped, but at least one agent holding this lease is offline. " +

@@ -3721,8 +3721,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// could finish and have its row skipped as pre-existing.
 	s.openSpendCursor(workDir, payer)
 
+	// Recorded as this project's run by the dispatch itself, before it
+	// returns: a run that cannot be recorded is refused (Task 20419).
 	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
-		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
+		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"},
+		s.recordingRun(workDir, "run"))
 	if err != nil {
 		// 409 when strict no-host-execution mode refused the dispatch, so
 		// the browser can show the remediation instead of a generic 500
@@ -3741,7 +3744,6 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// one can let go without settling it.
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	s.trackRunWithCancel(workDir, ex, handle.ID, cancelStream)
-	s.recordRunDispatch(workDir, "run", ex, handle.ID)
 	s.broadcastRunState(workDir, true, true)
 	s.publishRunState(workDir, true)
 
@@ -6924,7 +6926,8 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	s.openSpendCursor(entry.Path, payer)
 	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
 		entry.Path, append([]string{exe}, args...),
-		map[string]string{"handler": "project-run", "project_name": entry.Name})
+		map[string]string{"handler": "project-run", "project_name": entry.Name},
+		s.recordingRun(entry.Path, "project-run"))
 	if err != nil {
 		releaseSlot()
 		s.releaseRunClaim(entry.Path)
@@ -6936,7 +6939,6 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	if lines, streamErr := ex.Stream(streamCtx, handle.ID); streamErr == nil {
 		s.trackRunWithCancel(entry.Path, ex, handle.ID, cancelStream)
-		s.recordRunDispatch(entry.Path, "project-run", ex, handle.ID)
 		go func() {
 			defer releaseSlot()
 			stopDrain := s.startSpendDrain(entry.Path)
@@ -7312,7 +7314,8 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			// dialog that grants one.
 			runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), s.harnessClearanceFor(r, abs), autoPayer,
 				abs, append([]string{exe}, runArgs...),
-				map[string]string{"handler": "project-new-autorun"})
+				map[string]string{"handler": "project-new-autorun"},
+				s.recordingRun(abs, "project-new-autorun"))
 			streamCtx, cancelStream := context.WithCancel(context.Background())
 			if refused, ok := asHarnessRefusal(startErr); ok {
 				autorunRefused = map[string]any{
@@ -7330,7 +7333,6 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
 			} else if lines, streamErr := runEx.Stream(streamCtx, runHandle.ID); streamErr == nil {
 				s.trackRunWithCancel(abs, runEx, runHandle.ID, cancelStream)
-				s.recordRunDispatch(abs, "project-new-autorun", runEx, runHandle.ID)
 				s.publishRunState(abs, true)
 				go func() {
 					defer releaseSlot()

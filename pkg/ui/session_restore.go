@@ -911,7 +911,7 @@ func restoreOneEgress(db *statedb.DB, workDir string, ex executor.Executor, hand
 // for a cluster.
 var egressHolderAlive = func(holder string) bool {
 	n := currentCluster()
-	return n != nil && n.IsAlive(holder)
+	return n != nil && n.Serving(holder)
 }
 
 // retireRunEgressRecords ends the egress records of a run that ended while no
