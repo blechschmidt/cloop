@@ -1260,7 +1260,11 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		TaskID:      taskIDNumber(spec.Labels),
 		Image:       podImage(created, desired),
 		StartedAt:   rec.startedAt,
-		Meta:        handleMeta(rec.networkPolicyName, rec.result != nil),
+		// With the run id, and the lease Secret's file keys, so an adopter
+		// finds the workload and refreshes and revokes its files in place
+		// (Task 20419).
+		Meta: withLeaseKeysMeta(executor.WithRunID(handleMeta(rec.networkPolicyName, rec.result != nil), spec),
+			leaseSecret),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this Pod. Names and paths only — the credential values

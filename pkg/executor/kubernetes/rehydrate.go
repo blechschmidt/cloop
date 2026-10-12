@@ -71,8 +71,11 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -185,6 +188,19 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 		return
 	}
 
+	e.mu.Lock()
+	_, tracked := e.handles[persisted.HandleID]
+	e.mu.Unlock()
+	if tracked {
+		return
+	}
+	// Claimed before it is tracked (Task 20419): a row another hub process
+	// adopted first is that process's, and adopting it here too would run a
+	// second watcher and a second lease renewer against one Pod.
+	if !executor.ClaimHandle(e.handleStore(), persisted) {
+		return
+	}
+
 	// A seeded run's frame scanner, rebuilt from the row. The log is re-read
 	// from the start below, so the frame is found whether it was printed
 	// before the restart or after it. A row that cannot tag a frame — which a
@@ -202,6 +218,9 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 		podName:           podName,
 		networkPolicyName: persisted.Meta[metaNetworkPolicy],
 		result:            result,
+		// The lease Secret, as the dispatcher kept it (Task 20419): its keys
+		// are on the row, so a file is refreshed or emptied in place.
+		leaseSecret: restoreLeaseSecret(persisted.Meta, namespace, persisted.HandleID),
 		// Running rather than pending, and the distinction is a claim about
 		// what we know: a row only exists because Start created a Pod, so the
 		// workload is at least dispatched. The first status update the watcher
@@ -445,4 +464,121 @@ func taskIDNumber(labels map[string]string) int {
 		return 0
 	}
 	return n
+}
+
+// metaLeaseSecretKeys is the HandleRecord.Meta key carrying, JSON-encoded,
+// which key of the run's lease Secret each delivered file is projected from
+// (Task 20419). Names and paths only, like leaseSecretState.keys.
+//
+// An adopted record used to have no lease Secret state at all, so a GitHub App
+// token delivered as a file could not be refreshed in a Pod a hub member
+// adopted — GitHub stopped honouring it an hour into the run — and revoking one
+// grant's files deleted the Pod rather than emptying its keys. With the keys
+// on the row the adopter patches the Secret exactly as the dispatcher would.
+const metaLeaseSecretKeys = "lease_secret_keys"
+
+// secretDataKey is the shape of a Secret data key: what the API server
+// accepts, and what planSecretFiles produces.
+var secretDataKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
+
+// withLeaseKeysMeta records st's file keys in meta.
+func withLeaseKeysMeta(meta map[string]string, st *leaseSecretState) map[string]string {
+	if st == nil {
+		return meta
+	}
+	st.mu.Lock()
+	keys := make(map[string]string, len(st.keys))
+	for k, v := range st.keys {
+		keys[k] = v
+	}
+	st.mu.Unlock()
+	if len(keys) == 0 {
+		return meta
+	}
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	meta[metaLeaseSecretKeys] = string(b)
+	return meta
+}
+
+// restoreLeaseSecret rebuilds an adopted record's lease Secret state from its
+// row: the Secret's name, which is a function of the handle, and the file keys
+// the row recorded. Nil when the row recorded none. A key that is not a Secret
+// key, or a path that is not one, is dropped: the row is read back from a
+// database, and the Secret it may patch is this run's alone either way.
+func restoreLeaseSecret(meta map[string]string, namespace, handleID string) *leaseSecretState {
+	raw := strings.TrimSpace(meta[metaLeaseSecretKeys])
+	if raw == "" {
+		return nil
+	}
+	var recorded map[string]string
+	if err := json.Unmarshal([]byte(raw), &recorded); err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: handle %s: lease Secret keys not restored: %v\n", handleID, err)
+		return nil
+	}
+	keys := make(map[string]string, len(recorded))
+	for path, key := range recorded {
+		if filepath.IsAbs(path) && filepath.Clean(path) == path && secretDataKey.MatchString(key) {
+			keys[path] = key
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return &leaseSecretState{namespace: namespace, secretName: leaseSecretName(handleID), keys: keys}
+}
+
+// Compile-time proof that this driver can delete a run's Pods by its run id
+// (Task 20419).
+var _ executor.RunReaper = (*Executor)(nil)
+
+// ReapRun implements executor.RunReaper: it deletes every Pod this executor
+// created for runID — found by the run-id label — whether or not a handle
+// names it, for a Pod its hub process created and died before recording. The
+// run's Secrets and egress policy are owned by the Pod and go with it.
+func (e *Executor) ReapRun(ctx context.Context, runID string) ([]string, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	creds, cli, err := e.connect(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		cli.close()
+		e.opts.Credentials.Release(creds.LeaseID)
+	}()
+	namespace := e.namespaceFor(creds)
+	selector := executorLabelSelector(e.id) + "," + LabelRunID + "=" + sanitizeLabelValue(runID)
+	listCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	list, err := cli.listPods(listCtx, namespace, selector)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes: list the pods of run %s in %s: %w", runID, namespace, err)
+	}
+	var reaped, failed []string
+	for i := range list.Items {
+		p := &list.Items[i]
+		delCtx, cancel := context.WithTimeout(ctx, cleanupTimeout)
+		err := cli.deletePod(delCtx, namespace, p.Metadata.Name, e.opts.KillGracePeriod)
+		cancel()
+		if err != nil {
+			failed = append(failed, p.Metadata.Name+": "+err.Error())
+			continue
+		}
+		reaped = append(reaped, namespace+"/"+p.Metadata.Name)
+	}
+	if len(failed) > 0 {
+		return reaped, fmt.Errorf("kubernetes: could not delete the pods of run %s: %s", runID, strings.Join(failed, "; "))
+	}
+	return reaped, nil
 }

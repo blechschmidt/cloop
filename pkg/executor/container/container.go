@@ -1049,8 +1049,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		StartedAt: rec.startedAt,
 		Deadline:  deadline,
 		// The disk limit rides with the handle, so a restarted hub resumes
-		// sampling the workload it adopts.
-		Meta: withDiskMeta(handleMeta(e.rt.Name, feature), disk),
+		// sampling the workload it adopts — and so does where its credential
+		// files are staged, so an adopter wipes, revokes and refreshes them
+		// (Task 20419).
+		Meta: withStageMeta(executor.WithRunID(withDiskMeta(handleMeta(e.rt.Name, feature), disk), spec), stage),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this sandbox. Names and paths only — the credential

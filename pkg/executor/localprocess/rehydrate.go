@@ -477,6 +477,19 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 		return
 	}
 
+	e.mu.Lock()
+	_, tracked := e.handles[saved.HandleID]
+	e.mu.Unlock()
+	if tracked {
+		return
+	}
+	// Claimed before it is tracked (Task 20419): a row another hub process
+	// adopted first is that process's, and adopting it here too would put two
+	// watchers and two kill timers on one pid.
+	if !executor.ClaimHandle(e.handleStore(), saved) {
+		return
+	}
+
 	want, identErr := identityFromMeta(saved.Meta)
 	verifyErr := identErr
 	if verifyErr == nil {

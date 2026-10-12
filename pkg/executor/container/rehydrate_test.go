@@ -878,8 +878,9 @@ func TestAdoptedHandleTakesItsLeasesRedactions(t *testing.T) {
 }
 
 // TestRevokingAnAdoptedContainersFilesRemovesTheContainer (Task 20403): a
-// container adopted after a hub restart was rebuilt from a row that records no
-// host paths of credentials, so its staged files cannot be found to be wiped.
+// container adopted after a hub restart from a row that does not record where
+// its credential files were staged — one written before Task 20419, which
+// records it (stagerecord.go) — cannot have them found to be wiped.
 // A revocation reaching it — an operator's, or the janitor's for a lapsed lease
 // — must not report a scrub it did not perform: the container is removed, the
 // one withdrawal that does not need the paths, and the report says Killed.

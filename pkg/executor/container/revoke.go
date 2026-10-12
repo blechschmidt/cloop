@@ -179,10 +179,11 @@ func (e *Executor) RefreshSecretFiles(ctx context.Context, req executor.SecretRe
 			continue
 		}
 		if rec.secretStage == nil {
-			// Adopted after a hub restart: the record was rebuilt from a row,
-			// and the row deliberately holds no host paths of credentials.
-			errs = append(errs, fmt.Errorf("container %s was adopted from a row written before this hub "+
-				"process started, which does not record where its credential files were staged", handleID))
+			// Adopted from a row that does not record where its credential
+			// files were staged: one written before Task 20419, or for a
+			// container that staged none.
+			errs = append(errs, fmt.Errorf("container %s was adopted from a row that does not record where "+
+				"its credential files were staged", handleID))
 			continue
 		}
 		if rec.bus != nil {
@@ -245,11 +246,12 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	// than merely over-granted.
 	envKeys := executor.EnvKeys(bindings)
 	// So do files this process cannot find. A container adopted after a hub
-	// restart was rebuilt from a row that deliberately records no host paths
-	// of credentials, so its stage is unknown: the files are in a directory
+	// restart is rebuilt from its row, which records where its files were
+	// staged (Task 20419); a row from before that, or one some of whose
+	// directories could not be accounted for, leaves files in a directory
 	// bound into the container that nothing here can name (Task 20403).
 	// Reporting the scrub done would be the lie this file exists to remove.
-	lostFiles := rec.secretStage == nil && bindingsCarryFiles(bindings)
+	lostFiles := !rec.secretStage.accountsForFiles() && bindingsCarryFiles(bindings)
 	if len(envKeys) == 0 && !lostFiles && req.Effective() != executor.RevokeKill {
 		return removed, false, errors.Join(errs...)
 	}
@@ -264,7 +266,8 @@ func (e *Executor) revokeHandle(ctx context.Context, handleID string,
 	case lostFiles:
 		reason = fmt.Sprintf(
 			"secret lease %s revoked; the container was adopted after a hub restart, and where its credential "+
-				"files were staged is not recorded, so they could only be taken back with the container", req.LeaseID)
+				"files were staged could not be accounted for, so they could only be taken back with the container",
+			req.LeaseID)
 	}
 
 	// `rm --force` rather than a kill signal: a stopped container still holds

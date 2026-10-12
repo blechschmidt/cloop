@@ -98,6 +98,22 @@ type secretStage struct {
 	// created. The sandbox user owns these directories in a sticky /dev/shm and
 	// can rename them; a refresh writes only into the directory it created.
 	dirIDs map[string]executor.FileIdentity
+	// incomplete marks a stage rebuilt for an adopted container from a row
+	// that did not account for every directory it staged (stagerecord.go): a
+	// revocation of a lease whose files it held cannot be sure the files are
+	// gone, and removes the container instead.
+	incomplete bool
+}
+
+// accountsForFiles reports whether the stage knows where every credential
+// file it staged is: false for no stage at all, and for an incomplete one.
+func (s *secretStage) accountsForFiles() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.incomplete
 }
 
 // mountList returns the binds to add to the run, or nil for no stage.

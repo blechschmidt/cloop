@@ -524,8 +524,10 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// The boot id and start time that turn the pid above from a recycled
 		// integer into an identity. Nil when they could not be read, in which
 		// case the row is still written — a sweep can still see that a workload
-		// exists — but adoption will decline it rather than guess.
-		Meta: ident.meta(),
+		// exists — but adoption will decline it rather than guess. And the run
+		// id, so the workload is found by it if this process dies before the
+		// hub records the run (Task 20419).
+		Meta: executor.WithRunID(ident.meta(), spec),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this process. Names and paths only — the credential

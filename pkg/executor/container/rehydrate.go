@@ -36,6 +36,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -169,6 +170,19 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	}
 
 	e.mu.Lock()
+	_, tracked := e.handles[saved.HandleID]
+	e.mu.Unlock()
+	if tracked {
+		return
+	}
+	// Claimed before it is tracked (Task 20419): a row another hub process
+	// adopted first is that process's, and adopting it here too would put a
+	// second log follower and a second reaper on one container.
+	if !executor.ClaimHandle(e.handleStore(), saved) {
+		return
+	}
+
+	e.mu.Lock()
 	if _, exists := e.handles[saved.HandleID]; exists {
 		e.mu.Unlock()
 		return
@@ -181,6 +195,14 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 		// A feature workload's output is where it was; the log follower
 		// replays the backlog, so its write-back report is found again.
 		feature: restoreFeature(saved.Meta),
+	}
+	// Where its credential files are staged, from the row (Task 20419): wiped
+	// when it ends, revoked without killing it, refreshed before a GitHub App
+	// token runs out — as its dispatcher would have.
+	stage, problems := restoreSecretStage(saved.Meta)
+	rec.secretStage = stage
+	for _, p := range problems {
+		fmt.Fprintf(os.Stderr, "container: handle %s: credential staging not restored: %s\n", saved.HandleID, p)
 	}
 	// The bus is built under the lock because it is pure allocation, and doing
 	// it before the existence check would leave an orphaned bus on the
@@ -243,4 +265,45 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 			"resumed after a control-plane restart\n", disk.describe()))
 		go e.watchDisk(pumpCtx, rec, disk, nil)
 	}
+}
+
+// Compile-time proof that this driver can stop a run's containers by its run
+// id (Task 20419).
+var _ executor.RunReaper = (*Executor)(nil)
+
+// ReapRun implements executor.RunReaper: it removes every container this
+// executor started for runID — found by the run-id label every Spec label is
+// carried under — whether or not any handle names it. It is for a workload its
+// hub process started and died before recording, which nothing will ever
+// adopt or supervise.
+func (e *Executor) ReapRun(ctx context.Context, runID string) ([]string, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil
+	}
+	args := []string{"ps", "--all",
+		"--filter", "label=" + LabelManaged + "=true",
+		"--filter", "label=" + LabelExecutor + "=" + e.id,
+		"--filter", "label=cloop.spec." + sanitizeLabelKeySegment(executor.LabelRunID) + "=" + runID,
+		"--format", "{{.Names}}"}
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, args...)
+	if err != nil {
+		return nil, fmt.Errorf("container: list the containers of run %s: %w", runID, err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("container: list the containers of run %s failed: %s", runID, firstLine(res.Stderr))
+	}
+	var reaped []string
+	var failed []string
+	for _, name := range strings.Fields(res.Stdout) {
+		if e.removeContainer(ctx, name) {
+			reaped = append(reaped, name)
+		} else {
+			failed = append(failed, name)
+		}
+	}
+	if len(failed) > 0 {
+		return reaped, fmt.Errorf("container: could not remove %s of run %s", strings.Join(failed, ", "), runID)
+	}
+	return reaped, nil
 }

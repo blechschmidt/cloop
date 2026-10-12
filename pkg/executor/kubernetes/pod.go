@@ -63,6 +63,10 @@ const (
 	LabelTaskID     = "cloop.dev/task-id"
 	LabelHandleID   = "cloop.dev/handle-id"
 	LabelProject    = "cloop.dev/project"
+	// LabelRunID carries the run id the hub minted for the dispatch, so a
+	// Pod its hub process created and died before recording can be found and
+	// deleted by it (Task 20419). "none" on a Pod dispatched without one.
+	LabelRunID = "cloop.dev/run-id"
 
 	// AnnotationProjectPath carries the untruncated project path. Label
 	// values are capped at 63 characters and constrained to a small
@@ -820,6 +824,7 @@ func buildPod(req podRequest) (*pod, error) {
 		LabelTaskID:     sanitizeLabelValue(taskIDFrom(req.Labels)),
 		LabelProject:    sanitizeLabelValue(projectSlug(req.Labels["project"])),
 		LabelEgress:     egressLabelValue(req.DisableNetwork),
+		LabelRunID:      sanitizeLabelValue(strings.TrimSpace(req.Labels[executor.LabelRunID])),
 	}
 	annotations := map[string]string{
 		AnnotationArgv: firstLine(strings.Join(req.Argv, " ")),

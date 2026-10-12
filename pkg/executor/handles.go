@@ -38,6 +38,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -341,4 +342,66 @@ func (m *MemoryHandleStore) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.rows)
+}
+
+// HandleClaimer is implemented by a HandleStore several control-plane
+// processes share (Task 20419). ClaimHandle records that the process asking
+// now tracks rec — the one adopting it — provided the row still names the
+// owner rec was read with, and reports whether it does.
+//
+// Adoption used to leave a row naming the process that started the workload.
+// A process that started later found the row of a member that had died, and
+// adopted the workload again: two log pumps, two kill timers, two Kubernetes
+// lease renewers for one workload, each settling it. A claimed row names its
+// adopter, so it is visible to that adopter alone — and so is everything that
+// follows the workload: its wipe, its credential refresh, its watchers.
+type HandleClaimer interface {
+	ClaimHandle(rec HandleRecord) (bool, error)
+}
+
+// ClaimHandle claims rec on store before a driver adopts it, and reports
+// whether the driver may: true for a store no other process shares, and for
+// one whose claim could not be written — adopting without it is what every
+// adoption did before, and refusing would leave a running workload unwatched.
+// False only when another process claimed the row first.
+func ClaimHandle(store HandleStore, rec HandleRecord) bool {
+	c, ok := store.(HandleClaimer)
+	if !ok || c == nil {
+		return true
+	}
+	claimed, err := c.ClaimHandle(rec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "executor: could not record the adoption of handle %s (%s): %v\n",
+			rec.HandleID, rec.ExecutorID, err)
+		return true
+	}
+	return claimed
+}
+
+// MetaRunID is the HandleRecord.Meta key carrying the run id the hub minted
+// for the dispatch (the LabelRunID Spec label), so the workload a hub process
+// started can be found by it if that process died before recording the run
+// (Task 20419). Not a secret: it is on the run's audit rows too.
+const MetaRunID = "run_id"
+
+// WithRunID records spec's run id in meta, which it returns.
+func WithRunID(meta map[string]string, spec Spec) map[string]string {
+	run := strings.TrimSpace(spec.Labels[LabelRunID])
+	if run == "" {
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	meta[MetaRunID] = run
+	return meta
+}
+
+// RunReaper is implemented by a driver that can find and stop the workloads it
+// started for a run by the run id alone (Task 20419): what a hub process that
+// died between starting a workload and recording its handle leaves behind,
+// which no row names. reaped lists what was stopped; none found is not an
+// error.
+type RunReaper interface {
+	ReapRun(ctx context.Context, runID string) (reaped []string, err error)
 }

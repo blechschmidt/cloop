@@ -166,3 +166,28 @@ func (h *Handles) DeleteHandle(handleID string) error {
 	}
 	return nil
 }
+
+// ClaimHandleMeta sets one meta key of a handle's row from expect to value,
+// conditionally (Task 20419). See statedb.ClaimExecutorHandleMeta.
+func (h *Handles) ClaimHandleMeta(handleID, key, expect, value string) (bool, error) {
+	if h == nil || h.db == nil {
+		return false, fmt.Errorf("executorstore: nil handle store")
+	}
+	return h.db.ClaimExecutorHandleMeta(handleID, key, expect, value)
+}
+
+// HandleMeta returns one meta key of a handle's row, and whether the row
+// exists.
+func (h *Handles) HandleMeta(handleID, key string) (string, bool, error) {
+	if h == nil || h.db == nil {
+		return "", false, fmt.Errorf("executorstore: nil handle store")
+	}
+	row, err := h.db.GetExecutorHandle(handleID)
+	if errors.Is(err, statedb.ErrExecutorHandleNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return statedb.UnmarshalHandleMeta(row.MetaJSON)[key], true, nil
+}
