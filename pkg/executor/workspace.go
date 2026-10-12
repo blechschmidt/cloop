@@ -678,6 +678,18 @@ func baseGitConfig() [][2]string {
 		// pkg/gitproxy already refuses redirects on its own upstream leg, for
 		// the same reason; this is the client leg of the same circuit.
 		{"http.followRedirects", "false"},
+		// Housekeeping in the foreground (Task 20421). gc --auto has long
+		// detached, and since git 2.47 a fetch ends by starting `git
+		// maintenance run --auto` detached as well: a child that outlives the
+		// command, escapes BoundChild's process group and its cancellation,
+		// keeps this environment — an authenticated step's credential header
+		// included — and writes into .git after the step has returned (CI saw
+		// it as a test's TempDir cleanup failing on a .git that was not
+		// empty). With detaching off, the work, when there is any, finishes
+		// inside the command that started it. An older git ignores the
+		// maintenance key.
+		{"gc.autoDetach", "false"},
+		{"maintenance.autoDetach", "false"},
 	}
 }
 

@@ -568,3 +568,25 @@ func TestSpecRequiresProjectSeedForExecutorWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// TestGitEnvKeepsHousekeepingInTheForeground (Task 20421): cloop's own git
+// children run gc and auto-maintenance, when git wants either, inside the
+// command that triggered it. A detached child outlives the step, escapes its
+// process group, keeps the step's environment — the authenticated step's
+// credential header included — and writes into .git after the step returned.
+func TestGitEnvKeepsHousekeepingInTheForeground(t *testing.T) {
+	cred, err := GitCredentialEnv(Workspace{Kind: WorkspaceGit, Repo: "https://git.example.com/o/r.git"},
+		GitCredential{Username: "x-access-token", Password: "tok-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string][]string{"GitEnv": GitEnv(), "GitCredentialEnv": cred} {
+		cfg := parseGitConfigEnv(t, env)
+		for _, key := range []string{"gc.autoDetach", "maintenance.autoDetach"} {
+			if cfg[key] != "false" {
+				t.Errorf("%s has %s=%q, want false: a detached child would outlive the step with its environment",
+					name, key, cfg[key])
+			}
+		}
+	}
+}
