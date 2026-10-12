@@ -663,6 +663,11 @@ server's URLs reach the proxy through a route of their own, so a lease holding
 grants for both hosts keeps them apart (see
 [the git proxy's forge routes](../architecture/git-proxy.md#one-route-per-forge-host)).
 
+Upgrade every hub member that shares the control plane before minting such a
+PAT. A member on a build from before hosts were recorded reads the document as
+the token itself, and presents it — the Enterprise token inside it included —
+wherever a project's origin points.
+
 ### When it is missing
 
 The run does not start, and it does not start *by name*. The refusal is an HTTP
