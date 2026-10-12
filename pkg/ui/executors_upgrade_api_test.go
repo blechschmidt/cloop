@@ -18,6 +18,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // upgradeDevice registers a connected device whose agent advertises protocol
@@ -156,13 +157,19 @@ func TestExecutorUpgrade_UnresolvedLatestIsJudgedFromTheTable(t *testing.T) {
 	withLatestRelease(t, "", errors.New("GitHub API returned HTTP 403"))
 	dir := setupProjectDir(t, "upgrade fallback", nil)
 
-	high := upgradeDevice(t, "sgx-upgrade-4", 14)
+	// A device ahead of the newest release this hub knows of, whichever that
+	// is: "latest" judged as that release would lower it.
+	newest, ok := version.NewestPublishedRelease()
+	if !ok {
+		t.Skip("this build knows of no published release")
+	}
+	high := upgradeDevice(t, "sgx-upgrade-4", newest.Protocol+1)
 	code, body := postUpgrade(t, dir, "sgx-upgrade-4", map[string]any{"target_version": "latest"})
 	if code != http.StatusConflict || !strings.Contains(errorText(body), "the newest published release this hub knows of") {
 		t.Fatalf("status %d, error %q; want 409 saying how latest was judged", code, errorText(body))
 	}
 	if got := high(); len(got) != 0 {
-		t.Errorf("the v14 device was asked for %v", got)
+		t.Errorf("the v%d device was asked for %v", newest.Protocol+1, got)
 	}
 
 	low := upgradeDevice(t, "edge-upgrade-5", 12)

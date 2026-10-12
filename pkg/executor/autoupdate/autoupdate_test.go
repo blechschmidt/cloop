@@ -229,11 +229,17 @@ func TestPlanRefusesATargetThatLowersTheProtocol(t *testing.T) {
 		}
 	}
 
-	// "latest" is judged as the newest release this hub knows of.
+	// "latest" is judged as the newest release this hub knows of — refused for
+	// a device whose agent speaks a newer protocol than that release, whichever
+	// release it is (Task 20421 published v0.0.5, which a v14 device would gain
+	// from, not lose to).
 	newest, _ := version.NewestPublishedRelease()
-	vs := Plan(Policy{Enabled: true, TargetVersion: "latest"}, devHub, []Device{d})
+	ahead := d
+	ahead.AgentProtocol = newest.Protocol + 1
+	vs := Plan(Policy{Enabled: true, TargetVersion: "latest"}, devHub, []Device{ahead})
 	if vs[0].Upgrade || !strings.Contains(vs[0].Reason, "judged as "+newest.Tag) ||
-		!strings.Contains(vs[0].Reason, executor.ProtocolDrop("this device's agent", 14, newest.Tag, newest.Protocol)) {
+		!strings.Contains(vs[0].Reason,
+			executor.ProtocolDrop("this device's agent", newest.Protocol+1, newest.Tag, newest.Protocol)) {
 		t.Errorf("latest: %+v", vs[0])
 	}
 }

@@ -59,6 +59,8 @@ type Release struct {
 var publishedReleases = []Release{
 	{Tag: "v0.0.1", Protocol: 6},
 	{Tag: "v0.0.4", Protocol: 13},
+	// The first release stamped with its place on main (Task 20421).
+	{Tag: "v0.0.5", Protocol: 21, Sequence: 1080},
 }
 
 // ReleaseSequence returns the sequence the release tag's binaries carry, and

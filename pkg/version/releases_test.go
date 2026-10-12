@@ -105,16 +105,18 @@ func TestReleaseProtocolBounds(t *testing.T) {
 		// Listed: exact.
 		{"v0.0.1", 6, 6},
 		{"v0.0.4", 13, 13},
+		{"v0.0.5", 21, 21},
 		// Between two listed releases. v0.0.2 and v0.0.3 are real tags that
 		// were never published; their true protocols (v7, v13) lie inside.
 		{"v0.0.2", 6, 13},
 		{"v0.0.3", 6, 13},
 		{"v0.0.4-rc1", 6, 13},
+		{"v0.0.5-rc1", 13, 21},
 		// Before everything listed: nothing below, the oldest above.
 		{"v0.0.0", 0, 6},
 		// After everything listed: newer than this build, no upper bound.
-		{"v0.0.5", 13, 0},
-		{"v1.0.0", 13, 0},
+		{"v0.0.6", 21, 0},
+		{"v1.0.0", 21, 0},
 		// Not a release at all.
 		{"dev", 0, 0},
 		{"dev+g8b418e2", 0, 0},

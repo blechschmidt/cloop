@@ -10,574 +10,1308 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
-### Added
+## [0.0.5] - 2026-10-12
 
-- **CI gates on staticcheck, unused and ineffassign.** A **Lint** job runs
-  golangci-lint (pinned in the Makefile, v2.14.0) with staticcheck's SA checks,
-  `unused` and `ineffassign` over the whole module, tests included, in parallel
-  with the rest of CI; `make lint` runs exactly what it runs. The 72 findings
-  already in the tree are fixed — 39 unused declarations, 9 ineffective
-  assignments and 24 staticcheck findings, among them TLS configs setting
-  `PreferServerCipherSuites`, which Go has ignored since 1.18, and the JWK
-  parsers' deprecated `elliptic.IsOnCurve` (now
-  `ecdsa.ParseUncompressedPublicKey`, accepting exactly what it accepted
-  before). errcheck stays off until it has a baseline of its own:
-  `CONTRIBUTING.md` explains why, and how to silence a finding that is wrong
-  (Task 20411).
-- **The edge channel: devices can follow the hub's own build, signed by CI.**
-  After CI passes on a push to `main`, the new `edge.yml` workflow builds that
-  commit for every release platform — stamped `dev+g<short sha>` as the hub's
-  deploy stamps it — and signs each archive and a manifest `{commit, version,
-  protocol, archive hashes}` with Sigstore keyless signing. They are
-  commit-named assets of one `edge` prerelease that is never latest, whose tag
-  is never moved, and which keeps the newest 30 commits. Edge builds are trusted
-  by a pin of their own, `edge.yml@refs/heads/main`, accepted only for an
-  `edge:<commit>` target; the tag-only release pin is unchanged and refuses
-  them. A device opts in on the device — `sudo cloop executor agent install
-  --upgrade --channel edge` writes `20-update-channel.conf`, which upgrades keep
-  and the hub cannot change — and then the Executors panel's Upgrade dialog and
-  the auto-update policy offer it **this hub's build (`<short sha>`)** once CI has
-  published it and only if its manifest's protocol does not lower the device's,
-  saying plainly otherwise why not: the deploy built an unpushed commit, CI has
-  not published it yet, or CI failed. `install --upgrade --to <target>` fetches
-  and verifies a published build on the device (Task 20376).
-- **Remote upgrade works on a hardened device.** The agent runs unprivileged
-  and could never replace its own root-owned binary or restart itself, so the
-  Upgrade button was accepted and then failed in the device's journal. A root
-  helper (`cloop-executor-upgrade.path` and `.service`, installed by default and
-  by `install --upgrade --remote-upgrade`) now carries out the request the agent
-  files: it takes the device's channel from systemd, verifies the build, and
-  installs it with the usual backup, restart and rollback. A device that cannot
-  carry out an upgrade — no helper, a helper whose path unit is not active, or
-  no cosign — refuses before acknowledging and says why; the dialog warns with
-  what it said at hello and asks it again on Upgrade (Task 20376).
-
-- **GitHub App tokens outlive GitHub's hour.** A run that still uses git more
-  than an hour after dispatch keeps its GitHub access. The hub re-mints a
-  `github_app` grant's installation token when about ten minutes of its hour
-  are left — at exactly the scope of the first (same installation, same
-  repositories by ID, same permissions, never wider than GitHub granted the
-  first time), and only while the grant still authorises the lease — and
-  destroys the token it replaced once nothing presents it. Under the git proxy
-  the session renews the token it presents upstream from its own request path;
-  without it the lease keepalive rewrites the sandbox's `github-token` file in
-  place: on the hub's host, in a container's staged directory, on an edge
-  device through the new `secret_refresh` frame (agent protocol **v17**), and on
-  Kubernetes by patching the run's lease Secret (the chart's executor Role gains
-  `patch` on `secrets`). A refresh the broker or GitHub refuses — the grant
-  revoked or expired, the installation suspended, a repository removed from it —
-  ends the grant's access as revocation does; a device too old for the frame is
-  journaled instead of refused, and keeps the token it was given. Each re-mint
-  is an allowed `secret.renew` row; each delivery to an executor a
-  `lease.refresh` row (new audit action). See *Keeping the token past GitHub's
-  hour* in `docs/guides/secrets.md`.
-
-- **Done means committed.** An opt-in, per-project post-condition: a task
-  whose agent says it is done is accepted only once the changes it made are
-  committed — and, with *pushed*, on its branch's upstream. When a turn ends
-  with this attempt's changes uncommitted (or its commits unpushed), the turn
-  is handed back in the same conversation naming the paths and commits, at
-  most twice; a task that still ends that way goes back to `pending` as an
-  `uncommitted_work` abort with its work left in the tree, the next attempt is
-  held to it, and the run pauses (reason `uncommitted_work`) at the
-  consecutive-abort ceiling. What was already dirty when the task started,
-  and `.cloop/`, are never blamed; a push the review gate holds counts as
-  pending. Set it with the Overview's *Done = Committed* / *…and Pushed*
-  badges, `cloop run --require-committed[=pushed]` or `cloop
-  require-committed`; `cloop status` shows it. It travels to isolating
-  executors with the project. See `docs/guides/done-means-committed.md`.
-  The unfinished-turn detector also recognises the ending that stranded Task
-  20368 ("the only thing still running is …, then commit and push"), re-checked
-  against the project's 314-message ledger with no signalled turn matching.
-
-- **Project sharing.** On a hub with single sign-on, a project's maintainer
-  adds named people to it at a role — never above their own role there — from
-  the Overview's **Members** card or `cloop project members add`. A membership
-  only adds: someone who already holds more keeps it. A member sees the project
-  in their list, on their glasses link and through tokens minted on their
-  behalf, including on a hub whose `default_role` is `none`, and its features
-  come with it. A removal takes effect on every hub within seconds and closes
-  the member's open dashboard on the project; members can also leave. API:
-  `/api/projects/{idx}/members`, permission `project.share` (maintainer and
-  up); audit actions `project.member.grant`, `.change`, `.revoke` and `.leave`.
-  Offboarding a user removes their memberships, and removing a project drops
-  its roster. See *Project members* in `docs/security/model.md`.
-- **Settings → Telemetry.** An admin switches front-end telemetry on and off
-  from the dashboard, optionally for one front end only
-  (`ui.telemetry.sources`), and sees what is already stored and for how long;
-  switching off deletes nothing. API: `GET`/`PUT /api/config/telemetry`
-  (`user.manage`); audit action `telemetry.config.updated`. On a hub with a
-  per-instance overlay (`.cloop/config.ui-<port>.yaml`) the setting is read
-  from and saved to that file.
-- **Dictation goes where the caret is.** The Dictate buttons on the Tasks tab
-  and in the task editor insert what you said at the caret of the text field
-  you were in — the Add Task description, the task filter, the editor's Title —
-  replacing a selection, and a toast names the field. With no field focused
-  they do what they did before: append to the Add Task title, and in the editor
-  ask whether to replace the description, add to it or edit it with AI.
-- **Multi-line task descriptions.** The description box in the Tasks tab's Add
-  Task form takes several lines: Enter starts a new one, and Ctrl+Enter
-  (⌘+Enter on a Mac) adds the task. It was a one-line field that flattened a
-  pasted brief into one run-on line.
-- **Review gate.** A project can have a reviewer model — its own provider and
-  model, free to differ from the ones doing the work — check each task's changes
-  before anything leaves the working copy. While a task runs, the agent's `git
-  push` is held (reported to it as "held by cloop's review gate" and recorded,
-  through a `pushInsteadOf` rewrite in its environment only); when it reports
-  the task done, the reviewer reads the diff of every repository the task
-  touched, read-only. On approval cloop sends the held pushes itself, at the
-  reviewed commits and never with a commit the reviewer did not see, and lets
-  git-mode and worktree merges proceed only for the approved tree. On a request
-  for changes, `fix` mode sends the findings back to the agent in its own
-  conversation and reviews again, `block` fails the task, `advisory` records
-  and publishes. A reviewer that gives no verdict fails the task closed.
-  Configure it from the Overview's **Review gate** card or `cloop review gate`;
-  the verdict shows in the task list, the task details and the event history.
-  API: `/api/options/review-gate`. See `docs/guides/review-gate.md`.
-- **Virtual executors.** An enrolled device can carry named sub-executors, each
-  with its own container engine, OCI runtime and image, an **IP firewall with an
-  allowlist and a denylist**, and the **host devices** its sandboxes are given.
-  Projects bind to one like to any executor, and resource limits and the access
-  list apply to it under its own ID — so one machine can offer a locked-down
-  sandbox to everyone and one holding its hardware security module to the few
-  people allowed near it. Press **Virtual** on a device's card in the Executors
-  tab: the dialog shows the device's USB devices (vendor, product, serial, node;
-  **Refresh** re-reads them from the device) to pick from. The Settings tab lists
-  every enrolled device's USB hardware, each with a way into that dialog. API:
-  `/api/executors/{device}/virtuals` and `/api/executors/{id}/virtual`; audit
-  action `executor.virtual`. See `docs/guides/virtual-executors.md`.
-- **Executor protocol v14.** Agents report their USB inventory (read from sysfs,
-  which the hardened unit leaves visible), whether they can install a packet
-  filter, and their engine's OCI runtimes; a start frame can carry a virtual
-  executor's firewall and devices, which the device resolves against its live
-  hardware at every dispatch — an unplugged device fails the start, naming it.
-  A USB device is selected by identity rather than by `/dev/bus/usb` path, which
-  changes on every re-enumeration.
-- `cloop executor agent install --packet-filter` grants the agent
-  `CAP_NET_ADMIN` and netlink so it can install a virtual executor's firewall
-  with nft(8); without it such a virtual executor is refused, never started
-  unfiltered.
-- A denylist for the IP-layer egress filter (`netfilter.Input.DenyCIDRs`),
-  compiled ahead of every allow and carried into Kubernetes NetworkPolicies as
-  `except` ranges.
-
-### Changed
-
-- **WebSockets run on `github.com/coder/websocket` v1.8.15.**
-  `nhooyr.io/websocket` v1.8.17 — the library behind the dashboard's sockets,
-  both ends of the hub-to-agent transport, and sandbox attach from the
-  browser, the CLI and to a Kubernetes API server — is deprecated and
-  receives no fixes; its maintained successor has the same API.
-  Three of its changes reach the hub. A socket the hub closes because access
-  was withdrawn now ends in the browser with its 1008 and reason: the old
-  library answered the browser's close reply with a second close frame, which
-  a browser reports as 1006 with the reason lost (the `access_withdrawn`
-  message still goes first). A connection no longer keeps a goroutine of its
-  own for read and write deadlines. A frame over a read limit fails with an
-  error wrapping `websocket.ErrMessageTooBig`, and still closes the connection
-  with 1009. `go test ./tests/arch/` fails if the old module is imported again
-  anywhere or named in `go.mod` (Task 20411).
-- **The Event History panel is pushed its rows instead of re-reading them.**
-  Every `task_update`, `state_diff`, `task_added`, `task_deleted`,
-  `task_mutation` and `run_state` message used to make the dashboard fetch
-  `GET /api/event-history` again — every row it held, after a scroll up to
-  500 — and each fetch loaded the whole project, every step's output included,
-  to return fifty rows: half of all dashboard requests on the hub that runs
-  cloop's own project, 244 ms and 155 MB of allocation per request on a journal
-  of 50,000 steps. A page is now two index reads (migration 0059 indexes
-  `julianday()` of each table's timestamp, so offsets and trimmed fractions
-  sort as instants) — about 3 ms at any journal size — paged with `before=`,
-  and the rows written since a page arrive as `history_append` messages to the
-  project's room, from the watcher that computes its `state_diff`. The panel
-  reads only to fill a gap the cursors show: on connect, when the hub's sync
-  point is above what it holds, and when a push does not continue from it.
-  `offset=` still works; responses no longer carry `total`. A step's output or
-  an event's details over 4 KB arrives cut and loads whole when the row is
-  opened (`?step=N`, `?event=N`) (Task 20384).
-- **Browser telemetry is off by default.** An unset `ui.telemetry.enabled` now
-  means off, and the dashboard and the glasses page ask the hub
-  (`GET /api/telemetry/config`, `/api/glasses/telemetry/config`) before sending
-  anything, so nothing leaves the browser on a hub that collects nothing. A hub
-  whose config already says `enabled: true` keeps collecting.
-- **The error boundary ships without its comments too.** `errboundary.js`, the
-  one first-paint script still served as written, goes through the bundle's
-  line-preserving comment stripper: 4.9 KB → 2.6 KB on the wire.
-- **`cloop ui --port N` applies its executor policy with its overlay merged.**
-  `executors.allow_host_process`, `min_agent_build` and `limits` were applied
-  at startup from `config.yaml` alone, before the hub read its overlay. They
-  only ever tighten, so the shared file's value always won. An overlay that
-  says `allow_host_process: true` now relaxes a shared `config.yaml` that says
-  `false`, for that hub alone, as the overlay's per-key merge has always been
-  documented to do.
-
-### Fixed
-
-- **`cloop task effort-calibrate` asks the model it resolved.** It looked up
-  the model from `--model`, then the provider's model in the configuration,
-  then the project's — and built its provider call from `--model` alone, so
-  without the flag the provider's built-in default answered instead of the
-  configured model. Found by the new lint gate's `ineffassign` (Task 20411).
-- **`CLOOP_SOAK_KEEP` keeps the soak root.** `docs/operations/soak.md`
-  documented it for post-mortems and nothing read it; the soak now leaves its
-  hub state, project databases and logs in a directory it names in the test
-  log (Task 20411).
-
-- **Three defects every interactive CLI user met.** (1) Every command whose
-  stdout was a terminal asked it for its background colour (OSC 11 and a
-  cursor-position request) in bubbletea's package init and waited up to five
-  seconds for the reply: under a pty nobody answers — expect, `docker` or
-  `kubectl exec -t` from a script, CI with a tty — `cloop status` took 5.05 s
-  instead of 0.03 s and its output began with the query. An init that Go runs
-  first now gives lipgloss the answer; nothing in cloop reads it, and
-  `tests/arch` fails if something starts to. (2) Every project created by
-  current cloop printed "warning: .cloop schema is out of date — run 'cloop
-  migrate'" on every interactive command, because `cloop migrate` kept a
-  version number of its own that the database layer never wrote. It now
-  answers from the database's own migrations and warns only for a legacy
-  `state.json` project or a database from before them, and `cloop migrate`
-  converts and migrates through the database layer instead of its own
-  `CREATE TABLE`/`ALTER TABLE` — whose converted databases could not be opened
-  at all: the database layer adopted them and then failed at migration 0009
-  ("no such table: stuck_tasks"). Such databases are now completed and adopted.
-  (3) `cloop config validate --fix` reset every in-progress task to `pending`
-  with a bare `UPDATE`, even while a run was executing it. It now leaves the
-  plan alone while a run of the project is live — a `cloop run` process in it,
-  or a run claimed in the control plane of a hub on this host, judged by the
-  rule hub members use — and otherwise recovers the tasks the way the hub
-  does: an outcome cloop or the agent had reached (a review gate's rejection,
-  a finished agent's `TASK_DONE`) is kept, anything else goes back to
-  `pending`, a stale running status is paused, all saved through the database
-  layer into the events journal and the audit trail. Every package that opened
-  a cloop database with a bare `sql.Open` (taskqueue, globalbudget, taskreplay,
-  chaos, the read-only handles of `cloop db backup`/`verify`) now opens it
-  under one connection policy: `busy_timeout` on every connection the pool
-  opens — taskqueue's `MarkDone` failed instantly with `SQLITE_BUSY` once the
-  pool replaced the one connection its pragma had reached — foreign keys,
-  `BEGIN IMMEDIATE` for writers, `mode=ro` for readers. A new bare open fails
-  `tests/arch`.
-- **The Upgrade button no longer moves a device backwards, and "upgrade the
-  agent" says how.** The Executors panel's Upgrade button and the fleet
-  auto-update policy can only make a device install a published, signed
-  release. On a hub running an unreleased build — whose devices speak newer
-  protocols than any release — pressing Upgrade prefilled the hub's own
-  `dev+g…` version, which no device can download, and `latest` meant v0.0.4,
-  which speaks protocol v13: the device's own check could not order its dev
-  build against the release, so a v14 device would have installed it and
-  dropped a protocol. The hub now resolves `latest` to a tag and refuses, before
-  anything is sent, a target that is not a release (400) or whose binaries
-  speak an older protocol than the device (409; `force` overrides it), and the
-  planner refuses both before it compares versions. The dialog offers the hub's
-  own release, or the newest published release that would not lower the
-  device's protocol, or — when there is none — only the explanation.
-  `cloop executor agent install --upgrade` on a device refuses a staged binary
-  speaking an older protocol than the installed one, `--force` to override. And
-  every refusal of a device's protocol — revocation, workspace, secret files,
-  project state, feature branches, container mode, virtual executors, stored
-  firewall rules, attach, remote upgrade — now names the protocol the device
-  speaks, the one the hub needs, and the remedy for the hub's build: Upgrade to
-  the hub's own release on a hub that is one; on one that is not, build cloop at
-  the hub's commit and install it on the device with
-  `sudo ./cloop executor agent install --upgrade --insecure-skip-verify`. A
-  connected device below the hub's protocol is material version skew whatever
-  its build string says. See *Moving a device forward* in
-  `docs/architecture/executors.md`.
-- **Features run on a remote device against a private repository, come back
-  clean, and open their pull request.** Three defects, found on the first live
-  run of a feature on a real device (Task 20371), each fixed with a test. A
-  feature whose branch rides on a clone of its project's https upstream leased
-  the project's GitHub grant as the feature's own path, which no grant names,
-  so the dispatch was refused with "no active GitHub grant named … is issued to
-  this executor for this project" while the grant was in force. A host-mode
-  payload with an environment of its own (any project holding a grant) had its
-  checkout as `HOME`, so the harness wrote `.claude.json`, `.claude/` — its
-  session transcript among them — and `.config/cloop/` into the repository,
-  and a feature's write-back committed them onto the feature's branch; the
-  agent now gives such a payload a home of its own beside the tree
-  (`.<dir>.home`, mode 0700). And the hub's push of a feature's branch dropped
-  its Authorization header, so opening the pull request failed with GitHub's
-  403 every time. `scripts/e2e/device-features` drives the whole path through
-  the dashboard.
-- **Recovery no longer resurrects a task cloop rejected.** A run that died — or
-  stopped because its outcome write failed — after the review gate, `--verify`,
-  `--script-verify`, abandoned background work or an unanswered clarification
-  question had failed a task was recovered from the agent's own `TASK_DONE`, and
-  the task's dependents ran on rejected work. The orchestrator now writes each
-  decision to `.cloop/artifacts/<id>_verdict.json` before it stores it, and the
-  next run's recovery, the hub's dead-run repair and a remote device reading a
-  run back all apply that first; the agent's signal is used only when there is
-  no decision for the execution. A task whose review had not finished runs
-  again rather than counting as done. `cloop compact` and the retention janitor
-  remove verdicts nothing will read again.
-- **Multi-agent mode obeys the review gate.** `cloop run --multi-agent` built
-  options of its own for its architect, coder and reviewer passes, so a gated
-  project's sub-agents pushed straight to the remote, unreviewed. Every pass now
-  runs as a single agent would — the gate's push hold, the task's directory, the
-  project's effort and thinking settings, the background-work notice — and no
-  longer stops at a hidden ten-minute limit when no step timeout is set.
-- `--script-verify` verified nothing when no step timeout was set, which is the
-  default: the script was requested under a deadline that had already passed,
-  and the error that followed counted as a pass.
-- A project's `capabilities.egress: public` on an executor whose firewall allows
-  only a private range handed the project the whole public Internet. It is now
-  refused, like the broker-only case: a scope may only remove reach.
-- Device passthrough is no longer advertised or attempted under gVisor or Kata.
-  Measured on a gVisor host: the node exists in the sandbox and every open of it
-  fails with `ENXIO`. The enterprise-hosts guide claimed the combination worked.
-- A filtered sandbox resolves through the resolvers its filter opened, named in
-  a `resolv.conf` of its own. Dropping private space also drops the engine's
-  default resolver — on a cloud VM usually the provider's, in CGNAT space — and
-  under gVisor Docker's embedded resolver on `127.0.0.11` is unreachable
-  altogether (measured: every lookup `EAI_AGAIN`), so DNS failed inside such a
-  sandbox.
-- An egress filter is refused under rootless podman, whose networks live in a
-  network namespace the host's packet filter cannot see: the ruleset loaded,
-  matched nothing, and the sandbox ran unfiltered.
-- A task whose harness reported "API Error: Can't reach the API server" was
-  recorded as done. An unreachable provider is now an abort
-  (`network_unreachable`) that pauses the run and names the cause.
-- Revoking a device deletes its virtual executors, each with an audit row.
-- The Executors panel's sandbox chip always described a container-mode device's
-  network as `none`: the card read a field the API never filled in.
-- A run on a hub in strict mode with no isolating executor answered `500` "no
-  default executor configured". Strict mode evicts the host driver, which was
-  the registry's default, and the empty registry was reported as a broken
-  install. It is now the policy refusal: a `409` `host_execution_denied` that
-  names the setting and what to configure.
+The first release since 0.0.4, about three hundred commits later. It carries the
+security fixes `main` has accumulated since — among them a hub without sign-in
+reachable from the network (Task 20393), web pages that could drive a hub
+across sites and through DNS rebinding (Task 20394), stored XSS through a
+project's name (Task 20408), project directories that could take in the hub's
+own state (Task 20418), revocations that never reached running workloads (Task
+20403) and offboarding that left a person's credentials on the hub (Task
+20400) — and executor protocol **v21**, against 0.0.4's v13: virtual executors
+(v14), firewall rules stored in the hub (v15), feature branches (v16), secret
+refresh (v17), the hub's egress route (v18), exact grant revocation (v19), disk
+limits (v20) and the hub's CA for `tls: auto` git proxies (v21). It is the first
+release stamped with its place on `main`, so a device that runs it is covered by
+rollback protection. Read *Upgrading from 0.0.4* before upgrading a hub, a Helm
+release or a device.
 
 ### Security
 
-- **Revoking a grant takes it back from the workloads already holding it.**
-  A revoked grant was refused only at the next lease; a running workload kept
-  the credential until its lease lapsed, and a lapsed lease was swept only from
-  the hub's copy and remote agents, so a container's staged files and a Pod's
-  lease Secret kept it until the workload exited. Now every revocation a broker
-  makes is announced (`secretbroker.OnGrantRevoked`) and the hub cascades it to
-  every hub member: each takes the grant back from every live lease carrying it
-  — that grant's files wiped from a host process, a container and a device,
-  its keys emptied in a Pod's lease Secret so the Pod keeps running on the
-  rest, its git-proxy and kube-guard sessions closed, its App tokens destroyed
-  — and the lease keeps its other grants. `cloop secret revoke` and `cloop hub
-  user offboard` announce on the hub bus and print what each member took back,
-  naming a member that did not answer; `--wait` bounds it. The janitor takes
-  back a revocation nothing announced within a minute, and a lapsed lease from
-  the hub's own container and Kubernetes drivers. A member adopting a run takes
-  back a grant revoked while no hub held it. Material in a running process's
-  environment cannot be taken out of it: a container or Pod holding the grant
-  there is removed, and the Secrets panel's confirmation names those workloads
-  first; `DELETE /api/grants/{id}` returns each holder's outcome and the new
-  `GET /api/grants/{id}/holders` previews them. Agents narrow a revocation to
-  one grant from protocol v19; an older one gives back the whole lease, and the
-  outcome says so. An assignment edit that only widens supersedes the old grant
-  — recorded on it (`broker_grants.superseded_by`, migration 0063, additive) —
-  and the running task stands on the successor; an edit that narrows or switches
-  the credential is a revocation, taken back from the running task at once
-  (Task 20403).
-
-- **Offboarding destroys what a departed user kept on the hub, not only what
-  they could use.** `cloop hub user offboard` and **Secrets → Offboard a user**
-  ended sessions, tokens, glasses links, memberships, leases and tasks, and left
-  the person's personal secrets — GitHub PATs, git-proxy-guarded ones included,
-  and kubeconfigs — sealed indefinitely with every grant over them live, so a
-  colleague's shared project kept spending them; left their pending grant
-  requests open; and left their Claude Code login home — a plaintext OAuth
-  refresh token, transcripts and history — under every hub member's config
-  directory, with `claudecodeauth.ForgetHome`, "the deprovisioning path",
-  uncalled. The plan now has a **Credentials** section, shown by `--dry-run`:
-  personal secrets (name, kind, created), the grants over them with their
-  subjects, whether a Claude home and a credential exist on each member, and
-  pending requests. After the credential transaction and the leases, the run
-  revokes the grants, deletes the secrets through the broker, withdraws the
-  requests, stops the person's tasks, then cancels a login in flight,
-  best-effort `claude auth logout`s each home and removes it — each step
-  reporting its own failure and none rolling back the severing. A secret's
-  sealed payload and wrapped data key are now overwritten before its row is
-  deleted and the WAL checkpointed, so a later copy of `state.db` holds zeroes
-  where the material was; a tombstone keeps the name and the grant records why
-  it was revoked (migration 0062, additive). The CLI needs no `CLOOP_SECRET_KEY` for any of it
-  (`secretbroker.WithoutKey`). Claude homes are reached on every hub member —
-  over the peer channel from the dashboard, over the bus from the CLI — and a
-  member that does not answer, a hub holding the control plane exclusively, and
-  a stopped member's tree on a reachable host are named as failures; a member
-  acts on another process's word only for an identity the control plane denies.
-  On a strict hub the logout step is skipped and reported, gated inside the step
-  and proven through a real peer call (`gatedHostSteps`). `--keep-credentials`
-  (and *Legal hold* in the dashboard) keeps the secrets and homes and still
-  severs access, recorded as `user.offboard_hold`. A shared project that was
-  granted a destroyed — or, under a hold, withdrawn — personal credential is
-  refused it by name on its next run, in the lease's audit row and once per hub
-  process as a `credential_refused` journal event, instead of a bare "secret
-  not found"; the offboarding's reason reaches neither that nor the withdrawn
-  requests' notes. New audit actions:
-  `user.offboard_grant`, `user.offboard_secret`, `user.offboard_request`,
-  `user.offboard_claude`, `user.offboard_hold` (Task 20400).
-
-- **An SSO hub without a role policy says it runs with RBAC off, and one click
-  leaves that state.** With `ui.oidc` enabled and neither `role_mappings` nor a
-  `default_role` — the upgrade rule, and the shape of a hub configured with
-  only `admin_emails` — every identity the issuer authenticates holds every
-  permission but executor administration, and quotas never count them. `cloop
-  hub doctor` reported that as `rbac.default_role` PASS "deny-by-default", the
-  startup banner as `default role "none"`, and Settings → Single sign-on
-  pre-selected "none — deny by default", so saving any field of that form wrote
-  `default_role: none` and, at the next restart, locked out every identity
-  without a mapping. Whether RBAC is in force is now one predicate,
-  `authz.Enforced`, that the request gate and every reporter ask, and a
-  `tests/arch` gate fails a second copy: the doctor fails `rbac.enforced`
-  naming the issuer, `cloop ui` warns on stderr, `/api/me` reports
-  `rbac_enforced`, and Settings says *"RBAC is off: everyone who can sign in
-  through ‹issuer› has full access"*, shows the default role as saved — unset —
-  and offers **Enforce deny-by-default** (`POST /api/config/oidc/enforce`,
-  audited as `oidc.rbac.enforced`), which writes `default_role: none` plus an
-  admin mapping for the acting admin and keeps every current admin one. A save
-  of `ui.oidc` that would switch RBAC on or off is refused with 409
-  `rbac_change` unless it carries `confirm_rbac`, which the panel asks for. New
-  `ui.oidc.require_rbac: true` (Helm `oidc.requireRBAC`) refuses to start in
-  the RBAC-off state. On such a hub audit rows named every actor `local`, and a
-  signed-in user outside `admin_emails` could not save the form at all; both are
-  fixed. :8888's policy is unchanged (Task 20395).
-- **A web page can no longer drive the hub.** No HTTP route checked where a
-  state-changing request came from, and every handler decoded its body as JSON
-  whatever its `Content-Type` said, so a form with `enctype=text/plain` on any
-  page reached any mutating route — on an SSO hub from another port of its host
-  or a sibling subdomain (SameSite does not tell origins of one site apart),
-  and on a hub without sign-in from anywhere. Now every `POST`/`PUT`/`PATCH`/
-  `DELETE` without an `Authorization: Bearer` credential is refused with 403
-  `CROSS_ORIGIN` unless the browser's `Sec-Fetch-Site` is `same-origin` or
-  `none` — or, from a browser too old to send it, its `Origin` is exactly one of
-  the hub's own: the scheme and host it was addressed to, `ui.external_url`,
-  the SSO callback's origin, `ui.allowed_origins`. A body must be
-  `application/json` (multipart on the three upload routes), else 415
-  `UNSUPPORTED_MEDIA_TYPE`, and every handler decodes through one decoder,
-  `pkg/jsonbody`, that refuses the rest. The hub sends no CORS header to anyone:
-  it used to answer every loopback `Origin`, which let any page on another port
-  of localhost read a hub without sign-in. Refusals are counted
-  (`cloop_cross_origin_refusals_total`) and audited as `request.origin_refused`.
-  A route-table sweep and a Chrome test — a page on another port and another
-  site submitting a text/plain form, `no-cors` fetches and a WebSocket — prove it
-  (Task 20394).
-- **DNS rebinding is refused on a hub without sign-in.** A page on a name the
-  attacker controls, re-pointed at 127.0.0.1, was same-origin with a loopback
-  hub and could read and drive every API — on a developer's machine, queue a
-  task an agent runs with `bypassPermissions`. Such a hub now answers only to
+- **A hub without sign-in listens on loopback only.** `cloop ui` bound every
+  interface whatever its authentication, so a hub with neither `ui.oidc` nor
+  a static `--token`/`CLOOP_UI_TOKEN` let anyone who could reach the machine
+  list its projects and start agent runs on it. Such a hub now binds
+  `127.0.0.1`; one with sign-in still binds every interface, and API tokens
+  do not count as sign-in. `--listen`/`ui.listen` name an address; one
+  beyond loopback without sign-in is refused at startup unless
+  `ui.allow_unauthenticated_network: true`, which then warns at every start.
+  `cloop serve` follows the same rule with its own token, and `cloop hub
+  doctor` reports where a hub is actually reachable (`ui.exposure`). The
+  image, the Helm chart and the compose stack pass `--listen 0.0.0.0`, so the
+  image refuses to start without sign-in. See *Web UI* in
+  `docs/reference/configuration.md` (Task 20393).
+- **A web page can no longer drive the hub.** Handlers decoded JSON whatever the
+  `Content-Type` and nothing checked a request's origin, so a `text/plain` form
+  on any page reached any mutating route (on an SSO hub from another port or a
+  sibling subdomain; without sign-in, from anywhere). Every
+  `POST`/`PUT`/`PATCH`/`DELETE` without `Authorization: Bearer` is now refused
+  with 403 `CROSS_ORIGIN` unless `Sec-Fetch-Site` is `same-origin` or `none` or,
+  from an older browser, the `Origin` is the hub's own (the scheme and host
+  addressed, `ui.external_url`, the SSO callback's, `ui.allowed_origins`).
+  Bodies must be `application/json` (multipart for uploads), else 415
+  `UNSUPPORTED_MEDIA_TYPE`. The hub sends no CORS headers: it answered every
+  loopback `Origin`, so any page on localhost could read a hub without sign-in.
+  Refusals are counted (`cloop_cross_origin_refusals_total`) and audited as
+  `request.origin_refused` (Task 20394).
+- **DNS rebinding is refused on a hub without sign-in.** An attacker's name
+  re-pointed at 127.0.0.1 was same-origin with a loopback hub, so its page could
+  drive every API, down to queueing agent runs. Such a hub now answers only to
   `localhost`, `*.localhost`, IP addresses, `ui.external_url`'s host, its
-  cluster's advertise hosts and the new `ui.allowed_hosts`; any other `Host` is
-  421 `MISDIRECTED_REQUEST`, audited as `request.host_refused` (Task 20394).
+  cluster's advertise hosts and the new `ui.allowed_hosts`; any other `Host`
+  gets 421 `MISDIRECTED_REQUEST`, audited as `request.host_refused`
+  (Task 20394).
 - **WebSocket origins are matched exactly.** The dashboard socket and the
   executor-agent endpoint admitted every loopback origin and every port of the
-  hub's host name; they now require the scheme, host and port of one of the
-  hub's own origins (Task 20394). A schemeless `ui.allowed_origins` or
-  `ui.allowed_ws_origins` entry means https.
-- **`X-Forwarded-*` are believed only from a trusted proxy.** The scheme an
-  origin was judged by came from `X-Forwarded-Proto`, believed from any peer
-  once `ui.external_url` was https, and the client address the sign-in lockout
-  and rate limiter count was the leftmost `X-Forwarded-For` entry — which
-  nginx's `$proxy_add_x_forwarded_for` passes through from the client, so
-  anyone could reset their lockout per request. The headers are now believed
-  from loopback and the new `ui.trusted_proxies` (CIDR list) only, and
-  `X-Forwarded-For` is walked from the right; HSTS is still sent whenever
-  the public URL (`ui.external_url`, else the SSO callback) is https, and the
-  session cookie is `Secure` under
-  `cookie_secure: auto` whenever `ui.oidc.redirect_url` is. A proxy on another
-  host now needs a `ui.trusted_proxies` entry for `/install.sh` and the
-  one-line installer; the Helm chart lists the private pod ranges by default
-  (`config.trustedProxies`) and the compose stack its network (Task 20394).
+  hub's host; they now require the scheme, host and port of one of the hub's own
+  origins. A schemeless `ui.allowed_origins` or `ui.allowed_ws_origins` entry
+  means https (Task 20394).
+- **`X-Forwarded-*` are believed only from a trusted proxy.**
+  `X-Forwarded-Proto` was believed from any peer once `ui.external_url` was
+  https, and the sign-in lockout and rate limiter counted the leftmost
+  `X-Forwarded-For` entry, which nginx passes through from the client, so anyone
+  could reset their lockout per request. Only loopback and the new
+  `ui.trusted_proxies` (CIDR list) are believed now, and `X-Forwarded-For` is
+  read from the right; HSTS and `cookie_secure: auto` follow the configured
+  https URLs, not the headers. A proxy on another host needs an entry there for
+  `/install.sh` and the one-line installer; the Helm chart lists the private pod
+  ranges by default (`config.trustedProxies`), the compose stack its network
+  (Task 20394).
 - **`cloop serve` no longer answers every origin with
-  `Access-Control-Allow-Origin: *`.** Without a token — its default, on
-  loopback — any page on the Internet could read the plan and `POST
-  /run/start`. CORS is now granted only to a server with a token, and the same
-  origin, media-type and Host rules apply (Task 20394).
-
-- **Executor failover is capped, and a task that takes nodes down is
-  quarantined.** A run stranded on an executor that stopped answering was
-  re-dispatched to the next healthy one with no ceiling, so a workload that
-  takes its node down — a fork bomb, one that exhausts memory, one that panics
-  the kernel — went on to take down every enrolled device in turn.
-  `executors.failover.max_attempts` (2 by default, `0` for none, at most 10;
-  hub-scope, so a per-instance overlay applies) bounds it, decided inside the
-  claim that makes a failover exactly-once so that racing supervisors and hub
-  members agree. Past the cap the session closes `failover_exhausted`, nothing
-  re-dispatches it, and the tasks it was running fail with every lost node and
-  when it went unreachable named in the reason — written through the verdict
-  sidecar, journalled, and audited as `executor.failover_exhausted`. A task two
-  distinct executors went down under is quarantined as a suspected node killer
-  (`task.quarantine`), shown in its details and by `cloop executor list
-  --inventory` (a new flag), and runs again only after an explicit reset, which
-  is audited as `task.quarantine_release`; `--retry-failed` and the
-  orchestrator's gate hold it. A failover with nowhere to go now also returns
-  the lost node's tasks to pending, as it was always documented to, and a late
-  session close no longer overwrites what a failover's claim recorded (Task
-  20391).
-- **The Projects grid's Run button and a new project's auto-run meet the same
-  admission gates as the Overview's Run.** They checked neither the executor's
-  access list nor the tenant's daily budget and concurrency quota, so an
-  identity left off a restricted executor's access list was refused on the
-  Overview and admitted from the project card (Task 20391).
-- **The threat model's residual-risk column matches the code again**, and a
-  docs gate fails the build when `docs/security/*.md` cites a test that does not
-  exist (Task 20391).
-
-- **One credential registry for every scanner; `cloop audit` sees the tokens
-  GitHub issues now.** Four places recognise credentials by shape and each kept
-  its own list. `cloop audit` matched `ghp_`/`ghs_` followed by 30 letters and
-  digits, so it missed `gho_`, `ghu_` and `ghr_` and every installation token
-  minted since September 2026 (390 characters, an underscore seven in): it
-  reported a clean history over a real leak. Browser telemetry knew only
-  `cloop_pat_` and `cloop_glasses_` and stored a GitHub token or an Anthropic
-  key in a page's error verbatim; the broker's audit-reason scrubber knew none
-  of cloop's prefixes, turned `risk-free` into `ri[redacted]`, and removed only
-  the `-----BEGIN` line of a private key; the provider-call audit knew `sk-`
-  keys and `Bearer`. All four now use the registry in `pkg/redact` — GitHub
-  tokens in both forms for all five prefixes and `github_pat_`, Anthropic,
-  OpenAI, AWS, Google and Slack keys, JWTs, PEM private keys, kubeconfig keys
-  and tokens, Authorization values, URL passwords, and cloop's own tokens — each
-  keeping its own replacement style. `cloop audit` streams the history instead
-  of reading it whole and also reports credential shapes in task artifacts
-  (*Credentials in task artifacts*); the git-history finding is now named
-  *Credentials in git history*. Exact-value redaction of leased material is
-  unchanged and still the primary defence. The shapes are listed in
-  `docs/reference/credential-patterns.md`.
-
-  An adversarial review before landing (Task 20369) found more, all fixed:
-  the first registry rescanned rejected candidates, which made one 2 MiB
-  telemetry POST hold a core for hours, and it is linear now; it missed keys
-  behind a prefix (`GITHUB_TOKEN=`), escaped JSON, Go headers, `sk-None-` keys,
-  URL passwords led by `%`, `$` or `*`, credentials after a percent-encoded
-  `=`, and values that run into `[` or hold `!`, `|` or `%2B`; and it matched a
-  private-key header with no key, fields across a line break, names in code and
-  documentation placeholders. `cloop audit`'s history scan no longer runs
-  programs a repository's config names (`gpg.program`, a partial clone's
-  `upload-pack`) and now reads replace refs' originals, merges' own changes,
-  files marked binary and moved files; its artifact scan reaches
-  subdirectories. Broker audit reasons are cut to 8 KiB, and telemetry runs the
-  registry before its query-parameter pass.
-
+  `Access-Control-Allow-Origin: *`.** Without a token — its default — any page
+  on the Internet could read the plan and `POST /run/start`. CORS is now granted
+  only to a server with a token, and the same origin, media-type and Host rules
+  apply (Task 20394).
+- **The dashboard's markup carries no code, and its policy runs no inline
+  script.** A project's name — a directory name anyone with `project.write`
+  chooses — was spliced into inline `onclick` handlers, so a project named
+  `demo&quot;+(…)+&quot;` ran script with the session of whoever clicked it,
+  hub admins included; the presence bar rendered identity-provider display
+  names as markup, and task links accepted `javascript:` URLs. Every control
+  is now a `data-action` read as data by one dispatcher, links work only
+  over http(s), and every response's policy is `script-src 'self'` without
+  `'unsafe-inline'`, with `base-uri 'none'`, `form-action 'self'` and
+  `object-src 'none'`. Browsers report violations to the new public `POST
+  /api/csp-report`, counted in `cloop_csp_violations_total`. See
+  `docs/security/threat-model.md` (Task 20408).
+- **An SSO hub without a role policy says it runs with RBAC off, and one click
+  leaves that state.** With `ui.oidc` on and neither `role_mappings` nor
+  `default_role` set (a hub with only `admin_emails`, say), every identity the
+  issuer authenticates holds every permission but executor administration,
+  uncounted by quotas. Settings pre-selected "none", so saving any field wrote
+  `default_role: none`, locking out everyone without a mapping at the next
+  restart. Now `cloop hub doctor` fails `rbac.enforced`, `cloop ui` warns,
+  `/api/me` reports `rbac_enforced`, and Settings says RBAC is off and offers
+  **Enforce deny-by-default** (`POST /api/config/oidc/enforce`, audited as
+  `oidc.rbac.enforced`), which writes `default_role: none` and keeps every
+  current admin. A `ui.oidc` save that switches RBAC on or off needs
+  `confirm_rbac` (else 409 `rbac_change`), and the new
+  `ui.oidc.require_rbac: true` (Helm `oidc.requireRBAC`) refuses to start in
+  that state. Audit rows there no longer name every actor `local` (Task 20395).
+- **A project's directory is confined, so a maintainer can no longer hand
+  sandboxes the hub's own state.** `dir` on `POST /api/projects/new` (and
+  `cloop remote init --dir`) passed only a text denylist: a maintainer could
+  register an ancestor of the control plane, such as `/var/lib` in the
+  image, which a strict hub then bind-mounted read-write into its sandboxes
+  with `.cloop/hub.env` and every tenant's project, and `?delete_root=true`
+  deleted whatever a project named. A project may no longer be at or above
+  `ui.projects_root`, overlap the hub's own directory (except under a root
+  placed inside it, as in the image), another hub's or another project, or
+  sit inside a `.cloop` directory; without `executor.manage` it must be
+  inside `ui.projects_root` (`403` otherwise). Creations claim their path
+  first (migration 0068, additive). Registered projects that break the rule
+  are flagged, refused at run with `409` `project_unconfined`, and fail
+  `cloop hub doctor` (`projects.confinement`); `?delete_root=true` deletes
+  only a directory the hub created. See *Which directory a project may be*
+  in `docs/architecture/executors.md` (Task 20418).
+- **A project's own files can no longer aim the hub at another project's
+  state.** A workload could write `.cloop/active_session` or a stored
+  working directory so that the hub's reads and saves on its behalf landed
+  in another project's database or the control plane's. Both now resolve
+  only inside the project's own directory (Task 20418).
+- **Creating a project no longer wipes one that already exists.** `POST
+  /api/projects/new` ran `cloop init`, which overwrites the plan, history and
+  settings it finds, so anyone with `project.write` could reset another
+  person's project — even one they could not see — by naming its directory. A
+  directory that holds a project is now refused with 409 `CONFLICT` (Task
+  20417).
+- **The hub's worktree sweep no longer runs what a repository configures.**
+  On a strict hub it ran `git` in repositories sandboxes write, with the
+  hub's whole environment, no deadline, and the repository's own hooks,
+  `core.fsmonitor` and filters. It now runs with those off, in a closed
+  environment, under a deadline, and skips a `.git` that is a file or a link
+  (Task 20418).
 - **Removing a project closes the dashboards still attached to it.** Live
-  streams are filed by project path, so a socket left open on a removed
-  project went on receiving whatever was registered at that path next —
-  possibly somebody else's project. They are now told the project is gone and
-  closed.
+  streams are filed by path, so a socket left open on a removed project received
+  whatever was registered at that path next, possibly another person's project
+  (Task 20366).
+- **Revoking a grant takes it back from the workloads already holding it.** A
+  revoked grant was refused only at the next lease, and a running container or
+  Pod kept it until it exited. Every hub member now takes a revoked grant back
+  from each live lease carrying it — files wiped wherever they were staged, keys
+  emptied in a Pod's lease Secret, git-proxy and kube-guard sessions closed, App
+  tokens destroyed — leaving the lease's other grants. A container or Pod
+  holding it in its environment is removed, as the Secrets panel's confirmation
+  warns. `cloop secret revoke` (waiting up to `--wait`) and `cloop hub user
+  offboard` print what each member took back; `DELETE /api/grants/{id}` returns
+  each holder's outcome, and the new `GET /api/grants/{id}/holders` previews
+  them. Agents before protocol v19 give back the whole lease. An assignment edit
+  that only widens supersedes the grant (`broker_grants.superseded_by`,
+  migration 0063, additive) and the running task keeps going; one that narrows
+  or switches the credential revokes it (Task 20403).
+- **A revocation outlives the hub process holding the lease.** When the member
+  holding a run's lease had died, or a hub had restarted before the run's agent
+  reconnected, `POST /api/leases/{id}/revoke` reached nothing, answered 404 and
+  recorded nothing, and the process that then adopted the run took the lease
+  over and restored its git-proxy and Kubernetes-monitor sessions. A revocation
+  is now recorded first (migration 0069, additive): no process takes over or
+  extends a revoked lease, the adopter takes the material back instead, and the
+  request answers 202 listing the holders still `pending`. A member that sees
+  another die wipes the `/dev/shm` lease directories it left. See *Revoking
+  what a dead member held* in `docs/architecture/hub-cluster.md` (Task 20419).
+- **No run goes unsupervised.** A dispatch whose executor session could not be
+  recorded ran untracked, never failed over or adopted, and a member that died
+  between starting a workload and recording its run left it running with nobody
+  holding its lease. A dispatch is now recorded before its workload exists
+  (migration 0069); one that cannot be recorded is refused with 503 and its
+  workload stopped, and a dead member's unrecorded workload is stopped and its
+  credentials taken back. An adopted container or Pod is claimed by one hub
+  process, which wipes, revokes and refreshes its credential files as its
+  dispatcher would have (Task 20419).
+- **A run's secret lease outlives the hub process that issued it.** A hub
+  restarted while a device ran a task, or a hub-cluster member that died, left
+  the run's lease held by nobody: never extended, swept or released, missing
+  from the Secrets panel, and the adopted run's output no longer scrubbed of
+  its values. Leases are now recorded (migration 0057, additive), and the
+  process that adopts the run takes the lease over, keeps it alive, releases
+  it, and scrubs env-secret and personal-access-token values from the output
+  again; a lease that lapsed or lost its grant meanwhile is taken back from the
+  device instead (Task 20382).
+- **Revoking a session or an API token closes the streams and sandbox
+  terminals it opened.** Revocation, sign-out, expiry and offboarding left
+  dashboard WebSockets and `/api/events` streams running, and a sandbox
+  terminal re-checked by re-running its opening request, which without the
+  session resolved to the static token's allow-all: a revoked session kept
+  its shell. Each stream and terminal now re-checks the credential that
+  opened it — at once when this hub or the hub bus reports it ended, and
+  every 30 seconds otherwise — and closes with `1008` and a
+  `credential_ended` message. `cloop hub session revoke`, `cloop hub token
+  revoke` and `cloop hub user offboard` announce on the hub bus, so running
+  hubs act within about a second (Task 20398).
+- **The static admin token can be retired at runtime, on every hub member.**
+  `--token`/`CLOOP_UI_TOKEN` bypasses RBAC and never expires; stopping a hub
+  honouring it took a Secret edit and a restart of every member, and the
+  streams and sandbox terminals it had opened stayed open. `cloop hub token
+  static retire --reason …` (or Settings → Static admin token, `POST
+  /api/static-token/retire`) records its fingerprint (migration 0064,
+  additive); every member then refuses it with `401` `static_token_retired`
+  within about a second (30 seconds on a `ui.cluster.exclusive` hub) and
+  closes what it opened. A new `CLOOP_UI_TOKEN` value is admitted. `cloop
+  hub token static status` shows its last use, and `cloop hub doctor` warns
+  `ui.static_token` while one is accepted beside SSO with an enforced role
+  policy. See *The static token leaked* in `docs/operations/runbook.md`
+  (Task 20406).
+- **A session that ends mid-request is granted nothing.** On a hub enforcing
+  a role policy, a request whose session ended between authentication and
+  authorization was treated as the static token's, with every permission
+  (Task 20412).
+- **Offboarding destroys what a departed user kept on the hub, not only what
+  they could use.** `cloop hub user offboard` and **Secrets → Offboard a user**
+  left a person's personal secrets (GitHub PATs, kubeconfigs) and every grant
+  over them live for colleagues' projects to spend, their grant requests open,
+  and their Claude Code login home, with a plaintext OAuth refresh token, on
+  every hub member. The plan (`--dry-run`) now lists these under
+  **Credentials**; the run revokes the grants, deletes the secrets, withdraws
+  the requests, and logs out (except on a strict hub) and removes each Claude
+  home, reporting what failed without undoing the severing. A deleted secret's
+  sealed payload and wrapped key are overwritten before its row is deleted and
+  the WAL checkpointed; a tombstone keeps its name (migration 0062, additive).
+  The CLI needs no `CLOOP_SECRET_KEY`. `--keep-credentials` (*Legal hold* in the
+  dashboard) keeps secrets and homes and still severs access. A shared project
+  granted a destroyed or withdrawn credential is refused it by name
+  (`credential_refused` journal event). New audit actions `user.offboard_grant`,
+  `user.offboard_secret`, `user.offboard_request`, `user.offboard_claude` and
+  `user.offboard_hold` (Task 20400).
+- **On a hub with single sign-on a personal Claude credential is spent only
+  on its owner's runs.** A token one member granted to a shared project was
+  used by every member's runs; other users' leases now withhold it, each
+  with a `secret.lease` denial (Task 20379).
+- **The provider-call log no longer stores credentials a lease lent.**
+  `provider_calls.response` was written before redaction, so a leased value
+  a harness echoed — a `GITHUB_TOKEN`, a proxy URL — was kept verbatim
+  (Task 20378).
+- **One credential registry for every scanner; `cloop audit` sees the tokens
+  GitHub issues now.** `cloop audit` missed `gho_`, `ghu_` and `ghr_` tokens and
+  every installation token minted since September 2026, reporting a clean
+  history over a real leak; browser telemetry stored GitHub tokens and Anthropic
+  keys from page errors verbatim; the broker's audit-reason scrubber and the
+  provider-call audit knew few shapes. All four now use the registry in
+  `pkg/redact` (`docs/reference/credential-patterns.md`). `cloop audit` streams
+  the history, now reading merges, moved and binary-marked files too, and also
+  reports *Credentials in task artifacts*; its history finding is now
+  *Credentials in git history* (Task 20368). A review before landing
+  (Task 20369) also stopped `cloop audit` running programs a repository's config
+  names (`gpg.program`, a partial clone's `upload-pack`) and cut broker audit
+  reasons to 8 KiB.
+- **A Kubernetes Pod's environment is no longer readable from the Pod
+  object.** Every environment value — the harness's Claude login,
+  `GITHUB_TOKEN`, an egress session's proxy URL — was a plain value in the
+  Pod spec, visible to anyone with `get pods` in the workload namespace. It
+  now travels in the run's `cloop-lease-<handle>` Secret through
+  `secretKeyRef`, so every run with environment or files creates that
+  Secret; preflight's RBAC remedy now names `patch` on `secrets` as the
+  chart does (Task 20401).
+- **The Kubernetes access monitor refuses writes that would mint a
+  credential.** It judged verb, resource and namespace only, so a write
+  grant could create a `kubernetes.io/service-account-token` Secret, run a
+  workload as another ServiceAccount or call the TokenRequest API, and keep
+  a cluster credential that bypasses the monitor and outlives every revoke.
+  It now reads the body of every create, update and patch of Secrets,
+  workloads and custom resources, and refuses token Secrets, workloads that
+  name a `serviceAccountName` other than `default` or reach the node (host
+  namespaces, privileged, `hostPath`), every RBAC and
+  CertificateSigningRequest write, `serviceaccounts/token`,
+  `pods/ephemeralcontainers`, and bodies it cannot read (protobuf, CBOR),
+  each under its own `kubeguard.request_denied` reason. Charts that create
+  their own ServiceAccount or RBAC must be installed by a cluster
+  administrator. See `docs/architecture/kubernetes-access.md` (Tasks 20416,
+  20420).
+- **A kubeconfig grant is delivered only where its limits are enforced.**
+  Without `executors.kube_guard` the broker delivered the minimised
+  kubeconfig whatever the grant said, so "read-only, namespace `app`" gave
+  the workload everything the kubeconfig's identity may do. On such a hub a
+  grant naming `--namespaces` or fewer than all eight verbs — read-only, the
+  default, included — is now refused: the run goes without it, its Activity
+  tab shows `credential_refused`, and `cloop hub doctor` fails
+  `kubeguard.enabled`. An administrator may accept the risk per grant with
+  `cloop hub grant unguarded <grant-id> --reason …` or **Acknowledge
+  unguarded** in the Secrets panel (`POST /api/grants/{id}/unguarded`,
+  audited as `secret.unguarded_ack`; migration 0070, additive) (Task 20420).
+- **No allowlist reaches a cloud metadata service by containing it.** An
+  entry such as `169.254.0.0/16` opened `169.254.169.254` on its ports, and
+  allowing `fc00::/7` or `100.64.0.0/10` opened AWS's IPv6
+  (`fd00:ec2::254`) and Alibaba Cloud's (`100.100.100.200`) endpoints. One
+  table of metadata services now feeds the packet filter, the egress broker
+  and Kubernetes NetworkPolicies: a service is reached only through its own
+  `/32` or `/128`, and an entry containing one is refused unless the list
+  names it. `cloop ui` refuses to start on such an in-force
+  `executors.container.egress_filter.allow_cidrs` or
+  `executors.kubernetes.egress_filter.cidrs` entry, `cloop hub doctor` fails
+  `firewall.metadata`, the firewall APIs answer 400, and rules stored
+  earlier keep the service closed. See `docs/guides/firewall.md` (Task
+  20397).
+- **Reaching the git proxy's port no longer writes to the audit trail.**
+  git's credential-less first request of every clone, fetch and push was a
+  `gitproxy.rejected` row — half the proxy's rows, and anyone who could
+  connect could add more. It is now counted in
+  `cloop_gitproxy_anonymous_requests_total`, and every per-request row
+  names the repository the request addressed, which allowlist-scoped
+  sessions left empty (Task 20346).
+- **Git interception fails closed in every process.** `cloop serve`, `cloop
+  hub doctor` and the CLI, which do not run the git proxy, handed a Pod's
+  workspace fetch the forge credential itself even with
+  `executors.git_proxy` enabled; they now refuse to provision the workspace
+  (Tasks 20347, 20349).
 - **Hub-scope settings in a per-instance overlay now govern the hub.** `cloop ui
-  --port N` merged `.cloop/config.ui-N.yaml` over `config.yaml` for its `ui.*`
-  settings, but read every other hub-scope setting from `config.yaml` alone. An
-  overlay that set `executors.allow_host_process: false` still let the dashboard
-  spawn harnesses on its host. An image allowlist there admitted any image.
-  `executors.git_proxy` there started no proxy, so forge credentials went into
-  sandboxes as if none were configured. `min_agent_build`, `limits`,
-  `auto_install_harness`, the container and Kubernetes drivers, retention,
-  backup, dictation and the hub's `github.token` were ignored the same way.
-  Every hub-scope read now goes through one overlay-aware accessor, and a source
-  gate fails on any new `config.Load` in `pkg/ui` that is not on its
-  project-scope allowlist. The configuration reference lists the hub-scope keys.
+  --port N` merged `.cloop/config.ui-N.yaml` for `ui.*` only and read every
+  other hub-scope key from `config.yaml`: an overlay's
+  `executors.allow_host_process: false` still let the dashboard spawn harnesses
+  on its host, its image allowlist admitted any image, and its
+  `executors.git_proxy` started no proxy, so forge credentials went into
+  sandboxes. `docs/reference/configuration.md` lists the hub-scope keys
+  (Task 20364).
 - **Settings saves no longer leak between dashboards.** On a hub with an
   overlay, saving CI federation or the dictation key rewrote the shared
-  `config.yaml`. The overlay hid the change from this hub, and the other
-  dashboard reading that file picked it up. Saves now write the overlay when one
-  exists (`ui.ci`, `stt.groq_api_key`) and leave `config.yaml` byte for byte as
-  it was. Without one, `config.yaml` is rewritten only from itself.
-- **`cloop hub doctor --smoke` keeps git tokens out of its sandbox** when any hub
-  sharing the directory runs the git proxy, including one enabled only in an
-  overlay. A configuration it cannot read counts as enabled. `cloop hub doctor
-  --port N` diagnoses the hub on port N with its overlay merged.
+  `config.yaml`, which the other dashboard then read. Saves now go to the
+  overlay when one exists (`ui.ci`, `stt.groq_api_key`), leaving `config.yaml`
+  untouched (Task 20364).
+- **`cloop hub doctor --smoke` keeps git tokens out of its sandbox** when any
+  hub sharing the directory runs the git proxy, including one enabled only in an
+  overlay; a configuration it cannot read counts as enabled (Task 20364).
+- **`cloop hub doctor --smoke` opens no operator credential for its
+  sandbox.** It could lease operators' grants aimed at its executor beside
+  its own throwaway; it now withholds every grant but its own (Task 20413).
+- **A device never moves back to a build earlier on `main` than its own unless
+  root on the device says so.** Two edge builds could not be ordered, so the
+  installer's downgrade guard checked only the protocol, and an upgrade
+  request's `force` waved even that through: a compromised hub or agent could
+  have the root upgrade helper install an older signed build. Every edge build,
+  and every release from v0.0.5 on, is now stamped with its sequence, its
+  commit's first-parent position on `main` (`cloop version` prints it). The
+  installer reads both binaries' sequences and refuses a staged build with a
+  lower one, or with none when the installed build has one; only root's own
+  `cloop executor agent install --upgrade --to <target> --force` (or `--from
+  <binary> --force`) overrides it, never the hub's or the request's `force`. The
+  hub never offers such a build, and `POST /api/executors/{id}/upgrade` refuses
+  it with 409 even with `force`. `cloop hub doctor` warns (`executors.edge_lag`)
+  about an edge device more than 20 sequences behind the hub's build. See
+  *Rollback protection* in `docs/guides/edge-channel.md` (Task 20380).
+- **A compromised edge agent can no longer pin hub memory through the work it
+  returns.** Every handle accepted write-back chunks up to the hard 128 MiB
+  ceiling whatever its dispatch asked for, kept accepting them after it
+  finished or was collected, and revoking the device freed nothing: up to
+  32 GiB per agent per hub process. Late frames are now refused before anything
+  is allocated, a handle holds only what its dispatch asked for, and held work
+  counts against `executors.remote.max_pinned_writeback_bytes` (256 MiB per
+  executor) and `executors.remote.max_pinned_writeback_total_bytes` (1 GiB per
+  hub process); a write-back that would cross either fails with the limit named
+  on the run's journal. `cloop_writeback_pinned_bytes` reports the level (Task
+  20399).
+- **An operator's resource ceilings bind container workloads.** A disk ceiling
+  (`executors.limits.max_disk`, an executor's Limits, `cloop hub limits set
+  <project> --disk`) was never applied on a container executor, and a device
+  running payloads in a container got none of its CPU, memory or process
+  ceilings for a project that stated no resources. Both now apply: an unstated
+  limit is given the ceiling and a larger one is lowered to it; where nothing
+  can hold a disk ceiling, the project's journal says so on every dispatch
+  (Task 20405).
+- **Failover never moves a run onto an executor with an access list, nor an
+  isolated run onto the hub's own host, and the stranded run gives up its
+  credentials.** A replacement was placed by health alone, so it could land on
+  an executor whose access list excluded the run's owner or, with host
+  execution allowed, on the hub's host; and the stranded run kept its lease
+  alive, and a device that came back resumed the workload beside its
+  replacement. Now the stranded run's leases and egress session close when its
+  node is declared lost, and a returning device whose agent speaks protocol v5
+  or later is told to terminate it (Task 20396).
+- **Executor failover is capped, and a task that takes nodes down is
+  quarantined.** A workload that kills its node (a fork bomb, a memory hog, a
+  kernel panic) was re-dispatched without limit, taking down every enrolled
+  device in turn. `executors.failover.max_attempts` (default 2, `0` for none, at
+  most 10; hub-scope) bounds it. Past the cap the session closes
+  `failover_exhausted` and its tasks fail naming every lost node, audited as
+  `executor.failover_exhausted`. A task two distinct executors went down under
+  is quarantined (`task.quarantine`), shown in its details and by the new `cloop
+  executor list --inventory`, and runs again only after an explicit reset
+  (`task.quarantine_release`), not with `--retry-failed`. A failover with
+  nowhere to go now returns the lost node's tasks to pending, as documented
+  (Task 20391).
+- **The Projects grid's Run button and a new project's auto-run meet the same
+  admission gates as the Overview's Run**: the executor's access list and the
+  tenant's daily budget and concurrency quota, which they skipped (Task 20391).
+- **The threat model's residual-risk column matches the code again**, and a docs
+  gate fails the build when `docs/security/*.md` cites a test that does not
+  exist (Task 20391).
+- **A failed audit append is recorded in the chain it was meant for.** An
+  append that failed (the database locked, read-only or full) left no trace:
+  the next append linked to the last that succeeded, and `cloop hub audit
+  verify` reported an intact chain over a trail with holes. Every failure is
+  now counted and reported on stderr. The next append that succeeds writes one
+  `audit.gap` row (new audit action) saying how many events of which actions
+  were lost, when and why. A process that dies owing one leaves it in
+  `.cloop/audit-failures/` for the next hub to record. `cloop hub audit
+  verify`, `cloop audit-log verify` and `cloop events verify` exit 3 for an
+  intact chain holding gaps (`--allow-gaps` for 0). `cloop hub doctor`, the
+  Audit tab and `cloop_audit_append_failures_total` show them. See *Audit
+  chain verification* in `docs/operations/runbook.md` (Task 20404).
+- **Deleting the newest audit rows is detected.** A chain cut short at its
+  newest end still verifies. The cluster leader now records each chain's head
+  every `audit.checkpoints.interval` (default `5m`) and at clean shutdown. Each
+  record is sealed with HMAC-SHA256 under a key derived from
+  `CLOOP_SECRET_KEY`. Records go to `audit.checkpoints.file`, which must lie
+  outside every `.cloop/`, and by default also as a JSON line on stderr
+  (`audit.checkpoints.stderr`). `cloop hub audit verify --checkpoints <file>`
+  fails (exit 2) when a chain no longer holds a head a checkpoint recorded.
+  `cloop hub doctor` reports whether checkpoints are written, signed, fresh and
+  agree with the chain. See *Audit head checkpoints* in
+  `docs/reference/configuration.md` (Task 20404).
+- **An edited backup no longer restores.** `cloop db restore` trusted the
+  SHA-256 in a backup's unprotected sidecar, and a missing sidecar passed
+  silently. Sidecars are now sealed under a key derived from
+  `CLOOP_SECRET_KEY`; a restore refuses a missing or mismatched one
+  (`--skip-checksum` overrides) and one whose seal it cannot check, such as a
+  0.0.4 backup's (`--allow-unsealed`) (Task 20410).
+- **cloop is built with Go 1.26.9 and `golang.org/x/net` v0.60.0.** v0.0.4's
+  Go 1.25.14, a line now out of support, carries eleven standard-library
+  advisories reachable from the hub's HTTP server, TLS and templates
+  (GO-2026-6599, -6600, -6603, -6605, -6607, -6608, -6610 to -6613 and -6617).
+  `go.mod` now declares `go 1.26.0` and pins `toolchain go1.26.9` (Task 20396).
+- **cloop builds with OpenTelemetry v1.45.0**, for GO-2026-6505 in the
+  `otlptrace` exporter v1.44.0, which the hub's tracing reaches (Task 20359).
+
+### Upgrading from 0.0.4
+
+0.0.5 changes defaults and refuses configurations 0.0.4 ran with. Back up,
+upgrade every hub process on a control plane together, then the edge devices,
+and run 0.0.5's `cloop hub doctor` right after: it names most of what follows.
+
+#### Before you upgrade
+
+- **Back up: a rollback is a restore.** Migrations 0049–0070 are all additive,
+  so a 0.0.4 binary still opens an upgraded database, but every save it makes
+  clears the new task columns and review verdicts, and it ignores what it does
+  not know: retired static tokens work again, SCIM-suspended grants and project
+  memberships vanish, kubeconfig grants are delivered unenforced. Run 0.0.4's
+  `cloop db backup` in the hub's directory and in each project's first, let
+  0.0.4 `cloop run` processes finish, and roll back by stopping every hub,
+  reinstalling 0.0.4 and running its `cloop db restore <backup> --force`
+  (Tasks 20361, 20388).
+- **Stop every 0.0.4 hub on a control plane before starting 0.0.5**: the new
+  `cloop ui` refuses to start beside a live 0.0.4 hub. A second `cloop ui` in
+  one directory now joins the first as a hub-cluster member;
+  `ui.cluster.exclusive: true` keeps one process (Task 20354).
+- **Review per-instance overlays**: hub-scope keys in
+  `.cloop/config.ui-<port>.yaml` — `executors.*`, `sandbox.image_policy`,
+  `retention`, `audit`, `backup`, `stt`, `github.token` — now govern that hub,
+  where 0.0.4 read only `ui.*` there (Task 20364).
+- **Pause the fleet auto-update policy** until 0.0.4 devices are upgraded by
+  hand (see *Edge devices*): it asks them again every 15 minutes, and every
+  attempt fails on the device (Task 20376).
+- **Building from source needs Go 1.26** (`go 1.26.0`, toolchain go1.26.9)
+  (Task 20396).
+
+#### Reaching the hub
+
+- **A hub without sign-in binds `127.0.0.1`**: browsers and agents on other
+  machines lose it. Give it `ui.oidc` or `CLOOP_UI_TOKEN`, tunnel over SSH, or
+  name an address (`ui.listen`/`--listen`) and set
+  `ui.allow_unauthenticated_network: true`, which warns at every start. `cloop
+  serve` without a token binds `127.0.0.1` too (Task 20393).
+- **The image refuses to start without sign-in**: its command now passes
+  `--listen 0.0.0.0`. Set `CLOOP_UI_TOKEN` or `ui.oidc` (a Helm release on
+  `secrets.existingSecret` too, which otherwise crash-loops). A custom command
+  without `--listen` binds the container's own loopback (Task 20393).
+- **A proxy on another host must be in `ui.trusted_proxies`**: `X-Forwarded-*`
+  is believed only from loopback and that CIDR list, so otherwise `/install.sh`
+  answers 403 and every client shares the proxy's rate limit. The chart's new
+  `config.trustedProxies` lists the private ranges, but `helm upgrade
+  --reuse-values` from chart 0.1.0 renders without it: pass it, or use
+  `--reset-then-reuse-values`; a copied compose config needs the eval stack's
+  entry (Task 20394).
+- **Browser-facing rules are strict now** (Task 20394):
+  - a state-changing request without `Authorization: Bearer` from another
+    origin gets 403 `CROSS_ORIGIN`, and every request body must be
+    `application/json` (415 otherwise) — scripts using `curl -d` need the
+    header;
+  - the hub sends no CORS headers, so a front end served from another origin
+    must call the API server-side with a token;
+  - `ui.allowed_origins` and `ui.allowed_ws_origins` entries are exact origins
+    (scheme, host, port; no scheme means https);
+  - a hub without sign-in answers only `localhost`, IP addresses,
+    `ui.external_url`'s host and `ui.allowed_hosts` (421 otherwise), agents
+    dialing it by name included.
+- **The dashboard runs no inline script**: a proxy that injects a `<script>` is
+  blocked. `POST /api/csp-report`, `/auth/sign-in.js` and `/assets/*` are
+  served before authentication; a path allowlist must pass them (Task 20408).
+- **An SSO hub without a role policy is reported as running with RBAC off**:
+  nobody's access changes, but `cloop hub doctor` fails `rbac.enforced` and a
+  settings save that would switch RBAC needs `confirm_rbac`. Use Settings →
+  Single sign-on → **Enforce deny-by-default**, then `ui.oidc.require_rbac:
+  true` (Task 20395).
+- **Terminal sign-in is on wherever SSO is** (`/api/device/*`, `/device`);
+  `ui.oidc.device_login: false` turns it off (Task 20412). **Browser telemetry
+  is off** unless `ui.telemetry.enabled: true` or Settings → Telemetry turns
+  it on (Task 20311).
+
+#### Projects and runs
+
+- **Projects whose directory breaks the confinement rule stop running** with
+  409 `project_unconfined`: one at or above `ui.projects_root`, overlapping the
+  hub's own directory, another hub's or another project, inside a `.cloop`
+  directory, or a home or system tree. Run `cloop hub doctor`
+  (`projects.confinement`) and move or remove each one. Without
+  `executor.manage`, projects are created only inside `ui.projects_root` (403);
+  creating one where a project exists answers 409; "Remove with directory"
+  refuses projects created before the upgrade — remove the project, then its
+  directory by hand (Tasks 20417, 20418).
+- **Claude runs on isolating executors need a leased credential**: until the
+  Overview's **Claude credential** card grants an env secret with
+  `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, or the executor is listed in
+  `executors.harness_credential_exempt`, they are refused with 409
+  `harness_credential_missing` (Task 20379).
+- **Runs pause `disk_low` below 1 GiB free** on the volume of `.cloop` or the
+  working tree (`orchestrator.min_free_disk_mb`; `0` turns it off), and each
+  project keeps a 16 MiB `.cloop/reserve` (Task 20381). `cloop run` exits 74,
+  paused `state_not_persisted`, when its database refuses a write (Task 20362).
+- **A damaged `depends_on`, `on_success` or `on_failure` stops a project's loads
+  and saves**, and migration 0054 stops startup if `plan_tasks` already has one
+  of its columns in another shape; *A task row that will not load* in
+  `docs/operations/runbook.md` repairs both (Task 20361).
+- **Failover is narrower**: at most `executors.failover.max_attempts` (2) moves,
+  never onto an executor with an access list or, for an isolated run, the hub's
+  host; a run nothing replaces pauses `executor_lost`, and a task that took two
+  executors down is quarantined until reset (Tasks 20391, 20396).
+- **Restart each run started by 0.0.4 once** so it can adopt later builds;
+  until then `cloop hub doctor` warns `runs.build_lag` (Task 20389).
+
+#### Credentials, Kubernetes and the network
+
+- **Constrained kubeconfig grants need the Kubernetes monitor**: without
+  `executors.kube_guard`, a grant naming namespaces or fewer than all eight
+  verbs (the read-only default included) is no longer delivered. Enable it
+  (`{enabled: true, tls: auto}`; Helm `executor.kubeGuard.enabled` with
+  `executor.monitorTLS.auto`), or accept each grant with `cloop hub grant
+  unguarded <grant-id> --reason …` (Task 20420). The monitor also refuses
+  RBAC, CertificateSigningRequest, token-Secret and other-ServiceAccount
+  writes and unreadable bodies: install such charts as a cluster
+  administrator (Tasks 20416, 20420).
+- **Kubernetes executors**: a hand-written Role needs `secrets` `create`,
+  `patch` and `delete` (every run now has a lease Secret), and a pinned
+  `executors.kubernetes.image` must carry this release's cloop, or Pods fail
+  with `unknown flag: --seed`; the hub's copy of the project now supersedes a
+  `.cloop/` committed to the repository (Tasks 20401, 20402).
+- **`executors.egress.enabled` now starts the egress proxy**, on an ephemeral
+  loopback port by default: give containers a `listen_addr` such as
+  `0.0.0.0:8899` and Pods and devices an IP `advertise_addr`, and name
+  `api.anthropic.com` in egress grants (Task 20378).
+- **`cloop ui` refuses to start on a firewall allowlist that contains a cloud
+  metadata service** without naming it — `169.254.0.0/16`, `100.64.0.0/10`
+  (Alibaba Cloud) or `fd00::/8` (AWS, GCP) — in an enabled container or
+  Kubernetes `egress_filter`. Run `cloop hub doctor` (`firewall.metadata`) and
+  narrow the range or list the service's own `/32` (Task 20397). An egress
+  filter under rootless podman is refused (Task 20345).
+- **`tls: auto` needs `CLOOP_SECRET_KEY` and agents at protocol v21**: upgrade
+  devices before enabling it (Task 20409). `cloop serve` refuses git
+  workspaces while `executors.git_proxy` is on (Tasks 20347, 20349).
+- **Ceilings bind container runs**: `executors.limits.max_disk`, executor
+  Limits and `--disk` now refuse and stop container runs, and container-mode
+  devices get their CPU, memory and process ceilings; work a device returns is
+  held to `executors.remote.max_pinned_writeback_bytes` (256 MiB) and
+  `max_pinned_writeback_total_bytes` (1 GiB) (Tasks 20399, 20405).
+- **Run every hub member on this build before enabling SCIM**: an older member
+  would lease a grant SCIM suspended (Task 20415).
+
+#### Helm and containers
+
+- **Chart 0.1.0 → 0.4.1.** Upgrade at `replicaCount: 1`; more replicas need
+  persistence and are pinned to the volume's node (Task 20354). Projects in
+  `/var/lib/cloop/.cloop` are now refused: move them to
+  `/var/lib/cloop/projects`, which the chart mounts as the projects root (Task
+  20418). New values (`executor.gitProxy`, `executor.kubeGuard`,
+  `executor.monitorTLS`, `extraCACerts`, `oidc.requireRBAC`, `strategy`) are
+  off by default (Tasks 20385, 20409).
+- **Feature runs on a container executor need git and this release's cloop in
+  the sandbox image**; Kubernetes executors cannot run features (Task 20367).
+- **Firewall rule sets refuse runs nothing can filter**: on Kubernetes set
+  `executors.kubernetes.network_policy_enforced: true` or run `cloop hub doctor
+  --probe-network-policy` (Task 20363).
+
+#### Edge devices
+
+- **A device on 0.0.4 speaks protocol v13; 0.0.5 speaks v21 and still runs its
+  ordinary work.** What needs a newer agent is refused or degraded: virtual
+  executors with a firewall or devices (v14), firewall rules stored in the hub
+  (v15), features (v16), GitHub App token refresh (v17: tokens lapse an hour
+  after dispatch), the egress proxy route (v18), revoking one grant without the
+  whole lease (v19), disk limits (v20) and git-proxy workloads under `tls: auto`
+  (v21) (Tasks 20345, 20363, 20367, 20375, 20378, 20403, 20405, 20409).
+- **Upgrade 0.0.4 devices on the device: the Upgrade button cannot.** A 0.0.4
+  agent accepts the hub's request and then fails it in its journal: the root
+  helper that carries upgrades out ships in 0.0.5. On each device, as root, with
+  `cosign` on `PATH`: `cloop upgrade` (0.0.4's own command fetches 0.0.5 and
+  verifies its signature), then `cloop executor agent install --upgrade
+  --remote-upgrade --packet-filter`, which restarts the agent on 0.0.5,
+  installs the helper and grants what sandbox firewalls need — a plain
+  `--upgrade` changes no unit file. From then on the Upgrade button and
+  auto-update work, rollback protection covers the device, and `cloop hub
+  doctor` (`executors.rollback_protection`) and its card stop warning (Tasks
+  20352, 20376, 20380, 20421).
+- **Enroll new devices with a freshly minted command.** The installer refuses a
+  cloop older than the hub's protocol — downloaded, already on the device, or
+  `CLOOP_BIN` — so re-enrolling a 0.0.4 device needs `cloop upgrade` first; on a
+  hub running a published build of `main` the command installs that build with
+  `--channel edge` (Task 20421).
+- **The hub can never roll a 0.0.5 device back**: its installer refuses a build
+  earlier on `main`, or one carrying no place on it — 0.0.4 included, and a
+  binary built by hand without the stamp the hub's advice now names. Only root
+  on the device can: `sudo cloop executor agent install --upgrade --to v0.0.4
+  --force` (Tasks 20380, 20421).
+- **Workloads waiting for a granted host interface should poll `IFF_UP`** in
+  `/sys/class/net/<name>/flags` rather than wait for its name (Task 20349).
+
+#### Operations, CLI and API
+
+- **`cloop hub doctor` fails on hubs 0.0.4 passed** — `rbac.enforced`,
+  `ui.exposure`, `firewall.metadata`, `projects.confinement`,
+  `kubeguard.enabled`, `storage.free_space`, `config.repaired` — and warns on
+  more (`secret_key.escrow`, `ui.static_token`, `runs.build_lag`,
+  `executors.rollback_protection`), each with its remedy; a bare run diagnoses
+  port 8080. A pipeline gated on its exit status turns red until they are fixed
+  (Tasks 20381, 20387, 20389, 20393, 20395, 20397, 20406, 20410, 20418, 20420,
+  20421).
+- **Restores and audits**: `cloop db restore` needs `--reason` and every hub
+  stopped, and a 0.0.4 backup `--allow-unsealed`; try `--check` first (Task
+  20410). `cloop hub audit verify`, `cloop audit-log verify` and `cloop events
+  verify` exit 3 on recorded `audit.gap` rows (`--allow-gaps`), and the hub
+  prints audit head checkpoints to stderr every five minutes until
+  `audit.checkpoints.file` names a file outside `.cloop/` (Task 20404).
+- **Scripts may meet**: `GET /api/event-history` no longer returns `total`
+  (page with `before=`; Task 20384); `POST /api/leases/{id}/revoke` can answer
+  202 with `pending` holders (Task 20419); a dispatch that cannot be recorded
+  answers 503 (Task 20419); several refusals that answered 500 are now 409
+  with a code (Tasks 20364, 20379, 20417, 20418); `cloop hub quota set` and
+  `cloop db maintain` refuse while a hub serves (Task 20354); `cloop migrate
+  --from-version` is ignored (Task 20374). Some broken configuration now fails
+  at load, naming the field (Task 20387).
+- **Copy the CI workflow again** if you took it from Settings → CI/CD
+  pipelines or `docs/guides/ci-pipelines.md`: with current Claude Code the old
+  one fails with the relay's 403 (Task 20353).
+
+### Added
+
+- **Several `cloop ui` processes serve one control plane as a hub cluster.**
+  A second hub on the same `state.db` refused to start; now every `cloop ui`
+  joins the control plane as a member, and members behind a load balancer need
+  no stickiness. A request only one member can answer — a Stop for a run it
+  streams, a login callback, an edge agent's traffic — is forwarded to it over
+  an HMAC-signed peer channel and authenticated again there; live events reach
+  every member's dashboards; an elected leader runs retention, backups and the
+  sweeps; a dead member's runs are adopted without restarting their harness,
+  and SIGTERM hands them over. Members must share one kernel (one machine or
+  node) and one `$HOME/.cloop/projects.json`, and reach each other at
+  `--advertise-url`, `CLOOP_CLUSTER_ADVERTISE_URL`,
+  `CLOOP_CLUSTER_ADVERTISE_HOST` or `ui.cluster.advertise_url` (default
+  `http://127.0.0.1:<port>`); `ui.cluster.exclusive: true` keeps the
+  single-process rule. `cloop hub cluster status` and `GET /api/cluster` show
+  the members and the leader. The Helm chart allows `replicaCount` above 1,
+  pinned to the volume's node (migration 0052, additive). See
+  `docs/architecture/hub-cluster.md` (Task 20354).
+- **`cloop login`: a terminal signs in to an SSO hub with a session of its
+  own.** A terminal could get no credential from an SSO hub: API tokens need
+  `token.admin`, and the session cookie never leaves the browser. `cloop
+  login <hub>` runs the RFC 8628 device grant — a signed-in browser approves
+  the code at `/device` — and the terminal gets a CLI session that expires
+  and idles out (`ui.oidc.cli_session_ttl_hours`,
+  `cli_idle_timeout_hours`), re-checks its claims, and is listed and revoked
+  like a browser's; approving needs a sign-in newer than
+  `ui.oidc.device_approval_max_age_minutes` (120). `cloop logout`, `cloop
+  whoami` and `cloop remote projects|tasks|add|run|stop|logs` come with it,
+  and `cloop task attach` uses the stored session. On wherever SSO is;
+  `ui.oidc.device_login: false` turns it off (migration 0066, additive). See
+  `docs/getting-started/terminal.md` (Task 20412).
+- **SCIM 2.0 provisioning: an account the identity provider disables is
+  suspended on the hub in one request, without an administrator.**
+  Disabling a person at the identity provider ended nothing the hub had
+  issued until someone ran `cloop hub user offboard`. Entra ID or Okta can
+  now provision the hub at `/scim/v2` (with `ui.oidc` enabled), using a
+  `cloop_scim_…` credential from Settings → Provisioning (SCIM) or `cloop hub
+  scim credential create`. `active: false` writes a deny binding, ends the
+  person's sessions, API tokens and glasses links, suspends grants over their
+  personal secrets, releases their leases and stops their tasks; `active:
+  true` lifts the deny and the suspension, and what ended stays ended. A
+  `DELETE`, or `ui.oidc.scim.offboard_after_days` of deactivation, offboards
+  fully, honouring legal holds (`cloop hub user hold`).
+  `ui.oidc.scim.match_claim` picks the claim users are matched on, and
+  provisioned groups become the `scim_group` claim kind for role bindings
+  (migration 0067, additive). See `docs/guides/scim-provisioning.md` (Task
+  20415).
+- **SSO sessions renew from the browser when the hub cannot.** A hub that
+  keeps no refresh token (no `CLOOP_SECRET_KEY`, or a provider that issues
+  none) refused every action above operator once a session's claims passed
+  `max_claim_age_minutes`, until the user signed out. The dashboard now
+  re-asserts them through a hidden `prompt=none` frame at the new `GET
+  /auth/renew` before they go stale, and once more when a call is refused as
+  renewable; when the provider needs the user, a banner offers a sign-in
+  that returns to the same view. A renewal sets no cookie and never extends
+  the session. See *Silent renewal from the browser* in
+  `docs/security/model.md` (Task 20359).
+- **Project sharing.** On a hub with single sign-on, a project's maintainer adds
+  named people at a role no higher than their own, from the Overview's
+  **Members** card or `cloop project members add`. A membership only adds
+  access, also on a hub whose `default_role` is `none`, and extends to the
+  member's glasses link, tokens minted for them and the project's features;
+  removals apply on every hub within seconds and close the member's open
+  dashboard; members can leave. API `/api/projects/{idx}/members`, permission
+  `project.share`; audit actions `project.member.grant`, `.change`, `.revoke`,
+  `.leave`. See *Project members* in `docs/security/model.md` (Task 20366).
+- **`cloop remote init` creates a hub project from a local checkout.** In a
+  git checkout it creates the project on the hub — by name under the new
+  `ui.projects_root` (default `projects/` in the hub's home,
+  `/var/lib/cloop/projects` in the packaged image) — binds `--executor`,
+  grants the GitHub origin through a GitHub App or the caller's
+  git-proxy-guarded token (`--access write`, `--branch`), requests from an
+  approver what the caller may not grant, naming who can approve it, settles
+  the Claude credential, prints the dashboard link and with `--run` starts it.
+  Beside it: `cloop remote executors`, `repos`, `grants` and `features`, each
+  with `--json`. `POST /api/projects/new` takes a `name` instead of a `dir`, and
+  grant requests list their `approvers`. See
+  `docs/getting-started/terminal.md` (Task 20417).
+- **Disaster recovery: the sealing key can be escrowed, and a restore checks
+  the key before it swaps anything.** Losing `.cloop/hub.env` lost every
+  sealed secret, and `cloop db restore` swapped in a backup the hub's key
+  could not open, leaving a hub that would not start. `cloop hub key escrow
+  export|verify|import` keeps `CLOOP_SECRET_KEY` sealed under a passphrase,
+  and `cloop hub doctor` warns `secret_key.escrow` until it is. `cloop db
+  restore` now runs a read-only preflight first (`--check` runs it alone),
+  including whether the key opens the backup's sealing keys, which only
+  `--accept-secret-loss` overrides; requires `--reason`; is refused while a
+  hub serves the database; and records itself as `audit.restored` and in
+  the audit checkpoints, which then accept the restore (exit code 3: restored
+  but not fully recorded). See the runbook's *Disaster recovery drill* (Task
+  20410).
+- **The edge channel: devices can follow the hub's own build, signed by CI.**
+  After CI passes on a push to `main`, `edge.yml` builds the commit for every
+  release platform (stamped `dev+g<short sha>`) and signs the archives and a
+  manifest with Sigstore keyless signing, as assets of an `edge` prerelease that
+  is never latest and keeps the newest 30 commits. Edge builds are trusted by
+  their own pin, `edge.yml@refs/heads/main`, only for an `edge:<commit>` target;
+  the release pin refuses them. A device opts in locally with `sudo cloop
+  executor agent install --upgrade --channel edge` (`20-update-channel.conf`,
+  which upgrades keep and the hub cannot change); the Upgrade dialog and
+  auto-update then offer **this hub's build** once CI has published it, and only
+  if it does not lower the device's protocol, else say why not. `install
+  --upgrade --to <target>` fetches, verifies and installs a published build. See
+  `docs/guides/edge-channel.md` (Task 20376).
+- **Remote upgrade works on a hardened device.** The unprivileged agent cannot
+  replace its root-owned binary, so an accepted Upgrade failed in the device's
+  journal. A root helper (`cloop-executor-upgrade.path` and `.service`,
+  installed by default and by `install --upgrade --remote-upgrade`) now carries
+  out the request on the channel systemd gives the device, with the usual
+  verification, backup, restart and rollback. A device without the helper, with
+  its path unit inactive, or without cosign refuses before acknowledging, and
+  the Upgrade dialog shows why (Task 20376).
+- **`cloop hub doctor` and the Executors panel name every device rollback
+  protection does not cover.** The doctor looked for a build without a sequence
+  only on edge devices, though every release before this one carries none.
+  `executors.rollback_protection` now warns about each device that follows
+  releases on such a build, and the device's card in the Executors panel says
+  the same (`rollback_note`), each with the way to cover it: the Upgrade button,
+  or — for an agent from before the remote-upgrade helper — once on the device,
+  as root, `cloop upgrade` and then `cloop executor agent install --upgrade
+  --remote-upgrade` (Task 20421).
+- **Virtual executors.** An enrolled device can carry named sub-executors, each
+  with its own container engine, OCI runtime, image, network and **host
+  devices**; projects bind to one like to any executor, and limits and the
+  access list apply under its own ID — so one machine can offer a locked-down
+  sandbox to everyone and its hardware security module to a few. Press
+  **Virtual** on a device's card in the Executors tab to choose its USB devices
+  from the device's inventory, and its network: **No network** (the default),
+  **Firewalled** (a bridge of its own under an IP firewall with an allowlist
+  and a denylist) or **Unfiltered**. The Settings tab lists every device's USB
+  hardware. API: `/api/executors/{device}/virtuals`,
+  `/api/executors/{id}/virtual`; audit action `executor.virtual`. See
+  `docs/guides/virtual-executors.md` (Tasks 20345, 20356).
+- **Executor protocol v14.** Agents report their USB inventory, whether they can
+  install a packet filter, and their engine's OCI runtimes; a start frame can
+  carry a virtual executor's firewall and devices, resolved against the device's
+  live hardware at every dispatch (an unplugged device fails the start by name).
+  USB devices are selected by identity, not `/dev/bus/usb` path (Task 20345).
+- A denylist for the IP-layer egress filter (`netfilter.Input.DenyCIDRs`),
+  compiled ahead of every allow and carried into Kubernetes NetworkPolicies as
+  `except` ranges (Task 20345).
+- **Devices and projects carry firewall rule sets, each inside the one
+  above.** A sandbox's IP firewall came only from an executor's
+  `egress_filter` or a virtual executor's own, with no ceiling per device and
+  nothing a project's maintainers could narrow. An administrator now sets a
+  device's rule set (the device's card → **Firewall**), the most any sandbox
+  on it may reach, virtual executors included; a project's maintainers
+  (`config.write`) may narrow it on the Overview's **Network Firewall** card.
+  Containment is checked on save (409 `firewall_exceeds_bound`), at dispatch
+  and in the driver, and tightening a device narrows what is saved under it.
+  Devices apply rules from protocol **v15**, Kubernetes only where
+  NetworkPolicy enforcement is proven or asserted; runs on the host-process
+  executor, a host-mode device or a rootless engine are refused while rules
+  apply. API: `/api/executors/{id}/firewall`, `/api/firewall`; audit actions
+  `executor.firewall`, `project.firewall` (migration 0055, additive). See
+  `docs/guides/firewall.md` (Task 20363).
+- **The executor installer grants the agent what a sandbox firewall needs, and
+  nothing the agent starts receives it.** A device's hardened unit allowed no
+  capability and no netlink socket, so nft(8) could not install a firewall
+  there. `cloop executor agent install` now adds `CAP_NET_ADMIN` and
+  `AF_NETLINK` in a systemd drop-in, `10-packet-filter.conf`
+  (`--packet-filter=false` withholds it); an installed device gets it with
+  `--upgrade --packet-filter`, never from a plain `--upgrade`. Every cloop
+  process clears its ambient and inheritable capabilities at startup, and only
+  nft(8) is handed `CAP_NET_ADMIN` back — never a workload, git or a shell
+  (Task 20352).
+- **Features run on isolating executors.** A feature's worktree names its
+  parent's `.git` by its path on the hub, so features ran only on the hub's
+  host executor, and on a hub with `executors.allow_host_process: false` not
+  at all. A feature now travels to the executor as its branch, in a git bundle
+  capped by `executors.feature_bundle_mb` (default 32, at most 128): a
+  container executor needs git and this release's cloop in its sandbox image,
+  a remote agent protocol **v16** and git, and a Kubernetes executor or an
+  older agent is refused with a 409. The run's commits come back vetted and
+  fast-forward the feature's worktree only when it is clean and on its branch;
+  otherwise they are kept on `cloop/returned/<slug>/<run>` and the feature
+  shows a conflict. The hub opens its pull request. See
+  `docs/guides/features.md` (Task 20367).
+- **Container executors hold a workload to `resources.disk`.** The container
+  driver refused any disk limit, so a project that set one could not run on a
+  container executor at all. It now measures the workspace while the workload
+  runs: a tree already over the limit is refused at the start (409
+  `workspace_over_disk_limit`), and one that grows past it is stopped and its
+  run paused with the new reason `disk_limit`, the task back to pending. This
+  is sampling, not a quota, so keep `orchestrator.min_free_disk_mb` on. A
+  device holds the limit in container mode from agent protocol **v20**. See
+  *`resources.disk` and the workspace* in `docs/reference/sandbox.md` (Task
+  20405).
+- **A long-lived run moves to a newly deployed build at a task boundary, and
+  the dashboard shows when a run is behind.** A deploy replaces the binary but
+  not the runs it started, so a run in auto-evolve kept its build
+  indefinitely. The Overview, `cloop status` and `cloop hub doctor`
+  (`runs.build_lag`) now show a run's build and how far it lags the hub. A
+  host-process run on Linux moves without stopping — once with **Adopt at next
+  task boundary** (`POST /api/run/adopt-build`, audited `run.adopt_requested`)
+  or always with the per-project **Follow New Builds** option (`cloop run
+  --follow-builds`, off by default) — when the binary at its path is a newer
+  sequence-stamped build embedding the database's schema: it re-executes in
+  place, keeping its pid, live log and run claim (audited `run.reexecuted`); a
+  refusal is journalled as `run_adoption` and the run carries on. See
+  *Following new builds* in `docs/reference/configuration.md` (Task 20389).
+- **GitHub App tokens outlive GitHub's hour.** The hub re-mints a `github_app`
+  grant's installation token about ten minutes before it expires, at the first
+  token's exact scope and only while the grant still authorises the lease, and
+  destroys the old one once unused. The git proxy renews upstream itself;
+  otherwise the lease keepalive rewrites the sandbox's `github-token` file in
+  place, on an edge device via the new `secret_refresh` frame (agent protocol
+  **v17**; an older device keeps its token, journaled) and on Kubernetes by
+  patching the lease Secret (the chart's executor Role gains `patch` on
+  `secrets`). A refresh GitHub or the broker refuses ends the grant's access
+  like a revocation. Audit: `secret.renew` per re-mint, the new `lease.refresh`
+  per delivery. See *Keeping the token past GitHub's hour* in
+  `docs/guides/secrets.md` (Task 20375).
+- **The git proxy and the Kubernetes monitor need no certificate: `tls:
+  auto`.** Turning either on took a certificate every sandbox image already
+  trusted, so most hubs ran neither and put forge and cluster credentials
+  in sandboxes. With `executors.git_proxy.tls: auto` (and
+  `executors.kube_guard.tls: auto`) the hub mints its own CA, sealed under
+  `CLOOP_SECRET_KEY` and shared by every hub-cluster member (migration 0065,
+  additive), and serves each monitor a short-lived certificate it renews
+  itself. Sandboxes trust the CA for the proxy's URL only: host processes,
+  containers and Pods receive it with the run, edge devices in the start
+  frame (protocol **v21**; an older agent is refused a workload that would
+  use the proxy), and the kube guard embeds it in the kubeconfigs it
+  issues. Helm: `executor.monitorTLS.auto`. See
+  `docs/git-interception-proxy.md` (Task 20409).
+- **The Helm chart runs the git proxy and the Kubernetes monitor.** Neither
+  could be enabled from `values.yaml`, and `config.extra` cannot add a
+  second `executors:` block. Chart 0.3.0 adds `executor.gitProxy` and
+  `executor.kubeGuard` (ports 8443 and 8444, off by default) and
+  `executor.monitorTLS` (`auto` from chart 0.4.0, an existing TLS Secret,
+  or a generated one), plus `extraCACerts` and `hostAliases`; workload Pods
+  trust the CA for the proxy's URL only
+  (`executors.kubernetes.git_ca_bundle`).
+  `executors.kube_guard.audit_allowed` also audits forwarded requests. See
+  `deploy/README.md` (Task 20385).
+- **Share a cluster behind `kubelogin`, `aws eks get-token` or the GKE
+  plugin: `cloop remote kube share`.** The hub will not run an exec
+  credential plugin, which left such clusters with no supported path.
+  `cloop remote kube share <name> --context <ctx> --namespaces a,b` runs the
+  plugin on the developer's machine, creates a ServiceAccount bound to
+  `view` (`edit` with `--access write`, which needs `--sa-namespace` outside
+  the shared namespaces), mints a bounded token (`--ttl`, default 24h) and
+  stores its kubeconfig on the hub, as a personal secret on a hub with
+  single sign-on. With the Kubernetes monitor on, the hub renews the token
+  at half its life; otherwise `cloop remote kube renew` does. `list` and
+  `revoke` complete it, and revoke and renew touch only objects the hub
+  recorded and the cluster confirms are the share's. The dashboard refuses
+  an exec-plugin kubeconfig at upload (400), naming the command. See
+  `docs/architecture/kubernetes-access.md` (Tasks 20416, 20420).
+- **A device run keeps its credential guards when its hub restarts.** Its
+  git proxy, Kubernetes monitor and egress sessions, its workspace's git
+  session and its App-token refresh lived only in the hub process, so after
+  a restart its next fetch, push or `kubectl` call got a 401. They are now
+  recorded — a token hash, never a token (migration 0058, additive) — and
+  the hub that adopts the run restores them, never wider than the grant and
+  this hub's policy allow now. See `docs/architecture/git-proxy.md` (Tasks
+  20383, 20390).
+- **A CI job relaying through the hub survives a hub restart.** Its relay
+  session lived only in the process that minted it, so a deploy left the
+  job "Not logged in" and unable to federate again. Sessions are now
+  recorded (migration 0060, additive) and restored by the next call, held to
+  their rule as it stands now; editing or deleting the rule ends them (Task
+  20390).
+- **`executors.write_back: push` returns a device run's work as a branch.**
+  The hub never asked a device for a push write-back, so the work stayed on
+  the device. With this opt-in setting a successful run's changes are
+  committed to a fresh `cloop/run-…` branch and pushed to the project's
+  `origin`, through the git proxy when it runs, so the device never holds
+  the forge credential (Task 20390).
+- **The hub hosts the egress proxy, and each run gets its own session.**
+  `executors.egress` was validated but never bound, so an egress grant gave
+  a run nothing. `cloop ui` now binds `listen_addr` (each hub-cluster member
+  its own; `cloop hub doctor` reports it as `egress.hosted`), and a run
+  whose project holds an active egress grant gets `HTTPS_PROXY` for a
+  session of its own, renewed while it runs and never past the grant. Pods
+  and devices reach it at `advertise_addr`; behind a device firewall that
+  takes protocol **v18**. A `.cloop/sandbox.yaml` naming a grant the hub
+  cannot serve is refused with 409 `sandbox_egress_unavailable`. Claude
+  Code sends its model API calls through the proxy too. See
+  `docs/reference/configuration.md` (Task 20378).
+- **Review gate.** A project can have a reviewer model, of any provider, check
+  each task's changes before anything leaves the working copy. While a task
+  runs, the agent's `git push` is held; when it reports done, the reviewer reads
+  the diff of every repository the task touched. On approval cloop sends the
+  held pushes at the reviewed commits and lets git-mode and worktree merges
+  proceed for the approved tree only. On a request for changes, mode `fix` sends
+  the findings back and reviews again, `block` fails the task, `advisory`
+  records and publishes; in `fix` and `block` no verdict fails the task.
+  Configure it on the Overview's **Review gate** card, with `cloop review gate`
+  or `/api/options/review-gate`; see `docs/guides/review-gate.md` (Task 20357).
+- **Done means committed.** An opt-in, per-project check: a task its agent calls
+  done is accepted only once its changes are committed (with *pushed*, also on
+  its branch's upstream). A turn that leaves this attempt's changes uncommitted
+  or unpushed is handed back naming them, at most twice; then the task returns
+  to `pending` as an `uncommitted_work` abort, its work left in the tree, and
+  the run pauses at the consecutive-abort ceiling. Pre-existing changes and
+  `.cloop/` are never blamed; a push the review gate holds counts as pending.
+  Set it with the Overview's *Done = Committed* / *…and Pushed* badges, `cloop
+  run --require-committed[=pushed]` or `cloop require-committed`. See
+  `docs/guides/done-means-committed.md` (Task 20370).
+- **Runs pause before a full disk can swallow their outcome.** A full disk
+  used to show up as a failed write, often the one recording a task's outcome.
+  Before every task attempt and evolve round, a run now measures the volumes
+  holding `.cloop` and the working tree. Below `orchestrator.min_free_disk_mb`
+  (default `1024`; `0` turns it off) it starts nothing and pauses with reason
+  `disk_low`. It carries on by itself once every volume has the floor plus a
+  tenth free. If an outcome write still meets a full disk, the run releases a
+  16 MiB `.cloop/reserve` so that the write can land. `cloop hub doctor`
+  reports `storage.free_space`, and `cloop_hub_disk_free_bytes{volume}` tracks
+  free space. Admins set the floor in the Budget tab's **Disk & Retention**
+  panel (`PUT /api/config/disk`, audit action `disk.floor.updated`). See
+  *Disk space low* in `docs/operations/runbook.md` (Task 20381).
+- **The 18 metric families the catalog declared but nothing recorded now carry
+  samples.** They were scraped with no series, so an alert on one could never
+  fire:
+  - run starts, completions, failures and durations
+    (`cloop_executor_task_*`);
+  - `cloop_executors` and `cloop_executor_heartbeat_age_seconds_max`;
+  - `cloop_secret_leases_live` and `cloop_secret_kek_rotation_*`;
+  - sessions (`cloop_sessions_*`);
+  - API-token checks (`cloop_apitoken_auth_*`);
+  - the egress broker (`cloop_egress_*`).
+
+  Gauges read from the shared database are exported by the cluster leader
+  only. See `docs/operations/metrics.md` (Task 20377).
+- **Settings → Telemetry.** An admin switches front-end telemetry on or off,
+  optionally per front end (`ui.telemetry.sources`), and sees what is stored and
+  for how long; switching off deletes nothing. API `GET`/`PUT
+  /api/config/telemetry` (`user.manage`), audit action
+  `telemetry.config.updated`; an overlay holds it if the hub has one
+  (Task 20311).
+- **Dictation goes where the caret is.** The Dictate buttons on the Tasks tab
+  and in the task editor insert at the caret of the field you were in, replacing
+  a selection, and a toast names the field; with no field focused they behave as
+  before (Task 20309).
+- **Multi-line task descriptions.** The Add Task description box takes several
+  lines: Enter starts a new one, Ctrl+Enter (⌘+Enter on a Mac) adds the task
+  (Task 20343).
+- **CI gates on staticcheck, unused and ineffassign.** A **Lint** job runs
+  golangci-lint v2.14.0 with staticcheck's SA checks, `unused` and `ineffassign`
+  over the whole module; `make lint` runs the same. The 72 findings in the tree
+  are fixed, among them TLS configs setting `PreferServerCipherSuites`, which Go
+  has ignored since 1.17. errcheck stays off for now, as `CONTRIBUTING.md`
+  explains (Task 20411).
+
+### Changed
+
+- **The installer a hub hands out never puts a device behind the hub.** It
+  fetched `/releases/latest` whatever the hub ran, so a hub built from `main` at
+  protocol v21 enrolled every new device with 0.0.4's v13 agent, which connected
+  and was then refused virtual executors, stored firewall rules, features,
+  secret refresh and the rest. `/install.sh` now refuses any cloop that speaks
+  an older executor protocol than the hub — one it downloads, one already on
+  the device, or `CLOOP_BIN` — naming both protocols and the remedy. When the
+  hub runs a build of `main` that CI signed and published, the Executors panel's
+  command ends in `install.sh --channel edge`: the script installs exactly that
+  build, verified with its manifest against the edge workflow's identity, and
+  puts the device on the edge channel, so the choice of channel stays in the
+  command the device's operator runs. Otherwise it installs the latest release,
+  and the panel says so when no signed build speaks the hub's protocol. See
+  *Installing the agent as a service* in `docs/architecture/executors.md` (Task
+  20421).
+- **A sandboxed harness with no Claude credential is refused before it
+  starts.** A `claudecode` or `anthropic` project on an isolating executor
+  gets no Claude login from the hub, so a run without an env grant carrying
+  one started and failed `auth_refused`. Runs, resumes, autoruns, plans,
+  chat and reproductions are now refused with 409
+  `harness_credential_missing` (or `harness_credential_expiring` within ten
+  minutes of the lease's end). The Overview's **Claude credential** card
+  grants one or stores a pasted token
+  (`/api/projects/{idx}/harness-credential`); executors that bring their own
+  are listed in `executors.harness_credential_exempt`. See
+  `docs/guides/secrets.md` (Task 20379).
+- **`cloop hub bootstrap` turns on the git proxy and the Kubernetes
+  monitor.** A bootstrapped hub put forge and cluster credentials in
+  sandboxes; it now enables both with `tls: auto` on ports 8443 and 8444
+  (`--git-proxy-port`, `--kube-guard-port`) (Task 20409).
+- **On Kubernetes the hub's project travels with the run, and supersedes a
+  `.cloop/` committed to the repository.** The seed rides the run's lease
+  Secret into the `workspace` init container, and the outcome comes back at
+  the end of the Pod's log. A committed `.cloop/` is no longer what runs; the
+  lease Secret must fit the API server's 1 MiB, or Start is refused (archive
+  finished tasks with `cloop task archive`); and the harness image
+  (`executors.kubernetes.image`) must carry this release's cloop, or the init
+  container fails with `unknown flag: --seed`. See
+  `docs/architecture/executors.md` (Task 20402).
+- **The Helm chart gives a hub a projects root**: it mounts the state
+  volume's `projects/` at `/var/lib/cloop/projects`, the default
+  `ui.projects_root`, where the read-only image had nowhere to create a
+  project. Chart 0.4.1 (Task 20418).
+- **`cloop ui --port N` applies its executor policy with its overlay merged.**
+  `executors.allow_host_process`, `min_agent_build` and `limits` were applied
+  from `config.yaml` alone, so the shared value always won; an overlay's
+  `allow_host_process: true` now relaxes a shared `false` for that hub alone
+  (Task 20364).
+- **Browser telemetry is off by default.** An unset `ui.telemetry.enabled` now
+  means off, and the dashboard and the glasses page ask the hub (`GET
+  /api/telemetry/config`, `/api/glasses/telemetry/config`) before sending
+  anything. A config that says `enabled: true` keeps collecting (Task 20311).
+- **The Event History panel is pushed its rows instead of re-reading them.**
+  Every task or state update made the dashboard re-fetch `GET
+  /api/event-history` in full, each request loading the whole project to return
+  fifty rows (244 ms on a 50,000-step journal). A page is now two index reads
+  (migration 0059, additive), about 3 ms at any journal size, paged with
+  `before=`; new rows arrive as `history_append` messages. `offset=` still
+  works; responses no longer carry `total`. Step output or event details over
+  4 KB arrive cut and load whole when the row is opened (`?step=N`, `?event=N`)
+  (Task 20384).
+- **The Settings and admin tabs load the first time they are opened.** The
+  Settings, Budget, Secrets, Audit, Quotas and Telemetry tabs and the executor
+  dialogs were part of every first paint; they are now fetched on first open,
+  with Retry if the fetch fails. First paint falls from 212 KB to 142 KB on
+  the wire, and its ceiling (`eagerWireBudgetBytes`) from 213,000 B to
+  144,000 B, so a new admin panel belongs in `pkg/ui/assets/js/deferred/`
+  (Task 20386).
+- **The stylesheet and the dashboard page ship without their comments**,
+  about 7.6 KB of `app.css`'s 24 KB on the wire and 7 KB of the gzipped
+  `index.html`; an asset its stripper cannot model is served as written
+  (Tasks 20356, 20363).
+- **The error boundary ships without its comments too.** `errboundary.js`, the
+  one first-paint script still served as written, is stripped like the bundle:
+  4.9 KB → 2.6 KB on the wire (Task 20360).
+- **WebSockets run on `github.com/coder/websocket` v1.8.15**, the maintained
+  successor of the deprecated `nhooyr.io/websocket`, for the dashboard, the
+  hub-to-agent transport and sandbox attach. A socket closed because access was
+  withdrawn now reaches the browser as 1008 with its reason, not 1006; an
+  oversized frame still closes with 1009 (Task 20411).
+- **CI runs `pkg/ui` in three shard jobs and fails any package that takes
+  over 60% of its `-timeout`.** The workflow takes about 18 minutes instead
+  of 27 to 34. The race step also starts its longest packages first, and
+  tests copy a migrated database (`internal/statedbtest`) instead of
+  building one. When the shards drift apart, refresh
+  `scripts/test-durations/pkg-ui.txt` (see `CONTRIBUTING.md`). A real-browser
+  layout sweep of every tab and dialog from 320 to 1280px also gates CI; a
+  new tab or dialog needs an entry in it (Tasks 20372, 20407, 20414).
+- **A security fix can no longer wait unnoticed for a release.** The scheduled
+  *Released installer* workflow, which now also runs as soon as a release run
+  finishes, fails "ship something" when an `[Unreleased]` Security entry in
+  `CHANGELOG.md` is older than 14 days by `git blame`
+  (`scripts/unreleased-security-age.py`). A release's notes longer than a
+  GitHub release can hold are cut at a whole entry and link the rest, instead of
+  failing the publish step after the artifacts are built (Task 20421).
+
+### Fixed
+
+- **Stopping a run returns its in-flight task to `pending`.** Stop, Ctrl+C
+  and an expiring `--timeout` failed the task, left it `in_progress` or marked
+  it `timed_out`, which stranded its dependants. The dashboard's Stop now also
+  reaches runs on devices and in containers (Task 20348).
+- **A run stops when a state write fails: it pauses as `state_not_persisted`
+  and exits with status 74.** Runs ignored such failures and announced
+  outcomes the database never held, so the next start ran the task again.
+  `cloop status` shows the pause reason, and `cloop run --auto-evolve` now
+  sticks (Task 20362).
+- **Fourteen task fields survive a reload.** Every load dropped them: assignee,
+  links, sprint and story points, risk and impact scores, retry budget, TDD
+  verdicts and the `on_success`/`on_failure` branches, among others. A branched
+  plan stopped branching (migration 0054, additive) (Task 20361).
+- **A damaged `depends_on`, `on_success` or `on_failure` stops the project
+  instead of releasing the task early.** It used to read as empty. Loads now
+  fail and saves refuse, naming the task and column. See *A task row that will
+  not load* in `docs/operations/runbook.md` (Task 20361).
+- **Saves update rows in place, so a column a later release adds survives
+  them.** They replaced whole rows and erased every column the binary did not
+  know. A future column on `plan_tasks`, `quota_counters` or `ci_exchanges` is
+  recorded `additive-columns`, which earlier builds refuse (Task 20388).
+- **The database's write-ahead log stays bounded.** It never shrank after a
+  burst of writes. Connections now trim it to 64 MiB, the leading hub
+  truncates it, and `cloop hub doctor` warns on `statedb.wal`. See *The
+  write-ahead log* in `docs/operations/runbook.md` (Task 20392).
+- **A turn that ends waiting on its own background work is handed back, not
+  recorded done.** Such turns were recorded done with their work uncommitted.
+  The agent is now resumed at most twice; after that the task goes back to
+  `pending` as an `unfinished_turn` abort (Task 20349).
+- **Task edits survive a running orchestrator's saves, and database opens and
+  writes wait out locks.** The run's stale copy overwrote dashboard and CLI
+  edits. An open could fail with `enable WAL mode: database is locked`. A
+  write failed with `SQLITE_BUSY_SNAPSHOT` when another handle committed first
+  (Task 20349).
+- **Recovery no longer resurrects a task cloop rejected.** A run that died after
+  the review gate, `--verify`, `--script-verify`, abandoned background work or
+  an unanswered clarification had failed a task was recovered from the agent's
+  `TASK_DONE`, so its dependents ran on rejected work. Each decision is now
+  written first to `.cloop/artifacts/<id>_verdict.json`, which every recovery
+  path applies before the agent's signal; a task whose review had not finished
+  runs again (Task 20365).
+- **Multi-agent mode obeys the review gate.** `cloop run --multi-agent`'s
+  architect, coder and reviewer passes pushed a gated project's work straight to
+  the remote; each now runs as a single agent would (push hold, task directory,
+  effort and thinking settings), without a hidden ten-minute limit when no step
+  timeout is set (Task 20365).
+- `--script-verify` verified nothing without a step timeout, the default: the
+  script ran under an expired deadline and the error counted as a pass
+  (Task 20365).
+- A task whose harness reported "API Error: Can't reach the API server" was
+  recorded as done; it is now a `network_unreachable` abort that pauses the run
+  and names the cause (Task 20345).
+- A run on a hub in strict mode with no isolating executor got `500` "no default
+  executor configured"; it is now a `409` `host_execution_denied` naming the
+  setting and what to configure (Task 20364).
+- **Switching a run between sequential and parallel no longer restarts it**:
+  under `--replan` it discarded the plan, under `--retry-failed` it reset
+  failed tasks, and the `pre_plan` hook ran again (Task 20389).
+- **A device run survives its hub restarting mid-run**: it is adopted when its
+  agent reconnects and its result merged once, where a restart used to lose the
+  result and close the session as failed (Task 20382).
+- **A failed-over run is dispatched and followed as the project's run**, with a
+  fresh lease and seed; when nothing replaces it the project pauses with the
+  new reason `executor_lost` instead of showing "running" forever (Task 20396).
+- **A Kubernetes run is seeded with its project and its outcome reaches the
+  hub's plan**; a repository needed `.cloop/` committed, and tasks a Pod
+  finished ran again at the next Start (Task 20402).
+- **A hub-cluster member that heartbeats but no longer answers is treated as
+  down**: its runs are adopted and forwards to it fail with 502 instead of
+  hanging; a forward waits at most 6 minutes for headers (Task 20419).
+- **A device run no longer settles without its changes** when its status is
+  asked for as the harness exits: this release's agent reports it running
+  until its final status is sent (Task 20354).
+- **A run on a device reads as running while it runs, and as stopped once it
+  is stopped.** The hub showed the previous run's outcome until the device
+  returned its state. A late reply to Stop could leave the run "unknown"
+  (Task 20349).
+- **The Upgrade button no longer moves a device backwards, and "upgrade the
+  agent" says how.** On a hub running an unreleased build, Upgrade offered the
+  hub's own `dev+g…` version, which no device can download, and `latest`
+  (v0.0.4, protocol v13) would have taken a v14 device backwards. The hub now
+  resolves `latest` to a tag and refuses a target that is not a release (400) or
+  would lower the device's protocol (409; `force` overrides), and the dialog
+  offers a release that would not, else says why there is none. `cloop executor
+  agent install --upgrade` likewise refuses an older-protocol binary unless
+  `--force`. Every refusal of a device's protocol now names the protocol the
+  device speaks, the one the hub needs, and the remedy for the hub's build:
+  Upgrade to the hub's own release on a hub that is one; on one that is not,
+  build cloop at the hub's commit and install it on the device with `sudo
+  ./cloop executor agent install --upgrade --insecure-skip-verify`. See *Moving
+  a device forward* in `docs/architecture/executors.md` (Task 20371).
+- **The hub's advice to build an agent by hand stamps its place on `main`.** It
+  named a plain `go build`, which carries no sequence, so a device whose build
+  carries one refused it unless forced — and, forced, was left with nothing to
+  order its next upgrade by. The advised command now stamps the commit and its
+  first-parent count, as release builds do (Task 20421).
+- **A host-mode device run's home is `.<dir>.home` beside its checkout**: for a
+  project holding a grant it was the checkout, so Claude Code's `.claude/`
+  (session transcripts) landed in the repository (Task 20371).
+- **`cloop hub doctor --smoke` no longer fails the dispatch of executors that
+  can write back** (remote agents with git, Kubernetes) (Task 20367).
+- **Binding an executor in `POST /api/projects/new` applies its access list**
+  (403 `executor_audience_denied`), as binding it later always did (Task
+  20417).
+- A project's `capabilities.egress: public` on an executor whose firewall allows
+  only a private range was handed the whole public Internet; it is now refused,
+  as a scope may only remove reach (Task 20345).
+- Device passthrough is no longer advertised or attempted under gVisor or Kata;
+  on gVisor every open of the node fails with `ENXIO`, though the
+  enterprise-hosts guide claimed it worked (Task 20345).
+- A filtered sandbox resolves through the resolvers its filter opened, named in
+  its own `resolv.conf`: dropping private space also dropped the engine's
+  default resolver (on a cloud VM usually in CGNAT space), and under gVisor
+  Docker's `127.0.0.11` is unreachable, so DNS failed (Task 20345).
+- An egress filter is refused under rootless podman, whose networks the host's
+  packet filter cannot see: the ruleset loaded, matched nothing, and the sandbox
+  ran unfiltered (Task 20345).
+- Revoking a device deletes its virtual executors, each with an audit row
+  (Task 20345).
+- The Executors panel's sandbox chip showed every container-mode device's
+  network as `none`, from a field the API never filled in (Task 20345).
+- **A granted host interface comes up last, once it has its address; wait for
+  `IFF_UP`.** A workload that waited for the interface's name could find it
+  unaddressed and fail. See *The start-up window* in
+  `docs/guides/enterprise-hosts.md` (Task 20349).
+- **A hub's startup sweep leaves another executor's just-exited container to
+  its owner.** The owner recorded the clean exit as a failed run (Task 20349).
+- **cloop never signals a process group whose id has been reused.** That id
+  could belong to another project's run (Task 20349).
+- The executor **Limits** dialog no longer overwrites a value typed before the
+  stored ceiling has loaded (Task 20405).
+- **A project can hold more than one kubeconfig grant.** A second one was
+  refused (`secret_files[N] repeats path …/kubeconfig`); they now merge into
+  one kubeconfig with a context per grant, and a credential the hub cannot
+  deliver shows on the run as `credential_refused` (Task 20413).
+- **A project can hold more than one GitHub grant.** A second one was
+  refused (`secret_files[N] repeats path …/github-token`) or overwrote the
+  first; each now gets its own token and helper (Task 20349).
+- **GitHub access lasts the whole run.** A run's secret lease lapsed after
+  15 minutes and took its GitHub token, proxy sessions and App token with
+  it; the hub now extends a live run's lease in place (Tasks 20347, 20349).
+- **Pods, virtual executors and moved checkouts work behind the git
+  proxy.** A Pod's fetch presented the wrong username and its credential
+  helper was not executable, releasing a lease destroyed the App token a
+  session still presented, a virtual executor's workspace was leased as its
+  device, and toggling the proxy stranded device checkouts (Tasks 20347,
+  20349).
+- **Git workspaces work on Kubernetes.** Every fetch into a Pod's
+  root-owned `/workspace` failed with git's "detected dubious ownership"
+  (Task 20385).
+- **A Kubernetes run whose lease Secret is gone fails and names it.** It
+  waited in `CreateContainerConfigError`, which a hub restarting mid-fetch
+  could cause (Task 20401).
+- **Audit rows are no longer lost when two writers append at once.** An
+  append that raced another connection failed with `SQLITE_BUSY_SNAPSHOT`
+  and was dropped; it is now retried (Task 20346).
+- **An internal-only container egress filter needs no `CAP_NET_ADMIN`.**
+  Without it, every run under `egress_filter.internal: true` was refused
+  (Task 20378).
+- **A hub started with `--token` loads its dashboard.** Its `/assets/*`
+  bundle required the token, so no control worked; assets are now public on
+  every hub, and the Assistant's input no longer throws (Task 20408).
+- **A lapsed SSO session signs in again and returns to the same view.** A
+  mid-session `401` opened the token prompt, useless to SSO users; it now
+  goes through `/auth/login?return=` (Task 20359).
+- **`cloop hub doctor` judges with the hub's own code**, so a working SSO hub
+  on `/auth/oidc` passes `oidc.redirect_uri`; a bare run diagnoses port 8080,
+  and `--port 0` reads `config.yaml` alone (Task 20387).
+- **An OIDC callback path the hub cannot serve is refused at startup**
+  instead of panicking it, and egress and git-proxy advertise addresses with
+  no host are caught when the configuration loads (Task 20387).
+- **`cloop db restore` works on a fresh host**: it no longer demands
+  `--force` for the empty database the CLI had just created, and sets aside
+  a stale `-wal` left without its database (Task 20410).
+- **Three defects every interactive CLI user met.** (1) On a terminal every
+  command queried its background colour and waited up to five seconds for a
+  reply no pty gives (scripts driving `docker`/`kubectl exec -t`, CI with a
+  tty), so `cloop status` took 5 s instead of 0.03 s. Nothing asks now.
+  (2) Every project created by current cloop printed "warning: .cloop schema is
+  out of date — run 'cloop migrate'" on every interactive command. The check now
+  reads the database's own migrations, warning only for a legacy `state.json`
+  project or a pre-migration database; `cloop migrate` works through the
+  database layer, completes and adopts databases its old conversion left failing
+  at migration 0009 ("no such table: stuck_tasks"), and ignores
+  `--from-version`. (3) `cloop config validate --fix` reset in-progress tasks to
+  `pending` even under a live run; it now leaves a live run's plan alone and
+  otherwise recovers tasks as the hub does, journalled and audited. Every cloop
+  database handle now opens with `busy_timeout` on each pooled connection
+  (taskqueue's `MarkDone` failed at once with `SQLITE_BUSY`) (Task 20374).
+- **`cloop task effort-calibrate` asks the model it resolved.** Without
+  `--model` the provider's built-in default answered instead of the configured
+  model (Task 20411).
+- **`CLOOP_SOAK_KEEP` keeps the soak root**, as `docs/operations/soak.md`
+  documented: its hub state, project databases and logs stay in a directory the
+  test log names (Task 20411).
+- **The CI workflow in `docs/guides/ci-pipelines.md` works with current Claude
+  Code** (`--model sonnet`) and fails at the step that broke (Task 20353).
+- **An evolving run offers Stop, and the Tasks tab says it is evolving**
+  instead of offering Start and saying "Not running" (Task 20358).
+- **Budget's Save Global Limits and Save Project Limits save**; both threw
+  and had never saved a limit (Task 20386).
+- **The Secrets tab's dialogs show the hub's refusal** instead of success,
+  and a hub without sign-on gets shared secrets by default (Task 20386).
+- **Long names, paths and URLs wrap or truncate instead of widening the
+  page**, on every tab and dialog from 320 to 1280px (Task 20407).
+- **The header's tabs wrap instead of widening the page**, which scrolled
+  sideways at every desktop width (Task 20351).
+- **Selects look like the page's fields in both themes**, and keys typed
+  into an open list no longer trigger the dashboard's shortcuts (Task 20355).
+- The Kanban board renders after a project switch, and switching the theme
+  on the Timeline tab no longer throws (Task 20407).
+- The command palette's run and reset entries, Knowledge Base search, Provider
+  Calls filters and the init form's provider list now work (Task 20386).
+- **The documentation site publishes every docs change again**; `build.json`
+  names its commit and `make docs-freshness` checks it (Task 20373).
+- **Diagram labels on the documentation site are readable in both colour
+  schemes** (Task 20350).
 
 ## [0.0.4] - 2026-09-27
 
@@ -791,6 +1525,7 @@ is now installable as a versioned binary rather than only from source.
   stable, and upgrades between 0.0.x releases may require configuration
   changes.
 
+[0.0.5]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.5
 [0.0.4]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.4
 [0.0.3]: https://github.com/blechschmidt/cloop/tree/v0.0.3
 [0.0.2]: https://github.com/blechschmidt/cloop/tree/v0.0.2

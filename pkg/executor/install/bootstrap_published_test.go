@@ -268,6 +268,7 @@ bin=$(find_or_fetch_cloop)
 [ "$bin" = "/usr/local/bin/cloop" ] || { printf 'FAIL: returned [%s]\n' "$bin"; exit 1; }
 [ -x "$bin" ] || { echo "FAIL: $bin is not executable"; exit 1; }
 "$bin" version
+"$bin" version --json
 `
 	out, err := runPublishedHarness(t, docker, installerBody(t), harness)
 	if err != nil {
@@ -283,6 +284,16 @@ bin=$(find_or_fetch_cloop)
 		t.Errorf("the published binary reports \"dev\", so the release was built "+
 			"without the version ldflag; `cloop upgrade --check` will never offer "+
 			"an update to it:\n%s", out)
+	}
+	// Rollback protection on the release channel (Task 20421): a device's
+	// installer orders builds by the sequence a binary reports, and refuses one
+	// carrying none once it runs a build that carries one. A release published
+	// without it would be refused by every device that ever ran an edge build or
+	// a later release — and would leave the devices it installs unprotected.
+	if !regexp.MustCompile(`"sequence":\s*[1-9][0-9]*`).MatchString(out) ||
+		!regexp.MustCompile(`"commit":\s*"[0-9a-f]{40}"`).MatchString(out) {
+		t.Errorf("the published binary reports no sequence or commit in `version --json`, so the release "+
+			"was built without the stamps scripts/build-release.sh adds; devices cannot order it:\n%s", out)
 	}
 }
 
