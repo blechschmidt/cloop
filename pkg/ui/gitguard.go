@@ -134,7 +134,7 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		BaseURL:   g.svc.baseURL,
 		Username:  cred.Username,
 		Password:  cred.Password,
-		ExpiresAt: m.Session.ExpiresAt,
+		ExpiresAt: m.Session.ExpiresAt(),
 		SessionID: m.Session.ID,
 		ReadOnly:  readOnly,
 		PushRefs:  pushRefs,

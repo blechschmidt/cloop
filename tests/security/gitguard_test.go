@@ -132,7 +132,7 @@ func (g *registryGuard) GuardGitHub(_ context.Context, req secretbroker.GitGuard
 		Username:  c.Username,
 		Password:  c.Password,
 		SessionID: m.Session.ID,
-		ExpiresAt: m.Session.ExpiresAt,
+		ExpiresAt: m.Session.ExpiresAt(),
 		ReadOnly:  readOnly,
 	}, nil
 }

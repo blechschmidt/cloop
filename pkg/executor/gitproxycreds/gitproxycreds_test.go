@@ -227,10 +227,13 @@ func TestProxyRepoURLPreservesTheOwnerNamePath(t *testing.T) {
 	}
 }
 
-func TestCredentialExpiryIsTheSessionsNotTheLeases(t *testing.T) {
-	// Before interception the sandbox held the PAT and its access ended never,
-	// whatever the lease said. The session's expiry is the deadline that now
-	// actually bounds it.
+// TestTheSandboxIsHandedNoDeadline: the session is what bounds a sandbox's
+// access now — the proxy refuses it once it lapses or is ended — and its
+// deadline is the hub's to keep: renewed while the run lives, ended when the
+// run is done (Task 20422). A deadline handed to the sandbox would be stale by
+// the time a long run's write-back came to push, and the device refuses to
+// push past the one it holds; the inner lease's would be wrong outright.
+func TestTheSandboxIsHandedNoDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	inner := &fakeInner{access: patAccess()} // lease expires at 18:00
 	reg := newRegistry(t, now)
@@ -242,17 +245,102 @@ func TestCredentialExpiryIsTheSessionsNotTheLeases(t *testing.T) {
 	}
 	defer release()
 
-	sess := reg.Sessions()[0]
-	if !access.Credential.ExpiresAt.Equal(sess.ExpiresAt) {
-		t.Fatalf("credential ExpiresAt = %s, want the session's %s",
-			access.Credential.ExpiresAt, sess.ExpiresAt)
+	if !access.Credential.ExpiresAt.IsZero() {
+		t.Fatalf("the sandbox was handed a deadline, %s", access.Credential.ExpiresAt)
 	}
-	if want := now.Add(30 * time.Minute); !access.Credential.ExpiresAt.Equal(want) {
-		t.Fatalf("credential ExpiresAt = %s, want %s", access.Credential.ExpiresAt, want)
+	if sess := reg.Sessions()[0]; !sess.ExpiresAt().Equal(now.Add(30 * time.Minute)) {
+		t.Fatalf("the session lasts until %s, want the TTL from now", sess.ExpiresAt())
 	}
-	if access.Credential.ExpiresAt.Equal(patAccess().Credential.ExpiresAt) {
-		t.Fatal("credential ExpiresAt is the inner lease's deadline, not the session's")
+}
+
+// TestASessionIsRenewedWhileTheDriverHoldsIt: a run longer than the session
+// TTL still presents its session at the end, for its write-back push, because
+// the session is renewed while the driver holds it — and no longer once the
+// driver has given it back (Task 20422).
+func TestASessionIsRenewedWhileTheDriverHoldsIt(t *testing.T) {
+	var mu sync.Mutex
+	t0 := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	now := t0
+	reg := newRegistry(t, t0)
+	reg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(to time.Time) { mu.Lock(); now = to; mu.Unlock() }
+	inner := &fakeInner{access: patAccess()}
+	src := newSource(t, inner, reg, 30*time.Minute)
+	src.RenewEvery = 2 * time.Millisecond
+
+	access, release, err := src.ForWorkspace(context.Background(), "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace = %v", err)
 	}
+	id, token := access.Credential.Username, access.Credential.Password
+	sess, err := reg.Session(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Four renewals' worth of run, each looked at inside the margin.
+	for i := 1; i <= 4; i++ {
+		deadline := sess.ExpiresAt()
+		advance(deadline.Add(-time.Minute))
+		waitUntil(t, "a renewal", func() bool { return sess.ExpiresAt().After(deadline) })
+	}
+	advance(t0.Add(2 * time.Hour))
+	if _, err := reg.Authenticate(id, token); err != nil {
+		t.Fatalf("two hours into a run with a 30-minute TTL the held session does not authenticate: %v", err)
+	}
+
+	// Given back: ended at once, and renewed no more.
+	release()
+	if _, err := reg.Authenticate(id, token); err == nil {
+		t.Fatal("the released session still authenticates")
+	}
+	ended := sess.ExpiresAt()
+	advance(ended.Add(-time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	if !sess.ExpiresAt().Equal(ended) {
+		t.Fatalf("a released session was renewed to %s", sess.ExpiresAt())
+	}
+}
+
+// TestRenewalStopsWhenTheSessionEndsElsewhere: a session revoked, its lease
+// released or handed over is not revived by the driver still holding it.
+func TestRenewalStopsWhenTheSessionEndsElsewhere(t *testing.T) {
+	var mu sync.Mutex
+	t0 := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	now := t0
+	reg := newRegistry(t, t0)
+	reg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	src := newSource(t, &fakeInner{access: patAccess()}, reg, 30*time.Minute)
+	src.RenewEvery = 2 * time.Millisecond
+	access, release, err := src.ForWorkspace(context.Background(), "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace = %v", err)
+	}
+	defer release()
+	reg.Close(access.Credential.Username, "grant revoked")
+	mu.Lock()
+	now = t0.Add(29 * time.Minute)
+	mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	if reg.Known(access.Credential.Username) {
+		t.Fatal("a revoked session came back")
+	}
+	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); err == nil {
+		t.Fatal("a revoked session authenticates")
+	}
+}
+
+// waitUntil polls cond for up to five seconds.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func TestForWorkspaceCarriesTheAuditIdentifiersThrough(t *testing.T) {
@@ -648,11 +736,19 @@ func zeroAccess(a executor.WorkspaceAccess) bool {
 
 // --- the inner lease lives as long as the session (Task 20349) --------------
 
-// TestInnerLeaseOutlivesTheDelivery: releasing the inner lease destroys a
-// GitHub App's installation token at GitHub, and the session presents that
-// token upstream for its whole life. So the driver being done with what it was
-// handed must not release it while the session can still be used.
-func TestInnerLeaseOutlivesTheDelivery(t *testing.T) {
+// TestTheDriversReleaseEndsAUsedSession: a workspace session the sandbox used
+// kept its TTL — 60 minutes by default, up to 12 hours — after its run was
+// done with it, for anything that had lifted its token out of the sandbox
+// (Task 20422). Drivers call the release once they are done with the
+// credential — after the fetch for a run that pushes nothing back, after the
+// write-back for one that does — so the release ends the session, used or
+// not, and the session's token stops working at once.
+//
+// And the inner lease, whose release destroys a GitHub App's installation
+// token at GitHub, goes with the session and never before it (Task 20349):
+// delivered and used, it is still held; released, it is given back exactly
+// once, however many times the session is ended.
+func TestTheDriversReleaseEndsAUsedSession(t *testing.T) {
 	inner := &fakeInner{access: patAccess()}
 	reg := newRegistry(t, time.Time{})
 	src := newSource(t, inner, reg, 0)
@@ -665,25 +761,25 @@ func TestInnerLeaseOutlivesTheDelivery(t *testing.T) {
 	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); err != nil {
 		t.Fatalf("the session the sandbox was handed does not authenticate: %v", err)
 	}
-
-	release()
 	if inner.releases != 0 {
-		t.Fatalf("the driver's release gave the inner lease back while the session is live "+
-			"(%d releases): an App token would be dead before the write-back presents it", inner.releases)
-	}
-	sess, err := reg.Session(access.Credential.Username)
-	if err != nil || sess.Closed() {
-		t.Fatalf("a used session was closed by the driver's release (err=%v)", err)
+		t.Fatalf("the inner lease was given back while the session is live (%d releases)", inner.releases)
 	}
 
-	// The session ending is what gives the lease back — exactly once.
-	reg.Close(access.Credential.Username, "run finished")
-	if inner.releases != 1 {
-		t.Fatalf("closing the session released the inner lease %d times, want 1", inner.releases)
+	// The driver is done with it.
+	release()
+	if _, err := reg.Authenticate(access.Credential.Username, access.Credential.Password); !errors.Is(err, gitproxy.ErrUnauthenticated) {
+		t.Fatalf("a used session outlived the driver's release: %v", err)
 	}
+	if reg.Known(access.Credential.Username) {
+		t.Fatal("the released session is still in the registry")
+	}
+	if inner.releases != 1 {
+		t.Fatalf("ending the session released the inner lease %d times, want 1", inner.releases)
+	}
+	release()
 	reg.Close(access.Credential.Username, "again")
 	if inner.releases != 1 {
-		t.Fatalf("a second close re-released the inner lease; count = %d", inner.releases)
+		t.Fatalf("a second end re-released the inner lease; count = %d", inner.releases)
 	}
 }
 

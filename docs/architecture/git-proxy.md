@@ -160,7 +160,7 @@ No driver imports `pkg/gitproxy`, and neither does `pkg/secretbroker`:
 | **Policy** | the hub's, with the grant's branch list as `RestrictRefs` | the hub's, narrowed by `guardPolicy` — see [below](#the-policy-a-session-carries) |
 | **Reaches git as** | a credential in the environment of **one git child**, as an origin-scoped `http.<origin>.extraHeader` — never on disk | three files in the lease directory and a few environment variables |
 | **How git finds the proxy** | the workspace's `Repo` is replaced by `Minted.RepoURL`, so the fetch and any push aim at it | the lease's gitconfig rewrites `https://github.com/`, `git@github.com:` and `ssh://git@github.com/` to it |
-| **Ended by** | its TTL (`session_minutes`), its lease revoked, or — when the sandbox never presented it — the driver handing it back; the lease behind it is kept alive until then and released when it ends. A hub stopping suspends it; after a restart it ends with the workload | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
+| **Ended by** | the driver handing it back once the run is done with it — after the fetch, or once the workload is terminal and its write-back has run — or its lease revoked; renewed `session_minutes` at a time until then, so its TTL ends it only once nothing renews it. The lease behind it is kept alive while it lives and released when it ends. A hub stopping suspends it; after a restart the adopting member renews it and ends it with the workload | the release of the lease that minted it, else its TTL — see [how long a session lives](#how-long-a-session-lives) |
 | **Session actor** | `ui` | the credential's owner for a personal secret, else the lease's actor |
 
 ### The workspace path
@@ -625,21 +625,37 @@ cannot steer it:
 The two paths end their sessions on different events, and the difference is
 operational, not cosmetic.
 
-**A workspace session lives for its TTL.** `session_minutes`, 60 by default and
-720 at most, counted from dispatch. Nothing closes it when the run ends, because
-the fetch happens at the start of a run and a push write-back, where one is asked
-for, at the end; a session closed at delivery would refuse the push it exists to
-authorise. The reaper drops it within five minutes of lapsing. A hub shutdown
-suspends a recorded one — its record stays open for the process that adopts its
-run — and closes one with no record with the reason *"the hub is shutting
-down"*. What bounds it in practice is the fetch: the device or the init
-container uses it once, early, and the push write-back, where asked for, once,
-late. The one early close is a session nothing ever authenticated with — the
-dispatch failed before the fetch — which the driver's release closes with the
-reason *"workspace credential released unused"*. The lease behind it is kept
-alive while it lives (Task 20390) — listed among the hub's leases, where
-revoking it closes the session — and released when it ends, a `github_app`
-token with it. A session restored with an adopted run ends with the workload.
+**A workspace session lives as long as its run needs it** (Task 20422). The
+fetch happens at the start of a run and a push write-back, where one is asked
+for, at the end. So the session is minted for `session_minutes` (60 by default,
+720 at most) and *renewed* — moved another period forward once five minutes or
+less are left, `gitproxy.RenewMargin` — for as long as the driver holds the
+credential: `gitproxycreds.Source` runs the renewer, and stops it when the driver
+releases the credential, which it does once the run is done with it — after the
+fetch for a run that pushes nothing back, once the workload is terminal and its
+write-back has run or been abandoned for one that does (the remote driver parks
+the release on the handle, the Kubernetes driver keeps it with the workspace
+Secret). The release closes the session, used or not: *"the run is done with its
+workspace credential"*, or *"workspace credential released unused"* for one
+nothing authenticated with. Each renewal moves the recorded `expires_at` and
+`renewed_at` and is a `gitproxy.session_renewed` row. The sandbox is handed no
+deadline — the credential's `ExpiresAt` is zero — because the device refuses to
+push past one it holds, and one handed over at dispatch would be stale by a long
+run's write-back.
+
+A hub shutdown suspends a recorded session — its record stays open for the
+process that adopts its run — and closes one with no record with the reason
+*"the hub is shutting down"*. The adopting process restores it with its renewed
+deadline, bounded by `session_minutes` from its last renewal rather than its
+issue, and renews it from the keepalive of the workspace lease it took over —
+asking the executor whether the workload still runs only once a renewal is due
+— until the workload ends, when the lease is released and the session closed
+with it. The reaper drops a lapsed session within five minutes. The lease behind
+a session is kept alive while the session lives (Task 20390) — listed among the
+hub's leases, where revoking it closes the session — and released when it ends,
+a `github_app` token with it. Before Task 20422 a session the sandbox had used
+was left to its TTL when its run ended — up to 12 hours, for anything that had
+lifted its token — and a run longer than the TTL could not push its write-back.
 
 **A lease session ends with the lease that minted it**, whichever of these comes
 first:
@@ -693,9 +709,10 @@ request presenting it is indistinguishable from one presenting a token that
 never existed — and the reason is on the `gitproxy.session_closed` row before it.
 
 What still bounds a lease session is its own TTL, `session_minutes`, counted from
-dispatch: the keepalive extends the lease, not the session. Set it against the
-longest run the hub is expected to complete — see
-[a session's life is its TTL](../git-interception-proxy.md#a-sessions-life-is-its-ttl-not-the-runs).
+dispatch: the keepalive extends the lease, not the session — unlike a workspace
+session, which
+[is renewed while its run lives](../git-interception-proxy.md#a-workspace-session-lives-as-long-as-its-run).
+Set it against the longest run the hub is expected to complete.
 
 ### The upstream credential renews itself
 
@@ -775,7 +792,8 @@ lease feeds is:
 4. held to where and how long this hub mints a session now, whatever the record
    says: its upstream must be the forge this hub's proxy fronts
    (`github_upstream`, else `https://github.com`), and its deadline is clamped to
-   the session TTL from when it was issued. A record is read back from a
+   the session TTL from when it was issued or, for a workspace session, last
+   renewed. A record is read back from a
    database, and nothing in it decides where a credential is presented;
 5. given an upstream credential re-derived from the lease: a PAT opened from the
    grant's secret, or an App installation token minted at once at the slot's

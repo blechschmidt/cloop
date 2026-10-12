@@ -14,6 +14,8 @@ const (
 	EventSessionMinted EventKind = "session_minted"
 	// EventSessionClosed records one going away, by revocation or expiry.
 	EventSessionClosed EventKind = "session_closed"
+	// EventSessionRenewed records a session's deadline moved by Renew.
+	EventSessionRenewed EventKind = "session_renewed"
 	// EventPushAllowed records a push whose every command passed policy. It is
 	// emitted before forwarding, so it describes what was authorised, not what
 	// the remote ultimately accepted.

@@ -588,8 +588,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// revocations and dispatch intents, Task 20419) is applied by the first
 	// member of a new build while older members still serve the cluster.
 	// 0071 (API token mint policy, Task 20422) appends to api_tokens, which
-	// an older member reads on every token-authenticated request.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71} {
+	// an older member reads on every token-authenticated request, and 0072
+	// (proxy session renewal, the same task) to proxy_sessions, which it
+	// reads when it adopts a run.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

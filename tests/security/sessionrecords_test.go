@@ -97,7 +97,7 @@ func (g *recordGuards) GuardGitHub(_ context.Context, req secretbroker.GitGuardR
 	sum := sha256.Sum256([]byte(m.Token))
 	g.hashes[m.Session.ID] = hex.EncodeToString(sum[:])
 	return secretbroker.GitGuardResult{BaseURL: g.git.BaseURL, Username: m.Session.ID, Password: m.Token,
-		SessionID: m.Session.ID, ExpiresAt: m.Session.ExpiresAt}, nil
+		SessionID: m.Session.ID, ExpiresAt: m.Session.ExpiresAt()}, nil
 }
 
 func (g *recordGuards) GuardKubeconfig(_ context.Context, req secretbroker.KubeGuardRequest) (secretbroker.KubeGuardResult, error) {

@@ -1202,11 +1202,17 @@ from step 4 is the proof, and its absence is the alarm. See
 
 ### Session lifetime is not run lifetime
 
-A **workspace** session — the one cloop's own fetch and write-back use — lives
-for `session_minutes` (60 by default, 720 maximum) from *dispatch*, and nothing
-closes it when the run ends. **A run that outlives its session fails its push**
-with an authentication error from git and a `gitproxy.rejected` row. Set the TTL
-against the longest run the hub is expected to finish, not the median one.
+A **workspace** session — the one cloop's own fetch and write-back use — follows
+its run (Task 20422). It is minted for `session_minutes` (60 by default, 720
+maximum), renewed by as much whenever five minutes or less are left while the
+run lives — a `gitproxy.session_renewed` row each time — and closed once the run
+is done with it: after the fetch, or once the workload is terminal and its
+write-back has run. A run longer than `session_minutes` still pushes its work
+back, and a run that ends early takes its session with it. After a restart the
+member that adopts the run renews and ends it. A member on an older build
+restores only sessions inside their first period: if one adopts a run whose
+session was renewed past it, the push fails with an authentication error from
+git and a `gitproxy.rejected` row — finish the upgrade.
 
 A session minted for a GitHub **lease** — the one the workload's own git uses —
 ends with its lease or at its own `session_minutes`, whichever is first: when the
@@ -1228,8 +1234,10 @@ it — a guarded one, the one a GitHub lease is delivered as, and a workspace on
 whose lease is recorded — and the process that adopts its run restores it (see
 [after a control-plane restart](#after-a-control-plane-restart)); one with no
 record is closed, as `gitproxy.session_closed` with the reason *"the hub is
-shutting down"*. Short of that a session expires on its own TTL, which is
-enforced at authentication whether or not the five-minute reaper has swept it.
+shutting down"*. Short of that a workspace session ends with its run and a
+lease session with its lease, or either lapses at its deadline once nothing
+extends it — enforced at authentication whether or not the five-minute reaper
+has swept it.
 Revoking the underlying grant — from the Secrets panel or with `cloop secret
 revoke` — closes the sessions it fed at once, on every hub member, and stops the
 next dispatch from minting anything; rotate the PAT at the forge as well.
@@ -1237,8 +1245,8 @@ next dispatch from minting anything; rotate the PAT at the forge as well.
 The lease keepalive does not stretch the GitHub App **token** a session presents
 upstream, which GitHub honours for an hour: the session renews that itself, at
 the grant's original scope, when about ten minutes are left (Task 20375). So with
-a `github_app` grant `session_minutes` is the only ceiling on a session's life,
-as it is with a PAT. See
+a `github_app` grant a lease session's life is capped by `session_minutes`, as
+it is with a PAT, and a workspace session's by its run. See
 [GitHub App tokens past their hour](#github-app-tokens-past-their-hour).
 
 ### GitHub App tokens past their hour

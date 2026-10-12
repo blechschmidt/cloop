@@ -608,13 +608,13 @@ Nothing about the grant changes — same `--to executor:…`, same `--repos`, sa
 matching, same audit rows naming the same grant and repository, because the
 proxy's URL keeps the `owner/name` shape the allowlist is matched against. What
 changes is that a leaked sandbox now yields a token worth one namespace on one
-repository for the rest of its TTL, instead of the PAT.
+repository until its run is done with it, instead of the PAT.
 
-Two things worth knowing before turning it on: a session lasts
-`session_minutes` (60 by default) rather than the length of a run, so a run that
-outlives it fails its push; and the sandbox's git must trust the proxy's
-certificate, which for a self-signed hub certificate means installing the CA in
-the sandbox image. Both are covered in
+Two things worth knowing before turning it on: a session lasts as long as its
+run — renewed `session_minutes` (60 by default) at a time while the run lives,
+closed once the run is done with it; and the sandbox's git must trust the
+proxy's certificate, which for a self-signed hub certificate means installing
+the CA in the sandbox image. Both are covered in
 [operating it](../git-interception-proxy.md#operating-it).
 
 **The grant for the task goes through it too, by a separate path.** A GitHub

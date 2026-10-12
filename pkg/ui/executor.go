@@ -772,21 +772,26 @@ func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease, 
 	defer lease.Close()
 
 	// The lease is kept alive while this goroutine watches the workload
-	// (Task 20349), but only while the executor still has it running: a
-	// workload the executor reports finished or no longer knows is one whose
-	// credential should lapse on schedule rather than wait for this watch to
-	// notice. An executor that cannot be asked — a device between reconnects
-	// reports "unknown" — keeps it; the supervisor's failover is what decides
-	// that device is gone, and ends this watch when it does.
-	lease.setLiveness(func(ctx context.Context) bool {
+	// (Task 20349), but only while the executor still has it running.
+	lease.setLiveness(workloadAlive(ex, handleID))
+
+	watchWorkloadExit(ex, handleID)
+}
+
+// workloadAlive asks ex whether the workload with handleID still runs: a
+// workload the executor reports finished or no longer knows is not, and its
+// credential should lapse on schedule rather than wait for a watch to notice.
+// An executor that cannot be asked — a device between reconnects reports
+// "unknown" — counts it as running; the supervisor's failover is what decides
+// that device is gone.
+func workloadAlive(ex executor.Executor, handleID string) func(context.Context) bool {
+	return func(ctx context.Context) bool {
 		st, err := ex.Status(ctx, handleID)
 		if err != nil {
 			return !errors.Is(err, executor.ErrHandleNotFound)
 		}
 		return !st.State.Terminal()
-	})
-
-	watchWorkloadExit(ex, handleID)
+	}
 }
 
 // watchWorkloadExit returns once the workload with handleID reaches a

@@ -112,8 +112,16 @@ type Session struct {
 	GrantID string
 	LeaseID string
 
-	IssuedAt  time.Time
-	ExpiresAt time.Time
+	IssuedAt time.Time
+
+	// expiresAt is when the session stops authenticating, and renewedAt
+	// when Renew last moved it — zero for a session never renewed. Guarded
+	// by lifeMu: a workspace's session is renewed while its sandbox
+	// authenticates with it (Task 20422). Read through ExpiresAt and
+	// RenewedAt.
+	lifeMu    sync.Mutex
+	expiresAt time.Time
+	renewedAt time.Time
 
 	tokenHash [sha256.Size]byte
 
@@ -163,8 +171,22 @@ func (s *Session) end() {
 	})
 }
 
+// ExpiresAt returns when the session stops authenticating.
+func (s *Session) ExpiresAt() time.Time {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	return s.expiresAt
+}
+
+// RenewedAt returns when Renew last moved the deadline, or zero.
+func (s *Session) RenewedAt() time.Time {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	return s.renewedAt
+}
+
 // Expired reports whether the session's TTL has run out.
-func (s *Session) Expired(now time.Time) bool { return !now.Before(s.ExpiresAt) }
+func (s *Session) Expired(now time.Time) bool { return !now.Before(s.ExpiresAt()) }
 
 // Closed reports whether the session was revoked.
 func (s *Session) Closed() bool { return s.closed.Load() }
@@ -392,7 +414,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		GrantID:      strings.TrimSpace(req.Credential.GrantID),
 		LeaseID:      strings.TrimSpace(req.Credential.LeaseID),
 		IssuedAt:     now,
-		ExpiresAt:    now.Add(ttl),
+		expiresAt:    now.Add(ttl),
 		tokenHash:    sha256.Sum256([]byte(token)),
 		cred:         &credentialGen{cred: req.Credential, expiresAt: req.CredentialExpiresAt},
 		refresh:      req.Refresh,
@@ -432,7 +454,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		TaskID:    req.TaskID,
 		Actor:     req.Actor,
 		At:        now,
-		Detail:    mintDetail(pol, s.ExpiresAt, recordErr),
+		Detail:    mintDetail(pol, s.ExpiresAt(), recordErr),
 	})
 
 	// A pinned session hands back the one remote URL the sandbox clones. A
@@ -469,7 +491,7 @@ func (r *Registry) Authenticate(id, token string) (*Session, error) {
 		return nil, fmt.Errorf("%w: session was revoked (%s)", ErrUnauthenticated, s.CloseReason())
 	}
 	if s.Expired(r.now()) {
-		return nil, fmt.Errorf("%w: session expired at %s", ErrUnauthenticated, s.ExpiresAt.UTC().Format(time.RFC3339))
+		return nil, fmt.Errorf("%w: session expired at %s", ErrUnauthenticated, s.ExpiresAt().UTC().Format(time.RFC3339))
 	}
 	s.used.Store(true)
 	return s, nil
@@ -504,6 +526,142 @@ func (r *Registry) Known(id string) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.sessions[id]
 	return ok
+}
+
+// Renew moves a live session's deadline to ttl from now — 0 is
+// DefaultSessionTTL, more than MaxSessionTTL is refused as Mint refuses it —
+// and never backwards, recording the renewal in the Store when the session is
+// durable. It returns the deadline afterwards.
+//
+// It is how a workspace's session outlives session_minutes while its run does
+// (Task 20422): the session is minted when the run is dispatched and has to
+// authenticate the run's write-back push at its end, however long the run
+// took. Whoever calls it decides the run is alive; the registry decides only
+// that the session is. A session that is closed or unknown is
+// ErrSessionNotFound, one already past its deadline ErrSessionLapsed —
+// reviving it would race the reaper into serving a session it had written off.
+func (r *Registry) Renew(id string, ttl time.Duration) (time.Time, error) {
+	switch {
+	case ttl == 0:
+		ttl = DefaultSessionTTL
+	case ttl < 0:
+		return time.Time{}, fmt.Errorf("gitproxy: session TTL %s is negative", ttl)
+	case ttl > MaxSessionTTL:
+		return time.Time{}, fmt.Errorf("gitproxy: session TTL %s exceeds the %s maximum", ttl, MaxSessionTTL)
+	}
+	r.mu.RLock()
+	s := r.sessions[id]
+	r.mu.RUnlock()
+	if s == nil || s.Closed() {
+		return time.Time{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+	}
+	now := r.now()
+	next := now.Add(ttl)
+	s.lifeMu.Lock()
+	current := s.expiresAt
+	switch {
+	case !now.Before(current):
+		s.lifeMu.Unlock()
+		return time.Time{}, fmt.Errorf("%w: %s expired at %s", ErrSessionLapsed, id, current.UTC().Format(time.RFC3339))
+	case !next.After(current):
+		s.lifeMu.Unlock()
+		return current, nil
+	}
+	s.expiresAt, s.renewedAt = next, now
+	s.lifeMu.Unlock()
+	detail := "renewed while its run lives; allow " + s.Policy.RefSummary() + " until " + next.UTC().Format(time.RFC3339)
+	if s.durable && r.Store != nil {
+		// Renewed here all the same: refusing would end a live run's
+		// write-back over a busy database. The trail says what a restart
+		// would make of it, as a mint's does, and the next renewal writes
+		// the record again.
+		if err := r.Store.RenewSession(s.ID, next, now); err != nil {
+			detail += "; not recorded durably, so a hub process that adopts its run restores it only until " +
+				current.UTC().Format(time.RFC3339) + ": " + err.Error()
+		}
+	}
+	r.emit(Event{
+		Kind:      EventSessionRenewed,
+		SessionID: s.ID,
+		RepoPath:  s.scopeDescription(),
+		ProjectID: s.ProjectID,
+		TaskID:    s.TaskID,
+		Actor:     s.Actor,
+		At:        now,
+		Detail:    detail,
+	})
+	return next, nil
+}
+
+// RenewMargin is how close to its deadline a session is renewed: five minutes,
+// or half its TTL for a shorter one.
+func RenewMargin(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	if half := ttl / 2; half < 5*time.Minute {
+		return half
+	}
+	return 5 * time.Minute
+}
+
+// RenewTick is how often a renewer looks: a minute, or a quarter of the TTL
+// for a shorter one — at least twice inside RenewMargin either way.
+func RenewTick(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	if q := ttl / 4; q < time.Minute {
+		return q
+	}
+	return time.Minute
+}
+
+// RenewalDue reports whether id is open with RenewMargin(ttl) or less of its
+// life left, on the registry's clock: what a renewer asks before anything
+// costlier, such as whether the run is still alive.
+func (r *Registry) RenewalDue(id string, ttl time.Duration) bool {
+	r.mu.RLock()
+	s := r.sessions[id]
+	r.mu.RUnlock()
+	return s != nil && !s.Closed() && s.ExpiresAt().Sub(r.now()) <= RenewMargin(ttl)
+}
+
+// RenewDue renews id when RenewMargin(ttl) or less of its life remains, on the
+// registry's clock, and reports whether it did and the deadline afterwards.
+// A session that is closed or unknown is ErrSessionNotFound, one past its
+// deadline ErrSessionLapsed, as for Renew.
+func (r *Registry) RenewDue(id string, ttl time.Duration) (bool, time.Time, error) {
+	r.mu.RLock()
+	s := r.sessions[id]
+	r.mu.RUnlock()
+	if s == nil || s.Closed() {
+		return false, time.Time{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+	}
+	current := s.ExpiresAt()
+	if !r.RenewalDue(id, ttl) {
+		return false, current, nil
+	}
+	next, err := r.Renew(id, ttl)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return next.After(current), next, nil
+}
+
+// LeaseSessions returns the live sessions whose upstream credential stands on
+// leaseID.
+func (r *Registry) LeaseSessions(leaseID string) []*Session {
+	var out []*Session
+	for _, id := range r.sessionsForLease(leaseID) {
+		r.mu.RLock()
+		s := r.sessions[id]
+		r.mu.RUnlock()
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Close revokes a session. It is idempotent, so a driver can call it from a

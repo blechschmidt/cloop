@@ -116,13 +116,26 @@ func (g GitStore) SaveSession(rec gitproxy.SessionRecord) error {
 		Kind: statedb.ProxySessionGit, SessionID: rec.ID, TokenSHA256: rec.TokenSHA256,
 		LeaseID: rec.LeaseID, GrantID: rec.GrantID, Holder: holder, RunID: rec.RunID,
 		ProjectID: rec.ProjectID, ExecutorID: rec.ExecutorID, TaskID: rec.TaskID, Actor: rec.Actor,
-		Scope: string(scope), IssuedAt: rec.IssuedAt, ExpiresAt: rec.ExpiresAt,
+		Scope: string(scope), IssuedAt: rec.IssuedAt, ExpiresAt: rec.ExpiresAt, RenewedAt: rec.RenewedAt,
 	})
 }
 
 // CloseSession implements gitproxy.SessionStore.
 func (g GitStore) CloseSession(id, reason string, at time.Time) error {
 	return g.closeRow(statedb.ProxySessionGit, id, reason, at, "")
+}
+
+// RenewSession implements gitproxy.SessionStore.
+func (g GitStore) RenewSession(id string, expiresAt, renewedAt time.Time) error {
+	holder, err := g.holder()
+	if err != nil {
+		return err
+	}
+	ok, err := g.DB.RenewProxySession(statedb.ProxySessionGit, id, holder, expiresAt, renewedAt)
+	if err == nil && !ok {
+		err = errNotHeld
+	}
+	return g.report(statedb.ProxySessionGit, id, "record its renewal", err)
 }
 
 // GitRecord reads a row back into what gitproxy.Registry.Restore takes.
@@ -136,7 +149,7 @@ func GitRecord(row statedb.ProxySessionRow) (gitproxy.SessionRecord, error) {
 		RepoPatterns: scope.RepoPatterns, Upstream: scope.Upstream, Policy: scope.Policy,
 		ProjectID: row.ProjectID, TaskID: row.TaskID, ExecutorID: row.ExecutorID, Actor: row.Actor,
 		RunID: row.RunID, GrantID: row.GrantID, LeaseID: row.LeaseID,
-		IssuedAt: row.IssuedAt, ExpiresAt: row.ExpiresAt,
+		IssuedAt: row.IssuedAt, ExpiresAt: row.ExpiresAt, RenewedAt: row.RenewedAt,
 	}, nil
 }
 

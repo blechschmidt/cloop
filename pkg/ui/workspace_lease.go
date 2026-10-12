@@ -123,6 +123,45 @@ func bindWorkspaceLease(ex executor.Executor, handleID string) {
 	}
 	if sl := liveLeases.get(held.LeaseID); sl != nil && sl.isWorkspace() {
 		sl.bindWorkspace(ex.ID(), handleID, held.SessionID)
+		// Extended only while the workload runs, as a run's own lease is.
+		sl.setLiveness(workloadAlive(ex, handleID))
+	}
+}
+
+// renewWorkspaceSessions renews the pinned git proxy session a workspace
+// lease taken over with an adopted run feeds, while the run lives (Task
+// 20422). In the process that dispatched the run, the source that minted the
+// session renews it for as long as the driver holds it; that source stopped
+// with its process, so here the lease's keepalive — which runs while the
+// lease extends — does, and stops once the executor reports the workload
+// over, when the lease is closed and the session with it.
+func (sl *secretLease) renewWorkspaceSessions(ctx context.Context) {
+	if sl == nil || sl.lease == nil {
+		return
+	}
+	sl.mu.Lock()
+	renew := sl.workspace && sl.renewsSessions && !sl.closing && !sl.handedOver
+	alive := sl.alive
+	sl.mu.Unlock()
+	svc := activeGitProxy()
+	if !renew || svc == nil || svc.reg == nil {
+		return
+	}
+	// The workload is asked only once a session is due — a round trip to a
+	// device, at most once a session period rather than on every tick.
+	var due []string
+	for _, sess := range svc.reg.LeaseSessions(sl.lease.ID) {
+		if svc.reg.RenewalDue(sess.ID, svc.ttl) {
+			due = append(due, sess.ID)
+		}
+	}
+	if len(due) == 0 || (alive != nil && !alive(ctx)) {
+		return
+	}
+	for _, id := range due {
+		if _, _, err := svc.reg.RenewDue(id, svc.ttl); err != nil {
+			fmt.Fprintf(os.Stderr, "ui: renew git proxy session %s of workspace lease %s: %v\n", id, sl.lease.ID, err)
+		}
 	}
 }
 
@@ -203,6 +242,7 @@ func (s *Server) takeOverWorkspaceLease(workDir string, ex executor.Executor, ha
 	}
 	sl.mu.Lock()
 	sl.workspace = true
+	sl.renewsSessions = true
 	sl.mu.Unlock()
 	sl.bindWorkspace(ex.ID(), handleID, ws.Session)
 	liveLeases.add(sl)

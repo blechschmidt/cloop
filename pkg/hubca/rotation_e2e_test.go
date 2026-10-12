@@ -43,6 +43,8 @@ func (s *sessionRecords) SaveSession(rec gitproxy.SessionRecord) error {
 
 func (s *sessionRecords) CloseSession(string, string, time.Time) error { return nil }
 
+func (s *sessionRecords) RenewSession(string, time.Time, time.Time) error { return nil }
+
 func (s *sessionRecords) get(id string) (gitproxy.SessionRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

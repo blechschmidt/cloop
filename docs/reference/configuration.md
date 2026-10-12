@@ -995,8 +995,11 @@ executors:
   or `host.docker.internal` / `host.containers.internal` for a containerised
   agent. Empty falls back to the bound address, which is right only when that
   process shares the hub's network namespace.
-- **A session lasts `session_minutes` from dispatch, not for the run.** A run
-  that outlives it fails its push.
+- **A workspace session lasts as long as its run.** It is minted for
+  `session_minutes`, renewed by as much while the run lives, and closed once the
+  run is done with it (Task 20422), so a run longer than `session_minutes` still
+  pushes its work back. A session a GitHub lease mints for the workload's own
+  git lasts at most `session_minutes` from dispatch.
 - **`allowed_refs` is the ceiling for every grant.** A GitHub grant can narrow
   it to particular branches (`--branches`, or **Push to branches** in the
   dashboard) but never widen it, so a hub that wants projects to push to
@@ -1007,8 +1010,8 @@ executors:
   [limiting pushes to particular branches](../guides/secrets.md#limiting-pushes-to-particular-branches).
 - Every decision lands in the hash-chained audit log as
   `gitproxy.push_denied`, `gitproxy.push_allowed`, `gitproxy.session_minted`,
-  `gitproxy.session_closed`, `gitproxy.fetch` and `gitproxy.rejected`. Alert on
-  the first. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
+  `gitproxy.session_renewed`, `gitproxy.session_closed`, `gitproxy.fetch` and
+  `gitproxy.rejected`. Alert on the first. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
   the CA and every certificate issued from it.
 
 The proxy runs inside the hub process — sessions are in memory, so the process
@@ -1312,9 +1315,10 @@ agent has git). The workspace is fetched at the commit the hub's checkout
 records for `origin/<branch>` — the base the push is measured from — so fetch
 the origin on the hub before a run; a project with no such ref, or no branch
 checked out, is dispatched as before, without a write-back, and its journal says
-why. The push presents the workspace's git proxy session, which ends after
-`executors.git_proxy.session_minutes`: a run that outlives it cannot push its
-work back. A value other than `push` is refused by `cloop config validate` and
+why. The push presents the workspace's git proxy session, which is renewed
+while the run lives and closed once its write-back has run (Task 20422), so a
+run longer than `executors.git_proxy.session_minutes` still pushes its work
+back. A value other than `push` is refused by `cloop config validate` and
 `cloop config set`; one written into the file by hand is treated as unset and
 shown as a warning on the Executors tab. Read from the hub's own configuration,
 its instance overlay included, on every dispatch.

@@ -1,0 +1,21 @@
+-- 0072_proxy_session_renewal: when a proxy session's deadline was last moved
+-- by a renewal (Task 20422).
+--
+-- A workspace's git proxy session is minted when its run is dispatched and has
+-- to authenticate the run's write-back push when it ends. It used to live for
+-- session_minutes from dispatch, so a run longer than that could not write its
+-- work back, and a run that ended early left the session working until then.
+-- Now the session is renewed while the run lives — expires_at moves forward —
+-- and closed once the run is done with it.
+--
+--   renewed_at  RFC 3339 UTC, when expires_at was last moved by a renewal; ''
+--               for a session never renewed.
+--
+-- A process restoring the session holds the recorded deadline to the session
+-- TTL counted from here rather than from issued_at, which is what lets a
+-- renewed session outlive its first period across a hub restart.
+--
+-- Additive — one defaulted column — so an older hub opens a database carrying
+-- it and restores only sessions within their first period, as before.
+
+ALTER TABLE proxy_sessions ADD COLUMN renewed_at TEXT NOT NULL DEFAULT '';

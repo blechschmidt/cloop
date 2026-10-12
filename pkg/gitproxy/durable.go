@@ -67,6 +67,9 @@ type SessionRecord struct {
 	LeaseID    string
 	IssuedAt   time.Time
 	ExpiresAt  time.Time
+	// RenewedAt is when Renew last moved ExpiresAt, zero for a session never
+	// renewed: what a restore bounds the recorded deadline from (Task 20422).
+	RenewedAt time.Time
 }
 
 // SessionStore persists the record of every Durable session and its end.
@@ -81,6 +84,9 @@ type SessionStore interface {
 	// and why. A session another process took over is not this process's to
 	// close; an implementation fences the write on its own holder.
 	CloseSession(id, reason string, at time.Time) error
+	// RenewSession records a session's deadline moved to expiresAt by a
+	// renewal at renewedAt, fenced on the holder as CloseSession is.
+	RenewSession(id string, expiresAt, renewedAt time.Time) error
 }
 
 // record renders the session for its Store.
@@ -100,7 +106,8 @@ func (s *Session) record() SessionRecord {
 		GrantID:      s.GrantID,
 		LeaseID:      s.LeaseID,
 		IssuedAt:     s.IssuedAt,
-		ExpiresAt:    s.ExpiresAt,
+		ExpiresAt:    s.ExpiresAt(),
+		RenewedAt:    s.RenewedAt(),
 	}
 }
 
@@ -187,7 +194,8 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		GrantID:      rec.GrantID,
 		LeaseID:      rec.LeaseID,
 		IssuedAt:     rec.IssuedAt,
-		ExpiresAt:    rec.ExpiresAt,
+		expiresAt:    rec.ExpiresAt,
+		renewedAt:    v.renewedAt,
 		cred:         &credentialGen{cred: cred, expiresAt: req.CredentialExpiresAt},
 		refresh:      req.Refresh,
 		onEnd:        req.OnEnd,
@@ -207,7 +215,7 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 	r.mu.Unlock()
 
 	detail := fmt.Sprintf("restored with its run; allow %s until %s", pol.RefSummary(),
-		s.ExpiresAt.UTC().Format(time.RFC3339))
+		s.ExpiresAt().UTC().Format(time.RFC3339))
 	if from := strings.TrimSpace(req.From); from != "" {
 		detail += " (held until then by " + from + ")"
 	}
@@ -238,6 +246,7 @@ type restoreCheck struct {
 	patterns               []string
 	policy                 Policy
 	hash                   []byte
+	renewedAt              time.Time
 }
 
 func (r *Registry) checkRestore(rec SessionRecord) (restoreCheck, error) {
@@ -290,22 +299,30 @@ func (r *Registry) checkRestore(rec SessionRecord) (restoreCheck, error) {
 	if !now.Before(rec.ExpiresAt) {
 		return restoreCheck{}, fmt.Errorf("%w: %s expired at %s", ErrSessionLapsed, id, rec.ExpiresAt.UTC().Format(time.RFC3339))
 	}
-	// No session Mint issues outlives MaxSessionTTL from its issue — nor from
-	// now, for an issue time in the future. A deadline beyond that was not
-	// written by Mint.
-	issued := rec.IssuedAt
-	if issued.IsZero() || issued.After(now) {
-		issued = now
+	// No session Mint issues outlives MaxSessionTTL from its issue, nor
+	// Renew from its renewal — nor from now, for a time in the future. A
+	// deadline beyond that was not written by either.
+	from := rec.IssuedAt
+	if rec.RenewedAt.After(from) {
+		from = rec.RenewedAt
 	}
-	if rec.IssuedAt.IsZero() || rec.ExpiresAt.After(issued.Add(MaxSessionTTL)) {
+	if from.IsZero() || from.After(now) {
+		from = now
+	}
+	if rec.IssuedAt.IsZero() || rec.ExpiresAt.After(from.Add(MaxSessionTTL)) {
 		return restoreCheck{}, fmt.Errorf("gitproxy: restore %s: a session issued %s cannot run until %s, beyond "+
-			"the %s any session is minted for", id, rec.IssuedAt.UTC().Format(time.RFC3339),
+			"the %s any session is minted or renewed for", id, rec.IssuedAt.UTC().Format(time.RFC3339),
 			rec.ExpiresAt.UTC().Format(time.RFC3339), MaxSessionTTL)
 	}
 	if r.Known(id) {
 		return restoreCheck{}, fmt.Errorf("%w: %s", ErrSessionExists, id)
 	}
-	return restoreCheck{id: id, repoPath: repoPath, upstream: upstream, patterns: patterns, policy: pol, hash: hash}, nil
+	renewed := rec.RenewedAt
+	if renewed.After(now) {
+		renewed = now
+	}
+	return restoreCheck{id: id, repoPath: repoPath, upstream: upstream, patterns: patterns, policy: pol, hash: hash,
+		renewedAt: renewed}, nil
 }
 
 // Suspend stops serving a session without ending it: it leaves the registry,

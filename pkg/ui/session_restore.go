@@ -300,8 +300,13 @@ func (sl *secretLease) restoreGitSession(ctx context.Context, row statedb.ProxyS
 	if why := gitScopeWider(rec, g.Constraints, want); why != "" {
 		return refusedf("its recorded scope is wider than its grant and this hub's git proxy policy allow now: %s", why)
 	}
-	// Nor longer than this hub mints a session for.
-	rec.ExpiresAt = clampRestoredExpiry(rec.IssuedAt, rec.ExpiresAt, svc.ttl, gitproxy.DefaultSessionTTL)
+	// Nor longer than this hub mints a session for — or renews one for,
+	// counted from the renewal that last moved it (Task 20422).
+	since := rec.IssuedAt
+	if rec.RenewedAt.After(since) {
+		since = rec.RenewedAt
+	}
+	rec.ExpiresAt = clampRestoredExpiry(since, rec.ExpiresAt, svc.ttl, gitproxy.DefaultSessionTTL)
 	// Everything Restore would check, before anything is minted for it: a
 	// token minted for a session that is then refused would sit at GitHub
 	// with nothing presenting it.

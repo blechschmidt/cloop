@@ -9,7 +9,7 @@ import (
 // TestProxySessionsMoveOnlyFromTheHolder covers the rows a proxy session
 // outlives its hub process with (Task 20383): every write after the insert
 // names the holder it expects, so a process that lost a session to the one
-// that adopted its run can neither extend, checkpoint nor close it, two
+// that adopted its run can neither extend, renew, checkpoint nor close it, two
 // processes racing to restore it cannot both win, and a closed session cannot
 // be taken over at all.
 func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
@@ -29,7 +29,8 @@ func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
 		t.Fatalf("GetProxySession: %v", err)
 	}
 	if got.TokenSHA256 != "ab12" || got.LeaseID != "lease_a" || got.Holder != "hub_old" || got.Scope != row.Scope ||
-		got.Counters != "{}" || !got.IssuedAt.Equal(issued) || !got.ExpiresAt.Equal(row.ExpiresAt) || !got.Open() {
+		got.Counters != "{}" || !got.IssuedAt.Equal(issued) || !got.ExpiresAt.Equal(row.ExpiresAt) || !got.Open() ||
+		!got.RenewedAt.IsZero() {
 		t.Fatalf("round trip = %+v, want %+v", got, row)
 	}
 	if _, err := db.GetProxySession(ProxySessionKube, "sess_a"); !errors.Is(err, ErrProxySessionNotFound) {
@@ -39,6 +40,9 @@ func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
 	later := issued.Add(2 * time.Hour)
 	if ok, err := db.ExtendProxySession(ProxySessionGit, "sess_a", "hub_other", later); err != nil || ok {
 		t.Fatalf("a non-holder's extension = %v, %v; want refused", ok, err)
+	}
+	if ok, err := db.RenewProxySession(ProxySessionGit, "sess_a", "hub_other", later, issued.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("a non-holder's renewal = %v, %v; want refused", ok, err)
 	}
 	if ok, err := db.CheckpointProxySession(ProxySessionGit, "sess_a", "hub_old", `{"bytes_up":7}`); err != nil || !ok {
 		t.Fatalf("the holder's checkpoint = %v, %v", ok, err)
@@ -58,6 +62,9 @@ func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
 	if ok, _ := db.CheckpointProxySession(ProxySessionGit, "sess_a", "hub_old", `{}`); ok {
 		t.Fatal("the previous holder checkpointed a session it lost")
 	}
+	if ok, _ := db.RenewProxySession(ProxySessionGit, "sess_a", "hub_old", later, issued.Add(time.Hour)); ok {
+		t.Fatal("the previous holder renewed a session it lost")
+	}
 	if ok, _ := db.DeleteProxySession(ProxySessionGit, "sess_a", "hub_old"); ok {
 		t.Fatal("the previous holder deleted a session it lost")
 	}
@@ -67,6 +74,16 @@ func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
 	got, _ = db.GetProxySession(ProxySessionGit, "sess_a")
 	if got.Holder != "hub_new" || !got.ExpiresAt.Equal(later) || got.Counters != `{"bytes_up":7}` {
 		t.Fatalf("after the takeover = %+v", got)
+	}
+	// A renewal records when it was made: a restore bounds the deadline from
+	// it (Task 20422).
+	renewedAt := issued.Add(90 * time.Minute)
+	if ok, err := db.RenewProxySession(ProxySessionGit, "sess_a", "hub_new", renewedAt.Add(time.Hour), renewedAt); err != nil || !ok {
+		t.Fatalf("the holder's renewal = %v, %v", ok, err)
+	}
+	got, _ = db.GetProxySession(ProxySessionGit, "sess_a")
+	if !got.ExpiresAt.Equal(renewedAt.Add(time.Hour)) || !got.RenewedAt.Equal(renewedAt) {
+		t.Fatalf("after the renewal = %+v", got)
 	}
 
 	// Closed stays closed: no second close, no takeover of a closed session.
@@ -78,6 +95,9 @@ func TestProxySessionsMoveOnlyFromTheHolder(t *testing.T) {
 	}
 	if ok, _ := db.TakeProxySession(ProxySessionGit, "sess_a", "hub_new", "hub_late"); ok {
 		t.Fatal("a closed session was taken over")
+	}
+	if ok, _ := db.RenewProxySession(ProxySessionGit, "sess_a", "hub_new", later.Add(time.Hour), later); ok {
+		t.Fatal("a closed session was renewed")
 	}
 	got, _ = db.GetProxySession(ProxySessionGit, "sess_a")
 	if got.Open() || got.CloseReason != "lease released" || got.Counters != `{"bytes_up":9}` {

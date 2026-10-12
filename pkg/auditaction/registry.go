@@ -845,6 +845,18 @@ var registry = []Entry{
 			"be restored gets a `gitproxy.session_closed` row instead (Task 20383).",
 	},
 	{
+		Action:    ActionGitProxySessionRenewed,
+		Home:      HomeControlPlane,
+		Entity:    "gitproxy",
+		Trigger:   "A workspace's pinned proxy session nears its end while its run is still alive, and the hub renews it for another session_minutes.",
+		Payload:   gitProxyPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`detail` gives the new deadline. Renewed only while the workspace lease it stands on is kept alive " +
+			"and the run's executor still holds the workload; the session is closed once the run is done with it " +
+			"(Task 20422).",
+	},
+	{
 		Action:    ActionGitProxyPushAllowed,
 		Home:      HomeControlPlane,
 		Entity:    "gitproxy",

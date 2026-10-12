@@ -47,6 +47,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
+// workspaceSessionRenewEvery overrides how often a workspace session a driver
+// holds is looked at for renewal (gitproxycreds.Source.RenewEvery). Zero —
+// production — is gitproxy.RenewTick of the session TTL; tests shorten it.
+var workspaceSessionRenewEvery time.Duration
+
 // gitProxyReapInterval is how often lapsed sessions are swept out of the
 // registry. Expiry is enforced at authentication regardless, so this is
 // hygiene — without it the map grows for the life of the process — and the
@@ -320,6 +325,9 @@ func (s *gitProxyService) Wrap(execID string, src executor.WorkspaceCredentialSo
 		return src
 	}
 	wrapped, err := gitproxycreds.New(src, s.reg, s.policy, s.ttl, execID, workspaceLeaseActor)
+	if err == nil {
+		wrapped.RenewEvery = workspaceSessionRenewEvery
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"ui: executor %s is NOT routed through the git proxy: %v\n", execID, err)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -15,10 +16,11 @@ import (
 
 // memSessionStore is a SessionStore that remembers what it was told.
 type memSessionStore struct {
-	mu      sync.Mutex
-	records map[string]SessionRecord
-	closed  map[string]string
-	saveErr error
+	mu       sync.Mutex
+	records  map[string]SessionRecord
+	closed   map[string]string
+	saveErr  error
+	renewErr error
 }
 
 func newMemSessionStore() *memSessionStore {
@@ -39,6 +41,21 @@ func (m *memSessionStore) CloseSession(id, reason string, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed[id] = reason
+	return nil
+}
+
+func (m *memSessionStore) RenewSession(id string, expiresAt, renewedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.renewErr != nil {
+		return m.renewErr
+	}
+	rec, ok := m.records[id]
+	if !ok {
+		return fmt.Errorf("no record of %s", id)
+	}
+	rec.ExpiresAt, rec.RenewedAt = expiresAt, renewedAt
+	m.records[id] = rec
 	return nil
 }
 
@@ -101,7 +118,7 @@ func TestDurableSessionIsRecordedWithoutItsCredentials(t *testing.T) {
 	}
 	if rec.LeaseID != "lease_1" || rec.GrantID != "grant_1" || rec.RunID != "run_7" || rec.Actor != "alice" ||
 		strings.Join(rec.RepoPatterns, ",") != "acme/*" || rec.Upstream != "https://github.com" ||
-		!rec.ExpiresAt.Equal(m.Session.ExpiresAt) {
+		!rec.ExpiresAt.Equal(m.Session.ExpiresAt()) {
 		t.Fatalf("record = %+v", rec)
 	}
 	raw, _ := json.Marshal(rec)
@@ -187,7 +204,7 @@ func TestRestoreBringsBackTheSameSession(t *testing.T) {
 	if _, err := second.Authenticate(m.Session.ID, m.Token+"x"); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("a wrong token = %v", err)
 	}
-	if !s.ExpiresAt.Equal(m.Session.ExpiresAt) || !s.Scoped() || !s.AllowsRepo("acme/tool") || s.AllowsRepo("evil/tool") {
+	if !s.ExpiresAt().Equal(m.Session.ExpiresAt()) || !s.Scoped() || !s.AllowsRepo("acme/tool") || s.AllowsRepo("evil/tool") {
 		t.Fatalf("restored scope or expiry differs: %+v", s)
 	}
 	if !s.Policy.AllowsRef("refs/heads/cloop/feature-x") || s.Policy.AllowsRef("refs/heads/cloop/other") ||

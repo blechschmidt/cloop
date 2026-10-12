@@ -148,7 +148,7 @@ func (g *e2eGuard) GuardGitHub(_ context.Context, req secretbroker.GitGuardReque
 	cred := m.Credential()
 	return secretbroker.GitGuardResult{
 		BaseURL: g.h.proxySrv.URL, Username: cred.Username, Password: cred.Password,
-		ExpiresAt: m.Session.ExpiresAt, SessionID: m.Session.ID, PushRefs: pol.AllowedRefs,
+		ExpiresAt: m.Session.ExpiresAt(), SessionID: m.Session.ID, PushRefs: pol.AllowedRefs,
 	}, nil
 }
 

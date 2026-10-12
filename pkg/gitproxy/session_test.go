@@ -275,8 +275,8 @@ func TestMintTTL(t *testing.T) {
 	t.Run("zero gets the default", func(t *testing.T) {
 		reg := newTestRegistry(t, now)
 		m := mintOne(t, reg, MintRequest{})
-		if want := now.Add(DefaultSessionTTL); !m.Session.ExpiresAt.Equal(want) {
-			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt, want)
+		if want := now.Add(DefaultSessionTTL); !m.Session.ExpiresAt().Equal(want) {
+			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt(), want)
 		}
 		if !m.Session.IssuedAt.Equal(now) {
 			t.Fatalf("IssuedAt = %s, want the registry clock %s", m.Session.IssuedAt, now)
@@ -286,16 +286,16 @@ func TestMintTTL(t *testing.T) {
 	t.Run("an explicit TTL is honoured", func(t *testing.T) {
 		reg := newTestRegistry(t, now)
 		m := mintOne(t, reg, MintRequest{TTL: 90 * time.Minute})
-		if want := now.Add(90 * time.Minute); !m.Session.ExpiresAt.Equal(want) {
-			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt, want)
+		if want := now.Add(90 * time.Minute); !m.Session.ExpiresAt().Equal(want) {
+			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt(), want)
 		}
 	})
 
 	t.Run("exactly the maximum is allowed", func(t *testing.T) {
 		reg := newTestRegistry(t, now)
 		m := mintOne(t, reg, MintRequest{TTL: MaxSessionTTL})
-		if want := now.Add(MaxSessionTTL); !m.Session.ExpiresAt.Equal(want) {
-			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt, want)
+		if want := now.Add(MaxSessionTTL); !m.Session.ExpiresAt().Equal(want) {
+			t.Fatalf("ExpiresAt = %s, want %s", m.Session.ExpiresAt(), want)
 		}
 	})
 
@@ -306,7 +306,7 @@ func TestMintTTL(t *testing.T) {
 		m, err := reg.Mint(MintRequest{Upstream: "https://github.com/acme/tool", TTL: MaxSessionTTL + time.Second})
 		if err == nil {
 			t.Fatalf("Mint clamped an over-long TTL to %s instead of refusing it",
-				m.Session.ExpiresAt.Sub(m.Session.IssuedAt))
+				m.Session.ExpiresAt().Sub(m.Session.IssuedAt))
 		}
 		if !strings.Contains(err.Error(), "maximum") {
 			t.Fatalf("Mint error = %q, want it to name the maximum", err)

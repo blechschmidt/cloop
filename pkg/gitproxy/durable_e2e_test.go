@@ -43,6 +43,8 @@ func (s *recordingStore) CloseSession(id, reason string, _ time.Time) error {
 	return nil
 }
 
+func (s *recordingStore) RenewSession(string, time.Time, time.Time) error { return nil }
+
 func TestRestoredSessionServesTheSandboxAfterARestart(t *testing.T) {
 	h := newHarness(t)
 	store := newRecordingStore()

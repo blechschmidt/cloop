@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 181 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 182 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 160 |
+| `control-plane` | the hub's own state.db | 161 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-181 actions in 43 families. Every action is listed: this section is the whole
+182 actions in 43 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
 
 ### task.*
 
@@ -378,12 +378,14 @@ Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret
 | `gitproxy.rejected` | `gitproxy` | control-plane | stable | A request is refused before any policy could be evaluated — no session, bad credential, unknown repository. |
 | `gitproxy.session_closed` | `gitproxy` | control-plane | stable | A proxy session ends and its credential stops working. |
 | `gitproxy.session_minted` | `gitproxy` | control-plane | stable | A proxy session is created for a task, scoping which repository and refs it may touch. |
+| `gitproxy.session_renewed` | `gitproxy` | control-plane | stable | A workspace's pinned proxy session nears its end while its run is still alive, and the hub renews it for another session_minutes. |
 | `gitproxy.session_restored` | `gitproxy` | control-plane | stable | The hub process that adopted a run restores the run's proxy session under its original id and token, with an upstream credential re-derived from the run's lease. |
 
 Payload keys, on every action above: `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
 
 - `gitproxy.push_denied` — The row that matters in this family: it is the only place a sandbox's attempt to write outside its lane is recorded. `refs` names what it tried to push.
 - `gitproxy.session_closed` — Also written for a session that ended while no hub process served it — not restored with its run, or retired by the leader's janitor once it lapsed — with the reason in `detail`.
+- `gitproxy.session_renewed` — `detail` gives the new deadline. Renewed only while the workspace lease it stands on is kept alive and the run's executor still holds the workload; the session is closed once the run is done with it (Task 20422).
 - `gitproxy.session_restored` — `detail` names the hub process that held the session until then. A session that could not be restored gets a `gitproxy.session_closed` row instead (Task 20383).
 
 ### kubeguard.*

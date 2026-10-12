@@ -490,7 +490,8 @@ an oracle for enumerating session ids. `ErrSessionNotFound` exists separately fo
 management calls, where the caller is the operator and precision is the point.
 
 The hub's session TTL is `executors.git_proxy.session_minutes`, defaulting to
-60 — the same hour as `DefaultSessionTTL`. A value outside
+60 — the same hour as `DefaultSessionTTL` — and is also the period a workspace
+session is renewed by. A value outside
 `[0, GitProxySessionMinutesUpper]` (720, i.e. `MaxSessionTTL`) is reported and
 reset to the default at load rather than silently narrowed.
 
@@ -503,27 +504,43 @@ renewal the broker or GitHub refuses (the grant revoked, the installation
 suspended) closes the session. See
 [the upstream credential renews itself](architecture/git-proxy.md#the-upstream-credential-renews-itself).
 
-### A session's life is its TTL, not the run's
+### A workspace session lives as long as its run
 
 This is about the *workspace* session — the one cloop's own fetch and write-back
-use. A session minted for a GitHub lease ends with its lease; see
-[closing and reaping](#closing-and-reaping).
+use. A session minted for a GitHub lease ends with its lease, or at
+`session_minutes` from dispatch; see [closing and reaping](#closing-and-reaping).
 
-**Nothing closes a workspace session when a run ends.** The credential source
-mints at dispatch and hands the sandbox its token; `ForWorkspace` is not told
-when the workload finished, and a session closed at the moment the credential
-was delivered would refuse the write-back it exists to authorise — the sandbox
-fetches at the *start* of a run and pushes at the *end*.
+The credential source mints at dispatch, and the sandbox fetches at the *start*
+of a run and pushes at the *end*, so the session has to last from one to the
+other — and, since Task 20422, no longer:
 
-The consequence is a real operational limit, and it is worth stating plainly: **a
-run that outlives `session_minutes` fails its push.** The proxy answers an
-expired session with HTTP 401, which the sandbox's git reports as an
-authentication failure, and the attempt lands in the audit trail as a `rejected`
-event. Set the TTL against the longest run the hub is expected to complete, not
-against the median one. The trade is deliberate — before interception the
-sandbox held the PAT and its access ended never, whatever the lease said — but a
-push that fails at the end of a two-hour run is an expensive way to discover a
-one-hour ceiling.
+- **It ends when the run is done with it.** The driver hands the credential back
+  after the fetch for a run that pushes nothing back, and once the workload is
+  terminal and its write-back has run or been abandoned for one that does: the
+  remote driver parks the release on the run's handle, the Kubernetes driver
+  keeps it with the workspace Secret. Handing it back closes the session —
+  *"the run is done with its workspace credential"*, or *"workspace credential
+  released unused"* when nothing ever presented it — and releases the lease
+  behind it. When the hub that dispatched the run stops first, the member that
+  adopts the run restores the session and ends it with the workload.
+- **It is renewed while the run lives.** Minted for `session_minutes`, it is
+  moved another `session_minutes` forward whenever five minutes or less are left
+  (half a period, for one under ten minutes): by the dispatching hub while its
+  driver still holds the credential, and after a restart by the member that
+  adopted the run while the workload still runs. Each renewal is written to the
+  session's record, so a restart keeps it, and audited as
+  [`gitproxy.session_renewed`](reference/audit-events.md#gitproxy). The sandbox
+  is handed no deadline: the device would refuse to push past one, and the
+  proxy is what refuses a session that lapsed.
+
+So `session_minutes` no longer caps how long a run may take; it bounds how long
+a session stays valid once nothing renews it. And a run that ends early no
+longer leaves its session valid for the rest of the hour — or of the twelve — to
+anything that had lifted its token out of the sandbox. A member on an older
+build restores only sessions within their first period, as it always did: if one
+adopts a run whose session was renewed past it, the run's write-back push is
+answered HTTP 401, which the sandbox's git reports as an authentication failure
+and the trail records as a `rejected` event.
 
 ### Closing and reaping
 
@@ -538,8 +555,8 @@ hub's other leases since Task 20390 — kept alive for as long as the session
 lives — and revoking it in the Secrets panel (or `POST /api/leases/{id}/revoke`)
 closes the session at once. A hub restart suspends a recorded session rather
 than closing it, and the process that adopts its run restores it; short of that
-a session lives out its TTL, which is enforced at authentication whether or not
-the reaper has swept it. Revoking the underlying grant with `cloop secret
+a session ends with its run, or lapses once nothing renews it — enforced at
+authentication whether or not the reaper has swept it. Revoking the underlying grant with `cloop secret
 revoke` stops the *next* dispatch from minting anything; it does not reach a
 session already minted.
 
@@ -911,10 +928,13 @@ it is a default.
 unauthenticated fetch; there is nothing to keep off the sandbox, so a session
 would only add a hop that can fail.
 
-The `ExpiresAt` the driver sees on the credential is the *session's*, not the
-lease's. That is the deadline that now actually bounds the sandbox's access to
-the forge — before interception the sandbox held the PAT and its access ended
-never, whatever the lease said.
+The credential the driver sees carries no `ExpiresAt` (Task 20422). The
+session's deadline is the hub's to keep — renewed while the run lives, ended
+when the run is done with it, see
+[a workspace session lives as long as its run](#a-workspace-session-lives-as-long-as-its-run)
+— and one handed to a device would be stale by the time a long run came to push,
+since the device refuses to push past the deadline it holds. Before interception
+the sandbox held the PAT and its access ended never, whatever the lease said.
 
 Every git-provisioning driver is routed, which is both of them: the Kubernetes
 driver through `reconcile.Options.WrapWorkspaceSource`, and the remote agent
@@ -1020,7 +1040,7 @@ question is only what a leak is worth.
 
 | Leaked | Worth |
 | --- | --- |
-| **Workspace session token** | Exactly the policy, for the remaining TTL: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy — plus the read of that one repository, since the hub's policy sets `AllowFetch` so the clone can go through the proxy as well. No deletes. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
+| **Workspace session token** | Exactly the policy, until its run is done with it: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy — plus the read of that one repository, since the hub's policy sets `AllowFetch` so the clone can go through the proxy as well. No deletes. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
 | **Guarded-lease session token** | The grant's repository allowlist rather than one repository, through **one** proxy, until the lease is released: reads, plus — only if the grant carries `contents:write` — pushes inside both the hub's allowlist and the grant's branches. Never a delete. Still nothing against `github.com` directly. |
 | **PAT delivered into the sandbox** — what an un-configured hub still does | Every repository the token is scoped to, every ref in them, in every direction, from anywhere on the Internet, until someone notices and revokes it. |
 

@@ -176,10 +176,16 @@ func TestGitProxyRoutesTheWorkspace(t *testing.T) {
 		t.Fatalf("routed BaseURL = %q, want the proxy origin %q", base, svc.BaseURL())
 	}
 
-	// The session, not the lease, is what now bounds the sandbox.
-	if !access.Credential.ExpiresAt.After(inner.cred.ExpiresAt) {
-		t.Fatalf("credential expiry %s is not the session's — the sandbox's access "+
-			"is still bounded by the lease it no longer holds", access.Credential.ExpiresAt)
+	// The session, not the lease, is what now bounds the sandbox — on the
+	// hub's clock: the sandbox is handed no deadline, since the session is
+	// renewed while the run lives and ended when the run is done with it
+	// (Task 20422), and a device refuses to push past a deadline it holds.
+	if !access.Credential.ExpiresAt.IsZero() {
+		t.Fatalf("the sandbox was handed a deadline, %s, that a long run's write-back would be refused on",
+			access.Credential.ExpiresAt)
+	}
+	if sess, err := svc.reg.Session(access.Credential.SessionID); err != nil || !sess.ExpiresAt().After(inner.cred.ExpiresAt) {
+		t.Fatalf("the session (%v) is not bounded on its own clock, past the lease's", err)
 	}
 	// Audit joinability: the grant that authorised the fetch is still named.
 	if access.Credential.GrantID != "grant-1" || access.Credential.LeaseID != "lease-1" {
@@ -218,12 +224,11 @@ func TestGitProxyCloseEndsSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForWorkspace: %v", err)
 	}
-	// The sandbox fetches: the session is presented, so the driver handing
-	// the credential back leaves it live for a later write-back (Task 20349).
+	// The sandbox fetches, and the driver still holds the credential for the
+	// run's write-back when the hub shuts down.
 	if _, err := svc.reg.Authenticate(access.Credential.Username, access.Credential.Password); err != nil {
 		t.Fatalf("the session the sandbox was handed does not authenticate: %v", err)
 	}
-	release()
 	if n := len(svc.reg.Sessions()); n != 1 {
 		t.Fatalf("live sessions = %d, want 1", n)
 	}
@@ -237,7 +242,9 @@ func TestGitProxyCloseEndsSessions(t *testing.T) {
 			t.Fatalf("session %s survived shutdown", s.ID)
 		}
 	}
-	// The session ending is what gives the lease behind it back.
+	// The session ending is what gives the lease behind it back — once, the
+	// driver's later release included.
+	release()
 	if inner.released != 1 {
 		t.Fatalf("closing the session at shutdown released the inner lease %d times, want 1", inner.released)
 	}

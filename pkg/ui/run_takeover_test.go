@@ -34,6 +34,8 @@ type takeoverExecutor struct {
 	once sync.Once
 	// redactions are the values the hub asked to scrub, per handle.
 	redactions map[string][]string
+	// statuses counts Status calls: each is a round trip to a device.
+	statuses int
 }
 
 func (e *takeoverExecutor) AddHandleRedactions(handleID string, values ...string) bool {
@@ -63,7 +65,15 @@ func (e *takeoverExecutor) HealthCheck(context.Context) error                   
 func (e *takeoverExecutor) Status(context.Context, string) (executor.Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.statuses++
 	return e.st, nil
+}
+
+// statusCalls reports how often the hub asked for the workload's status.
+func (e *takeoverExecutor) statusCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.statuses
 }
 
 // Stream stays open until the workload finishes.

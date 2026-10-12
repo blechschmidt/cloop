@@ -263,6 +263,9 @@ const (
 	ActionGitProxySessionClosed Action = "gitproxy.session_closed"
 	// ActionGitProxySessionRestored records a git proxy session restored with its adopted run.
 	ActionGitProxySessionRestored Action = "gitproxy.session_restored"
+	// ActionGitProxySessionRenewed records a workspace's git proxy session
+	// renewed while its run lives (Task 20422).
+	ActionGitProxySessionRenewed Action = "gitproxy.session_renewed"
 	// ActionGitProxyPushAllowed records a push admitted by branch policy.
 	ActionGitProxyPushAllowed Action = "gitproxy.push_allowed"
 	// ActionGitProxyPushDenied records a push refused by branch policy.

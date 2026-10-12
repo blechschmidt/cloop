@@ -284,6 +284,11 @@ type secretLease struct {
 	// session once a driver says which it kept. Guarded by mu.
 	workspace        bool
 	workspaceSession string
+	// renewsSessions marks a workspace lease this process took over with an
+	// adopted run (Task 20422): its keepalive renews the pinned session the
+	// lease feeds while the run lives, as the source that minted it did in
+	// the process that stopped. Guarded by mu.
+	renewsSessions bool
 	// controlPlane is the directory of the control plane the lease was issued
 	// from, so a revocation there reaches it and one elsewhere — another
 	// control plane served by the same process — does not (Task 20403).
@@ -534,6 +539,11 @@ func (sl *secretLease) startKeepalive(tick time.Duration) {
 				sl.retryPendingSessions()
 				if extending && !sl.keepAlive(ctx, now) {
 					extending = false
+				}
+				// A taken-over workspace lease's session, renewed while the
+				// run lives and the lease extends (Task 20422).
+				if extending {
+					sl.renewWorkspaceSessions(ctx)
 				}
 				// A GitHub App token in the sandbox's files is renewed before
 				// GitHub's hour ends (Task 20375), for as long as the lease

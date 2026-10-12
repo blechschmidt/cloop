@@ -55,6 +55,9 @@ type ProxySessionRow struct {
 	UpdatedAt   time.Time
 	ClosedAt    time.Time
 	CloseReason string
+	// RenewedAt is when a renewal last moved ExpiresAt, zero for a session
+	// never renewed (migration 0072).
+	RenewedAt time.Time
 }
 
 // Open reports whether the session has not been closed.
@@ -81,8 +84,8 @@ func (d *DB) PutProxySession(row ProxySessionRow) error {
 		`INSERT INTO proxy_sessions(kind, session_id, token_sha256, lease_id, grant_id, holder,
 		                            run_id, project_id, executor_id, task_id, actor,
 		                            scope_json, counters_json, issued_at, expires_at, updated_at,
-		                            closed_at, close_reason)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		                            closed_at, close_reason, renewed_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(kind, session_id) DO UPDATE SET
 		   token_sha256  = excluded.token_sha256,
 		   lease_id      = excluded.lease_id,
@@ -99,11 +102,13 @@ func (d *DB) PutProxySession(row ProxySessionRow) error {
 		   expires_at    = excluded.expires_at,
 		   updated_at    = excluded.updated_at,
 		   closed_at     = excluded.closed_at,
-		   close_reason  = excluded.close_reason`,
+		   close_reason  = excluded.close_reason,
+		   renewed_at    = excluded.renewed_at`,
 		row.Kind, row.SessionID, row.TokenSHA256, row.LeaseID, row.GrantID, row.Holder,
 		row.RunID, row.ProjectID, row.ExecutorID, row.TaskID, row.Actor,
 		row.Scope, row.Counters, formatOptionalTime(row.IssuedAt), formatOptionalTime(row.ExpiresAt),
 		formatOptionalTime(row.UpdatedAt), formatOptionalTime(row.ClosedAt), row.CloseReason,
+		formatOptionalTime(row.RenewedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: put proxy session %s/%s: %w", row.Kind, row.SessionID, classifyDriverErr(err))
@@ -114,7 +119,7 @@ func (d *DB) PutProxySession(row ProxySessionRow) error {
 // proxySessionColumns is the column list scanProxySession reads.
 const proxySessionColumns = `kind, session_id, token_sha256, lease_id, grant_id, holder,
 	run_id, project_id, executor_id, task_id, actor, scope_json, counters_json,
-	issued_at, expires_at, updated_at, closed_at, close_reason`
+	issued_at, expires_at, updated_at, closed_at, close_reason, renewed_at`
 
 // GetProxySession returns one session, or a wrapped ErrProxySessionNotFound.
 func (d *DB) GetProxySession(kind, id string) (ProxySessionRow, error) {
@@ -232,6 +237,16 @@ func (d *DB) ExtendProxySession(kind, id, holder string, expiresAt time.Time) (b
 		formatOptionalTime(expiresAt), formatOptionalTime(time.Now().UTC()), kind, id, holder)
 }
 
+// RenewProxySession moves an open session's deadline by a renewal made at
+// renewedAt, provided holder holds it, and reports whether it did.
+func (d *DB) RenewProxySession(kind, id, holder string, expiresAt, renewedAt time.Time) (bool, error) {
+	return d.execOne(`UPDATE proxy_sessions SET expires_at = ?, renewed_at = ?, updated_at = ?
+		WHERE kind = ? AND session_id = ? AND holder = ? AND closed_at = ''`,
+		fmt.Sprintf("renew proxy session %s/%s", kind, id),
+		formatOptionalTime(expiresAt), formatOptionalTime(renewedAt), formatOptionalTime(time.Now().UTC()),
+		kind, id, holder)
+}
+
 // CheckpointProxySession replaces an open session's counters, provided holder
 // holds it, and reports whether it did.
 func (d *DB) CheckpointProxySession(kind, id, holder, counters string) (bool, error) {
@@ -294,14 +309,15 @@ type proxySessionScanner interface {
 
 func scanProxySession(s proxySessionScanner) (ProxySessionRow, error) {
 	var (
-		rec                                     ProxySessionRow
-		issuedAt, expiresAt, updatedAt, closeAt string
+		rec                                              ProxySessionRow
+		issuedAt, expiresAt, updatedAt, closeAt, renewed string
 	)
 	if err := s.Scan(&rec.Kind, &rec.SessionID, &rec.TokenSHA256, &rec.LeaseID, &rec.GrantID, &rec.Holder,
 		&rec.RunID, &rec.ProjectID, &rec.ExecutorID, &rec.TaskID, &rec.Actor, &rec.Scope, &rec.Counters,
-		&issuedAt, &expiresAt, &updatedAt, &closeAt, &rec.CloseReason); err != nil {
+		&issuedAt, &expiresAt, &updatedAt, &closeAt, &rec.CloseReason, &renewed); err != nil {
 		return ProxySessionRow{}, err
 	}
+	rec.RenewedAt = parseOptionalTime(renewed)
 	rec.IssuedAt = parseOptionalTime(issuedAt)
 	rec.ExpiresAt = parseOptionalTime(expiresAt)
 	rec.UpdatedAt = parseOptionalTime(updatedAt)

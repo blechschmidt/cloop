@@ -1000,14 +1000,16 @@ type GitProxyConfig struct {
 	// MinTLSVersion is "1.2" or "1.3". Empty means 1.2, matching the hub.
 	MinTLSVersion string `yaml:"min_tls_version,omitempty"`
 
-	// SessionMinutes bounds one session: the window covering a run's clone at
-	// the start and its write-back push at the end. Zero uses 60. Values
-	// outside [1, GitProxySessionMinutesUpper] are clamped.
+	// SessionMinutes is one session period. Zero uses 60. Values outside
+	// [1, GitProxySessionMinutesUpper] are clamped.
 	//
-	// This is the deadline that actually bounds a sandbox's access to the
-	// forge. Before interception the sandbox held the PAT and its access
-	// ended never; a run that outlives this fails its push, which is by far
-	// the better of the two failures.
+	// A workspace session — the run's clone at the start and its write-back
+	// push at the end — is renewed a period at a time while its run lives
+	// and ended once the run is done with it (Task 20422), so this bounds how
+	// long it stays valid once nothing renews it, not how long a run may
+	// take. A session a GitHub lease mints for the workload's own git lasts
+	// at most this from dispatch. Before interception the sandbox held the
+	// PAT and its access ended never.
 	SessionMinutes int `yaml:"session_minutes,omitempty"`
 
 	// AllowedRefs overrides the branch allowlist. Empty means

@@ -28,9 +28,9 @@
 //
 // # What a leaked token is worth
 //
-// The session token is worth the policy below, for the remaining TTL, against
-// one repository, through one proxy: push to refs/heads/cloop/**, create and
-// update only, and fetch. It is worth nothing against github.com directly. The
+// The session token is worth the policy below, until its run is done with it,
+// against one repository, through one proxy: push to refs/heads/cloop/**,
+// create and update only, and fetch. It is worth nothing against github.com directly. The
 // PAT it stands in for is worth every repository the token is scoped to, in
 // every direction, from anywhere, until someone revokes it.
 package gitproxycreds
@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -64,6 +65,10 @@ type Source struct {
 	ExecutorID string
 	// Actor is the audit identity recorded on the mint.
 	Actor string
+	// RenewEvery overrides how often a session a driver still holds is
+	// looked at for renewal. Zero is gitproxy.RenewTick of TTL; tests
+	// shorten it.
+	RenewEvery time.Duration
 }
 
 // New returns a source that routes w through reg, or an error when it would be
@@ -121,13 +126,17 @@ func New(inner executor.WorkspaceCredentialSource, reg *gitproxy.Registry, polic
 // delivers before the init container fetches, the fetch itself did (Task 20349).
 //
 // The release function handed to the driver is therefore about the *session*.
-// It is always non-nil, and it closes the session only if nothing ever
-// authenticated with it — the dispatch failed, or the fetch never reached the
-// proxy — which releases the inner lease with it. A session the sandbox did use
-// keeps its TTL: the sandbox fetches at the start of a run and pushes at the
-// end, so a session closed when the credential was delivered would refuse the
-// write-back it exists to authorise. Registry.Close is how an operator ends one
-// early.
+// It is always non-nil, and it ends the session — which releases the inner
+// lease with it — whether or not the sandbox used it (Task 20422). A driver
+// calls it when it is done with the credential: once the fetch is over for a
+// run that pushes nothing back, and once the workload is terminal and its
+// write-back has run or been abandoned for one that does — the remote driver
+// parks it on the handle until then, the Kubernetes driver keeps it with the
+// workspace Secret. A session the sandbox had used used to keep its TTL after
+// that, 60 minutes by default and up to 12 hours, for anything that had lifted
+// its token out of the sandbox to use. A run longer than the TTL keeps its
+// session through the hub renewing it while the run lives (Registry.Renew),
+// not through a longer TTL.
 func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	noop := func() {}
 	if s == nil || s.Inner == nil || s.Registry == nil {
@@ -231,6 +240,11 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			"gitproxycreds: mint a proxy session for %s: %w", w.Repo, err)
 	}
 
+	// Renewed while the driver holds it, so a run longer than the session TTL
+	// can still present it for its write-back (Task 20422).
+	released := make(chan struct{})
+	go s.renewWhileHeld(m.Session, released)
+
 	sessionCred := m.Credential()
 	return executor.WorkspaceAccess{
 		Credential: executor.GitCredential{
@@ -243,10 +257,12 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			LeaseID:    access.Credential.LeaseID,
 			GrantID:    access.Credential.GrantID,
 			SecretName: access.Credential.SecretName,
-			// The session's expiry, not the lease's. This is the deadline that
-			// now actually bounds the sandbox: before interception the sandbox
-			// held the PAT and its access ended never, whatever the lease said.
-			ExpiresAt: m.Session.ExpiresAt,
+			// No deadline for the sandbox to act on. The session's is the
+			// hub's to keep — renewed while the run lives, ended when the run
+			// is done with it (Task 20422) — and the proxy refuses a session
+			// that lapsed. A deadline handed over here would be stale by the
+			// time a long run's write-back came to push, and the device
+			// refuses to push past the one it holds.
 			// Passed on for anything downstream that reports it. The session
 			// above is what enforces it.
 			Branches: access.Credential.Branches,
@@ -256,7 +272,36 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			SessionID: m.Session.ID,
 		},
 		Repo: m.RepoURL,
-	}, s.relinquish(m.Session), nil
+	}, s.relinquish(m.Session, released), nil
+}
+
+// renewWhileHeld renews sess while the driver holds it (Task 20422). A driver
+// gives a workspace credential back once its run is done with it — after the
+// fetch, or once the workload is terminal and its write-back has run — so
+// until then the run may still present it, at its very end, for its push. It
+// stops at the release, or as soon as the session ends some other way:
+// revoked, its lease released, handed to the hub process that adopted the
+// run, or this process shutting down.
+func (s *Source) renewWhileHeld(sess *gitproxy.Session, released <-chan struct{}) {
+	every := s.RenewEvery
+	if every <= 0 {
+		every = gitproxy.RenewTick(s.TTL)
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-released:
+			return
+		case <-t.C:
+		}
+		if sess.Closed() {
+			return
+		}
+		if _, _, err := s.Registry.RenewDue(sess.ID, s.TTL); err != nil {
+			return
+		}
+	}
 }
 
 // RecordedSource is implemented by an inner source whose leases are recorded
@@ -277,14 +322,17 @@ func (s *Source) leasesRecorded() bool {
 }
 
 // relinquish returns the release a driver calls when it is done with what it
-// was handed: it closes a session nothing ever authenticated with, and leaves a
-// used one to its TTL. See ForWorkspace.
-func (s *Source) relinquish(sess *gitproxy.Session) func() {
+// was handed: it stops renewing the session and ends it, used or not. See
+// ForWorkspace.
+func (s *Source) relinquish(sess *gitproxy.Session, released chan struct{}) func() {
+	var once sync.Once
 	return func() {
+		once.Do(func() { close(released) })
+		reason := "workspace credential released unused"
 		if sess.Used() {
-			return
+			reason = "the run is done with its workspace credential"
 		}
-		s.Registry.Close(sess.ID, "workspace credential released unused")
+		s.Registry.Close(sess.ID, reason)
 	}
 }
 
