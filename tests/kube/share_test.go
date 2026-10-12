@@ -27,7 +27,13 @@ package kube_test
 //  3. Grants the share to the hub's project for writes in all three namespaces
 //     and dispatches a task running share_probe.sh: kubectl through the monitor
 //     reads and writes (P1, P2), and is refused the ServiceAccount's own token
-//     (P3), a raw TokenRequest for another (P4), and kube-system (P5).
+//     (P3), a raw TokenRequest for another (P4), and kube-system (P5). Then
+//     every other way the write grant could mint a ServiceAccount credential of
+//     its own (Task 20420) — a token Secret (P8), a Pod or a Deployment running
+//     as another ServiceAccount (P9, P10), a hostPath Pod (P11), a new image for
+//     a Deployment that already runs as one (P12), a RoleBinding (P13) — is
+//     refused by the monitor and, checked from outside, never created; and an
+//     ordinary Pod still passes (P14, a server-side dry run).
 //  4. Waits for the hub to renew the share at half-life, then until the token
 //     the run's session started with has expired (plus the API server's minute
 //     of leeway), and has the probe read and write again (P6) — the same
@@ -35,8 +41,14 @@ package kube_test
 //     checked from outside.
 //  5. Runs `cloop remote kube revoke`, checks no labelled object is left in any
 //     namespace and the secret is gone, and has the probe confirm the run is cut
-//     off (P7). Then reads the audit trail for the renewal and the monitor's
-//     refusals.
+//     off (P7).
+//  6. Uploads a crafted share (Task 20420) — its token for a ServiceAccount the
+//     cluster administrator made, with an object named like the share's and a
+//     decoy labelled with its id by another owner, its metadata listing
+//     cluster-admin's binding — and revokes it as the cluster administrator:
+//     the revoke deletes nothing, keeps the hub's secret, and with --force
+//     deletes only that. Then reads the audit trail for the renewal and the
+//     monitor's refusals.
 //
 // It takes about thirteen minutes, nearly all of it waiting for the first token
 // to expire. Opt in with CLOOP_KUBE_E2E_KUBECONFIG (cluster-admin on a
@@ -53,6 +65,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -283,6 +296,15 @@ users:
 		}
 	}
 
+	// A Deployment that runs as a ServiceAccount of its own, made by the
+	// cluster's administrator rather than through the monitor: what P12 must
+	// not be able to change. No replicas, so nothing is scheduled.
+	x.kubectl(ctx, "-n", nsA, "create", "serviceaccount", "probe-victim-sa")
+	x.kubectlIn(ctx, []byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"probe-victim"},`+
+		`"spec":{"replicas":0,"selector":{"matchLabels":{"app":"victim"}},"template":{"metadata":{"labels":`+
+		`{"app":"victim"}},"spec":{"serviceAccountName":"probe-victim-sa","containers":[{"name":"c",`+
+		`"image":"registry.k8s.io/pause:3.9"}]}}}}`), "-n", nsA, "create", "-f", "-")
+
 	// ── grant and dispatch ──────────────────────────────────────────────────
 	hub.must(http.MethodPost, "/api/grants", map[string]any{
 		"source": "secret", "secret_ref": name, "subject": "project:" + hubDir, "ttl_minutes": 120,
@@ -328,7 +350,23 @@ users:
 		})
 	}
 	awaitFile("phase1-done", 3*time.Minute)
-	expect("P0", "P1", "P2", "P3", "P4", "P5")
+	expect("P0", "P1", "P2", "P3", "P4", "P5", "P8", "P9", "P10", "P11", "P12", "P13", "P14")
+	// From outside: nothing the refusals stood for exists — no token Secret,
+	// no Pod or Deployment as another ServiceAccount, no hostPath Pod, no
+	// RoleBinding — and the victim Deployment still runs its own image.
+	for _, obj := range [][2]string{
+		{"secret", "probe-token"}, {"pod", "probe-sa"}, {"deployment", "probe-deploy"},
+		{"pod", "probe-node"}, {"rolebinding", "probe-rb"}, {"pod", "probe-ok"},
+	} {
+		if out, err := x.kubectlMay(ctx, "-n", nsA, "get", obj[0], obj[1], "-o", "name"); err == nil {
+			t.Errorf("%s/%s exists after the monitor refused it: %s", obj[0], obj[1], out)
+		}
+	}
+	if got := x.out(ctx, "-n", nsA, "get", "deployment", "probe-victim", "-o",
+		"jsonpath={.spec.template.spec.containers[0].image} {.spec.template.spec.serviceAccountName}"); got !=
+		"registry.k8s.io/pause:3.9 probe-victim-sa" {
+		t.Errorf("the Deployment running as another ServiceAccount was changed: %q", got)
+	}
 	if t.Failed() {
 		t.FailNow()
 	}
@@ -391,6 +429,9 @@ users:
 	awaitFile("probe-done", 3*time.Minute)
 	expect("P7")
 
+	// ── a crafted share's revoke deletes nothing it did not create ──────────
+	craftedShareRevoke(ctx, t, x, hub, cloop, work, cliEnv, hubURL, adminToken, server, caData, nsA, nsB, stamp)
+
 	// ── the audit trail ─────────────────────────────────────────────────────
 	var audit struct {
 		Events []struct {
@@ -401,7 +442,20 @@ users:
 	}
 	hub.must(http.MethodGet, "/api/audit?limit=1000", nil, &audit)
 	var renewed, tokenDenied, sessionClosed bool
+	// The monitor's refusals of the write grant's credential attempts, each
+	// under its own reason (Task 20420).
+	credentialReasons := map[string]bool{
+		"service_account_token_secret": false, "workload_service_account": false,
+		"host_access": false, "rbac_binding": false,
+	}
 	for _, e := range audit.Events {
+		if e.EventType == "kubeguard.request_denied" {
+			for reason := range credentialReasons {
+				if strings.Contains(e.Payload, `"reason":"`+reason+`"`) {
+					credentialReasons[reason] = true
+				}
+			}
+		}
 		switch {
 		case e.EventType == "secret.renew" && e.Actor == "hub" && strings.Contains(e.Payload, `"decision":"allow"`):
 			renewed = true
@@ -424,7 +478,135 @@ users:
 	if !sessionClosed {
 		t.Error("no kubeguard.session_closed row for the run's session")
 	}
+	for reason, seen := range credentialReasons {
+		if !seen {
+			t.Errorf("no kubeguard.request_denied row with reason %s", reason)
+		}
+	}
 }
+
+// craftedShareRevoke uploads a share whose metadata and token its uploader
+// chose, against objects the share never created, and revokes it as the
+// cluster's administrator — the colleague a crafted share is aimed at (Task
+// 20420). The revoke must delete nothing: not cluster-admin's binding its
+// metadata lists, not an object named like the share's, not a decoy labelled
+// with its id by another owner, not the ServiceAccount its token is for.
+func craftedShareRevoke(ctx context.Context, t *testing.T, x tool, hub hubClient, cloop, work string, cliEnv []string,
+	hubURL, adminToken, server, caData, nsA, nsB, stamp string) {
+	t.Helper()
+	cid := strings.ToLower(randomAlnum(t, 8))
+	for !kubeshareID.MatchString(cid) {
+		cid = strings.ToLower(randomAlnum(t, 8))
+	}
+	sa := "cloop-crafted-" + cid
+	// Made by the administrator, outside any share: the ServiceAccount the
+	// crafted token is for, an object with the share's own name, and a decoy
+	// labelled with the share's id by somebody else.
+	x.kubectl(ctx, "-n", nsB, "create", "serviceaccount", sa)
+	x.kubectl(ctx, "-n", nsA, "create", "rolebinding", sa, "--clusterrole=view", "--serviceaccount="+nsB+":"+sa)
+	x.kubectlIn(ctx, []byte(`{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"decoy-`+
+		stamp+`","labels":{"cloop.dev/kube-share":"`+cid+`"},"annotations":{"cloop.dev/owner":"mallory@example.com"}},`+
+		`"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"view"},"subjects":[{"kind":`+
+		`"ServiceAccount","name":"default","namespace":"`+nsA+`"}]}`), "-n", nsA, "create", "-f", "-")
+	token := x.out(ctx, "-n", nsB, "create", "token", sa, "--duration=1h")
+	adminCtx := x.out(ctx, "config", "current-context")
+
+	name := "crafted-" + stamp
+	doc := "apiVersion: v1\nkind: Config\ncurrent-context: c\nclusters:\n- name: c\n  cluster:\n    server: " + server +
+		"\n    certificate-authority-data: " + caData + "\ncontexts:\n- name: c\n  context: {cluster: c, user: c}\n" +
+		"users:\n- name: c\n  user:\n    token: " + token + "\n"
+	hub.must(http.MethodPost, "/api/secrets", map[string]any{
+		"name": name, "kind": "kubeconfig", "payload": doc, "personal": false,
+		"metadata": map[string]string{
+			"kube.share": cid, "kube.renewal": "manual", "kube.access": "read", "kube.namespaces": nsA,
+			"kube.context": adminCtx,
+			// What the uploader would like the administrator's revoke to act on.
+			"kube.objects":         "ClusterRoleBinding:cluster-admin,RoleBinding:" + nsA + "/decoy-" + stamp,
+			"kube.service_account": "kube-system/default",
+			"kube.owner":           "mallory@example.com",
+		},
+	}, nil)
+
+	revoke := func(force bool) (string, error) {
+		args := []string{"remote", "kube", "revoke", name, "--kubeconfig", x.kubeconfig, "--context", adminCtx,
+			"--hub", hubURL, "--token", adminToken}
+		if force {
+			args = append(args, "--force")
+		}
+		cmd := exec.CommandContext(ctx, cloop, args...)
+		cmd.Dir, cmd.Env = work, cliEnv
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	out, err := revoke(false)
+	t.Logf("crafted share revoke:\n%s", out)
+	if err == nil {
+		t.Error("the revoke of a crafted share succeeded; its ServiceAccount is not one the share created")
+	}
+	for _, want := range []string{
+		"Not deleted, not this share's: ServiceAccount " + nsB + "/" + sa,
+		"Not deleted, not this share's: RoleBinding " + nsA + "/" + sa,
+		"Not deleted, not this share's: RoleBinding " + nsA + "/decoy-" + stamp,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the revoke does not report %q", want)
+		}
+	}
+	if strings.Contains(out, "Deleted ") {
+		t.Errorf("the revoke of a crafted share deleted something:\n%s", out)
+	}
+	stillThere := func(when string) {
+		t.Helper()
+		for _, obj := range [][3]string{
+			{"", "clusterrolebinding", "cluster-admin"},
+			{nsB, "serviceaccount", sa},
+			{nsA, "rolebinding", sa},
+			{nsA, "rolebinding", "decoy-" + stamp},
+		} {
+			args := []string{"get", obj[1], obj[2], "-o", "name"}
+			if obj[0] != "" {
+				args = append([]string{"-n", obj[0]}, args...)
+			}
+			if _, err := x.kubectlMay(ctx, args...); err != nil {
+				t.Errorf("%s: %s %s/%s is gone", when, obj[1], obj[0], obj[2])
+			}
+		}
+	}
+	stillThere("after the revoke")
+	var secrets struct {
+		Secrets []struct {
+			Name string `json:"name"`
+		} `json:"secrets"`
+	}
+	hub.must(http.MethodGet, "/api/secrets", nil, &secrets)
+	kept := false
+	for _, s := range secrets.Secrets {
+		kept = kept || s.Name == name
+	}
+	if !kept {
+		t.Error("a revoke that left the share's ServiceAccount alive deleted the hub's secret")
+	}
+
+	out, err = revoke(true)
+	t.Logf("crafted share revoke --force:\n%s", out)
+	if err != nil {
+		t.Errorf("revoke --force: %v", err)
+	}
+	if strings.Contains(out, "Deleted ServiceAccount") || strings.Contains(out, "Deleted RoleBinding") {
+		t.Errorf("revoke --force deleted cluster objects:\n%s", out)
+	}
+	stillThere("after revoke --force")
+	secrets.Secrets = nil
+	hub.must(http.MethodGet, "/api/secrets", nil, &secrets)
+	for _, s := range secrets.Secrets {
+		if s.Name == name {
+			t.Error("revoke --force kept the hub's secret")
+		}
+	}
+}
+
+// kubeshareID is what a share id may be.
+var kubeshareID = regexp.MustCompile(`^[a-z0-9]{4,16}$`)
 
 // freePort returns a port nothing listens on now.
 func freePort(t *testing.T) int {

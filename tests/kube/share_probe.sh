@@ -7,7 +7,9 @@
 # monitor holds the share's ServiceAccount token. The test substitutes the
 # __PLACEHOLDERS__ and drives the phases through files in __DIR__:
 #
-#   phase 1  read, write, and the refusals — then touch phase1-done
+#   phase 1  read, write, and the refusals — including every way a write grant
+#            could mint a ServiceAccount credential of its own (Task 20420) —
+#            then touch phase1-done
 #   phase 2  once the test says the token the session started with has expired
 #            (go-renewed): read and write again, with the hub's renewed token
 #   phase 3  once the test has revoked the share (go-revoked): nothing works
@@ -95,6 +97,87 @@ elif grep -q "not in this session's allowlist" "$tmp/p5"; then
 	r P5 PASS "kube-system refused by the monitor"
 else
 	r P5 FAIL "refused, but not by the monitor: $(last "$tmp/p5")"
+fi
+
+# P8-P13 (Task 20420): this write grant's verbs, and the edit role behind the
+# share, both allow creating Secrets, Pods and Deployments in NS_A — and each of
+# these would hand the workload a ServiceAccount credential that never passes
+# through the monitor and outlives a revoke. So what refuses them can only be
+# the monitor reading the request body. The test checks from outside that none
+# of them exists.
+#
+# refused ID FILE PHRASE: PASS when kubectl failed with the monitor's message.
+refused() {
+	if grep -q "$3" "$2"; then
+		r "$1" PASS "refused by the monitor: $(last "$2")"
+	else
+		r "$1" FAIL "refused, but not by the monitor: $(last "$2")"
+	fi
+}
+kubectl -n "$NS_A" create serviceaccount probe-other >"$tmp/sa" 2>&1 || r P8 FAIL "could not create probe-other: $(last "$tmp/sa")"
+
+# P8: a ServiceAccount token Secret, which the cluster would fill in.
+cat >"$tmp/p8.json" <<'JSON'
+{"apiVersion":"v1","kind":"Secret","metadata":{"name":"probe-token","annotations":{"kubernetes.io/service-account.name":"probe-other"}},"type":"kubernetes.io/service-account-token"}
+JSON
+if kubectl -n "$NS_A" create -f "$tmp/p8.json" >"$tmp/p8" 2>&1; then
+	r P8 FAIL "the monitor let the sandbox create a ServiceAccount token Secret"
+else
+	refused P8 "$tmp/p8" "makes a Secret a ServiceAccount token"
+fi
+
+# P9: a Pod running as another ServiceAccount, whose token the cluster mounts.
+cat >"$tmp/p9.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"probe-sa"},"spec":{"serviceAccountName":"probe-other","containers":[{"name":"c","image":"registry.k8s.io/pause:3.9"}]}}
+JSON
+if kubectl -n "$NS_A" create -f "$tmp/p9.json" >"$tmp/p9" 2>&1; then
+	r P9 FAIL "the monitor let the sandbox run a Pod as another ServiceAccount"
+else
+	refused P9 "$tmp/p9" "names ServiceAccount"
+fi
+
+# P10: the same through a Deployment's template.
+cat >"$tmp/p10.json" <<'JSON'
+{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"probe-deploy"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"probe"}},"template":{"metadata":{"labels":{"app":"probe"}},"spec":{"serviceAccountName":"probe-other","containers":[{"name":"c","image":"registry.k8s.io/pause:3.9"}]}}}}
+JSON
+if kubectl -n "$NS_A" create -f "$tmp/p10.json" >"$tmp/p10" 2>&1; then
+	r P10 FAIL "the monitor let the sandbox create a Deployment running as another ServiceAccount"
+else
+	refused P10 "$tmp/p10" "names ServiceAccount"
+fi
+
+# P11: a Pod on the node's filesystem, where every Pod's token sits.
+cat >"$tmp/p11.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"probe-node"},"spec":{"volumes":[{"name":"kubelet","hostPath":{"path":"/var/lib/kubelet"}}],"containers":[{"name":"c","image":"registry.k8s.io/pause:3.9","volumeMounts":[{"name":"kubelet","mountPath":"/k"}]}]}}
+JSON
+if kubectl -n "$NS_A" create -f "$tmp/p11.json" >"$tmp/p11" 2>&1; then
+	r P11 FAIL "the monitor let the sandbox mount the node's kubelet directory"
+else
+	refused P11 "$tmp/p11" "which reaches the node"
+fi
+
+# P12: a new image for a Deployment that already runs as another ServiceAccount
+# (the test made it): the patch keeps the ServiceAccount.
+if kubectl -n "$NS_A" set image deployment/probe-victim c=registry.k8s.io/busybox:1.36 >"$tmp/p12" 2>&1; then
+	r P12 FAIL "the monitor let the sandbox change a Deployment that runs as another ServiceAccount"
+else
+	refused P12 "$tmp/p12" "already runs as ServiceAccount"
+fi
+
+# P13: a RoleBinding, which would give the namespace's default ServiceAccount
+# whatever it names.
+if kubectl -n "$NS_A" create rolebinding probe-rb --clusterrole=edit --serviceaccount="$NS_A:default" >"$tmp/p13" 2>&1; then
+	r P13 FAIL "the monitor let the sandbox create a RoleBinding"
+else
+	refused P13 "$tmp/p13" "a binding hands"
+fi
+
+# P14: and the inspection lets an ordinary Pod through: one as the namespace's
+# default ServiceAccount, as a server-side dry run so nothing is scheduled.
+if kubectl -n "$NS_A" run probe-ok --image=registry.k8s.io/pause:3.9 --restart=Never --dry-run=server -o name >"$tmp/p14" 2>&1; then
+	r P14 PASS "a Pod as the default ServiceAccount passes: $(last "$tmp/p14")"
+else
+	r P14 FAIL "an ordinary Pod was refused: $(last "$tmp/p14")"
 fi
 touch "$DIR/phase1-done"
 

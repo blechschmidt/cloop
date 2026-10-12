@@ -136,12 +136,24 @@ machine. It:
 2. runs `cloop remote kube share --access write --sa-namespace … --ttl 10m` and
    checks the plugin was told the cluster, the five objects and their RBAC, and
    that RBAC alone *would* let the ServiceAccount create its own token;
-3. grants the share to the hub's project and dispatches a task running
-   [`share_probe.sh`](share_probe.sh);
+3. grants the share to the hub's project for writes and dispatches a task
+   running [`share_probe.sh`](share_probe.sh) — which, besides reading and
+   writing, tries every way a write grant could mint a ServiceAccount credential
+   of its own (Task 20420); the test then checks from outside that none of those
+   objects exists, and that a Deployment the cluster administrator made, running
+   as a ServiceAccount of its own, still has its image;
 4. waits for the hub to renew the share, then for the first token to expire, and
    has the same run use the cluster again;
 5. revokes the share and checks nothing labelled `cloop.dev/kube-share=<id>` is
-   left, the secret is gone and the run is cut off; then reads the audit trail.
+   left, the secret is gone and the run is cut off;
+6. uploads a crafted share: its token is for a ServiceAccount the cluster
+   administrator made, an object named like the share's and a decoy labelled
+   with its id by another owner sit in its namespace, and its metadata lists
+   `cluster-admin`'s binding. Revoked with the administrator's own kubeconfig,
+   it deletes nothing and keeps the hub's secret; `--force` deletes the secret
+   and still nothing in the cluster. Then the test reads the audit trail,
+   including a `kubeguard.request_denied` row for each credential refusal's
+   reason.
 
 | id | passes when |
 | --- | --- |
@@ -152,6 +164,12 @@ machine. It:
 | P5 | `kube-system` is refused by the monitor |
 | P6 | after the token the run's session started with has expired, the run reads and writes again (the hub renewed the share; the session took the new token up) |
 | P7 | after `cloop remote kube revoke`, the run can no longer reach the cluster |
+| P8 | a `kubernetes.io/service-account-token` Secret is refused by the monitor (`service_account_token_secret`) |
+| P9, P10 | a Pod, and a Deployment, naming a ServiceAccount other than the namespace's default are refused (`workload_service_account`) |
+| P11 | a Pod mounting the node's `/var/lib/kubelet` through `hostPath` is refused (`host_access`) |
+| P12 | `kubectl set image` on a Deployment that already runs as another ServiceAccount is refused — the monitor reads the Deployment before the patch |
+| P13 | a RoleBinding is refused (`rbac_binding`) |
+| P14 | an ordinary Pod, as the namespace's default ServiceAccount, passes (a server-side dry run, so nothing is scheduled) |
 
 ```bash
 kind create cluster --name cloop-share

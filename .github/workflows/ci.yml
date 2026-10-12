@@ -2474,6 +2474,11 @@ jobs:
     # whose probe drives kubectl through the monitor — read, write, and the
     # serviceaccounts/token refusal — across the hub's renewal and the first
     # token's expiry, and a revoke that must leave no labelled object behind.
+    # Task 20420 added the proofs that the write grant cannot obtain a
+    # ServiceAccount token by Secret or Pod (or Deployment, hostPath Pod,
+    # RoleBinding, or a patch to a workload already running as another
+    # ServiceAccount), and that a crafted share's revoke — run with a
+    # cluster-admin kubeconfig — deletes nothing it did not create.
     # See tests/kube/README.md.
     #
     # A job of its own, not a step of deploy-artifacts: it needs no chart, and
