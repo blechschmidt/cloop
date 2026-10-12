@@ -2003,6 +2003,38 @@ If you see `unreachable` and the credential is compromised, revoke it at the
 source — rotate the PAT at GitHub, rotate the kubeconfig's credentials — because
 that is the only action that does not depend on a machine you cannot talk to.
 
+### When the hub member holding the lease is gone
+
+On a [hub cluster](../architecture/hub-cluster.md) a lease is held by the member
+that dispatched — or adopted — its run. If that member has died, nothing alive
+holds the lease, and a revoke cannot reach the workload yet. It is **recorded**
+all the same, and answered `202` rather than `404`:
+
+```json
+{"ok": true, "recorded": true, "state": "revoke_pending",
+ "pending": [{"executor_id": "container", "state": "revoke_pending",
+   "error": "recorded; takes effect when hub member hub_7c1… 's run is reached: …"}]}
+```
+
+A revoke made in the seconds after a member died, before any member has judged
+it dead, cannot ask that member and is answered the same way: the member is
+listed under `pending` as `hub member <id>`, "could not be asked", rather than
+as an `unreachable` holder. The record binds it whether it stopped or is only
+cut off: if it is still running, its own lease janitor takes the credential
+back, and no hub process extends the lease meanwhile.
+
+From then on no hub process may take the lease over or keep it alive. The
+member that adopts the run — the leader for a container, Pod or host process,
+the member holding an agent's socket for the agent's — takes the credential
+back from the workload instead of restoring the lease, and restores none of the
+git proxy or Kubernetes monitor sessions it fed. A revoke made after a member is
+judged dead has the leader adopt the run at once, or reach the container or Pod
+through its executor when the run cannot be adopted, so it is usually enforced
+before it answers. A host process the dead member forked keeps running, but
+its credential directory is wiped as soon as a member sees the death. Until a
+pending revocation is enforced the workload keeps what it was given — revoke at
+the source if that matters.
+
 `not revocable` in the panel means a holder cannot honour a `revoke` frame —
 most often an agent older than protocol v2, though an offline device or a
 driver that cannot revoke shows it too; the chip's tooltip says which holder and
@@ -2033,7 +2065,9 @@ Revocation is driven from four places, all through the same path:
 3. **Cordon and drain** — taking a device out of rotation scrubs everything it
    is holding. It scrubs rather than kills, because draining explicitly waits
    for in-flight work to finish and killing it would contradict the operation
-   you asked for.
+   you asked for. When the hub member holding the device's connection cannot be
+   asked, every lease issued to the device is recorded revoked and revoked from
+   the member you cordoned it on.
 4. **Grant revocation** — [revoking a grant](#revoking-a-grant), or deleting
    the secret it points at, scrubs that grant from every lease carrying it and
    leaves the lease's other grants in place.

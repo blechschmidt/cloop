@@ -27,6 +27,9 @@ where the work was never meant to leave anyway.
 - [Running one](#running-one)
 - [What the members share](#what-the-members-share)
 - [Runs, agents and failover](#runs-agents-and-failover)
+- [A member that stops answering](#a-member-that-stops-answering)
+- [Revoking what a dead member held](#revoking-what-a-dead-member-held)
+- [No run goes unsupervised](#no-run-goes-unsupervised)
 - [The peer channel](#the-peer-channel)
 - [Configuration](#configuration)
 - [Operating it](#operating-it)
@@ -261,7 +264,7 @@ When the owner stops, what happens next depends on where the run's workload is:
 | --- | --- |
 | An edge agent | The agent reconnects through the load balancer to another member, which **adopts** the run: it keeps streaming and settles it. The harness is not restarted. |
 | A container or a Pod | The leader adopts it: the container or Pod is still running, and the leader reattaches to it. |
-| The hub host (`localprocess`) | The run was the member's child process and ends with it. The leader settles it as interrupted; auto-resume, if enabled, starts it again. |
+| The hub host (`localprocess`) | A member that is killed does not take its child with it: the run's process is reparented and carries on. The leader adopts it when it runs on the same machine, in the same pid namespace — it cannot stream the process's output, which went to a pipe the dead member held, but it watches the process to its end and settles the run. Its **credentials do not survive**: the lease directories the dead member materialised in `/dev/shm` are wiped as soon as a member sees it die (Task 20419), so the run carries on without them. A leader in another pid namespace cannot see the process and settles the run as interrupted; auto-resume, if enabled, starts it again. A member stopped gracefully ends its runs first. |
 
 On a graceful stop (SIGTERM, a rolling update) a member releases what it holds
 on the way out, so adoption starts at once. After a crash it starts when the
@@ -274,7 +277,29 @@ busy for two minutes, then is recovered like any run whose process is gone.
 A member that finds a run's workload gone or finished when it adopts it settles
 the run exactly as the owner would have. A run that was claimed but never
 dispatched — the member died between the two — is cleared by the leader so the
-project can start again.
+project can start again; one whose dispatch got as far as its executor is
+cleared only once the workload it may have started is stopped
+([No run goes unsupervised](#no-run-goes-unsupervised)).
+
+Adopting a container's, Pod's or host process's workload claims its row in
+`executor_handles` (Task 20419): the row names the member that adopted it, by
+a compare-and-swap on the member it named before, and a member's drivers adopt
+only their own rows and those of a stopped member when that member is the one
+adopting for it — the leader, or a member serving alone. A member started later
+used to adopt every row a dead member left, alongside the member that had taken
+the run over: two log pumps, two kill timers and, for a Pod, two lease renewers
+for one workload. Rows also carry what the dispatcher kept in memory and an
+adopter needs: where a container's credential files are staged on the host
+(the directory, its identity and each file's lease and grant — never the
+contents) and which key of a Pod's lease Secret each file is projected from. An
+adopter wipes a container's staged files when it ends, revokes them without
+removing the container, and refreshes a GitHub App token delivered as a file in
+a container or a Pod, as the dispatcher would have; before, GitHub stopped
+honouring such a token an hour into an adopted run. A staged directory is
+trusted only if it is under a staging base, named as the driver names them and
+still the directory it was — the sandbox user owns it and could have replaced
+it — and a stage that cannot be accounted for makes a revocation remove the
+container instead.
 
 An adopting member takes over what the owner held for the run besides its
 output (Task 20382): its secret lease — recorded in `secret_leases` under the
@@ -299,6 +324,129 @@ mid-run](executors.md#the-project-comes-back-task-20339) and
 Executor health probes are divided the same way: an agent is probed by the
 member holding its connection, every other executor by the leader, so an
 executor is never marked offline by a member that simply cannot see it.
+
+---
+
+## A member that stops answering
+
+A heartbeat proves one goroutine and one database write. A member can keep both
+going while everything that serves requests is stuck — a deadlock in a handler,
+a listener that stopped accepting, an advertise address that leads nowhere —
+and until Task 20419 such a member was as alive as any other: requests
+forwarded to it waited on it without bound, and its runs were never adopted.
+
+Each member now asks every live peer, every 5 seconds, whether it answers: a
+signed `GET /api/internal/cluster/ping` over the [peer channel](#the-peer-channel),
+bounded at 5 seconds. A peer that has failed every probe for the member TTL (20
+seconds), and at least twice, is **unresponsive** to that member, which from
+then on treats it as down for everything that hands work over:
+
+- what it owns — runs, agent sockets, in-flight logins and conversations — is
+  adoptable, and adopted by the member that would adopt it from a member that
+  died;
+- nothing more is forwarded to it, and the requests already waiting on it fail
+  at once with a `502` that says it is not answering;
+- its handle rows and its host-process lease directories are a stopped
+  member's.
+
+If the leader itself stops answering it keeps its lease, which is renewed in
+the database, so the member serving longest adopts in its stead. The verdict is
+each member's own and is cleared by the first answer; adoption is a
+compare-and-swap on the owner row, so two members judging differently still
+produce one adopter, and a member judged wrongly — slow rather than stuck —
+finds its run adopted at its next ownership check and lets it go, as a member
+paused past its heartbeat TTL does. `GET /api/cluster` lists such a member as
+`alive` with `unresponsive` set.
+
+A request a member accepted and never answers is also bounded on its own: a
+forwarded request waits at most 6 minutes for the owner's response headers —
+longer than the slowest request a member answers only once its work is done, a
+voice transcription or an agent's `cloop init`, each bounded at 5 minutes — and
+then fails with a `502`. Once the headers arrive, a response streams for as long
+as it lasts.
+
+---
+
+## Revoking what a dead member held
+
+A run's secret lease is held by one member: the one that dispatched or adopted
+the run, which keeps it alive and releases it. When that member dies the lease
+is held by nobody until another member adopts the run — and revoking it in that
+window used to answer `404 no lease with that id is open`, record nothing, and
+let the adopter take the lease over and restore the git proxy and Kubernetes
+monitor sessions it fed. An incident responder's revoke was undone without a
+trace. Since Task 20419:
+
+- **A lease revocation is recorded** in `secret_lease_revocations` before any
+  holder is asked, and outlives the lease record. The broker refuses to hand a
+  revoked lease to a new holder, so the member adopting the run takes the
+  material back from the workload instead — closing nothing it would have
+  restored, because it restores nothing — and retires the lease's record. It
+  also refuses to extend one, so a live holder the revocation could not reach
+  lets the lease lapse, and its own lease janitor takes it back within a pass.
+- **The answer is `202`, not `404`,** when nothing reachable holds the lease
+  because its member is gone: the revocation is recorded, and each holder it
+  waits for is listed under `pending` with when it takes effect — when that
+  member's run is reached. A member the revocation could not ask, which in the
+  seconds after a death is usually a member not yet judged dead, is listed
+  there too, as `hub member <id>`, rather than as an `unreachable` holder. The
+  record binds it either way: if it is still running, its own lease janitor
+  takes the credential back, and if it stopped, so does the member that adopts
+  its run. `200` still means every holder answered.
+- **The member that adopts a dead member's runs reaches them now**, rather than
+  at its next sweep: a revocation — of a lease, of a grant, of a lapsed lease —
+  that concerns a lease a dead member held has that member's run adopted first
+  by the member that would adopt it (the leader for a container, Pod or host
+  process; the member holding an agent's socket for the agent's), and the
+  leader also rehydrates the dead member's handle rows into its own drivers, so
+  a container or Pod whose run cannot be adopted at all — its claim was never
+  recorded — is reached through its executor all the same. What adoption took
+  back is reported as the revocation's.
+- **A grant revocation reports such a lease honestly.** The cascade used to
+  skip leases "held by nobody here", so it reported `revoked` while a dead
+  member's container still held the material; the leader now lists the lease
+  as `pending` until its workload is reached.
+- **Host-process lease directories go when their member does.** A member that
+  sees another die wipes the directories that member materialised in
+  `/dev/shm` on this machine; one not visible from here (another machine,
+  another mount namespace) is left on record for a process that can see it.
+- **A cordon whose agent's member cannot be asked** — dead and not yet judged
+  so — records each lease issued to the agent revoked and revokes it from the
+  member that cordoned, rather than logging the failure.
+
+A revocation stays pending until a process finds the material gone from every
+holder; the lease janitor retries pending ones, backing off to every half hour,
+and the leader prunes enforced ones after 30 days.
+
+---
+
+## No run goes unsupervised
+
+A dispatch is on record before its workload exists (Task 20419). The member
+writes a **dispatch intent** — the run id, the executor, itself, the run's
+leases — to `dispatch_intents` before it asks the executor for anything, and
+marks the project's run claim with the run id; it completes the intent with the
+workload's handle; and it retires it once the run is on record, or when the
+workload ends. Every step of becoming supervised must succeed:
+
+- an intent, a session record (`executor_sessions`, which failover reads) or
+  the run's owner row that cannot be written **refuses the dispatch**: the
+  workload, if it already exists, is stopped, its lease released, its egress
+  session closed, and `POST /api/run` answers `503` with the storage error. It
+  used to proceed untracked — never failed over, never adopted, its
+  credentials never taken back after its member died;
+- an intent whose member died names a workload no member supervises. The
+  member that would have adopted its run stops it — through the handle its
+  driver recorded, rehydrated from the dead member's row, or by its run id (a
+  container's `cloop.spec.run_id` label, a Pod's `cloop.dev/run-id`) — takes
+  its leases back and retires their records, and only then does the leader
+  clear the dead member's claim. A claim whose dispatch reached its executor
+  holds its project for the orphan grace meanwhile, so the project cannot be
+  started again beside the workload.
+
+An intent whose run turns out to be on record after all — the member died
+between recording the run and retiring the intent — is retired and the run left
+to adoption.
 
 A run whose executor is *lost* — declared unreachable by those probes, rather
 than its member stopping — is failed over, and that too happens where it can
@@ -431,14 +579,17 @@ readiness does not depend on leadership: every member serves.
 
 - **One kernel.** Members must share the database file through one kernel — one
   machine, or one node. There is no multi-node mode.
-- **Host-executor runs end with their member**, as described
-  [above](#runs-agents-and-failover). Use an isolating executor for runs that
-  must survive a member.
+- **Host-executor runs outlive a killed member without their credentials**, as
+  described [above](#runs-agents-and-failover): the process carries on, its
+  lease directory is wiped, and only a member in its pid namespace can watch it.
+  Use an isolating executor for runs that must survive a member intact.
 - **Credentials minted by a member that dies** are restored by the member that
   adopts their run when they stand on the run's lease or belong to the run — its
   git proxy, Kubernetes monitor and egress sessions (Task 20383), and since Task
   20390 a device workspace's pinned session, whose workspace lease the run's
-  owner row names. A request made before the adoption waits up to 60 seconds
+  owner row names — unless the lease was revoked meanwhile: then nothing is
+  restored and the material is taken back
+  ([Revoking what a dead member held](#revoking-what-a-dead-member-held)). A request made before the adoption waits up to 60 seconds
   for it. A restored git or Kubernetes session is served by its adopter and a
   request reaching another member is forwarded there, so the proxies'
   `advertise_url` has to reach some live member — a load balancer, or one
@@ -481,6 +632,20 @@ readiness does not depend on leadership: every member serves.
 - [`pkg/ui/cluster_test.go`](../../pkg/ui/cluster_test.go) — two or three
   dashboards on one database: relayed output and presence, forwarded Stops and
   callbacks, refused forgeries, shared quota counters.
+- [`pkg/ui/run_supervision_test.go`](../../pkg/ui/run_supervision_test.go) and
+  [`run_supervision_cluster_test.go`](../../pkg/ui/run_supervision_cluster_test.go)
+  — a dead holder's lease revoked (`202`, recorded) and taken back on adoption
+  instead of taken over; a dispatch whose session record the database refuses
+  (`PRAGMA query_only`) refused and its workload stopped; a dead member's
+  unrecorded dispatch reaped before its claim is cleared; a member that
+  heartbeats without answering having its run adopted; a dead member's host
+  lease directory wiped before its record goes; a workload row adopted by one
+  member.
+- [`pkg/hubcluster/probe_test.go`](../../pkg/hubcluster/probe_test.go) — a
+  forward to a member that never answers bounded by the header timeout; a
+  member that heartbeats but does not answer judged unresponsive, its requests
+  failed, what it owns orphaned; an unresponsive leader's adoption done in its
+  stead.
 - [`tests/cluster`](../../tests/cluster/cluster_test.go) — three real `cloop ui`
   processes behind a load balancer with an enrolled edge agent: a run started on
   one member is dispatched by the agent's member and watched from the third; its
@@ -491,6 +656,13 @@ readiness does not depend on leadership: every member serves.
   after a member dies, and the run's start, completion and cancellation are each
   counted once across the cluster. It runs in CI as the `hub-cluster` job,
   against a binary built with the race detector.
+- [`tests/cluster/revocation_test.go`](../../tests/cluster/revocation_test.go)
+  — two real members; the one holding a run's lease is SIGKILLed and the lease,
+  then its grant, are revoked through the survivor. For a container run the
+  credential is gone from the sandbox and its staged copy from the host, and
+  the lease is never restored on adoption; for a host-process run the dead
+  member's `/dev/shm` directory is wiped while the reparented process runs on.
+  In the `hub-cluster` job.
 - The chart job in CI installs the Helm chart into a kind cluster, scales it to
   three replicas, and asserts one cluster with one leader on one node — before
   and after a rolling restart that replaces every member.
