@@ -76,7 +76,10 @@ act('submitKBAdd', function() {
   }).catch(() => toast('Failed to add entry', 'err'));
 });
 
+// Asks first, naming the entry; one the tab is not showing is not deleted.
 act('deleteKBEntry', function(id) {
+  const e = _kbEntries.find(x => x.id === id);
+  if (!e || !confirm('Delete "' + e.title + '" from the knowledge base?\n\nThis cannot be undone.')) return;
   apiMethod('DELETE', pUrl('/api/kb/' + id), null).then(d => {
     if (d.ok) { toast('Entry deleted', 'ok'); loadKB(); }
     else toast(d.error || 'Delete failed', 'err');

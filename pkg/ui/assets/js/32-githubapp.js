@@ -12,10 +12,11 @@
 // the operator can copy from; and both, typed by hand, are wrong in ways
 // nothing notices until a clone 404s inside a sandbox.
 //
-// Every listener here is attached rather than inlined. Repository names and
-// account logins are attacker-influenced strings (anyone who can name a repo
-// can choose what is in it), and an onclick built by concatenation is how that
-// becomes markup — see the recurring bug class in this dashboard's history.
+// Every control here is an action of the dashboard's registry that runs only
+// from inside this panel (see Wiring). Repository names and account logins are
+// attacker-influenced strings (anyone who can name a repo can choose what is
+// in it), and an onclick built by concatenation is how that becomes markup —
+// see the recurring bug class in this dashboard's history.
 
 const ghAppState = {
   apps: [],            // the Apps this project may be assigned repositories from
@@ -122,15 +123,15 @@ function ghAppEditRow(a) {
   const write = a.access === 'write';
   return '<tr class="gh-edit-row"><td colspan="5" style="background:var(--hover-bg)">' +
     '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-      '<select class="input gh-edit-access" style="max-width:150px">' +
+      '<select class="input gh-edit-access" data-action-change="ghEditAccess" style="max-width:150px">' +
         '<option value="read"' + (write ? '' : ' selected') + '>Read only</option>' +
         '<option value="write"' + (write ? ' selected' : '') + '>Read and write</option>' +
       '</select>' +
       '<input class="input gh-edit-branches" style="flex:1;min-width:200px' + (write ? '' : ';display:none') +
         '" placeholder="Push to branches — e.g. cloop/*, feature/**" value="' +
         esc((a.branches || []).join(', ')) + '">' +
-      '<button class="btn btn-sm btn-primary" data-gh-edit-save="' + esc(a.grant_id) + '">Save</button>' +
-      '<button class="btn btn-sm" data-gh-edit-cancel="1">Cancel</button>' +
+      '<button class="btn btn-sm btn-primary" data-action="ghSave" data-arg="' + esc(a.grant_id) + '">Save</button>' +
+      '<button class="btn btn-sm" data-action="ghCancel">Cancel</button>' +
     '</div>' +
     '<div class="gh-branch-hint" style="font-size:11px;color:var(--muted);margin-top:6px' +
       (write ? '' : ';display:none') + '">' + ghAppBranchHint() + '</div>' +
@@ -161,11 +162,11 @@ function ghAppRenderAssignments() {
         const exp = a.expires_at && !a.expires_at.startsWith('0001-')
           ? esc(new Date(a.expires_at).toLocaleString()) : 'no expiry';
         const revoke = canGrant
-          ? '<button class="btn btn-sm btn-danger" data-gh-revoke="' + esc(a.grant_id) + '">Revoke</button>'
+          ? '<button class="btn btn-sm btn-danger" data-action="ghRevoke" data-arg="' + esc(a.grant_id) + '">Revoke</button>'
           : '';
         // A wildcard grant reaching this project is edited where it was made.
         const edit = canGrant && a.replaceable
-          ? '<button class="btn btn-sm" data-gh-edit="' + esc(a.grant_id) + '">Edit</button> '
+          ? '<button class="btn btn-sm" data-action="ghEdit" data-arg="' + esc(a.grant_id) + '">Edit</button> '
           : '';
         return '<tr><td>' + repos + '</td>' +
           '<td><span class="badge ' + (a.access === 'write' ? 'running' : 'complete') +
@@ -192,11 +193,11 @@ function ghAppRenderAssignments() {
           '<select id="ghAssignApp" class="input" style="max-width:220px">' +
             apps.map(a => '<option value="' + esc(a.id) + '">' + esc(a.name) + '</option>').join('') +
           '</select>' +
-          '<select id="ghAssignAccess" class="input" style="max-width:150px">' +
+          '<select id="ghAssignAccess" class="input" data-action-change="ghAccess" style="max-width:150px">' +
             '<option value="read">Read only</option>' +
             '<option value="write">Read and write</option>' +
           '</select>' +
-          '<button class="btn btn-sm" id="ghAssignLoad">List repositories</button>' +
+          '<button class="btn btn-sm" data-action="ghLoad">List repositories</button>' +
         '</div>' +
         '<div id="ghAssignBranchGroup" style="display:none;margin-top:8px">' +
           '<input id="ghAssignBranches" class="input" style="width:100%" ' +
@@ -245,7 +246,7 @@ function ghAppLoadRepos() {
             (r.private ? '<span class="badge unknown" style="font-size:9px">private</span>' : '') +
           '</label>').join('') +
         '</div>' +
-        '<button class="btn btn-sm btn-primary" id="ghAssignSubmit" style="margin-top:8px">' +
+        '<button class="btn btn-sm btn-primary" data-action="ghSubmit" style="margin-top:8px">' +
         'Grant access</button>';
     }).catch(e => {
       out.innerHTML = '<div style="color:var(--danger);font-size:12px">' +
@@ -296,7 +297,12 @@ function ghAppSaveEdit(grantID, row) {
   }).catch(e => toast(String(e && e.message ? e.message : e), 'error'));
 }
 
+// ghAppRevoke takes a grant away, once the user confirms which. A grant the
+// panel is not showing is not revoked from here.
 function ghAppRevoke(grantID) {
+  const a = ghAppState.assignments.find(x => x.grant_id === grantID);
+  if (!a || !confirm('Revoke this project\'s access to ' + (a.repos || []).join(', ') +
+    '?\n\nA run in progress loses it at once.')) return;
   apiMethod('DELETE', '/api/projects/' + ghAppProjectIdx() +
     '/repositories?grant=' + encodeURIComponent(grantID))
     .then(d => {
@@ -310,42 +316,27 @@ function ghAppRevoke(grantID) {
 // Wiring
 // ---------------------------------------------------------------------------
 
-// One delegated listener for every control this file renders. Delegation
-// rather than per-element binding because the panels are re-rendered whole on
-// each load, which would otherwise strip the handlers with the markup.
-document.addEventListener('click', function(ev) {
-  const t = ev.target;
-  if (!t || !t.closest) return;
-
-  const revoke = t.closest('[data-gh-revoke]');
-  if (revoke) { ghAppRevoke(revoke.getAttribute('data-gh-revoke')); return; }
-
-  if (t.closest('#ghAssignLoad')) { ghAppLoadRepos(); return; }
-  if (t.closest('#ghAssignSubmit')) { ghAppSubmitAssignment(); return; }
-
-  const edit = t.closest('[data-gh-edit]');
-  if (edit) { ghAppState.editing = edit.getAttribute('data-gh-edit'); ghAppRenderAssignments(); return; }
-  if (t.closest('[data-gh-edit-cancel]')) { ghAppState.editing = ''; ghAppRenderAssignments(); return; }
-  const save = t.closest('[data-gh-edit-save]');
-  if (save) { ghAppSaveEdit(save.getAttribute('data-gh-edit-save'), save.closest('tr')); return; }
-});
-
+// Each control is an action of 00-core.js's registry, and runs only from
+// inside this panel (Task 20422). The panel used to route its own data-gh-*
+// attributes from one listener on the whole document, so an element carrying
+// one anywhere on the page — markup injected into a task's output, say —
+// revoked a repository grant when clicked.
+const ghPanel = fn => function(ev) { if (this.closest('#projectReposPanel')) return fn.call(this, ev); };
+ACTIONS.ghRevoke = ghPanel(function() { ghAppRevoke(this.dataset.arg); });
+ACTIONS.ghLoad = ghPanel(ghAppLoadRepos);
+ACTIONS.ghSubmit = ghPanel(ghAppSubmitAssignment);
+ACTIONS.ghEdit = ghPanel(function() { ghAppState.editing = this.dataset.arg; ghAppRenderAssignments(); });
+ACTIONS.ghCancel = ghPanel(function() { ghAppState.editing = ''; ghAppRenderAssignments(); });
+ACTIONS.ghSave = ghPanel(function() { ghAppSaveEdit(this.dataset.arg, this.closest('tr')); });
 // The access level shows or hides its branch field; change, so keyboards work too.
-document.addEventListener('change', function(ev) {
-  const t = ev.target;
-  if (!t || !t.closest) return;
-  const write = t.value === 'write';
-  if (t.id === 'ghAssignAccess') {
-    const g = document.getElementById('ghAssignBranchGroup');
-    if (g) g.style.display = write ? '' : 'none';
-    return;
-  }
-  if (t.classList && t.classList.contains('gh-edit-access')) {
-    const row = t.closest('tr');
-    if (!row) return;
-    const input = row.querySelector('.gh-edit-branches');
-    const hint = row.querySelector('.gh-branch-hint');
-    if (input) input.style.display = write ? '' : 'none';
-    if (hint) hint.style.display = write ? '' : 'none';
-  }
+ACTIONS.ghAccess = ghPanel(function() {
+  const g = document.getElementById('ghAssignBranchGroup');
+  if (g) g.style.display = this.value === 'write' ? '' : 'none';
+});
+ACTIONS.ghEditAccess = ghPanel(function() {
+  const row = this.closest('tr');
+  ['.gh-edit-branches', '.gh-branch-hint'].forEach(q => {
+    const el = row && row.querySelector(q);
+    if (el) el.style.display = this.value === 'write' ? '' : 'none';
+  });
 });

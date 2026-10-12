@@ -242,7 +242,7 @@ async function scenarioPanelShowsTheRestriction(cdp) {
     panel_visible: await cdp.eval(visibleExpr('#projectReposPanel')),
     names_branch: text.indexOf('branches: cloop/*') >= 0,
     says_not_enforced: text.indexOf('no git proxy') >= 0,
-    edit_visible: await cdp.eval(visibleExpr('[data-gh-edit]')),
+    edit_visible: await cdp.eval(visibleExpr('[data-action="ghEdit"]')),
   };
 }
 
@@ -266,7 +266,7 @@ async function scenarioEditReplacesTheGrant(cdp) {
   const before = await fetchJSON(cdp, '/api/projects/0/repositories');
   const oldID = before.assignments[0].grant_id;
 
-  await click(cdp, '[data-gh-edit]');
+  await click(cdp, '[data-action="ghEdit"]');
   await waitFor(cdp, `!!document.querySelector('.gh-edit-row')`, 'the edit row to open');
   const prefilled = await cdp.eval(`document.querySelector('.gh-edit-branches').value`);
 
@@ -282,7 +282,7 @@ async function scenarioEditReplacesTheGrant(cdp) {
   await cdp.eval(`document.querySelector('.gh-edit-branches').select()`);
   await cdp.send('Input.insertText', {text: 'feature/**, release/*'});
 
-  await click(cdp, '[data-gh-edit-save]');
+  await click(cdp, '[data-action="ghSave"]');
   await waitFor(cdp, `!document.querySelector('.gh-edit-row')`, 'the edit row to close after saving');
 
   // The hub, not the screen, is the witness: what we typed is on the screen.
