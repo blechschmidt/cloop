@@ -704,9 +704,30 @@ grants the user it belongs to.
 
 Both are enforced by the [Kubernetes access monitor](../architecture/kubernetes-access.md),
 which runs outside the sandbox and decides every API request before the cluster
-credential is attached. Turn it on with `executors.kube_guard.enabled: true`.
-Without it, `--namespaces` and `--verbs` are recorded and audited but not
-enforced, and the Secrets panel marks such a grant **unguarded**.
+credential is attached. Turn it on with `executors.kube_guard.enabled: true`
+(`tls: auto`). Without it nothing would enforce either, so since Task 20420 a
+grant that names `--namespaces`, or fewer verbs than all eight — read-only, the
+default, included — is **not delivered**: the run goes without it, told why on
+its Activity tab, the Secrets panel badges the grant **no kube monitor: not
+delivered**, and `cloop hub doctor` fails. Where handing the workload the
+cluster credential unenforced is genuinely acceptable, an administrator records
+that on the grant, with a reason:
+
+```console
+$ cloop hub grant unguarded grant_187bd292e8f8da691fa698ea --reason "lab cluster, monitor next sprint"
+✓ grant_187bd292e8f8da691fa698ea may be delivered without the Kubernetes access monitor
+  unenforced  namespaces team-a and read-only access (get, list, watch)
+  recorded    by cli:root at 2026-10-12T14:02:11Z
+  reason      lab cluster, monitor next sprint
+```
+
+— or with **Acknowledge unguarded** on the grant's row in the Secrets panel
+(administrators). It is audited (`secret.unguarded_ack`), shown on the grant
+wherever it appears, and withdrawn with `--withdraw` or **Withdraw
+acknowledgement**. See [without the
+monitor](../architecture/kubernetes-access.md#without-the-monitor-refused-unless-acknowledged).
+A grant naming only contexts and every verb claims nothing a monitor enforces
+and is delivered without one as before.
 
 Delivered as:
 
@@ -825,12 +846,24 @@ Deleted RoleBinding payments/cloop-aks-dev-3f9c2a1b
 Deleted secret aks-dev from https://cloop.example.com, revoking its 2 active grant(s).
 ```
 
-`revoke` deletes the ServiceAccount first — which invalidates every token ever
-minted for it, the hub's and any copy — then its bindings and Role, then the
-hub's secret, which revokes its grants and closes the monitor sessions standing
-on it. If the cluster cannot be reached or an object cannot be deleted, the
-secret is kept so the revoke can run again; `--force` deletes it anyway and
-prints the `kubectl delete … -l cloop.dev/kube-share=<id>` that removes the rest.
+`revoke` asks the hub first whether you may revoke the share, and touches
+nothing if not. It then deletes the ServiceAccount — which invalidates every
+token ever minted for it, the hub's and any copy — then its bindings and Role,
+then the hub's secret, which revokes its grants and closes the monitor sessions
+standing on it. It deletes **only** what it reads back from the cluster carrying
+the share's `cloop.dev/kube-share` label and an owner annotation naming the
+share's owner; anything else it was pointed at is reported as `Not deleted, not
+this share's` and left alone. `revoke` and `renew` also refuse a context that
+does not reach the share's own API server through the CA the share trusts — pass
+`--context` to name one that does — and `renew` mints only for a ServiceAccount
+it reads back as the share's (Task 20420). If the cluster cannot be reached or an
+object cannot be deleted, the secret is kept so the revoke can run again;
+`--force` deletes it anyway and names what is left of the share's own, or lists
+the candidates with their owner to check before you delete anything.
+
+A personal share is renewed by the hub only while its owner may use the hub:
+suspended at the identity provider, or offboarded with the secret kept under a
+legal hold, it is **stopped**, and `list` says why.
 
 Deleting the secret on the hub instead — from the Secrets panel, or because its
 owner was [offboarded](#when-the-owner-of-a-personal-secret-leaves) — destroys
@@ -926,7 +959,8 @@ the lease and written to the project's **Activity** tab as a
 `credential_refused` event on every run it affects, naming the run — `This run
 goes without kubeconfig "aks-kube", which the project was granted, because the
 hub could not deliver it: credential guard unavailable: … exec credential
-plugin …`. The same holds for every other kind the broker refuses this way: a
+plugin …`. A grant [refused for want of the monitor](#kubeconfig) is told the
+same way, naming `cloop hub grant unguarded`. The same holds for every other kind the broker refuses this way: a
 GitHub token the git proxy could not take, an App token GitHub would not mint.
 A credential whose secret was destroyed is told once per hub process instead
 ([below](#when-the-owner-of-a-personal-secret-leaves)), since nothing will

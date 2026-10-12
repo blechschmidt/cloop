@@ -13,18 +13,21 @@ allowlist stops being a default `kubectl` can ignore and becomes a property of
 the network path. "Read-only", which a kubeconfig has no field for at all, starts
 existing.
 
-The monitor runs **inside the hub process** and is **off by default**. An
-unconfigured hub behaves exactly as [the hole it closes](#the-hole-it-closes)
-describes: the cluster credential is delivered into the sandbox, minimised to
-the contexts the grant allows, and the namespace list is a suggestion. Setting
-`executors.kube_guard.enabled: true` turns it on, and from then on every
-kubeconfig grant the hub delivers is a monitor session instead. See
+The monitor runs **inside the hub process** and is **off by default**. Without
+it, a kubeconfig grant that names namespaces, or fewer verbs than all of them —
+read-only, the default, above all — is **not delivered** (Task 20420): nothing
+would enforce what it says, as [the hole it closes](#the-hole-it-closes)
+describes. An administrator may acknowledge delivering one anyway, on the
+record ([without the monitor](#without-the-monitor-refused-unless-acknowledged)).
+Setting `executors.kube_guard.enabled: true` turns the monitor on, and from then
+on every kubeconfig grant the hub delivers is a monitor session instead. See
 [turning it on](#turning-it-on).
 
 This is the same bargain the [git interception proxy](../git-interception-proxy.md)
 makes for git, and the two packages are deliberately shaped alike.
 
 - [The hole it closes](#the-hole-it-closes)
+- [Without the monitor: refused, unless acknowledged](#without-the-monitor-refused-unless-acknowledged)
 - [The inversion](#the-inversion)
 - [What a request is, and how it is decided](#what-a-request-is-and-how-it-is-decided)
 - [The policy](#the-policy)
@@ -39,8 +42,8 @@ makes for git, and the two packages are deliberately shaped alike.
 
 ## The hole it closes
 
-With the monitor off — the default, and what an un-configured hub does — a
-kubeconfig grant is delivered by rewriting the document. `MinimizeKubeconfig`
+Without the monitor a kubeconfig grant can only be delivered by rewriting the
+document. `MinimizeKubeconfig`
 drops every context outside `--contexts`, pins each survivor to an allowed
 namespace, and removes the clusters and users nothing references any more,
 credentials included. See [the secrets guide](../guides/secrets.md#kubeconfig).
@@ -85,6 +88,69 @@ must live **outside** the sandbox — anything inside it is advice to code under
 obligation to take it. So: the hub keeps the credential, the sandbox gets a
 token worth only what the policy allows, and every request passes through a
 process the sandbox does not control.
+
+---
+
+## Without the monitor: refused, unless acknowledged
+
+Until Task 20420 a hub with no monitor delivered the minimised kubeconfig
+whatever the grant said, so a grant reading "read-only, namespace `app`" handed
+the workload everything the kubeconfig's identity may do, and nothing anywhere
+said so at the moment it happened. Now the broker refuses it
+(`ErrKubeConstraintsUnenforced`, `pkg/secretbroker/material.go`), the way a
+GitHub branch allowlist is refused without the git proxy:
+
+```console
+secretbroker: kubeconfig grant constraints cannot be enforced without the Kubernetes access
+monitor: grant grant_1a2b… limits kubeconfig dev-kube to namespaces app and read-only access
+(get, list, watch), which only cloop's Kubernetes access monitor enforces, and this hub runs
+none … It is not delivered — enable executors.kube_guard (enabled: true, tls: auto), or have an
+administrator acknowledge delivering it unenforced with `cloop hub grant unguarded grant_1a2b…
+--reason <why>`
+```
+
+What counts is `Constraints.KubeMonitorOnly`: a namespace list that confines
+(anything but `*`), and a verb list short of all eight — the empty list is
+read-only and claims the most. A grant naming only contexts **and** every verb
+claims nothing a monitor enforces (contexts are enforced by minimisation), so it
+is delivered as before. The refusal reaches the project like any other refused
+credential: named on the lease (`Lease.Refused`) and journaled per run.
+
+It is a rule about delivery into a workload. The `kubernetes` executor's own
+cluster credential — the grant `--to executor:<id>` it creates Pods with — is
+leased by a broker of the executor's own and used in the hub process
+([never routed through the monitor](#what-it-enforces-and-what-it-does-not)), so that
+lease says so (`Requester.KubeInProcess`) and is not refused; workspace
+provisioning, which reads only GitHub tokens out of the same subjects' lease,
+says the same. A *run* on that executor matches the same grant, and its lease
+is refused like any other.
+
+The fix is the monitor. The exception is an administrator's acknowledgement,
+recorded **on the grant** — who, when and why:
+
+```bash
+cloop hub grant unguarded grant_1a2b3c --reason "throwaway lab cluster, no monitor yet"
+cloop hub grant unguarded grant_1a2b3c --withdraw
+```
+
+or the **Acknowledge unguarded** button on the grant's row in the Secrets panel
+(`POST`/`DELETE /api/grants/{id}/unguarded`, `user.manage`). A reason is
+required. Recording or withdrawing one is its own audit row,
+[`secret.unguarded_ack`](../reference/audit-events.md#secret) /
+`secret.unguarded_withdraw`; every lease that delivers such a grant says
+"unguarded: … not enforced, acknowledged by …" in its summary; the Secrets
+panel badges the row (`kube_delivery`: `refused`, `acknowledged`, `monitor`,
+`monitor_down`, `unconstrained`, `monitor_required`); `cloop hub grant list`
+lists every acknowledged grant below the request queue, and `--grants` lists
+every grant with what it amounts to without the monitor. `cloop hub doctor`
+**fails** while an unacknowledged grant like this exists on a hub with the
+monitor off, and warns while an acknowledged one does.
+
+Two things no acknowledgement changes: a hub that asked for the monitor
+(`executors.kube_guard.enabled`) and is not running one refuses every kubeconfig
+(`ErrGuardUnavailable`), and a [share the hub renews](#renewal-through-the-monitor)
+is delivered only through the monitor, because its ServiceAccount may mint its
+own tokens.
 
 ---
 
@@ -288,7 +354,7 @@ kubeconfig from the lease's grant. See [a hub restarted mid-run](#a-hub-restarte
 | Leaked | Worth |
 | --- | --- |
 | **Session token** | Exactly the policy, for the remaining TTL, against **one** cluster, through **one** monitor. Under the default: get, list and watch, in the granted namespaces, with no exec, no port-forward, no writes, and nothing at all once the TTL lapses or the lease is released. Meaningless against the API server directly — it is not a credential the cluster has ever heard of. |
-| **Kubeconfig delivered into the sandbox** — what an un-configured hub still does | Whatever that cluster's RBAC grants the uploading user, which on a personal kubeconfig is frequently cluster-admin: every namespace, every verb, `exec` into any pod, from anywhere on the network, until somebody rotates the credential — which means rotating it for the human it belongs to as well. |
+| **Kubeconfig delivered into the sandbox** — what an un-configured hub still does for a grant that claims every verb in every namespace, or that an administrator [acknowledged](#without-the-monitor-refused-unless-acknowledged) | Whatever that cluster's RBAC grants the uploading user, which on a personal kubeconfig is frequently cluster-admin: every namespace, every verb, `exec` into any pod, from anywhere on the network, until somebody rotates the credential — which means rotating it for the human it belongs to as well. |
 
 Two sharper points follow:
 
@@ -357,19 +423,25 @@ than smoothed over.
 
 ### The order of the checks
 
-`Policy.Decide` runs six checks, in an order chosen for the message the operator
-reads rather than for speed: the most specific and most alarming reason wins.
+`Policy.Decide` runs seven checks, in an order chosen for the message the
+operator reads rather than for speed: the most specific and most alarming reason
+wins.
 
 1. **A dangerous subresource**, or the TokenRequest API, whatever the verb.
-2. **A protocol upgrade.**
-3. **A non-resource URL** — readable only, and only if it is in the allowlist.
-4. **The verb.**
-5. **The resource.**
-6. **The namespace.**
+2. **A write to RBAC or to a CertificateSigningRequest**, under every grant.
+3. **A protocol upgrade.**
+4. **A non-resource URL** — readable only, and only if it is in the allowlist.
+5. **The verb.**
+6. **The resource.**
+7. **The namespace.**
+
+A write that passes all seven and could [mint a credential by what it
+contains](#writes-that-would-mint-a-credential) is then read, and decided by its
+body.
 
 ### Subresources that are not data
 
-Four subresources are refused for **every** verb and cannot be opted back into
+Five subresources are refused for **every** verb and cannot be opted back into
 by any policy:
 
 | Subresource | What it actually is |
@@ -378,6 +450,7 @@ by any policy:
 | `attach` | a shell on a process already running in it |
 | `portforward` | a tunnel to anything the pod can reach, which on a cluster network is usually everything |
 | `proxy` | arbitrary requests to the kubelet or a Service, laundered through the API server's credential |
+| `ephemeralcontainers` | a new container inside a Pod already running — as whichever ServiceAccount that Pod runs as, with its token mounted (Task 20420); `edit` carries it |
 
 This is the single most important rule in the package, because the obvious
 implementation is wrong in a way that looks right:
@@ -409,6 +482,62 @@ error: failed to create token: serviceaccounts/token is refused by the cloop Kub
 for every verb, under every grant: it answers with a token for the cluster itself, which would
 never pass through this monitor again. …
 ```
+
+### Writes that would mint a credential
+
+The verb check cannot tell a ConfigMap from a credential, and a write grant holds
+`create` on both. Before Task 20420 the monitor refused only
+`serviceaccounts/token`, and a workload that may write a namespace — the `edit`
+role may create Secrets, Pods and Deployments — could still give itself a
+ServiceAccount credential that never passes through the monitor, that no grant's
+TTL bounds and that a revocation does not reach:
+
+| What the workload writes | Why it is a credential | Refusal |
+| --- | --- | --- |
+| a Secret of type `kubernetes.io/service-account-token`, or a write touching the `kubernetes.io/service-account.name`/`.uid` annotations | the token controller fills it in with a non-expiring token for the named ServiceAccount | `service_account_token_secret` |
+| a Pod, PodTemplate, ReplicationController, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job or CronJob naming a `serviceAccountName` (or the deprecated `serviceAccount`) other than `default` | the cluster mounts that ServiceAccount's token into the container, which prints it to its log | `workload_service_account` |
+| any custom resource (an API group the API server does not serve itself, one under `k8s.io` included: the Gateway API's are CRDs too) naming such a `serviceAccountName` | Tekton's TaskRuns, Argo's Workflows, Flux's Kustomizations act as the ServiceAccount they name | `workload_service_account` |
+| a workload asking for `hostPID`, `hostIPC`, `hostNetwork`, a privileged container or a `hostPath` volume | on the node sit every Pod's token and the kubelet's own credential | `host_access` |
+| a **patch** to a workload that already runs as another ServiceAccount, or already reaches the node | a patch keeps every field it does not mention: a new image for the deployer's Deployment runs the attacker's code as the deployer | `workload_service_account` / `host_access` |
+| any write to a RoleBinding or ClusterRoleBinding | binds some subject — the namespace's default ServiceAccount, which any Pod runs as — to more | `rbac_binding` |
+| any write to a Role or ClusterRole | changes what every subject already bound to it may do | `rbac_role` |
+| any write to a CertificateSigningRequest, its approval or status | a signed client certificate is a credential for the cluster | `certificate_signing_request` |
+
+A Pod as the namespace's `default` ServiceAccount passes, as does everything not
+in this table.
+
+**How the body is read** (`pkg/kubeguard/inspect.go`). Only writes to the
+resources above are read — `create`, `update` and `patch` of the resource itself;
+a subresource's body (a Scale, a Status) cannot change who a workload runs as. The
+body is read whole, up to the session's body cap, judged, and then forwarded byte
+for byte. JSON is walked token by token, so **every** occurrence of a repeated key
+is checked rather than whichever one a decoder keeps; YAML (`application/yaml`,
+server-side apply) is decoded with a parser that refuses repeated keys, bounds
+aliasing and depth, and whose YAML-1.2 `yes` is treated as the YAML-1.1 `true` the
+API server's decoder reads. A JSON patch is judged by each operation's path and
+value, and a `copy` or `move` on a workload is refused, since what it writes comes
+from elsewhere in the object. A **patch** to a workload is judged against the
+object it patches too: the monitor reads it with the session's credential first,
+and a patch to one that already runs as another ServiceAccount is refused. A body
+the monitor cannot read — protobuf, CBOR, a compressed body, malformed JSON — is
+refused (`unreadable_body`) rather than forwarded; kubectl, Helm and client-go send
+JSON by default.
+
+```console
+$ kubectl -n team-a create -f pod-as-deployer.json
+Error from server (Forbidden): error when creating "pod-as-deployer.json": create pods is refused
+by the cloop Kubernetes monitor: it names ServiceAccount "deployer" (serviceAccountName), whose
+token the cluster would hand the workload — a credential outside this monitor, which no
+revocation reaches. Workloads created through it run as the namespace's default ServiceAccount
+```
+
+Each refusal is its own `reason` on the
+[`kubeguard.request_denied`](../reference/audit-events.md#kubeguard) row and its
+own label on `cloop_kubeguard_denials_total`. The price is real and deliberate: a
+Helm chart that creates its own ServiceAccount, Role and RoleBinding, or a
+Deployment that runs as a named ServiceAccount, cannot be installed through the
+monitor. Install those as a cluster administrator; run the workload's own work
+through the grant.
 
 ### Protocol upgrades
 
@@ -730,7 +859,7 @@ appear to be wrong. A hub with the monitor off leases, dispatches and runs
 
 | Check | What it catches |
 | --- | --- |
-| `kubeguard.enabled` | The monitor is off while Kubernetes access is configured, so grants deliver the cluster credential and enforce nothing. A pass states the policy and session length actually in force. |
+| `kubeguard.enabled` | The monitor is off while Kubernetes access is configured. **Fails** while an active kubeconfig grant claims namespaces or verbs and nobody acknowledged delivering it without the monitor — it is refused at every dispatch (Task 20420) — naming each grant; **warns** while acknowledged ones are delivered unenforced, naming who acknowledged each and why, and while grants claiming nothing are delivered with the cluster credential. A pass states the policy and session length actually in force. |
 | `kubeguard.tls` | `cert_file`, `key_file` or `ca_file` missing or unreadable — the monitor will not start and every kubeconfig lease will be refused. Under `tls: auto`: no `CLOOP_SECRET_KEY` (the monitor will not start), or a leaf that does not chain to the hub CA, has less than a day left — the leader renews with two — or does not name the host of `advertise_url`. Passes before the hub has first started, when there is nothing issued yet. |
 | `kubeguard.advertise_url` | Unset, or loopback, so `kubectl` inside a Pod or an edge device cannot connect. This is the most common misconfiguration, because the wrong value works perfectly on the machine it was written on. |
 | `kubeguard.advertise_reachable` | Nothing is listening at the advertised address. Reported, never failed: the hub is not on the sandbox's network, so a Service name that does not resolve here is frequently correct. |
@@ -875,7 +1004,7 @@ $ cloop remote kube share aks-dev --context aks-dev --namespaces payments,paymen
 | Create the ServiceAccount and its bindings, mint the token | the cluster, as the developer | the credential the plugin printed |
 | Store the share | the hub, as the developer | `POST /api/secrets` over the `cloop login` session — a personal secret, as the dashboard would store it |
 | Renew the token | the hub | the share's own token, through its self-renewal Role — when the hub runs this monitor |
-| Revoke | the cluster, then the hub | the developer's credential again, then `DELETE /api/secrets/{id}` |
+| Revoke | the hub's authorisation, the cluster, then the hub | `GET /api/secrets/{id}/authorize`, the developer's credential again, then `DELETE /api/secrets/{id}` |
 
 The hub never runs the plugin, and the guarantee is structural: only `cmd`
 imports `pkg/kubeexec`, so no package the hub, the monitor, the broker or an
@@ -897,13 +1026,30 @@ document's context and namespace filled in.
 
 Every object carries `cloop.dev/kube-share=<id>` and
 `app.kubernetes.io/managed-by=cloop`, plus annotations naming the share, the
-hub, the owner and the access. The label deliberately shares nothing with the
-`kubernetes` executor's own (`cloop.dev/managed`), so the executor's orphan
-sweep can never take a share for something it owns. The secret's metadata
-records the share (`kube.share`, `kube.service_account`, `kube.namespaces`,
-`kube.access`, `kube.renewal`, `kube.objects`); its token's issue time and
-expiry (`kube.issued_at`, `kube.expires_at`) are read by the hub from the token
-itself at upload, not taken from the client, and so is the ServiceAccount.
+hub, the owner and the access. The owner annotation is the hub's own key for the
+person sharing — a lowercased email, or `sub:` and the subject — which the
+terminal reads from `/api/me`'s `identity`. The label deliberately shares nothing
+with the `kubernetes` executor's own (`cloop.dev/managed`), so the executor's
+orphan sweep can never take a share for something it owns.
+
+The secret's metadata records the share (`kube.share`, `kube.namespaces`,
+`kube.access`, `kube.renewal`, `kube.context`). Everything a revoke or a renewal
+acts on is the hub's to write, never the client's (Task 20420), because the
+metadata is its uploader's and a revoke or renewal runs with somebody else's
+credentials — often an administrator's:
+
+| Key | Written from |
+| --- | --- |
+| `kube.service_account` | the token's claims, which must name the share's own ServiceAccount — `cloop-<name>-<id>`, in a valid namespace, or the upload is refused |
+| `kube.issued_at`, `kube.expires_at` | the token's claims |
+| `kube.server`, `kube.ca_sha256` | the stored kubeconfig: its server, and the SHA-256 of the CA it trusts (`none` when it names none) |
+| `kube.owner` | the authenticated uploader |
+| `kube.objects` | what the share's plan creates, from the fields above — never the client's list |
+
+The token's claims are not verified at upload — the hub cannot, short of asking
+the cluster with them — which is why they are held to the share's own
+ServiceAccount, and why revoke and renew [check the cluster's own
+objects](#what-revoke-and-renew-trust) besides.
 
 **Write access needs a ServiceAccount namespace it cannot write.** `edit` is
 not "write most objects": it may create Pods and Secrets, impersonate
@@ -951,6 +1097,22 @@ the hub**:
    monitor is turned off later refuses its grants at dispatch, with that said on
    the project's Activity tab, and keeps renewing it for when the monitor is back.
 
+A share is its owner's credential, and the hub renewing it keeps it alive. So a
+personal share whose owner the hub **denies** — a global deny role binding on
+their email or subject, which an offboarding and a suspension at the identity
+provider (SCIM) write, or a provisioned user the provider deactivated, since a
+suspension that resolved neither denies only a username or oid claim — is **not
+renewed** (Task 20420), whether the person was suspended or offboarded with the
+secret kept under a legal hold. The share says why (`kube.renew_state:
+stopped`, `kube.renew_error` naming the suspension, the hold's date and matter,
+or the binding's reason; `cloop remote kube list` shows "stopped by the hub"),
+and the refusal is a `secret.renew` deny row, once per distinct reason. A token
+pushed from a terminal does not keep it alive either: `cloop remote kube renew`
+is told so before it mints anything, and the hub refuses the push (409). The
+check runs every pass, so a reactivated owner's share resumes; a token that
+expired meanwhile is lapsed. A shared share belongs to the organisation and is
+renewed whatever happens to the person who made it, as an offboarding keeps it.
+
 A renewal that fails records why on the share (`kube.renew_error`, shown by
 `cloop remote kube list`) and is audited once per distinct cause, not once a
 minute. One that finds the token already expired — the hub was down for more
@@ -966,22 +1128,67 @@ A hub that does not run the monitor would hand the share's token to the sandbox
 as a file, and with it the self-renewal permission — so none is installed
 (`--renewal manual`; a developer may ask for it on any hub). The developer renews
 from the terminal: `cloop remote kube renew` mints a token with their own
-credentials and posts it to `POST /api/secrets/{id}/renew`, and the hub stores it
-only after the cluster has authenticated it as the share's own ServiceAccount
-(a SelfSubjectReview; on a cluster too old to answer one, the token's claims
-are checked alone and the response says so). A run already holding the old
-kubeconfig keeps it until that token expires; the next dispatch gets the new one.
+credentials and posts it to `POST /api/secrets/{id}/renew` together with where it
+was minted, and the hub stores it only after the cluster has authenticated it as
+the share's own ServiceAccount (a SelfSubjectReview; on a cluster too old to
+answer one, the token's claims are checked alone and the response says so). A run
+already holding the old kubeconfig keeps it until that token expires; the next
+dispatch gets the new one. Without the monitor, a grant of the share is itself
+[refused unless acknowledged](#without-the-monitor-refused-unless-acknowledged),
+like any kubeconfig grant that names namespaces or verbs.
+
+### What revoke and renew trust
+
+`cloop remote kube revoke` and `renew` act on the cluster with the developer's
+own credentials — the colleague or administrator running them — over a share
+whose metadata its uploader wrote, and which names the context they default to.
+Before Task 20420 a `secret.grant` holder could therefore upload a share listing
+`ClusterRoleBinding/cluster-admin` among its objects and have an administrator's
+revoke delete it, or name `kube-system`'s ServiceAccount and a server of their
+own and have a colleague's renew mint a token for it and hand it to the hub,
+which then sent it to that server to check. Now:
+
+1. **The hub decides first.** Both ask `GET /api/secrets/{id}/authorize?action=delete|renew`
+   before anything touches the cluster — the predicates the `DELETE` and the
+   renewal apply — and stop, having touched nothing, when the hub refuses. (A hub
+   too old to answer refuses too; `revoke --force` then deletes only the hub's
+   secret.)
+2. **The context must reach the share's cluster.** The local context's API
+   server must be the share's `kube.server`, and the CA it trusts must hash to
+   `kube.ca_sha256`; otherwise both refuse, naming `--context`, rather than act
+   with the developer's credentials on another cluster. A share made with
+   `--server` (the hub reaches the cluster at another address) is renewed and
+   revoked through a context for that address.
+3. **Revoke deletes only what the share created.** The candidates are what its
+   plan creates, what its metadata lists and what carries its label in its
+   namespaces; each is **read back from the cluster** and deleted only if it
+   carries `cloop.dev/kube-share=<id>` **and** a `cloop.dev/owner` annotation
+   naming the share's owner (the hub's record, or for a personal share its
+   owner), by uid and resourceVersion so an object changed after it was read is
+   not the one deleted. Anything else is reported — "Not deleted, not this
+   share's" — and left alone; a name that is not one a share could create never
+   becomes a request at all. A ServiceAccount that exists and is not the share's
+   fails the revoke: the share's tokens stay valid until they expire.
+4. **Renew mints only for the share's own ServiceAccount.** It must be named as a
+   share names it, and read back from the cluster with the share's label and
+   owner, or renew refuses before minting.
+5. **A token goes only to the server that minted it.** The terminal posts the
+   server and CA it minted at; the hub refuses — sending the token nowhere —
+   unless they are the stored kubeconfig's, and only then asks that server to
+   confirm it.
 
 ### Revoking
 
-`cloop remote kube revoke` deletes the ServiceAccount **first**, which
-invalidates every token ever minted for it at once — the hub's, a live session's,
-any copy — then its RoleBindings and Role, then sweeps the share's namespaces for
-anything else carrying its label, and only then deletes the hub's secret, which
-revokes its grants and closes the monitor sessions standing on them. A revoke the
-cluster cannot complete keeps the secret so it can run again; `--force` deletes
-it anyway and prints the `kubectl delete … -l cloop.dev/kube-share=<id>` for
-what is left.
+`cloop remote kube revoke` asks the hub, then deletes the ServiceAccount
+**first**, which invalidates every token ever minted for it at once — the hub's,
+a live session's, any copy — then its RoleBindings and Role, then sweeps the
+share's namespaces for anything else carrying its label (each checked as above),
+and only then deletes the hub's secret, which revokes its grants and closes the
+monitor sessions standing on them. A revoke the cluster cannot complete keeps the
+secret so it can run again; `--force` deletes it anyway and names what is left of
+the share's own — or, when the cluster was not touched, lists the candidates with
+their owner annotation to check before deleting. It never advises a delete by
+label: anybody who may label objects could give theirs the share's id.
 
 ### Proven on a cluster
 
@@ -993,10 +1200,18 @@ host executor. It shares with `--access write --ttl 10m` — the shortest token 
 API issues — checks the objects and that RBAC alone *would* let the
 ServiceAccount mint its own token, then dispatches a run whose probe reads and
 writes through the monitor and is refused the ServiceAccount's own token, a raw
-TokenRequest for another and `kube-system`. It waits for the hub's renewal and
+TokenRequest for another and `kube-system` — and, under that write grant, a
+ServiceAccount token Secret, a Pod and a Deployment as another ServiceAccount, a
+`hostPath` Pod, a new image for a Deployment already running as another
+ServiceAccount and a RoleBinding, none of which exists afterwards, while a Pod as
+the default ServiceAccount passes (Task 20420). It waits for the hub's renewal and
 for the first token to expire, has the same run read and write again, revokes,
-finds no labelled object anywhere, and has the run confirm it is cut off. About
-thirteen minutes, most of it waiting out the first token.
+finds no labelled object anywhere, and has the run confirm it is cut off. Then it
+uploads a crafted share — a token for a ServiceAccount the administrator made, an
+object named like the share's and a decoy labelled with its id by another owner,
+metadata listing `cluster-admin`'s binding — and revokes it with a cluster-admin
+kubeconfig: nothing is deleted, the hub's secret is kept, and `--force` deletes
+only that. About thirteen minutes, most of it waiting out the first token.
 
 ---
 
@@ -1010,7 +1225,8 @@ thirteen minutes, most of it waiting out the first token.
 | Namespace allowlist | Both directions: a named namespace outside the list, and a request that names none while a list exists. |
 | Resource allowlist | When set, matched as RBAC spells it. |
 | Non-resource URLs | Readable only, and only inside the allowlist; discovery by default. |
-| Dangerous subresources | `exec`, `attach`, `portforward`, `proxy`, and the TokenRequest API `serviceaccounts/token` — refused for every verb, not configurable. |
+| Dangerous subresources | `exec`, `attach`, `portforward`, `proxy`, `ephemeralcontainers`, and the TokenRequest API `serviceaccounts/token` — refused for every verb, not configurable. |
+| Credentials minted by a write | A ServiceAccount token Secret, a workload running as a non-default ServiceAccount or reaching the node, a patch to one already doing either, RBAC writes and CertificateSigningRequests — refused under every grant; a body the monitor cannot read is refused for these kinds. See [writes that would mint a credential](#writes-that-would-mint-a-credential). |
 | Protocol upgrades | Refused. SPDY and websocket both. |
 | Impersonation | `Impersonate-*` stripped, never forwarded. |
 | Request body size | Bounded at 3 MiB by default, and **refused rather than truncated**: a declared `Content-Length` over the cap is rejected before a byte is read, and a chunked body that runs over is cut with `body_too_large`. Truncating was worse than either — the API server answered with its own parse error, so the sandbox was told its JSON was malformed when its request was simply too large. Under the default read-only policy no request has a body at all. |
@@ -1022,8 +1238,19 @@ thirteen minutes, most of it waiting out the first token.
   the granted credential cannot read `secrets` in `team-a`, a policy that permits
   it does not make it work — the API server's own 403 is forwarded back.
 - **Response content is not filtered.** A permitted `get secrets` in a permitted
-  namespace returns the secret. The monitor decides *which requests*, not *what
-  comes back*; narrowing that is what `resources` and the namespace list are for.
+  namespace returns the secret — including a ServiceAccount token Secret
+  somebody else created there before, which `edit` may read. The monitor decides
+  *which requests*, not *what comes back*; narrowing that is what `resources` and
+  the namespace list are for.
+- **The credential-minting checks know the shapes they name.** A custom resource
+  that names a ServiceAccount under some key other than `serviceAccountName` or
+  `serviceAccount`, an admission webhook that rewrites Pods (cluster-scoped, so
+  refused under a namespace list, but not under a grant without one), and a
+  container that escalates by capabilities rather than `privileged` are not
+  recognised: enforce at least the `baseline` Pod Security Standard on namespaces
+  you grant writes in. A patch is checked against the object as it was read a
+  moment before; a concurrent change by someone else between the read and the
+  patch is not.
 - **Cluster-scoped reads are refused, not scoped.** With a namespace allowlist in
   force there is no way to allow `get nodes` — it is refused as
   `cluster_scope`. Use a second grant without a namespace list, resource-limited
@@ -1063,7 +1290,7 @@ export to a SIEM.
 
 | Kind | Emitted when | Notes |
 | --- | --- | --- |
-| `request_denied` | policy refused a request | **The row that matters.** The only place a sandbox's attempt to write to, or read outside, its granted scope is written down. Nothing else in cloop would record it. Alert on it. |
+| `request_denied` | policy refused a request | **The row that matters.** The only place a sandbox's attempt to write to, or read outside, its granted scope — or to mint itself a credential — is written down. Nothing else in cloop would record it. Alert on it. |
 | `request_allowed` | a request was forwarded | **Off** by default: a `kubectl get pods` is several requests and a watch is one that never ends, so a row per allowed request would bury the denials in discovery traffic. `executors.kube_guard.audit_allowed: true` turns it on (Task 20385), for a hub whose trail has to say what a sandbox *read*. |
 | `session_minted` | a session was created | `Detail` carries the policy summary and the expiry. |
 | `session_closed` | a session was revoked, released or reaped | `Detail` carries the reason and the allowed/denied counters. Also written for a session that ended while no hub process served it — not restored with its run, or retired once it lapsed. |
@@ -1106,7 +1333,11 @@ Two counters, exported at `/metrics` — see [metrics](../operations/metrics.md)
 
 `reason` is one of `verb_not_allowed`, `namespace_not_allowed`, `cluster_scope`,
 `resource_not_allowed`, `dangerous_subresource`, `non_resource_path`,
-`protocol_upgrade`, `body_too_large` and `unauthenticated`.
+`protocol_upgrade`, `body_too_large` and `unauthenticated` — and, for a write
+that would [mint a credential](#writes-that-would-mint-a-credential) (Task 20420),
+`service_account_token_secret`, `workload_service_account`, `host_access`,
+`rbac_binding`, `rbac_role`, `certificate_signing_request` and
+`unreadable_body`. The same reason is on the `request_denied` audit row.
 
 A proxy-side failure — an unreachable cluster, an unusable credential — is
 counted as **neither** allowed nor denied. Conflating a broken upstream with a
@@ -1123,6 +1354,12 @@ rate(cloop_kubeguard_denials_total{reason="verb_not_allowed"}[5m]) > 0.1
 
 ```promql
 rate(cloop_kubeguard_denials_total{reason="dangerous_subresource"}[5m]) > 0
+```
+
+**A workload reaching for a credential of its own** — also flat at zero:
+
+```promql
+sum(rate(cloop_kubeguard_denials_total{reason=~"service_account_token_secret|workload_service_account|host_access|rbac_binding|rbac_role|certificate_signing_request"}[5m])) > 0
 ```
 
 ---
@@ -1171,11 +1408,53 @@ TokenRequest API for a credential, from a sandbox. By design: the token would
 bypass the monitor from then on. A workload holds the access its grant gives it,
 through the monitor, and no credential of its own.
 
+**`kubeconfig grant constraints cannot be enforced without the Kubernetes access
+monitor`** — a grant naming namespaces or fewer than every verb, on a hub with
+`executors.kube_guard` off. [Turn the monitor
+on](#turning-it-on) (`enabled: true`, `tls: auto`); or, where delivering the
+credential unenforced is genuinely acceptable, have an administrator run
+`cloop hub grant unguarded <grant-id> --reason <why>`. `cloop hub doctor` lists
+every such grant.
+
+**`… is refused by the cloop Kubernetes monitor: it names ServiceAccount …`**,
+**`… it mentions "kubernetes.io/service-account-token" …`**, **`… it asks for a
+hostPath volume …`**, **`… under every grant: a binding hands …`** — a write that
+would give the workload a credential of its own; see [writes that would mint a
+credential](#writes-that-would-mint-a-credential). Run the workload as the
+namespace's default ServiceAccount, and create RBAC, named ServiceAccounts'
+workloads and node-level workloads as a cluster administrator.
+
+**`… the object already runs as ServiceAccount … and a patch keeps that`** — a
+change to a workload somebody else created to run as its own ServiceAccount.
+Change it as a cluster administrator.
+
+**`… cannot read this one (it is sent as application/vnd.kubernetes.protobuf)`** —
+a client configured for protobuf writes. Use JSON (`--kube-api-content-type
+application/json`, or leave client-go's default).
+
 **`kubeconfig … is a share the hub renews, so its ServiceAccount may create
 tokens for itself, and it is delivered only through the Kubernetes access
 monitor`** — a self-renewing [share](#kubernetes-shares-a-cluster-behind-a-credential-plugin)
 granted on a hub that delivers kubeconfigs without the monitor. Turn the monitor
 on, or share the cluster again with `--renewal manual`.
+
+**`cloop remote kube revoke` or `renew`: `the context reaches …, and the share is
+for …`** or **`the context trusts another CA`** — the context (by default the one
+the share was made from, as its metadata names it) does not reach the share's
+cluster. Pass `--context` naming one that does; for a share made with `--server`,
+a context for the address the hub uses.
+
+**`Not deleted, not this share's: …`** — revoke found an object it was asked
+about, or one carrying the share's label, that the cluster does not show as the
+share's own: no label, another share's, or an owner annotation that is not the
+share's owner. It is left alone. If the share's ServiceAccount is among them the
+revoke fails and keeps the hub's secret — the share's tokens are still valid;
+look at who made the ServiceAccount before deleting anything.
+
+**`cloop remote kube list` shows a share as `stopped by the hub`** — its owner is
+denied on the hub: suspended at the identity provider, offboarded with the
+secret kept under a legal hold, or a deny role binding. The line under the table
+says which. Renewal resumes when the deny goes.
 
 **`cloop remote kube list` shows a share as `hub, failing`** — read the
 `the last renewal failed:` line under the table. `may not create its own token:
