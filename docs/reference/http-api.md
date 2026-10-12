@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-273 endpoints, by the permission each one requires:
+274 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -109,7 +109,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 12 |
+| `secret.own` | 13 |
 | `secret.request` | 4 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
@@ -304,6 +304,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/secrets` | `secret.own` | global |
 | GET | `/api/secrets/catalog` | `secret.request` | global |
 | DELETE | `/api/secrets/{id}` | `secret.own` | global |
+| POST | `/api/secrets/{id}/renew` | `secret.own` | global |
 | POST | `/api/session/logout-all` | `public` | global |
 | GET | `/api/sessions` | `session.admin` | global |
 | DELETE | `/api/sessions/{id}` | `session.admin` | global |

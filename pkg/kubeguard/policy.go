@@ -7,11 +7,14 @@ package kubeguard
 // answers them about the tuple apirequest.go produced, never about a raw
 // path. Anything that needs to reason about a URL has already done so.
 //
-// Two rules are not configurable, and both are refusals:
+// Three rules are not configurable, and all are refusals:
 //
 //   - a subresource in dangerousSubresources is denied outright, because it
 //     confers a capability (a shell, a tunnel, a laundered request) rather
 //     than returning data, and no verb allowlist expresses that distinction;
+//   - so is one in credentialSubresources — serviceaccounts/token, which
+//     answers with a credential for the cluster that would bypass the monitor
+//     from then on (Task 20416);
 //   - a protocol upgrade is denied outright, for the reason in decideUpgrade.
 //
 // Everything else is allowlist-and-deny-by-default.
@@ -469,7 +472,19 @@ func (p Policy) AllowsNonResourcePath(pth string) bool {
 func (p Policy) Decide(r APIRequest) error {
 	// 1. A capability subresource, whatever the method. Ahead of everything,
 	//    because a GET to pods/exec is a shell and must never be reported as
-	//    an allowed read.
+	//    an allowed read — and a POST to serviceaccounts/token is a credential
+	//    that a write grant's "create" would otherwise admit.
+	if r.MintsCredential() {
+		return &Denial{
+			Reason: DenyDangerousSubresource,
+			Message: fmt.Sprintf(
+				"%s is refused by the cloop Kubernetes monitor for every verb, under every grant: it "+
+					"answers with a token for the cluster itself, which would never pass through this "+
+					"monitor again. A workload holds the access its grant gives it, through the monitor, "+
+					"and no credential of its own",
+				r.ResourceString()),
+		}
+	}
 	if r.Dangerous() {
 		return &Denial{
 			Reason: DenyDangerousSubresource,

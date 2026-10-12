@@ -52,6 +52,12 @@ const (
 	groupHubSetup   = "hub-setup"
 	groupHubAccess  = "hub-access"
 	groupHubOperate = "hub-operate"
+
+	groupRemoteProjects = "remote-projects"
+	groupRemoteAccess   = "remote-access"
+
+	groupKubeShare  = "kube-share"
+	groupKubeManage = "kube-manage"
 )
 
 // helpFooterAnnotation opts a command into a trailing block in its help output.
@@ -381,6 +387,40 @@ var hubCommandGroups = map[string]string{
 	"telemetry":   groupHubOperate,
 }
 
+var remoteGroups = []*cobra.Group{
+	{ID: groupRemoteProjects, Title: "Projects and runs:"},
+	{ID: groupRemoteAccess, Title: "Cluster access:"},
+}
+
+// remoteCommandGroups maps a `cloop remote` subcommand to its group. The
+// split is the one a reader needs: everything above `kube` acts on the hub's
+// projects; `kube` acts on a Kubernetes cluster of yours and leaves the hub a
+// credential for it (Task 20416).
+var remoteCommandGroups = map[string]string{
+	"projects": groupRemoteProjects,
+	"tasks":    groupRemoteProjects,
+	"add":      groupRemoteProjects,
+	"run":      groupRemoteProjects,
+	"stop":     groupRemoteProjects,
+	"logs":     groupRemoteProjects,
+
+	"kube": groupRemoteAccess,
+}
+
+var remoteKubeGroups = []*cobra.Group{
+	{ID: groupKubeShare, Title: "Share a cluster:"},
+	{ID: groupKubeManage, Title: "Look after a share:"},
+}
+
+// remoteKubeCommandGroups maps a `cloop remote kube` subcommand to its group.
+var remoteKubeCommandGroups = map[string]string{
+	"share": groupKubeShare,
+
+	"list":   groupKubeManage,
+	"renew":  groupKubeManage,
+	"revoke": groupKubeManage,
+}
+
 // hubHelpFooter points at the runbook rather than trying to be it. The three
 // incident playbooks are sequences across several commands plus the REST API,
 // which is not something a --help block can hold.
@@ -444,6 +484,12 @@ func applyCommandGroups() {
 	if hubCmd != nil {
 		assignGroups(hubCmd, hubGroups, hubCommandGroups)
 		hubCmd.Annotations = withAnnotation(hubCmd.Annotations, helpFooterAnnotation, hubHelpFooter)
+	}
+	if remoteCmd != nil {
+		assignGroups(remoteCmd, remoteGroups, remoteCommandGroups)
+	}
+	if remoteKubeCmd != nil {
+		assignGroups(remoteKubeCmd, remoteKubeGroups, remoteKubeCommandGroups)
 	}
 
 	hideAIHelpers()

@@ -903,6 +903,11 @@ type Server struct {
 	// auditCheckpoints is the leader's record of the audit heads it last
 	// wrote off the database (Task 20404). See audit_checkpoints.go.
 	auditCheckpoints auditCheckpointState
+
+	// kubeShares is this member's record of Kubernetes share renewals: the
+	// failure each share last reported, and which renewal each live monitor
+	// session last took up (Task 20416). See kubeshare.go.
+	kubeShares kubeShareState
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1471,6 +1476,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// monitor (tls: auto, Task 20409) two days before they expire. One member
 	// renews; every member serves the result. See hubtls.go.
 	s.runLeaderDuty(watcherCtx, "monitor-certificates", s.watchMonitorCertificates)
+	// Renews the ServiceAccount token of every Kubernetes share the hub
+	// renews, at half its life (Task 20416). One member renews — two would
+	// mint two tokens — and every member hands the new token to its own live
+	// monitor sessions. See kubeshare.go.
+	s.runLeaderDuty(watcherCtx, "kube-share-renewal", s.watchKubeShareRenewals)
+	go s.watchKubeGuardUpstreams(watcherCtx)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential

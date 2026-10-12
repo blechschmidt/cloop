@@ -199,9 +199,9 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		RunID:       strings.TrimSpace(rec.RunID),
 		IssuedAt:    rec.IssuedAt,
 		ExpiresAt:   rec.ExpiresAt,
-		upstream:    rc,
 		durable:     r.Store != nil,
 	}
+	s.upstream.Store(rc)
 	copy(s.tokenHash[:], hash)
 
 	r.mu.Lock()

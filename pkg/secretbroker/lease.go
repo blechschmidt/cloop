@@ -113,6 +113,11 @@ type Material struct {
 	// installation token's hour. Zero for a PAT, whose expiry the hub does not
 	// know. GitHubTokenExpiresAt is the only reader.
 	githubTokenExpiresAt time.Time
+
+	// kubeSelfRenewing marks a kubeconfig share whose ServiceAccount may
+	// create its own tokens (kubeshare.go): delivered through the Kubernetes
+	// monitor or not at all.
+	kubeSelfRenewing bool
 }
 
 // GitHubTokenExpiresAt reports when the GitHub token this material carries

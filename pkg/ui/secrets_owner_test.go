@@ -411,6 +411,10 @@ func TestSecretsRoutesNarrowOperatorsToTheirOwn(t *testing.T) {
 		// The revoke confirmation's preview (Task 20403), narrowed like the
 		// DELETE it precedes; fleet identifiers only with secret.grant.
 		"GET /api/grants/{id}/holders": true,
+		// A Kubernetes share's next token (Task 20416): its owner's alone for
+		// a personal share, secret.grant for a shared one — pinned by
+		// TestRenewRoute, where a colleague and an admin are both refused.
+		"POST /api/secrets/{id}/renew": true,
 	}
 	// Leases stay above the floor. A lease is live fleet state — which
 	// executor is holding which credential right now — and has no personal

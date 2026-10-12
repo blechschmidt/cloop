@@ -1040,6 +1040,11 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/secrets", Handler: s.handleSecretsList, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secOwn, Scope: scopeGlobal},
+		// A Kubernetes share's next token (Task 20416): renewed by the hub
+		// now, or taken from its owner's terminal. Narrowed in the handler
+		// exactly as the DELETE above is — a personal share by its owner, a
+		// shared one by secret.grant — see kubeshare.go.
+		{Pattern: "POST /api/secrets/{id}/renew", Handler: s.handleSecretRenew, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},

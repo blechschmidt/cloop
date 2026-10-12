@@ -113,6 +113,23 @@ var dangerousSubresources = map[string]bool{
 	"proxy":       true,
 }
 
+// credentialSubresources are resource/subresource pairs that answer with a
+// credential for the cluster itself — one that would never pass through this
+// monitor again. They are refused for every verb, under every grant, for the
+// same reason as dangerousSubresources: no verb allowlist can tell "create a
+// configmap" from "create a token", and a write grant permits both.
+//
+// serviceaccounts/token is the TokenRequest API. A ServiceAccount shared for
+// self-renewal (pkg/kubeshare, Task 20416) holds a Role allowing exactly this,
+// for itself: that is how the hub mints its next token. Through the monitor
+// the permission must be the hub's alone, or a workload could mint itself a
+// token the monitor never sees and the share's TTL never bounds. Refusing it
+// for every ServiceAccount, not just the shared one, costs a workload nothing
+// it should be doing through a monitored session either.
+var credentialSubresources = map[string]bool{
+	"serviceaccounts/token": true,
+}
+
 // APIRequest is one request, reduced to what a decision is about.
 //
 // A request is either about a resource (IsResource true, and the fields below
@@ -187,9 +204,19 @@ func (r APIRequest) String() string {
 func (r APIRequest) ClusterScoped() bool { return r.IsResource && r.Namespace == "" }
 
 // Dangerous reports that the request names a subresource that confers a
-// capability rather than data.
+// capability rather than data: a session into the workload, or a credential
+// for the cluster.
 func (r APIRequest) Dangerous() bool {
-	return r.IsResource && dangerousSubresources[r.Subresource]
+	return r.IsResource && (dangerousSubresources[r.Subresource] || r.MintsCredential())
+}
+
+// MintsCredential reports that the request asks the cluster for a credential
+// of its own (see credentialSubresources). The API group is deliberately not
+// consulted: the core group is the only one that serves serviceaccounts, and
+// an aggregated API that chose the same names would be asking for the same
+// thing.
+func (r APIRequest) MintsCredential() bool {
+	return r.IsResource && r.Subresource != "" && credentialSubresources[r.Resource+"/"+r.Subresource]
 }
 
 // Parse reduces an HTTP request to an APIRequest.

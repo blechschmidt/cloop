@@ -43,6 +43,8 @@ func groupedParents(t *testing.T) []struct {
 		{taskCmd, taskGroups, taskCommandGroups},
 		{planCmd, planGroups, planCommandGroups},
 		{hubCmd, hubGroups, hubCommandGroups},
+		{remoteCmd, remoteGroups, remoteCommandGroups},
+		{remoteKubeCmd, remoteKubeGroups, remoteKubeCommandGroups},
 	}
 }
 
@@ -174,6 +176,7 @@ func TestPreviouslyWorkingCommandPathsStillResolve(t *testing.T) {
 		{"task", "ai-coach"}, {"task", "ai-what-if"},
 		{"plan", "history"}, {"plan", "critique"}, {"plan", "ai-brief"},
 		{"config", "validate"}, {"hub", "doctor"},
+		{"remote", "logs"}, {"remote", "kube", "share"}, {"remote", "kube", "revoke"},
 	}
 	for _, path := range paths {
 		found, rest, err := rootCmd.Find(path)

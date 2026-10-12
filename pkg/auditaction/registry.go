@@ -560,10 +560,13 @@ var registry = []Entry{
 		Action:    ActionSecretRenew,
 		Home:      HomeControlPlane,
 		Entity:    "secret",
-		Trigger:   "A live lease is renewed before it expires: re-issued to the same holder, extended in place while its run is live, or taken over by the hub process that adopted its run after the one holding it stopped.",
+		Trigger:   "A live lease is renewed before it expires: re-issued to the same holder, extended in place while its run is live, or taken over by the hub process that adopted its run after the one holding it stopped. Also a credential renewed in place: a GitHub App installation token re-minted, or a Kubernetes share's ServiceAccount token replaced — by the hub at half its life, or by its owner from the terminal.",
 		Payload:   secretPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+		Note: "A Kubernetes share's renewal (Task 20416) is attributed to `hub` when the hub renewed it and to the owner " +
+			"when they pushed a token with `cloop remote kube renew`; `reason` names the ServiceAccount and both " +
+			"expiries, `expires_at` the new one. A renewal that failed is a `deny` row, written once per distinct cause.",
 	},
 	{
 		Action:    ActionSecretRelease,

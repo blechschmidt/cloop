@@ -107,7 +107,11 @@ type Session struct {
 	// upstream is the real cluster credential. Unexported, and never
 	// serialised: Session has no MarshalJSON and every exported field above
 	// is safe, so an accidental json.Marshal of a session cannot leak it.
-	upstream *kubernetes.RESTConfig
+	//
+	// An atomic pointer because it can change under a live session: a
+	// shared ServiceAccount's token is renewed by the hub before it expires
+	// (UpdateUpstream, Task 20416), while requests are reading it.
+	upstream atomic.Pointer[kubernetes.RESTConfig]
 
 	tokenHash [sha256.Size]byte
 
@@ -150,7 +154,7 @@ func (s *Session) Stats() Stats {
 
 // Upstream returns the real cluster credential. Only the proxy calls it, and
 // only to build the outbound request.
-func (s *Session) Upstream() *kubernetes.RESTConfig { return s.upstream }
+func (s *Session) Upstream() *kubernetes.RESTConfig { return s.upstream.Load() }
 
 // Describe renders the session for a diagnostic line, never its credential.
 func (s *Session) Describe() string {
@@ -331,9 +335,9 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		RunID:       strings.TrimSpace(req.RunID),
 		IssuedAt:    now,
 		ExpiresAt:   now.Add(ttl),
-		upstream:    rc,
 		tokenHash:   sha256.Sum256([]byte(bearerToken(id, secret))),
 	}
+	s.upstream.Store(rc)
 
 	doc, err := r.renderKubeconfig(s, bearerToken(id, secret), rc.Namespace)
 	if err != nil {

@@ -290,7 +290,7 @@ Payload keys:
 | `secret.lease` | `secret` | control-plane | stable | A lease is issued — or refused — against the grants matching a request. |
 | `secret.mint` | `secret` | control-plane | stable | A credential is sealed and stored as a new secret. |
 | `secret.release` | `secret` | control-plane | stable | A workload finishes with a lease and it is dropped from the server-side record — or a recorded lease nobody holds any more is retired: its run ended while no hub process held it, or it lapsed after its holder stopped. |
-| `secret.renew` | `secret` | control-plane | stable | A live lease is renewed before it expires: re-issued to the same holder, extended in place while its run is live, or taken over by the hub process that adopted its run after the one holding it stopped. |
+| `secret.renew` | `secret` | control-plane | stable | A live lease is renewed before it expires: re-issued to the same holder, extended in place while its run is live, or taken over by the hub process that adopted its run after the one holding it stopped. Also a credential renewed in place: a GitHub App installation token re-minted, or a Kubernetes share's ServiceAccount token replaced — by the hub at half its life, or by its owner from the terminal. |
 | `secret.request` | `secret` | control-plane | stable | A developer files a self-service request for access they do not have. |
 | `secret.request_approve` | `secret` | control-plane | stable | A reviewer approves a pending request and the grant it asked for is minted. |
 | `secret.request_deny` | `secret` | control-plane | stable | A reviewer refuses a pending request. |
@@ -303,6 +303,7 @@ Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret
 - `secret.grant` — This is the row that answers "what authority exists"; the request family answers "who asked for it".
 - `secret.lease` — `decision` is `allow` or `deny` on every action in this family; a denial is a row, not a missing one.
 - `secret.release` — An ordinary end of life. Compare the lease.revoke_* family, which is somebody deciding mid-run that a holder may no longer hold it.
+- `secret.renew` — A Kubernetes share's renewal (Task 20416) is attributed to `hub` when the hub renewed it and to the owner when they pushed a token with `cloop remote kube renew`; `reason` names the ServiceAccount and both expiries, `expires_at` the new one. A renewal that failed is a `deny` row, written once per distinct cause.
 - `secret.request` — The gap between this row and its approval is the number that says whether the request path is used or routed around.
 - `secret.request_expire` — Its own action rather than a flavour of deny: denied is an answer, expired is the absence of one, and conflating them hides a queue nobody is working.
 

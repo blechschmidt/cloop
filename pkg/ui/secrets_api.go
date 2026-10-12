@@ -62,6 +62,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/kubeshare"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -316,6 +317,11 @@ type secretsListResponse struct {
 	Secrets []secretView     `json:"secrets"`
 	Kinds   []string         `json:"kinds"`
 	Broker  brokerStatusView `json:"broker"`
+	// KubeGuard says whether this hub delivers kubeconfigs through the
+	// Kubernetes access monitor — and so whether it renews a Kubernetes share
+	// itself, which `cloop remote kube share` asks before it installs the
+	// self-renewal Role (Task 20416).
+	KubeGuard kubeGuardView `json:"kube_guard"`
 }
 
 type grantsListResponse struct {
@@ -472,9 +478,10 @@ func (s *Server) handleSecretsList(w http.ResponseWriter, r *http.Request) {
 	defer bs.close()
 
 	resp := secretsListResponse{
-		Secrets: []secretView{},
-		Kinds:   kindNames(),
-		Broker:  bs.status,
+		Secrets:   []secretView{},
+		Kinds:     kindNames(),
+		Broker:    bs.status,
+		KubeGuard: currentKubeGuardView(),
 	}
 	if bs.secret == nil {
 		// Not an error: an un-adopted broker has no secrets, and saying so
@@ -628,6 +635,27 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		if _, err := secretbroker.ParseGitHubApp([]byte(req.Payload)); err != nil {
 			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 			return
+		}
+	}
+	// A kubeconfig whose user signs in through an exec credential plugin
+	// (kubelogin, `aws eks get-token`, the GKE plugin) can never be used: the
+	// hub will not run the plugin and a sandbox cannot. Stored, it would be
+	// refused at every dispatch, long after its uploader stopped looking — so
+	// it is refused here, naming the plugin and the command that does work
+	// (Task 20416). And a Kubernetes share has its metadata settled from its
+	// token, not from whoever sent it.
+	if kind == secretbroker.KindKubeconfig {
+		if msg := kubeshare.UploadRefusal([]byte(req.Payload), strings.TrimSpace(req.Name), s.externalBaseURL(r)); msg != "" {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, msg))
+			return
+		}
+		if kubeshare.IsShare(req.Metadata) {
+			meta, err := prepareKubeShare(req.Metadata, []byte(req.Payload), time.Now())
+			if err != nil {
+				apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+				return
+			}
+			req.Metadata = meta
 		}
 	}
 

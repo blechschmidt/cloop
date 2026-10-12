@@ -70,6 +70,9 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		leaseID:     leaseID,
 		heldByProxy: req.GitHubProxied,
 		requester:   req,
+		// Read from the stored metadata, so it holds for every delivery of the
+		// secret whoever minted it.
+		kubeSelfRenewing: SelfRenewingKubeconfig(s),
 	}
 
 	switch s.Kind {
@@ -574,6 +577,17 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 		if guarded.Guarded() {
 			delivered = guarded.Kubeconfig
 		}
+	}
+	if mat.kubeSelfRenewing && !guarded.Guarded() {
+		// The cluster credential would reach the workload as a file, and this
+		// one can extend itself: its ServiceAccount may create its own
+		// tokens. Only the monitor, which refuses that subresource to every
+		// sandbox, makes the permission the hub's alone (Task 20416).
+		return Material{}, fmt.Errorf("%w: kubeconfig %s is a share the hub renews, so its ServiceAccount may "+
+			"create tokens for itself, and it is delivered only through the Kubernetes access monitor — which "+
+			"refuses that to every workload. This delivery has no monitor (executors.kube_guard is off): turn it "+
+			"on, or share the cluster again with `cloop remote kube share --renewal manual`",
+			ErrGuardUnavailable, mat.SecretName)
 	}
 
 	// One file under a fixed name. A lease carrying several kubeconfig grants
