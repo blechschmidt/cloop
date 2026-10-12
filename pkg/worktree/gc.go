@@ -146,7 +146,7 @@ func List(repoDir string) ([]Entry, error) {
 	if !IsGitRepo(repoDir) {
 		return nil, fmt.Errorf("worktree: %q is not a git repository", repoDir)
 	}
-	registered, err := gitWorktreeList(repoDir)
+	registered, err := gitWorktreeList(runGit, repoDir)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +466,7 @@ func Prune(repoDir string, opts PruneOptions) (*PruneResult, error) {
 	if opts.DeleteBranches {
 		base = strings.TrimSpace(opts.BaseBranch)
 		if base == "" {
-			base, err = currentBranch(repoDir)
+			base, err = currentBranch(runGit, repoDir)
 			if err != nil {
 				return nil, fmt.Errorf("worktree: determine base branch for branch deletion: %w", err)
 			}
@@ -562,7 +562,7 @@ func keepReason(opts PruneOptions, e Entry, now time.Time) (KeepCode, string, bo
 // forceRemoveWorktree always runs — unregisters exactly those worktrees whose
 // directory has gone.
 func removeEntry(repoDir string, e Entry) error {
-	if err := forceRemoveWorktree(repoDir, e.Path); err != nil {
+	if err := forceRemoveWorktree(runGit, repoDir, e.Path); err != nil {
 		return err
 	}
 	if _, err := os.Stat(e.Path); err == nil {
@@ -666,8 +666,8 @@ type registration struct {
 // key, optionally followed by one space and a value that runs to end of line —
 // which is why the split below is on the first space only, and why a `locked`
 // with no reason has to be handled as a bare key.
-func gitWorktreeList(repoDir string) ([]registration, error) {
-	out, err := runGit(repoDir, "worktree", "list", "--porcelain")
+func gitWorktreeList(git gitRunner, repoDir string) ([]registration, error) {
+	out, err := git(repoDir, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}

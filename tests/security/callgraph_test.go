@@ -80,6 +80,31 @@ var gatedHostSteps = map[string]string{
 		"false and still removes the home — refusing the request would leave the refresh token on disk",
 }
 
+// sanctionedHostDoors are the functions where the hub's background code runs a
+// program on the control-plane host on purpose (Task 20418), with the reason
+// each may and where that reason is proved. FindBackgroundSpawns stops at a
+// door and reports every other spawn the background roots reach.
+//
+// Keys are (*types.Func).FullName() values. Name the hardened entry point, not
+// the exec helper behind it: pkg/worktree's execGit also runs the task's own
+// git for the orchestrator, and that path must never become reachable from the
+// hub's background without failing here.
+var sanctionedHostDoors = map[string]string{
+	"github.com/blechschmidt/cloop/pkg/worktree.runGit": "the startup and periodic worktree sweep " +
+		"(pkg/executor/reconcile.pruneWorktrees) lists and removes leaked task worktrees in repositories a sandbox " +
+		"could write. Its git runs hardened: executor.GitEnv's closed environment carrying " +
+		"executor.HardenedGitConfig (no hooks, fsmonitor, filters or signing), .git pinned and any redirect " +
+		"refused, under a deadline and gitprovision.BoundChild. Proved by " +
+		"TestBackgroundSweepRunsNoRepositoryProgram and pkg/worktree's TestSweep* tests",
+	"github.com/blechschmidt/cloop/pkg/worktree.IsGitRepo": "the sweep's \"is this a repository\" probe: " +
+		"rev-parse in the same hardened environment, bounded the same way, unpinned so a feature's worktree " +
+		"still answers the orchestrator",
+	"(github.com/blechschmidt/cloop/pkg/offboard.LocalClaude).destroy": "a hub member's half of an " +
+		"offboarding announced on the cluster bus: the gated step handleClusterOffboardClaude is listed for " +
+		"in gatedHostSteps, reached here from the bus instead of a request. It runs `claude auth logout` only " +
+		"when executor.HostExecutionAllowed(); TestGatedStepsRunNothingUnderStrictMode proves it",
+}
+
 // minExpectedHandlers guards against the analysis silently finding nothing.
 // If a refactor renames Server methods or changes the handler signature, the
 // count collapses and this test must fail loudly rather than pass vacuously —
@@ -144,6 +169,35 @@ func TestNoHandlerReachesProcessExecution(t *testing.T) {
 		t.Errorf("%s is exempted (gatedHostExecution or gatedHostSteps), but it no longer "+
 			"reaches process execution. Remove the entry — the exemption lists must only shrink.", key)
 	}
+
+	// The same guarantee for what the hub runs that no request asked for
+	// (Task 20418): its startup sweep, its periodic sweep, its watchers and
+	// its cluster bus. A background loop that shells out to git in a
+	// sandbox-writable repository with the hub's whole environment is host
+	// execution as surely as a handler that does.
+	if missing := g.MissingBackgroundRoots(); len(missing) > 0 {
+		t.Fatalf("background roots not found in the graph: %v — the hub's startup or run "+
+			"functions were renamed, and the background check would pass vacuously. "+
+			"Update BackgroundRoots in tests/security/callgraph.go.", missing)
+	}
+	spawns, reached := g.FindBackgroundSpawns(sanctionedHostDoors)
+	for _, v := range spawns {
+		t.Errorf("host execution reachable from a background entry point:\n%s\n"+
+			"Route it through an executor, or — if the program genuinely runs on the control plane — "+
+			"harden it (executor.GitEnv + HardenedGitConfig + gitprovision.BoundChild for git) and list "+
+			"its entry point in sanctionedHostDoors with the test that proves it.", v)
+	}
+	var staleDoors []string
+	for key := range sanctionedHostDoors {
+		if !reached[key] {
+			staleDoors = append(staleDoors, key)
+		}
+	}
+	sort.Strings(staleDoors)
+	for _, key := range staleDoors {
+		t.Errorf("%s is listed in sanctionedHostDoors, but no background entry point reaches it. "+
+			"Remove the entry — the list must only shrink.", key)
+	}
 }
 
 // handlerKey strips the trailing " (pkgpath)" that Violation.Handler carries
@@ -201,6 +255,83 @@ func TestAnalysisDetectsASeededViolation(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("seeded violation for %s was not reported", victim)
+	}
+}
+
+// TestBackgroundAnalysisDetectsASeededViolation is the meta-test for the
+// background check: a spawn seeded two hops from a background root is found,
+// one behind a door is not, and the reconcile package is traversed rather
+// than trusted.
+func TestBackgroundAnalysisDetectsASeededViolation(t *testing.T) {
+	g, err := LoadGraph()
+	if err != nil {
+		t.Fatalf("build reference graph: %v", err)
+	}
+	before, _ := g.FindBackgroundSpawns(sanctionedHostDoors)
+
+	root := BackgroundRoots[0]
+	const midKey = "github.com/blechschmidt/cloop/pkg/seeded.loop"
+	g.nodes[midKey] = &node{key: midKey, pkgPath: "github.com/blechschmidt/cloop/pkg/seeded",
+		callees: map[string]bool{}, spawns: "os/exec.CommandContext"}
+	g.nodes[root].callees[midKey] = true
+	after, _ := g.FindBackgroundSpawns(sanctionedHostDoors)
+	var found bool
+	for _, v := range after {
+		if v.Path[len(v.Path)-1] == midKey {
+			found = true
+		}
+	}
+	if !found || len(after) != len(before)+1 {
+		t.Fatalf("a spawn seeded under %s was not reported (%d spawns before, %d after)", root, len(before), len(after))
+	}
+	delete(g.nodes[root].callees, midKey)
+
+	// Behind a door: not reported, and the door counts as reached.
+	const doorKey = "github.com/blechschmidt/cloop/pkg/seeded.door"
+	g.nodes[doorKey] = &node{key: doorKey, pkgPath: "github.com/blechschmidt/cloop/pkg/seeded",
+		callees: map[string]bool{midKey: true}}
+	g.nodes[root].callees[doorKey] = true
+	doors := map[string]string{doorKey: "seeded"}
+	for k, v := range sanctionedHostDoors {
+		doors[k] = v
+	}
+	behind, reached := g.FindBackgroundSpawns(doors)
+	for _, v := range behind {
+		if v.Path[len(v.Path)-1] == midKey {
+			t.Fatalf("a spawn behind a door was reported: %v", v)
+		}
+	}
+	if !reached[doorKey] {
+		t.Fatal("the seeded door was not reached")
+	}
+	delete(g.nodes[root].callees, doorKey)
+
+	// Through reconcile: the sweep's package is not the executor boundary.
+	sweep, ok := g.FindFunc(ExecutorBoundary+"/reconcile", "pruneWorktrees")
+	if !ok {
+		t.Fatal("reconcile.pruneWorktrees not found; the background check cannot be shown to reach the sweep")
+	}
+	if _, ok := g.Reaches(root, sweep); !ok {
+		t.Fatalf("%s does not reach %s; the startup sweep is no longer under the background check", root, sweep)
+	}
+	without := map[string]string{}
+	for k, v := range sanctionedHostDoors {
+		if !strings.HasPrefix(k, "github.com/blechschmidt/cloop/pkg/worktree.") {
+			without[k] = v
+		}
+	}
+	exposed, _ := g.FindBackgroundSpawns(without)
+	var sawSweep bool
+	for _, v := range exposed {
+		for _, step := range v.Path {
+			if step == sweep {
+				sawSweep = true
+			}
+		}
+	}
+	if !sawSweep {
+		t.Fatal("with pkg/worktree's doors removed, no spawn is reported through reconcile.pruneWorktrees: " +
+			"the analysis is treating reconcile as the executor boundary again")
 	}
 }
 

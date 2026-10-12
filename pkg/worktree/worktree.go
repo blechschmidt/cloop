@@ -8,10 +8,10 @@
 package worktree
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -67,14 +67,17 @@ func Path(repoDir string, task *pm.Task) string {
 
 // IsGitRepo reports whether dir is inside a git repository (working tree or
 // linked worktree). Useful as a guard before invoking worktree machinery.
+//
+// Hardened and bounded (git.go): the hub's sweep asks it about repositories a
+// sandbox could write.
 func IsGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := execGit(ctx, dir, probeEnv(dir), "rev-parse", "--is-inside-work-tree")
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) == "true"
+	return strings.TrimSpace(out) == "true"
 }
 
 // Worktree represents a single live git worktree for a task.
@@ -101,7 +104,7 @@ func Create(repoDir string, task *pm.Task) (*Worktree, error) {
 	if !IsGitRepo(repoDir) {
 		return nil, fmt.Errorf("worktree: %q is not a git repository", repoDir)
 	}
-	baseBranch, err := currentBranch(repoDir)
+	baseBranch, err := currentBranch(taskGit, repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: determine current branch: %w", err)
 	}
@@ -111,14 +114,14 @@ func Create(repoDir string, task *pm.Task) (*Worktree, error) {
 	// A worktree kept for this task's next attempt holds work that exists
 	// nowhere else (Task 20370). Re-creating would destroy it; Reopen is how
 	// it is picked up again.
-	if reg, ok := keptRegistration(repoDir, wtPath); ok {
+	if reg, ok := keptRegistration(taskGit, repoDir, wtPath); ok {
 		return nil, fmt.Errorf("worktree: %s is kept for task %d's next attempt (%s); reopen it rather than re-creating it",
 			wtPath, task.ID, reg.lockReason)
 	}
 
 	// If a worktree already exists at this path (from a crashed prior run or a
 	// stale entry in .git/worktrees), tear it down before re-creating.
-	_ = forceRemoveWorktree(repoDir, wtPath)
+	_ = forceRemoveWorktree(taskGit, repoDir, wtPath)
 
 	// Ensure the parent directory exists; git worktree add will create wtPath itself.
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
@@ -126,13 +129,13 @@ func Create(repoDir string, task *pm.Task) (*Worktree, error) {
 	}
 
 	// Try to create the worktree with a brand-new branch.
-	if _, err := runGit(repoDir, "worktree", "add", "-b", branch, wtPath, "HEAD"); err != nil {
+	if _, err := taskGit(repoDir, "worktree", "add", "-b", branch, wtPath, "HEAD"); err != nil {
 		// Branch may already exist (leftover from a previous run). Fall back to
 		// reusing it: reset the branch to HEAD and check it out in the new worktree.
-		if _, resetErr := runGit(repoDir, "branch", "-f", branch, "HEAD"); resetErr != nil {
+		if _, resetErr := taskGit(repoDir, "branch", "-f", branch, "HEAD"); resetErr != nil {
 			return nil, fmt.Errorf("worktree: reset existing branch %q: %w (initial add error: %v)", branch, resetErr, err)
 		}
-		if _, addErr := runGit(repoDir, "worktree", "add", wtPath, branch); addErr != nil {
+		if _, addErr := taskGit(repoDir, "worktree", "add", wtPath, branch); addErr != nil {
 			return nil, fmt.Errorf("worktree: add reusing branch %q: %w (initial add error: %v)", branch, addErr, err)
 		}
 	}
@@ -151,7 +154,7 @@ func (w *Worktree) HasChanges() (bool, error) {
 	if w == nil {
 		return false, errors.New("worktree: nil receiver")
 	}
-	out, err := runGit(w.Path, "status", "--porcelain")
+	out, err := taskGit(w.Path, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("worktree status: %w", err)
 	}
@@ -175,13 +178,13 @@ func (w *Worktree) Commit(task *pm.Task) (string, error) {
 	if !dirty {
 		return "", nil
 	}
-	if _, err := runGit(w.Path, "add", "-A"); err != nil {
+	if _, err := taskGit(w.Path, "add", "-A"); err != nil {
 		return "", fmt.Errorf("worktree git add: %w", err)
 	}
 	// Re-check after staging — `git add -A` can produce nothing to commit when
 	// every change was already tracked-and-staged before the call (rare but
 	// possible) or when only gitignored files were dirty.
-	staged, err := runGit(w.Path, "diff", "--cached", "--name-only")
+	staged, err := taskGit(w.Path, "diff", "--cached", "--name-only")
 	if err != nil {
 		return "", fmt.Errorf("worktree diff --cached: %w", err)
 	}
@@ -189,10 +192,10 @@ func (w *Worktree) Commit(task *pm.Task) (string, error) {
 		return "", nil
 	}
 	msg := fmt.Sprintf("cloop(task-%d): %s", task.ID, task.Title)
-	if _, err := runGit(w.Path, "commit", "-m", msg); err != nil {
+	if _, err := taskGit(w.Path, "commit", "-m", msg); err != nil {
 		return "", fmt.Errorf("worktree git commit: %w", err)
 	}
-	sha, err := runGit(w.Path, "rev-parse", "HEAD")
+	sha, err := taskGit(w.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("worktree rev-parse HEAD: %w", err)
 	}
@@ -221,7 +224,7 @@ func (w *Worktree) Keep(repoDir, why string) error {
 		}
 		reason += ": " + why
 	}
-	if _, err := runGit(repoDir, "worktree", "lock", "--reason", reason, w.Path); err != nil {
+	if _, err := taskGit(repoDir, "worktree", "lock", "--reason", reason, w.Path); err != nil {
 		return fmt.Errorf("worktree: keep %s: %w", w.Path, err)
 	}
 	return nil
@@ -235,7 +238,7 @@ func Reopen(repoDir string, task *pm.Task) (*Worktree, error) {
 		return nil, errors.New("worktree: nil task")
 	}
 	wtPath := Path(repoDir, task)
-	reg, ok := keptRegistration(repoDir, wtPath)
+	reg, ok := keptRegistration(taskGit, repoDir, wtPath)
 	if !ok {
 		return nil, nil
 	}
@@ -245,19 +248,19 @@ func Reopen(repoDir string, task *pm.Task) (*Worktree, error) {
 		// branch. Leave it to Create to report.
 		return nil, nil
 	}
-	baseBranch, err := currentBranch(repoDir)
+	baseBranch, err := currentBranch(taskGit, repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: determine current branch: %w", err)
 	}
-	if _, err := runGit(repoDir, "worktree", "unlock", wtPath); err != nil {
+	if _, err := taskGit(repoDir, "worktree", "unlock", wtPath); err != nil {
 		return nil, fmt.Errorf("worktree: reopen %s: %w", wtPath, err)
 	}
 	return &Worktree{Path: wtPath, Branch: branch, BaseBranch: baseBranch, TaskID: task.ID}, nil
 }
 
 // keptRegistration finds a worktree registered at wtPath and locked by Keep.
-func keptRegistration(repoDir, wtPath string) (registration, bool) {
-	regs, err := gitWorktreeList(repoDir)
+func keptRegistration(git gitRunner, repoDir, wtPath string) (registration, bool) {
+	regs, err := gitWorktreeList(git, repoDir)
 	if err != nil {
 		return registration{}, false
 	}
@@ -287,53 +290,42 @@ func (w *Worktree) Remove(repoDir string) error {
 	if w == nil {
 		return errors.New("worktree: nil receiver")
 	}
-	return forceRemoveWorktree(repoDir, w.Path)
+	return forceRemoveWorktree(taskGit, repoDir, w.Path)
 }
 
 // forceRemoveWorktree runs `git worktree remove --force` against the given
 // path; if that fails it also rm-rfs the directory and runs `git worktree
 // prune` so a future Create() can re-use the same path.
-func forceRemoveWorktree(repoDir, wtPath string) error {
+func forceRemoveWorktree(git gitRunner, repoDir, wtPath string) error {
 	if wtPath == "" {
 		return nil
 	}
 	// Best-effort removal; ignore the error from git but always try to prune
 	// stale entries afterwards so the path can be re-used.
-	_, gitErr := runGit(repoDir, "worktree", "remove", "--force", wtPath)
+	_, gitErr := git(repoDir, "worktree", "remove", "--force", wtPath)
 	if _, statErr := os.Stat(wtPath); statErr == nil {
 		if rmErr := os.RemoveAll(wtPath); rmErr != nil && gitErr != nil {
 			return fmt.Errorf("worktree remove: git=%v fs=%w", gitErr, rmErr)
 		}
 	}
-	_, _ = runGit(repoDir, "worktree", "prune")
+	_, _ = git(repoDir, "worktree", "prune")
 	return nil
 }
 
 // currentBranch returns the current branch name in repoDir, or the commit SHA
 // when HEAD is detached.
-func currentBranch(repoDir string) (string, error) {
-	out, err := runGit(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+func currentBranch(git gitRunner, repoDir string) (string, error) {
+	out, err := git(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return "", err
 	}
 	branch := strings.TrimSpace(out)
 	if branch == "HEAD" {
-		out, err = runGit(repoDir, "rev-parse", "HEAD")
+		out, err = git(repoDir, "rev-parse", "HEAD")
 		if err != nil {
 			return "", err
 		}
 		branch = strings.TrimSpace(out)
 	}
 	return branch, nil
-}
-
-// runGit executes a git command in dir and returns combined stdout+stderr.
-func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
 }

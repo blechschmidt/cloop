@@ -272,9 +272,22 @@ func inAuditedRoot(pkgPath string) bool {
 	return false
 }
 
+// notTheBoundary are packages under pkg/executor that are not a driver: code
+// the hub itself runs, which reaches packages outside the tree. reconcile
+// decides which executors exist and sweeps what they left behind — leaked
+// task worktrees, through pkg/worktree's git — in the hub's own process, on
+// a timer. Treating it as the sanctioned door hid exactly that from the
+// background analysis (Task 20418), so it is audited like any other package.
+var notTheBoundary = map[string]bool{
+	ExecutorBoundary + "/reconcile": true,
+}
+
 // inExecutorBoundary reports whether pkgPath is the sanctioned execution
 // boundary.
 func inExecutorBoundary(pkgPath string) bool {
+	if notTheBoundary[pkgPath] {
+		return false
+	}
 	return pkgPath == ExecutorBoundary || strings.HasPrefix(pkgPath, ExecutorBoundary+"/")
 }
 
@@ -336,6 +349,97 @@ func (v Violation) String() string {
 // HandlerCount reports how many HTTP handlers were discovered, so a test can
 // refuse to pass vacuously when a refactor renames or moves them all.
 func (g *Graph) HandlerCount() int { return len(g.handlers) }
+
+// BackgroundRoots are where the hub runs code no request asked for (Task
+// 20418): its construction — which bootstraps the executors and runs the
+// startup sweep — and Run and Start, which start the watchers, the cluster
+// bus and the periodic sweep. Every goroutine the hub starts outside a
+// request is referenced from one of them, and the reference graph follows a
+// function value as an edge, so these reach all of it. A goroutine a handler
+// starts is the handler's, and the handler check covers it.
+var BackgroundRoots = []string{
+	"github.com/blechschmidt/cloop/pkg/ui.NewInCluster",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).Run",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).Start",
+	"(*github.com/blechschmidt/cloop/pkg/apiserver.Server).Run",
+	"(*github.com/blechschmidt/cloop/pkg/apiserver.Server).Start",
+}
+
+// MissingBackgroundRoots lists the roots the graph does not have, so a test
+// can refuse to pass when a rename leaves the background check with nothing
+// to start from.
+func (g *Graph) MissingBackgroundRoots() []string {
+	var out []string
+	for _, r := range BackgroundRoots {
+		if _, ok := g.nodes[r]; !ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// FindBackgroundSpawns returns every process the background roots reach
+// outside the executor boundary, one Violation per spawning function, and the
+// doors it stopped at.
+//
+// It differs from FindSpawnReachable in three ways. Every spawn is reported,
+// not the first per root: a root here is the whole hub, and one violation
+// must not hide the next. The search stops at an HTTP handler, which the
+// handler check owns. And it stops at doors — functions that run one program
+// on the hub deliberately, each with the reason it is allowed and a test
+// proving the reason (sanctionedHostDoors in callgraph_test.go); a door the
+// search never reaches is stale.
+func (g *Graph) FindBackgroundSpawns(doors map[string]string) (spawns []Violation, reached map[string]bool) {
+	reached = map[string]bool{}
+	reported := map[string]bool{}
+	for _, root := range BackgroundRoots {
+		if _, ok := g.nodes[root]; !ok {
+			continue
+		}
+		parent := map[string]string{root: ""}
+		queue := []string{root}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			n := g.nodes[cur]
+			if n == nil {
+				continue
+			}
+			if n.spawns != "" && !reported[cur] {
+				reported[cur] = true
+				spawns = append(spawns, Violation{
+					Handler: root + " (background)",
+					Path:    reconstruct(parent, cur),
+					Spawn:   spawnFuncs[n.spawns],
+				})
+			}
+			callees := make([]string, 0, len(n.callees))
+			for c := range n.callees {
+				callees = append(callees, c)
+			}
+			sort.Strings(callees)
+			for _, c := range callees {
+				if _, seen := parent[c]; seen {
+					continue
+				}
+				next := g.nodes[c]
+				if next == nil || inExecutorBoundary(next.pkgPath) {
+					continue
+				}
+				if _, isHandler := g.handlers[c]; isHandler {
+					continue
+				}
+				if _, isDoor := doors[c]; isDoor {
+					reached[c] = true
+					continue
+				}
+				parent[c] = cur
+				queue = append(queue, c)
+			}
+		}
+	}
+	return spawns, reached
+}
 
 // FindSpawnReachable returns every audited handler that transitively reaches
 // process execution outside the executor boundary.
