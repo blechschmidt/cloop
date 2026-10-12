@@ -613,17 +613,26 @@ func (s *revokeScene) assertNeverRestored(b *hub, leaseID string, recorded bool)
 		s.t.Fatalf("the survivor lists the revoked lease: %s", r.body)
 	}
 	// Never taken over, not even for a moment before something else took it
-	// back: the trail holds no takeover of it, and — when the revocation was
-	// recorded before the run was adopted — the refusal of one.
+	// back: the trail holds no takeover of it. A container's adopter asks to
+	// take the lease over, so when the revocation was recorded before the run
+	// was adopted the trail holds the refusal. A host process's adopter never
+	// asks: it wipes the files and retires the record, and the trail holds
+	// the wipe.
 	const takeover = "%taken over by the hub process that adopted its run%"
 	if n, _ := s.query(`SELECT COUNT(*) FROM audit_events WHERE event_type = 'secret.renew'
 		AND (entity_id = ? OR payload LIKE ?) AND payload LIKE ?`, leaseID, "%"+leaseID+"%", takeover); n != "0" {
 		s.t.Fatalf("the revoked lease was taken over by the member adopting its run (%s takeover row(s))", n)
 	}
-	if recorded {
+	switch {
+	case s.container && recorded:
 		if n, _ := s.query(`SELECT COUNT(*) FROM audit_events WHERE event_type = 'secret.renew'
 			AND (entity_id = ? OR payload LIKE ?) AND payload LIKE '%cannot be taken over%'`, leaseID, "%"+leaseID+"%"); n == "0" || n == "" {
 			s.t.Error("the trail does not record the takeover of the revoked lease refused")
+		}
+	case !s.container:
+		if n, _ := s.query(`SELECT COUNT(*) FROM audit_events WHERE event_type = 'secret.lease.sweep'
+			AND json_extract(payload, '$.wiped') >= 1`); n == "0" || n == "" {
+			s.t.Error("the trail does not record the dead member's lease directory wiped")
 		}
 	}
 	if n, _ := s.query(`SELECT COUNT(*) FROM proxy_sessions WHERE lease_id = ? AND closed_at = ''`, leaseID); n != "" && n != "0" {
