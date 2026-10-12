@@ -8,7 +8,9 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -28,10 +30,16 @@ import (
 )
 
 // saToken is an unsigned ServiceAccount JWT; the hub reads its claims and the
-// fake cluster below decides whether it is valid.
+// fake cluster below decides whether it is valid. Each carries a jti of its
+// own, as a real one does: two tokens for one ServiceAccount minted in the same
+// second must not be the same token, or a test's "forged" one can coincide
+// with one the cluster just issued.
 func saToken(ns, name string, iat, exp time.Time) string {
+	jti := make([]byte, 8)
+	_, _ = rand.Read(jti)
 	payload, _ := json.Marshal(map[string]any{
 		"sub": "system:serviceaccount:" + ns + ":" + name, "iat": iat.Unix(), "exp": exp.Unix(),
+		"jti":           hex.EncodeToString(jti),
 		"kubernetes.io": map[string]any{"namespace": ns, "serviceaccount": map[string]any{"name": name}},
 	})
 	enc := base64.RawURLEncoding
