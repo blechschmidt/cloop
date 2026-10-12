@@ -357,9 +357,15 @@ func (h *deviceHub) terminalEnv() []string {
 
 func (h *deviceHub) start(t *testing.T, args ...string) *cloopProc {
 	t.Helper()
+	return h.startIn(t, t.TempDir(), args...) // no .cloop: nothing local for the command to find
+}
+
+// startIn is start in dir: a checkout, for `cloop remote init`.
+func (h *deviceHub) startIn(t *testing.T, dir string, args ...string) *cloopProc {
+	t.Helper()
 	p := &cloopProc{args: args, stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan struct{})}
 	p.cmd = exec.Command(binaryPath(t), args...)
-	p.cmd.Dir = t.TempDir() // no .cloop: nothing local for the command to find
+	p.cmd.Dir = dir
 	p.cmd.Env = h.terminalEnv()
 	p.cmd.Stdout, p.cmd.Stderr = p.stdout, p.stderr
 	if err := p.cmd.Start(); err != nil {

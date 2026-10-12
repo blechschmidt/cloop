@@ -49,7 +49,10 @@ func writeCredentials(t *testing.T, path string, hubs ...*hubclient.Hub) {
 
 func TestTheHubCommandsCreateNoDatabase(t *testing.T) {
 	for _, c := range []*cobra.Command{loginCmd, logoutCmd, whoamiCmd, remoteProjectsCmd, remoteLogsCmd,
-		remoteKubeShareCmd, remoteKubeListCmd, remoteKubeRenewCmd, remoteKubeRevokeCmd} {
+		remoteKubeShareCmd, remoteKubeListCmd, remoteKubeRenewCmd, remoteKubeRevokeCmd,
+		remoteInitCmd, remoteExecutorsCmd, remoteReposListCmd, remoteReposAddCmd, remoteReposRemoveCmd,
+		remoteGrantsRequestCmd, remoteGrantsListCmd, remoteGrantsWithdrawCmd,
+		remoteFeaturesStartCmd, remoteFeaturesListCmd, remoteFeaturesPRCmd} {
 		t.Run(c.CommandPath(), func(t *testing.T) {
 			dir := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o700); err != nil {

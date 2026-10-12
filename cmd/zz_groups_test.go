@@ -177,6 +177,7 @@ func TestPreviouslyWorkingCommandPathsStillResolve(t *testing.T) {
 		{"plan", "history"}, {"plan", "critique"}, {"plan", "ai-brief"},
 		{"config", "validate"}, {"hub", "doctor"},
 		{"remote", "logs"}, {"remote", "kube", "share"}, {"remote", "kube", "revoke"},
+		{"remote", "init"}, {"remote", "repos", "add"}, {"remote", "grants", "request"}, {"remote", "features", "pr"},
 	}
 	for _, path := range paths {
 		found, rest, err := rootCmd.Find(path)
