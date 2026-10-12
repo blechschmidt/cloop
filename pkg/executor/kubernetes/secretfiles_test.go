@@ -356,6 +356,7 @@ func TestStart_SecretFilesAreDeletedWhenTheWorkloadFinishes(t *testing.T) {
 	}
 
 	api.waitSecretsEmpty(t, 3*time.Second)
+	api.waitSecretDeleted(t, wantName, 3*time.Second)
 	if got := api.secretDeleteNames(); len(got) != 1 || got[0] != wantName {
 		t.Errorf("secret deletes = %v, want exactly %q once", got, wantName)
 	}

@@ -252,6 +252,22 @@ func (f *fakeAPI) waitSecretsEmpty(t *testing.T, d time.Duration) {
 		d, f.secretNames())
 }
 
+// waitSecretDeleted polls until the driver has sent a delete for name. No
+// Secret being left does not mean that: the pump deletes a finished Pod before
+// it finishes the run, so the garbage collector can reap a Secret the Pod owns
+// before the driver's own delete goes out.
+func (f *fakeAPI) waitSecretDeleted(t *testing.T, name string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if containsString(f.secretDeleteNames(), name) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the driver sent no delete for secret %s within %s (deletes: %v)", name, d, f.secretDeleteNames())
+}
+
 // requestsMatching returns every recorded request whose line contains sub.
 func (f *fakeAPI) requestsMatching(sub string) []string {
 	f.mu.Lock()
