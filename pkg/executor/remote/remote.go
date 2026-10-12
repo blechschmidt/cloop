@@ -24,6 +24,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // StatusUnreachable is the executors-table status written when an agent misses
@@ -213,6 +214,26 @@ type Options struct {
 	// do not want a vendor script run on a critical host turn it off here, and
 	// get the Task 20332 refusal back unchanged.
 	AutoInstallHarness func() bool
+	// ImagePolicy reads the hub's image trust policy, for the image a project
+	// names in its .cloop/sandbox.yaml (Task 20424). Consulted on every Start
+	// whose sandbox runs that image, and enforced here because nothing on the
+	// device enforces it: see imagepolicy.go.
+	//
+	// A function, re-read per dispatch, for the reason Sandbox is one: a
+	// policy an operator tightens governs the next task. An error refuses
+	// the dispatch — it never stands in for the zero policy, which admits
+	// every image.
+	//
+	// Nil means no policy source, the pre-Task-20424 behaviour of an executor
+	// built outside a hub. The hub always sets it.
+	ImagePolicy func() (imagepolicy.Policy, error)
+	// ImageResolver turns a tag into the digest its registry serves, for a
+	// policy that requires signatures. Nil asks the registry
+	// (imagepolicy.RegistryResolver). Tests inject their own.
+	ImageResolver imagepolicy.Resolver
+	// ImageVerifier checks a digest's signature. Nil runs cosign on the hub,
+	// through a verifier every executor shares. Tests inject their own.
+	ImageVerifier imagepolicy.Verifier
 	// ResultBudget bounds the returned work — write-back bundles and project
 	// state documents — this executor may have the hub hold in memory while
 	// it waits to be collected (Task 20399). Nil draws on the process-wide
@@ -749,6 +770,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		return executor.Handle{}, err
 	}
 
+	// The image the project names, under the hub's trust policy (Task 20424):
+	// its signature verified here when the policy requires one, because
+	// nothing on the device verifies it, and the dispatch then names the
+	// digest that was verified. Before anything is leased, like the refusals
+	// above — a verification can take a registry round trip and a cosign run,
+	// and a credential minted for a run refused at the end of them would be
+	// one the broker believes is out in the world.
+	image, verified, err := e.authorizeProjectImage(ctx, spec, sandbox)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	spec.Image = image
+
 	// Convert and bound the credential files here, before a credential is leased
 	// or a handle row is written, so a lease that cannot fit in a start frame
 	// fails naming the files rather than surfacing later as an oversized-payload
@@ -1051,7 +1085,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		// Capabilities().SharesHostFilesystem is false.
 		PID:       started.PID,
 		StartedAt: startedAt,
+		Image:     ranImage(spec, verified),
 	}, nil
+}
+
+// ranImage is the image a dispatch is known to run: the digest the hub
+// verified, when nothing on the device builds over it. A tag the device pins
+// in its own store, and a setup: block it builds on top, produce an image the
+// hub never saw, which it does not claim to know.
+func ranImage(spec executor.Spec, verified bool) string {
+	if !verified || len(spec.SetupCommands) > 0 {
+		return ""
+	}
+	return spec.Image
 }
 
 // HandleStatuses implements executor.Lister from the control plane's last-known view

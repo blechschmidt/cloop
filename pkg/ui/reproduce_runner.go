@@ -235,6 +235,7 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	}
 	spec, sandboxSpec, err := applySandbox(spec, ex, rs.ProjectDir)
 	if err != nil {
+		auditImageDenial(rs.ProjectDir, err)
 		return nil, err
 	}
 	if spec, err = applyFirewall(spec, ex, rs.ProjectDir); err != nil {
@@ -299,6 +300,9 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	}
 	outcome.Test = parseTestOutcome(outcome.Output)
 	if runErr != nil {
+		// The executor enforces the image policy too, and a device's is where
+		// the signature is verified (Task 20424): audited as a run's is.
+		auditImageDenial(rs.ProjectDir, runErr)
 		return outcome, fmt.Errorf("reproduction sandbox: %w", runErr)
 	}
 

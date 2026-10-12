@@ -29,11 +29,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -200,13 +202,13 @@ func TestOverlayImagePolicyIsEnforced(t *testing.T) {
 
 	// Served on the other port, the same directory has no policy at all.
 	New(dir, otherHubPort, "")
-	if hubImagePolicy().Configured() {
-		t.Fatal("a hub with no overlay applied another hub's image policy")
+	if p, err := hubImagePolicy(); err != nil || p.Configured() {
+		t.Fatalf("a hub with no overlay applied another hub's image policy (%v)", err)
 	}
 
 	New(dir, overlayHubPort, "")
-	if !hubImagePolicy().Configured() {
-		t.Fatal("the hub's early image check ignored the overlay's sandbox.image_policy")
+	if p, err := hubImagePolicy(); err != nil || !p.Configured() {
+		t.Fatalf("the hub's early image check ignored the overlay's sandbox.image_policy (%v)", err)
 	}
 	_, _, err := applySandbox(executor.Spec{}, nil, project)
 	var denied *imagepolicy.DenyError
@@ -220,6 +222,63 @@ func TestOverlayImagePolicyIsEnforced(t *testing.T) {
 	cfg := bootstrapHubConfig(dir, overlayHubPort)
 	if cfg == nil || !cfg.Sandbox.ImagePolicy.Policy().RequireDigest {
 		t.Error("the configuration the drivers are reconciled from does not carry the overlay's image policy")
+	}
+}
+
+// TestAnUnreadableHubConfigRefusesAProjectImage: a configuration that will not
+// load is never the zero policy, which admits every image (Task 20424). The
+// hub's early check used to read it that way on the argument that the
+// executors hold their own copy — and a device holds none. Both the early
+// check and the policy a device executor reads per dispatch now refuse, and
+// the refusal is audited as the image denial it is.
+func TestAnUnreadableHubConfigRefusesAProjectImage(t *testing.T) {
+	restoreControlPlane(t)
+
+	dir, sharedPath, _ := overlayControlPlane(t, `sandbox:
+  image_policy:
+    allowed_registries: [ghcr.io]
+    require_signature: true
+    cosign_public_keys: [/etc/cloop/cosign.pub]
+`, "")
+	srv := New(dir, otherHubPort, "")
+	if p, err := srv.deviceImagePolicy(); err != nil || !p.RequireSignature {
+		t.Fatalf("deviceImagePolicy = %+v, %v; want the configured signature rule", p, err)
+	}
+
+	if err := os.WriteFile(sharedPath, []byte("sandbox:\n  image_policy: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.deviceImagePolicy(); err == nil {
+		t.Fatal("a configuration that does not load gave a device executor a policy to dispatch under")
+	}
+
+	project := writeSandboxYAML(t, "image: ghcr.io/acme/tools:3.12\n")
+	_, _, err := applySandbox(executor.Spec{}, nil, project)
+	var denied *imagepolicy.DenyError
+	if !errors.As(err, &denied) || denied.Rule != imagepolicy.RuleConfig {
+		t.Fatalf("applySandbox under an unreadable configuration = %v, want a %s denial",
+			err, imagepolicy.RuleConfig)
+	}
+	auditImageDenial(project, err)
+	db, oerr := statedb.Open(state.DBPath(dir))
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer db.Close()
+	rows, _, lerr := db.ListAuditEvents(statedb.AuditFilter{EventType: string(auditaction.ActionSandboxImageDenied)})
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if len(rows) != 1 || !strings.Contains(rows[0].Payload, imagepolicy.RuleConfig) {
+		t.Fatalf("image denial rows = %+v, want one naming %s", rows, imagepolicy.RuleConfig)
+	}
+
+	// A project that names no image is not refused for it: there is nothing
+	// for the policy to decide. (It goes on to the capability gate, which a
+	// nil executor fails for its own reason.)
+	plain := writeSandboxYAML(t, "env: [FOO]\n")
+	if _, _, err := applySandbox(executor.Spec{}, nil, plain); errors.As(err, &denied) {
+		t.Errorf("a project naming no image was refused an image under an unreadable configuration: %v", err)
 	}
 }
 

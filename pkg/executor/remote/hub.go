@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // HubOptions configures a Hub.
@@ -109,6 +110,18 @@ type HubOptions struct {
 	//
 	// Nil means enabled. See Options.AutoInstallHarness.
 	AutoInstallHarness func() bool
+	// ImagePolicy reads the hub's image trust policy for every executor this
+	// hub builds, which enforces it on the image a project names before a
+	// dispatch to its device (Task 20424). See Options.ImagePolicy.
+	//
+	// Deployment-wide, like AutoInstallHarness: the policy is the hub's, and
+	// a device holding a copy of its own would be deciding its own
+	// containment.
+	ImagePolicy func() (imagepolicy.Policy, error)
+	// ImageResolver and ImageVerifier stand in for the registry and for
+	// cosign, for tests. Nil uses the real ones; see Options.
+	ImageResolver imagepolicy.Resolver
+	ImageVerifier imagepolicy.Verifier
 	// ResultBudget bounds the returned work every executor this hub builds
 	// may have it hold in memory (Task 20399). Nil uses the process-wide
 	// DefaultResultBudget, whose limits the caller sets from
@@ -246,6 +259,9 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		// whose losing side terminates the device's work.
 		HandleStore:        h.opts.HandleStore,
 		AutoInstallHarness: h.opts.AutoInstallHarness,
+		ImagePolicy:        h.opts.ImagePolicy,
+		ImageResolver:      h.opts.ImageResolver,
+		ImageVerifier:      h.opts.ImageVerifier,
 		ResultBudget:       h.opts.ResultBudget,
 		Now:                h.opts.Now,
 	}

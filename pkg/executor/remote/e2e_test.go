@@ -83,6 +83,13 @@ func detachableLogf(t *testing.T) func(string, ...any) {
 // to connect.
 func newLoopback(t *testing.T, configure ...func(*agent.Config)) *loopback {
 	t.Helper()
+	return newLoopbackHub(t, nil, configure...)
+}
+
+// newLoopbackHub is newLoopback with the hub's options adjusted by hubOpts
+// before it is built.
+func newLoopbackHub(t *testing.T, hubOpts func(*remote.HubOptions), configure ...func(*agent.Config)) *loopback {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the loopback test runs POSIX shell commands")
 	}
@@ -95,11 +102,15 @@ func newLoopback(t *testing.T, configure ...func(*agent.Config)) *loopback {
 
 	logf := detachableLogf(t)
 
-	hub, err := remote.NewHub(remote.HubOptions{
+	opts := remote.HubOptions{
 		Store:    store,
 		Registry: reg,
 		Logf:     func(format string, args ...any) { logf("hub: "+format, args...) },
-	})
+	}
+	if hubOpts != nil {
+		hubOpts(&opts)
+	}
+	hub, err := remote.NewHub(opts)
 	if err != nil {
 		t.Fatalf("NewHub: %v", err)
 	}

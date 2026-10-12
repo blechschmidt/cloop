@@ -55,9 +55,14 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 
 	// Image trust, before anything else looks at the spec. The executors
 	// enforce this too — they are the authority, because they are what runs the
-	// image — but a refusal here reaches the author as a config error on the
+	// image, and a device's executor is where its signature is verified (Task
+	// 20424) — but a refusal here reaches the author as a config error on the
 	// file they wrote, rather than as a container that failed to start.
-	if _, err := resolved.CheckImagePolicy(hubImagePolicy()); err != nil {
+	policy, err := hubImagePolicy()
+	if err != nil && resolved.Spec.Image != "" {
+		return spec, resolved, fmt.Errorf("%s: image: %w", sandbox.FileName, unreadableImagePolicy(resolved.Spec.Image, err))
+	}
+	if _, err := resolved.CheckImagePolicy(policy); err != nil {
 		return spec, resolved, err
 	}
 
@@ -81,17 +86,38 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 // configuration, so a policy written in the per-instance overlay is enforced
 // here as well as in the drivers' bootstrap copy (Task 20364).
 //
-// A config that will not load yields the zero policy, which constrains nothing.
-// That is not a fail-open hole: this is the *early* check, and the executors
-// hold their own copy of the policy from the config that loaded successfully at
-// bootstrap. A hub whose config.yaml became unreadable mid-flight therefore
-// loses the friendly error, not the enforcement.
-func hubImagePolicy() imagepolicy.Policy {
+// A config that will not load is an error, never the zero policy, which admits
+// every image (Task 20424). This read used to fail open on the argument that
+// the executors hold their own copy — true of the container and Kubernetes
+// drivers, built from the config that loaded at bootstrap, and of nothing on a
+// device. A device's executor now reads the policy itself per dispatch and
+// refuses when it cannot; this refuses too, earlier and naming the file.
+//
+// No control plane at all — a process that bootstrapped no hub — has stated no
+// policy, and gets the zero one: there is no configuration to have failed.
+func hubImagePolicy() (imagepolicy.Policy, error) {
 	cfg, err := controlPlaneConfig()
-	if err != nil || cfg == nil {
-		return imagepolicy.Policy{}
+	if errors.Is(err, errNoControlPlane) {
+		return imagepolicy.Policy{}, nil
 	}
-	return cfg.Sandbox.ImagePolicy.Policy()
+	if err != nil {
+		return imagepolicy.Policy{}, err
+	}
+	return cfg.Sandbox.ImagePolicy.Policy(), nil
+}
+
+// unreadableImagePolicy is the refusal of a project image the hub cannot check
+// because its own configuration will not load: an image denial, so it is
+// audited and rendered as one.
+func unreadableImagePolicy(image string, cause error) error {
+	return &imagepolicy.DenyError{
+		Ref:  image,
+		Rule: imagepolicy.RuleConfig,
+		Reason: fmt.Sprintf("the hub could not read its image trust policy (%v), so it cannot say whether "+
+			"this image is one it admits", cause),
+		Remediation: "Fix the hub's configuration — `cloop config validate` in the hub's directory names what " +
+			"is wrong — and start the run again.",
+	}
 }
 
 // auditImageDenial records a container image refused by the trust policy, and

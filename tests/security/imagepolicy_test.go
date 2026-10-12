@@ -20,12 +20,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 )
@@ -255,5 +258,123 @@ func TestSignatureRequirementNeverDegradesToASkip(t *testing.T) {
 	bare := imagepolicy.Enforcer{Policy: e.Policy}
 	if _, err := bare.Authorize(context.Background(), "ghcr.io/acme/tools@"+allowedDigest); err == nil {
 		t.Fatal("an enforcer with no verifier admitted an unverified image")
+	}
+}
+
+// deviceTagResolver stands in for the registry the hub resolves a device's tag
+// at: the digest each tag names.
+type deviceTagResolver map[string]string
+
+func (r deviceTagResolver) ResolveDigest(_ context.Context, ref string) (string, error) {
+	if d, ok := r[ref]; ok {
+		return d, nil
+	}
+	return "", errors.New("no such tag")
+}
+
+// TestADeviceRunsOnlyASignatureVerifiedImage is guarantee 9 on the device path
+// (Task 20424). A device in container mode runs the image a project names, and
+// its own container driver applies no policy: before this guarantee the hub
+// checked such an image against the allowlists and the digest rule and never
+// its signature, so require_signature held on the hub's executors and on no
+// device. The hub now verifies it, and the device is sent the digest it
+// verified — never the tag, which the device would resolve in a store the hub
+// cannot see — or nothing at all.
+//
+// It drives a real remote executor over the in-memory pipe, against a stand-in
+// cosign that accepts one digest, as cosign accepts only what an accepted key
+// signed.
+func TestADeviceRunsOnlyASignatureVerifiedImage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the cosign stand-in is a POSIX shell script")
+	}
+	signed := "sha256:" + strings.Repeat("5a", 32)
+	unsigned := "sha256:" + strings.Repeat("0d", 32)
+	cosign := filepath.Join(t.TempDir(), "cosign")
+	script := "#!/bin/sh\nfor a in \"$@\"; do ref=$a; done\ncase \"$ref\" in *@" + signed +
+		") exit 0 ;; esac\necho 'Error: no matching signatures' >&2\nexit 1\n"
+	if err := os.WriteFile(cosign, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := remote.NewExecutor(remote.Options{
+		ID: pinningAgentID, Name: "edge",
+		Sandbox: func() (executor.SandboxSettings, error) {
+			return executor.SandboxSettings{Mode: executor.SandboxModeContainer}, nil
+		},
+		ImagePolicy: func() (imagepolicy.Policy, error) {
+			return imagepolicy.Policy{AllowedRegistries: []string{"ghcr.io"}, RequireSignature: true,
+				CosignPublicKeys: []string{"/etc/cloop/cosign.pub"}}, nil
+		},
+		ImageResolver: deviceTagResolver{"ghcr.io/acme/tools:3.12": signed, "ghcr.io/acme/tools:3.13": unsigned},
+		ImageVerifier: &imagepolicy.CosignVerifier{Binary: cosign},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, dev := remote.NewPipe(64)
+	agent := &hostileAgent{t: t, conn: dev}
+	accepted := make(chan error, 1)
+	go func() {
+		_, err := remote.Accept(context.Background(), cp, remote.AcceptOptions{
+			Agent: remote.AgentRecord{AgentID: pinningAgentID}, Executor: ex,
+		})
+		accepted <- err
+	}()
+	agent.send(remote.TypeHello, "hello", "", remote.HelloPayload{
+		ProtocolVersion: remote.ProtocolVersion, AgentID: pinningAgentID, Name: "edge",
+		Capabilities: remote.AgentCapabilities{OS: "linux", Arch: "amd64"},
+	})
+	if f := agent.next(); f.Type != remote.TypeWelcome {
+		t.Fatalf("handshake answered with %s", f.Type)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	spec := func(image string) executor.Spec {
+		return executor.Spec{Argv: []string{"true"}, WorkDir: "/tmp/project", Image: image}
+	}
+
+	// Unsigned — by tag, and by digest — is refused with nothing sent.
+	for _, image := range []string{"ghcr.io/acme/tools:3.13", "ghcr.io/acme/tools@" + unsigned} {
+		_, err := ex.Start(context.Background(), spec(image))
+		var denied *imagepolicy.DenyError
+		if !errors.As(err, &denied) || denied.Rule != imagepolicy.RuleSignature {
+			t.Fatalf("Start(%s) = %v, want a signature denial", image, err)
+		}
+	}
+	agent.send(remote.TypeHeartbeat, "hb", "", remote.HeartbeatPayload{Seq: 1})
+	for f := agent.next(); f.Type != remote.TypeHeartbeatAck; f = agent.next() {
+		if f.Type == remote.TypeStart {
+			t.Fatal("a start frame reached the device for an unsigned image")
+		}
+	}
+
+	// Signed: the device is told to run the digest the hub verified.
+	type result struct {
+		h   executor.Handle
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		h, err := ex.Start(context.Background(), spec("ghcr.io/acme/tools:3.12"))
+		done <- result{h, err}
+	}()
+	var sent remote.StartPayload
+	for {
+		f := agent.next()
+		if f.Type != remote.TypeStart {
+			continue
+		}
+		if sent, err = remote.DecodeStart(f); err != nil {
+			t.Fatal(err)
+		}
+		agent.send(remote.TypeStarted, f.ID, f.Handle, remote.StartedPayload{HandleID: f.Handle, StartedAt: time.Now()})
+		break
+	}
+	if res := <-done; res.err != nil {
+		t.Fatalf("Start of the signed image: %v", res.err)
+	}
+	if want := "ghcr.io/acme/tools@" + signed; sent.Spec.Image != want {
+		t.Fatalf("the device was told to run %q, want the verified digest %q", sent.Spec.Image, want)
 	}
 }

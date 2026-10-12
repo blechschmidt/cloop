@@ -28,6 +28,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -123,6 +124,10 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 				}
 				return cfg.Executors.AutoInstallHarnessAllowed()
 			},
+			// The image trust policy every device executor enforces on the
+			// image a project names, before dispatch (Task 20424): nothing on
+			// a device does. See deviceImagePolicy.
+			ImagePolicy: s.deviceImagePolicy,
 			// Agents send no Origin, so these only ever affect browsers.
 			//
 			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry
@@ -175,6 +180,20 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		executorHubLive.Store(hub)
 	})
 	return executorHub, executorHubErr
+}
+
+// deviceImagePolicy is the image trust policy a device executor enforces on
+// the image a project names (Task 20424). Read per dispatch from this hub's
+// own configuration, overlay included, so a policy tightened in Settings
+// governs the next task. An unreadable configuration is an error, which
+// refuses the dispatch: unlike AutoInstallHarness, failing open here would
+// admit every image.
+func (s *Server) deviceImagePolicy() (imagepolicy.Policy, error) {
+	cfg, err := s.loadHubConfig()
+	if err != nil {
+		return imagepolicy.Policy{}, err
+	}
+	return cfg.Sandbox.ImagePolicy.Policy(), nil
 }
 
 // configureResultBudget applies executors.remote to the process-wide budget

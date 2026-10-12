@@ -1008,8 +1008,9 @@ func TestImagePolicyChecks(t *testing.T) {
 	})
 
 	// A device in container mode runs the images projects name; the hub
-	// checks them against the allowlists before dispatch, and no device
-	// verifies a signature.
+	// checks them against the policy before dispatch, and verifies their
+	// signature with cosign on this host (Task 20424) — so a device fleet
+	// needs cosign on the hub even when no hub executor runs an image.
 	t.Run("devices whose sandbox runs a container run project images", func(t *testing.T) {
 		// Host mode runs no image, so the policy decides nothing a device
 		// in it runs.
@@ -1023,16 +1024,33 @@ func TestImagePolicyChecks(t *testing.T) {
 		got = findingsFor(t, dir, cfg, Options{Offline: true})
 		wantSeverity(t, only(t, got, "images.policy"), SeverityWarn)
 
+		key := filepath.Join(t.TempDir(), "cosign.pub")
+		if err := os.WriteFile(key, []byte("-----BEGIN PUBLIC KEY-----\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		cfg.Sandbox.ImagePolicy = config.ImagePolicyConfig{
 			AllowedRegistries: []string{"ghcr.io"},
 			RequireSignature:  true,
-			CosignPublicKeys:  []string{"/etc/cloop/cosign.pub"},
+			CosignPublicKeys:  []string{key},
 		}
-		got = findingsFor(t, dir, cfg, Options{Offline: true})
+		got = findingsFor(t, dir, cfg, Options{
+			Offline:  true,
+			LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		})
 		f := only(t, got, "images.signature")
-		wantSeverity(t, f, SeverityWarn)
-		if !strings.Contains(f.Message, "no device verifies a signature") {
-			t.Errorf("want the device gap named, got %q", f.Message)
+		wantSeverity(t, f, SeverityFail)
+		if !strings.Contains(f.Message, "devices and virtual executors") {
+			t.Errorf("want the devices named among what refuses every image, got %q", f.Message)
+		}
+
+		got = findingsFor(t, dir, cfg, Options{
+			Offline:  true,
+			LookPath: func(string) (string, error) { return "/usr/bin/cosign", nil },
+		})
+		f = only(t, got, "images.signature")
+		wantSeverity(t, f, SeverityPass)
+		if !strings.Contains(f.Message, "sent the digest this hub verified") {
+			t.Errorf("want the device path described, got %q", f.Message)
 		}
 	})
 }

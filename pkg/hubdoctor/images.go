@@ -17,11 +17,11 @@ package hubdoctor
 // apply to them.
 //
 // The cosign case is worth more than a schema check: require_signature with no
-// cosign binary means the container and Kubernetes executors refuse every
-// project image rather than admit it unchecked, which is the safe direction
-// and a total loss of function, so it must be said out loud rather than
-// discovered. And where a device runs project images, the signature is not
-// checked at all — which has to be said too.
+// cosign binary means every project image is refused rather than admitted
+// unchecked — by the container and Kubernetes executors, and for a device by
+// the hub, which verifies a device's project image before dispatching to it
+// (Task 20424) — which is the safe direction and a total loss of function, so
+// it must be said out loud rather than discovered.
 
 import (
 	"context"
@@ -180,9 +180,14 @@ func checkPinning(p imagepolicy.Policy, usesImages bool, add addFn) {
 }
 
 // checkCosign verifies the hub can do what its policy demands, where it is
-// demanded. Signatures are verified by the container and Kubernetes drivers
-// (imagepolicy.Enforcer with a CosignVerifier); a device runs project images
-// the hub checked against the allowlists and the digest rule only.
+// demanded. Every signature is verified with cosign on this host
+// (imagepolicy.Enforcer with a CosignVerifier): by the container and
+// Kubernetes drivers for their own workloads, and by the hub for a device or
+// virtual executor whose sandbox runs project images, before it dispatches to
+// it (Task 20424). For a device the hub first resolves a tag at its registry,
+// so the device is sent the digest that was verified — which is why a device
+// fleet needs the registries reachable from the hub, not only from the
+// devices (checkRegistryReachability probes them).
 func checkCosign(p imagepolicy.Policy, cfg *config.Config, devices bool, opts Options, add addFn) {
 	// A policy that requires a signature with no key or identity to check it
 	// against is rejected by Policy.Validate, so by the time this runs there is
@@ -190,19 +195,17 @@ func checkCosign(p imagepolicy.Policy, cfg *config.Config, devices bool, opts Op
 	if !p.RequireSignature {
 		return
 	}
+	var verifying []string
+	if cfg.Executors.Container.Enabled || cfg.Executors.Kubernetes.Enabled {
+		verifying = append(verifying, "the container and Kubernetes executors")
+	}
 	if devices {
-		add(Finding{
-			Check: "images.signature", Title: "Signature verification", Severity: SeverityWarn,
-			Message: "require_signature is on, but devices whose sandbox runs a container run project images without it: " +
-				"the hub checks theirs against the allowlists and the digest rule only, and no device " +
-				"verifies a signature",
-			Remediation: "Run projects whose images must be signed on the container or Kubernetes " +
-				"executor, or restrict allowed_repos to a repository only your signing pipeline pushes to",
-		})
+		verifying = append(verifying, "devices and virtual executors whose sandbox runs a container")
 	}
-	if !cfg.Executors.Container.Enabled && !cfg.Executors.Kubernetes.Enabled {
-		return // no verifying executor here, so nothing on this host runs cosign
+	if len(verifying) == 0 {
+		return // nothing on this hub runs a project image, so nothing here runs cosign
 	}
+	where := strings.Join(verifying, " and ")
 
 	look := opts.LookPath
 	if look == nil {
@@ -211,8 +214,8 @@ func checkCosign(p imagepolicy.Policy, cfg *config.Config, devices bool, opts Op
 	if _, err := look(imagepolicy.CosignBinary); err != nil {
 		add(Finding{
 			Check: "images.signature", Title: "Signature verification", Severity: SeverityFail,
-			Message: "require_signature is on but cosign is not on this host's PATH; the container and " +
-				"Kubernetes executors refuse every project image rather than admit it unchecked",
+			Message: "require_signature is on but cosign is not on this host's PATH; every project image " +
+				"is refused on " + where + " rather than admitted unchecked",
 			Remediation: "Install cosign in the hub image, or set require_signature: false",
 		})
 		return
@@ -247,10 +250,15 @@ func checkCosign(p imagepolicy.Policy, cfg *config.Config, devices bool, opts Op
 			Remediation: "Fix or remove the unreadable entries in sandbox.image_policy.cosign_public_keys",
 		})
 	default:
+		msg := fmt.Sprintf("cosign is available; %d key(s) and %d identity pattern(s) configured; verified for %s",
+			len(p.CosignPublicKeys), len(p.CosignIdentities), where)
+		if devices {
+			msg += "; a device is sent the digest this hub verified, after resolving a tag at its registry " +
+				"from this host"
+		}
 		add(Finding{
 			Check: "images.signature", Title: "Signature verification", Severity: SeverityPass,
-			Message: fmt.Sprintf("cosign is available; %d key(s) and %d identity pattern(s) configured",
-				len(p.CosignPublicKeys), len(p.CosignIdentities)),
+			Message: msg,
 		})
 	}
 }
