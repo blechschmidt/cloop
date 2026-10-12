@@ -653,9 +653,13 @@ sandbox's `kubectl` passes through, so the denial counter says whether the
 boundary is being tested. `result` is `allowed` or `denied`; `reason` is
 `verb_not_allowed`, `namespace_not_allowed`, `cluster_scope`,
 `resource_not_allowed`, `dangerous_subresource`, `non_resource_path`,
-`protocol_upgrade`, `body_too_large` or `unauthenticated`. Sustained
-`verb_not_allowed` is a workload expecting write access it was not granted;
-`dangerous_subresource` is an attempt to open a shell inside a pod.
+`protocol_upgrade`, `body_too_large` or `unauthenticated` — or, for a write
+that would mint a credential outside the monitor (Task 20420),
+`service_account_token_secret`, `workload_service_account`, `host_access`,
+`rbac_binding`, `rbac_role`, `certificate_signing_request` or `unreadable_body`.
+Sustained `verb_not_allowed` is a workload expecting write access it was not
+granted; `dangerous_subresource` is an attempt to open a shell inside a pod; any
+of the credential reasons is a workload reaching for a credential of its own.
 
 A proxy-side failure — an unreachable cluster, an unusable credential — is
 counted as **neither** allowed nor denied, so the denial rate does not lie in
@@ -668,10 +672,18 @@ rate(cloop_kubeguard_denials_total{reason="verb_not_allowed"}[5m]) > 0.1
 ```
 
 **An attempt to get a shell in a pod.** The monitor refuses `exec`, `attach`,
-`portforward` and `proxy` for every verb, so this should be flat at zero:
+`portforward`, `proxy` and `ephemeralcontainers` for every verb, so this should
+be flat at zero:
 
 ```promql
 rate(cloop_kubeguard_denials_total{reason="dangerous_subresource"}[5m]) > 0
+```
+
+**A workload minting a credential of its own** — a token Secret, a workload as
+another ServiceAccount or on the node, RBAC, a certificate. Also flat at zero:
+
+```promql
+sum(rate(cloop_kubeguard_denials_total{reason=~"service_account_token_secret|workload_service_account|host_access|rbac_binding|rbac_role|certificate_signing_request"}[5m])) > 0
 ```
 
 See [the Kubernetes access monitor](../architecture/kubernetes-access.md) for

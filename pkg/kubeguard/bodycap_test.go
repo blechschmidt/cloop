@@ -62,9 +62,12 @@ func newTransportHarness(t *testing.T, policy Policy, tr http.RoundTripper) (*ha
 	return h, srv
 }
 
+// chunkedPost streams body with no declared length. To configmaps, a kind
+// whose body the monitor streams rather than reads whole (inspect.go), which
+// is the path these tests are about.
 func chunkedPost(t *testing.T, h *harness, body string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/namespaces/app/pods",
+	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/namespaces/app/configmaps",
 		io.NopCloser(strings.NewReader(body)))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)

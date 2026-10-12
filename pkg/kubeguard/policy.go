@@ -7,14 +7,20 @@ package kubeguard
 // answers them about the tuple apirequest.go produced, never about a raw
 // path. Anything that needs to reason about a URL has already done so.
 //
-// Three rules are not configurable, and all are refusals:
+// Five rules are not configurable, and all are refusals:
 //
 //   - a subresource in dangerousSubresources is denied outright, because it
-//     confers a capability (a shell, a tunnel, a laundered request) rather
-//     than returning data, and no verb allowlist expresses that distinction;
+//     confers a capability (a shell, a tunnel, a laundered request, a new
+//     process in a running Pod) rather than returning data, and no verb
+//     allowlist expresses that distinction;
 //   - so is one in credentialSubresources — serviceaccounts/token, which
 //     answers with a credential for the cluster that would bypass the monitor
 //     from then on (Task 20416);
+//   - a write to RBAC or to a CertificateSigningRequest is denied outright
+//     (inspect.go): each hands out authority the monitor never sees again;
+//   - a write whose body would make a credential — a ServiceAccount token
+//     Secret, a workload running as another ServiceAccount or reaching the
+//     node — is denied once the body is read (inspect.go, Task 20420);
 //   - a protocol upgrade is denied outright, for the reason in decideUpgrade.
 //
 // Everything else is allowlist-and-deny-by-default.
@@ -70,7 +76,8 @@ var DefaultNonResourcePaths = []string{
 
 // DenyReason classifies a refusal. It is a metric label and an audit field,
 // so the set is small and stable: an operator watching a fleet wants to tell
-// "someone's chart tried to write" from "someone probed kube-system".
+// "someone's chart tried to write" from "someone probed kube-system". The
+// reasons for writes that would mint a credential are declared in inspect.go.
 type DenyReason string
 
 const (
@@ -465,6 +472,9 @@ func (p Policy) AllowsNonResourcePath(pth string) bool {
 
 // Decide returns nil when the request may be forwarded, or a *Denial.
 //
+// For a write NeedsBody marks, nil is provisional: the proxy reads the body,
+// and InspectWrite has the last word (inspect.go).
+//
 // The order of the checks is chosen for the message the operator reads, not
 // for speed: the most specific and most alarming reason wins, so a sandbox
 // that tried to exec into a pod is told that, rather than being told its verb
@@ -494,6 +504,15 @@ func (p Policy) Decide(r APIRequest) error {
 					"refused for every verb",
 				r.ResourceString(), r.Subresource),
 		}
+	}
+
+	// 1b. A write that hands out authority by its kind alone — RBAC, a
+	//     CertificateSigningRequest. Ahead of the verb check for the reason
+	//     the subresources are: it is refused under every grant, and saying
+	//     "read-only" to someone creating a RoleBinding would suggest a write
+	//     grant would let it through.
+	if d := credentialResourceDenial(r); d != nil {
+		return d
 	}
 
 	// 2. A protocol upgrade.

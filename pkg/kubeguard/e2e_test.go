@@ -29,6 +29,10 @@ type fakeAPIServer struct {
 	mu       sync.Mutex
 	requests []*http.Request
 	bodies   []string
+	// answer, when set, decides a request's status and body instead of the
+	// default 200 PodList: how a test stands up an object the monitor reads
+	// back before a patch (inspect.go).
+	answer func(r *http.Request) (int, string)
 }
 
 func newFakeAPIServer(t *testing.T) *fakeAPIServer {
@@ -39,8 +43,15 @@ func newFakeAPIServer(t *testing.T) *fakeAPIServer {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.Clone(r.Context()))
 		f.bodies = append(f.bodies, string(body))
+		answer := f.answer
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if answer != nil {
+			status, out := answer(r)
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, out)
+			return
+		}
 		fmt.Fprintf(w, `{"kind":"PodList","items":[],"path":%q}`, r.URL.Path)
 	}))
 	t.Cleanup(f.srv.Close)

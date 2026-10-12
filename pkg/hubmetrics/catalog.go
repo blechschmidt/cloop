@@ -420,7 +420,7 @@ var (
 
 	KubeGuardDenials = Default.MustRegister(Definition{
 		Name:   "cloop_kubeguard_denials_total",
-		Help:   "Kubernetes API requests refused, by reason (verb_not_allowed, namespace_not_allowed, cluster_scope, resource_not_allowed, dangerous_subresource, non_resource_path, protocol_upgrade, body_too_large, unauthenticated). Sustained verb_not_allowed is a workload that expects write access it was not granted; dangerous_subresource is an attempt to exec into a pod.",
+		Help:   "Kubernetes API requests refused, by reason (verb_not_allowed, namespace_not_allowed, cluster_scope, resource_not_allowed, dangerous_subresource, non_resource_path, protocol_upgrade, body_too_large, unauthenticated, and for writes that would mint a credential outside the monitor: service_account_token_secret, workload_service_account, host_access, rbac_binding, rbac_role, certificate_signing_request, unreadable_body). Sustained verb_not_allowed is a workload that expects write access it was not granted; dangerous_subresource is an attempt to exec into a pod; any of the credential reasons is a workload reaching for a credential of its own.",
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
 	})

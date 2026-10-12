@@ -106,11 +106,18 @@ var namespaceSubresources = map[string]bool{"status": true, "finalize": true}
 // cannot opt back into them. An operator who genuinely wants a sandbox to
 // exec into pods does not want this proxy in the path; they want a grant
 // without it.
+//
+// ephemeralcontainers belongs with them (Task 20420): it starts a new
+// container inside a Pod that is already running — as whichever
+// ServiceAccount that Pod runs as, with that ServiceAccount's token mounted —
+// so a write grant could read the token of any Pod in its namespaces through
+// it. The edit role carries it.
 var dangerousSubresources = map[string]bool{
-	"exec":        true,
-	"attach":      true,
-	"portforward": true,
-	"proxy":       true,
+	"exec":                true,
+	"attach":              true,
+	"portforward":         true,
+	"proxy":               true,
+	"ephemeralcontainers": true,
 }
 
 // credentialSubresources are resource/subresource pairs that answer with a

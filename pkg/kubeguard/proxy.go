@@ -24,6 +24,7 @@ package kubeguard
 // "this session has read-only access to the cluster" rather than a raw 403.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -277,9 +278,27 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, r
 		})
 		return
 	}
+	tr, err := p.transportFor(sess)
+	if err != nil {
+		p.fail(w, sess, req, http.StatusBadGateway,
+			"the cluster credential is unusable: "+err.Error(), "unusable_credential")
+		return
+	}
+
+	// A write whose content decides whether it mints a credential is read
+	// whole and judged before a byte of it reaches the cluster (inspect.go).
+	// Everything else streams through the cap below.
+	inspected, ok := p.inspectWrite(w, r, sess, req, rc, tr)
+	if !ok {
+		return
+	}
+
 	var body io.Reader
 	var capped *cappedReader
-	if r.Body != nil {
+	switch {
+	case inspected != nil:
+		body = bytes.NewReader(inspected.body)
+	case r.Body != nil:
 		capped = &cappedReader{r: r.Body, n: &sess.bytesIn, limit: sess.Policy.MaxBodyBytes}
 		body = capped
 	}
@@ -295,15 +314,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, r
 	// Set last, after every copy, so nothing a sandbox sent can survive into
 	// the credential slot.
 	applyCredential(out.Header, rc)
-	if r.ContentLength >= 0 {
+	switch {
+	case inspected != nil:
+		// Exactly the bytes that were judged, and their length.
+		out.ContentLength = int64(len(inspected.body))
+	case r.ContentLength >= 0:
 		out.ContentLength = r.ContentLength
-	}
-
-	tr, err := p.transportFor(sess)
-	if err != nil {
-		p.fail(w, sess, req, http.StatusBadGateway,
-			"the cluster credential is unusable: "+err.Error(), "unusable_credential")
-		return
 	}
 
 	resp, err := tr.RoundTrip(out)
@@ -350,6 +366,107 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session, r
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	streamBody(w, resp.Body, &sess.bytesOut)
+}
+
+// inspectedBody is a write's body, read whole and judged by inspect.go.
+type inspectedBody struct{ body []byte }
+
+// storedObjectMaxBytes bounds what is read of the object a patch would patch.
+// The API server refuses objects above about 1.5 MiB.
+const storedObjectMaxBytes = 4 << 20
+
+// inspectWrite reads and judges the body of a write NeedsBody marks, and for a
+// patch of a workload the object it patches too. It answers the request itself
+// when the write is refused, and reports ok=false; a nil body with ok=true is a
+// request that needs no inspection.
+func (p *Proxy) inspectWrite(w http.ResponseWriter, r *http.Request, sess *Session, req APIRequest,
+	rc *kubernetes.RESTConfig, tr http.RoundTripper) (*inspectedBody, bool) {
+	if !NeedsBody(req) {
+		return nil, true
+	}
+	var data []byte
+	if r.Body != nil {
+		var err error
+		data, err = io.ReadAll(io.LimitReader(r.Body, sess.Policy.MaxBodyBytes+1))
+		sess.bytesIn.Add(int64(len(data)))
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+				return nil, false
+			}
+			p.fail(w, sess, req, http.StatusBadRequest,
+				"the request body could not be read: "+err.Error(), "malformed_request")
+			return nil, false
+		}
+	}
+	if int64(len(data)) > sess.Policy.MaxBodyBytes {
+		p.deny(w, sess, req, &Denial{
+			Reason: DenyBodyTooLarge,
+			Message: fmt.Sprintf("request body exceeds this session's limit of %d bytes",
+				sess.Policy.MaxBodyBytes),
+		})
+		return nil, false
+	}
+	if err := InspectWrite(req, r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding"), data); err != nil {
+		p.deny(w, sess, req, err)
+		return nil, false
+	}
+	if rulesFor(req).stored {
+		stored, status, err := p.readStored(r.Context(), req, rc, tr)
+		switch {
+		case err != nil:
+			if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+				return nil, false
+			}
+			// Not a refusal of the request — the monitor could not finish
+			// judging it — but not forwarded either: a patch the monitor
+			// cannot check against what it patches is one it cannot vouch for.
+			p.fail(w, sess, req, http.StatusBadGateway,
+				"the monitor could not read the object this patch would change, to check which "+
+					"ServiceAccount it runs as: "+err.Error(), "stored_object_unreadable")
+			return nil, false
+		case status == http.StatusNotFound:
+			// Nothing stored yet — a server-side apply creating the object.
+			// The body was the whole of it, and it passed.
+		default:
+			if err := InspectStored(req, stored); err != nil {
+				p.deny(w, sess, req, err)
+				return nil, false
+			}
+		}
+	}
+	return &inspectedBody{body: data}, true
+}
+
+// readStored fetches the object req names, as the session's credential sees
+// it, for InspectStored. A 404 is reported as such and is not an error.
+func (p *Proxy) readStored(ctx context.Context, req APIRequest, rc *kubernetes.RESTConfig,
+	tr http.RoundTripper) ([]byte, int, error) {
+	get, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(rc.Server, "/")+req.Path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	get.Header.Set("Accept", "application/json")
+	get.Header.Set("User-Agent", userAgent)
+	applyCredential(get.Header, rc)
+	resp, err := tr.RoundTrip(get)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, resp.StatusCode, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, fmt.Errorf("the cluster answered %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, storedObjectMaxBytes+1))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if len(data) > storedObjectMaxBytes {
+		return nil, resp.StatusCode, fmt.Errorf("the object exceeds %d bytes", storedObjectMaxBytes)
+	}
+	return data, resp.StatusCode, nil
 }
 
 // transportFor returns the outbound transport for a session, building it once.
