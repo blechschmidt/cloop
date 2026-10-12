@@ -92,6 +92,37 @@ func setSessionAdoptionWait(t *testing.T, d time.Duration) {
 
 func newRestoreRig(t *testing.T) *restoreRig {
 	t.Helper()
+	return newRestoreRigWith(t, false)
+}
+
+// newWorkspaceRestoreRig is the restore rig for a workspace whose origin is
+// the forge: its App is installed on the forge itself, a GitHub Enterprise
+// Server whose API is at /api/v3, so its tokens are for the forge's host and
+// a pinned session presents them there (Task 20423). The rig's default App is
+// a github.com one, which the forge stands in for behind the lease path's
+// rewrite and which is refused for a workspace on the forge's own host.
+func newWorkspaceRestoreRig(t *testing.T) *restoreRig {
+	t.Helper()
+	return newRestoreRigWith(t, true)
+}
+
+// appPayloadOn is a github_app payload whose API base is base.
+func appPayloadOn(t *testing.T, appID, installationID int64, base string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(secretbrokertest.AppPayload(appID, installationID), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["base_url"] = base
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func newRestoreRigWith(t *testing.T, appOnForge bool) *restoreRig {
+	t.Helper()
 	secretbrokertest.GitTools(t)
 	t.Setenv(secretbroker.EnvPassphraseKey, "session-restore-unit-passphrase")
 	dir := t.TempDir()
@@ -177,8 +208,12 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	}
 	defer closeDB()
 	ctx := context.Background()
+	appPayload := secretbrokertest.AppPayload(301, 302)
+	if appOnForge {
+		appPayload = appPayloadOn(t, 301, 302, r.forge.URL+"/api/v3")
+	}
 	app, err := broker.Mint(ctx, secretbroker.MintRequest{
-		Name: "restore-app", Kind: secretbroker.KindGitHubApp, Payload: secretbrokertest.AppPayload(301, 302), Actor: "test",
+		Name: "restore-app", Kind: secretbroker.KindGitHubApp, Payload: appPayload, Actor: "test",
 	})
 	if err != nil {
 		t.Fatalf("Mint app: %v", err)

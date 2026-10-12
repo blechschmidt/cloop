@@ -103,9 +103,13 @@ e2e-stack:
 ##                startup's (pkg/hubdoctor), and every callback path startup
 ##                accepts is one the router serves (pkg/ui); and one guarantee —
 ##                no listen address lets a hub without sign-in off loopback
-##                (pkg/exposure); and the frame a Kubernetes Pod returns its
+##                (pkg/exposure); the frame a Kubernetes Pod returns its
 ##                project result in, read out of a log the workload writes
-##                (pkg/executor/resultframe).
+##                (pkg/executor/resultframe); and the forge-host binding — no
+##                workspace credential is bound to a host other than its
+##                grant's (pkg/executor/gitcreds), and the one host comparison
+##                every path uses is stable and folds nothing a resolver would
+##                not (pkg/forgehost).
 ##
 ## This list is the single source of truth. CI's Parser fuzzing job runs this
 ## same target with a shorter budget rather than repeating the targets in YAML,
@@ -124,7 +128,9 @@ FUZZ_TARGETS := \
 	./pkg/ui/:FuzzOIDCCallbackRoutes \
 	./pkg/exposure/:FuzzDecideNeverOpensAnOpenHub \
 	./pkg/executor/resultframe/:FuzzScanner \
-	./pkg/executor/resultframe/:FuzzRoundTrip
+	./pkg/executor/resultframe/:FuzzRoundTrip \
+	./pkg/executor/gitcreds/:FuzzNoCredentialLeavesItsGrantsHost \
+	./pkg/forgehost/:FuzzCanonical
 
 ## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
 ## two of its distinctions matter locally as much as in CI: Go intermittently

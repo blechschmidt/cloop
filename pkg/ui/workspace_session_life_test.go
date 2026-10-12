@@ -26,7 +26,7 @@ func shortSessionRig(t *testing.T) *restoreRig {
 	prev := workspaceSessionRenewEvery
 	workspaceSessionRenewEvery = 2 * time.Millisecond
 	t.Cleanup(func() { workspaceSessionRenewEvery = prev })
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.gitTTL = 20 * time.Minute
 	r.startProcess()
 	r.pinOrigin(r.forgeRepoURL())
@@ -49,7 +49,7 @@ func liveSession(t *testing.T, id string) *gitproxy.Session {
 // Now the driver's release, which it makes once the workload is terminal and
 // its write-back has run, ends it at once, with the lease it stood on.
 func TestAWorkspaceSessionEndsWhenItsRunIsDoneWithIt(t *testing.T) {
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	d := r.dispatchWorkspace()
 	sessionID, leaseID := d.access.Credential.SessionID, d.access.Credential.LeaseID

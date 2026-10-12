@@ -362,6 +362,33 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 				"for the organisation", owner)
 	}
 
+	// A GitHub secret's forge host is derived from its payload, before the
+	// payload is sealed and zeroed, and recorded where a caller that must not
+	// open the payload can read it (Task 20423). Never taken from the caller:
+	// a host typed into metadata would bind nothing, since every lease
+	// re-derives it from the sealed payload, but it would mislead whatever
+	// chose a grant by it.
+	meta := req.Metadata
+	switch req.Kind {
+	case KindGitHubPAT, KindGitHubApp:
+		host, herr := payloadForgeHost(req.Kind, req.Payload)
+		switch {
+		case herr == nil:
+			meta = withForgeHostMetadata(meta, host)
+		case req.Kind == KindGitHubPAT:
+			// A PAT document that does not parse would be delivered as a
+			// token that is not one, or bound to a host nobody chose.
+			zero(req.Payload)
+			return Secret{}, b.denyf(ev, ErrInvalidSecret, "%v", herr)
+		default:
+			// An App payload this cannot read yet mints nothing: its lease
+			// refuses it with the parse error. Nothing is recorded meanwhile.
+			meta = withForgeHostMetadata(meta, "")
+		}
+	default:
+		meta = withForgeHostMetadata(meta, "")
+	}
+
 	// The ID is minted before the payload is sealed because it *is* the
 	// envelope's associated data: binding the ciphertext to the row it lives
 	// in is what stops an attacker with database write access from moving a
@@ -384,7 +411,7 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 		Sealed:     env.Ciphertext,
 		KeyID:      env.KeyID,
 		WrappedDEK: env.WrappedDEK,
-		Metadata:   req.Metadata,
+		Metadata:   meta,
 		CreatedAt:  b.now(),
 		CreatedBy:  req.Actor,
 		Owner:      owner,

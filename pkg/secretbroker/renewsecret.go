@@ -99,6 +99,16 @@ func (b *Broker) RenewSecret(ctx context.Context, req RenewSecretRequest) (Secre
 	if len(out.Payload) == 0 {
 		return Secret{}, b.denyf(ev, ErrInvalidSecret, "renew %s: the renewal produced an empty payload", s.Name)
 	}
+	// A renewed GitHub payload names its own forge host, which the metadata
+	// follows as Mint's does (Task 20423).
+	forgeHost, hasForgeHost := "", false
+	if s.Kind == KindGitHubPAT || s.Kind == KindGitHubApp {
+		if h, herr := payloadForgeHost(s.Kind, out.Payload); herr == nil {
+			forgeHost, hasForgeHost = h, true
+		} else {
+			hasForgeHost = true // recorded as unknown
+		}
+	}
 	env, err := b.seal.SealFor(AADFor(SetSecrets, s.ID), out.Payload)
 	zero(out.Payload)
 	if err != nil {
@@ -108,6 +118,9 @@ func (b *Broker) RenewSecret(ctx context.Context, req RenewSecretRequest) (Secre
 	updated := s.WithEnvelope(env)
 	if out.Metadata != nil {
 		updated.Metadata = out.Metadata
+	}
+	if hasForgeHost {
+		updated.Metadata = withForgeHostMetadata(updated.Metadata, forgeHost)
 	}
 	if err := updated.Validate(); err != nil {
 		return Secret{}, b.denyf(ev, ErrInvalidSecret, "%v", err)
@@ -158,6 +171,13 @@ func (b *Broker) UpdateSecretMetadata(ref string, mutate func(map[string]string)
 		meta[k] = v
 	}
 	mutate(meta)
+	// The forge host is the payload's to say, recorded at mint (Task 20423):
+	// bookkeeping does not get to move it.
+	if host, ok := s.Metadata[MetaForgeHost]; ok {
+		meta[MetaForgeHost] = host
+	} else {
+		delete(meta, MetaForgeHost)
+	}
 	cur, err := b.store.GetSecret(s.ID)
 	if err != nil {
 		return Secret{}, fmt.Errorf("%w: re-read %s: %v", ErrSecretNotFound, s.Name, err)

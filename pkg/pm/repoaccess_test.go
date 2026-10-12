@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
 // leaseEnv is a getenv backed by a map, shaped like what a GitHub lease sets.
@@ -197,5 +199,32 @@ func TestExecuteTaskPromptCarriesRepositoryAccess(t *testing.T) {
 	// context for the task rather than as an afterthought.
 	if strings.Index(p, "REPOSITORY ACCESS") > strings.Index(p, "## INSTRUCTIONS") {
 		t.Errorf("repository section placed after the instructions")
+	}
+}
+
+// TestRepositoryAccessSectionNamesTheGrantsHost: a GitHub Enterprise Server
+// grant's repositories are cloned from that server (Task 20423) — told
+// github.com, the agent would clone a repository the credential is not for.
+func TestRepositoryAccessSectionNamesTheGrantsHost(t *testing.T) {
+	got := RepositoryAccessSection(leaseEnv(map[string]string{
+		envRepoAllowlist: "acme/tool",
+		envGitHubHost:    "ghes.example.com",
+	}))
+	if !strings.Contains(got, "git clone https://ghes.example.com/acme/tool") {
+		t.Errorf("the clone command does not name the grant's server:\n%s", got)
+	}
+	if strings.Contains(got, "https://github.com/") {
+		t.Errorf("an enterprise grant's prompt sends the agent to github.com:\n%s", got)
+	}
+
+	// A lease from before hosts were announced is github.com's.
+	legacy := RepositoryAccessSection(leaseEnv(map[string]string{envRepoAllowlist: "acme/tool"}))
+	if !strings.Contains(legacy, "git clone https://github.com/acme/tool") {
+		t.Errorf("a lease with no host announced is not github.com's:\n%s", legacy)
+	}
+
+	// The spelling is the broker's.
+	if envGitHubHost != secretbroker.GitHubHostEnvKey {
+		t.Errorf("pkg/pm reads %s, the broker announces %s", envGitHubHost, secretbroker.GitHubHostEnvKey)
 	}
 }

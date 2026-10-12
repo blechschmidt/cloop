@@ -485,7 +485,10 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 				}
 			}
 		case KindGitHubPAT:
-			if token := strings.TrimSpace(string(plaintext)); token != "" {
+			// The token, whichever form the payload records it in: a
+			// GitHub Enterprise Server PAT is a JSON document (Task 20423),
+			// and redacting the document would leave the token itself.
+			if token, _, perr := parseGitHubPAT(plaintext); perr == nil && token != "" {
 				out = append(out, token)
 			}
 		}

@@ -87,6 +87,13 @@ type GitGuardRequest struct {
 	// Token is the credential the guard takes custody of. It must not be
 	// copied into the result, into a log, or into anything the sandbox reads.
 	Token string
+	// Host is the forge host Token is good against, in forgehost's canonical
+	// form: github.com, or the GitHub Enterprise Server host the grant's
+	// secret names (Task 20423). The guard presents Token there and nowhere
+	// else, and routes the sandbox's https://<Host>/ to a proxy URL of that
+	// host's own (GitGuardResult.ForgeURL). Empty is github.com, the only
+	// host a request named before hosts were recorded.
+	Host string
 	// TokenExpiresAt is when GitHub stops honouring Token: a GitHub App
 	// installation token's hour. Zero for a PAT, whose expiry the hub does not
 	// know.
@@ -135,9 +142,17 @@ type GitGuardRequest struct {
 
 // GitGuardResult is the substitute credential a sandbox receives.
 type GitGuardResult struct {
-	// BaseURL is the proxy's https base, with no path. GitHub URLs are
-	// rewritten to it.
+	// BaseURL is the proxy's https base, with no path. The sandbox's git
+	// reaches the proxy here, and its credential helper answers for this
+	// host only.
 	BaseURL string
+	// ForgeURL is what the sandbox's https://<Host>/ is rewritten to: the
+	// proxy's route for the forge host the session presents its credential
+	// to, beneath BaseURL (Task 20423). Empty means BaseURL itself, the route
+	// for github.com. A lease holding grants for two hosts gets one rewrite
+	// per host, each to that host's own route, so neither can reach the
+	// other's session.
+	ForgeURL string
 	// Username and Password authenticate to the proxy and to nothing else.
 	Username string
 	Password string

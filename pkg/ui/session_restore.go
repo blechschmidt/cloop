@@ -49,6 +49,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
@@ -269,25 +270,36 @@ func (sl *secretLease) restoreGitSession(ctx context.Context, row statedb.ProxyS
 	if err != nil {
 		return refusedf("%v", err)
 	}
-	// Where the credential goes is this hub's to say, never the record's. A
-	// lease-path session is scoped to its grant's allowlist on the forge this
-	// hub's proxy fronts, which is what Mint was given (gitguard.go); a
-	// workspace's pinned session to the one repository the project's origin
-	// names (Task 20390, workspace_lease.go). A record that names anything
-	// else was not written for this hub.
+	// Where the credential goes is this hub's to say, never the record's —
+	// and the grant's forge host bounds it (Task 20423): its secret's, read
+	// from the sealed payload, before anything is minted for it. A lease-path
+	// session is scoped to its grant's allowlist on that host, which is what
+	// Mint was given (gitguard.go); a workspace's pinned session to the one
+	// repository the project's origin names on it (Task 20390,
+	// workspace_lease.go). A record that names anything else was not written
+	// for this hub, and a record written before hosts were recorded reads as
+	// what it was minted for — github.com, or its upstream's host.
+	grantHost, err := sl.broker.GitHubGrantHost(sl.lease.ID, row.GrantID)
+	if err != nil {
+		if errors.Is(err, secretbroker.ErrMalformedPayload) {
+			return refusedf("its grant's secret names no usable forge host: %v", err)
+		}
+		return err
+	}
 	pinned := len(rec.RepoPatterns) == 0
 	if pinned {
 		if !sl.isWorkspace() {
 			return refusedf("it is pinned to one repository, and only a workspace lease feeds a pinned session")
 		}
-		up, why := pinnedUpstream(rec, sl.workDir)
+		up, why := pinnedUpstream(rec, sl.workDir, grantHost)
 		if why != "" {
 			return refusedf("%s", why)
 		}
 		rec.Upstream = up
-	} else if why := gitUpstreamMismatch(rec, svc.githubUpstream); why != "" {
+	} else if why := gitUpstreamMismatch(rec, svc, grantHost); why != "" {
 		return refusedf("%s", why)
 	}
+	rec.ForgeHost = grantHost
 	g, err := sl.broker.HeldGrant(sl.lease.ID, row.GrantID)
 	if err != nil {
 		return err
@@ -322,6 +334,11 @@ func (sl *secretLease) restoreGitSession(ctx context.Context, row statedb.ProxyS
 	up, err := sl.broker.GitHubUpstream(ctx, sl.lease.ID, row.GrantID, row.SessionID)
 	if err != nil {
 		return err
+	}
+	if up.Host != grantHost {
+		// Unreachable unless the secret changed between the two reads: what
+		// was checked is not what would be presented.
+		return refusedf("its grant's credential is now for %s, not %s", up.Host, grantHost)
 	}
 	req := gitproxy.RestoreRequest{
 		Record: rec,
@@ -406,26 +423,30 @@ func (sl *secretLease) restoreKubeSession(row statedb.ProxySessionRow, from stri
 	return nil
 }
 
-// gitUpstreamMismatch reports why a git session's recorded upstream is not the
-// one this hub's proxy would mint it for now, or "". configured is the proxy's
-// GitHub upstream, empty for github.com.
-func gitUpstreamMismatch(rec gitproxy.SessionRecord, configured string) string {
+// gitUpstreamMismatch reports why a scoped git session's record is not one
+// this hub's proxy would mint now for a grant whose credential is for
+// grantHost, or "": its forge host must be the grant's, and its upstream the
+// one guardUpstream picks for that host (Task 20423).
+func gitUpstreamMismatch(rec gitproxy.SessionRecord, svc *gitProxyService, grantHost string) string {
 	if len(rec.RepoPatterns) == 0 {
 		return "it is pinned to one repository, and only a session scoped to its grant's allowlist is minted " +
 			"for a lease"
 	}
-	want := githubUpstreamBase
-	if configured != "" {
-		want = configured
+	recHost := strings.TrimSpace(rec.ForgeHost)
+	if recHost == "" {
+		recHost = forgehost.GitHub // a record from before hosts were recorded
 	}
-	wantBase, err := gitproxy.UpstreamHostBase(want)
+	if !forgehost.Equal(recHost, grantHost) {
+		return fmt.Sprintf("it was minted for %s, and its grant's credential is for %s", recHost, grantHost)
+	}
+	wantBase, err := gitproxy.UpstreamHostBase(guardUpstream(svc, grantHost))
 	if err != nil {
 		return "this hub's git proxy upstream is unusable: " + err.Error()
 	}
 	got, err := gitproxy.UpstreamHostBase(rec.Upstream)
 	if err != nil || !strings.EqualFold(got, wantBase) {
-		return fmt.Sprintf("it names upstream %q, and this hub's git proxy presents its credentials to %s only",
-			rec.Upstream, wantBase)
+		return fmt.Sprintf("it names upstream %q, and this hub's git proxy presents %s credentials to %s only",
+			rec.Upstream, grantHost, wantBase)
 	}
 	return ""
 }

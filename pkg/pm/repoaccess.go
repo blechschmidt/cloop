@@ -33,6 +33,11 @@ const (
 	envRepoPerms     = "CLOOP_GITHUB_PERMISSIONS"
 	envGitProxyURL   = "CLOOP_GIT_PROXY_URL"
 	envGitProxyMode  = "CLOOP_GIT_PROXY_MODE"
+	// envGitHubHost names the forge host the grants are for (Task 20423):
+	// github.com, or a GitHub Enterprise Server — several, comma-separated.
+	// secretbroker.GitHubHostEnvKey; absent on a lease from before hosts were
+	// recorded, which was github.com.
+	envGitHubHost = "CLOOP_GITHUB_HOST"
 
 	// Where a push will be accepted, and why one will not be (Task 20340):
 	// secretbroker.GitHubPushBranchesEnvKey, GitPushRefsEnvKey and
@@ -82,9 +87,19 @@ func RepositoryAccessSection(getenv func(string) string) string {
 		access = "read only"
 	}
 
+	hosts := splitRepoList(getenv(envGitHubHost))
+	if len(hosts) == 0 {
+		hosts = []string{"github.com"}
+	}
+
 	var b strings.Builder
 	b.WriteString("## REPOSITORY ACCESS\n")
-	b.WriteString("This run has been granted access to these GitHub repositories:\n")
+	if len(hosts) == 1 && hosts[0] == "github.com" {
+		b.WriteString("This run has been granted access to these GitHub repositories:\n")
+	} else {
+		fmt.Fprintf(&b, "This run has been granted access to these repositories on %s:\n",
+			strings.Join(hosts, " and "))
+	}
 	var concrete []string
 	for i, r := range repos {
 		if i == maxAnnouncedRepos {
@@ -110,7 +125,10 @@ func RepositoryAccessSection(getenv func(string) string) string {
 	}
 	b.WriteString("These repositories are not checked out here unless you can see them in the working " +
 		"directory. Clone the one you need into the working directory by its plain https URL:\n")
-	fmt.Fprintf(&b, "    git clone https://github.com/%s\n", example)
+	fmt.Fprintf(&b, "    git clone https://%s/%s\n", hosts[0], example)
+	if len(hosts) > 1 {
+		b.WriteString("(each repository on the host its grant is for — a credential works on its own host only)\n")
+	}
 	b.WriteString("git is already configured to authenticate for them: do not ask for, create, print or " +
 		"store a token, and do not change the remote URL.\n")
 

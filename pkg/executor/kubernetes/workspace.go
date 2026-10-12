@@ -388,6 +388,9 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		StringData: map[string]string{
 			EnvWorkspaceToken: cred.Password,
 			EnvWorkspaceUser:  workspaceUser(cred),
+			// Where the token may go (Task 20423), so the init container
+			// refuses a workspace on another host however the Spec reached it.
+			EnvWorkspaceHost: cred.Host,
 		},
 	}
 

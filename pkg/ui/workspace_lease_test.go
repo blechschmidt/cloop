@@ -112,7 +112,7 @@ func (r *restoreRig) restartWorkspace(d workspaceDispatch, holder string) {
 // the scope recorded for it.
 func TestAWorkspaceSessionSurvivesARestart(t *testing.T) {
 	setSessionAdoptionWait(t, 20*time.Second)
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	d := r.dispatchWorkspace()
 	sessionID, leaseID := d.access.Credential.SessionID, d.access.Credential.LeaseID
@@ -187,7 +187,7 @@ func TestAWorkspaceSessionSurvivesARestart(t *testing.T) {
 // recorded session's request does, and is then served.
 func TestAWorkspacePushBeforeAdoptionWaits(t *testing.T) {
 	setSessionAdoptionWait(t, 20*time.Second)
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	d := r.dispatchWorkspace()
 	work := filepath.Join(t.TempDir(), "tool")
@@ -234,6 +234,13 @@ func TestAWorkspaceSessionIsHeldToTheProjectAndTheGrant(t *testing.T) {
 			closed: "the project's origin is",
 		},
 		{
+			// The same owner/name on another host (Task 20423): the session is
+			// not restored toward it, and the reason names both hosts.
+			name:   "origin moved to another host",
+			change: func(r *restoreRig) { r.setOrigin("https://attacker.example/" + restoreRepo) },
+			closed: "attacker.example",
+		},
+		{
 			name: "grant revoked",
 			change: func(r *restoreRig) {
 				broker, closeDB, err := openUIBroker(r.dir)
@@ -250,7 +257,7 @@ func TestAWorkspaceSessionIsHeldToTheProjectAndTheGrant(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSessionAdoptionWait(t, time.Second)
-			r := newRestoreRig(t)
+			r := newWorkspaceRestoreRig(t)
 			r.pinOrigin(r.forgeRepoURL())
 			d := r.dispatchWorkspace()
 			sessionID := d.access.Credential.SessionID
@@ -289,7 +296,7 @@ func TestAWorkspaceSessionIsHeldToTheProjectAndTheGrant(t *testing.T) {
 // it — the leader's sweep would otherwise retire both records — and releases
 // it when the session ends.
 func TestAWorkspaceLeaseLivesAsLongAsItsSession(t *testing.T) {
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	d := r.dispatchWorkspace()
 	leaseID := d.access.Credential.LeaseID
@@ -357,7 +364,7 @@ func (e *pushError) Error() string { return e.what + ": " + e.err.Error() + "\n"
 // close the lease from inside the handover, which holds the lease's restore
 // lock.
 func TestAHandoverOfAnUnrecordedWorkspaceSessionReturns(t *testing.T) {
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	activeGitProxy().reg.Store = nil // the record could not be written
 	d := r.dispatchWorkspace()
@@ -384,7 +391,7 @@ func TestAHandoverOfAnUnrecordedWorkspaceSessionReturns(t *testing.T) {
 // the adopted run's executor and project.
 func TestAWorkspaceLeaseOfAnotherRunIsNotTakenOver(t *testing.T) {
 	setSessionAdoptionWait(t, time.Second)
-	r := newRestoreRig(t)
+	r := newWorkspaceRestoreRig(t)
 	r.pinOrigin(r.forgeRepoURL())
 	d := r.dispatchWorkspace()
 	r.restartWorkspace(d, "hub_new")

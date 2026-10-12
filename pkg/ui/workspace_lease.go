@@ -35,6 +35,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -302,9 +303,13 @@ func workspaceUpstreamNow(workDir string) (string, error) {
 }
 
 // pinnedUpstream holds a pinned session's recorded upstream to the repository
-// the project's origin names now, and returns that — taken from the project's
-// configuration, never from the record — or why the two differ.
-func pinnedUpstream(rec gitproxy.SessionRecord, workDir string) (string, string) {
+// the project's origin names now, on grantHost — the host the grant's
+// credential is good against — and returns that repository's URL on
+// grantHost, or why it cannot (Task 20423). Taken from the project's
+// configuration and the grant, never from the record: the origin, the record
+// and the grant must all name one host, and the URL is the grant's host and
+// the origin's owner/name.
+func pinnedUpstream(rec gitproxy.SessionRecord, workDir, grantHost string) (string, string) {
 	now, err := workspaceUpstreamNow(workDir)
 	if err != nil {
 		return "", "the project's git origin cannot be read to restore it against: " + err.Error()
@@ -317,11 +322,18 @@ func pinnedUpstream(rec gitproxy.SessionRecord, workDir string) (string, string)
 		recHost != nowHost || !strings.EqualFold(recPath, nowPath) {
 		return "", fmt.Sprintf("it is pinned to %q, and the project's origin is %q now", rec.Upstream, now)
 	}
-	return now, ""
+	if err := forgehost.Check(nowHost, grantHost); err != nil {
+		return "", fmt.Sprintf("the project's origin %q is not on %s, the host its grant's credential is for: %v",
+			now, grantHost, err)
+	}
+	if h := strings.TrimSpace(rec.ForgeHost); h != "" && !forgehost.Equal(h, grantHost) {
+		return "", fmt.Sprintf("it was minted for %s, and its grant's credential is for %s", h, grantHost)
+	}
+	return "https://" + grantHost + "/" + nowPath, ""
 }
 
-// repoURLHost returns the scheme and host of an https repository URL, the
-// host lower-cased: where a credential presented to it goes.
+// repoURLHost returns the canonical forge host of an https repository URL:
+// where a credential presented to it goes.
 func repoURLHost(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -330,7 +342,7 @@ func repoURLHost(raw string) (string, error) {
 	if u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return "", fmt.Errorf("%q is not an https repository URL", raw)
 	}
-	return "https://" + strings.ToLower(u.Host), nil
+	return forgehost.Canonical(u.Host)
 }
 
 // workspaceSessionPolicy is the policy gitproxycreds mints a workspace's

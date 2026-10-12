@@ -96,6 +96,12 @@ type Session struct {
 	// it never reaches the sandbox, and it is the only source of the host the
 	// credential is ever presented to.
 	Upstream string
+	// ForgeHost is the forge host the session's credential is good against,
+	// canonical: github.com, or a GitHub Enterprise Server host (Task 20423).
+	// The proxy serves the session on that host's route only (forge.go).
+	// Upstream is on this host, except for a scoped github.com session's,
+	// which is the hub's to point at github.com or, in a test, a stand-in.
+	ForgeHost string
 	// Policy is what this session may do.
 	Policy Policy
 
@@ -230,6 +236,14 @@ type MintRequest struct {
 	// This is the mode a user's GitHub PAT grant uses, because its allowlist
 	// ("acme/*") names a set that only the forge can enumerate. See scope.go.
 	RepoPatterns []string
+	// ForgeHost is the forge host Credential is good against (Task 20423):
+	// github.com, or the GitHub Enterprise Server host the grant names. The
+	// session is served on that host's route alone, and a pinned session's
+	// Upstream must be on it, as must a scoped one's for any host but
+	// github.com. Empty is github.com for a scoped session and Upstream's own
+	// host for a pinned one — what every request meant before hosts were
+	// recorded.
+	ForgeHost string
 	// Credential authenticates the proxy upstream. Optional: a public
 	// repository needs none, though pushing to one generally does.
 	Credential Credential
@@ -287,7 +301,9 @@ type Minted struct {
 	// so this is the only copy that will ever exist.
 	Token string
 	// RepoURL is what the sandbox uses as its remote: the proxy's public base
-	// with the session's repository path. It carries no credential.
+	// with the session's repository path — or, for a scoped session, the route
+	// its forge host's URLs are rewritten to (ForgeRoute). It carries no
+	// credential.
 	RepoURL string
 }
 
@@ -364,6 +380,10 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		}
 		upstream = strings.TrimSuffix(strings.TrimSpace(req.Upstream), "/")
 	}
+	forge, err := sessionForgeHost(req.ForgeHost, upstream, len(patterns) > 0)
+	if err != nil {
+		return nil, err
+	}
 
 	pol := req.Policy
 	if pol.IsZero() {
@@ -405,6 +425,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		RepoPath:     repoPath,
 		RepoPatterns: patterns,
 		Upstream:     upstream,
+		ForgeHost:    forge,
 		Policy:       pol,
 		ProjectID:    req.ProjectID,
 		TaskID:       req.TaskID,
@@ -454,18 +475,30 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		TaskID:    req.TaskID,
 		Actor:     req.Actor,
 		At:        now,
-		Detail:    mintDetail(pol, s.ExpiresAt(), recordErr),
+		Detail:    mintDetail(pol, s.ExpiresAt(), recordErr) + forgeDetail(forge),
 	})
 
 	// A pinned session hands back the one remote URL the sandbox clones. A
 	// scoped one cannot: the repository is not known until the sandbox asks
-	// for it, so what it gets is the base to rewrite github.com to, and the
-	// path comes from whatever it was already trying to clone.
+	// for it, so what it gets is the route to rewrite its forge host to — the
+	// base for github.com, /_forge/<host> beneath it for any other host — and
+	// the path comes from whatever it was already trying to clone.
 	repoURL := r.BaseURL
 	if !s.Scoped() {
 		repoURL = r.BaseURL + "/" + repoPath
+	} else if path, perr := forgeRoutePath(forge); perr == nil && path != "" {
+		repoURL = r.BaseURL + "/" + path
 	}
 	return &Minted{Session: s, Token: token, RepoURL: repoURL}, nil
+}
+
+// forgeDetail names a session's forge host on its audit rows, when it is not
+// github.com: the host its credential is presented to.
+func forgeDetail(host string) string {
+	if host == "" || host == "github.com" {
+		return ""
+	}
+	return "; presented to " + host
 }
 
 // Authenticate resolves a session from the basic credential a sandbox

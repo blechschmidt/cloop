@@ -178,6 +178,8 @@ started crashing again — fails.
 | `pkg/exposure`       | `FuzzDecideNeverOpensAnOpenHub` | `--listen` / `ui.listen`: a hub without sign-in or the acknowledgement binds a loopback IP literal or is refused, and every accepted address is a well-formed `host:port`. |
 | `pkg/executor/resultframe` | `FuzzScanner` | The project result frame a Kubernetes Pod prints into its own log: on any input and any chunking the scanner neither panics nor holds more than one line, decides the same way however the stream was cut, and lets no frame line into the transcript. |
 | `pkg/executor/resultframe` | `FuzzRoundTrip` | Every payload `resultframe.Write` accepts comes back byte for byte through any chunking, past transcript around it. |
+| `pkg/executor/gitcreds` | `FuzzNoCredentialLeavesItsGrantsHost` | Over (origin URL, grant host, allowlist pattern): a workspace credential is leased only for an origin on its grant's own forge host, is bound to that host, and scopes its header there (Task 20423). |
+| `pkg/forgehost` | `FuzzCanonical` | The one host comparison every credential path uses: canonical forms are stable, `Equal` agrees with them, and nothing equal to `github.com` is a suffix, prefix or look-alike of it. |
 
 ### Adding a new fuzz target
 

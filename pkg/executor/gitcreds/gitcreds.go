@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -61,11 +62,19 @@ func New(broker *secretbroker.Broker, executorID, actor string) (*BrokerSource, 
 //
 // Selection is by *authority*, not by name alone. A grant satisfies the
 // workspace when it is a GitHub credential whose repository allowlist admits
-// this repository — and, when the spec named a grant, when it is that one. A
-// grant that names the right secret but excludes the repository is reported as
-// a distinct Reason, because "create a grant" and "widen the grant you have"
-// are different fixes and an operator who is told the wrong one will go looking
-// in the wrong place.
+// this repository on the forge host its credential is good against — and,
+// when the spec named a grant, when it is that one. A grant that names the
+// right secret but excludes the repository is reported as a distinct Reason,
+// because "create a grant" and "widen the grant you have" are different fixes
+// and an operator who is told the wrong one will go looking in the wrong
+// place.
+//
+// A repository is (host, path) here (Task 20423). An allowlist names
+// owner/name, so a grant for acme/* used to match
+// https://attacker.example/acme/tool exactly as it matched github.com, and the
+// token was handed to whatever host the project's origin named. Now a grant
+// whose allowlist admits the path on another host is a refusal naming both
+// hosts — never a credential, and never a silent pass.
 func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	return s.forWorkspace(ctx, projectID, w, false)
 }
@@ -101,6 +110,9 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	executorID := executor.RequestingExecutor(ctx, s.ExecutorID)
 
 	repoPath, hasRepoPath := w.RepoPath()
+	// The origin's host, once it is known, rides on every refusal: what
+	// fixes one depends on whether that host is github.com (Task 20423).
+	var originHost string
 	denied := func(reason string) error {
 		return &executor.WorkspaceGrantError{
 			Repo:        w.Repo,
@@ -109,6 +121,7 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 			ExecutorID:  executorID,
 			ProjectPath: projectID,
 			Reason:      reason,
+			Host:        originHost,
 		}
 	}
 	if !hasRepoPath {
@@ -118,6 +131,13 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 			"%s is not an owner/name repository URL, so no repository allowlist can authorise it", w.Repo))
 	}
+	host, herr := w.ForgeHost()
+	if herr != nil {
+		// No host a credential could be bound to, so none is leased.
+		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
+			"%s names no forge host a credential could be presented to: %v", w.Repo, herr))
+	}
+	originHost = host
 
 	// Leased as the project whose grants these are. For a feature (Task
 	// 20367) that is its parent: the grant chosen before the dispatch was
@@ -139,7 +159,12 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	release := func() { s.Broker.Release(lease.ID) }
 
 	want := strings.TrimSpace(w.CredentialGrant)
-	var sawSecret bool
+	var (
+		sawSecret bool
+		// The first grant whose allowlist admitted the path on another
+		// host, and that host: reported when nothing admits both.
+		otherHostGrant, otherHost string
+	)
 	for _, mat := range lease.Materials {
 		token, ok := mat.GitHubToken()
 		if !ok {
@@ -152,6 +177,12 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 		if !mat.Constraints.AllowsRepo(repoPath) {
 			continue
 		}
+		if mat.CheckForgeHost(originHost) != nil {
+			if otherHost == "" {
+				otherHostGrant, otherHost = mat.SecretName, mat.GitHubHost()
+			}
+			continue
+		}
 		return executor.WorkspaceAccess{
 			Credential: executor.GitCredential{
 				Username:   secretbroker.GitHubUsername,
@@ -160,6 +191,9 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 				GrantID:    mat.GrantID,
 				SecretName: mat.SecretName,
 				ExpiresAt:  lease.ExpiresAt,
+				// The host the token may be presented to, and the only one:
+				// every consumer downstream checks it again (Task 20423).
+				Host: mat.GitHubHost(),
 				// Carried for the proxy that applies it. Only a grant that
 				// can push has one to carry: the broker drops the list from a
 				// grant whose push it withheld, and a read-only grant never
@@ -176,16 +210,28 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	// workload that will not start is a credential the broker believes is out
 	// in the world.
 	release()
+	if otherHost != "" {
+		// Ahead of every other reason: the grant exists and admits the
+		// path, so "create a grant" and "widen the allowlist" would both
+		// send the operator the wrong way.
+		gerr := denied(executor.HostMismatchReason(otherHostGrant, originHost, otherHost)).(*executor.WorkspaceGrantError)
+		gerr.GrantHost = otherHost
+		return executor.WorkspaceAccess{}, noop, gerr
+	}
+	shown := repoPath
+	if !forgehost.IsGitHub(originHost) {
+		shown += " on " + originHost
+	}
 	if sawSecret {
 		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
-			"grant %s does not include repository %s in its allowlist", want, repoPath))
+			"grant %s does not include repository %s in its allowlist", want, shown))
 	}
 	if want != "" {
 		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 			"no active GitHub grant named %s is issued to this executor for this project", want))
 	}
 	return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
-		"no active GitHub grant authorises %s", repoPath))
+		"no active GitHub grant authorises %s", shown))
 }
 
 // RefreshWorkspaceCredential re-mints the GitHub App installation token cred

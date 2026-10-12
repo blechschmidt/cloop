@@ -56,7 +56,12 @@ type SessionRecord struct {
 	RepoPatterns []string
 	// Upstream is the forge URL or host base; it carries no credential (Mint
 	// refuses one with userinfo).
-	Upstream   string
+	Upstream string
+	// ForgeHost is the forge host the session's credential is good against
+	// (Task 20423). A record written before hosts were recorded has none, and
+	// reads as github.com for a scoped session and its upstream's host for a
+	// pinned one — what it was minted for.
+	ForgeHost  string
 	Policy     Policy
 	ProjectID  string
 	TaskID     string
@@ -97,6 +102,7 @@ func (s *Session) record() SessionRecord {
 		RepoPath:     s.RepoPath,
 		RepoPatterns: append([]string(nil), s.RepoPatterns...),
 		Upstream:     s.Upstream,
+		ForgeHost:    s.ForgeHost,
 		Policy:       s.Policy,
 		ProjectID:    s.ProjectID,
 		TaskID:       s.TaskID,
@@ -168,6 +174,7 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		return nil, err
 	}
 	id, repoPath, patterns, upstream, pol, hash := v.id, v.repoPath, v.patterns, v.upstream, v.policy, v.hash
+	forge := v.forge
 	if req.Refresh != nil && req.CredentialExpiresAt.IsZero() {
 		return nil, fmt.Errorf("gitproxy: restore %s: a refreshable upstream credential needs its expiry", id)
 	}
@@ -185,6 +192,7 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		RepoPath:     repoPath,
 		RepoPatterns: patterns,
 		Upstream:     upstream,
+		ForgeHost:    forge,
 		Policy:       pol,
 		ProjectID:    rec.ProjectID,
 		TaskID:       rec.TaskID,
@@ -215,7 +223,7 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 	r.mu.Unlock()
 
 	detail := fmt.Sprintf("restored with its run; allow %s until %s", pol.RefSummary(),
-		s.ExpiresAt().UTC().Format(time.RFC3339))
+		s.ExpiresAt().UTC().Format(time.RFC3339)) + forgeDetail(forge)
 	if from := strings.TrimSpace(req.From); from != "" {
 		detail += " (held until then by " + from + ")"
 	}
@@ -243,6 +251,7 @@ func (r *Registry) CheckRestore(rec SessionRecord) error {
 // restoreCheck is what checkRestore derived from a record.
 type restoreCheck struct {
 	id, repoPath, upstream string
+	forge                  string
 	patterns               []string
 	policy                 Policy
 	hash                   []byte
@@ -280,6 +289,12 @@ func (r *Registry) checkRestore(rec SessionRecord) (restoreCheck, error) {
 				id, rec.RepoPath, repoPath)
 		}
 		upstream = strings.TrimSuffix(strings.TrimSpace(rec.Upstream), "/")
+	}
+	// Held to the rule Mint applies: the credential is presented to the
+	// record's forge host and to no other (Task 20423).
+	forge, err := sessionForgeHost(rec.ForgeHost, upstream, len(patterns) > 0)
+	if err != nil {
+		return restoreCheck{}, fmt.Errorf("gitproxy: restore %s: %w", id, err)
 	}
 
 	pol := rec.Policy
@@ -321,8 +336,8 @@ func (r *Registry) checkRestore(rec SessionRecord) (restoreCheck, error) {
 	if renewed.After(now) {
 		renewed = now
 	}
-	return restoreCheck{id: id, repoPath: repoPath, upstream: upstream, patterns: patterns, policy: pol, hash: hash,
-		renewedAt: renewed}, nil
+	return restoreCheck{id: id, repoPath: repoPath, upstream: upstream, forge: forge, patterns: patterns,
+		policy: pol, hash: hash, renewedAt: renewed}, nil
 }
 
 // Suspend stops serving a session without ending it: it leaves the registry,

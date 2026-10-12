@@ -1176,3 +1176,38 @@ func TestTransportConfigImportsOnlyURLScopedCertificateKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestProvisionPresentsACredentialOnlyToItsHost: the extraHeader fetch is the
+// last step before a brokered token leaves the machine, so it holds the
+// credential to the host it was bound to (Task 20423). A workspace whose origin
+// is on another host with the same owner/name — here, a forge that would
+// accept anything — gets no Authorization header and no fetch at all, and the
+// refusal names both hosts. The same forge, named as the credential's host,
+// is fetched from as before.
+func TestProvisionPresentsACredentialOnlyToItsHost(t *testing.T) {
+	f := newFixture(t, gitforge.Options{User: credUser, Password: credToken})
+	forgeHost := strings.TrimPrefix(f.forge.URL(), "https://")
+
+	f.cred.Host = "github.com"
+	err := f.provision()
+	var gerr *executor.WorkspaceGrantError
+	if !errors.As(err, &gerr) || gerr.Host != forgeHost || gerr.GrantHost != "github.com" {
+		t.Fatalf("Provision = %v; want a refusal naming %s and github.com\nlog:\n%s", err, forgeHost, f.log())
+	}
+	if !strings.Contains(err.Error(), forgeHost) || !strings.Contains(err.Error(), "github.com") {
+		t.Fatalf("the refusal does not name both hosts: %v", err)
+	}
+	for _, r := range f.forge.Requests() {
+		if r.Authorization != "" {
+			t.Errorf("the other host received %s %s with an Authorization header", r.Method, r.Path)
+		}
+	}
+	f.assertNoLeak(err)
+
+	// The control: bound to the forge's own host, it is presented there.
+	f.cred.Host = forgeHost
+	f.dir = filepath.Join(t.TempDir(), "workspace")
+	if err := f.provision(); err != nil {
+		t.Fatalf("Provision to the credential's own host: %v\nlog:\n%s", err, f.log())
+	}
+}

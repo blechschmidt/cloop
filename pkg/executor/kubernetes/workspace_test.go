@@ -447,7 +447,7 @@ func TestBuildPod_WorkspaceInitDoesNotInheritEnv(t *testing.T) {
 	}
 	for _, ev := range p.Spec.InitContainers[0].Env {
 		switch ev.Name {
-		case EnvWorkspaceToken, EnvWorkspaceUser:
+		case EnvWorkspaceToken, EnvWorkspaceUser, EnvWorkspaceHost:
 		default:
 			t.Errorf("init container inherited %q from the harness environment", ev.Name)
 		}

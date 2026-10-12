@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
@@ -368,6 +369,9 @@ type UpstreamGitHub struct {
 	// Token is the credential, for the proxy's own use. Never logged, never
 	// delivered to a sandbox by this type.
 	Token string
+	// Host is the forge host Token is good against, canonical (Task 20423).
+	// A restored session presents Token there and nowhere else.
+	Host string
 	// ExpiresAt is when GitHub stops honouring an App token; zero for a PAT.
 	ExpiresAt time.Time
 	// Refresh re-mints an App token at its recorded scope; nil for a PAT.
@@ -403,12 +407,12 @@ func (b *Broker) GitHubUpstream(ctx context.Context, leaseID, grantID, sessionID
 		if err != nil {
 			return UpstreamGitHub{}, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
 		}
-		token := strings.TrimSpace(string(plaintext))
+		token, host, perr := parseGitHubPAT(plaintext)
 		zero(plaintext)
-		if token == "" {
-			return UpstreamGitHub{}, wrapf(ErrMalformedPayload, "github secret %s is empty", s.Name)
+		if perr != nil {
+			return UpstreamGitHub{}, fmt.Errorf("github secret %s: %w", s.Name, perr)
 		}
-		return UpstreamGitHub{Token: token}, nil
+		return UpstreamGitHub{Token: token, Host: host}, nil
 	case KindGitHubApp:
 		if err := b.retryPendingSlots(leaseID); err != nil {
 			// Not a refusal: the store did not answer, and the caller tries
@@ -434,6 +438,14 @@ func (b *Broker) GitHubUpstream(ctx context.Context, leaseID, grantID, sessionID
 			return UpstreamGitHub{}, wrapf(ErrRefreshRefused,
 				"grant %s's github app token reached lease %s as a file, not through a git proxy session", g.ID, leaseID)
 		}
+		b.mu.Lock()
+		slotBase := slot.scope.baseURL
+		b.mu.Unlock()
+		host, herr := forgehost.WebHostForAPI(slotBase)
+		if herr != nil {
+			return UpstreamGitHub{}, wrapf(ErrRefreshRefused,
+				"lease %s's github app token slot for grant %s names no forge host: %v", leaseID, g.ID, herr)
+		}
 		got, err := b.refreshSlot(ctx, slot, "")
 		if err != nil {
 			return UpstreamGitHub{}, err
@@ -444,10 +456,61 @@ func (b *Broker) GitHubUpstream(ctx context.Context, leaseID, grantID, sessionID
 			// one.
 			got.Retire()
 		}
-		return UpstreamGitHub{Token: got.Token, ExpiresAt: got.ExpiresAt, Refresh: b.slotRefresher(slot)}, nil
+		return UpstreamGitHub{Token: got.Token, Host: host, ExpiresAt: got.ExpiresAt,
+			Refresh: b.slotRefresher(slot)}, nil
 	default:
 		return UpstreamGitHub{}, wrapf(ErrInvalidKind, "grant %s carries a %s secret, not a GitHub credential", g.ID, s.Kind)
 	}
+}
+
+// GitHubGrantHost reports the forge host the credential behind grantID of
+// leaseID is good against, after the checks GitHubUpstream makes, without
+// minting anything: what a process restoring a git proxy session asks before
+// it spends a GitHub App mint on one it may then refuse (Task 20423).
+//
+// A PAT's host is read from its sealed payload. An App's is the web host of
+// the API base its lease's token slot was minted against — what every token
+// the slot re-mints is good for — and the App's current payload must still
+// name that base: a slot whose secret has since moved to another host is
+// refused here as remint would refuse it, before any token exists.
+func (b *Broker) GitHubGrantHost(leaseID, grantID string) (string, error) {
+	g, s, err := b.heldGrant(leaseID, grantID)
+	if err != nil {
+		return "", err
+	}
+	if s.Kind != KindGitHubPAT && s.Kind != KindGitHubApp {
+		return "", wrapf(ErrInvalidKind, "grant %s carries a %s secret, not a GitHub credential", g.ID, s.Kind)
+	}
+	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
+	if err != nil {
+		return "", fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
+	}
+	defer zero(plaintext)
+	host, err := payloadForgeHost(s.Kind, plaintext)
+	if err != nil {
+		return "", fmt.Errorf("github secret %s: %w", s.Name, err)
+	}
+	if s.Kind != KindGitHubApp {
+		return host, nil
+	}
+	if err := b.retryPendingSlots(leaseID); err != nil {
+		return "", fmt.Errorf("the github app token slots of lease %s could not be read yet: %w", leaseID, err)
+	}
+	slot := b.findSlot(leaseID, g.ID)
+	if slot == nil {
+		return "", wrapf(ErrRefreshRefused,
+			"lease %s holds no recorded github app token slot for grant %s", leaseID, g.ID)
+	}
+	b.mu.Lock()
+	slotBase := slot.scope.baseURL
+	b.mu.Unlock()
+	slotHost, err := forgehost.WebHostForAPI(slotBase)
+	if err != nil || slotHost != host {
+		return "", wrapf(ErrRefreshRefused,
+			"grant %s's github app now names %s, and lease %s's token slot was minted for %s",
+			g.ID, host, leaseID, slotBase)
+	}
+	return host, nil
 }
 
 // KubeconfigUpstream re-derives the cluster credential a Kubernetes monitor

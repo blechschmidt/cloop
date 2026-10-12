@@ -173,6 +173,12 @@ const (
 	// secret, but whenever there is a credential the value comes from the same
 	// per-run Secret as the token, so the pair is never split across objects.
 	EnvWorkspaceUser = "CLOOP_WORKSPACE_USER"
+	// EnvWorkspaceHost carries the host the credential may be presented to
+	// (Task 20423): its grant's forge host, or the git proxy's for a session
+	// token. The provisioner and the write-back scope the credential to it and
+	// refuse a workspace on any other host. Not secret; it rides in the same
+	// per-run Secret as the pair it qualifies.
+	EnvWorkspaceHost = "CLOOP_WORKSPACE_HOST"
 
 	// defaultWorkspaceUser matches secretbroker.GitHubUsername. It is
 	// duplicated rather than imported: this package must not depend on the
@@ -1248,6 +1254,13 @@ func workspaceCredentialEnv(req podRequest) ([]envVar, error) {
 			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
 				Name: name,
 				Key:  EnvWorkspaceToken,
+			}},
+		},
+		{
+			Name: EnvWorkspaceHost,
+			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+				Name: name,
+				Key:  EnvWorkspaceHost,
 			}},
 		},
 	}, nil

@@ -128,6 +128,7 @@ func TestGitProxyRoutesTheWorkspace(t *testing.T) {
 		GrantID:    "grant-1",
 		SecretName: "github-pat",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		Host:       "github.com",
 	}}
 	routed := svc.Wrap("exec-1", inner)
 	if routed == nil {
@@ -214,7 +215,7 @@ func TestGitProxyCloseEndsSessions(t *testing.T) {
 	}
 	inner := &recordingSource{cred: executor.GitCredential{
 		Username: "x-access-token", Password: testForgePAT,
-		ExpiresAt: time.Now().Add(15 * time.Minute),
+		ExpiresAt: time.Now().Add(15 * time.Minute), Host: "github.com",
 	}}
 	w := executor.Workspace{
 		Kind: executor.WorkspaceGit, Repo: testUpstream,

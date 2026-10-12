@@ -110,9 +110,11 @@ The credential, if the repository needs one, is read from the environment:
 
   ` + kubernetes.EnvWorkspaceToken + `   the bare token; absent or empty means an unauthenticated fetch
   ` + kubernetes.EnvWorkspaceUser + `    the basic-auth username (default ` + secretbroker.GitHubUsername + `)
+  ` + kubernetes.EnvWorkspaceHost + `    the host the token may be presented to; a repository on any
+                        other host is refused rather than fetched with it
 
-Both are removed from this process's environment before anything is spawned,
-and no output of this command can contain either.`,
+All three are removed from this process's environment before anything is
+spawned, and no output of this command can contain the token.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// First statement in the command, deliberately: everything below this
@@ -211,11 +213,13 @@ func (o workspaceProvisionOptions) workspace() (executor.Workspace, error) {
 func takeWorkspaceCredential() executor.GitCredential {
 	token := strings.TrimSpace(os.Getenv(kubernetes.EnvWorkspaceToken))
 	user := strings.TrimSpace(os.Getenv(kubernetes.EnvWorkspaceUser))
+	host := strings.TrimSpace(os.Getenv(kubernetes.EnvWorkspaceHost))
 
 	// Unconditional, including when they were never set: "clear it if it was
 	// there" and "clear it" differ only in a branch that could be got wrong.
 	_ = os.Unsetenv(kubernetes.EnvWorkspaceToken)
 	_ = os.Unsetenv(kubernetes.EnvWorkspaceUser)
+	_ = os.Unsetenv(kubernetes.EnvWorkspaceHost)
 
 	if token == "" {
 		return executor.GitCredential{}
@@ -225,7 +229,9 @@ func takeWorkspaceCredential() executor.GitCredential {
 		// rather than repeated so the two cannot disagree.
 		user = secretbroker.GitHubUsername
 	}
-	return executor.GitCredential{Username: user, Password: token}
+	// The host the hub bound the credential to (Task 20423): scoping it to a
+	// workspace on any other host is refused by executor.GitCredentialEnv.
+	return executor.GitCredential{Username: user, Password: token, Host: host}
 }
 
 // runWorkspaceProvision is the command body, factored out so a test can drive it

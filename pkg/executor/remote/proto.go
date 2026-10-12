@@ -1460,6 +1460,12 @@ type WorkspaceCredential struct {
 	// fetch with a credential that will lapse mid-transfer rather than failing
 	// halfway through with an opaque 401.
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// Host is the host the credential may be presented to (Task 20423): its
+	// grant's forge host, or the git proxy's for a session token. The hub
+	// chose it for exactly that host; a device scopes it there and refuses a
+	// workspace on any other, as executor.GitCredentialConfig does. Not
+	// secret. An older hub sends none, and an older agent ignores it.
+	Host string `json:"host,omitempty"`
 }
 
 // String renders the credential without its secret, so a `%v` on a start
@@ -1487,6 +1493,7 @@ func (p StartPayload) GitCredential() executor.GitCredential {
 		Username:  p.WorkspaceCredential.Username,
 		Password:  p.WorkspaceCredential.Password,
 		ExpiresAt: p.WorkspaceCredential.ExpiresAt,
+		Host:      p.WorkspaceCredential.Host,
 	}
 }
 

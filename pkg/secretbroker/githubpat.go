@@ -2,12 +2,16 @@ package secretbroker
 
 import (
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 )
 
-// GitHub's canonical host. Credentials are released for this host only; a
-// grant for github.com must not authenticate to a look-alike that a
-// workload's /etc/hosts or proxy points elsewhere.
-const githubHost = "github.com"
+// GitHub's canonical host: where a github_pat with no recorded host, and an
+// App on the public API, is released. A grant's own host is the material's
+// githubHost (forgehost.go), which a helper releases its token for and for no
+// other host — not a look-alike that a workload's /etc/hosts or proxy points
+// elsewhere, and not github.com for a GitHub Enterprise Server token.
+const githubHost = forgehost.GitHub
 
 // credentialHelperName is the file the generated helper is written to inside
 // the lease's tmpfs directory.
@@ -52,19 +56,25 @@ const proxyCredentialName = "git-proxy-credential"
 // path.Match, where it does not. Without that guard "org/*" would mean two
 // different things in the two matchers, and the shell's would be the wider.
 func buildGitCredentialHelper(patterns []string) (string, error) {
-	return buildGitCredentialHelperFor(patterns, tokenFileName)
+	return buildGitCredentialHelperFor(patterns, tokenFileName, githubHost)
 }
 
 // buildGitCredentialHelperFor is buildGitCredentialHelper reading the token
-// from tokenFile, so several GitHub grants can share one lease directory, each
-// helper releasing its own token (githubmulti.go).
-func buildGitCredentialHelperFor(patterns []string, tokenFile string) (string, error) {
+// from tokenFile and releasing it for host — the forge host the grant's token
+// is good against (Task 20423) — so several GitHub grants can share one lease
+// directory, each helper releasing its own token to its own host
+// (githubmulti.go).
+func buildGitCredentialHelperFor(patterns []string, tokenFile, host string) (string, error) {
 	cases, err := repoFilterCases(patterns)
 	if err != nil {
 		return "", err
 	}
 	if !validLeaseFileToken(tokenFile) {
 		return "", wrapf(ErrInvalidSecret, "unsafe credential file name %q", tokenFile)
+	}
+	host, err = helperHost(host)
+	if err != nil {
+		return "", err
 	}
 
 	var b strings.Builder
@@ -84,14 +94,44 @@ func buildGitCredentialHelperFor(patterns []string, tokenFile string) (string, e
 	b.WriteString("    path) reqpath=$value ;;\n")
 	b.WriteString("  esac\n")
 	b.WriteString("done\n")
-	// Only https to the real github.com. Anything else gets silence.
+	// Only https to the grant's own host. Anything else gets silence.
 	b.WriteString("[ \"$proto\" = https ] || exit 0\n")
-	b.WriteString("[ \"$host\" = " + githubHost + " ] || exit 0\n")
+	writeHostFilter(&b, host)
 	writeRepoFilter(&b, cases)
 	b.WriteString("[ -r \"$dir/" + tokenFile + "\" ] || exit 0\n")
 	b.WriteString("printf 'username=x-access-token\\n'\n")
 	b.WriteString("printf 'password=%s\\n' \"$(cat \"$dir/" + tokenFile + "\")\"\n")
 	return b.String(), nil
+}
+
+// helperHost canonicalises the host a generated helper answers for, and
+// refuses one that could not appear in its body unquoted. The canonical
+// charset is already narrower than that; this is the check at the sink.
+func helperHost(host string) (string, error) {
+	c, err := forgehost.Canonical(host)
+	if err != nil {
+		return "", wrapf(ErrInvalidSecret, "credential helper host %q: %v", host, err)
+	}
+	if err := validateShellSafeHost(c); err != nil {
+		return "", wrapf(ErrInvalidSecret, "credential helper host: %v", err)
+	}
+	return c, nil
+}
+
+// writeHostFilter renders the helper lines that stay silent unless git's
+// request names host, which must already be canonical and shell-safe.
+//
+// git reports the host as the URL spelled it, so the two spellings forgehost
+// folds that a shell can fold too are folded here — letter case, and one
+// trailing dot. Anything else it folds (a default port spelled out, a
+// Unicode spelling) gets silence: the safe direction, since a non-match
+// releases nothing.
+func writeHostFilter(b *strings.Builder, host string) {
+	b.WriteString("host=$(printf '%s' \"$host\" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' 2>/dev/null || printf '%s' \"$host\")\n")
+	b.WriteString("host=${host%.}\n")
+	// Single-quoted: the charset has no quote in it, and a bracketed IPv6
+	// literal left bare would be a glob the shell could expand.
+	b.WriteString("[ \"$host\" = '" + host + "' ] || exit 0\n")
 }
 
 // repoFilterCases validates an allowlist and renders it as the alternatives of
@@ -122,6 +162,26 @@ func repoFilterCases(patterns []string) ([]string, error) {
 // request names a repository inside cases. It reads $reqpath, which the helper
 // has already parsed from git's request.
 func writeRepoFilter(b *strings.Builder, cases []string) {
+	writeRepoFilterUnder(b, cases, "")
+}
+
+// writeRepoFilterUnder is writeRepoFilter for repositories beneath prefix: a
+// request path outside it gets silence, and the prefix is stripped before the
+// owner/name checks. prefix is a proxy route path (githubguarded.go), already
+// validated to plain lowercase segments; it is checked again here because
+// this is where it meets the shell.
+func writeRepoFilterUnder(b *strings.Builder, cases []string, prefix string) {
+	for _, c := range prefix {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == '_' || c == ':' || c == '/':
+		default:
+			// Unreachable through newProxyRoute. A prefix that cannot be
+			// rendered safely matches nothing.
+			b.WriteString("exit 0\n")
+			return
+		}
+	}
 	b.WriteString("[ -n \"$reqpath\" ] || exit 0\n")
 	// Normalise: strip a leading slash and a .git suffix, then lowercase.
 	// If tr is missing the comparison stays cased and simply fails to
@@ -129,6 +189,15 @@ func writeRepoFilter(b *strings.Builder, cases []string) {
 	b.WriteString("repo=${reqpath#/}\n")
 	b.WriteString("repo=${repo%.git}\n")
 	b.WriteString("repo=$(printf '%s' \"$repo\" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' 2>/dev/null || printf '%s' \"$repo\")\n")
+	if prefix = strings.Trim(prefix, "/"); prefix != "" {
+		// Beneath this host's route, or silence: a request on another
+		// host's route — or on github.com's, at the base — is not this
+		// grant's to answer.
+		b.WriteString("case \"$repo\" in\n")
+		b.WriteString("  '" + prefix + "/'*) repo=${repo#'" + prefix + "/'} ;;\n")
+		b.WriteString("  *) exit 0 ;;\n")
+		b.WriteString("esac\n")
+	}
 	// Exactly one slash: this is what makes shell globbing agree with
 	// path.Match's non-separator-crossing "*".
 	b.WriteString("case \"$repo\" in\n")

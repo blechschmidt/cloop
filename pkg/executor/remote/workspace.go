@@ -46,9 +46,11 @@ func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (exec
 		// operator's next step identical whichever half is missing, instead of
 		// making "no source configured" a distinct mystery.
 		repoPath, _ := spec.Workspace.RepoPath()
+		host, _ := spec.Workspace.ForgeHost()
 		return executor.WorkspaceAccess{}, noop, &executor.WorkspaceGrantError{
 			Repo:        spec.Workspace.Repo,
 			RepoPath:    repoPath,
+			Host:        host,
 			Grant:       strings.TrimSpace(spec.Workspace.CredentialGrant),
 			ExecutorID:  executor.RequestingExecutor(ctx, e.id),
 			ProjectPath: projectOf(spec),

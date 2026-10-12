@@ -58,6 +58,9 @@ func patAccess() executor.WorkspaceAccess {
 			GrantID:    "grant-42",
 			SecretName: "github-pat",
 			ExpiresAt:  time.Date(2026, 8, 23, 18, 0, 0, 0, time.UTC),
+			// The broker's source says which host its credential is for;
+			// the decorator presents it there and nowhere else.
+			Host: "github.com",
 		},
 	}
 }

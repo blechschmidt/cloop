@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -434,8 +435,20 @@ func projectSeedRemedy(ex executor.Executor) string {
 // It has to. A grant selected here that LeaseFor would not produce is a Spec
 // that names a grant the driver cannot lease, which fails at dispatch with a
 // worse error than the one this function could have returned.
+//
+// And it matches the repository as (host, path), as the lease does (Task
+// 20423): a grant's allowlist names owner/name on its secret's forge host, so
+// a grant for acme/* does not admit https://attacker.example/acme/tool, and a
+// grant that admits the path on another host is a refusal naming both hosts.
+// The host is read from what Mint recorded (secretbroker.SecretForgeHost), so
+// no payload is opened here either; a GitHub App minted before hosts were
+// recorded has none on record, and is left to the lease, which reads it from
+// the sealed payload and refuses a mismatch the same way.
 func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir string) (string, error) {
 	repoPath, hasRepoPath := w.RepoPath()
+	// The origin's host, once known, rides on every refusal: what fixes one
+	// depends on whether that host is github.com (Task 20423).
+	var originHost string
 	denied := func(reason string) error {
 		return &executor.WorkspaceGrantError{
 			Repo:        w.Repo,
@@ -443,6 +456,7 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 			ExecutorID:  ex.ID(),
 			ProjectPath: workDir,
 			Reason:      reason,
+			Host:        originHost,
 		}
 	}
 	if !hasRepoPath {
@@ -495,8 +509,16 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 		byID[s.ID] = s
 	}
 
+	originHost, herr := w.ForgeHost()
+	if herr != nil {
+		return "", denied(fmt.Sprintf("%s names no forge host a credential could be presented to: %v", w.Repo, herr))
+	}
+
 	requester := secretbroker.Requester{ExecutorID: ex.ID(), ProjectID: policyProjectPath(workDir)}
-	var excluded string
+	// unverified is the first grant admitting the path whose host is not on
+	// record — a GitHub App minted before hosts were — chosen only when no
+	// grant known to be for this host is, since the lease may refuse it.
+	var excluded, otherHostGrant, otherHost, unverified string
 	for _, g := range grants {
 		if !g.Subject.Matches(requester) {
 			continue
@@ -512,20 +534,59 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 			excluded = s.Name
 			continue
 		}
+		host, known := secretbroker.SecretForgeHost(s)
+		if !known {
+			if unverified == "" {
+				unverified = s.Name
+			}
+			continue
+		}
+		if !forgehost.Equal(host, originHost) {
+			// The path is admitted on another host. Remembered too: another
+			// grant may be for this one.
+			if otherHost == "" {
+				otherHostGrant, otherHost = s.Name, host
+			}
+			continue
+		}
 		// ListGrants is newest-first, so the most recently issued authority
 		// wins when several admit the repository. That is the one an operator
 		// who just created a grant expects to take effect.
 		return s.Name, nil
 	}
 
+	if unverified != "" {
+		return unverified, nil
+	}
+	if otherHost != "" {
+		return "", &executor.WorkspaceGrantError{
+			Repo:        w.Repo,
+			RepoPath:    repoPath,
+			Grant:       otherHostGrant,
+			ExecutorID:  ex.ID(),
+			ProjectPath: workDir,
+			Reason:      executor.HostMismatchReason(otherHostGrant, originHost, otherHost),
+			Host:        originHost,
+			GrantHost:   otherHost,
+		}
+	}
 	if excluded != "" {
 		return "", denied(fmt.Sprintf(
 			"grant %s is issued to this executor but its allowlist excludes repository %s",
-			excluded, repoPath))
+			excluded, repoOnHost(repoPath, originHost)))
 	}
 	return "", denied(fmt.Sprintf(
 		"no active GitHub grant is issued to executor %s for this project, so %s cannot be fetched",
-		ex.ID(), repoPath))
+		ex.ID(), repoOnHost(repoPath, originHost)))
+}
+
+// repoOnHost names a repository with its host when the host is not github.com,
+// where a refusal that named only owner/name would read as a github.com one.
+func repoOnHost(repoPath, host string) string {
+	if host == "" || forgehost.IsGitHub(host) {
+		return repoPath
+	}
+	return repoPath + " on " + host
 }
 
 // --- errors -----------------------------------------------------------------

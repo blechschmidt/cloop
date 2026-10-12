@@ -143,13 +143,16 @@ func (b *Broker) envMaterial(mat Material, plaintext []byte) (Material, error) {
 // helper, and a guard that fails takes the lease with it rather than falling
 // back to handing over the broad credential. See gitguard.go.
 func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []byte) (Material, error) {
-	token := strings.TrimSpace(string(plaintext))
-	if token == "" {
-		return Material{}, wrapf(ErrMalformedPayload, "github secret %s is empty", mat.SecretName)
+	token, host, err := parseGitHubPAT(plaintext)
+	if err != nil {
+		return Material{}, fmt.Errorf("github secret %s: %w", mat.SecretName, err)
 	}
 	// Recorded before either delivery branch, because the hub needs it whether
-	// or not the sandbox gets it.
+	// or not the sandbox gets it — and with the host it is good against, read
+	// from the sealed payload rather than from anything a row can say, which
+	// every hub-side consumer checks before presenting it (Task 20423).
 	mat.githubToken = token
+	mat.githubHost = host
 
 	if b != nil && b.GitGuard != nil {
 		if len(mat.Constraints.Repos) == 0 {
@@ -158,6 +161,7 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 		}
 		res, err := b.GitGuard.GuardGitHub(ctx, GitGuardRequest{
 			Token:       token,
+			Host:        host,
 			Repos:       mat.Constraints.Repos,
 			Permissions: mat.Constraints.Permissions,
 			Branches:    mat.Constraints.Branches,
@@ -192,6 +196,9 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 			if s := strings.TrimSpace(res.Summary); s != "" {
 				mat.Summary = "github " + s
 			}
+			if !strings.Contains(mat.Summary, host) {
+				mat.Summary += onHost(host)
+			}
 			return mat, nil
 		}
 		// Declined, not failed: the hub has no proxy running and said so.
@@ -212,13 +219,24 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 			mat.GrantID, strings.Join(mat.Constraints.BranchNames(), ", "))
 	}
 
-	mat, err := deliverGitHubToken(mat, token)
+	mat, err = deliverGitHubToken(mat, token)
 	if err != nil {
 		return Material{}, err
 	}
 	mat.Summary = fmt.Sprintf("github repos: %s (helper-scoped=%t)",
 		strings.Join(mat.Constraints.Repos, "|"), !allowsAllRepos(mat.Constraints.Repos))
+	mat.Summary += onHost(host)
 	return mat, nil
+}
+
+// onHost names a GitHub Enterprise Server host in a lease summary, and
+// nothing for github.com — the host every summary meant before hosts were
+// recorded.
+func onHost(host string) string {
+	if host == "" || host == githubHost {
+		return ""
+	}
+	return " on " + host
 }
 
 // githubAppMaterial mints a short-lived installation token from the stored App
@@ -254,6 +272,14 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		return Material{}, wrapf(ErrRepoDenied,
 			"github_app grant %s carries no repository allowlist", mat.GrantID)
 	}
+	// The host its tokens are good against: the web host of the App's API
+	// base (Task 20423). Decided before anything is minted, so an App whose
+	// base names no host never has a token at all.
+	host, err := appForgeHost(cred)
+	if err != nil {
+		return Material{}, err
+	}
+	mat.githubHost = host
 
 	// A branch allowlist is only ever enforced by the git proxy, so with no
 	// guard on this broker the grant cannot have the push it names — git's
@@ -323,6 +349,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 	if b != nil && b.GitGuard != nil {
 		guarded, gerr := b.GitGuard.GuardGitHub(ctx, GitGuardRequest{
 			Token:          res.token.Token,
+			Host:           host,
 			TokenExpiresAt: res.token.ExpiresAt,
 			Refresh:        b.slotRefresher(slot),
 			Repos:          mat.Constraints.Repos,
@@ -377,7 +404,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			mat.Summary = fmt.Sprintf(
 				"github app installation %d token for %s (proxy-guarded, %s), expires %s",
 				cred.InstallationID, res.summary, mode,
-				res.token.ExpiresAt.UTC().Format(time.RFC3339))
+				res.token.ExpiresAt.UTC().Format(time.RFC3339)) + onHost(host)
 			return mat, nil
 		}
 		// Declined, not failed: this hub runs no proxy. Fall through — unless
@@ -411,7 +438,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		slot.guarded = true
 		b.mu.Unlock()
 		mat.Summary = fmt.Sprintf("github app installation %d token for %s (held by the git proxy), expires %s",
-			cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339))
+			cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339)) + onHost(host)
 		return mat, nil
 	}
 	if b != nil && allowsAllRepos(mat.Constraints.Repos) {
@@ -431,7 +458,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 	mat.Env["CLOOP_GITHUB_TOKEN_EXPIRES_AT"] = res.token.ExpiresAt.UTC().Format(time.RFC3339)
 
 	mat.Summary = fmt.Sprintf("github app installation %d token for %s, expires %s",
-		cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339))
+		cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339)) + onHost(host)
 	if withheld != "" {
 		// Said to the workload, so that an agent asked to push reports the
 		// reason instead of retrying a refusal it cannot understand, and to the
@@ -511,7 +538,10 @@ func deliverGitHubToken(mat Material, token string) (Material, error) {
 			"github grant %s carries no repository allowlist", mat.GrantID)
 	}
 
-	helper, err := buildGitCredentialHelper(mat.Constraints.Repos)
+	// Released for the grant's own host only (Task 20423): a GitHub
+	// Enterprise Server token is never answered for github.com, nor a
+	// github.com token for anywhere else.
+	helper, err := buildGitCredentialHelperFor(mat.Constraints.Repos, tokenFileName, mat.GitHubHost())
 	if err != nil {
 		return Material{}, err
 	}
@@ -528,13 +558,23 @@ func deliverGitHubToken(mat Material, token string) (Material, error) {
 	}
 
 	mat.Env["CLOOP_GITHUB_REPO_ALLOWLIST"] = strings.Join(mat.Constraints.Repos, ",")
+	mat.Env[GitHubHostEnvKey] = mat.GitHubHost()
 	if len(mat.Constraints.Permissions) > 0 {
 		mat.Env["CLOOP_GITHUB_PERMISSIONS"] = strings.Join(mat.Constraints.Permissions, ",")
 	}
 	if allowsAllRepos(mat.Constraints.Repos) {
-		mat.Env["GITHUB_TOKEN"] = token
-		mat.Env["GH_TOKEN"] = token
-		mat.SensitiveEnv = append(mat.SensitiveEnv, "GITHUB_TOKEN", "GH_TOKEN")
+		if mat.GitHubHost() == githubHost {
+			mat.Env["GITHUB_TOKEN"] = token
+			mat.Env["GH_TOKEN"] = token
+			mat.SensitiveEnv = append(mat.SensitiveEnv, "GITHUB_TOKEN", "GH_TOKEN")
+		} else {
+			// Every tool that reads GITHUB_TOKEN or GH_TOKEN sends it to
+			// github.com by default, and a GitHub Enterprise Server token is
+			// never presented there (Task 20423). gh reads this one for an
+			// enterprise host only.
+			mat.Env["GH_ENTERPRISE_TOKEN"] = token
+			mat.SensitiveEnv = append(mat.SensitiveEnv, "GH_ENTERPRISE_TOKEN")
+		}
 	}
 	return mat, nil
 }

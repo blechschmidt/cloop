@@ -227,7 +227,7 @@ func (p *Proxy) Close() error {
 // repository, which would let a sandbox fetch by path and bypass every check
 // below.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	repoPath, endpoint, ok := splitGitPath(r.URL.Path)
+	forge, repoPath, endpoint, ok := splitRoutedPath(r.URL.Path)
 	if !ok {
 		p.reject(w, r, http.StatusNotFound, "", "not a git smart-HTTP endpoint")
 		return
@@ -242,6 +242,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="cloop git proxy"`)
 		p.reject(w, r, http.StatusUnauthorized, repoPath, err.Error())
+		return
+	}
+	// Before the repository: a session is served on its own forge host's
+	// route alone, so its credential is never presented to — or asked to
+	// stand in for — another host's (Task 20423).
+	if why := forgeMismatch(sess, forge); why != "" {
+		p.rejectSession(w, r, sess, http.StatusForbidden, why)
 		return
 	}
 	if !sess.AllowsRepo(repoPath) {
@@ -491,7 +498,7 @@ func requestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) (io.Rea
 // already did: the check and the URL construction live together, so neither
 // can be moved away from the other by a later edit.
 func (p *Proxy) upstreamRequest(r *http.Request, sess *Session, suffix string, body io.Reader) (*http.Response, error) {
-	repoPath, _, _ := splitGitPath(r.URL.Path)
+	repoPath, _ := routedRepoPath(r.URL.Path)
 	base, err := sess.upstreamFor(repoPath)
 	if err != nil {
 		return nil, err
@@ -805,7 +812,7 @@ func (p *Proxy) emitPush(r *http.Request, sess *Session, kind EventKind, cmds []
 // when it does not, because the exact spelling of a refused path is the
 // evidence.
 func requestRepo(r *http.Request, sess *Session) string {
-	repo, _, ok := splitGitPath(r.URL.Path)
+	repo, ok := routedRepoPath(r.URL.Path)
 	if !ok || repo == "" {
 		return sess.RepoPath
 	}

@@ -216,6 +216,11 @@ type projectRepoAssignment struct {
 	Kind       string   `json:"kind"`
 	Repos      []string `json:"repos"`
 	Access     string   `json:"access"`
+	// ForgeHost is the host the grant's repositories are on (Task 20423):
+	// github.com, or the GitHub Enterprise Server its secret names. Empty for
+	// a GitHub App minted before hosts were recorded, whose host is in its
+	// sealed base_url.
+	ForgeHost string `json:"forge_host,omitempty"`
 	// Branches is the grant's branch allowlist for pushes (Task 20340), as
 	// branch names. Empty means pushes are limited only by the hub's policy.
 	Branches []string `json:"branches,omitempty"`
@@ -336,6 +341,7 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 		if !g.Subject.Matches(secretbroker.Requester{ProjectID: entry.Path}) {
 			continue
 		}
+		forgeHost, _ := secretbroker.SecretForgeHost(sec)
 		assignments = append(assignments, projectRepoAssignment{
 			GrantID:           g.ID,
 			SecretID:          g.SecretID,
@@ -343,6 +349,7 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 			Kind:              string(sec.Kind),
 			Repos:             g.Constraints.Repos,
 			Access:            repoAccessLabel(g.Constraints),
+			ForgeHost:         forgeHost,
 			Branches:          g.Constraints.BranchNames(),
 			BranchEnforcement: branchEnforcement(sec.Kind, g.Constraints),
 			Replaceable:       grantIssuedToProject(g, entry.Path),

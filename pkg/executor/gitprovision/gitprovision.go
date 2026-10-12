@@ -181,6 +181,21 @@ func Provision(ctx context.Context, r Request) error {
 			cred.ExpiresAt.UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
 	}
 
+	if !cred.Empty() && strings.TrimSpace(cred.Host) != "" {
+		// Before anything is created or contacted: a credential bound to one
+		// host is not presented to another, whatever chose it (Task 20423).
+		// The refusal keeps its type, which carries no secret — only the
+		// two hosts, the repository and the grant — so a caller can still
+		// tell the operator which credential and which origin disagree.
+		if _, err := executor.GitCredentialConfig(w, cred); err != nil {
+			var gerr *executor.WorkspaceGrantError
+			if errors.As(err, &gerr) {
+				return fmt.Errorf("%w: %w", executor.ErrWorkspaceUnavailable, gerr)
+			}
+			return fail("%v", err)
+		}
+	}
+
 	plan, err := w.GitPlan(dir)
 	if err != nil {
 		return fail("%v", err)

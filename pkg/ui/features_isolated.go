@@ -47,6 +47,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/featureops"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -417,31 +418,74 @@ func featureOpsCode(err error) string {
 	return "failed"
 }
 
+// featureCredential is the token the hub pushes a feature and opens its pull
+// request with, and where it may go.
+type featureCredential struct {
+	// Token is the credential. Never logged.
+	Token string
+	// Source names where it came from, never the token.
+	Source string
+	// APIURL is the REST API of a GitHub Enterprise Server the token is good
+	// against — its /api/v3, from the grant, never from the origin (Task
+	// 20423) — and "" for a github.com token, whose API featureops takes to be
+	// api.github.com (or the stand-in CLOOP_GITHUB_API_URL names). Either way
+	// featureops sends the token nowhere the origin names unless it is the
+	// host that API serves.
+	APIURL string
+}
+
+// grantAPIURL is featureCredential.APIURL for a token good against host.
+func grantAPIURL(host string) string {
+	if forgehost.IsGitHub(host) {
+		return ""
+	}
+	return forgehost.APIBase(host)
+}
+
 // hubFeatureToken finds the credential the hub pushes a feature's branch and
 // opens its pull request with, when the hub does it itself: the project's own
 // GitHub grant first — branch restrictions honoured here, since no proxy
 // stands between the hub and the forge — and the hub's own token only where
 // featureTokenEnv would hand it out too, a hub without sign-in.
 //
+// The grant is chosen and leased for the origin's (host, path), as a
+// workspace's is (Task 20423): one whose credential is for another host is a
+// refusal naming both, never a token. The API endpoint is the grant's host's.
+//
 // release must be called once the token is no longer needed; it is never nil.
-func (s *Server) hubFeatureToken(ctx context.Context, dir, branch string) (token, source string, release func(), err error) {
+func (s *Server) hubFeatureToken(ctx context.Context, dir, branch string) (cred featureCredential, release func(), err error) {
 	release = func() {}
 	remote, err := featurehub.Origin(ctx, dir)
 	if err != nil {
-		return "", "", release, fmt.Errorf("%w: %v", featureops.ErrNoToken, err)
+		return featureCredential{}, release, fmt.Errorf("%w: %v", featureops.ErrNoToken, err)
 	}
 	parent := policyProjectPath(dir)
 	registerBuiltinExecutors()
 	ex, rerr := executor.ResolveBinding(parent)
 	if rerr == nil && ex != nil && remote.HTTPS {
 		ws := executor.Workspace{Kind: executor.WorkspaceGit, Repo: "https://" + remote.Host + "/" + remote.Repo}
-		if grantName, gerr := workspaceGrantFor(ws, ex, dir); gerr == nil && grantName != "" {
+		grantName, gerr := workspaceGrantFor(ws, ex, dir)
+		var grantErr *executor.WorkspaceGrantError
+		if errors.As(gerr, &grantErr) && grantErr.HostMismatch() {
+			// A grant admits the repository on another host. Said as it is,
+			// rather than as "no token": the fix is the origin or the
+			// credential, not a grant the project already holds.
+			return featureCredential{}, release, fmt.Errorf("%w: %v", featureops.ErrNoToken, gerr)
+		}
+		if gerr == nil && grantName != "" {
 			ws.CredentialGrant = grantName
 			broker, closeDB, berr := openUIBroker(controlPlaneDir())
 			if berr == nil {
 				src, serr := gitcreds.New(broker, ex.ID(), workspaceLeaseActor)
 				if serr == nil {
 					access, rel, lerr := src.ForProxiedWorkspace(ctx, parent, ws)
+					if errors.As(lerr, &grantErr) && grantErr.HostMismatch() {
+						rel()
+						if closeDB != nil {
+							closeDB()
+						}
+						return featureCredential{}, func() {}, fmt.Errorf("%w: %v", featureops.ErrNoToken, lerr)
+					}
 					if lerr == nil && !access.Credential.Empty() {
 						release = func() {
 							rel()
@@ -454,12 +498,23 @@ func (s *Server) hubFeatureToken(ctx context.Context, dir, branch string) (token
 							pol.Normalize()
 							if !pol.AllowsRef("refs/heads/" + branch) {
 								release()
-								return "", "", func() {}, fmt.Errorf("%w: grant %s may push only to %s, not to the "+
-									"feature's branch %s — add it (or cloop/*) to the grant's branches",
+								return featureCredential{}, func() {}, fmt.Errorf("%w: grant %s may push only to %s, "+
+									"not to the feature's branch %s — add it (or cloop/*) to the grant's branches",
 									featureops.ErrNoToken, access.Credential.SecretName, strings.Join(b, ", "), branch)
 							}
 						}
-						return access.Credential.Password, "grant " + access.Credential.SecretName, release, nil
+						// Checked here as well as by the lease: the token goes
+						// to the origin's host, and only to its grant's.
+						if herr := forgehost.Check(remote.Host, access.Credential.Host); herr != nil {
+							release()
+							return featureCredential{}, func() {}, fmt.Errorf("%w: grant %s: %v",
+								featureops.ErrNoToken, access.Credential.SecretName, herr)
+						}
+						return featureCredential{
+							Token:  access.Credential.Password,
+							Source: "grant " + access.Credential.SecretName,
+							APIURL: grantAPIURL(access.Credential.Host),
+						}, release, nil
 					}
 					rel()
 				}
@@ -469,14 +524,14 @@ func (s *Server) hubFeatureToken(ctx context.Context, dir, branch string) (token
 			}
 		}
 	}
-	if !s.oidcEnabled() && strings.EqualFold(remote.Host, "github.com") {
+	if !s.oidcEnabled() && forgehost.IsGitHub(remote.Host) {
 		if cfg, cerr := s.loadHubConfig(); cerr == nil && cfg != nil {
 			if t := strings.TrimSpace(cfg.GitHub.Token); t != "" {
-				return t, "the hub's github.token", release, nil
+				return featureCredential{Token: t, Source: "the hub's github.token"}, release, nil
 			}
 		}
 	}
-	return "", "", release, fmt.Errorf("%w for %s: grant the project its GitHub repository with write and "+
+	return featureCredential{}, release, fmt.Errorf("%w for %s: grant the project its GitHub repository with write and "+
 		"pull-request access", featureops.ErrNoToken, remote.Repo)
 }
 
@@ -486,13 +541,14 @@ func (s *Server) openFeaturePROnHub(ctx context.Context, dir string, req feature
 	if err != nil {
 		return &featurePROutcome{Error: err.Error(), Code: "not_found"}
 	}
-	token, _, release, err := s.hubFeatureToken(ctx, dir, meta.Branch)
+	cred, release, err := s.hubFeatureToken(ctx, dir, meta.Branch)
 	defer release()
 	if err != nil {
 		return &featurePROutcome{Error: err.Error(), Code: featureOpsCode(err)}
 	}
 	res, err := featurehub.OpenPR(ctx, featureops.PROptions{
-		FeatureDir: dir, Title: req.Title, Body: req.Body, Draft: req.Draft, Token: token,
+		FeatureDir: dir, Title: req.Title, Body: req.Body, Draft: req.Draft,
+		Token: cred.Token, APIURL: cred.APIURL,
 	})
 	if err != nil {
 		return &featurePROutcome{Error: err.Error(), Code: featureOpsCode(err), Partial: res}
@@ -506,10 +562,10 @@ func (s *Server) refreshFeaturePROnHub(ctx context.Context, dir string) (*featur
 	if err != nil {
 		return nil, err
 	}
-	token, _, release, err := s.hubFeatureToken(ctx, dir, meta.Branch)
+	cred, release, err := s.hubFeatureToken(ctx, dir, meta.Branch)
 	defer release()
 	if err != nil {
 		return nil, err
 	}
-	return featurehub.RefreshPR(ctx, dir, token, "")
+	return featurehub.RefreshPR(ctx, dir, cred.Token, cred.APIURL)
 }

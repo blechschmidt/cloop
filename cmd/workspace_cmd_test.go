@@ -211,6 +211,25 @@ func TestTakeWorkspaceCredentialClearsTheEnvironment(t *testing.T) {
 	}
 }
 
+// TestTakeWorkspaceCredentialKeepsItsHost: the Pod's Secret names the host the
+// token is bound to (Task 20423), and the provisioner scopes it there and
+// nowhere else — the variable goes with the other two.
+func TestTakeWorkspaceCredentialKeepsItsHost(t *testing.T) {
+	t.Setenv(kubernetes.EnvWorkspaceToken, "ghp_test_0123456789abcdefghijklmnop")
+	t.Setenv(kubernetes.EnvWorkspaceHost, "github.com")
+	cred := takeWorkspaceCredential()
+	if cred.Host != "github.com" {
+		t.Fatalf("Host = %q, want the bound host", cred.Host)
+	}
+	if v, ok := os.LookupEnv(kubernetes.EnvWorkspaceHost); ok {
+		t.Errorf("%s is still set to %q after being read", kubernetes.EnvWorkspaceHost, v)
+	}
+	other := executor.Workspace{Kind: executor.WorkspaceGit, Repo: "https://attacker.example/acme/tool.git"}
+	if _, err := executor.GitCredentialEnv(other, cred); err == nil {
+		t.Fatal("the provisioner would present a github.com token to attacker.example")
+	}
+}
+
 // TestTakeWorkspaceCredentialDefaultsTheUsername: the driver sets the username
 // variable, but a hand-run command and a future driver may not, and the default
 // has to be the literal the broker pairs with a GitHub PAT.

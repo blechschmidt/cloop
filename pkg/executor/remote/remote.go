@@ -938,6 +938,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			Username:  cred.Username,
 			Password:  cred.Password,
 			ExpiresAt: cred.ExpiresAt,
+			Host:      cred.Host,
 		}
 	}
 	// The lease's credential files travel beside the Spec too, and for a reason

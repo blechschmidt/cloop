@@ -54,6 +54,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
@@ -345,6 +346,17 @@ func (w Workspace) Host() string {
 	return u.Host
 }
 
+// ForgeHost returns the repo's host in pkg/forgehost's canonical form — the
+// host half of the (host, path) a credential is chosen and bound by — or an
+// error when the workspace names none a credential could be bound to.
+func (w Workspace) ForgeHost() (string, error) {
+	u, err := w.parseRepo()
+	if err != nil {
+		return "", err
+	}
+	return forgehost.Canonical(u.Host)
+}
+
 // BaseURL returns "https://host/", the key prefix an http.<base>.extraHeader
 // setting is scoped to.
 //
@@ -362,6 +374,10 @@ func (w Workspace) BaseURL() string {
 
 // RepoPath returns the "owner/name" form used to match a GitHub grant's
 // repository allowlist, and whether the URL had that shape at all.
+//
+// It is only the path half of the repository: an allowlist names owner/name
+// on the grant's own forge host, so a caller choosing a credential compares
+// ForgeHost against the grant's host as well (Task 20423).
 func (w Workspace) RepoPath() (string, bool) {
 	u, err := w.parseRepo()
 	if err != nil {
@@ -507,6 +523,14 @@ type GitCredential struct {
 	// the session's id, which is also its Username. Not secret. Empty for a
 	// forge credential handed over as is.
 	SessionID string
+	// Host is the host this credential may be presented to, in
+	// pkg/forgehost's canonical form (Task 20423): the forge host of the
+	// grant it was leased from — github.com, or a GitHub Enterprise Server
+	// host — or, for a git proxy session, the proxy's own host.
+	// GitCredentialConfig refuses to scope it to a workspace on any other
+	// host. Not secret. Empty only on a credential built by something that
+	// does not know, which is then scoped to the workspace's origin as before.
+	Host string
 }
 
 // HeldWorkspaceCredential names, without its secret, a workspace credential a
@@ -752,6 +776,16 @@ func GitCredentialConfig(w Workspace, c GitCredential) ([][2]string, error) {
 		return nil, fmt.Errorf("%w: workspace has no usable repo URL to scope the credential to",
 			ErrInvalidSpec)
 	}
+	// The header is scoped to the workspace's origin, so the origin must be
+	// the host the credential is for (Task 20423). Checked here, at the last
+	// step before git sends it, as well as wherever the credential was
+	// chosen: an origin on another host gets no header — and no fetch
+	// carrying the token — whatever chose it.
+	if strings.TrimSpace(c.Host) != "" {
+		if err := forgehost.Check(w.Host(), c.Host); err != nil {
+			return nil, hostMismatchError(w, c.GrantID, err)
+		}
+	}
 	header := c.AuthorizationHeader()
 	if strings.ContainsAny(header, "\r\n") {
 		// Unreachable via base64, but a header value that could carry a
@@ -989,7 +1023,19 @@ type WorkspaceGrantError struct {
 	// Reason distinguishes "no grant exists" from "a grant exists but excludes
 	// this repository" — different fixes, so they must not read alike.
 	Reason string
+	// Host is the forge host the workspace's origin names, canonical, when
+	// the refusal is about hosts (Task 20423).
+	Host string
+	// GrantHost is the forge host the grant that matched the repository's
+	// owner/name is good against, when that is not Host. A brokered
+	// credential is presented to its grant's host and to no other, so the
+	// refusal names both.
+	GrantHost string
 }
+
+// HostMismatch reports whether the refusal is a grant that admits the
+// repository's owner/name on another forge host.
+func (e *WorkspaceGrantError) HostMismatch() bool { return e.GrantHost != "" }
 
 // Error implements error.
 func (e *WorkspaceGrantError) Error() string {
@@ -1023,6 +1069,17 @@ func (e *WorkspaceGrantError) Unwrap() error { return ErrWorkspaceGrantMissing }
 // Remediation returns the command that fixes this, or "" when there is nothing
 // specific to suggest.
 func (e *WorkspaceGrantError) Remediation() string {
+	if e.HostMismatch() {
+		// Widening the allowlist would change nothing: the host is the
+		// grant's secret's to say, not the grant's.
+		host := e.Host
+		if host == "" {
+			host = "the origin's host"
+		}
+		return fmt.Sprintf("point the project's origin at %s, or authorise %s with a credential issued "+
+			"by it (a GitHub Enterprise Server PAT minted with --github-host %s, or a GitHub App whose "+
+			"base_url is its /api/v3)", e.GrantHost, host, host)
+	}
 	if e.RepoPath == "" || e.ExecutorID == "" {
 		return ""
 	}
@@ -1030,9 +1087,50 @@ func (e *WorkspaceGrantError) Remediation() string {
 	if name == "" {
 		name = "<github-pat-secret>"
 	}
+	if h := strings.TrimSpace(e.Host); h != "" && !forgehost.IsGitHub(h) {
+		// A github.com credential will never be presented here, so the
+		// grant has to be of one this host issued — and a forge that is not
+		// a GitHub Enterprise Server receives no brokered credential at all.
+		return fmt.Sprintf(
+			"if %s is a GitHub Enterprise Server, grant a credential it issued (a PAT minted with "+
+				"--github-host %s, or a GitHub App whose base_url is its /api/v3) with: cloop secret grant "+
+				"%s --to executor:%s --repos %s; any other forge receives no brokered credential",
+			h, h, name, e.ExecutorID, e.RepoPath)
+	}
 	return fmt.Sprintf(
 		"grant one with: cloop secret grant %s --to executor:%s --repos %s",
 		name, e.ExecutorID, e.RepoPath)
+}
+
+// HostMismatchReason is the Reason of a refusal whose grant admits the
+// repository on another forge host: it names the grant and both hosts.
+func HostMismatchReason(grant, originHost, grantHost string) string {
+	if grant == "" {
+		grant = "the grant"
+	} else {
+		grant = "grant " + grant
+	}
+	return fmt.Sprintf("%s admits this repository's owner/name, but its credential is for %s and the "+
+		"project's origin is on %s — a brokered credential is never presented to a host other than its "+
+		"grant's", grant, grantHost, originHost)
+}
+
+// hostMismatchError is the refusal GitCredentialConfig returns for a credential
+// whose host is not the workspace's.
+func hostMismatchError(w Workspace, grant string, err error) error {
+	var m *forgehost.Mismatch
+	if !errors.As(err, &m) {
+		return fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+	}
+	repoPath, _ := w.RepoPath()
+	return &WorkspaceGrantError{
+		Repo:      w.Repo,
+		RepoPath:  repoPath,
+		Grant:     grant,
+		Reason:    HostMismatchReason(grant, m.Origin, m.Grant),
+		Host:      m.Origin,
+		GrantHost: m.Grant,
+	}
 }
 
 // --- validation helpers -----------------------------------------------------

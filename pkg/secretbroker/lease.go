@@ -84,6 +84,17 @@ type Material struct {
 	// anywhere. GitHubToken is the only reader.
 	githubToken string
 
+	// githubHost is the forge host githubToken is good against, canonical:
+	// github.com, or the GitHub Enterprise Server host the secret names
+	// (Task 20423). Read from the sealed payload on every lease, so it binds;
+	// GitHubHost is the only reader.
+	githubHost string
+	// githubProxyRoute is the git proxy URL a guarded delivery rewrites
+	// https://<githubHost>/ to, which a lease holding several GitHub grants
+	// needs to give every host a rewrite of its own (githubmulti.go). Empty
+	// for an unguarded delivery.
+	githubProxyRoute string
+
 	// Who this material is being delivered for. Audit labels, not authority:
 	// nothing here is consulted to decide what a grant permits. A GitGuard
 	// puts them on the proxy session so its events join to the run, and so a

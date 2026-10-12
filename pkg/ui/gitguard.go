@@ -35,17 +35,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
-// githubUpstreamBase is the forge a github_pat grant is proxied to.
+// githubUpstreamBase is where a github.com grant is proxied to.
 //
-// Fixed rather than configurable: a GitHub PAT authenticates to github.com,
-// and a hub that pointed one somewhere else would be presenting a user's
-// credential to a host they never authorised. GitHub Enterprise would be a
-// different secret kind with its own base, not a setting on this one.
+// Not configurable: a github.com credential authenticates to github.com, and a
+// hub that pointed one somewhere else would be presenting a user's credential
+// to a host they never authorised. A grant for a GitHub Enterprise Server is
+// proxied to the host its secret names — the PAT's recorded host, or the
+// App's base_url — and to nothing else (Task 20423); see guardUpstream.
 const githubUpstreamBase = "https://github.com"
+
+// guardUpstream is the forge base a scoped session for a grant on host
+// presents its credential to: github.com's for github.com — or, in a test, the
+// local forge standing in for it — and https://<host> for a GitHub Enterprise
+// Server.
+func guardUpstream(svc *gitProxyService, host string) string {
+	if host == forgehost.GitHub {
+		if svc != nil && svc.githubUpstream != "" {
+			return svc.githubUpstream
+		}
+		return githubUpstreamBase
+	}
+	return "https://" + host
+}
 
 // gitGuard adapts the proxy service to the broker's seam.
 type gitGuard struct{ svc *gitProxyService }
@@ -88,12 +104,20 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		actor = workspaceLeaseActor
 	}
 
-	upstream := githubUpstreamBase
-	if g.svc.githubUpstream != "" {
-		upstream = g.svc.githubUpstream
+	// The forge the token is good against, and the only one it is presented
+	// to (Task 20423). Empty is github.com: what a request meant before hosts
+	// were recorded.
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		host = forgehost.GitHub
+	}
+	host, err := forgehost.Canonical(host)
+	if err != nil {
+		return secretbroker.GitGuardResult{}, fmt.Errorf("grant %s names no usable forge host: %w", req.GrantID, err)
 	}
 	m, err := g.svc.reg.Mint(gitproxy.MintRequest{
-		Upstream:     upstream,
+		Upstream:     guardUpstream(g.svc, host),
+		ForgeHost:    host,
 		RepoPatterns: req.Repos,
 		Credential: gitproxy.Credential{
 			Username: secretbroker.GitHubUsername,
@@ -131,7 +155,10 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		pushRefs = append([]string(nil), m.Session.Policy.AllowedRefs...)
 	}
 	return secretbroker.GitGuardResult{
-		BaseURL:   g.svc.baseURL,
+		BaseURL: g.svc.baseURL,
+		// The session's own route: where the sandbox's https://<host>/ is
+		// rewritten to, and the only route the proxy serves it on.
+		ForgeURL:  m.RepoURL,
 		Username:  cred.Username,
 		Password:  cred.Password,
 		ExpiresAt: m.Session.ExpiresAt(),
@@ -139,8 +166,17 @@ func (g gitGuard) GuardGitHub(ctx context.Context, req secretbroker.GitGuardRequ
 		ReadOnly:  readOnly,
 		PushRefs:  pushRefs,
 		Summary: fmt.Sprintf("%s via git proxy, repos %s, refs %s",
-			mode, strings.Join(req.Repos, "|"), m.Session.Policy.RefSummary()),
+			mode, strings.Join(req.Repos, "|"), m.Session.Policy.RefSummary()) + onForge(host),
 	}, nil
+}
+
+// onForge names a GitHub Enterprise Server host in a summary, and nothing for
+// github.com.
+func onForge(host string) string {
+	if host == "" || host == forgehost.GitHub {
+		return ""
+	}
+	return " on " + host
 }
 
 // refreshableExpiry is the expiry a session measures its upstream credential

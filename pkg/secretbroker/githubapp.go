@@ -461,6 +461,17 @@ var defaultGitHubAppAPI GitHubAppAPI = &httpGitHubApp{
 	client: &http.Client{Timeout: 30 * time.Second},
 }
 
+// NewHTTPGitHubAppAPI returns the production GitHub App API client over client:
+// for a caller whose GitHub — a GitHub Enterprise Server behind a private CA,
+// a test's stand-in — needs a transport of its own. Pass it to WithGitHubApp.
+// A nil client gets the default's per-request timeout.
+func NewHTTPGitHubAppAPI(client *http.Client) GitHubAppAPI {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &httpGitHubApp{client: client}
+}
+
 // maxRepoPages bounds the installation listing. 100 per page × 50 pages is
 // 5,000 repositories, past which an allowlist of concrete names is the right
 // answer anyway — and an unbounded loop against a paginating API is how a hub

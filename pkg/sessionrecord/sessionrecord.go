@@ -87,10 +87,15 @@ func (b base) closeRow(kind, id, reason string, at time.Time, counters string) e
 
 // GitScope is a git session's scope_json.
 type GitScope struct {
-	RepoPath     string          `json:"repo_path,omitempty"`
-	RepoPatterns []string        `json:"repo_patterns,omitempty"`
-	Upstream     string          `json:"upstream"`
-	Policy       gitproxy.Policy `json:"policy"`
+	RepoPath     string   `json:"repo_path,omitempty"`
+	RepoPatterns []string `json:"repo_patterns,omitempty"`
+	Upstream     string   `json:"upstream"`
+	// ForgeHost is the forge host the session's credential is good against
+	// (Task 20423). Absent from a record written before hosts were recorded,
+	// which gitproxy reads as github.com for a scoped session and the
+	// upstream's host for a pinned one.
+	ForgeHost string          `json:"forge_host,omitempty"`
+	Policy    gitproxy.Policy `json:"policy"`
 }
 
 // GitStore is a gitproxy.SessionStore over the control plane's database.
@@ -108,7 +113,7 @@ func (g GitStore) SaveSession(rec gitproxy.SessionRecord) error {
 		return err
 	}
 	scope, err := json.Marshal(GitScope{RepoPath: rec.RepoPath, RepoPatterns: rec.RepoPatterns,
-		Upstream: rec.Upstream, Policy: rec.Policy})
+		Upstream: rec.Upstream, ForgeHost: rec.ForgeHost, Policy: rec.Policy})
 	if err != nil {
 		return err
 	}
@@ -146,7 +151,7 @@ func GitRecord(row statedb.ProxySessionRow) (gitproxy.SessionRecord, error) {
 	}
 	return gitproxy.SessionRecord{
 		ID: row.SessionID, TokenSHA256: row.TokenSHA256, RepoPath: scope.RepoPath,
-		RepoPatterns: scope.RepoPatterns, Upstream: scope.Upstream, Policy: scope.Policy,
+		RepoPatterns: scope.RepoPatterns, Upstream: scope.Upstream, ForgeHost: scope.ForgeHost, Policy: scope.Policy,
 		ProjectID: row.ProjectID, TaskID: row.TaskID, ExecutorID: row.ExecutorID, Actor: row.Actor,
 		RunID: row.RunID, GrantID: row.GrantID, LeaseID: row.LeaseID,
 		IssuedAt: row.IssuedAt, ExpiresAt: row.ExpiresAt, RenewedAt: row.RenewedAt,

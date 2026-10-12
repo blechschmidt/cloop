@@ -128,8 +128,9 @@ The credential for --push is read from the environment:
 
   ` + kubernetes.EnvWorkspaceToken + `   the bare token
   ` + kubernetes.EnvWorkspaceUser + `    the basic-auth username
+  ` + kubernetes.EnvWorkspaceHost + `    the host the token may be presented to
 
-Both are removed from this process's environment before anything is spawned,
+All three are removed from this process's environment before anything is spawned,
 and no output of this command can contain either.`,
 	// ArbitraryArgs rather than NoArgs: everything after "--" is the harness's
 	// command line and cobra must not interpret any of it.

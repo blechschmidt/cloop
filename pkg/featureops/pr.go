@@ -15,6 +15,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/feature"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	gh "github.com/blechschmidt/cloop/pkg/github"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -52,10 +53,15 @@ type PROptions struct {
 	// NoPush skips the push, for a branch that is already published.
 	NoPush bool
 	// Token is an explicit API token; empty resolves one (see ResolveToken).
+	// It obeys the host rule an ambient token does (tokenMayReach): it is
+	// used only when the origin is on github.com or on the host APIURL names.
 	Token string
 	// Repo overrides the owner/name derived from the remote.
 	Repo string
-	// APIURL overrides the forge API base URL.
+	// APIURL overrides the forge API base URL. A caller holding a brokered
+	// token sets it from the token's grant — api.github.com, or a GitHub
+	// Enterprise Server's /api/v3 — never from the origin (Task 20423): it is
+	// what says which host the token is good against.
 	APIURL string
 	// Now is the clock; nil uses time.Now.
 	Now func() time.Time
@@ -97,7 +103,7 @@ func ParseRemote(raw string) (Remote, error) {
 	if raw == "" {
 		return Remote{}, errors.New("the remote URL is empty")
 	}
-	var host, path string
+	var host, hostRef, path string
 	var https bool
 	switch {
 	case strings.Contains(raw, "://"):
@@ -112,6 +118,9 @@ func ParseRemote(raw string) (Remote, error) {
 		default:
 			return Remote{}, fmt.Errorf("remote %q is a %s URL, not a forge repository", redactRemote(raw), u.Scheme)
 		}
+		// The authority alone — u.Host never carries the userinfo — with its
+		// scheme, whose default port is the one folded away below.
+		hostRef = u.Scheme + "://" + u.Host
 		host = u.Hostname()
 		path = u.Path
 	default:
@@ -128,6 +137,7 @@ func ParseRemote(raw string) (Remote, error) {
 		if at := strings.LastIndex(host, "@"); at >= 0 {
 			host = host[at+1:]
 		}
+		hostRef = "ssh://" + host
 		path = raw[colon+1:]
 	}
 	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
@@ -135,7 +145,15 @@ func ParseRemote(raw string) (Remote, error) {
 	if host == "" || len(parts) != 2 || !forgeNameRe.MatchString(parts[0]) || !forgeNameRe.MatchString(parts[1]) {
 		return Remote{}, fmt.Errorf("cannot find owner/name in remote %q", redactRemote(raw))
 	}
-	return Remote{Host: strings.ToLower(host), Repo: parts[0] + "/" + parts[1], HTTPS: https}, nil
+	// The host in the form every comparison of hosts uses (Task 20423) — case,
+	// trailing dot and default port folded, any other port kept, since it is
+	// another server — so a GitHub Enterprise Server on :8443 is addressed
+	// there rather than on :443.
+	canonical, err := forgehost.Canonical(hostRef)
+	if err != nil {
+		return Remote{}, fmt.Errorf("remote %q names no usable host", redactRemote(raw))
+	}
+	return Remote{Host: canonical, Repo: parts[0] + "/" + parts[1], HTTPS: https}, nil
 }
 
 // forgeNameRe is what an owner or repository name on GitHub may contain.
@@ -164,34 +182,70 @@ func redactRemote(raw string) string {
 	return raw
 }
 
-// tokenMayReach reports whether an ambient GitHub token — one from the
-// environment, a config file or the hub — may be sent to host. It is the
+// tokenMayReach reports whether a GitHub token — an ambient one from the
+// environment, a config file or the hub, or one handed over explicitly, the
+// way the hub hands over a brokered grant's — may be sent to host. It is the
 // guard against handing a GitHub credential to whatever server a project's
-// origin happens to name: a GitLab remote, a self-hosted forge, a typo.
-// github.com is always a GitHub host; anything else only when the operator
-// named it explicitly as the API endpoint (GitHub Enterprise).
+// origin happens to name: a GitLab remote, a self-hosted forge, a typo, or a
+// host someone pointed the origin at to collect it (Task 20423).
+//
+// The API endpoint says which host a token is for. With none named, that is
+// github.com; with one named, it is the host that endpoint serves — a GitHub
+// Enterprise Server's /api/v3 serves that server, and anything that is not an
+// enterprise endpoint stands in for the public API. The origin must be on that
+// host. So a GitHub Enterprise Server token, whose endpoint is the server's, is
+// never sent to github.com, and a github.com token is sent nowhere else.
 //
 // Credentials that git's own helpers or the gh CLI return for a host are
 // scoped to that host already, and do not need this check.
 func tokenMayReach(host, apiOverride string) bool {
-	switch strings.ToLower(host) {
-	case "github.com", "www.github.com", "api.github.com":
-		return true
-	}
-	if host == "" || apiOverride == "" {
+	if strings.TrimSpace(host) == "" {
 		return false
 	}
-	u, err := url.Parse(apiOverride)
-	return err == nil && strings.EqualFold(u.Hostname(), host)
+	web := forgehost.GitHub
+	if strings.TrimSpace(apiOverride) != "" {
+		var ok bool
+		if web, ok = apiWebHost(apiOverride); !ok {
+			return false
+		}
+	}
+	if web == forgehost.GitHub {
+		return isGitHubDotCom(host)
+	}
+	return forgehost.Equal(host, web)
+}
+
+// isGitHubDotCom reports whether host is one of the public GitHub's own.
+func isGitHubDotCom(host string) bool {
+	return forgehost.Equal(host, forgehost.GitHub) || forgehost.Equal(host, "www.github.com") ||
+		forgehost.Equal(host, "api.github.com")
+}
+
+// apiWebHost is the host an API endpoint's tokens are good against. A
+// cleartext endpoint — a test's stand-in — is read as its https twin would be.
+func apiWebHost(api string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(api))
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		u.Scheme = "https"
+	default:
+		return "", false
+	}
+	web, err := forgehost.WebHostForAPI(u.String())
+	return web, err == nil
 }
 
 // APIBaseURL returns the REST endpoint for a forge host: api.github.com for
 // github.com, and the GitHub Enterprise convention otherwise.
 func APIBaseURL(host string) string {
-	if host == "" || host == "github.com" || host == "www.github.com" {
-		return "https://api.github.com"
+	if host == "" || isGitHubDotCom(host) {
+		return forgehost.GitHubAPI
 	}
-	return "https://" + host + "/api/v3"
+	return forgehost.APIBase(host)
 }
 
 // ResolveToken finds a token for the forge's API, and names where it came
@@ -206,11 +260,20 @@ func APIBaseURL(host string) string {
 //  6. CLOOP_GITHUB_TOKEN — the hub's own token, handed over as a last resort,
 //     so that a project's credentials are always preferred to the operator's.
 //
-// Sources 2, 3 and 6 are only consulted for a host a GitHub token may be sent
-// to (see tokenMayReach). Only the source is ever reported; the token itself
-// stays in this process.
+// Sources 1, 2, 3 and 6 are only used for a host a GitHub token may be sent
+// to (see tokenMayReach). The explicit one is no exception: the hub hands a
+// project's brokered grant over through it, and it used to skip the check, so
+// a grant's token went wherever the origin pointed (Task 20423). One that
+// fails it resolves nothing — never another source, which would be sent to
+// the same host. A remote with no host at all (a local path, with the
+// repository named explicitly) has no origin to steer the token, which then
+// goes only to the API endpoint the caller chose. Only the source is ever
+// reported; the token itself stays in this process.
 func ResolveToken(ctx context.Context, dir string, remote Remote, explicit, apiOverride string) (token, source string) {
 	if t := strings.TrimSpace(explicit); t != "" {
+		if remote.Host != "" && !tokenMayReach(remote.Host, apiOverride) {
+			return "", ""
+		}
 		if hubEnv(ctx) != nil {
 			return t, "hub"
 		}

@@ -33,6 +33,9 @@ type Forge struct {
 	// URL is the server's https base, e.g. https://127.0.0.1:40123. Empty for
 	// a forge from NewForgeHandler, which its caller serves.
 	URL string
+	// APIURL is the forge's GitHub Enterprise Server-style API base,
+	// URL + "/api/v3", for a forge from NewEnterpriseForge; empty otherwise.
+	APIURL string
 	// Addr is the listener's host:port, likewise.
 	Addr string
 	// Root holds the bare repositories, <owner>/<name>.git.
@@ -148,7 +151,21 @@ func NewForgeWithCert(t testing.TB, addr string, gh *GitHub, cert tls.Certificat
 	return newForge(t, addr, gh, &cert, repos...)
 }
 
+// NewEnterpriseForge is NewForge standing in for a GitHub Enterprise Server at
+// its own host (Task 20423): beside its repositories it serves gh's App API
+// under /api/v3, as such a server does, so a github_app whose base_url is
+// APIURL mints its tokens here and is bound to this forge's host.
+func NewEnterpriseForge(t testing.TB, gh *GitHub, repos ...string) *Forge {
+	t.Helper()
+	return newForgeWith(t, "127.0.0.1:0", gh, nil, true, repos...)
+}
+
 func newForge(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, repos ...string) *Forge {
+	t.Helper()
+	return newForgeWith(t, addr, gh, cert, false, repos...)
+}
+
+func newForgeWith(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, api bool, repos ...string) *Forge {
 	t.Helper()
 	GitTools(t) // a machine without git skips, rather than fails
 	f, err := NewForgeHandler(ForgeConfig{GitHub: gh, Root: t.TempDir(), Home: t.TempDir(), Repos: repos})
@@ -159,7 +176,14 @@ func newForge(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, repo
 	if err != nil {
 		t.Fatalf("forge listen on %s: %v", addr, err)
 	}
-	f.srv = httptest.NewUnstartedServer(f)
+	var handler http.Handler = f
+	if api {
+		mux := http.NewServeMux()
+		mux.Handle("/api/v3/", http.StripPrefix("/api/v3", gh.APIHandler()))
+		mux.Handle("/", f)
+		handler = mux
+	}
+	f.srv = httptest.NewUnstartedServer(handler)
 	_ = f.srv.Listener.Close()
 	f.srv.Listener = ln
 	if cert != nil {
@@ -169,6 +193,9 @@ func newForge(t testing.TB, addr string, gh *GitHub, cert *tls.Certificate, repo
 	t.Cleanup(f.srv.Close)
 	f.URL = f.srv.URL
 	f.Addr = ln.Addr().String()
+	if api {
+		f.APIURL = f.URL + "/api/v3"
+	}
 	return f
 }
 

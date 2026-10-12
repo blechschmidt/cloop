@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 )
 
@@ -178,6 +179,17 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		return access, release, nil
 	}
 
+	// Where the session presents the forge credential: the host the grant
+	// says it is good against, and the workspace's repository on it — taken
+	// from the credential, never from the origin's spelling of it (Task
+	// 20423). The origin must name that same host, or the session would be
+	// the forge credential handed to whatever host a project's origin names.
+	upstream, err := pinnedUpstream(w, access.Credential)
+	if err != nil {
+		release()
+		return executor.WorkspaceAccess{}, noop, err
+	}
+
 	// The grant's own branch list narrows the hub's policy for this session
 	// (Task 20340): the hub's allowlist stays the ceiling, and a push has to
 	// match both. A grant with no list leaves the policy exactly as configured.
@@ -204,8 +216,9 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		// process that adopts the run after this one stops takes that lease
 		// over and restores the session, so a write-back push that presents
 		// it after a restart is served rather than refused.
-		Durable:  s.leasesRecorded() && strings.TrimSpace(access.Credential.LeaseID) != "",
-		Upstream: w.Repo,
+		Durable:   s.leasesRecorded() && strings.TrimSpace(access.Credential.LeaseID) != "",
+		Upstream:  upstream,
+		ForgeHost: access.Credential.Host,
 		Credential: gitproxy.Credential{
 			Username: access.Credential.Username,
 			Password: access.Credential.Password,
@@ -270,9 +283,51 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 			// can say which session it holds (Task 20390). Not secret: it is
 			// the session's username and in every proxy audit row.
 			SessionID: m.Session.ID,
+			// The session token is for the proxy and nowhere else.
+			Host: proxyHost(m.RepoURL),
 		},
 		Repo: m.RepoURL,
 	}, s.relinquish(m.Session, released), nil
+}
+
+// pinnedUpstream is the forge URL a workspace's pinned session forwards to:
+// https://<the credential's host>/<owner>/<name>. A credential that names no
+// host, or a workspace whose origin is on another one, gets none — a
+// *executor.WorkspaceGrantError naming both hosts for the second.
+func pinnedUpstream(w executor.Workspace, cred executor.GitCredential) (string, error) {
+	repoPath, ok := w.RepoPath()
+	if !ok {
+		return "", &executor.WorkspaceGrantError{Repo: w.Repo, Grant: cred.SecretName,
+			Reason: w.Repo + " is not an owner/name repository URL, so no session can be pinned to it"}
+	}
+	grantHost, err := forgehost.Canonical(cred.Host)
+	if err != nil {
+		// Only a source that is not the broker's builds a credential with no
+		// host, and a proxy that guessed one — the origin's — would be the
+		// defect this refuses.
+		return "", fmt.Errorf("%w: the workspace credential for %s names no forge host to present it to, "+
+			"so the git proxy will not hold it", executor.ErrWorkspaceUnavailable, repoPath)
+	}
+	if err := forgehost.Check(w.Host(), grantHost); err != nil {
+		gerr := &executor.WorkspaceGrantError{Repo: w.Repo, RepoPath: repoPath, Grant: cred.SecretName,
+			GrantHost: grantHost}
+		var m *forgehost.Mismatch
+		if errors.As(err, &m) {
+			gerr.Host = m.Origin
+		}
+		gerr.Reason = executor.HostMismatchReason(cred.SecretName, gerr.Host, grantHost)
+		return "", gerr
+	}
+	return "https://" + grantHost + "/" + repoPath, nil
+}
+
+// proxyHost is the canonical host of the proxy URL a session was minted at.
+func proxyHost(repoURL string) string {
+	h, err := forgehost.Canonical(repoURL)
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // renewWhileHeld renews sess while the driver holds it (Task 20422). A driver

@@ -48,9 +48,10 @@ var (
 	grantsSecretFlag  string
 	grantsAllFlag     bool
 
-	mintKindFlag  string
-	mintFileFlag  string
-	mintValueFlag string
+	mintKindFlag       string
+	mintFileFlag       string
+	mintValueFlag      string
+	mintGitHubHostFlag string
 )
 
 // openBroker builds a broker over the current project's state database,
@@ -151,6 +152,12 @@ things on a host rather than credentials, so --value and --file are natural.
   cloop secret mint bench-hw   --kind host_device --file bench-hw.txt
   cat token | cloop secret mint ci-pat --kind github_pat
 
+A github_pat is a github.com token. One issued by a GitHub Enterprise Server
+names its host, which is sealed with it and is the only host it is ever
+presented to:
+
+  cloop secret mint ghes-pat --kind github_pat --github-host ghes.example.com --file token.txt
+
 A host_device inventory is one 'name=/dev/path[:/dev/target][:mode]' per line,
 where mode is r, rw (the default) or rwm. Grants then select from it by name:
 
@@ -174,6 +181,22 @@ of the run, so the host cannot use it meanwhile.`,
 		payload, err := readMintPayload(cmd)
 		if err != nil {
 			return err
+		}
+		if host := strings.TrimSpace(mintGitHubHostFlag); host != "" {
+			if kind != secretbroker.KindGitHubPAT {
+				return fmt.Errorf("secret: --github-host applies to a github_pat; a github_app names its host " +
+					"in its payload's base_url")
+			}
+			// Sealed with the token, where nothing that can edit a row can
+			// move it (Task 20423).
+			doc, err := secretbroker.GitHubPATPayload(string(payload), host)
+			for i := range payload {
+				payload[i] = 0
+			}
+			if err != nil {
+				return err
+			}
+			payload = doc
 		}
 		if err := validateMintPayload(kind, payload); err != nil {
 			return err
@@ -799,6 +822,9 @@ func init() {
 		"secret kind: github_pat, github_app, kubeconfig, registry, env, egress_proxy, "+
 			"local_repo, host_device, host_interface")
 	secretMintCmd.Flags().StringVar(&mintFileFlag, "file", "", "read the payload from a file (\"-\" for stdin)")
+	secretMintCmd.Flags().StringVar(&mintGitHubHostFlag, "github-host", "",
+		"for a github_pat issued by a GitHub Enterprise Server: its host (e.g. ghes.example.com); "+
+			"the token is presented to that host and no other")
 	secretMintCmd.Flags().StringVar(&mintValueFlag, "value", "",
 		"payload as a literal (visible in the process table — prefer --file or stdin)")
 
