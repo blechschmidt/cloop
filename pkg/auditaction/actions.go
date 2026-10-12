@@ -213,6 +213,11 @@ const (
 	ActionSecretRequestExpire Action = "secret.request_expire"
 	// ActionSecretLeaseSweep records one run of the expired-lease sweeper.
 	ActionSecretLeaseSweep Action = "secret.lease.sweep"
+	// ActionSecretUnguardedAck records an administrator acknowledging that a
+	// kubeconfig grant may be delivered without the Kubernetes access monitor.
+	ActionSecretUnguardedAck Action = "secret.unguarded_ack"
+	// ActionSecretUnguardedWithdraw records that acknowledgement being taken back.
+	ActionSecretUnguardedWithdraw Action = "secret.unguarded_withdraw"
 
 	// ── lease ──────────────────────────────────────────────────────────────
 

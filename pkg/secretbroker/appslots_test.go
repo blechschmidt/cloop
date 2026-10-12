@@ -497,6 +497,9 @@ func TestUpstreamCredentialsAreReDerivedFromTheGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	kubeGrant := grantTo(t, setup, kc.ID, "project:/srv/app", Constraints{Contexts: []string{"prod"}}, 24*time.Hour)
+	// No monitor here: the read-only grant is delivered only on an
+	// administrator's word (Task 20420).
+	ackUnguarded(t, setup, kubeGrant.ID)
 
 	a, _ := holderBroker(t, store, clock, "hub_a")
 	lease, err := a.LeaseFor(ctx, Requester{ExecutorID: "dev1", ProjectID: "/srv/app"}, "ui")

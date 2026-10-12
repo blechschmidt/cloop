@@ -61,6 +61,8 @@ type fakeCluster struct {
 	refuse   int
 	minted   int
 	lifetime time.Duration
+	// hits counts every request the cluster answered.
+	hits int
 }
 
 func newFakeCluster(t *testing.T, ns, sa string) *fakeCluster {
@@ -83,6 +85,7 @@ func (f *fakeCluster) caPEM() []byte {
 func (f *fakeCluster) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.hits++
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	w.Header().Set("Content-Type", "application/json")
 	if !f.valid[bearer] {
@@ -140,11 +143,21 @@ func shareMetadata(renewal kubeshare.Renewal) map[string]string {
 		kubeshare.MetaExpiresAt: "2099-01-01T00:00:00Z",
 		kubeshare.MetaRenewals:  "42",
 		kubeshare.MetaServer:    "https://somewhere-else.example.com",
+		// And the ones revoke and renew act on (Task 20420): who made it,
+		// which CA its cluster presents, which objects it created.
+		kubeshare.MetaOwner:   "root@corp.example",
+		kubeshare.MetaCA:      "0000000000000000000000000000000000000000000000000000000000000000",
+		kubeshare.MetaObjects: "ClusterRoleBinding:cluster-admin,ServiceAccount:kube-system/default",
 	}
 }
 
 func withKubeGuardRequired(t *testing.T, on bool) {
 	t.Helper()
+	// Spend the process's one start of the monitor first. A server built
+	// after this (kubeShareHub) would otherwise run it and store the config's
+	// answer over this one, so a test calling this passed or failed by
+	// whether another had built a server before it — run alone, it failed.
+	kubeGuardOnce.Do(func() {})
 	prev := kubeGuardRequired.Load()
 	kubeGuardRequired.Store(on)
 	t.Cleanup(func() { kubeGuardRequired.Store(prev) })
@@ -236,6 +249,13 @@ func TestShareMetadataComesFromTheToken(t *testing.T) {
 		kubeshare.MetaServer:         cl.srv.URL,
 		kubeshare.MetaServiceAccount: "cloop-shares/cloop-aks-dev-3f9c2a1b",
 		kubeshare.MetaRenewal:        "hub",
+		// The uploader, from the session — not the metadata's root.
+		kubeshare.MetaOwner: "alice@corp.example",
+		kubeshare.MetaCA:    kubeshare.CAFingerprint(cl.caPEM()),
+		// What the share's plan creates, not what the client listed.
+		kubeshare.MetaObjects: "ServiceAccount:cloop-shares/cloop-aks-dev-3f9c2a1b," +
+			"RoleBinding:team-a/cloop-aks-dev-3f9c2a1b,RoleBinding:team-b/cloop-aks-dev-3f9c2a1b," +
+			"Role:cloop-shares/cloop-aks-dev-3f9c2a1b-renew,RoleBinding:cloop-shares/cloop-aks-dev-3f9c2a1b-renew",
 	}
 	for k, v := range want {
 		if sec.Metadata[k] != v {
@@ -261,6 +281,29 @@ func TestShareMetadataComesFromTheToken(t *testing.T) {
 		if code != http.StatusBadRequest || !strings.Contains(body, "ServiceAccount token") {
 			t.Errorf("%s: %d %s", name, code, body)
 		}
+	}
+
+	// A share whose token is for somebody else's ServiceAccount — its claims
+	// are nobody's to verify here, and renew would mint for it (Task 20420).
+	for name, sa := range map[string][2]string{
+		"kube-system's":   {"kube-system", "default"},
+		"another share's": {"cloop-shares", "cloop-aks-dev-deadbeef"},
+	} {
+		payload := strings.Replace(cl.shareDoc(t, tok), tok, saToken(sa[0], sa[1], iat, iat.Add(time.Hour)), 1)
+		code, body := f.postJSON(t, "alice", "/api/secrets", map[string]any{
+			"name": "bad-sa", "kind": "kubeconfig", "payload": payload, "metadata": shareMetadata(kubeshare.RenewalManual),
+		})
+		if code != http.StatusBadRequest || !strings.Contains(body, "its own ServiceAccount only") {
+			t.Errorf("a token for %s ServiceAccount: %d %s", name, code, body)
+		}
+	}
+	// Namespaces that are not namespaces.
+	bad := shareMetadata(kubeshare.RenewalManual)
+	bad[kubeshare.MetaNamespaces] = "team-a,../../kube-system"
+	if code, body := f.postJSON(t, "alice", "/api/secrets", map[string]any{
+		"name": "bad-ns", "kind": "kubeconfig", "payload": cl.shareDoc(t, tok), "metadata": bad,
+	}); code != http.StatusBadRequest || !strings.Contains(body, "not a namespace") {
+		t.Errorf("a namespace list naming a path: %d %s", code, body)
 	}
 }
 
@@ -297,10 +340,14 @@ func TestRenewRoute(t *testing.T) {
 		t.Errorf("after renew-now: %+v", view)
 	}
 
-	// A token its owner minted, which the cluster confirms.
+	// A token its owner minted at the share's server, which the cluster
+	// confirms.
+	origin := func(tok string) map[string]any {
+		return map[string]any{"token": tok, "server": cl.srv.URL, "ca_sha256": kubeshare.CAFingerprint(cl.caPEM())}
+	}
 	pushed := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", time.Now(), time.Now().Add(2*time.Hour))
 	cl.accept(pushed)
-	code, body = f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", map[string]any{"token": pushed})
+	code, body = f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", origin(pushed))
 	if code != http.StatusOK {
 		t.Fatalf("push: %d %s", code, body)
 	}
@@ -316,13 +363,36 @@ func TestRenewRoute(t *testing.T) {
 	// accept, somebody else's share.
 	other := saToken("cloop-shares", "someone-else", time.Now(), time.Now().Add(time.Hour))
 	cl.accept(other)
-	if code, body := f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", map[string]any{"token": other}); code != http.StatusBadRequest {
+	if code, body := f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", origin(other)); code != http.StatusBadRequest {
 		t.Errorf("another ServiceAccount's token: %d %s", code, body)
 	}
 	forged := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", time.Now(), time.Now().Add(time.Hour))
-	if code, body := f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", map[string]any{"token": forged}); code == http.StatusOK ||
+	if code, body := f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", origin(forged)); code == http.StatusOK ||
 		!strings.Contains(body, "does not accept") {
 		t.Errorf("a token the cluster refuses: %d %s", code, body)
+	}
+	// A token minted at another server, through another CA, or nowhere said
+	// is never sent to the share's server to be checked (Task 20420).
+	fresh := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", time.Now(), time.Now().Add(time.Hour))
+	cl.accept(fresh)
+	for name, body := range map[string]map[string]any{
+		"another server": {"token": fresh, "server": "https://prod.example.com:6443", "ca_sha256": kubeshare.CAFingerprint(cl.caPEM())},
+		"another CA":     {"token": fresh, "server": cl.srv.URL, "ca_sha256": kubeshare.CAFingerprint([]byte("x"))},
+		"unsaid":         {"token": fresh},
+	} {
+		cl.mu.Lock()
+		before := cl.hits
+		cl.mu.Unlock()
+		code, resp := f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", body)
+		if code != http.StatusBadRequest || !strings.Contains(resp, "minted") {
+			t.Errorf("%s: %d %s", name, code, resp)
+		}
+		cl.mu.Lock()
+		after := cl.hits
+		cl.mu.Unlock()
+		if after != before {
+			t.Errorf("%s: the token was sent to the share's server", name)
+		}
 	}
 	if code, body := f.postJSON(t, "bob", "/api/secrets/"+sec.ID+"/renew", map[string]any{}); code != http.StatusNotFound {
 		t.Errorf("bob renewing alice's share: %d %s", code, body)
@@ -367,7 +437,7 @@ func kubeShareHub(t *testing.T) (*Server, *secretbroker.Broker, *statedb.DB) {
 
 func mintShareSecret(t *testing.T, b *secretbroker.Broker, cl *fakeCluster, token string, renewal kubeshare.Renewal) secretbroker.Secret {
 	t.Helper()
-	meta, err := prepareKubeShare(shareMetadata(renewal), []byte(cl.shareDoc(t, token)), time.Now())
+	meta, err := prepareKubeShare(shareMetadata(renewal), []byte(cl.shareDoc(t, token)), "alice@corp.example", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,5 +616,238 @@ func TestLiveMonitorSessionTakesUpTheRenewedToken(t *testing.T) {
 	// And again changes nothing.
 	if n := srv.syncKubeGuardUpstreams(); n != 0 {
 		t.Errorf("an idle sync updated %d sessions", n)
+	}
+}
+
+// TestSecretAuthorizeRoute: what a terminal asks before it touches the
+// cluster with its own credentials (Task 20420) — the same answer the DELETE
+// and the renewal give.
+func TestSecretAuthorizeRoute(t *testing.T) {
+	f := newPersonalFixture(t)
+	withKubeGuardRequired(t, false)
+	cl := newFakeCluster(t, "cloop-shares", "cloop-aks-dev-3f9c2a1b")
+	iat := time.Now().Add(-time.Minute).Truncate(time.Second)
+	tok := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", iat, iat.Add(time.Hour))
+	code, body := f.postJSON(t, "alice", "/api/secrets", map[string]any{
+		"name": "aks-dev", "kind": "kubeconfig", "payload": cl.shareDoc(t, tok),
+		"metadata": shareMetadata(kubeshare.RenewalManual), "personal": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("mint: %d %s", code, body)
+	}
+	var sec struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(body), &sec)
+	plainCode, plainBody := f.postJSON(t, "lead", "/api/secrets", map[string]any{
+		"name": "plain-kube", "kind": "kubeconfig", "payload": testKubeconfigPayload, "personal": false,
+	})
+	if plainCode != http.StatusOK {
+		t.Fatalf("mint plain: %d %s", plainCode, plainBody)
+	}
+	var plain struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(plainBody), &plain)
+
+	ask := func(who, id, action string) int {
+		code, _ := getFull(t, f.clients[who], f.base+"/api/secrets/"+id+"/authorize?action="+action)
+		return code
+	}
+	for _, tc := range []struct {
+		who, id, action string
+		want            int
+	}{
+		{"alice", sec.ID, "delete", http.StatusOK},
+		{"alice", sec.ID, "renew", http.StatusOK},
+		{"bob", sec.ID, "delete", http.StatusNotFound},
+		{"bob", sec.ID, "renew", http.StatusNotFound},
+		// An administrator may delete a colleague's personal share, and may
+		// not put a credential into it.
+		{"root", sec.ID, "delete", http.StatusOK},
+		{"root", sec.ID, "renew", http.StatusForbidden},
+		// A shared secret: secret.revoke deletes it, an operator may not.
+		{"lead", plain.ID, "delete", http.StatusOK},
+		{"alice", plain.ID, "delete", http.StatusForbidden},
+		{"lead", plain.ID, "renew", http.StatusBadRequest},
+		{"alice", sec.ID, "explode", http.StatusBadRequest},
+	} {
+		if got := ask(tc.who, tc.id, tc.action); got != tc.want {
+			t.Errorf("%s may %s %s: %d, want %d", tc.who, tc.action, tc.id, got, tc.want)
+		}
+	}
+	// Asking deleted nothing.
+	if !hasName(f.secretNames(t, "alice"), "aks-dev") {
+		t.Fatal("authorizing a delete deleted the secret")
+	}
+}
+
+// TestRenewalStopsForADeniedOwner: a personal share is its owner's credential,
+// and the hub renewing it keeps it alive. Suspended at the identity provider,
+// or offboarded with the secret kept under a legal hold, the owner's share is
+// not renewed — and the share and the trail say why (Task 20420). Reactivated,
+// renewal resumes.
+func TestRenewalStopsForADeniedOwner(t *testing.T) {
+	withKubeGuardRequired(t, true)
+	srv, b, db := kubeShareHub(t)
+	cl := newFakeCluster(t, "cloop-shares", "cloop-aks-dev-3f9c2a1b")
+	iat := time.Now().Add(-time.Minute).Truncate(time.Second)
+	first := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", iat, iat.Add(time.Hour))
+	cl.accept(first)
+	meta, err := prepareKubeShare(shareMetadata(kubeshare.RenewalHub), []byte(cl.shareDoc(t, first)),
+		"alice@corp.example", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := b.Mint(context.Background(), secretbroker.MintRequest{
+		Name: "aks-dev", Kind: secretbroker.KindKubeconfig, Payload: []byte(cl.shareDoc(t, first)),
+		Metadata: meta, Actor: "alice@corp.example", Owner: "alice@corp.example", Personal: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	due := iat.Add(31 * time.Minute)
+
+	deny, err := db.PutRoleBinding(statedb.RoleBindingRow{Effect: statedb.RoleEffectDeny, Claim: "email",
+		Value: "alice@corp.example", Reason: "incident 4711", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if n := srv.renewDueKubeShares(ctx, due.Add(time.Duration(i)*time.Minute)); n != 0 {
+			t.Fatalf("the share of a denied owner was renewed")
+		}
+	}
+	if cl.minted != 0 {
+		t.Fatalf("the cluster minted %d tokens for a denied owner's share", cl.minted)
+	}
+	sh := shareOf(t, b, sec.ID)
+	if !sh.Stopped || !strings.Contains(sh.RenewError, "denied on this hub") ||
+		!strings.Contains(sh.RenewError, "incident 4711") {
+		t.Fatalf("the share does not say why it is not renewed: %+v", sh)
+	}
+	if n := countRenewRows(t, db, "deny"); n != 1 {
+		t.Errorf("%d secret.renew deny rows for three identical refusals, want 1", n)
+	}
+
+	// Under a legal hold, the reason says so.
+	if err := db.PutLegalHold(statedb.LegalHoldRow{Identity: "alice@corp.example", Reason: "matter 12",
+		PlacedAt: time.Now(), PlacedBy: "legal@corp.example"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	srv.renewDueKubeShares(ctx, due.Add(5*time.Minute))
+	if sh := shareOf(t, b, sec.ID); !strings.Contains(sh.RenewError, "legal hold") || !strings.Contains(sh.RenewError, "matter 12") {
+		t.Errorf("under a legal hold: %q", sh.RenewError)
+	}
+	if _, err := db.DeleteLegalHold("alice@corp.example", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reactivated: the deny goes, and the next pass renews.
+	if _, err := db.DeleteRoleBinding(deny.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.renewDueKubeShares(ctx, due.Add(6*time.Minute)); n != 1 {
+		t.Fatalf("renewed %d after the owner was reactivated, want 1", n)
+	}
+	if sh := shareOf(t, b, sec.ID); sh.Stopped || sh.RenewError != "" || sh.Renewals != 1 {
+		t.Errorf("after reactivation: %+v", sh)
+	}
+}
+
+// suspendAtProvider writes what pkg/provision writes for a user it matched on
+// preferred_username when no session carried that name: the user inactive,
+// and a deny on the username alone — a claim no owner key can match.
+func suspendAtProvider(t *testing.T, db *statedb.DB, local, email string, at time.Time) {
+	t.Helper()
+	const reason = "deactivated at the identity provider (scim:okta)"
+	if _, err := db.WriteSCIMUser(statedb.SCIMUserWrite{Create: true, At: at,
+		Row: statedb.SCIMUserRow{ID: "u-" + local, UserName: local + "-okta", Email: email, UpdatedBy: "scim:okta"},
+		Suspend: &statedb.SCIMSuspendWrite{
+			Denies: []statedb.RoleBindingRow{{Effect: statedb.RoleEffectDeny, Claim: "username",
+				Value: local + "-okta", Reason: reason, CreatedBy: "scim:okta"}},
+			Record: statedb.SCIMSuspensionRecord{By: "scim:okta", Reason: reason},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRenewalStopsForAnOwnerTheIdentityProviderDeactivated: a suspension that
+// resolved neither an email nor a subject denies only a username, which no
+// owner key matches. The directory still says who was deactivated: the hub
+// stops renewing their share, refuses a token pushed for it — telling the
+// terminal before it mints one — and resumes once they are reactivated.
+func TestRenewalStopsForAnOwnerTheIdentityProviderDeactivated(t *testing.T) {
+	f := newPersonalFixture(t)
+	withKubeGuardRequired(t, true)
+	cl := newFakeCluster(t, "cloop-shares", "cloop-aks-dev-3f9c2a1b")
+	iat := time.Now().Add(-time.Minute).Truncate(time.Second)
+	first := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", iat, iat.Add(time.Hour))
+	cl.accept(first)
+	code, body := f.postJSON(t, "alice", "/api/secrets", map[string]any{
+		"name": "aks-dev", "kind": "kubeconfig", "payload": cl.shareDoc(t, first), "metadata": shareMetadata(kubeshare.RenewalHub),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("mint: %d %s", code, body)
+	}
+	var sec struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(body), &sec)
+	bs, err := f.srv.openBrokers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(bs.close)
+	ctx := context.Background()
+	due := iat.Add(31 * time.Minute)
+
+	suspendAtProvider(t, bs.db, "alice", "alice@corp.example", time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC))
+	if n := f.srv.renewDueKubeShares(ctx, due); n != 0 {
+		t.Fatal("the share of an owner the identity provider deactivated was renewed")
+	}
+	if cl.minted != 0 {
+		t.Fatalf("the cluster minted %d tokens for a deactivated owner's share", cl.minted)
+	}
+	if sh := shareOf(t, bs.secret, sec.ID); !sh.Stopped || !strings.Contains(sh.RenewError, "suspended") ||
+		!strings.Contains(sh.RenewError, "2026-10-01") {
+		t.Fatalf("the share does not say why it is not renewed: %+v", sh)
+	}
+
+	// Nor does a token from the owner's terminal keep it alive.
+	code, body = getFull(t, f.clients["alice"], f.base+"/api/secrets/"+sec.ID+"/authorize?action=renew")
+	if code != http.StatusConflict || !strings.Contains(body, "suspended") {
+		t.Errorf("the terminal was not told before minting: %d %s", code, body)
+	}
+	pushed := saToken("cloop-shares", "cloop-aks-dev-3f9c2a1b", time.Now(), time.Now().Add(2*time.Hour))
+	cl.accept(pushed)
+	cl.mu.Lock()
+	before := cl.hits
+	cl.mu.Unlock()
+	code, body = f.postJSON(t, "alice", "/api/secrets/"+sec.ID+"/renew", map[string]any{
+		"token": pushed, "server": cl.srv.URL, "ca_sha256": kubeshare.CAFingerprint(cl.caPEM())})
+	if code != http.StatusConflict || !strings.Contains(body, "suspended") {
+		t.Errorf("a pushed token renewed a deactivated owner's share: %d %s", code, body)
+	}
+	cl.mu.Lock()
+	after := cl.hits
+	cl.mu.Unlock()
+	if after != before {
+		t.Error("the refused token was sent to the cluster")
+	}
+
+	// Reactivated, as the provider's PATCH active:true does: renewed again.
+	if _, err := bs.db.WriteSCIMUser(statedb.SCIMUserWrite{ExpectVersion: 1, Lift: true,
+		Row: statedb.SCIMUserRow{ID: "u-alice", UserName: "alice-okta", Email: "alice@corp.example", Active: true,
+			UpdatedBy: "scim:okta"}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.srv.renewDueKubeShares(ctx, due.Add(time.Minute)); n != 1 {
+		t.Fatalf("renewed %d after the owner was reactivated, want 1", n)
+	}
+	if sh := shareOf(t, bs.secret, sec.ID); sh.Stopped || sh.RenewError != "" {
+		t.Errorf("after reactivation: %+v", sh)
 	}
 }

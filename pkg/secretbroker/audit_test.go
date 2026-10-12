@@ -240,6 +240,10 @@ func TestAuditedEventsNeverContainPayloads(t *testing.T) {
 	}
 	kubeGrant := grantTo(t, b, kubeSec.ID, "project:/srv/app",
 		Constraints{Contexts: []string{"prod"}, Namespaces: []string{"team-a"}}, time.Hour)
+	// Delivered without a monitor, so on an acknowledgement — whose reason
+	// is free text an administrator wrote, and must not carry the token
+	// either.
+	ackUnguarded(t, b, kubeGrant.ID)
 
 	lease, err := b.Lease(ctx, "e1", "/srv/app")
 	if err != nil {

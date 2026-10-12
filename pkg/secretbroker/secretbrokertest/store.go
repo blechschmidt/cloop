@@ -76,6 +76,19 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 	return nil
 }
 
+// SetUnguardedAck implements secretbroker.UnguardedAcknowledger.
+func (s *Store) SetUnguardedAck(id string, ack secretbroker.UnguardedAck) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.grants[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", secretbroker.ErrGrantNotFound, id)
+	}
+	g.UnguardedAck = ack
+	s.grants[id] = g
+	return nil
+}
+
 func (s *Store) GetGrant(id string) (secretbroker.Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

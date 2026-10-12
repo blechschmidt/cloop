@@ -64,9 +64,9 @@ type Constraints struct {
 	// the kubeconfig — a kubeconfig has no field for it. It is enforced by
 	// pkg/kubeguard, the monitor the hub runs outside the sandbox, and it
 	// therefore only takes effect when executors.kube_guard is enabled.
-	// KubeconfigGuarded reports whether that is so for a given grant, and the
-	// Secrets panel renders the difference rather than letting a grant claim
-	// an enforcement that is not running.
+	// KubeMonitorOnly names what a grant claims that only the monitor
+	// enforces, and a grant claiming anything is not delivered without one
+	// (ErrKubeConstraintsUnenforced) unless an administrator acknowledged it.
 	Verbs []string `json:"verbs,omitempty"`
 	// Hosts is the allowed-host list for egress_proxy. A leading "*."
 	// matches subdomains only, not the bare domain.
@@ -503,6 +503,52 @@ func (c Constraints) KubeReadOnly() bool {
 		}
 	}
 	return true
+}
+
+// KubeMonitorOnly lists what a kubeconfig grant claims that nothing but the
+// Kubernetes access monitor enforces, as phrases for a person (Task 20420).
+// Empty means the minimised kubeconfig itself carries everything the grant
+// says, so delivering it without the monitor claims nothing false.
+//
+// Two dimensions can claim such a thing:
+//
+//   - Namespaces, when they confine: without the monitor a namespace is only
+//     the default kubectl uses when -n is not given. A list holding "*" does
+//     not confine.
+//   - Verbs, when they are short of all eight: a kubeconfig has no field for
+//     verbs, so without the monitor every verb the kubeconfig's identity holds
+//     works. The empty list is read-only, and so claims the most.
+//
+// Contexts are not here: minimisation removes the others from the document,
+// which needs no monitor.
+func (c Constraints) KubeMonitorOnly() []string {
+	var out []string
+	confining := len(c.Namespaces) > 0
+	for _, ns := range c.Namespaces {
+		if strings.TrimSpace(ns) == "*" {
+			confining = false
+		}
+	}
+	if confining {
+		out = append(out, "namespaces "+strings.Join(c.Namespaces, ", "))
+	}
+	verbs := c.KubeVerbs()
+	have := make(map[string]bool, len(verbs))
+	for _, v := range verbs {
+		have[v] = true
+	}
+	for _, v := range kubeVerbOrder {
+		if have[v] {
+			continue
+		}
+		if c.KubeReadOnly() {
+			out = append(out, "read-only access ("+strings.Join(kubeReadVerbs, ", ")+")")
+		} else {
+			out = append(out, "verbs "+strings.Join(verbs, ", "))
+		}
+		break
+	}
+	return out
 }
 
 // validateEnvKey enforces POSIX-ish environment variable naming. A key with

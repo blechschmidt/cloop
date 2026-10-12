@@ -189,17 +189,23 @@ func TestKubeGuardWriteFloorWarns(t *testing.T) {
 	}
 }
 
-// TestKubeGuardDisabledWithAKubeconfigGrantWarns: a kubeconfig grant delivers
-// the cluster credential into a sandbox of any kind when the monitor is off.
-// The pass on a host-only hub said "no kubeconfig secret is configured"
-// without ever reading the store (Task 20387).
-func TestKubeGuardDisabledWithAKubeconfigGrantWarns(t *testing.T) {
-	dir := t.TempDir()
+// seedKubeGrant stores a kubeconfig secret and one grant of it under c in the
+// control plane at dir, acknowledged when ack is set, and returns the grant.
+func seedKubeGrant(t *testing.T, dir string, c secretbroker.Constraints, ack bool) secretbroker.Grant {
+	t.Helper()
+	return seedKubeGrantTo(t, dir, secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "/srv/app"}, c, ack)
+}
+
+// seedKubeGrantTo is seedKubeGrant for any subject.
+func seedKubeGrantTo(t *testing.T, dir string, subject secretbroker.Subject, c secretbroker.Constraints,
+	ack bool) secretbroker.Grant {
+	t.Helper()
 	t.Setenv("CLOOP_SECRET_KEY", "hubdoctor-kubeconfig-grants")
 	db, err := statedb.Open(mustInitStateDB(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = db.Close() }()
 	store, err := secretstore.New(db)
 	if err != nil {
 		t.Fatal(err)
@@ -215,13 +221,90 @@ func TestKubeGuardDisabledWithAKubeconfigGrantWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	if _, err := b.Grant(context.Background(), secretbroker.GrantRequest{SecretRef: sec.ID,
-		Subject:     secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "/srv/app"},
-		Constraints: secretbroker.Constraints{Contexts: []string{"c"}}}); err != nil {
+	g, err := b.Grant(context.Background(), secretbroker.GrantRequest{SecretRef: sec.ID,
+		Subject: subject, Constraints: c})
+	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	_ = db.Close()
+	if ack {
+		if g, err = b.AcknowledgeUnguarded(context.Background(), secretbroker.UnguardedAckRequest{
+			GrantID: g.ID, Actor: "admin@example.com", Reason: "lab cluster"}); err != nil {
+			t.Fatalf("acknowledge: %v", err)
+		}
+	}
+	return g
+}
+
+// TestKubeGuardDisabledWithAConstrainedKubeconfigGrantFails: a grant that says
+// read-only, or names namespaces, is refused at every dispatch on a hub with
+// no monitor (Task 20420) — a grant that does nothing, which the doctor fails
+// rather than leave to be found inside somebody's run. The pass on a host-only
+// hub once said "no kubeconfig secret is configured" without ever reading the
+// store (Task 20387).
+func TestKubeGuardDisabledWithAConstrainedKubeconfigGrantFails(t *testing.T) {
+	dir := t.TempDir()
+	g := seedKubeGrant(t, dir, secretbroker.Constraints{Contexts: []string{"c"}}, false)
 
 	got := findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true})
-	wantSeverity(t, only(t, got, "kubeguard.enabled"), SeverityWarn)
+	f := only(t, got, "kubeguard.enabled")
+	wantSeverity(t, f, SeverityFail)
+	for _, want := range []string{g.ID, "read-only access", "refused at every dispatch"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("message does not say %q: %q", want, f.Message)
+		}
+	}
+	for _, want := range []string{"executors.kube_guard.enabled: true", "tls: auto", "cloop hub grant unguarded"} {
+		if !strings.Contains(f.Remediation, want) {
+			t.Errorf("remediation does not name %q: %q", want, f.Remediation)
+		}
+	}
+}
+
+// TestKubeGuardDisabledWithAnExecutorsGrantSaysWhatIsRefused: the kubernetes
+// executor's cluster credential, granted to it with a namespace, is refused to
+// the runs on it and not to the executor — the finding says both.
+func TestKubeGuardDisabledWithAnExecutorsGrantSaysWhatIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	g := seedKubeGrantTo(t, dir, secretbroker.Subject{Type: secretbroker.SubjectExecutor, Value: "k8s"},
+		secretbroker.Constraints{Namespaces: []string{"cloop"}, Verbs: []string{"get", "list", "watch", "create",
+			"update", "patch", "delete", "deletecollection"}}, false)
+
+	f := only(t, findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true}), "kubeguard.enabled")
+	wantSeverity(t, f, SeverityFail)
+	for _, want := range []string{g.ID + " to executor:k8s", "namespaces cloop", "refused only to the runs on it",
+		"own use of its cluster credential"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("message does not say %q: %q", want, f.Message)
+		}
+	}
+}
+
+// TestKubeGuardDisabledWithAnAcknowledgedGrantWarns: delivered on an
+// administrator's word, and named with it.
+func TestKubeGuardDisabledWithAnAcknowledgedGrantWarns(t *testing.T) {
+	dir := t.TempDir()
+	g := seedKubeGrant(t, dir, secretbroker.Constraints{Namespaces: []string{"app"}}, true)
+
+	f := only(t, findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true}), "kubeguard.enabled")
+	wantSeverity(t, f, SeverityWarn)
+	for _, want := range []string{g.ID, "acknowledged by admin@example.com", "lab cluster", "namespaces app"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("message does not say %q: %q", want, f.Message)
+		}
+	}
+}
+
+// TestKubeGuardDisabledWithAnUnconstrainedGrantWarns: a grant claiming every
+// verb in every namespace is delivered as before — with the cluster credential
+// in the sandbox, which is still worth a warning.
+func TestKubeGuardDisabledWithAnUnconstrainedGrantWarns(t *testing.T) {
+	dir := t.TempDir()
+	seedKubeGrant(t, dir, secretbroker.Constraints{Contexts: []string{"c"},
+		Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}}, false)
+
+	f := only(t, findingsFor(t, dir, hostOnlyConfig(), Options{Offline: true}), "kubeguard.enabled")
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Message, "delivers the cluster credential into the sandbox") {
+		t.Errorf("message = %q", f.Message)
+	}
 }

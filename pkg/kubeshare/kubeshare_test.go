@@ -359,6 +359,10 @@ type fakeAPI struct {
 	token  func(ns, name string, secs int64) string
 	auth   string
 	whoami string
+	// seq numbers objects' uids and resourceVersions; onGet runs after a
+	// single object is read and the answer written.
+	seq   int
+	onGet func(path string, obj map[string]any)
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -417,21 +421,53 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 		var obj map[string]any
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &obj)
-		name := obj["metadata"].(map[string]any)["name"].(string)
+		meta := obj["metadata"].(map[string]any)
+		name := meta["name"].(string)
 		path := r.URL.Path + "/" + name
 		if _, exists := f.objects[path]; exists {
 			f.status(w, 409, "AlreadyExists", name+" already exists")
 			return
 		}
+		f.seq++
+		meta["uid"] = fmt.Sprintf("uid-%d", f.seq)
+		meta["resourceVersion"] = fmt.Sprint(f.seq)
 		f.objects[path] = obj
 		_ = json.NewEncoder(w).Encode(obj)
 	case r.Method == http.MethodDelete:
-		if _, ok := f.objects[r.URL.Path]; !ok {
+		obj, ok := f.objects[r.URL.Path]
+		if !ok {
 			f.status(w, 404, "NotFound", "not found")
 			return
 		}
+		var opts struct {
+			Preconditions *struct {
+				UID             string `json:"uid"`
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"preconditions"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &opts)
+		if pc := opts.Preconditions; pc != nil {
+			meta := obj["metadata"].(map[string]any)
+			if pc.UID != meta["uid"] || pc.ResourceVersion != meta["resourceVersion"] {
+				f.status(w, 409, "Conflict", "the object has been modified; precondition failed")
+				return
+			}
+		}
 		delete(f.objects, r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Status", "status": "Success"})
+	case r.Method == http.MethodGet && r.URL.Query().Get("labelSelector") == "":
+		obj, ok := f.objects[r.URL.Path]
+		if !ok {
+			f.status(w, 404, "NotFound", "not found")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(obj)
+		// After the answer: what changes the object between a read and
+		// whatever the reader does next.
+		if f.onGet != nil {
+			f.onGet(r.URL.Path, obj)
+		}
 	case r.Method == http.MethodGet && r.URL.Query().Get("labelSelector") != "":
 		want := strings.TrimPrefix(r.URL.Query().Get("labelSelector"), LabelShare+"=")
 		var items []any
@@ -550,10 +586,12 @@ func TestMintRenewAndAdopt(t *testing.T) {
 	}
 	delete(api.fail, "POST /api/v1/namespaces/a/serviceaccounts/"+p.ServiceAccount+"/token")
 
-	// Adopt: a token its owner minted, checked with the cluster.
+	// Adopt: a token its owner minted, at the share's own server, checked
+	// with the cluster.
+	origin := Origin{Server: api.srv.URL, CAFingerprint: CAFingerprint(pemCA)}
 	pushed := jwt("a", p.ServiceAccount, now, now.Add(2*time.Hour))
 	api.auth, api.whoami = pushed, "system:serviceaccount:a:"+p.ServiceAccount
-	ad, err := Adopt(context.Background(), doc, pushed, now.Add(time.Minute))
+	ad, err := Adopt(context.Background(), doc, pushed, origin, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
@@ -561,18 +599,18 @@ func TestMintRenewAndAdopt(t *testing.T) {
 		t.Errorf("adopted %+v", ad)
 	}
 	other := jwt("a", "someone-else", now, now.Add(time.Hour))
-	if _, err := Adopt(context.Background(), doc, other, now); !errors.Is(err, ErrWrongToken) {
+	if _, err := Adopt(context.Background(), doc, other, origin, now); !errors.Is(err, ErrWrongToken) {
 		t.Errorf("another ServiceAccount's token: err = %v", err)
 	}
 	api.whoami = "system:serviceaccount:a:impostor"
-	if _, err := Adopt(context.Background(), doc, pushed, now); !errors.Is(err, ErrWrongToken) {
+	if _, err := Adopt(context.Background(), doc, pushed, origin, now); !errors.Is(err, ErrWrongToken) {
 		t.Errorf("a token the cluster names differently: err = %v", err)
 	}
 	api.auth = "not-the-pushed-token"
-	if _, err := Adopt(context.Background(), doc, pushed, now); err == nil || !strings.Contains(err.Error(), "does not accept") {
+	if _, err := Adopt(context.Background(), doc, pushed, origin, now); err == nil || !strings.Contains(err.Error(), "does not accept") {
 		t.Errorf("a token the cluster refuses: err = %v", err)
 	}
-	if _, err := Adopt(context.Background(), doc, jwt("a", p.ServiceAccount, now, now.Add(30*24*time.Hour)), now); err == nil {
+	if _, err := Adopt(context.Background(), doc, jwt("a", p.ServiceAccount, now, now.Add(30*24*time.Hour)), origin, now); err == nil {
 		t.Error("a token living a month was adopted")
 	}
 }

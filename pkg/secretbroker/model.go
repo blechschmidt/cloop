@@ -566,6 +566,23 @@ type Requester struct {
 	// caller that set it and then materialised the lease into a sandbox would
 	// be delivering a push the grant restricted, unrestricted.
 	GitHubProxied bool
+	// KubeInProcess says no kubeconfig in this lease leaves the hub process:
+	// the caller drives the cluster with it itself — the kubernetes
+	// executor's own credential, the one it creates Pods with
+	// (pkg/executor/kubernetes) — or discards it, as workspace provisioning
+	// does (pkg/executor/gitcreds). Like RunID it is never matched against.
+	//
+	// It matters to exactly one decision: whether a kubeconfig whose grant
+	// claims namespaces or verbs only the Kubernetes access monitor enforces
+	// may be delivered with no monitor in the path (Task 20420). In a
+	// workload nothing else would enforce them, so it is refused; in the hub
+	// the credential is the hub acting as itself, which the monitor does not
+	// govern either way.
+	//
+	// Set it only when it is true of every material the lease will carry. A
+	// caller that set it and then materialised the lease into a sandbox would
+	// be delivering exactly the kubeconfig the refusal exists to stop.
+	KubeInProcess bool
 	// Withhold names grants this lease must not deliver even though their
 	// subject matches, each with the reason its denial row records (Task
 	// 20379). The hub fills it for a sandboxed run whose Claude credential
@@ -689,7 +706,24 @@ type Grant struct {
 	// grant is not suspended.
 	SuspendedAt time.Time `json:"suspended_at,omitempty"`
 	SuspendedBy string    `json:"suspended_by,omitempty"`
+	// UnguardedAck is an administrator's recorded decision that this
+	// kubeconfig grant may be delivered without the Kubernetes access monitor,
+	// though it claims something only the monitor enforces (Task 20420). Zero
+	// unless recorded; see Broker.AcknowledgeUnguarded.
+	UnguardedAck UnguardedAck `json:"unguarded_ack,omitzero"`
 }
+
+// UnguardedAck is the acknowledgement on a kubeconfig grant that lets it be
+// delivered without the Kubernetes access monitor — knowingly, by name and
+// with a reason, rather than because nobody noticed the monitor was off.
+type UnguardedAck struct {
+	At     time.Time `json:"at"`
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
+}
+
+// Recorded reports whether an acknowledgement is in force.
+func (a UnguardedAck) Recorded() bool { return !a.At.IsZero() }
 
 // Personal reports whether this grant hands out a personally-owned credential.
 func (g Grant) Personal() bool { return strings.TrimSpace(g.Owner) != "" }

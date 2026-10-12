@@ -8,6 +8,7 @@ package hubclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -102,17 +103,62 @@ type RenewedShare struct {
 	Sessions       int       `json:"sessions"`
 }
 
+// ErrAuthorizeUnsupported is a hub that predates asking it, before the
+// cluster is touched, whether a share may be revoked or renewed (Task 20420).
+var ErrAuthorizeUnsupported = errors.New("this hub predates authorising a Kubernetes share's revoke or renew " +
+	"before the cluster is touched (GET /api/secrets/{id}/authorize); upgrade it")
+
+// AuthorizeSecret asks the hub whether the caller may perform action — "delete"
+// or "renew" — on secret id, without performing it. nil means they may; a
+// refusal is the hub's *APIError.
+func (c *Client) AuthorizeSecret(ctx context.Context, id, action string) error {
+	var out struct {
+		Authorized bool `json:"authorized"`
+	}
+	err := c.Do(ctx, http.MethodGet, "/api/secrets/"+url.PathEscape(id)+"/authorize",
+		url.Values{"action": {action}}, nil, &out)
+	var ae *APIError
+	if errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusMethodNotAllowed) &&
+		!strings.Contains(strings.ToLower(ae.Message), "secret") {
+		return ErrAuthorizeUnsupported
+	}
+	if err != nil {
+		return err
+	}
+	if !out.Authorized {
+		return fmt.Errorf("the hub did not authorise %s on %s", action, id)
+	}
+	return nil
+}
+
 // ErrRenewUnsupported is a hub that predates Kubernetes share renewal.
 var ErrRenewUnsupported = errors.New("this hub predates Kubernetes share renewal (POST /api/secrets/{id}/renew); upgrade it")
 
-// RenewSecret asks the hub to renew a Kubernetes share: itself, now, when
-// token is empty, or with token, which the share's owner minted.
-func (c *Client) RenewSecret(ctx context.Context, id, token string) (RenewedShare, error) {
+// RenewSecret asks the hub to renew a Kubernetes share itself, now.
+func (c *Client) RenewSecret(ctx context.Context, id string) (RenewedShare, error) {
+	return c.renewSecret(ctx, id, map[string]string{})
+}
+
+// MintedToken is a token a share's owner minted from their terminal, and where:
+// the API server their context reached and the SHA-256 of the CA it trusted
+// there (kubeshare.CAFingerprint). The hub sends the token to the cluster to
+// confirm it only when that is the share's own server (Task 20420).
+type MintedToken struct {
+	Token    string
+	Server   string
+	CASHA256 string
+}
+
+// AdoptToken asks the hub to store a token the share's owner minted.
+func (c *Client) AdoptToken(ctx context.Context, id string, t MintedToken) (RenewedShare, error) {
+	return c.renewSecret(ctx, id, map[string]string{
+		"token": strings.TrimSpace(t.Token), "server": strings.TrimSpace(t.Server),
+		"ca_sha256": strings.TrimSpace(t.CASHA256),
+	})
+}
+
+func (c *Client) renewSecret(ctx context.Context, id string, body map[string]string) (RenewedShare, error) {
 	var out RenewedShare
-	body := map[string]string{}
-	if strings.TrimSpace(token) != "" {
-		body["token"] = strings.TrimSpace(token)
-	}
 	err := c.Do(ctx, http.MethodPost, "/api/secrets/"+url.PathEscape(id)+"/renew", nil, body, &out)
 	var ae *APIError
 	if errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusMethodNotAllowed) &&

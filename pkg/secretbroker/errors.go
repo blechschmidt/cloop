@@ -211,4 +211,25 @@ var (
 	// branch it can reach, which is exactly what the allowlist was written to
 	// rule out.
 	ErrBranchesUnenforced = errors.New("secretbroker: branch allowlist cannot be enforced without the git proxy")
+
+	// ErrKubeConstraintsUnenforced: a kubeconfig grant claims something only
+	// the Kubernetes access monitor enforces — a namespace allowlist, or verbs
+	// short of every one, read-only above all — and this delivery has no
+	// monitor (Task 20420). Without it the namespaces are only kubectl's
+	// default and the verbs are not checked at all, so delivering the
+	// minimised kubeconfig would hand the workload whatever the kubeconfig's
+	// identity may do. A denial, not a fallback, unless an administrator has
+	// recorded an acknowledgement on the grant (Grant.UnguardedAck).
+	ErrKubeConstraintsUnenforced = errors.New("secretbroker: kubeconfig grant constraints cannot be enforced without the Kubernetes access monitor")
+
+	// ErrRenewalStopped: a credential the hub renews by itself was not
+	// renewed, because the hub refuses to keep it alive — its owner is denied
+	// on the hub (Task 20420).
+	ErrRenewalStopped = errors.New("secretbroker: renewal stopped")
+
+	// ErrUnguardedAckUnsupported: this broker's store keeps no unguarded
+	// acknowledgements, so none can be recorded. Reported rather than
+	// silently dropped: an acknowledgement nobody stored is a delivery that
+	// keeps failing while the administrator believes it was allowed.
+	ErrUnguardedAckUnsupported = errors.New("secretbroker: this store does not keep unguarded acknowledgements")
 )

@@ -309,7 +309,12 @@
       // differs: a kubeconfig row telling an operator to enable the git proxy
       // names a setting that would not change anything about this grant.
       const kube = g.kind === 'kubeconfig';
-      if (g.enforcement === 'proxy') {
+      if (kube && g.kube_delivery) {
+        // What the broker does with this grant on this hub (Task 20420): the
+        // server decides, from the same rule the broker applies, so the badge
+        // cannot claim a delivery the lease will refuse.
+        parts.push('<div><span class="sec-count">delivery</span> ' + _secKubeDeliveryChip(g) + '</div>');
+      } else if (g.enforcement === 'proxy') {
         parts.push('<div><span class="sec-count">enforced</span> ' +
           '<span class="sec-chip ok" title="' + (kube
             ? 'The Kubernetes access monitor stands between the sandbox and the API server. ' +
@@ -329,6 +334,39 @@
           '">&#9888; in sandbox</span></div>');
       }
       return parts.length ? parts.join('') : '<span class="sec-count">' + esc(g.summary || 'none') + '</span>';
+    }
+
+    // _secKubeDeliveryChip renders a kubeconfig grant's kube_delivery. A grant
+    // that claims namespaces or verbs is refused on a hub with no monitor,
+    // unless an administrator acknowledged it — and then the row says who did,
+    // when and why, for as long as it stands.
+    function _secKubeDeliveryChip(g) {
+      const ack = g.unguarded_ack || {};
+      const chip = {
+        monitor: ['ok', '&#128274; kube monitor',
+          'The Kubernetes access monitor stands between the sandbox and the API server. Contexts, ' +
+          'namespaces and verbs are checked outside the sandbox, on every request.'],
+        monitor_down: ['warn', 'kube monitor down: not delivered',
+          'executors.kube_guard is enabled and the monitor is not running, so no kubeconfig is delivered ' +
+          'until it is.'],
+        refused: ['warn', 'no kube monitor: not delivered',
+          'This grant names namespaces or verbs, which only the Kubernetes access monitor enforces, and ' +
+          'this hub runs none — without it a namespace is only kubectl\'s default and verbs are not checked ' +
+          'at all. It is refused at every dispatch. Enable executors.kube_guard (tls: auto), or have an ' +
+          'administrator acknowledge delivering it unenforced.'],
+        acknowledged: ['warn', '&#9888; unguarded, acknowledged by ' + esc(ack.by || '?'),
+          'Delivered without the Kubernetes access monitor on ' + (ack.by || '?') + '\'s acknowledgement of ' +
+          _secFmtTime(ack.at) + ': ' + (ack.reason || '') + '. The sandbox holds the cluster credential; ' +
+          'this grant\'s namespaces and verbs are not enforced.'],
+        unconstrained: ['warn', '&#9888; in sandbox',
+          'The grant claims every verb in every namespace, so its kubeconfig is delivered into the sandbox ' +
+          'and the cluster\'s own RBAC is the only limit.'],
+        monitor_required: ['warn', 'needs the kube monitor',
+          'A Kubernetes share the hub renews may create its own tokens, so it is delivered only through ' +
+          'the Kubernetes access monitor, and this hub runs none.']
+      }[g.kube_delivery];
+      if (!chip) return '';
+      return '<span class="sec-chip ' + chip[0] + '" title="' + esc(chip[2]) + '">' + chip[1] + '</span>';
     }
 
     function _secRenderGrants() {
@@ -373,12 +411,29 @@
             '<button class="btn" data-global-perm="audit.read" data-perm-hide data-grant-audit="' + esc(g.id) + '">Audit</button>' +
             (g.status === 'revoked' ? '' :
               '<button class="btn" data-global-perm="secret.revoke" data-grant-revoke="' + esc(g.id) + '">Revoke</button>') +
+            // The unguarded acknowledgement is an administrator's (Task 20420):
+            // offered where the grant is refused for want of a monitor, and
+            // withdrawable for as long as it stands.
+            (g.active && g.kube_delivery === 'refused'
+              ? '<button class="btn" data-global-perm="user.manage" data-perm-hide data-grant-unguarded="' + esc(g.id) +
+                '" title="Record that this grant may be delivered without the Kubernetes access monitor">Acknowledge unguarded</button>'
+              : '') +
+            (g.unguarded_ack
+              ? '<button class="btn" data-global-perm="user.manage" data-perm-hide data-grant-unguarded-withdraw="' +
+                esc(g.id) + '">Withdraw acknowledgement</button>'
+              : '') +
           '</div></td>' +
         '</tr>';
       }).join('');
 
       body.querySelectorAll('[data-grant-revoke]').forEach(btn => {
         btn.addEventListener('click', () => revokeGrant(btn.getAttribute('data-grant-revoke')));
+      });
+      body.querySelectorAll('[data-grant-unguarded]').forEach(btn => {
+        btn.addEventListener('click', () => acknowledgeUnguarded(btn.getAttribute('data-grant-unguarded')));
+      });
+      body.querySelectorAll('[data-grant-unguarded-withdraw]').forEach(btn => {
+        btn.addEventListener('click', () => withdrawUnguarded(btn.getAttribute('data-grant-unguarded-withdraw')));
       });
       body.querySelectorAll('[data-grant-audit]').forEach(btn => {
         btn.addEventListener('click', () => secretsAuditFor('grant', btn.getAttribute('data-grant-audit')));
@@ -557,6 +612,32 @@
           loadGrants(); loadSecrets(); loadLeases();
         });
       }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
+    }
+
+    // acknowledgeUnguarded records an administrator's decision that a kubeconfig
+    // grant may reach a sandbox without the Kubernetes access monitor (Task
+    // 20420). The reason is required: it is the decision's only record of why.
+    function acknowledgeUnguarded(id) {
+      const reason = prompt('Deliver grant ' + id + ' without the Kubernetes access monitor?\n\n' +
+        'Without the monitor its namespaces are only the default kubectl uses, and its verbs are not ' +
+        'checked at all: the sandbox holds the cluster credential and may do whatever its identity may. ' +
+        'Your name, the time and your reason are recorded on the grant and in the audit trail.\n\n' +
+        'Why is that acceptable here?');
+      if (reason === null) return;
+      if (!reason.trim()) { toast('A reason is required to acknowledge an unguarded grant', 'warn'); return; }
+      return api('/api/grants/' + encodeURIComponent(id) + '/unguarded', {reason: reason.trim()}).then(ok).then(() => {
+        toast('Acknowledged: grant ' + id + ' is delivered without the Kubernetes monitor', 'warn');
+        loadGrants();
+      }).catch(err => toast('Acknowledgement failed: ' + ((err && err.message) || String(err)), 'err'));
+    }
+
+    function withdrawUnguarded(id) {
+      if (!confirm('Withdraw the unguarded acknowledgement on grant ' + id + '?\n\n' +
+        'On a hub with no Kubernetes access monitor the grant is refused again from its next lease.')) return;
+      return apiMethod('DELETE', '/api/grants/' + encodeURIComponent(id) + '/unguarded').then(ok).then(() => {
+        toast('Acknowledgement withdrawn', 'ok');
+        loadGrants();
+      }).catch(err => toast('Withdrawal failed: ' + ((err && err.message) || String(err)), 'err'));
     }
 
     function _secGrantRevokePrompt(id, egress, p) {

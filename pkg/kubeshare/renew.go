@@ -42,7 +42,19 @@ var (
 	ErrUnrenewable = errors.New("the stored kubeconfig is not a renewable share")
 	// ErrWrongToken is a pushed token that is not the share's ServiceAccount's.
 	ErrWrongToken = errors.New("the token is not for the share's ServiceAccount")
+	// ErrWrongServer is a pushed token minted at another API server than the
+	// share's kubeconfig names, or through another CA — or one whose origin
+	// nobody named (Task 20420). The hub never sends a token anywhere but the
+	// server that minted it.
+	ErrWrongServer = errors.New("the token was not minted by the share's API server")
 )
+
+// Origin is where a token pushed to the hub was minted: the API server the
+// terminal's context reached and the CA it trusted there.
+type Origin struct {
+	Server        string
+	CAFingerprint string
+}
 
 // Lapsed reports whether err means the hub can never renew the share again on
 // its own: the token expired, or the cluster no longer accepts it — the
@@ -136,13 +148,31 @@ func explainRenewal(err error, old Claims) error {
 }
 
 // Adopt checks a token the share's owner minted and returns the stored
-// kubeconfig carrying it. The token must be a bounded token for the share's
-// own ServiceAccount, still valid, and — where the cluster can say —
-// authenticated by the cluster the share names as that ServiceAccount.
-func Adopt(ctx context.Context, kubeconfig []byte, token string, now time.Time) (*Renewed, error) {
+// kubeconfig carrying it. The token must have been minted at the API server
+// the stored kubeconfig names, through the CA it trusts (origin), be a bounded
+// token for the share's own ServiceAccount, still valid, and — where the
+// cluster can say — authenticated by the cluster the share names as that
+// ServiceAccount.
+//
+// The origin check comes first because the confirmation sends the token to
+// the stored server. That server is the share's uploader's to name, and the
+// token was minted with somebody else's credentials, so a token is never sent
+// to a server other than the one that minted it (Task 20420).
+func Adopt(ctx context.Context, kubeconfig []byte, token string, origin Origin, now time.Time) (*Renewed, error) {
 	rc, old, err := Inspect(kubeconfig)
 	if err != nil {
 		return nil, err
+	}
+	switch {
+	case strings.TrimSpace(origin.Server) == "" || strings.TrimSpace(origin.CAFingerprint) == "":
+		return nil, fmt.Errorf("%w: the request does not say which API server minted the token, so the hub will "+
+			"not send it to %s to check it — upgrade cloop on the machine that minted it", ErrWrongServer, rc.Server)
+	case normalizeServer(origin.Server) != normalizeServer(rc.Server):
+		return nil, fmt.Errorf("%w: it was minted at %s, and the share's kubeconfig names %s; the hub sends a "+
+			"token only to the server that minted it", ErrWrongServer, origin.Server, rc.Server)
+	case strings.TrimSpace(origin.CAFingerprint) != CAFingerprint(rc.CAData):
+		return nil, fmt.Errorf("%w: it was minted through a CA other than the one the share's kubeconfig trusts "+
+			"for %s", ErrWrongServer, rc.Server)
 	}
 	token = strings.TrimSpace(token)
 	fresh, err := ParseClaims(token)

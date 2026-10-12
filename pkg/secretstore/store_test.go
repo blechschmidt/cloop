@@ -242,7 +242,7 @@ func TestGrantConstraintsSurviveRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	if _, err := b.Grant(ctx, secretbroker.GrantRequest{
+	granted, err := b.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: "kube",
 		Subject:   mustSubject(t, "label:region=eu,tier=prod"),
 		Constraints: secretbroker.Constraints{
@@ -251,8 +251,29 @@ func TestGrantConstraintsSurviveRestart(t *testing.T) {
 		},
 		TTL:   time.Hour,
 		Actor: "test",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("grant: %v", err)
+	}
+	requester := secretbroker.Requester{
+		ExecutorID: "edge-01",
+		ProjectID:  "/srv/app",
+		Labels:     map[string]string{"region": "eu", "tier": "prod"},
+	}
+	// No Kubernetes monitor on this broker: a grant confined to a namespace
+	// is refused until an administrator acknowledges it (Task 20420), and
+	// that acknowledgement is stored with the grant.
+	refused, err := b.LeaseFor(ctx, requester, "test")
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if len(refused.Materials) != 0 || len(refused.Refused) != 1 ||
+		!strings.Contains(refused.Refused[0].Reason, "only cloop's Kubernetes access monitor enforces") {
+		t.Fatalf("an unacknowledged grant was not refused: %+v", refused)
+	}
+	if _, err := b.AcknowledgeUnguarded(ctx, secretbroker.UnguardedAckRequest{GrantID: granted.ID,
+		Actor: "admin@example.com", Reason: "the dev cluster, no monitor yet"}); err != nil {
+		t.Fatalf("acknowledge: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -285,24 +306,41 @@ func TestGrantConstraintsSurviveRestart(t *testing.T) {
 	if !g.Constraints.AllowsNamespace("team-a") {
 		t.Error("namespace allowlist lost its allowed entry after reload")
 	}
+	if ack := g.UnguardedAck; !ack.Recorded() || ack.By != "admin@example.com" ||
+		ack.Reason != "the dev cluster, no monitor yet" {
+		t.Errorf("the unguarded acknowledgement did not survive the reload: %+v", ack)
+	}
 
 	// And the reloaded grant still leases correctly to a matching subject.
-	lease, err := b2.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID: "edge-01",
-		ProjectID:  "/srv/app",
-		Labels:     map[string]string{"region": "eu", "tier": "prod"},
-	}, "test")
+	lease, err := b2.LeaseFor(ctx, requester, "test")
 	if err != nil {
 		t.Fatalf("lease: %v", err)
 	}
 	if len(lease.Materials) != 1 {
-		t.Fatalf("got %d materials, want 1", len(lease.Materials))
+		t.Fatalf("got %d materials, want 1 (refused: %+v)", len(lease.Materials), lease.Refused)
+	}
+	if s := lease.Materials[0].Summary; !strings.Contains(s, "unguarded") || !strings.Contains(s, "admin@example.com") {
+		t.Errorf("the summary does not say the grant was delivered unguarded, and on whose word: %q", s)
 	}
 	// The staging cluster's credential must not have survived minimization.
 	for _, f := range lease.Materials[0].Files {
 		if strings.Contains(string(f.Content), "staging-secret-token") {
 			t.Error("minimization did not drop the disallowed context's credential")
 		}
+	}
+
+	// Withdrawn, the grant is refused again — and stays so.
+	if _, err := b2.WithdrawUnguardedAck(ctx, secretbroker.UnguardedAckRequest{GrantID: granted.ID,
+		Actor: "admin@example.com"}); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	again, err := b2.LeaseFor(ctx, requester, "test")
+	if err != nil || len(again.Materials) != 0 {
+		t.Fatalf("after the withdrawal the grant was delivered: %+v, %v", again, err)
+	}
+	stored, err := b2.ListGrants(secretbroker.GrantFilter{})
+	if err != nil || len(stored) != 1 || stored[0].UnguardedAck.Recorded() {
+		t.Errorf("the withdrawal was not stored: %+v, %v", stored, err)
 	}
 }
 

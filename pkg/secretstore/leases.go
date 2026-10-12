@@ -26,6 +26,7 @@ type leaseDoc struct {
 	RunID         string            `json:"run_id,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubProxied bool              `json:"github_proxied,omitempty"`
+	KubeInProcess bool              `json:"kube_in_process,omitempty"`
 	Withhold      map[string]string `json:"withhold,omitempty"`
 	Actor         string            `json:"actor,omitempty"`
 	Kinds         []string          `json:"kinds,omitempty"`
@@ -44,6 +45,7 @@ func (s *Store) PutLease(r secretbroker.LeaseRecord) error {
 		RunID:         r.Requester.RunID,
 		Labels:        r.Requester.Labels,
 		GitHubProxied: r.Requester.GitHubProxied,
+		KubeInProcess: r.Requester.KubeInProcess,
 		Withhold:      r.Requester.Withhold,
 		Actor:         r.Actor,
 		Kinds:         kinds,
@@ -162,6 +164,7 @@ func leaseFromRow(row statedb.SecretLeaseRow) (secretbroker.LeaseRecord, error) 
 			RunID:         runID,
 			Labels:        doc.Labels,
 			GitHubProxied: doc.GitHubProxied,
+			KubeInProcess: doc.KubeInProcess,
 			Withhold:      doc.Withhold,
 		},
 		Actor:     doc.Actor,

@@ -160,7 +160,12 @@ var fileBackedKinds = []struct {
 		name:    "kubeconfig pinned to one context",
 		kind:    secretbroker.KindKubeconfig,
 		payload: []byte(kubeconfigPayload),
-		cons:    secretbroker.Constraints{Contexts: []string{"prod"}},
+		// Every verb: this broker runs no Kubernetes access monitor, and a
+		// grant claiming fewer — read-only, the default — is not delivered
+		// without one (Task 20420). This row is about how a file reaches
+		// each backend, which only a delivered grant exercises.
+		cons: secretbroker.Constraints{Contexts: []string{"prod"},
+			Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}},
 	},
 }
 

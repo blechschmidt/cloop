@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 176 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 178 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 155 |
+| `control-plane` | the hub's own state.db | 157 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-176 actions in 43 families. Every action is listed: this section is the whole
+178 actions in 43 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (16) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (7) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (16) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
 
 ### task.*
 
@@ -297,6 +297,8 @@ Payload keys:
 | `secret.request_expire` | `secret` | control-plane | stable | A pending request lapses with nobody having decided it. |
 | `secret.request_withdraw` | `secret` | control-plane | stable | A requester withdraws their own pending request. |
 | `secret.revoke` | `secret` | control-plane | stable | An operator marks a grant unusable. |
+| `secret.unguarded_ack` | `secret` | control-plane | stable | An administrator records that a kubeconfig grant whose namespaces or verbs only the Kubernetes access monitor enforces may be delivered on a hub that runs no monitor — or the attempt is refused. |
+| `secret.unguarded_withdraw` | `secret` | control-plane | stable | An unguarded acknowledgement on a kubeconfig grant is withdrawn, so the grant is refused again on a hub with no Kubernetes access monitor. |
 
 Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret_name`, `kind`, `grant_id`, `request_id`, `lease_id`, `executor_id`, `project_id`, `run_id`, `constraints`, `reason`, `task_id`, `host`, `port`, `bytes_up`, `bytes_down`, `expires_at`
 
@@ -306,6 +308,7 @@ Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret
 - `secret.renew` — A Kubernetes share's renewal (Task 20416) is attributed to `hub` when the hub renewed it and to the owner when they pushed a token with `cloop remote kube renew`; `reason` names the ServiceAccount and both expiries, `expires_at` the new one. A renewal that failed is a `deny` row, written once per distinct cause.
 - `secret.request` — The gap between this row and its approval is the number that says whether the request path is used or routed around.
 - `secret.request_expire` — Its own action rather than a flavour of deny: denied is an answer, expired is the absence of one, and conflating them hides a queue nobody is working.
+- `secret.unguarded_ack` — Without it such a grant is refused at every lease (Task 20420). `reason` names what goes unenforced and the administrator's own justification; `grant_id` the grant, which carries the acknowledgement until it is withdrawn.
 
 ### secret.lease.*
 
@@ -389,7 +392,7 @@ Payload keys, on every action above: `kind`, `session_id`, `repo`, `project_id`,
 | --- | --- | --- | --- | --- |
 | `kubeguard.rejected` | `kubeguard` | control-plane | stable | A request is refused before its session could be identified. |
 | `kubeguard.request_allowed` | `kubeguard` | control-plane | stable | A Kubernetes request is admitted by policy. |
-| `kubeguard.request_denied` | `kubeguard` | control-plane | stable | A Kubernetes request is refused by the session's verb and resource policy. |
+| `kubeguard.request_denied` | `kubeguard` | control-plane | stable | A Kubernetes request is refused by the session's verb and resource policy, or because it would hand the workload a credential of its own. |
 | `kubeguard.session_closed` | `kubeguard` | control-plane | stable | A Kubernetes proxy session ends. |
 | `kubeguard.session_minted` | `kubeguard` | control-plane | stable | A Kubernetes proxy session is created for a task against one cluster and context. |
 | `kubeguard.session_restored` | `kubeguard` | control-plane | stable | The hub process that adopted a run restores the run's Kubernetes proxy session under its original id and token, with the cluster credential re-derived from the run's lease and its policy narrowed to what the grant and the hub allow now. |
@@ -397,7 +400,7 @@ Payload keys, on every action above: `kind`, `session_id`, `repo`, `project_id`,
 Payload keys, on every action above: `kind`, `session_id`, `cluster`, `context`, `verb`, `resource`, `namespace`, `object`, `reason`, `project_id`, `task_id`, `executor_id`, `grant_id`, `lease_id`, `detail`
 
 - `kubeguard.request_allowed` — Sampled rather than exhaustive — a watch against a busy cluster would otherwise be the whole table.
-- `kubeguard.request_denied` — This is what enforces a read-only grant on a cluster from outside the sandbox: `verb`, `resource` and `namespace` say exactly what was attempted.
+- `kubeguard.request_denied` — This is what enforces a read-only grant on a cluster from outside the sandbox: `verb`, `resource` and `namespace` say exactly what was attempted. `reason` classifies it; `service_account_token_secret`, `workload_service_account`, `host_access`, `rbac_binding`, `rbac_role`, `certificate_signing_request` and `unreadable_body` are a write grant's attempts to obtain a credential that would bypass the monitor (Task 20420).
 - `kubeguard.session_closed` — Also written for a session that ended while no hub process served it, with the reason in `detail`.
 - `kubeguard.session_restored` — `detail` names the hub process that held the session until then (Task 20383).
 

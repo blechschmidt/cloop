@@ -215,9 +215,16 @@ func runRemoteKubeShare(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// The owner annotation every object carries is the hub's own key for
+	// this caller — the one it records as the share's owner — so a revoke can
+	// tell the share's objects from anyone else's (Task 20420). A hub that
+	// predates it answers with the email or subject, as before.
 	owner := ""
 	if me, err := c.Me(ctx); err == nil {
-		owner, _ = me["email"].(string)
+		owner, _ = me["identity"].(string)
+		if owner == "" {
+			owner, _ = me["email"].(string)
+		}
 		if owner == "" {
 			owner, _ = me["sub"].(string)
 		}
@@ -406,8 +413,11 @@ type shareView struct {
 	Renewals       int       `json:"renewals"`
 	RenewError     string    `json:"renew_error,omitempty"`
 	Lapsed         bool      `json:"lapsed,omitempty"`
-	Personal       bool      `json:"personal"`
-	ActiveGrants   int       `json:"active_grants"`
+	// Stopped: the hub will not renew the share while its owner is denied
+	// on it (Task 20420); RenewError says why.
+	Stopped      bool `json:"stopped,omitempty"`
+	Personal     bool `json:"personal"`
+	ActiveGrants int  `json:"active_grants"`
 }
 
 func listShares(list *hubclient.SecretsList) []shareView {
@@ -422,7 +432,8 @@ func listShares(list *hubclient.SecretsList) []shareView {
 			ServiceAccount: sh.Namespace + "/" + sh.ServiceAccount, Namespaces: sh.Namespaces,
 			ClusterWide: sh.ClusterWide, Access: string(sh.Access), Renewal: string(sh.Renewal),
 			ExpiresAt: sh.ExpiresAt, Renewals: sh.Renewals,
-			RenewError: sh.RenewError, Lapsed: sh.Lapsed, Personal: s.Personal, ActiveGrants: s.ActiveGrants,
+			RenewError: sh.RenewError, Lapsed: sh.Lapsed, Stopped: sh.Stopped, Personal: s.Personal,
+			ActiveGrants: s.ActiveGrants,
 		}
 		if !sh.RenewedAt.IsZero() {
 			v.RenewedAt = sh.RenewedAt.Format(time.RFC3339)
@@ -480,7 +491,10 @@ func runRemoteKubeList(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	for _, s := range shares {
-		if s.RenewError != "" {
+		switch {
+		case s.Stopped:
+			fmt.Fprintf(out, "\n%s: the hub does not renew it: %s\n", s.Name, s.RenewError)
+		case s.RenewError != "":
 			fmt.Fprintf(out, "\n%s: the last renewal failed: %s\n", s.Name, s.RenewError)
 		}
 	}
@@ -491,6 +505,8 @@ func runRemoteKubeList(cmd *cobra.Command, _ []string) error {
 func renewalStatus(s shareView, now time.Time) string {
 	expired := !s.ExpiresAt.IsZero() && !now.Before(s.ExpiresAt)
 	switch {
+	case s.Stopped:
+		return "stopped by the hub (see below)"
 	case s.Lapsed || (expired && s.Renewal == string(kubeshare.RenewalHub)):
 		return "lapsed: run `cloop remote kube renew " + quoteArg(s.Name) + "`"
 	case expired:
@@ -535,6 +551,12 @@ func findShare(ctx context.Context, c *hubclient.Client, name string) (hubclient
 		return hubclient.Secret{}, kubeshare.Share{}, fmt.Errorf("%q is not a Kubernetes share made with "+
 			"`cloop remote kube share`", name)
 	}
+	// A personal secret's owner is the hub's own record of who stored it,
+	// whatever its metadata says: that is whose objects revoke and renew may
+	// touch (Task 20420).
+	if sec.Personal && strings.TrimSpace(sec.Owner) != "" {
+		sh.Owner = sec.Owner
+	}
 	return sec, sh, nil
 }
 
@@ -553,7 +575,7 @@ func runRemoteKubeRenew(cmd *cobra.Command, args []string) error {
 	now := time.Now()
 
 	if sh.Renewal == kubeshare.RenewalHub && !kubeLocal && !sh.Lapsed && !sh.Expired(now) {
-		r, err := c.RenewSecret(ctx, sec.ID, "")
+		r, err := c.RenewSecret(ctx, sec.ID)
 		if err == nil {
 			fmt.Fprintf(out, "The hub renewed %s: the token now expires %s.\n", sec.Name, kubeshare.Expiry(r.ExpiresAt, time.Now()))
 			if r.Sessions > 0 {
@@ -565,6 +587,14 @@ func runRemoteKubeRenew(cmd *cobra.Command, args []string) error {
 			sec.Name, remoteErr(c, err))
 	}
 
+	// Minting runs with your own credentials, for a ServiceAccount the share's
+	// metadata names, and the token goes to the hub. So the hub is asked
+	// first whether you may renew this share at all, the context must reach
+	// the share's cluster through the CA the share trusts, and the
+	// ServiceAccount must be one the share created (Task 20420).
+	if err := c.AuthorizeSecret(ctx, sec.ID, "renew"); err != nil {
+		return fmt.Errorf("%s does not let you renew %s, so no token was minted: %w", c.Base, sec.Name, remoteErr(c, err))
+	}
 	contextName := strings.TrimSpace(kubeContext)
 	if contextName == "" {
 		contextName = sh.Context
@@ -573,14 +603,22 @@ func runRemoteKubeRenew(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if sh.Server != "" && !strings.EqualFold(strings.TrimRight(kctx.Server, "/"), strings.TrimRight(sh.Server, "/")) {
-		fmt.Fprintf(out, "Note: context %s reaches %s; the share names %s.\n", kctx.Name, kctx.Server, sh.Server)
+	if err := sh.SameCluster(kctx.Server, kctx.CAData); err != nil {
+		return fmt.Errorf("context %s: %w; no token was minted", kctx.Name, err)
 	}
 	kube, err := kubeshare.NewClient(rc)
 	if err != nil {
 		return err
 	}
 	defer kube.Close()
+	if err := kubeshare.VerifyServiceAccount(ctx, kube, sh); err != nil {
+		if kubeshare.IsNotFound(errors.Unwrap(err)) || kubeshare.IsNotFound(err) {
+			return fmt.Errorf("the cluster has no ServiceAccount %s/%s any more: the share was revoked there; "+
+				"run `cloop remote kube revoke %s --force` to remove it from the hub too", sh.Namespace,
+				sh.ServiceAccount, quoteArg(sec.Name))
+		}
+		return fmt.Errorf("%w; no token was minted", err)
+	}
 	ttl := kubeTTL
 	if !cmd.Flags().Changed("ttl") {
 		if ttl = sh.Lifetime(); ttl < kubeshare.MinTTL || ttl > kubeshare.MaxTTL {
@@ -599,7 +637,8 @@ func runRemoteKubeRenew(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("mint a token for %s/%s: %w", sh.Namespace, sh.ServiceAccount, err)
 	}
-	r, err := c.RenewSecret(ctx, sec.ID, tok.Value)
+	r, err := c.AdoptToken(ctx, sec.ID, hubclient.MintedToken{Token: tok.Value, Server: kctx.Server,
+		CASHA256: kubeshare.CAFingerprint(kctx.CAData)})
 	if err != nil {
 		return remoteErr(c, err)
 	}
@@ -628,34 +667,70 @@ func runRemoteKubeRevoke(cmd *cobra.Command, args []string) error {
 		// Deleted on the hub already — from the dashboard, or with its owner's
 		// offboarding. The hub's copy of the token is gone, but the cluster's
 		// objects are not, and only their labels say which they are.
+		//
+		// The advice lists before it deletes, with the owner of each object:
+		// a label is anybody's to set, so deleting by it could take objects
+		// somebody else labelled (Task 20420).
 		return fmt.Errorf("%w.\nIf the secret was deleted on the hub, its ServiceAccount and bindings may still be "+
-			"in the cluster. Find them with\n  kubectl get serviceaccounts -A -l %s=cloop -o "+
-			"custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,SHARE:.metadata.labels.cloop\\.dev/kube-share,"+
-			"FOR:.metadata.annotations.cloop\\.dev/share-name\nand remove each share with\n  kubectl delete "+
-			"serviceaccount,rolebinding,role -A -l %s=<SHARE>", err, kubeshare.LabelManagedBy, kubeshare.LabelShare)
+			"in the cluster. Find them, and who made each, with\n  kubectl get serviceaccounts,rolebindings,roles -A -l %s=cloop -o "+
+			"custom-columns=KIND:.kind,NAMESPACE:.metadata.namespace,NAME:.metadata.name,"+
+			"SHARE:.metadata.labels.cloop\\.dev/kube-share,FOR:.metadata.annotations.cloop\\.dev/share-name,"+
+			"OWNER:.metadata.annotations.cloop\\.dev/owner\nand delete the ones whose OWNER is you, by name:\n  "+
+			"kubectl delete -n <NAMESPACE> <KIND>/<NAME>", err, kubeshare.LabelManagedBy)
 	}
 	if err != nil {
 		return err
+	}
+
+	// The hub first. Revoke deletes cluster objects with your own credentials
+	// and only then asks the hub to delete the secret; a revoke the hub would
+	// refuse must not have reached the cluster by then (Task 20420).
+	hubOnly := false
+	if err := c.AuthorizeSecret(ctx, sec.ID, "delete"); err != nil {
+		if !kubeForce || !errors.Is(err, hubclient.ErrAuthorizeUnsupported) {
+			return fmt.Errorf("%s does not let you revoke %s, so nothing in the cluster was touched: %w",
+				c.Base, sec.Name, remoteErr(c, err))
+		}
+		hubOnly = true
 	}
 
 	contextName := strings.TrimSpace(kubeContext)
 	if contextName == "" {
 		contextName = sh.Context
 	}
+	// What to remove by hand when the cluster was not touched. Not a delete
+	// by label: anybody who may label objects could give one of theirs this
+	// share's id, so the advice lists the candidates with their owner, to be
+	// checked against the share's before anything is deleted (Task 20420).
 	leftover := func() string {
-		cmds := []string{kubeshare.DeleteCommand(sh.ID, sh.Namespace)}
+		cmds := []string{kubeshare.FindCommand(sh.ID, sh.Namespace)}
 		for _, ns := range sh.Namespaces {
 			if ns != sh.Namespace {
-				cmds = append(cmds, kubeshare.DeleteCommand(sh.ID, ns))
+				cmds = append(cmds, kubeshare.FindCommand(sh.ID, ns))
 			}
 		}
 		if sh.ClusterWide {
-			cmds = append(cmds, kubeshare.DeleteCommand(sh.ID, ""))
+			cmds = append(cmds, kubeshare.FindCommand(sh.ID, ""))
 		}
-		return strings.Join(cmds, "\n  ")
+		owner := sh.Owner
+		if owner == "" {
+			owner = "(none recorded)"
+		}
+		return strings.Join(cmds, "\n  ") + "\nand delete those whose OWNER is " + owner
 	}
 
-	_, rc, cerr := connectCluster(ctx, contextName, out)
+	var cerr error
+	var kctx *kubeexec.Context
+	var rc *kubernetes.RESTConfig
+	if hubOnly {
+		cerr = hubclient.ErrAuthorizeUnsupported
+	} else if kctx, rc, cerr = connectCluster(ctx, contextName, out); cerr == nil {
+		// Your credentials act only on the share's own cluster, reached
+		// through the CA the share trusts.
+		if err := sh.SameCluster(kctx.Server, kctx.CAData); err != nil {
+			cerr = fmt.Errorf("context %s: %w", kctx.Name, err)
+		}
+	}
 	if cerr == nil {
 		kube, err := kubeshare.NewClient(rc)
 		if err != nil {
@@ -667,11 +742,35 @@ func runRemoteKubeRevoke(cmd *cobra.Command, args []string) error {
 		for _, o := range res.Removed {
 			fmt.Fprintf(out, "Deleted %s\n", o)
 		}
+		for _, o := range res.Gone {
+			fmt.Fprintf(out, "Already gone: %s\n", o)
+		}
+		refused := make([]string, 0, len(res.Refused))
+		for o, why := range res.Refused {
+			refused = append(refused, fmt.Sprintf("%s: %s", o, why))
+		}
+		sort.Strings(refused)
+		for _, line := range refused {
+			fmt.Fprintf(out, "Not deleted, not this share's: %s\n", line)
+		}
 		switch {
 		case res.Clean() && len(left) == 0 && lerr == nil:
 		case kubeForce:
+			// Only objects verified as the share's are worth naming; one
+			// refused as somebody else's stays where it is.
+			var stuck []kubeshare.Object
+			for o := range res.Failed {
+				if _, refused := res.Refused[o]; !refused && o.Valid() {
+					stuck = append(stuck, o)
+				}
+			}
+			stuck = append(stuck, left...)
+			advice := "nothing of the share's own is left to remove by hand"
+			if len(stuck) > 0 {
+				advice = "remove what is left of the share's own with:\n  " + kubeshare.DeleteCommandFor(stuck)
+			}
 			fmt.Fprintf(out, "Some of the share's objects could not be removed (%s). --force: deleting the hub's "+
-				"secret anyway. Remove them with:\n  %s\n", describeFailures(res.Failed), leftover())
+				"secret anyway; %s\n", describeFailures(res.Failed), advice)
 		default:
 			if lerr != nil {
 				res.Failed[kubeshare.Object{Kind: "check"}] = lerr
@@ -686,8 +785,8 @@ func runRemoteKubeRevoke(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%w — the hub's secret is kept so the revoke can be run again; --force deletes it "+
 			"without touching the cluster", cerr)
 	} else {
-		fmt.Fprintf(out, "Could not reach the cluster (%v). --force: deleting the hub's secret only. "+
-			"Remove the share's objects with:\n  %s\n", cerr, leftover())
+		fmt.Fprintf(out, "The cluster was not touched (%v). --force: deleting the hub's secret only. "+
+			"Find the share's objects with:\n  %s\n", cerr, leftover())
 	}
 
 	if err := c.DeleteSecret(ctx, sec.ID); err != nil {

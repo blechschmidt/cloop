@@ -496,7 +496,7 @@ users:
 	if err != nil {
 		t.Fatalf("mint secret for %s: %v", p.name, err)
 	}
-	if _, err := broker.Grant(ctx, secretbroker.GrantRequest{
+	g, err := broker.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: sec.ID,
 		Subject:   secretbroker.Subject{Type: secretbroker.SubjectProject, Value: p.dir},
 		Constraints: secretbroker.Constraints{
@@ -504,8 +504,17 @@ users:
 		},
 		TTL:   2 * time.Hour,
 		Actor: p.tenant.email,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("grant secret for %s: %v", p.name, err)
+	}
+	// This hub runs no Kubernetes access monitor, and a grant confined to a
+	// namespace is not delivered without one unless an administrator says so
+	// (Task 20420). The suite needs the file delivered: its wipe is what it
+	// asserts.
+	if _, err := broker.AcknowledgeUnguarded(ctx, secretbroker.UnguardedAckRequest{GrantID: g.ID,
+		Actor: "soak-admin", Reason: "a soak cluster that does not exist"}); err != nil {
+		t.Fatalf("acknowledge the grant for %s: %v", p.name, err)
 	}
 }
 

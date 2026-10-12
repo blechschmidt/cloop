@@ -22,12 +22,17 @@ package hubdoctor
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // checkKubeGuard reports whether kubeconfig grants are brokered through the
@@ -40,6 +45,14 @@ func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Op
 			"the hub runs without the monitor, and a kubeconfig grant delivers the cluster credential "+
 				"into the sandbox"); ok {
 			add(f)
+			return
+		}
+		// A grant claiming namespaces or verbs is refused at every dispatch
+		// without the monitor (Task 20420), unless an administrator
+		// acknowledged delivering it unenforced. Either is worth more than
+		// the general warning below: the first is a grant that does nothing,
+		// the second one that does less than it says.
+		if unguardedKubeGrantFindings(dir, add) {
 			return
 		}
 		// A warning rather than a pass only when there is a kubeconfig grant
@@ -169,6 +182,135 @@ func checkKubeGuard(ctx context.Context, dir string, cfg *config.Config, opts Op
 			"session_minutes": k.SessionTTLMinutes(),
 		},
 	})
+}
+
+// kubeGrantRow is an active kubeconfig grant claiming what only the monitor
+// enforces.
+type kubeGrantRow struct {
+	id, secret, subject string
+	claims              []string
+	ack                 secretbroker.UnguardedAck
+	// executor: the grant is to an executor, whose own use of the
+	// credential in the hub is no delivery and is not refused.
+	executor bool
+}
+
+func (r kubeGrantRow) String() string {
+	s := fmt.Sprintf("%s to %s (%s: %s)", r.id, r.subject, r.secret, strings.Join(r.claims, " and "))
+	if r.ack.Recorded() {
+		s = fmt.Sprintf("%s, acknowledged by %s on %s: %q", s, r.ack.By, r.ack.At.UTC().Format("2006-01-02"),
+			r.ack.Reason)
+	}
+	return s
+}
+
+// unguardedKubeGrants lists the control plane's active kubeconfig grants that
+// claim something only the monitor enforces (secretbroker
+// Constraints.KubeMonitorOnly), split by whether an administrator acknowledged
+// delivering them without it. known is false when the store could not be
+// read, as for activeGrants.
+func unguardedKubeGrants(dir string) (refused, acknowledged []kubeGrantRow, known bool) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil, true
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, nil, false
+	}
+	defer func() { _ = db.Close() }()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return nil, nil, false
+	}
+	secrets, err := store.ListSecrets()
+	if err != nil {
+		return nil, nil, false
+	}
+	byID := make(map[string]secretbroker.Secret, len(secrets))
+	for _, s := range secrets {
+		byID[s.ID] = s
+	}
+	grants, err := store.ListGrants()
+	if err != nil {
+		return nil, nil, false
+	}
+	now := time.Now()
+	for _, g := range grants {
+		sec, ok := byID[g.SecretID]
+		if !ok || sec.Kind != secretbroker.KindKubeconfig || !g.Active(now) {
+			continue
+		}
+		claims := g.Constraints.KubeMonitorOnly()
+		if len(claims) == 0 {
+			continue
+		}
+		row := kubeGrantRow{id: g.ID, secret: sec.Name, subject: g.Subject.String(), claims: claims,
+			ack: g.UnguardedAck, executor: g.Subject.Type == secretbroker.SubjectExecutor}
+		if row.ack.Recorded() {
+			acknowledged = append(acknowledged, row)
+		} else {
+			refused = append(refused, row)
+		}
+	}
+	return refused, acknowledged, true
+}
+
+// unguardedKubeGrantFindings reports the kubeconfig grants a hub with no
+// monitor refuses, or delivers only on an acknowledgement, and whether it
+// reported any.
+func unguardedKubeGrantFindings(dir string, add addFn) bool {
+	refused, acknowledged, _ := unguardedKubeGrants(dir)
+	describe := func(rows []kubeGrantRow) ([]string, []string) {
+		var lines, ids []string
+		for _, r := range rows {
+			lines = append(lines, r.String())
+			ids = append(ids, r.id)
+		}
+		return lines, ids
+	}
+	if len(refused) > 0 {
+		lines, ids := describe(refused)
+		_, ackIDs := describe(acknowledged)
+		msg := fmt.Sprintf("disabled, and %d kubeconfig grant(s) claim namespaces or verbs only the monitor "+
+			"enforces, so each is refused at every dispatch rather than delivered with its limits unenforced: %s",
+			len(refused), strings.Join(lines, "; "))
+		for _, r := range refused {
+			if r.executor {
+				msg += ". A grant to an executor is refused only to the runs on it: the kubernetes executor's " +
+					"own use of its cluster credential, in the hub, is not a delivery and goes on"
+				break
+			}
+		}
+		add(Finding{
+			Check:    "kubeguard.enabled",
+			Title:    "Kubernetes access monitor",
+			Severity: SeverityFail,
+			Message:  msg,
+			Remediation: "Set executors.kube_guard.enabled: true with tls: auto and an advertise_url your executors " +
+				"reach, so the grants are enforced outside the sandbox. To deliver one without the monitor knowingly, " +
+				"an administrator records that with `cloop hub grant unguarded <grant-id> --reason <why>` (or from the " +
+				"Secrets panel); otherwise revoke it. See docs/architecture/kubernetes-access.md",
+			Details: map[string]any{"grants": ids, "acknowledged": ackIDs},
+		})
+		return true
+	}
+	if len(acknowledged) > 0 {
+		lines, ids := describe(acknowledged)
+		add(Finding{
+			Check:    "kubeguard.enabled",
+			Title:    "Kubernetes access monitor",
+			Severity: SeverityWarn,
+			Message: fmt.Sprintf("disabled; %d kubeconfig grant(s) are delivered without it on an administrator's "+
+				"acknowledgement, so the sandbox holds the cluster credential and their limits are not enforced: %s",
+				len(acknowledged), strings.Join(lines, "; ")),
+			Remediation: "Set executors.kube_guard.enabled: true with tls: auto, then withdraw each acknowledgement " +
+				"with `cloop hub grant unguarded <grant-id> --withdraw`",
+			Details: map[string]any{"acknowledged": ids},
+		})
+		return true
+	}
+	return false
 }
 
 // kubeconfigGrantsLikely reports whether this hub plausibly delivers a

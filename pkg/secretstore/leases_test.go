@@ -57,6 +57,9 @@ func TestLeaseSurvivesItsProcess(t *testing.T) {
 		ExecutorID: "edge-01", ProjectID: "/srv/app", RunID: "run_restart",
 		Labels:   map[string]string{"site": "lab"},
 		Withhold: map[string]string{"grant_other": "another user's personal credential"},
+		// What a renewal re-evaluates under (Task 20420): the kubernetes
+		// executor's own lease must stay its own after a takeover.
+		KubeInProcess: true,
 	}
 	lease, err := a.LeaseFor(ctx, req, "ui")
 	if err != nil {
@@ -85,7 +88,7 @@ func TestLeaseSurvivesItsProcess(t *testing.T) {
 		t.Fatalf("LeaseRecordFor: %v", err)
 	}
 	if rec.Holder != "hub_a" || rec.Requester.RunID != "run_restart" || rec.Requester.Labels["site"] != "lab" ||
-		rec.Requester.Withhold["grant_other"] == "" || rec.Actor != "ui" || len(rec.GrantIDs) != 1 ||
+		rec.Requester.Withhold["grant_other"] == "" || !rec.Requester.KubeInProcess || rec.Actor != "ui" || len(rec.GrantIDs) != 1 ||
 		len(rec.Kinds) != 1 || rec.Kinds[0] != secretbroker.KindEnv || !rec.ExpiresAt.Equal(lease.ExpiresAt) {
 		t.Fatalf("record after the restart = %+v", rec)
 	}

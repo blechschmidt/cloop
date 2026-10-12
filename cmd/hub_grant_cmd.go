@@ -80,8 +80,11 @@ var (
 	hubGrantStateFlag     string
 	hubGrantMineFlag      bool
 	hubGrantUsesFlag      bool
+	hubGrantGrantsFlag    bool
 	hubGrantFleetWideFlag bool
 	hubGrantWithdrawFlag  bool
+
+	hubGrantUnguardedWithdrawFlag bool
 )
 
 // openHubBroker builds a broker over the hub's own control-plane database.
@@ -240,12 +243,21 @@ grant feeding a workload around the clock look identical from the grant table.
 
 A task id appears where the dispatch was task-scoped. A lease issued for a whole
 project run shows the project instead; that is not a missing value, it is what
-happened — the hub leases credentials per run, not per task.`,
+happened — the hub leases credentials per run, not per task.
+
+Below the requests it lists every kubeconfig grant delivered without the
+Kubernetes access monitor on an administrator's acknowledgement — who recorded
+it, when and why — and every one refused for want of the monitor (see
+` + "`cloop hub grant unguarded`" + `). --grants lists the grants themselves instead,
+with what becomes of each kubeconfig grant on a hub with no monitor.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := cmd.Flags().GetString("workdir")
 		asJSON, _ := cmd.Flags().GetBool("json")
+		if hubGrantGrantsFlag {
+			return listHubGrants(workdir, asJSON)
+		}
 
 		filter := secretbroker.RequestFilter{}
 		if s := strings.TrimSpace(hubGrantStateFlag); s != "" {
@@ -269,6 +281,14 @@ happened — the hub leases credentials per run, not per task.`,
 		if err != nil {
 			return err
 		}
+		grants, err := broker.ListGrants(secretbroker.GrantFilter{})
+		if err != nil {
+			return err
+		}
+		grantByID := make(map[string]secretbroker.Grant, len(grants))
+		for _, g := range grants {
+			grantByID[g.ID] = g
+		}
 		if asJSON {
 			out := make([]map[string]any, 0, len(requests))
 			for _, req := range requests {
@@ -279,10 +299,17 @@ happened — the hub leases credentials per run, not per task.`,
 						row["uses"] = uses
 					}
 				}
+				// The approved grant's unguarded acknowledgement (Task 20420),
+				// so a script reading the queue sees which approvals reach a
+				// sandbox unenforced.
+				if g, ok := grantByID[req.GrantID]; ok && g.UnguardedAck.Recorded() {
+					row["unguarded_ack"] = g.UnguardedAck
+				}
 				out = append(out, row)
 			}
 			return json.NewEncoder(os.Stdout).Encode(out)
 		}
+		defer printUnguardedKubeGrants(broker, grants)
 
 		if len(requests) == 0 {
 			color.New(color.Faint).Println("no access requests")
@@ -463,6 +490,177 @@ to make an inconvenient ask disappear without ever appearing as a refusal.`,
 	},
 }
 
+var hubGrantUnguardedCmd = &cobra.Command{
+	Use:   "unguarded <grant-id>",
+	Short: "Acknowledge delivering a kubeconfig grant without the Kubernetes access monitor",
+	Long: `Record — as an administrator, on the hub's own host — that a kubeconfig grant may
+be delivered on a hub that runs no Kubernetes access monitor.
+
+Without the monitor a kubeconfig grant's namespaces are only the default kubectl
+uses when -n is not given, and its verbs — read-only above all — are not checked
+at all: the sandbox holds the cluster credential and may do whatever its identity
+may. So a grant that names namespaces, or fewer than every verb, is refused at
+every dispatch on such a hub. Enabling the monitor is the fix
+(executors.kube_guard, enabled: true, tls: auto). This is the exception, for a
+cluster where delivering the credential unenforced is acceptable:
+
+  cloop hub grant unguarded grant_1a2b3c --reason "throwaway lab cluster, no monitor yet"
+  cloop hub grant unguarded grant_1a2b3c --withdraw
+
+--reason is required and is recorded on the grant with your name and the time,
+written to the audit trail (secret.unguarded_ack), and shown wherever the grant
+is: the Secrets panel, ` + "`cloop hub grant list`" + ` and ` + "`cloop hub doctor`" + `.
+--withdraw takes it back, and the grant is refused again from its next lease.
+A Kubernetes share the hub renews cannot be acknowledged: its ServiceAccount may
+create its own tokens, so it is delivered only through the monitor.`,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := cmd.Flags().GetString("workdir")
+		asJSON, _ := cmd.Flags().GetBool("json")
+		reason, _ := cmd.Flags().GetString("reason")
+		if !hubGrantUnguardedWithdrawFlag && strings.TrimSpace(reason) == "" {
+			return fmt.Errorf("--reason is required: it is the only record of why this grant's namespaces " +
+				"and verbs may go unenforced")
+		}
+
+		warnIfNotAHub(workdir)
+		broker, closer, err := openHubBroker(workdir)
+		if err != nil {
+			return err
+		}
+		defer closer()
+
+		req := secretbroker.UnguardedAckRequest{GrantID: args[0], Actor: operatorActor(), Reason: reason}
+		var g secretbroker.Grant
+		if hubGrantUnguardedWithdrawFlag {
+			g, err = broker.WithdrawUnguardedAck(context.Background(), req)
+		} else {
+			g, err = broker.AcknowledgeUnguarded(context.Background(), req)
+		}
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return json.NewEncoder(os.Stdout).Encode(g)
+		}
+		if hubGrantUnguardedWithdrawFlag {
+			color.New(color.FgGreen).Printf("✓ withdrew the unguarded acknowledgement on %s\n", g.ID)
+			color.New(color.Faint).Println("  On a hub with no Kubernetes access monitor the grant is refused again from its next lease.")
+			return nil
+		}
+		color.New(color.FgYellow).Printf("✓ %s may be delivered without the Kubernetes access monitor\n", g.ID)
+		fmt.Printf("  unenforced  %s\n", strings.Join(g.Constraints.KubeMonitorOnly(), " and "))
+		fmt.Printf("  recorded    by %s at %s\n", g.UnguardedAck.By, g.UnguardedAck.At.Local().Format(time.RFC3339))
+		fmt.Printf("  reason      %s\n", g.UnguardedAck.Reason)
+		color.New(color.Faint).Println("\nThe sandbox will hold the cluster credential. Enable executors.kube_guard " +
+			"(tls: auto) and withdraw this with --withdraw to enforce the grant instead.")
+		return nil
+	},
+}
+
+// printUnguardedKubeGrants lists, below the request queue, the kubeconfig
+// grants that claim what only the Kubernetes access monitor enforces: those
+// delivered without it on an acknowledgement, and those refused for want of
+// it (Task 20420). Nothing when there are none.
+func printUnguardedKubeGrants(broker *secretbroker.Broker, grants []secretbroker.Grant) {
+	secrets, err := broker.ListSecrets()
+	if err != nil {
+		return
+	}
+	kinds := make(map[string]secretbroker.Secret, len(secrets))
+	for _, s := range secrets {
+		kinds[s.ID] = s
+	}
+	now := time.Now()
+	var acked, other []secretbroker.Grant
+	for _, g := range grants {
+		sec, ok := kinds[g.SecretID]
+		if !ok || sec.Kind != secretbroker.KindKubeconfig || !g.Active(now) || len(g.Constraints.KubeMonitorOnly()) == 0 {
+			continue
+		}
+		if g.UnguardedAck.Recorded() {
+			acked = append(acked, g)
+		} else {
+			other = append(other, g)
+		}
+	}
+	if len(acked) > 0 {
+		color.New(color.Bold).Println("\nkubeconfig grants delivered without the Kubernetes access monitor (acknowledged)")
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "GRANT\tSECRET\tSUBJECT\tUNENFORCED\tBY\tAT\tREASON")
+		for _, g := range acked {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g.ID, kinds[g.SecretID].Name, g.Subject.String(),
+				strings.Join(g.Constraints.KubeMonitorOnly(), " and "), g.UnguardedAck.By,
+				g.UnguardedAck.At.Local().Format("2006-01-02 15:04"), flattenCell(g.UnguardedAck.Reason, 48))
+		}
+		_ = w.Flush()
+	}
+	if len(other) > 0 {
+		color.New(color.Faint).Printf("\n%d kubeconfig grant(s) are refused on a hub with no Kubernetes access monitor "+
+			"unless acknowledged with `cloop hub grant unguarded`; `cloop hub grant list --grants` lists them.\n", len(other))
+	}
+}
+
+// listHubGrants serves `cloop hub grant list --grants`: the grants themselves,
+// with each kubeconfig grant's standing on a hub with no monitor.
+func listHubGrants(workdir string, asJSON bool) error {
+	broker, closer, err := openHubBroker(workdir)
+	if err != nil {
+		return err
+	}
+	defer closer()
+	grants, err := broker.ListGrants(secretbroker.GrantFilter{ActiveOnly: true})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		if grants == nil {
+			grants = []secretbroker.Grant{}
+		}
+		return json.NewEncoder(os.Stdout).Encode(grants)
+	}
+	if len(grants) == 0 {
+		color.New(color.Faint).Println("no active grants")
+		return nil
+	}
+	secrets, err := broker.ListSecrets()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]secretbroker.Secret, len(secrets))
+	for _, s := range secrets {
+		byID[s.ID] = s
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "GRANT\tSECRET\tKIND\tSUBJECT\tCONSTRAINTS\tWITHOUT THE KUBE MONITOR")
+	for _, g := range grants {
+		sec := byID[g.SecretID]
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", g.ID, defaultCell(sec.Name), defaultCell(string(sec.Kind)),
+			g.Subject.String(), flattenCell(g.Constraints.Summary(), 40), unguardedCell(sec, g))
+	}
+	return w.Flush()
+}
+
+// unguardedCell says what a grant amounts to on a hub with no Kubernetes
+// access monitor — the rule secretbroker's kubeMaterial applies.
+func unguardedCell(sec secretbroker.Secret, g secretbroker.Grant) string {
+	if sec.Kind != secretbroker.KindKubeconfig {
+		return "-"
+	}
+	switch {
+	case secretbroker.SelfRenewingKubeconfig(sec):
+		return "refused (a share the hub renews)"
+	case len(g.Constraints.KubeMonitorOnly()) == 0:
+		return "delivered (claims nothing it enforces)"
+	case g.UnguardedAck.Recorded():
+		return fmt.Sprintf("delivered unenforced, acknowledged by %s on %s", g.UnguardedAck.By,
+			g.UnguardedAck.At.Local().Format("2006-01-02"))
+	default:
+		return "refused: " + strings.Join(g.Constraints.KubeMonitorOnly(), " and ") + " unenforced"
+	}
+}
+
 // ---------------------------------------------------------------------------
 // rendering helpers
 // ---------------------------------------------------------------------------
@@ -542,7 +740,7 @@ func parseOptionalDuration(raw, flag string) (time.Duration, error) {
 
 func init() {
 	for _, c := range []*cobra.Command{
-		hubGrantRequestCmd, hubGrantListCmd, hubGrantApproveCmd, hubGrantDenyCmd,
+		hubGrantRequestCmd, hubGrantListCmd, hubGrantApproveCmd, hubGrantDenyCmd, hubGrantUnguardedCmd,
 	} {
 		c.Flags().String("workdir", "", "hub directory holding .cloop/state.db (default: current directory)")
 		c.Flags().Bool("json", false, "emit JSON")
@@ -574,6 +772,11 @@ func init() {
 	lf.StringVar(&hubGrantStateFlag, "state", "", "pending | approved | denied | withdrawn | expired")
 	lf.BoolVar(&hubGrantMineFlag, "mine", false, "only your own requests")
 	lf.BoolVar(&hubGrantUsesFlag, "uses", false, "also report which leases redeemed each approved grant")
+	lf.BoolVar(&hubGrantGrantsFlag, "grants", false,
+		"list the active grants instead, with each kubeconfig grant's standing without the Kubernetes monitor")
+	hubGrantUnguardedCmd.Flags().String("reason", "", "why delivering the grant unenforced is acceptable (required)")
+	hubGrantUnguardedCmd.Flags().BoolVar(&hubGrantUnguardedWithdrawFlag, "withdraw", false,
+		"take the acknowledgement back")
 
 	hubGrantApproveCmd.Flags().StringVar(&hubGrantTTLFlag, "ttl", "",
 		"shorten the granted lifetime; a longer value than requested is ignored")
@@ -586,5 +789,6 @@ func init() {
 	hubGrantCmd.AddCommand(hubGrantListCmd)
 	hubGrantCmd.AddCommand(hubGrantApproveCmd)
 	hubGrantCmd.AddCommand(hubGrantDenyCmd)
+	hubGrantCmd.AddCommand(hubGrantUnguardedCmd)
 	hubCmd.AddCommand(hubGrantCmd)
 }

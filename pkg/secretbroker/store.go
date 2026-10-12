@@ -50,6 +50,16 @@ type Store interface {
 	SetMeta(key, value string) error
 }
 
+// UnguardedAcknowledger is an optional Store extension that records, or
+// clears, an administrator's unguarded acknowledgement on a grant (Task
+// 20420). A store without it cannot record one, and a broker over it refuses
+// to (ErrUnguardedAckUnsupported) rather than pretend it did.
+type UnguardedAcknowledger interface {
+	// SetUnguardedAck stores ack on grant id; a zero ack clears it. A grant
+	// that does not exist is a wrapped ErrGrantNotFound.
+	SetUnguardedAck(id string, ack UnguardedAck) error
+}
+
 // findSecretByName is a helper over the Store's list, used by the CLI where
 // operators name secrets rather than quoting IDs. Names are unique, enforced
 // at Mint time.

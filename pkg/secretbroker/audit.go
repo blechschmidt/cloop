@@ -87,6 +87,14 @@ const (
 	// reason RequestExpired is its own state: denied is an answer and expired is
 	// the absence of one, and a trail that conflated them would hide a queue
 	// nobody is working.
+	// Unguarded acknowledgements (Task 20420): an administrator deciding
+	// that a kubeconfig grant whose constraints only the Kubernetes access
+	// monitor enforces may be delivered on a hub without one — and taking
+	// that decision back. Their own actions, because they are the rows that
+	// answer "who let this grant reach a sandbox unenforced, and why".
+	ActionUnguardedAck      Action = "secret.unguarded_ack"
+	ActionUnguardedWithdraw Action = "secret.unguarded_withdraw"
+
 	ActionRequestOpen     Action = "secret.request"
 	ActionRequestApprove  Action = "secret.request_approve"
 	ActionRequestDeny     Action = "secret.request_deny"

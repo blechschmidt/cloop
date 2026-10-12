@@ -202,6 +202,29 @@ type grantView struct {
 	// "not_delivered", or "unavailable" when a configured proxy is down. See
 	// branchEnforcement. Empty for a grant with no branch list.
 	BranchEnforcement string `json:"branch_enforcement,omitempty"`
+
+	// KubeDelivery is what becomes of a kubeconfig grant on this hub (Task
+	// 20420): "monitor" (held by the Kubernetes access monitor),
+	// "monitor_down" (one is configured and not running, so nothing is
+	// delivered), "refused" (no monitor, and the grant claims namespaces or
+	// verbs only a monitor enforces), "acknowledged" (delivered without one
+	// on an administrator's acknowledgement), "unconstrained" (claims nothing
+	// a monitor enforces, so it is delivered as the minimised file) or
+	// "monitor_required" (a share the hub renews, which nothing but a monitor
+	// may hold). See kubeDelivery. Empty for every other kind.
+	KubeDelivery string `json:"kube_delivery,omitempty"`
+	// UnguardedAck is the acknowledgement behind "acknowledged": who, when
+	// and why. Recorded on a grant whatever this hub runs, so it is sent
+	// whenever there is one.
+	UnguardedAck *unguardedAckView `json:"unguarded_ack,omitempty"`
+}
+
+// unguardedAckView is a grant's unguarded acknowledgement. Identity, time and
+// the administrator's sentence — no credential.
+type unguardedAckView struct {
+	At     time.Time `json:"at"`
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
 }
 
 // grantConstraintsView carries every constraint dimension either broker
@@ -650,7 +673,9 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if kubeshare.IsShare(req.Metadata) {
-			meta, err := prepareKubeShare(req.Metadata, []byte(req.Payload), time.Now())
+			// Recorded as the share's owner: who uploaded it, from the
+			// authenticated request, never from the metadata (Task 20420).
+			meta, err := prepareKubeShare(req.Metadata, []byte(req.Payload), s.secretViewer(r).Identity, time.Now())
 			if err != nil {
 				apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 				return
@@ -946,6 +971,10 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 	// something this field does not describe.
 	if sec.Kind == secretbroker.KindKubeconfig {
 		v.Constraints.ReadOnly = g.Constraints.KubeReadOnly()
+		v.KubeDelivery = kubeDelivery(sec, g)
+	}
+	if ack := g.UnguardedAck; ack.Recorded() {
+		v.UnguardedAck = &unguardedAckView{At: ack.At, By: ack.By, Reason: ack.Reason}
 	}
 	if !g.ExpiresAt.IsZero() {
 		exp := g.ExpiresAt
@@ -1944,7 +1973,8 @@ func writeBrokerError(w http.ResponseWriter, err error, action string) {
 		apierror.WriteError(w, apierror.New(apierror.CodeForbidden, err.Error()))
 	case errors.Is(err, secretbroker.ErrOwnerRequired):
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
-	case errors.Is(err, secretbroker.ErrNoKey):
+	case errors.Is(err, secretbroker.ErrNoKey),
+		errors.Is(err, secretbroker.ErrUnguardedAckUnsupported):
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, err.Error()))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "request cancelled"))

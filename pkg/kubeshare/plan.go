@@ -70,8 +70,30 @@ type Plan struct {
 // dnsLabel is RFC 1123's label: what a namespace and most object names must be.
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
+// dnsSubdomain is RFC 1123's subdomain: what a ServiceAccount's name must be.
+var dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+
+// shareIDPattern is what NewID produces, and all a share id may be.
+var shareIDPattern = regexp.MustCompile(`^[a-z0-9]{4,16}$`)
+
+// ValidShareID reports whether s can be a share's id.
+func ValidShareID(s string) bool { return shareIDPattern.MatchString(s) }
+
 // ValidNamespace reports whether s can name a namespace.
 func ValidNamespace(s string) bool { return len(s) <= 63 && dnsLabel.MatchString(s) }
+
+// ValidServiceAccountName reports whether s can name a ServiceAccount — and so
+// one of a share's objects, which are all named after it.
+func ValidServiceAccountName(s string) bool { return len(s) <= 253 && dnsSubdomain.MatchString(s) }
+
+// IsShareServiceAccount reports whether name is the ServiceAccount a share
+// with this id creates: "cloop-<name>-<id>", as serviceAccountName builds it.
+// The hub holds a share to it (Task 20420), so a share's token — whose claims
+// nobody verified — cannot point renew at some other ServiceAccount.
+func IsShareServiceAccount(name, id string) bool {
+	return id != "" && len(name) <= 63-len("-renew") && dnsLabel.MatchString(name) &&
+		strings.HasPrefix(name, "cloop-") && strings.HasSuffix(name, "-"+id) && len(name) > len("cloop-")+len(id)+1
+}
 
 // NewPlan validates req and decides every name.
 func NewPlan(req Request, now time.Time) (*Plan, error) {
@@ -160,7 +182,7 @@ func NewPlan(req Request, now time.Time) (*Plan, error) {
 			return nil, err
 		}
 	}
-	if !regexp.MustCompile(`^[a-z0-9]{4,16}$`).MatchString(req.ID) {
+	if !shareIDPattern.MatchString(req.ID) {
 		return nil, fmt.Errorf("share id %q is not 4-16 lowercase letters and digits", req.ID)
 	}
 	return &Plan{Request: req, ServiceAccount: serviceAccountName(req.Name, req.ID), created: now.UTC()}, nil
@@ -210,17 +232,23 @@ func (p *Plan) RenewRoleName() string { return p.ServiceAccount + "-renew" }
 // Objects lists what the plan creates, in creation order: the ServiceAccount
 // first, so every binding names something that exists.
 func (p *Plan) Objects() []Object {
-	out := []Object{{Kind: "ServiceAccount", Namespace: p.ServiceAccountNamespace, Name: p.ServiceAccount}}
-	if p.ClusterWide {
-		out = append(out, Object{Kind: "ClusterRoleBinding", Name: p.ServiceAccount})
+	return planObjects(p.ServiceAccountNamespace, p.ServiceAccount, p.ClusterWide, p.Namespaces, p.Renewal)
+}
+
+// planObjects is the one definition of what a share creates, shared by a plan
+// and by a share read back from the hub (Share.ExpectedObjects).
+func planObjects(saNamespace, sa string, clusterWide bool, namespaces []string, renewal Renewal) []Object {
+	out := []Object{{Kind: "ServiceAccount", Namespace: saNamespace, Name: sa}}
+	if clusterWide {
+		out = append(out, Object{Kind: "ClusterRoleBinding", Name: sa})
 	}
-	for _, ns := range p.Namespaces {
-		out = append(out, Object{Kind: "RoleBinding", Namespace: ns, Name: p.ServiceAccount})
+	for _, ns := range namespaces {
+		out = append(out, Object{Kind: "RoleBinding", Namespace: ns, Name: sa})
 	}
-	if p.Renewal == RenewalHub {
+	if renewal == RenewalHub {
 		out = append(out,
-			Object{Kind: "Role", Namespace: p.ServiceAccountNamespace, Name: p.RenewRoleName()},
-			Object{Kind: "RoleBinding", Namespace: p.ServiceAccountNamespace, Name: p.RenewRoleName()})
+			Object{Kind: "Role", Namespace: saNamespace, Name: sa + "-renew"},
+			Object{Kind: "RoleBinding", Namespace: saNamespace, Name: sa + "-renew"})
 	}
 	return out
 }
@@ -231,7 +259,7 @@ func (p *Plan) Share() Share {
 		ID: p.ID, Renewal: p.Renewal, Namespace: p.ServiceAccountNamespace,
 		ServiceAccount: p.ServiceAccount, Namespaces: append([]string(nil), p.Namespaces...),
 		ClusterWide: p.ClusterWide, Access: p.Access, Server: p.Server, Context: p.Context,
-		Objects: p.Objects(),
+		Objects: p.Objects(), Owner: p.Owner,
 	}
 }
 

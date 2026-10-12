@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-274 endpoints, by the permission each one requires:
+277 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -109,13 +109,13 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 13 |
+| `secret.own` | 14 |
 | `secret.request` | 4 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
 | `token.admin` | 5 |
-| `user.manage` | 19 |
+| `user.manage` | 21 |
 | `view.prefs` | 2 |
 
 | Method | Path | Permission | Scope |
@@ -234,6 +234,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/grants` | `secret.own` | global |
 | DELETE | `/api/grants/{id}` | `secret.own` | global |
 | GET | `/api/grants/{id}/holders` | `secret.own` | global |
+| POST | `/api/grants/{id}/unguarded` | `user.manage` | global |
+| DELETE | `/api/grants/{id}/unguarded` | `user.manage` | global |
 | POST | `/api/init` | `project.write` | project |
 | GET | `/api/instructions` | `project.read` | project |
 | POST | `/api/instructions` | `project.write` | project |
@@ -304,6 +306,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/secrets` | `secret.own` | global |
 | GET | `/api/secrets/catalog` | `secret.request` | global |
 | DELETE | `/api/secrets/{id}` | `secret.own` | global |
+| GET | `/api/secrets/{id}/authorize` | `secret.own` | global |
 | POST | `/api/secrets/{id}/renew` | `secret.own` | global |
 | POST | `/api/session/logout-all` | `public` | global |
 | GET | `/api/sessions` | `session.admin` | global |

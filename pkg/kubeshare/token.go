@@ -76,6 +76,13 @@ func ParseClaims(token string) (Claims, error) {
 	if !ok || !ok2 || ns == "" || name == "" {
 		return Claims{}, fmt.Errorf("%w: it authenticates as %q, not as a ServiceAccount", ErrNotServiceAccountToken, raw.Sub)
 	}
+	// The claims are not verified, and these two become path segments of the
+	// TokenRequest a renewal sends (Task 20420): a namespace "a/../../x" would
+	// address another API path entirely. The API server issues neither shape.
+	if !ValidNamespace(ns) || !ValidServiceAccountName(name) {
+		return Claims{}, fmt.Errorf("%w: it names ServiceAccount %q in namespace %q, which the API server "+
+			"could not have issued", ErrNotServiceAccountToken, name, ns)
+	}
 	if raw.K8s.Namespace != "" && (raw.K8s.Namespace != ns || raw.K8s.ServiceAccount.Name != name) {
 		return Claims{}, fmt.Errorf("%w: its subject and its kubernetes.io claims disagree", ErrNotServiceAccountToken)
 	}

@@ -126,6 +126,9 @@ func (s *BrokerSource) Acquire(ctx context.Context, projectID string) (*Credenti
 	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
 		ExecutorID: s.ExecutorID,
 		ProjectID:  projectID,
+		// The driver's own cluster credential: parsed here, used by this
+		// process to create Pods, and never handed to one (Task 20420).
+		KubeInProcess: true,
 	}, s.Actor)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes: lease kubeconfig: %w", err)

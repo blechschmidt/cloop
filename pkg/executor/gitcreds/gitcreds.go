@@ -129,6 +129,9 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 		ExecutorID:    executorID,
 		ProjectID:     executor.PolicyProjectPath(projectID),
 		GitHubProxied: proxied,
+		// Only a GitHub token is read out of this lease; a kubeconfig the
+		// same subjects hold is discarded, never handed on (Task 20420).
+		KubeInProcess: true,
 	}, s.Actor)
 	if err != nil {
 		return executor.WorkspaceAccess{}, noop, fmt.Errorf("gitcreds: lease for %s: %w", projectID, err)

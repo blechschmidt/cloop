@@ -149,7 +149,26 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 		SupersededBy:    g.SupersededBy,
 		SuspendedAt:     formatTime(g.SuspendedAt),
 		SuspendedBy:     g.SuspendedBy,
+		// Set on insert only; see SetUnguardedAck.
+		UnguardedAckAt:     formatTime(g.UnguardedAck.At),
+		UnguardedAckBy:     g.UnguardedAck.By,
+		UnguardedAckReason: g.UnguardedAck.Reason,
 	})
+}
+
+var _ secretbroker.UnguardedAcknowledger = (*Store)(nil)
+
+// SetUnguardedAck records, or with a zero ack clears, the unguarded
+// acknowledgement on grant id (secretbroker.UnguardedAcknowledger).
+func (s *Store) SetUnguardedAck(id string, ack secretbroker.UnguardedAck) error {
+	at := ""
+	if ack.Recorded() {
+		at = formatTime(ack.At)
+	}
+	if err := s.db.SetBrokerGrantUnguardedAck(id, at, ack.By, ack.Reason); err != nil {
+		return translateErr(err)
+	}
+	return nil
 }
 
 // GetGrant returns one grant by ID.
@@ -265,6 +284,9 @@ func toGrant(row statedb.BrokerGrantRow) (secretbroker.Grant, error) {
 		SupersededBy: row.SupersededBy,
 		SuspendedAt:  parseTime(row.SuspendedAt),
 		SuspendedBy:  row.SuspendedBy,
+		UnguardedAck: secretbroker.UnguardedAck{
+			At: parseTime(row.UnguardedAckAt), By: row.UnguardedAckBy, Reason: row.UnguardedAckReason,
+		},
 	}, nil
 }
 

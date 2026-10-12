@@ -397,6 +397,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// Global permissions gate the fleet-wide tabs (executors, global
 		// budget), which are not about the selected project.
 		"global_permissions": permissionStrings(s.permissionsFor(r, authz.GlobalScope).Permissions()),
+		// The key this caller's personal secrets are owned under, and the
+		// one the hub records as a Kubernetes share's owner: `cloop remote
+		// kube share` annotates the objects it creates with it, and revoke
+		// deletes only objects so annotated (Task 20420). The caller's own
+		// identity; empty where there is none.
+		"identity": s.secretViewer(r).Identity,
 	}
 	// The hub's state volume below its free-space floor (Task 20381), for the
 	// admin banner. Only for callers who may manage the hub: what it says is

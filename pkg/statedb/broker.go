@@ -67,6 +67,14 @@ type BrokerGrantRow struct {
 	// holding a copy read before the suspension cannot clear it by saving.
 	SuspendedAt string
 	SuspendedBy string
+	// UnguardedAckAt, UnguardedAckBy and UnguardedAckReason record an
+	// administrator's acknowledgement that a kubeconfig grant may be
+	// delivered without the Kubernetes access monitor (Task 20420, migration
+	// 0070). Written by SetBrokerGrantUnguardedAck alone: PutBrokerGrant sets
+	// them on insert and never on update.
+	UnguardedAckAt     string
+	UnguardedAckBy     string
+	UnguardedAckReason string
 }
 
 // PutBrokerSecret inserts or replaces a secret.
@@ -282,8 +290,9 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 	if _, err := d.conn.Exec(
 		`INSERT INTO broker_grants(id, secret_id, scope, subject_type, subject_value,
 		     constraints_json, expires_at, created_at, created_by, revoked_at, owner,
-		     revoked_cause, superseded_by, suspended_at, suspended_by)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		     revoked_cause, superseded_by, suspended_at, suspended_by,
+		     unguarded_ack_at, unguarded_ack_by, unguarded_ack_reason)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   secret_id=excluded.secret_id, scope=excluded.scope,
 		   subject_type=excluded.subject_type, subject_value=excluded.subject_value,
@@ -295,6 +304,7 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 		defaultJSON(row.ConstraintsJSON), row.ExpiresAt, row.CreatedAt,
 		row.CreatedBy, row.RevokedAt, row.Owner, row.RevokedCause, row.SupersededBy,
 		row.SuspendedAt, row.SuspendedBy,
+		row.UnguardedAckAt, row.UnguardedAckBy, row.UnguardedAckReason,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker grant %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -310,11 +320,13 @@ func (d *DB) GetBrokerGrant(id string) (BrokerGrantRow, error) {
 	err := d.conn.QueryRow(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
 		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
-		        superseded_by, suspended_at, suspended_by
+		        superseded_by, suspended_at, suspended_by,
+		        unguarded_ack_at, unguarded_ack_by, unguarded_ack_reason
 		 FROM broker_grants WHERE id = ?`, id,
 	).Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType, &row.SubjectValue,
 		&row.ConstraintsJSON, &row.ExpiresAt, &row.CreatedAt, &row.CreatedBy, &row.RevokedAt,
-		&row.Owner, &row.RevokedCause, &row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy)
+		&row.Owner, &row.RevokedCause, &row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy,
+		&row.UnguardedAckAt, &row.UnguardedAckBy, &row.UnguardedAckReason)
 	if err == sql.ErrNoRows {
 		return BrokerGrantRow{}, fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
 	}
@@ -336,7 +348,8 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 	rows, err := d.conn.Query(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
 		        expires_at, created_at, created_by, revoked_at, owner, revoked_cause,
-		        superseded_by, suspended_at, suspended_by
+		        superseded_by, suspended_at, suspended_by,
+		        unguarded_ack_at, unguarded_ack_by, unguarded_ack_reason
 		 FROM broker_grants ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker grants: %w", classifyDriverErr(err))
@@ -349,7 +362,8 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 		if err := rows.Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType,
 			&row.SubjectValue, &row.ConstraintsJSON, &row.ExpiresAt,
 			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt, &row.Owner, &row.RevokedCause,
-			&row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy); err != nil {
+			&row.SupersededBy, &row.SuspendedAt, &row.SuspendedBy,
+			&row.UnguardedAckAt, &row.UnguardedAckBy, &row.UnguardedAckReason); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker grant: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)
@@ -358,6 +372,26 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 		return nil, fmt.Errorf("statedb: list broker grants: %w", classifyDriverErr(err))
 	}
 	return out, nil
+}
+
+// SetBrokerGrantUnguardedAck records — or, with every argument empty, clears
+// — the unguarded acknowledgement on grant id (migration 0070). A grant that
+// does not exist is a wrapped ErrBrokerGrantNotFound.
+func (d *DB) SetBrokerGrantUnguardedAck(id, at, by, reason string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	res, err := d.conn.Exec(
+		`UPDATE broker_grants SET unguarded_ack_at = ?, unguarded_ack_by = ?, unguarded_ack_reason = ?
+		  WHERE id = ?`, at, by, reason, id)
+	if err != nil {
+		return fmt.Errorf("statedb: record the unguarded acknowledgement of broker grant %s: %w",
+			id, classifyDriverErr(err))
+	}
+	if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+		return fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
+	}
+	return nil
 }
 
 // RevokeBrokerGrant stamps a grant revoked.

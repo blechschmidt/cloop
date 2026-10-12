@@ -163,14 +163,20 @@ func (c *Client) Create(ctx context.Context, m Manifest) error {
 
 // ObjectMeta is the part of an object a share reads back.
 type ObjectMeta struct {
-	Name      string            `json:"name"`
-	Namespace string            `json:"namespace"`
-	UID       string            `json:"uid"`
-	Labels    map[string]string `json:"labels"`
+	Name            string            `json:"name"`
+	Namespace       string            `json:"namespace"`
+	UID             string            `json:"uid"`
+	ResourceVersion string            `json:"resourceVersion"`
+	Labels          map[string]string `json:"labels"`
+	Annotations     map[string]string `json:"annotations"`
 }
 
-// Get reads an object's metadata.
+// Get reads an object's metadata. An object that is not one a share could
+// have created is refused before any request is built from its name.
 func (c *Client) Get(ctx context.Context, o Object) (ObjectMeta, error) {
+	if !o.Valid() {
+		return ObjectMeta{}, fmt.Errorf("%s is not an object a share creates", o)
+	}
 	var out struct {
 		Metadata ObjectMeta `json:"metadata"`
 	}
@@ -179,7 +185,14 @@ func (c *Client) Get(ctx context.Context, o Object) (ObjectMeta, error) {
 }
 
 // Delete deletes one object. Gone already is success: revoke is idempotent.
+//
+// It deletes whatever the name holds. Only a share's own rollback, deleting
+// what it created a moment ago, may use it; revoke deletes through
+// DeleteExact, which names the object it read.
 func (c *Client) Delete(ctx context.Context, o Object) error {
+	if !o.Valid() {
+		return fmt.Errorf("%s is not an object a share creates", o)
+	}
 	err := c.do(ctx, http.MethodDelete, ObjectPath(o), nil,
 		map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background"}, nil)
 	if IsNotFound(err) {
@@ -188,10 +201,43 @@ func (c *Client) Delete(ctx context.Context, o Object) error {
 	return err
 }
 
-// ListLabelled lists the objects of o's kind in o's namespace (or cluster-wide
-// for a ClusterRoleBinding) that carry the share's label.
-func (c *Client) ListLabelled(ctx context.Context, kind, namespace, shareID string) ([]Object, error) {
+// DeleteExact deletes o only if it is still the object read as meta: the API
+// server checks the uid and resourceVersion preconditions and refuses (409) if
+// either changed — so an object swapped, relabelled or re-annotated after it
+// was checked is not the one deleted. Gone already is success.
+func (c *Client) DeleteExact(ctx context.Context, o Object, meta ObjectMeta) error {
+	if !o.Valid() {
+		return fmt.Errorf("%s is not an object a share creates", o)
+	}
+	if meta.UID == "" || meta.ResourceVersion == "" {
+		return fmt.Errorf("%s: the cluster reported no uid or resourceVersion to delete it by", o)
+	}
+	err := c.do(ctx, http.MethodDelete, ObjectPath(o), nil, map[string]any{
+		"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background",
+		"preconditions": map[string]any{"uid": meta.UID, "resourceVersion": meta.ResourceVersion},
+	}, nil)
+	if IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// Labelled is an object a labelled listing found, with its metadata as listed.
+type Labelled struct {
+	Object
+	Meta ObjectMeta
+}
+
+// ListLabelled lists the objects of a kind in namespace (or cluster-wide for a
+// ClusterRoleBinding) that carry the share's label, with their metadata.
+func (c *Client) ListLabelled(ctx context.Context, kind, namespace, shareID string) ([]Labelled, error) {
 	probe := Object{Kind: kind, Namespace: namespace}
+	if (kind == "ClusterRoleBinding") != (namespace == "") || (namespace != "" && !ValidNamespace(namespace)) {
+		return nil, fmt.Errorf("cannot list %s in namespace %q", kind, namespace)
+	}
+	if !shareIDPattern.MatchString(shareID) {
+		return nil, fmt.Errorf("%q is not a share id", shareID)
+	}
 	var out struct {
 		Items []struct {
 			Metadata ObjectMeta `json:"metadata"`
@@ -201,13 +247,13 @@ func (c *Client) ListLabelled(ctx context.Context, kind, namespace, shareID stri
 	if err := c.do(ctx, http.MethodGet, CollectionPath(probe), q, nil, &out); err != nil {
 		return nil, err
 	}
-	objs := make([]Object, 0, len(out.Items))
+	objs := make([]Labelled, 0, len(out.Items))
 	for _, it := range out.Items {
 		ns := it.Metadata.Namespace
 		if ns == "" {
 			ns = namespace
 		}
-		objs = append(objs, Object{Kind: kind, Namespace: ns, Name: it.Metadata.Name})
+		objs = append(objs, Labelled{Object: Object{Kind: kind, Namespace: ns, Name: it.Metadata.Name}, Meta: it.Metadata})
 	}
 	return objs, nil
 }

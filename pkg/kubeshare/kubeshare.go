@@ -40,6 +40,8 @@
 package kubeshare
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -138,12 +140,39 @@ const (
 	MetaRenewError   = "kube.renew_error"
 	MetaRenewErrorAt = "kube.renew_error_at"
 	// MetaRenewState is "lapsed" once the token expired with no renewal: the
-	// hub cannot renew it any more, only its owner can.
+	// hub cannot renew it any more, only its owner can — or "stopped" while
+	// the hub refuses to renew it because its owner is denied on the hub.
 	MetaRenewState = "kube.renew_state"
+	// MetaOwner is who made the share: the hub identity that uploaded it, as
+	// the hub's owner key (a lowercased email, or "sub:" and the subject).
+	// Written by the hub, never taken from the client (Task 20420): revoke
+	// and renew act only on cluster objects whose owner annotation names it.
+	MetaOwner = "kube.owner"
+	// MetaCA is the SHA-256 of the cluster CA the share's kubeconfig trusts,
+	// hex, or CANone when it carries none. Written by the hub from the
+	// kubeconfig itself: renew and revoke refuse a local context that trusts
+	// another.
+	MetaCA = "kube.ca_sha256"
 )
 
-// RenewStateLapsed is MetaRenewState's one value.
-const RenewStateLapsed = "lapsed"
+// MetaRenewState's values.
+const (
+	RenewStateLapsed  = "lapsed"
+	RenewStateStopped = "stopped"
+)
+
+// CANone is MetaCA for a kubeconfig that names no CA of its own and trusts
+// the system's.
+const CANone = "none"
+
+// CAFingerprint is MetaCA for a kubeconfig carrying caData.
+func CAFingerprint(caData []byte) string {
+	if len(caData) == 0 {
+		return CANone
+	}
+	sum := sha256.Sum256(caData)
+	return hex.EncodeToString(sum[:])
+}
 
 // maxMetaValue bounds a metadata value the hub writes from an error.
 const maxMetaValue = 300
@@ -184,6 +213,15 @@ type Share struct {
 	RenewError     string
 	RenewErrorAt   time.Time
 	Lapsed         bool
+	// Stopped is a share the hub will not renew while its owner is denied
+	// on the hub — suspended, or offboarded with its secret kept under a
+	// legal hold (Task 20420). RenewError says why.
+	Stopped bool
+	// Owner is MetaOwner: who made the share, as the hub recorded it.
+	Owner string
+	// CAFingerprint is MetaCA; empty for a share uploaded before the hub
+	// recorded it, which renew and revoke cannot check a context against.
+	CAFingerprint string
 }
 
 // IsShare reports whether metadata marks a kubeconfig secret as a share.
@@ -197,14 +235,17 @@ func FromMetadata(meta map[string]string) (Share, bool) {
 		return Share{}, false
 	}
 	s := Share{
-		ID:         strings.TrimSpace(meta[MetaShare]),
-		Renewal:    Renewal(strings.TrimSpace(meta[MetaRenewal])),
-		Access:     Access(strings.TrimSpace(meta[MetaAccess])),
-		Server:     strings.TrimSpace(meta[MetaServer]),
-		Context:    strings.TrimSpace(meta[MetaContext]),
-		RenewedBy:  strings.TrimSpace(meta[MetaRenewedBy]),
-		RenewError: strings.TrimSpace(meta[MetaRenewError]),
-		Lapsed:     strings.TrimSpace(meta[MetaRenewState]) == RenewStateLapsed,
+		ID:            strings.TrimSpace(meta[MetaShare]),
+		Renewal:       Renewal(strings.TrimSpace(meta[MetaRenewal])),
+		Access:        Access(strings.TrimSpace(meta[MetaAccess])),
+		Server:        strings.TrimSpace(meta[MetaServer]),
+		Context:       strings.TrimSpace(meta[MetaContext]),
+		RenewedBy:     strings.TrimSpace(meta[MetaRenewedBy]),
+		RenewError:    strings.TrimSpace(meta[MetaRenewError]),
+		Lapsed:        strings.TrimSpace(meta[MetaRenewState]) == RenewStateLapsed,
+		Stopped:       strings.TrimSpace(meta[MetaRenewState]) == RenewStateStopped,
+		Owner:         strings.TrimSpace(meta[MetaOwner]),
+		CAFingerprint: strings.TrimSpace(meta[MetaCA]),
 	}
 	if s.Renewal != RenewalHub {
 		s.Renewal = RenewalManual
@@ -324,6 +365,26 @@ func RecordFailure(meta map[string]string, reason string, at time.Time, lapsed b
 	}
 }
 
+// RecordStopped stamps a share the hub stopped renewing, and why: its owner
+// is denied on the hub (Task 20420). A lapsed share stays lapsed.
+func RecordStopped(meta map[string]string, reason string, at time.Time) {
+	meta[MetaRenewError] = FailureText(reason)
+	meta[MetaRenewErrorAt] = at.UTC().Format(time.RFC3339)
+	if meta[MetaRenewState] != RenewStateLapsed {
+		meta[MetaRenewState] = RenewStateStopped
+	}
+}
+
+// ClearStopped takes RecordStopped back, for an owner no longer denied.
+func ClearStopped(meta map[string]string) {
+	if meta[MetaRenewState] != RenewStateStopped {
+		return
+	}
+	delete(meta, MetaRenewState)
+	delete(meta, MetaRenewError)
+	delete(meta, MetaRenewErrorAt)
+}
+
 // FailureText is a renewal failure as RecordFailure stores it: trimmed and
 // bounded, so a caller can tell whether the stored one already says it.
 func FailureText(reason string) string {
@@ -347,6 +408,99 @@ type Object struct {
 	Kind      string // ServiceAccount, RoleBinding, Role, ClusterRoleBinding
 	Namespace string // empty for a ClusterRoleBinding
 	Name      string
+}
+
+// Valid reports whether o is an object a share could have created: one of its
+// four kinds, named as a share names things, in a namespace exactly when its
+// kind lives in one. Every path revoke builds from an object goes through
+// this, so a name carrying "/" or ".." can never steer a request elsewhere.
+func (o Object) Valid() bool {
+	if !ValidServiceAccountName(o.Name) {
+		return false
+	}
+	switch o.Kind {
+	case "ServiceAccount", "RoleBinding", "Role":
+		return ValidNamespace(o.Namespace)
+	case "ClusterRoleBinding":
+		return o.Namespace == ""
+	}
+	return false
+}
+
+// ExpectedObjects lists what a share's plan creates, derived from its
+// ServiceAccount, namespaces and renewal rather than read from MetaObjects —
+// the list the hub records for a share it has checked (Task 20420), and the
+// first thing revoke looks for.
+func (s Share) ExpectedObjects() []Object {
+	if !ValidNamespace(s.Namespace) || !ValidServiceAccountName(s.ServiceAccount) {
+		return nil
+	}
+	return planObjects(s.Namespace, s.ServiceAccount, s.ClusterWide, s.Namespaces, s.Renewal)
+}
+
+// OwnerMatches reports whether an object's owner annotation names owner, the
+// hub's record of who made the share (MetaOwner).
+//
+// The annotation is written by the terminal that made the share: since Task
+// 20420 the hub's own owner key, from /api/me; before that the email as the
+// identity provider spelled it, or the bare subject. All three compare equal
+// to the owner key they stand for. A share with no recorded owner — made on a
+// hub with no identity provider — matches only an object carrying none.
+func OwnerMatches(annotation, owner string) bool {
+	a, o := strings.TrimSpace(annotation), strings.TrimSpace(owner)
+	if o == "" || a == "" {
+		return o == a
+	}
+	want := secretbroker.NormalizeOwner(o)
+	if secretbroker.NormalizeOwner(a) == want {
+		return true
+	}
+	return !strings.Contains(a, "@") && !strings.HasPrefix(strings.ToLower(a), "sub:") && "sub:"+a == want
+}
+
+// SameCluster refuses a context that does not reach the share's cluster: its
+// API server differs, or it trusts another CA (Task 20420). Renew and revoke act
+// with the developer's own credentials, and the share's metadata — which names
+// the context they default to — is its uploader's; acting on another cluster,
+// or on the right URL through a TLS chain the share does not trust, is what
+// this stops.
+func (s Share) SameCluster(server string, caData []byte) error {
+	if s.CAFingerprint == "" {
+		return fmt.Errorf("the hub has no record of which CA this share's cluster presents (it was shared " +
+			"before the hub recorded one), so no context can be checked against it; share the cluster again")
+	}
+	if normalizeServer(server) != normalizeServer(s.Server) {
+		return fmt.Errorf("the context reaches %s, and the share is for %s: refusing to act on a cluster other "+
+			"than the share's with your credentials — pass --context naming a context for %s", server, s.Server,
+			s.Server)
+	}
+	if got := CAFingerprint(caData); got != s.CAFingerprint {
+		return fmt.Errorf("the context trusts another CA for %s than the share's kubeconfig does (%s, not %s): "+
+			"refusing to act with your credentials on a server the share would not trust", s.Server,
+			shortFingerprint(got), shortFingerprint(s.CAFingerprint))
+	}
+	return nil
+}
+
+// normalizeServer compares API server URLs the way a client reaches them:
+// scheme and host case-folded, a trailing slash dropped.
+func normalizeServer(u string) string {
+	u = strings.TrimRight(strings.TrimSpace(u), "/")
+	if scheme, rest, ok := strings.Cut(u, "://"); ok {
+		host, path, _ := strings.Cut(rest, "/")
+		u = strings.ToLower(scheme) + "://" + strings.ToLower(host)
+		if path != "" {
+			u += "/" + path
+		}
+	}
+	return u
+}
+
+func shortFingerprint(fp string) string {
+	if len(fp) > 12 {
+		return fp[:12] + "…"
+	}
+	return fp
 }
 
 func (o Object) String() string {

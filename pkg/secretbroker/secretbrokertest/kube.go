@@ -145,6 +145,11 @@ type KubeGrant struct {
 	Secret      string
 	Kubeconfig  []byte
 	Constraints secretbroker.Constraints
+	// Unacknowledged leaves the grant without the unguarded acknowledgement
+	// KubeLease otherwise records on it, so a grant the monitor does not
+	// hold is refused (secretbroker.ErrKubeConstraintsUnenforced) the way it
+	// is on a hub where nobody acknowledged it.
+	Unacknowledged bool
 }
 
 // KubeProject and KubeExecutor are the requester KubeLease leases for.
@@ -156,6 +161,12 @@ const (
 // KubeLease issues a lease of grants to KubeProject on KubeExecutor, through a
 // broker over a fresh in-memory store whose Kubernetes monitor is guard (nil
 // for none). It returns the broker too, for a test that withdraws or renews.
+//
+// Every grant claiming something only the monitor enforces carries an
+// unguarded acknowledgement (Task 20420) unless it is Unacknowledged: the tests
+// using this are about how a lease renders and merges where the monitor does
+// not hold a grant, and without one such a grant is not delivered at all. The
+// refusal itself is pkg/secretbroker's to test.
 func KubeLease(t testing.TB, guard secretbroker.KubeGuard, grants ...KubeGrant) (*secretbroker.Broker, *secretbroker.Lease) {
 	t.Helper()
 	key := make([]byte, 32)
@@ -187,10 +198,17 @@ func KubeLease(t testing.TB, guard secretbroker.KubeGuard, grants ...KubeGrant) 
 			id = s.ID
 			ids[g.Secret] = id
 		}
-		if _, err := b.Grant(ctx, secretbroker.GrantRequest{SecretRef: id,
+		grant, err := b.Grant(ctx, secretbroker.GrantRequest{SecretRef: id,
 			Subject:     secretbroker.Subject{Type: secretbroker.SubjectProject, Value: KubeProject},
-			Constraints: g.Constraints, TTL: time.Hour, Actor: "test"}); err != nil {
+			Constraints: g.Constraints, TTL: time.Hour, Actor: "test"})
+		if err != nil {
 			t.Fatalf("grant %s: %v", g.Secret, err)
+		}
+		if !g.Unacknowledged && len(g.Constraints.KubeMonitorOnly()) > 0 {
+			if _, err := b.AcknowledgeUnguarded(ctx, secretbroker.UnguardedAckRequest{GrantID: grant.ID,
+				Actor: "admin@example.com", Reason: "a test cluster"}); err != nil {
+				t.Fatalf("acknowledge %s: %v", g.Secret, err)
+			}
 		}
 	}
 	lease, err := b.LeaseFor(ctx, secretbroker.Requester{ExecutorID: KubeExecutor, ProjectID: KubeProject}, "test")

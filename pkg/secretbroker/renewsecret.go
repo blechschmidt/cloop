@@ -132,6 +132,19 @@ func (b *Broker) RenewSecret(ctx context.Context, req RenewSecretRequest) (Secre
 	return updated, nil
 }
 
+// RefuseRenewal records, as a secret.renew deny row, that a credential was
+// not renewed and why — for a renewal refused before any attempt was made,
+// such as a Kubernetes share whose owner the hub now denies (Task 20420).
+func (b *Broker) RefuseRenewal(ref, actor, reason string) error {
+	ev := Event{Action: ActionRenew, Actor: actor}
+	s, err := resolveSecret(b.store, ref)
+	if err != nil {
+		return b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", SafeRef(ref), err)
+	}
+	ev.SecretID, ev.SecretName, ev.Kind = s.ID, s.Name, s.Kind
+	return b.denyf(ev, ErrRenewalStopped, "%s", reason)
+}
+
 // UpdateSecretMetadata rewrites a secret's metadata, leaving its payload as it
 // is: bookkeeping a renewal keeps about itself, such as why the last attempt
 // failed. It is not audited; what it records is.

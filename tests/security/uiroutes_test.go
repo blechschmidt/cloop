@@ -440,6 +440,14 @@ func TestSecretsAPIViewStructsCarryNoMaterialField(t *testing.T) {
 			// credential material, and is the one thing on the row that
 			// distinguishes a bounded PAT from a broad one.
 			"enforcement": true,
+			// Reviewed (Task 20420): what becomes of a kubeconfig grant on this
+			// hub — a fixed vocabulary ("monitor", "refused", "acknowledged",
+			// ...) derived from whether the monitor runs and from the grant's
+			// constraints — and the administrator's acknowledgement behind
+			// "acknowledged": a time, an identity and the sentence they wrote.
+			// Neither can hold credential material.
+			"kube_delivery": true,
+			"unguarded_ack": true,
 		},
 	}
 	lists := map[string]string{"/api/secrets": "secrets", "/api/grants": "grants"}

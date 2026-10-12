@@ -118,6 +118,10 @@ type Material struct {
 	// create its own tokens (kubeshare.go): delivered through the Kubernetes
 	// monitor or not at all.
 	kubeSelfRenewing bool
+	// kubeUnguardedAck is the grant's unguarded acknowledgement (Task 20420):
+	// what lets a kubeconfig whose constraints only the monitor enforces be
+	// delivered without it.
+	kubeUnguardedAck UnguardedAck
 }
 
 // GitHubTokenExpiresAt reports when the GitHub token this material carries

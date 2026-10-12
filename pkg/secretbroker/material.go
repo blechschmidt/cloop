@@ -73,6 +73,7 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		// Read from the stored metadata, so it holds for every delivery of the
 		// secret whoever minted it.
 		kubeSelfRenewing: SelfRenewingKubeconfig(s),
+		kubeUnguardedAck: g.UnguardedAck,
 	}
 
 	switch s.Kind {
@@ -547,6 +548,16 @@ func deliverGitHubToken(mat Material, token string) (Material, error) {
 // default and the verb allowlist starts existing at all — so it is tried
 // first, and a guard that fails takes the lease with it rather than falling
 // back to handing over the cluster credential. See kubeguard.go.
+//
+// Without a monitor the minimised document is all there is, and it carries
+// only the contexts. So a grant that claims more — namespaces, or verbs short
+// of all of them — is refused (ErrKubeConstraintsUnenforced, Task 20420), the
+// way a GitHub branch allowlist is refused without the git proxy: delivering
+// it would hand the workload whatever the kubeconfig's identity may do while
+// the grant says otherwise. The one way past is an administrator's recorded
+// acknowledgement on the grant, which the summary and the audit row repeat.
+// A lease whose kubeconfig never leaves the hub (Requester.KubeInProcess) is
+// no delivery to a workload, and is not refused.
 func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byte) (Material, error) {
 	minimized, err := MinimizeKubeconfig(plaintext, mat.Constraints)
 	if err != nil {
@@ -590,6 +601,25 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 			ErrGuardUnavailable, mat.SecretName)
 	}
 
+	unguarded := ""
+	if !guarded.Guarded() && !mat.requester.KubeInProcess {
+		if claims := mat.Constraints.KubeMonitorOnly(); len(claims) > 0 {
+			ack := mat.kubeUnguardedAck
+			if !ack.Recorded() {
+				return Material{}, wrapf(ErrKubeConstraintsUnenforced,
+					"grant %s limits kubeconfig %s to %s, which only cloop's Kubernetes access monitor "+
+						"enforces, and this hub runs none: without it a namespace is only kubectl's default "+
+						"and verbs are not checked at all, so the workload would hold everything the "+
+						"kubeconfig's identity may do. It is not delivered — enable executors.kube_guard "+
+						"(enabled: true, tls: auto), or have an administrator acknowledge delivering it "+
+						"unenforced with `cloop hub grant unguarded %s --reason <why>`",
+					mat.GrantID, mat.SecretName, strings.Join(claims, " and "), mat.GrantID)
+			}
+			unguarded = fmt.Sprintf(" (unguarded: %s not enforced, acknowledged by %s on %s)",
+				strings.Join(claims, " and "), ack.By, ack.At.UTC().Format("2006-01-02"))
+		}
+	}
+
 	// One file under a fixed name. A lease carrying several kubeconfig grants
 	// merges their documents into one at render (kubemulti.go).
 	mat.Files = []File{{
@@ -616,7 +646,7 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 	// the delivered one: under a guard the delivered kubeconfig names one
 	// synthetic context pointing at the monitor, and an audit row saying
 	// "contexts: cloop" would describe the plumbing instead of the access.
-	mat.Summary = "kubeconfig " + access + " contexts: " + KubeconfigSummary(minimized)
+	mat.Summary = "kubeconfig " + access + " contexts: " + KubeconfigSummary(minimized) + unguarded
 
 	if guarded.Guarded() {
 		mat.Env[KubeGuardSessionEnvKey] = guarded.SessionID

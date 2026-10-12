@@ -635,6 +635,27 @@ var registry = []Entry{
 		Note:      "Its own action rather than a flavour of deny: denied is an answer, expired is the absence of one, and conflating them hides a queue nobody is working.",
 	},
 	{
+		Action:    ActionSecretUnguardedAck,
+		Home:      HomeControlPlane,
+		Entity:    "secret",
+		Trigger:   "An administrator records that a kubeconfig grant whose namespaces or verbs only the Kubernetes access monitor enforces may be delivered on a hub that runs no monitor — or the attempt is refused.",
+		Payload:   secretPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Without it such a grant is refused at every lease (Task 20420). `reason` names what goes unenforced and " +
+			"the administrator's own justification; `grant_id` the grant, which carries the acknowledgement until it " +
+			"is withdrawn.",
+	},
+	{
+		Action:    ActionSecretUnguardedWithdraw,
+		Home:      HomeControlPlane,
+		Entity:    "secret",
+		Trigger:   "An unguarded acknowledgement on a kubeconfig grant is withdrawn, so the grant is refused again on a hub with no Kubernetes access monitor.",
+		Payload:   secretPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
 		Action:    ActionSecretLeaseSweep,
 		Home:      HomeControlPlane,
 		Entity:    "secret",
@@ -896,11 +917,11 @@ var registry = []Entry{
 		Action:    ActionKubeGuardRequestDenied,
 		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
-		Trigger:   "A Kubernetes request is refused by the session's verb and resource policy.",
+		Trigger:   "A Kubernetes request is refused by the session's verb and resource policy, or because it would hand the workload a credential of its own.",
 		Payload:   kubeGuardPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "This is what enforces a read-only grant on a cluster from outside the sandbox: `verb`, `resource` and `namespace` say exactly what was attempted.",
+		Note:      "This is what enforces a read-only grant on a cluster from outside the sandbox: `verb`, `resource` and `namespace` say exactly what was attempted. `reason` classifies it; `service_account_token_secret`, `workload_service_account`, `host_access`, `rbac_binding`, `rbac_role`, `certificate_signing_request` and `unreadable_body` are a write grant's attempts to obtain a credential that would bypass the monitor (Task 20420).",
 	},
 	{
 		Action:    ActionKubeGuardRequestAllowed,

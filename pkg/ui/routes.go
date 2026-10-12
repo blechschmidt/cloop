@@ -1045,6 +1045,11 @@ func (s *Server) routeTable() []routeSpec {
 		// exactly as the DELETE above is — a personal share by its owner, a
 		// shared one by secret.grant — see kubeshare.go.
 		{Pattern: "POST /api/secrets/{id}/renew", Handler: s.handleSecretRenew, Perm: secOwn, Scope: scopeGlobal},
+		// Whether the caller may delete a secret, or renew a share, asked by
+		// `cloop remote kube revoke` and `renew` before they touch the
+		// cluster with the caller's own credentials (Task 20420). Narrowed in
+		// the handler by the predicates the DELETE and the renewal apply.
+		{Pattern: "GET /api/secrets/{id}/authorize", Handler: s.handleSecretAuthorize, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
@@ -1052,6 +1057,14 @@ func (s *Server) routeTable() []routeSpec {
 		// (Task 20403): narrowed in the handler to grants the caller may
 		// revoke, as the DELETE above is.
 		{Pattern: "GET /api/grants/{id}/holders", Handler: s.handleGrantHolders, Perm: secOwn, Scope: scopeGlobal},
+		// An administrator's acknowledgement that a kubeconfig grant may be
+		// delivered without the Kubernetes access monitor (Task 20420), and
+		// its withdrawal. Admin-only — user.manage, the permission that
+		// administers access itself — because it decides that a grant's
+		// holders get more than the grant says: without the monitor its
+		// namespaces and verbs are not enforced. See unguarded_api.go.
+		{Pattern: "POST /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedAck, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedWithdraw, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		// Connecting a GitHub App (Task 20306). Discovery takes a private key

@@ -263,11 +263,16 @@ func TestRevokeOfAShareTheHubNoLongerHasSaysHowToFindItsObjects(t *testing.T) {
 	}
 	for _, want := range []string{
 		`holds no secret named "aks-dev"`,
-		"kubectl get serviceaccounts -A -l app.kubernetes.io/managed-by=cloop",
-		"kubectl delete serviceaccount,rolebinding,role -A -l cloop.dev/kube-share=<SHARE>",
+		"kubectl get serviceaccounts,rolebindings,roles -A -l app.kubernetes.io/managed-by=cloop",
+		`OWNER:.metadata.annotations.cloop\.dev/owner`,
+		"delete the ones whose OWNER is you, by name",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q:\n%v", want, err)
 		}
+	}
+	// Never a delete by label, which would take what anybody labelled.
+	if strings.Contains(err.Error(), "delete serviceaccount,rolebinding,role -A -l") {
+		t.Errorf("the advice deletes by label:\n%v", err)
 	}
 }

@@ -1250,8 +1250,8 @@ cloop remote kube revoke <name> [--force] [--context <ctx>] [--kubeconfig <file>
 |------------|-------|------------|
 | `share` | the cluster as you; then `GET /api/secrets`, `POST /api/secrets` | `secret.own` (`secret.grant` with `--shared`) |
 | `list` | `GET /api/secrets` | `secret.own` |
-| `renew` | `POST /api/secrets/{id}/renew` — empty for the hub to renew it now, or with a token minted here | `secret.own`, the share's owner |
-| `revoke` | the cluster as you; then `DELETE /api/secrets/{id}` | `secret.own`, the share's owner |
+| `renew` | `POST /api/secrets/{id}/renew` — empty for the hub to renew it now; or `GET /api/secrets/{id}/authorize`, the cluster as you, then the renew with a token minted here and the server and CA it was minted at | `secret.own`, the share's owner |
+| `revoke` | `GET /api/secrets/{id}/authorize`; the cluster as you; then `DELETE /api/secrets/{id}` | `secret.own`, the share's owner |
 
 - **Write access** (`--access write`) needs `--sa-namespace`, a namespace outside
   `--namespaces`: `edit` can mint a ServiceAccount's credential in its own
@@ -1262,9 +1262,42 @@ cloop remote kube revoke <name> [--force] [--context <ctx>] [--kubeconfig <file>
   subresource to every sandbox. Elsewhere, or with `manual`, `renew` mints the next
   token with your credentials and the hub checks it with the cluster.
 - **`--ttl`** is 10m to 7d; a cluster that caps it is reported.
-- **`revoke`** deletes the ServiceAccount first, then its bindings, then the
-  hub's secret; `--force` deletes the secret even when the cluster's objects
-  could not be.
+- **`revoke`** asks the hub first, then deletes the ServiceAccount, then its
+  bindings, then the hub's secret — and in the cluster only objects it reads
+  back with the share's label and its owner's annotation, by uid and
+  resourceVersion; the rest are reported and left (Task 20420). `--force`
+  deletes the secret even when the cluster's objects could not be.
+- **The context** (`--context`, by default the one the share was made from) must
+  reach the share's own API server through the CA the share trusts, or `renew`
+  and `revoke` refuse. `renew` mints only for the share's own ServiceAccount, read
+  back the same way, and the hub sends the token only to the server that minted
+  it.
+
+### `cloop hub grant`
+
+Self-service access requests, and the grants they become (Task 20271). Run on the
+hub's host, or with `--workdir` naming the hub's directory.
+
+```bash
+cloop hub grant request <secret> --to project:<path> --why "…" [constraint flags] [--ttl 8h] [--wait 72h]
+cloop hub grant list [--state pending|approved|denied|withdrawn|expired] [--mine] [--uses] [--grants] [--json]
+cloop hub grant approve <request-id> [--ttl <d>] [--reason "…"] [--fleet-wide]
+cloop hub grant deny <request-id> --reason "…" | --withdraw
+cloop hub grant unguarded <grant-id> --reason "…" | --withdraw
+```
+
+- **`list`** prints the request queue, then every kubeconfig grant delivered
+  without the Kubernetes access monitor on an administrator's acknowledgement —
+  who, when, why — and how many are refused for want of the monitor. `--grants`
+  lists the active grants instead, with what each kubeconfig grant amounts to on
+  a hub with no monitor.
+- **`unguarded`** (Task 20420) records that a kubeconfig grant naming namespaces,
+  or fewer than every verb, may be delivered on a hub that runs no monitor, where
+  it is otherwise refused: its namespaces become only `kubectl`'s default and its
+  verbs go unchecked. `--reason` is required; the acknowledgement is stored on
+  the grant, audited as `secret.unguarded_ack`, and shown in the Secrets panel,
+  `list` and `cloop hub doctor`. `--withdraw` takes it back. A share the hub
+  renews cannot be acknowledged.
 
 ### `cloop hub`
 

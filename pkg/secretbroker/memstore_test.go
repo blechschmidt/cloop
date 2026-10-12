@@ -350,3 +350,16 @@ func (m *memStore) ListRequestUses(requestID string) ([]RequestUse, error) {
 	}
 	return out, nil
 }
+
+// SetUnguardedAck implements UnguardedAcknowledger (Task 20420).
+func (m *memStore) SetUnguardedAck(id string, ack UnguardedAck) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g, ok := m.grants[id]
+	if !ok {
+		return wrapf(ErrGrantNotFound, "%s", id)
+	}
+	g.UnguardedAck = ack
+	m.grants[id] = g
+	return nil
+}

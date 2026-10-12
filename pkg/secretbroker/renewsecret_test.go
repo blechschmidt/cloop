@@ -185,20 +185,25 @@ func (acceptAll) GuardKubeconfig(_ context.Context, req KubeGuardRequest) (KubeG
 // TestSelfRenewingShareIsDeliveredOnlyThroughTheMonitor: a share the hub
 // renews holds a ServiceAccount that may create its own tokens, so handing
 // its kubeconfig to a workload as a file would hand over a credential that
-// extends itself. Without a monitor it is refused — named on the lease — and a
-// manually renewed share, which has no such permission, is delivered as before.
+// extends itself. Without a monitor it is refused — named on the lease — and
+// no acknowledgement changes that. A manually renewed share, which has no
+// such permission, is delivered without a monitor only on an administrator's
+// acknowledgement, like any grant whose namespaces only the monitor enforces
+// (Task 20420).
 func TestSelfRenewingShareIsDeliveredOnlyThroughTheMonitor(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		renewal   string
 		guard     KubeGuard
+		ack       bool
 		delivered bool
 		refused   string
 	}{
-		{"hub-renewed, no monitor", KubeShareRenewalHub, nil, false, "delivered only through the Kubernetes access monitor"},
-		{"hub-renewed, monitor declines", KubeShareRenewalHub, declineAll{}, false, "delivered only through the Kubernetes access monitor"},
-		{"hub-renewed, monitored", KubeShareRenewalHub, acceptAll{}, true, ""},
-		{"manually renewed, no monitor", "manual", nil, true, ""},
+		{"hub-renewed, no monitor", KubeShareRenewalHub, nil, false, false, "delivered only through the Kubernetes access monitor"},
+		{"hub-renewed, monitor declines", KubeShareRenewalHub, declineAll{}, false, false, "delivered only through the Kubernetes access monitor"},
+		{"hub-renewed, monitored", KubeShareRenewalHub, acceptAll{}, false, true, ""},
+		{"manually renewed, no monitor", "manual", nil, false, false, "only cloop's Kubernetes access monitor enforces"},
+		{"manually renewed, no monitor, acknowledged", "manual", nil, true, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, _, _, _ := newTestBroker(t)
@@ -207,10 +212,14 @@ func TestSelfRenewingShareIsDeliveredOnlyThroughTheMonitor(t *testing.T) {
 			if tc.guard != nil {
 				b.KubeGuard = tc.guard
 			}
-			if _, err := b.Grant(ctx, GrantRequest{SecretRef: sec.ID, Subject: Subject{Type: SubjectProject, Value: "/srv/app"},
+			g, err := b.Grant(ctx, GrantRequest{SecretRef: sec.ID, Subject: Subject{Type: SubjectProject, Value: "/srv/app"},
 				Constraints: Constraints{Namespaces: []string{"team-a"}}, TTL: time.Hour, Actor: "alice@example.com",
-				Viewer: Viewer{Identity: "alice@example.com"}}); err != nil {
+				Viewer: Viewer{Identity: "alice@example.com"}})
+			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.ack {
+				ackUnguarded(t, b, g.ID)
 			}
 			lease, err := b.LeaseFor(ctx, Requester{ExecutorID: "e1", ProjectID: "/srv/app"}, "test")
 			if tc.delivered {

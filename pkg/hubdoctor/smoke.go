@@ -755,12 +755,17 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	grant, err := broker.Grant(ctx, secretbroker.GrantRequest{
 		SecretRef: secret.ID,
 		Subject:   secretbroker.Subject{Type: secretbroker.SubjectExecutor, Value: ex.ID()},
-		// The constraints are what make the kubeconfig renderable at all —
-		// minimization drops every context the grant does not name — and
-		// they double as proof that constraint evaluation runs on this path.
+		// The context is what makes the kubeconfig renderable at all —
+		// minimization drops every context the grant does not name — and it
+		// doubles as proof that constraint evaluation runs on this path.
+		//
+		// Every verb and no namespace list, because this process runs no
+		// Kubernetes access monitor — that lives in the hub — and a grant
+		// claiming either is not delivered without one (Task 20420). The
+		// credential reaches nothing, so there is nothing to confine.
 		Constraints: secretbroker.Constraints{
-			Contexts:   []string{smokeContext},
-			Namespaces: []string{smokeContext},
+			Contexts: []string{smokeContext},
+			Verbs:    smokeKubeVerbs,
 		},
 		TTL:   smokeLeaseTTL,
 		Actor: "hub-doctor-smoke",
@@ -864,6 +869,10 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 		fmt.Sprintf("minted, granted and leased a throwaway credential (TTL %s)", smokeLeaseTTL),
 		"")
 }
+
+// smokeKubeVerbs is every verb: what the smoke's grant claims, so that no
+// monitor is needed to honour it.
+var smokeKubeVerbs = []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
 
 // smokeContext is the single context name the throwaway kubeconfig carries.
 const smokeContext = "cloop-smoke"
