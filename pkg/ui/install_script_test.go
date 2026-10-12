@@ -20,12 +20,15 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
+	"github.com/blechschmidt/cloop/pkg/upgrade"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // installScriptRequest builds a request for /install.sh as a reverse proxy on
@@ -457,5 +460,111 @@ func TestTransportPinToleratesAnUnreadableCertificate(t *testing.T) {
 	s.handleInstallScript(rr, installScriptRequest(http.MethodGet, true))
 	if rr.Code != http.StatusOK {
 		t.Errorf("GET /install.sh with an unreadable certificate = %d, want 200", rr.Code)
+	}
+}
+
+// ── What the installer installs (Task 20421) ─────────────────────────────────
+
+// enrollOverHTTPS mints an enrollment through a trusted proxy's HTTPS leg and
+// returns the response.
+func enrollOverHTTPS(t *testing.T) enrollResponse {
+	t.Helper()
+	dir := setupProjectDir(t, "enroll source", nil)
+	srv := New(dir, 0, "")
+	srv.AllowedHosts = []string{"cloop.example.com"}
+	ts := newTestServerFor(t, srv)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/executors/enroll", strings.NewReader(`{"name":"edge-3"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "cloop.example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST enroll: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST enroll = %d", resp.StatusCode)
+	}
+	var got enrollResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// TestExecutorEnroll_HandsOutTheHubsOwnSignedBuild: a hub running a build of
+// main that CI published hands out that build, with --channel edge written in
+// the command the operator runs; the script it serves names the build and the
+// hub's protocol, which it holds every binary to.
+func TestExecutorEnroll_HandsOutTheHubsOwnSignedBuild(t *testing.T) {
+	withHubVersion(t, "dev+ga0f3870")
+	withEdgeResolution(t, published(remote.ProtocolVersion))
+
+	got := enrollOverHTTPS(t)
+	if !strings.HasSuffix(got.InstallCommand, `install.sh)" install.sh --channel edge`) {
+		t.Errorf("the command does not install the hub's build on the edge channel:\n  %s", got.InstallCommand)
+	}
+	if got.InstallChannel != "edge" || got.InstallStopped {
+		t.Errorf("install_channel = %q, stopped = %t; want edge, not stopped", got.InstallChannel, got.InstallStopped)
+	}
+	if !strings.Contains(got.InstallNote, "CI signed and published (commit a0f3870") {
+		t.Errorf("the note does not say what the command installs: %q", got.InstallNote)
+	}
+
+	rr := httptest.NewRecorder()
+	(&Server{WorkDir: t.TempDir()}).handleInstallScript(rr, installScriptRequest(http.MethodGet, true))
+	body := rr.Body.String()
+	for _, want := range []string{
+		"\nCLOOP_EDGE_COMMIT=" + hubCommit + "\n",
+		"\nCLOOP_HUB_VERSION=dev+ga0f3870\n",
+		"\nCLOOP_HUB_PROTOCOL=" + strconv.Itoa(remote.ProtocolVersion) + "\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh does not carry %q", strings.TrimSpace(want))
+		}
+	}
+}
+
+// TestExecutorEnroll_WithoutASignedBuildInstallsTheLatestRelease: until CI has
+// published the hub's build, the command installs the latest release with no
+// channel flag, the served script says why --channel edge has nothing to
+// install, and — the hub being ahead of every release it knows of — the note
+// warns that the installer will stop at its protocol check.
+func TestExecutorEnroll_WithoutASignedBuildInstallsTheLatestRelease(t *testing.T) {
+	withHubVersion(t, "dev+ga0f3870")
+	withEdgeResolution(t, unpublished(upgrade.EdgeCIRunning))
+	newest, ok := version.NewestPublishedRelease()
+	if !ok {
+		t.Skip("this build knows of no published release")
+	}
+
+	got := enrollOverHTTPS(t)
+	if strings.Contains(got.InstallCommand, "--channel") {
+		t.Errorf("the command names a channel with no edge build to install:\n  %s", got.InstallCommand)
+	}
+	if got.InstallChannel != "stable" {
+		t.Errorf("install_channel = %q, want stable", got.InstallChannel)
+	}
+	if newest.Protocol < remote.ProtocolVersion {
+		if !got.InstallStopped || !strings.Contains(got.InstallNote, "CLOOP_BIN=/path/to/cloop") {
+			t.Errorf("a hub ahead of %s (v%d) does not warn that the installer stops: stopped %t, note %q",
+				newest.Tag, newest.Protocol, got.InstallStopped, got.InstallNote)
+		}
+	} else if got.InstallStopped {
+		t.Errorf("%s speaks v%d, yet the note warns the installer stops: %q", newest.Tag, newest.Protocol,
+			got.InstallNote)
+	}
+
+	rr := httptest.NewRecorder()
+	(&Server{WorkDir: t.TempDir()}).handleInstallScript(rr, installScriptRequest(http.MethodGet, true))
+	body := rr.Body.String()
+	if !strings.Contains(body, "\nCLOOP_EDGE_COMMIT=''\n") {
+		t.Error("install.sh names an edge build CI has not published")
+	}
+	if !strings.Contains(body, "CI has not published commit a0f3870 yet") {
+		t.Error("install.sh does not say why --channel edge has nothing to install")
 	}
 }

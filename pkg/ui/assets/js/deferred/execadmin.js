@@ -1203,6 +1203,15 @@
         const installNoteText = document.getElementById('enrollInstallNoteText');
         if (installCmd) installCmd.textContent = d.install_command || '';
         if (installGroup) installGroup.style.display = d.install_command ? 'block' : 'none';
+        // What the command installs and why (Task 20421): this hub's own build
+        // with a visible --channel edge, or the latest release. Red when no
+        // signed build speaks the hub's protocol, so the installer will stop.
+        const installSource = document.getElementById('enrollInstallSource');
+        if (installSource) {
+          installSource.textContent = d.install_note || '';
+          installSource.style.display = d.install_note ? 'block' : 'none';
+          installSource.style.color = d.install_stopped ? 'var(--red)' : 'var(--muted)';
+        }
         if (installNoteText) installNoteText.textContent = d.install_unavailable || '';
         if (installNote) installNote.style.display = d.install_unavailable ? 'flex' : 'none';
 
@@ -1461,10 +1470,12 @@
             <div class="form-group" id="enrollInstallGroup" style="display:none">
               <label class="form-label">Install as a service (recommended)</label>
               <div class="exec-token" id="enrollInstallCommand"></div>
+              <div id="enrollInstallSource" style="display:none;font-size:11.5px;margin-top:6px"></div>
               <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
                 Fetches <code>/install.sh</code> from this hub and installs a systemd service with
                 <code>Restart=always</code>, a dedicated non-login user, and the token stored at mode 0600 &mdash;
-                never on the command line. Requires root on the device.
+                never on the command line. It refuses a cloop that speaks an older executor protocol than this
+                hub. Requires root on the device.
               </div>
               <div style="margin-top:8px">
                 <button class="btn" data-act="copyEnrollInstall">Copy install command</button>

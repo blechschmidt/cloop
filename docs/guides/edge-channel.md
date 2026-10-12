@@ -185,6 +185,15 @@ restarts the agent on it and installs the helper the button needs).
 The choice is made **on the device, by root**. The hub can read a device's
 channel; it has no way to set or clear it.
 
+A new device can make it when it is enrolled. When the hub runs a build CI has
+published, the Executors panel's one-command installer ends in
+`install.sh --channel edge`, and the bootstrap script installs exactly that
+build, verified against the edge workflow's identity, with the agent on the edge
+channel — visible in the command the operator runs, which can drop the flag to
+install the latest release instead
+([installing the agent as a service](../architecture/executors.md#installing-the-agent-as-a-service)).
+A device already enrolled opts in like this:
+
 ```bash
 # On the device — cosign first: every build is verified with it.
 sudo install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign

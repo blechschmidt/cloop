@@ -28,13 +28,16 @@ package ui
 // idempotent, cacheable-by-nobody, and free of anything worth stealing.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/install"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -61,9 +64,16 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// What the script installs, and what it holds every binary to: this hub's
+	// own protocol (Task 20421).
+	src := bootstrapSource(r.Context())
 	body := install.BootstrapScript(install.BootstrapParams{
-		Server: s.agentConnectURL(r),
-		Pin:    s.transportPin(),
+		Server:          s.agentConnectURL(r),
+		Pin:             s.transportPin(),
+		HubVersion:      hubVersion(),
+		HubProtocol:     remote.ProtocolVersion,
+		EdgeCommit:      src.Commit,
+		EdgeUnavailable: src.EdgeWhyNot,
 	})
 
 	// text/plain, not application/x-sh: an operator who opens the URL in a
@@ -130,10 +140,30 @@ var pinWarnOnce sync.Once
 // world-readable through /proc for the lifetime of the process, so an argument
 // form would expose the token to every local user on the device at exactly the
 // moment it is still redeemable.
-func (s *Server) installCommandFor(r *http.Request, bundle string) string {
+//
+// When the hub runs a build of main that CI signed, the snippet installs that
+// build, and says so in the command itself: `install.sh --channel edge` is the
+// device operator's choice of channel, made where they can read it, and never
+// implied by the script (Task 20421).
+func (s *Server) installCommandFor(r *http.Request, bundle string, src executor.BootstrapSource) string {
 	base := s.externalBaseURL(r)
-	return fmt.Sprintf("CLOOP_ENROLL_BUNDLE=%s \\\n  sh -c \"$(curl -fsSL %s%s)\"",
+	cmd := fmt.Sprintf("CLOOP_ENROLL_BUNDLE=%s \\\n  sh -c \"$(curl -fsSL %s%s)\"",
 		shellSingleQuote(bundle), base, installScriptPath)
+	if src.Edge {
+		cmd += " install.sh --channel edge"
+	}
+	return cmd
+}
+
+// bootstrapSource decides what the installer installs (Task 20421): this hub's
+// own build from the edge channel when CI signed and published it, otherwise
+// the latest release. Resolving the hub's edge build asks GitHub, through the
+// cache the Upgrade dialog shares and within its time bound; a release has no
+// edge build to ask about.
+func bootstrapSource(ctx context.Context) executor.BootstrapSource {
+	lookupCtx, cancel := context.WithTimeout(ctx, edgeLookupTimeout)
+	defer cancel()
+	return executor.ChooseBootstrapSource(remote.ProtocolVersion, hubEdgeOffer(lookupCtx))
 }
 
 // externalBaseURL reconstructs the origin the caller reached: the scheme and

@@ -3328,6 +3328,43 @@ hub's configured name is frequently not the one the operator reached. The script
 carries no credential: it locates a `cloop` binary and hands off to
 `cloop executor agent install`, where the hardening above actually lives.
 
+**What it installs.** The script never hands `cloop executor agent install` a
+cloop that speaks an older executor protocol than the hub that rendered it — one
+it downloads, one already on the device, or `CLOOP_BIN` — because such an agent
+connects and is then refused everything the hub needs the newer protocol for
+(Task 20421). It asks each binary (`cloop version --json`) before using it; a
+download is asked from beside its destination, `/usr/local/bin`, rather than
+from a `/tmp` a hardened device mounts `noexec`, and takes the name `cloop`
+only once it has answered. A refusal names both protocols and the way forward.
+A cloop already on the device that is too old is refused, not replaced: remove
+it, or point `CLOOP_BIN` at a newer one.
+
+By default the script installs the latest release. When the hub runs a build of
+`main` that CI signed and published on the
+[edge channel](../guides/edge-channel.md), the Executors panel's command ends in
+`install.sh --channel edge`:
+
+```bash
+CLOOP_ENROLL_BUNDLE='cloopenroll1.…' \
+  sh -c "$(curl -fsSL https://hub.example.com/install.sh)" install.sh --channel edge
+```
+
+The script then fetches exactly the hub's build
+(`cloop_<commit>_<os>_<arch>.tar.gz` from the `edge` prerelease), verifies it and
+its schema-2 manifest against the edge workflow's signing identity, checks that
+the manifest lists the archive's bytes and that the binary reports the hub's
+commit, and installs the agent with `--channel edge`, so the Upgrade button can
+move it along with the hub. The flag is in the command because the channel is
+the device operator's choice: the script never implies it, and without the flag
+it installs the latest release — and refuses that release if it speaks an older
+protocol than the hub, naming `--channel edge`. A hub that is a release hands out
+the latest release. A hub ahead of every release it knows of whose own build CI
+has not published (yet) has no signed build of its protocol to hand out: the
+panel says so beside the command (`install_note`, `install_stopped`), and until
+CI publishes it the remedy is a build of the hub's source at its commit,
+stamped with its place on `main` (the command the note gives, below), given to
+the script with `CLOOP_BIN=/path/to/cloop`.
+
 It prefers a binary the device already has — `CLOOP_BIN`, then `cloop` on
 `PATH`, then `/usr/local/bin/cloop`, then `/usr/bin/cloop` — so an operator who
 pinned or built a version does not have it replaced behind their back. Only when

@@ -39,7 +39,27 @@ type BootstrapParams struct {
 	Pin string
 	// ServiceName overrides the installed unit's name.
 	ServiceName string
+
+	// HubVersion and HubProtocol are the build the hub runs and the executor
+	// protocol it speaks (Task 20421). The script refuses to install an agent
+	// that speaks an older protocol — one it downloads, one already on the
+	// device, or CLOOP_BIN — because such an agent connects and is then
+	// refused everything the hub needs the newer protocol for. A HubProtocol
+	// of zero leaves the check out.
+	HubVersion  string
+	HubProtocol int
+	// EdgeCommit is the full commit of the hub's own build when CI signed and
+	// published it on the edge channel: what `--channel edge` installs. Empty
+	// when there is none, and EdgeUnavailable then says why, for the script's
+	// refusal of --channel edge.
+	EdgeCommit      string
+	EdgeUnavailable string
 }
+
+// edgeReleasesURL is where the edge prerelease's assets are downloaded from:
+// pkg/upgrade.EdgeAssetURL's base, which TestBootstrapEdgeURLMatchesUpgrade
+// holds this to.
+const edgeReleasesURL = "https://github.com/blechschmidt/cloop/releases/download/edge"
 
 // BootstrapScript renders the /install.sh body.
 func BootstrapScript(p BootstrapParams) string {
@@ -61,10 +81,12 @@ func BootstrapScript(p BootstrapParams) string {
 #
 # Usage:
 #
-#   CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sh -c "$(curl -fsSL <url>)"
+#   CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sh -c "$(curl -fsSL <url>)" [install.sh --channel edge]
 #
 # The bundle is read from the environment, not from an argument, so the
-# enrollment token never appears in this device's process list.
+# enrollment token never appears in this device's process list. --channel edge
+# installs the control plane's own build, signed by CI, instead of the latest
+# release; whichever it installs must speak the control plane's protocol.
 set -eu
 
 `)
@@ -72,7 +94,16 @@ set -eu
 	fmt.Fprintf(&b, "CLOOP_SERVER=%s\n", shellQuote(p.Server))
 	fmt.Fprintf(&b, "CLOOP_PIN=%s\n", shellQuote(strings.TrimSpace(p.Pin)))
 	fmt.Fprintf(&b, "CLOOP_SERVICE_NAME=%s\n", shellQuote(name))
-	b.WriteString(`CLOOP_RELEASES=${CLOOP_RELEASES:-https://github.com/blechschmidt/cloop/releases/latest/download}
+	// The hub's own build, as it rendered this script. Plain assignments, not
+	// ${VAR:-default}: what the hub speaks is not the device environment's to
+	// change, and the protocol check below is only as good as this number.
+	fmt.Fprintf(&b, "CLOOP_HUB_VERSION=%s\n", shellQuote(strings.TrimSpace(p.HubVersion)))
+	fmt.Fprintf(&b, "CLOOP_HUB_PROTOCOL=%d\n", max(p.HubProtocol, 0))
+	fmt.Fprintf(&b, "CLOOP_EDGE_COMMIT=%s\n", shellQuote(edgeCommit(p.EdgeCommit)))
+	fmt.Fprintf(&b, "CLOOP_EDGE_UNAVAILABLE=%s\n", shellQuote(strings.TrimSpace(p.EdgeUnavailable)))
+	b.WriteString(`CLOOP_CHANNEL=stable
+CLOOP_RELEASES=${CLOOP_RELEASES:-https://github.com/blechschmidt/cloop/releases/latest/download}
+CLOOP_EDGE_RELEASES=${CLOOP_EDGE_RELEASES:-` + edgeReleasesURL + `}
 CLOOP_INSECURE_SKIP_VERIFY=${CLOOP_INSECURE_SKIP_VERIFY:-0}
 `)
 
@@ -86,6 +117,10 @@ CLOOP_INSECURE_SKIP_VERIFY=${CLOOP_INSECURE_SKIP_VERIFY:-0}
 		provenance.IssuerEnv, shellQuote(provenance.DefaultIssuer))
 	fmt.Fprintf(&b, "CLOOP_PROVENANCE_IDENTITY=${%s:-%s}\n",
 		provenance.IdentityEnv, shellQuote(provenance.DefaultIdentityRegexp))
+	// The edge channel's own pin, never a widening of the release one: an
+	// edge build verifies only against it, and only for --channel edge.
+	fmt.Fprintf(&b, "CLOOP_PROVENANCE_EDGE_IDENTITY=${%s:-%s}\n",
+		provenance.EdgeIdentityEnv, shellQuote(provenance.EdgeIdentityRegexp))
 
 	b.WriteString(`
 
@@ -111,10 +146,24 @@ main() {
       --service-name=*) CLOOP_SERVICE_NAME=${1#--service-name=}; shift ;;
       --uninstall) action=uninstall; shift ;;
       --insecure-skip-verify) CLOOP_INSECURE_SKIP_VERIFY=1; shift ;;
+      --channel) CLOOP_CHANNEL=${2:-}; shift; [ $# -gt 0 ] && shift || true ;;
+      --channel=*) CLOOP_CHANNEL=${1#--channel=}; shift ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown option: $1" ;;
     esac
   done
+
+  # Which builds the device accepts is its operator's choice, made here and
+  # visible in the command they ran: the hub can offer --channel edge, never
+  # imply it.
+  case "$CLOOP_CHANNEL" in
+    stable) ;;
+    edge)
+      [ -n "$CLOOP_EDGE_COMMIT" ] || die "--channel edge installs this hub's own build from the edge channel, \
+and there is none to install: ${CLOOP_EDGE_UNAVAILABLE:-this hub named no edge build}."
+      ;;
+    *) die "unknown channel: $CLOOP_CHANNEL (stable or edge)" ;;
+  esac
 
   [ "$(id -u)" = "0" ] || die "run this as root (pipe it to 'sudo sh', or re-run under sudo)"
 
@@ -134,13 +183,22 @@ main() {
 
   # The bundle is passed on stdin, not as an argument: an argument is visible
   # in /proc to every local user for as long as the installer runs.
+  # --channel edge reaches the installer only when the operator asked for it:
+  # it writes the drop-in that lets the hub move the device along its own
+  # builds, which a stable device never has.
+  edge_channel=
+  [ "$CLOOP_CHANNEL" = "edge" ] && edge_channel=edge
   printf '%s\n' "$bundle" | "$bin" executor agent install \
     --output systemd \
     --service-name "$CLOOP_SERVICE_NAME" \
     --server "$CLOOP_SERVER" \
     ${CLOOP_PIN:+--pin "$CLOOP_PIN"} \
+    ${edge_channel:+--channel "$edge_channel"} \
     --bundle-stdin
 
+  if [ -n "$edge_channel" ]; then
+    say "this device follows the edge channel: the hub's Upgrade button can move it to the hub's own builds"
+  fi
   say "done. Follow the agent with: journalctl -fu ${CLOOP_SERVICE_NAME}.service"
 }
 
@@ -154,10 +212,14 @@ usage() {
   cat <<EOF
 cloop executor agent bootstrap
 
-  CLOOP_ENROLL_BUNDLE=<bundle> sh install.sh [--service-name NAME]
+  CLOOP_ENROLL_BUNDLE=<bundle> sh install.sh [--channel edge] [--service-name NAME]
   sh install.sh --uninstall [--service-name NAME]
 
 Options:
+  --channel edge           install this hub's own build, signed by CI on the
+                           edge channel, and follow that channel: the hub's
+                           Upgrade button can then move the device along its
+                           builds. Default: stable, the latest release.
   --service-name NAME      unit, container and state directory name
   --bundle BUNDLE          enrollment bundle (prefer CLOOP_ENROLL_BUNDLE)
   --uninstall              remove a previous install
@@ -170,12 +232,20 @@ Options:
 
 Environment:
   CLOOP_ENROLL_BUNDLE          enrollment bundle from the hub's Executors panel
-  CLOOP_BIN                    use this cloop binary instead of downloading one
+  CLOOP_BIN                    use this cloop binary instead of downloading one;
+                               it must speak this hub's protocol (v$CLOOP_HUB_PROTOCOL)
   CLOOP_RELEASES               base URL for release downloads
+  CLOOP_EDGE_RELEASES          base URL for edge-channel downloads
   CLOOP_INSECURE_SKIP_VERIFY   set to 1, same as --insecure-skip-verify
   CLOOP_PROVENANCE_ISSUER      OIDC issuer to require (default: GitHub Actions)
   CLOOP_PROVENANCE_IDENTITY    signing identity regexp to require, for a fork
                                that builds and signs cloop itself
+  CLOOP_PROVENANCE_EDGE_IDENTITY  the same for --channel edge builds
+
+Every cloop this script hands to the agent installer — downloaded, already on
+this device, or CLOOP_BIN — must speak this hub's executor protocol
+(v$CLOOP_HUB_PROTOCOL, $CLOOP_HUB_VERSION) or a newer one; an older one is
+refused rather than enrolled behind the hub.
 
 Verify a downloaded archive by hand:
   cosign verify-blob cloop_linux_amd64.tar.gz \\
@@ -188,14 +258,21 @@ EOF
 # find_or_fetch_cloop prefers a binary already on the device: an operator who
 # has pinned a version, or built one, should not have it replaced by a download
 # behind their back.
+#
+# A binary already here is still held to the hub's protocol (Task 20421): an
+# old cloop left by an earlier install would enroll an agent the hub refuses
+# most of what it asks of a device. It is refused rather than replaced, for the
+# same reason it is preferred.
 find_or_fetch_cloop() {
   if [ -n "${CLOOP_BIN:-}" ]; then
     [ -x "$CLOOP_BIN" ] || die "CLOOP_BIN=$CLOOP_BIN is not executable"
+    require_protocol "$CLOOP_BIN" "CLOOP_BIN ($CLOOP_BIN)" present
     echo "$CLOOP_BIN"
     return
   fi
   for candidate in "$(command -v cloop 2>/dev/null || true)" /usr/local/bin/cloop /usr/bin/cloop; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      require_protocol "$candidate" "the cloop already on this device ($candidate)" present
       echo "$candidate"
       return
     fi
@@ -215,8 +292,21 @@ fetch_cloop() {
   # releases: /releases/latest/download/ resolves a fixed name against whatever
   # release is current. scripts/build-release.sh publishes exactly these names
   # and its tests fail if the two ever disagree.
-  name="cloop_${os}_${arch}.tar.gz"
-  url="$CLOOP_RELEASES/$name"
+  #
+  # An edge build is named for its commit instead (scripts/build-edge.sh): the
+  # hub named the one it runs, and nothing else is fetched for --channel edge.
+  if [ "$CLOOP_CHANNEL" = "edge" ]; then
+    name="cloop_${CLOOP_EDGE_COMMIT}_${os}_${arch}.tar.gz"
+    base=$CLOOP_EDGE_RELEASES
+    identity=$CLOOP_PROVENANCE_EDGE_IDENTITY
+    what="this hub's own build ($CLOOP_HUB_VERSION, commit $CLOOP_EDGE_COMMIT)"
+  else
+    name="cloop_${os}_${arch}.tar.gz"
+    base=$CLOOP_RELEASES
+    identity=$CLOOP_PROVENANCE_IDENTITY
+    what="the latest release"
+  fi
+  url="$base/$name"
   tmp=$(mktemp -d)
   # The trap fires on the error paths too, so a failed download does not leave
   # a half-extracted binary in /tmp for the next run to find.
@@ -227,12 +317,90 @@ fetch_cloop() {
   # is the check that can actually fail in an attacker's presence, so it should
   # be the one that runs before anything else has had a chance to go wrong. The
   # checksum that follows is a second opinion, not the gate.
-  verify_signature "$tmp/cloop.tar.gz" "$name" "$tmp"
-  verify_archive "$tmp/cloop.tar.gz" "$name" "$tmp"
+  verify_signature "$tmp/cloop.tar.gz" "$name" "$tmp" "$base" "$identity"
+  if [ "$CLOOP_CHANNEL" = "edge" ]; then
+    verify_edge_manifest "$tmp/cloop.tar.gz" "$name" "$tmp"
+  else
+    verify_archive "$tmp/cloop.tar.gz" "$name" "$tmp"
+  fi
   tar -xzf "$tmp/cloop.tar.gz" -C "$tmp" || die "could not extract $url"
   [ -f "$tmp/cloop" ] || die "the release archive did not contain a cloop binary"
-  install -m 0755 "$tmp/cloop" /usr/local/bin/cloop || die "could not install /usr/local/bin/cloop"
+  # The binary is asked what it is before it takes the name cloop, so nothing
+  # older than the hub is ever installed. It is asked from beside its
+  # destination rather than from $tmp, which a hardened device mounts noexec —
+  # where every binary would look too old to say. An edge build must also be
+  # the build the hub named: its signature says CI built it from main, and the
+  # commit stamped into it says which commit.
+  stage=$(mktemp /usr/local/bin/.cloop-install.XXXXXX) || die "could not stage a binary in /usr/local/bin"
+  trap 'rm -rf "$tmp" "$stage"' EXIT INT TERM
+  install -m 0755 "$tmp/cloop" "$stage" || die "could not install /usr/local/bin/cloop"
+  if [ "$CLOOP_CHANNEL" = "edge" ]; then
+    require_commit "$stage" "$CLOOP_EDGE_COMMIT"
+  fi
+  require_protocol "$stage" "$what" fetched
+  mv -f "$stage" /usr/local/bin/cloop || die "could not install /usr/local/bin/cloop"
   echo /usr/local/bin/cloop
+}
+
+# version_field prints one field of what a cloop binary's "version --json" reports, or
+# nothing when the binary cannot say: one too old to have the flag, or built
+# for another machine. The report is indented JSON, one field to a line.
+version_field() {
+  "$1" version --json 2>/dev/null | sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}[[:space:]]*\$/\1/p" | head -n 1
+}
+
+# require_protocol refuses a cloop that speaks an older executor protocol than
+# this hub (Task 20421). The agent it would install connects, and is then
+# refused everything the hub needs the newer protocol for — virtual executors,
+# stored firewall rules, feature branches, secret refresh, exact revocation —
+# so the device would start out behind the hub that enrolled it.
+#
+# $1 is the binary, $2 names it for the operator, and $3 says where it came
+# from: "present" (on the device, or CLOOP_BIN) or "fetched".
+require_protocol() {
+  rp_bin=$1 rp_what=$2 rp_from=$3
+  [ "$CLOOP_HUB_PROTOCOL" -gt 0 ] 2>/dev/null || return 0
+  rp_have=$(version_field "$rp_bin" protocol)
+  rp_version=$(version_field "$rp_bin" version)
+  case "$rp_have" in
+    ''|*[!0-9]*) rp_have=0 ;;
+  esac
+  if [ "$rp_have" -ge "$CLOOP_HUB_PROTOCOL" ]; then
+    say "$rp_what${rp_version:+ ($rp_version)} speaks executor protocol v$rp_have; this hub speaks v$CLOOP_HUB_PROTOCOL"
+    return 0
+  fi
+  if [ "$rp_have" -gt 0 ]; then
+    rp_speaks="speaks executor protocol v$rp_have"
+  else
+    rp_speaks="does not report its executor protocol (a cloop too old to say)"
+  fi
+  rp_msg="$rp_what${rp_version:+ ($rp_version)} $rp_speaks, older than this hub's v$CLOOP_HUB_PROTOCOL \
+(${CLOOP_HUB_VERSION:-its build}): the agent would connect and be refused everything the hub needs the newer \
+protocol for. Refusing to install it."
+  # The remedy depends on where the binary came from. One already here is in
+  # the way of a download, which is checked in turn; one that was downloaded
+  # means the channel had nothing newer to give.
+  if [ "$rp_from" = "present" ]; then
+    rp_msg="$rp_msg Remove or rename it so this script downloads a cloop instead, or point CLOOP_BIN at a \
+cloop that speaks v$CLOOP_HUB_PROTOCOL or later."
+  elif [ "$CLOOP_CHANNEL" != "edge" ] && [ -z "$CLOOP_EDGE_COMMIT" ]; then
+    rp_msg="$rp_msg No signed build of this hub's protocol can be downloaded${CLOOP_EDGE_UNAVAILABLE:+: $CLOOP_EDGE_UNAVAILABLE}. \
+Build cloop at the hub's commit as the Executors panel's note says, copy it here and re-run with \
+CLOOP_BIN=/path/to/cloop."
+  fi
+  if [ "$CLOOP_CHANNEL" != "edge" ] && [ -n "$CLOOP_EDGE_COMMIT" ]; then
+    rp_msg="$rp_msg This hub runs a build of main that CI signed: re-run this installer with --channel edge to \
+install that build (commit $CLOOP_EDGE_COMMIT) and follow the edge channel."
+  fi
+  die "$rp_msg"
+}
+
+# require_commit refuses an edge build that is not the commit the hub named.
+require_commit() {
+  rc_have=$(version_field "$1" commit)
+  [ "$rc_have" = "$2" ] || die "the edge build reports commit ${rc_have:-none}, not $2, the build this hub \
+runs. Refusing to install it."
+  say "the edge build reports commit $rc_have, the build this hub runs"
 }
 
 download() {
@@ -274,8 +442,13 @@ download() {
 # "checksums.txt" instead of for the artifact. The prefix is the fix, and the
 # reason it is worth a comment is that the symptom appeared two functions away
 # from the cause.
+#
+# $4 and $5 are the base URL the bundle is fetched from and the identity it
+# must name; they default to the release's, and --channel edge passes the edge
+# channel's.
 verify_signature() {
   vs_artifact=$1 vs_name=$2 vs_dir=$3
+  vs_base=${4:-$CLOOP_RELEASES} vs_identity=${5:-$CLOOP_PROVENANCE_IDENTITY}
 
   if [ "$CLOOP_INSECURE_SKIP_VERIFY" = "1" ]; then
     warn "provenance verification is DISABLED (--insecure-skip-verify):"
@@ -290,20 +463,21 @@ Install it from https://github.com/sigstore/cosign/releases, or re-run with \
 checking where this binary came from."
 
   vs_sig="$vs_dir/$vs_name.sigstore.json"
-  download "$CLOOP_RELEASES/$vs_name.sigstore.json" "$vs_sig" || die \
-    "could not download $CLOOP_RELEASES/$vs_name.sigstore.json. Every cloop release \
-publishes a signature bundle beside each artifact; if this 404s, the archive \
-did not come from a cloop release."
+  download "$vs_base/$vs_name.sigstore.json" "$vs_sig" || die \
+    "could not download $vs_base/$vs_name.sigstore.json. Every cloop release \
+and edge build publishes a signature bundle beside each artifact; if this 404s, \
+the archive did not come from cloop's workflows."
 
   # cosign's own message names the actual mismatch, and the operator needs it:
   # a wrong identity and a corrupted download have entirely different remedies.
   if ! vs_out=$(cosign verify-blob "$vs_artifact" \
       --bundle "$vs_sig" \
       --certificate-oidc-issuer "$CLOOP_PROVENANCE_ISSUER" \
-      --certificate-identity-regexp "$CLOOP_PROVENANCE_IDENTITY" 2>&1); then
+      --certificate-identity-regexp "$vs_identity" 2>&1); then
     die "SIGNATURE VERIFICATION FAILED for $vs_name. Refusing to install. \
-This archive was not signed by cloop's release workflow, which means it is not \
-a cloop release — regardless of what its checksum says. cosign reported: $vs_out"
+This archive was not signed by the cloop workflow its channel trusts, which \
+means it is not a cloop build — regardless of what its checksum says. cosign \
+reported: $vs_out"
   fi
 
   say "verified the signature on $vs_name"
@@ -324,11 +498,8 @@ a cloop release — regardless of what its checksum says. cosign reported: $vs_o
 verify_archive() {
   archive=$1 name=$2 dir=$3
 
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$archive" | cut -d' ' -f1)
-  elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
-  else
+  actual=$(sha256_of "$archive")
+  if [ -z "$actual" ]; then
     # Nothing to verify with. Warn rather than abort: on a system this
     # stripped down there is no second opinion to be had, and refusing would
     # only push the operator towards an unverified manual download.
@@ -356,6 +527,44 @@ Refusing to install. This means the download was corrupted or tampered with."
   say "verified $name (sha256 $actual)"
 }
 
+# verify_edge_manifest is verify_archive for --channel edge. An edge build
+# publishes no checksums.txt; its manifest (scripts/build-edge.sh) names the
+# commit and every archive's SHA-256, and is signed by the same workflow. So
+# the manifest's signature is checked, then that it describes the commit the
+# hub named, then that it lists this archive's bytes.
+verify_edge_manifest() {
+  vm_archive=$1 vm_name=$2 vm_dir=$3
+  vm_manifest="cloop_${CLOOP_EDGE_COMMIT}_manifest.v2.json"
+  download "$CLOOP_EDGE_RELEASES/$vm_manifest" "$vm_dir/$vm_manifest" ||
+    die "could not download $CLOOP_EDGE_RELEASES/$vm_manifest to verify $vm_name"
+  verify_signature "$vm_dir/$vm_manifest" "$vm_manifest" "$vm_dir" \
+    "$CLOOP_EDGE_RELEASES" "$CLOOP_PROVENANCE_EDGE_IDENTITY"
+  grep -q "^[[:space:]]*\"commit\":[[:space:]]*\"$CLOOP_EDGE_COMMIT\"" "$vm_dir/$vm_manifest" ||
+    die "the edge manifest does not describe commit $CLOOP_EDGE_COMMIT. Refusing to install."
+  # The manifest is indented JSON, one archive to a line. A name holds only
+  # [a-z0-9_.], so the dots matching any byte cannot match another name.
+  vm_expected=$(sed -n "s/^[[:space:]]*\"$vm_name\":[[:space:]]*\"\([0-9a-f]\{64\}\)\".*/\1/p" "$vm_dir/$vm_manifest")
+  [ -n "$vm_expected" ] || die "$vm_name is not listed in the edge manifest $vm_manifest"
+  vm_actual=$(sha256_of "$vm_archive")
+  if [ -z "$vm_actual" ]; then
+    warn "no sha256sum or shasum available; cannot check $vm_name against the edge manifest"
+    return 0
+  fi
+  [ "$vm_actual" = "$vm_expected" ] || die \
+    "checksum mismatch for $vm_name: the edge manifest says $vm_expected, the download is $vm_actual. \
+Refusing to install. This means the download was corrupted or tampered with."
+  say "verified $vm_name against the edge manifest (sha256 $vm_actual)"
+}
+
+# sha256_of prints a file's SHA-256, or nothing when no tool can compute it.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 # All three write to stderr, and say() must: find_or_fetch_cloop returns the
 # binary path to its caller through a command substitution, so anything else
 # written to stdout inside it is concatenated into that path and then executed
@@ -368,4 +577,20 @@ die()  { printf '\033[31m==> error:\033[0m %s\n' "$*" >&2; exit 1; }
 main "$@"
 `)
 	return b.String()
+}
+
+// edgeCommit is commit when it is a full 40-digit lower-case commit id, and
+// "" otherwise: it is interpolated into a download URL and a grep pattern, so
+// anything else is dropped rather than quoted.
+func edgeCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) != 40 {
+		return ""
+	}
+	for _, r := range commit {
+		if !('0' <= r && r <= '9' || 'a' <= r && r <= 'f') {
+			return ""
+		}
+	}
+	return commit
 }

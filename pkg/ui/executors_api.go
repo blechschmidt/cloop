@@ -894,6 +894,17 @@ type enrollResponse struct {
 	InstallCommand string `json:"install_command,omitempty"`
 	// InstallUnavailable explains an empty InstallCommand.
 	InstallUnavailable string `json:"install_unavailable,omitempty"`
+	// InstallChannel is the channel the command puts the device on: "edge"
+	// when it installs this hub's own build (`install.sh --channel edge`),
+	// "stable" when it installs the latest release (Task 20421).
+	InstallChannel string `json:"install_channel,omitempty"`
+	// InstallNote says why the command installs what it installs, and what
+	// happens without --channel edge. InstallStopped marks a note the operator
+	// must read first: no signed build this hub knows of speaks its protocol,
+	// so the installer stops at its protocol check on a device without a newer
+	// cloop, and the note says what to do instead.
+	InstallNote    string `json:"install_note,omitempty"`
+	InstallStopped bool   `json:"install_stopped,omitempty"`
 	// Notice is shown next to the token. It is part of the payload rather
 	// than hard-coded in the frontend so the CLI and the UI cannot drift on
 	// what they promise about recoverability.
@@ -1023,7 +1034,13 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 			"It is single-use and expires at the time above. If it leaks, revoke it from this panel.",
 	}
 	if s.requestIsTLS(r) {
-		resp.InstallCommand = s.installCommandFor(r, encoded)
+		src := bootstrapSource(r.Context())
+		resp.InstallCommand = s.installCommandFor(r, encoded, src)
+		resp.InstallChannel = executor.ChannelStable
+		if src.Edge {
+			resp.InstallChannel = executor.ChannelEdge
+		}
+		resp.InstallNote, resp.InstallStopped = src.Note, src.Stopped
 	} else {
 		resp.InstallUnavailable = "The one-command installer is served only over HTTPS, because it is piped " +
 			"into a root shell on a device that does not yet know which control plane to trust. " +
