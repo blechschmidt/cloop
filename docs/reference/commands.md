@@ -1108,6 +1108,46 @@ uses the stored session for the hub it targets — `--hub`, `CLOOP_HUB_URL` or t
 default hub — when no `--token` is given, on the same rule for
 `CLOOP_API_TOKEN`.
 
+### `cloop remote kube`
+
+Share a Kubernetes cluster with the hub through a least-privilege ServiceAccount
+(Task 20416) — the path for a cluster whose kubeconfig signs you in through an
+exec credential plugin (`kubelogin`, `aws eks get-token`,
+`gke-gcloud-auth-plugin`), which the hub never runs. `share` runs the plugin on
+this machine, creates a labelled ServiceAccount bound to `view` (or `edit`) in
+the named namespaces, mints a bounded token through the TokenRequest API, and
+stores a static kubeconfig for it on the hub as a personal secret. See
+[the secrets guide](../guides/secrets.md#a-cluster-that-signs-you-in-through-a-plugin-aks-eks-gke).
+
+```bash
+cloop remote kube share <name> --context <ctx> --namespaces a,b [--access read|write]
+    [--sa-namespace <ns>] [--ttl 24h] [--renewal auto|hub|manual] [--cluster-wide]
+    [--server <url>] [--kubeconfig <file>] [--shared] [--dry-run]
+cloop remote kube list [--json]
+cloop remote kube renew <name> [--local] [--context <ctx>] [--ttl <d>] [--kubeconfig <file>]
+cloop remote kube revoke <name> [--force] [--context <ctx>] [--kubeconfig <file>]
+```
+
+| Subcommand | Calls | Permission |
+|------------|-------|------------|
+| `share` | the cluster as you; then `GET /api/secrets`, `POST /api/secrets` | `secret.own` (`secret.grant` with `--shared`) |
+| `list` | `GET /api/secrets` | `secret.own` |
+| `renew` | `POST /api/secrets/{id}/renew` — empty for the hub to renew it now, or with a token minted here | `secret.own`, the share's owner |
+| `revoke` | the cluster as you; then `DELETE /api/secrets/{id}` | `secret.own`, the share's owner |
+
+- **Write access** (`--access write`) needs `--sa-namespace`, a namespace outside
+  `--namespaces`: `edit` can mint a ServiceAccount's credential in its own
+  namespace. Cluster-wide write is refused.
+- **Renewal.** `auto` lets the hub renew the token at half its life when the hub
+  runs its Kubernetes access monitor, installing a Role that lets the
+  ServiceAccount create its own token and nothing else; the monitor refuses that
+  subresource to every sandbox. Elsewhere, or with `manual`, `renew` mints the next
+  token with your credentials and the hub checks it with the cluster.
+- **`--ttl`** is 10m to 7d; a cluster that caps it is reported.
+- **`revoke`** deletes the ServiceAccount first, then its bindings, then the
+  hub's secret; `--force` deletes the secret even when the cluster's objects
+  could not be.
+
 ### `cloop hub`
 
 Control-plane transport security.

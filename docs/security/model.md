@@ -211,6 +211,22 @@ it into a Pod and printing it. The namespace has always been the boundary, and
 the lease Secret does not move it: whoever may read Secrets there, or create Pods
 there, can read a run's credentials. Run workloads in a namespace of their own.
 
+**A cluster a developer shares** (Task 20416) is the other direction across this
+boundary: a cluster the *workload* is granted, not the one it runs in. Its
+kubeconfig signs people in through an exec credential plugin, which the hub
+never runs — only `cmd` imports the package that does
+(`TestOnlyTheTerminalImportsTheCredentialPluginRunner`) — so `cloop remote kube
+share` runs it on the developer's machine and leaves the hub a static kubeconfig
+for a ServiceAccount bound to `view` or `edit` in named namespaces. The same rule
+as above shapes it: `edit` in a namespace can mint the credential of a
+ServiceAccount living there, so a write share's ServiceAccount must live
+somewhere it cannot write, and cluster-wide write is refused. When the hub runs
+the [Kubernetes access monitor](../architecture/kubernetes-access.md#kubernetes-shares-a-cluster-behind-a-credential-plugin)
+the ServiceAccount may create its own token, which is how the hub renews it; the
+monitor refuses `serviceaccounts/token` to every sandbox under every grant
+(`TestTheMonitorNeverForwardsATokenRequest`), and the broker delivers such a
+share through the monitor or not at all.
+
 ### Between hub members
 
 The trusted core may be several processes: `cloop ui` instances serving one

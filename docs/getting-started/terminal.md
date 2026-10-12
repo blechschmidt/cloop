@@ -12,6 +12,7 @@ browser's, on the same rules.
 - [What the approval page is telling you](#what-the-approval-page-is-telling-you)
 - [What the terminal gets](#what-the-terminal-gets)
 - [Using it](#using-it)
+- [Sharing a Kubernetes cluster](#sharing-a-kubernetes-cluster)
 - [Signing out](#signing-out)
 - [Where the session is kept](#where-the-session-is-kept)
 - [When it does not work](#when-it-does-not-work)
@@ -167,6 +168,45 @@ session, or `CLOOP_API_TOKEN` — which is `CLOOP_HUB_URL`'s hub's token when th
 is set, and otherwise used only for a hub you hold no session for, so a token
 exported for one hub never travels to another.
 
+## Sharing a Kubernetes cluster
+
+If your cluster signs you in through a credential plugin — `kubelogin` on AKS,
+`aws eks get-token` on EKS, the GKE plugin — the hub cannot use your kubeconfig:
+it never runs a plugin, and the dashboard refuses the upload and points you
+here. `cloop remote kube share` runs the plugin on your machine instead, creates
+a ServiceAccount with only the access you choose, and stores its token on the
+hub as your personal secret:
+
+```console
+$ cloop remote kube share aks-dev --context aks-dev --namespaces payments,payments-staging
+Sharing context aks-dev (https://aks-dev-dns.hcp.westeurope.azmk8s.io:443) with https://cloop.example.com as "aks-dev":
+  ServiceAccount  payments/cloop-aks-dev-3f9c2a1b (no token mounted into Pods)
+  Read access     payments, payments-staging (RoleBinding cloop-aks-dev-3f9c2a1b -> ClusterRole view in each)
+  …
+Signing in to https://aks-dev-dns.hcp.westeurope.azmk8s.io:443 with kubelogin (Microsoft Entra ID, as on AKS)…
+To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code …
+
+Shared. https://cloop.example.com holds the token as your personal secret "aks-dev" (sec_9b1f…).
+  Token expires   2026-10-13 09:14 UTC (in 23h59m)
+  Renewal         by the hub, at half the token's life; `cloop remote kube list` shows it
+
+$ cloop remote kube list                 # every share, when its token expires, who renews it
+$ cloop remote kube renew aks-dev        # the next token now
+$ cloop remote kube revoke aks-dev       # the ServiceAccount, its bindings and the hub's secret
+```
+
+A plugin that wants to sign you in interactively gets this terminal, as under
+`kubectl`; `--dry-run` shows what would be created without signing in at all.
+Read access binds the cluster's `view` role in each namespace; `--access write`
+binds `edit` and needs `--sa-namespace`, a namespace the share cannot write, for
+the ServiceAccount to live in. The token lives `--ttl` (10m to 7d, default 24h),
+or less if the cluster caps it. On a hub running its Kubernetes access monitor
+the hub renews it before it expires, and a run in flight takes the new token up;
+elsewhere `renew` it yourself. Then grant it to a project in the dashboard's
+Secrets panel. The [secrets guide](../guides/secrets.md#a-cluster-that-signs-you-in-through-a-plugin-aks-eks-gke)
+has every flag, and the [architecture](../architecture/kubernetes-access.md#kubernetes-shares-a-cluster-behind-a-credential-plugin)
+why each object is shaped as it is.
+
 ## Signing out
 
 ```console
@@ -212,6 +252,7 @@ credential: not `login`, not `whoami`, not an error about the file.
 | `the session … has ended (revoked, expired or idle)` | Run `cloop login` again. |
 | `x509: certificate signed by unknown authority` | The hub's certificate is from a private CA: `cloop login <hub> --ca-file ca.pem`. |
 | `warning: … is plain http to another machine` | The session credential would cross the network unencrypted. Use the hub's `https://` URL. |
+| `This kubeconfig cannot be stored: user … signs in through …` (the dashboard) | The kubeconfig runs a credential plugin. Share the cluster from here instead: [`cloop remote kube share`](#sharing-a-kubernetes-cluster) |
 | `answered with a sign-in code this terminal will not show` | The approval page the hub named is not an `http(s)://` URL, or the answer carried control characters. `cloop login` neither prints nor opens it — handed to the desktop, another scheme can start any program registered for it. Check the URL is a cloop hub's. |
 | `note: this hub keeps no refresh grant for the session` | The hub has no `CLOOP_SECRET_KEY`, or the provider issued no refresh token. Your roles are as of the approval, and actions above operator need a fresh `cloop login` once that is older than `max_claim_age_minutes`. |
 | The approval page says *not approved: you signed in at the identity provider as a different account* | The provider answered for another account than the one signed in to the dashboard. Nothing was approved; sign in to the provider as yourself and approve again. |

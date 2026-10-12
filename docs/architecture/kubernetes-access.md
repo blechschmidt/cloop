@@ -30,6 +30,7 @@ makes for git, and the two packages are deliberately shaped alike.
 - [The policy](#the-policy)
 - [Creating a read-only grant, end to end](#creating-a-read-only-grant-end-to-end)
 - [Turning it on](#turning-it-on)
+- [Kubernetes shares: a cluster behind a credential plugin](#kubernetes-shares-a-cluster-behind-a-credential-plugin)
 - [What it enforces, and what it does not](#what-it-enforces-and-what-it-does-not)
 - [Audit events and metrics](#audit-events-and-metrics)
 - [Troubleshooting](#troubleshooting)
@@ -270,7 +271,10 @@ The kubeconfig is parsed by `pkg/executor/kubernetes.ParseKubeconfig` rather
 than a parser of kubeguard's own, so the three refusals that already guard a
 tenant-supplied kubeconfig apply here too and cannot drift apart from the
 driver's: an `exec` credential plugin, an `auth-provider` block, and a
-credential that points at a file path on the control-plane host.
+credential that points at a file path on the control-plane host. A cluster whose
+kubeconfig signs people in through a plugin — AKS, EKS, GKE — is shared through
+a ServiceAccount instead, minted from the developer's own terminal; see
+[Kubernetes shares](#kubernetes-shares-a-cluster-behind-a-credential-plugin).
 
 **What it writes down (Task 20383).** Each session is also recorded in
 `proxy_sessions` — its id, the token's SHA-256, the cluster URL, the context, the
@@ -356,7 +360,7 @@ than smoothed over.
 `Policy.Decide` runs six checks, in an order chosen for the message the operator
 reads rather than for speed: the most specific and most alarming reason wins.
 
-1. **A dangerous subresource**, whatever the verb.
+1. **A dangerous subresource**, or the TokenRequest API, whatever the verb.
 2. **A protocol upgrade.**
 3. **A non-resource URL** — readable only, and only if it is in the allowlist.
 4. **The verb.**
@@ -389,6 +393,22 @@ would have meant remote code execution on the cluster.
 
 An operator who genuinely wants a sandbox to exec into pods does not want the
 monitor in that path; they want a grant without it.
+
+One more is refused on the same terms, for a different reason: **`serviceaccounts/token`**,
+the TokenRequest API (Task 20416). It does not open a session; it answers with a
+token for the cluster itself, which would never pass through the monitor again
+and would last as long as the caller asked. A write grant's `create` admits it as
+readily as it admits a configmap, so it is refused for every verb under every
+grant — and it has to be: a [self-renewing
+share](#renewal-through-the-monitor)'s ServiceAccount may create its own token,
+which is how the hub renews it, and that permission must be the hub's alone.
+
+```console
+$ kubectl -n cloop-shares create token cloop-aks-dev-3f9c2a1b
+error: failed to create token: serviceaccounts/token is refused by the cloop Kubernetes monitor
+for every verb, under every grant: it answers with a token for the cluster itself, which would
+never pass through this monitor again. …
+```
 
 ### Protocol upgrades
 
@@ -828,6 +848,158 @@ leader's janitor retires the records of sessions that closed or lapsed.
 
 ---
 
+## Kubernetes shares: a cluster behind a credential plugin
+
+The clusters enterprises run sign people in through an **exec credential
+plugin** — `kubelogin` on AKS with Entra ID, `aws eks get-token` on EKS,
+`gke-gcloud-auth-plugin` on GKE — and the hub refuses such a kubeconfig, rightly:
+running the plugin would execute a program named in an uploaded file on the
+control-plane host. Until Task 20416 the refusal was the end of it. The
+developer had to create a ServiceAccount, choose and bind roles, mint a token
+and assemble a kubeconfig by hand, and the token then expired mid-run, because
+managed API servers cap how long a TokenRequest token may live.
+
+`cloop remote kube share` does that work from the developer's own terminal, and
+the hub keeps the result working:
+
+```console
+$ cloop login https://cloop.example.com
+$ cloop remote kube share aks-dev --context aks-dev --namespaces payments,payments-staging
+```
+
+### What runs where
+
+| Step | Where | With what |
+| --- | --- | --- |
+| Run the exec plugin | the developer's machine | `pkg/kubeexec`: client.authentication.k8s.io `v1` and `v1beta1` ExecCredential, `interactiveMode` (`Never`, `IfAvailable`, `Always`), `provideClusterInfo` with the cluster's `client.authentication.k8s.io/exec` extension, the plugin's own stderr for its device-code prompt, its stdout read under a 1 MiB cap and never echoed into an error |
+| Create the ServiceAccount and its bindings, mint the token | the cluster, as the developer | the credential the plugin printed |
+| Store the share | the hub, as the developer | `POST /api/secrets` over the `cloop login` session — a personal secret, as the dashboard would store it |
+| Renew the token | the hub | the share's own token, through its self-renewal Role — when the hub runs this monitor |
+| Revoke | the cluster, then the hub | the developer's credential again, then `DELETE /api/secrets/{id}` |
+
+The hub never runs the plugin, and the guarantee is structural: only `cmd`
+imports `pkg/kubeexec`, so no package the hub, the monitor, the broker or an
+executor runs can reach it by any path
+(`TestOnlyTheTerminalImportsTheCredentialPluginRunner`). The kubeconfig the hub
+stores is static — server, CA, one bearer token — and passes the same
+`ParseKubeconfig` every other kubeconfig does. The dashboard refuses an
+exec-plugin kubeconfig at upload, naming the plugin and giving the
+`cloop remote kube share` command with the hub's URL, the chosen name and the
+document's context and namespace filled in.
+
+### What a share creates
+
+| Object | Scope |
+| --- | --- |
+| ServiceAccount `cloop-<name>-<id>`, `automountServiceAccountToken: false` | in `--sa-namespace` (read access: the first shared namespace by default) |
+| RoleBinding to ClusterRole `view` — `edit` with `--access write` | in each of `--namespaces`; a ClusterRoleBinding only with `--cluster-wide`, and only for read |
+| Role `…-renew`: `create` on `serviceaccounts/token`, `resourceNames: [the ServiceAccount]`, and its RoleBinding | in the ServiceAccount's namespace, and only when the hub renews the share |
+
+Every object carries `cloop.dev/kube-share=<id>` and
+`app.kubernetes.io/managed-by=cloop`, plus annotations naming the share, the
+hub, the owner and the access. The label deliberately shares nothing with the
+`kubernetes` executor's own (`cloop.dev/managed`), so the executor's orphan
+sweep can never take a share for something it owns. The secret's metadata
+records the share (`kube.share`, `kube.service_account`, `kube.namespaces`,
+`kube.access`, `kube.renewal`, `kube.objects`); its token's issue time and
+expiry (`kube.issued_at`, `kube.expires_at`) are read by the hub from the token
+itself at upload, not taken from the client, and so is the ServiceAccount.
+
+**Write access needs a ServiceAccount namespace it cannot write.** `edit` is
+not "write most objects": it may create Pods and Secrets, impersonate
+ServiceAccounts and create tokens for them, in its namespace. A ServiceAccount
+that can write where it lives can therefore hand a workload its own credential
+— a Pod running as it whose logs print its token, a Secret of type
+`kubernetes.io/service-account-token` — through requests the monitor reads as
+ordinary writes, producing a credential that bypasses the monitor and outlives
+the share's TTL. So `--access write` requires `--sa-namespace` outside
+`--namespaces`, and cluster-wide write is refused: there is no namespace
+outside it. `view` reads neither Secrets nor the logs of a Pod it could have
+started, so a read share may live where it reads.
+
+### Renewal through the monitor
+
+When the hub runs this monitor (`executors.kube_guard.enabled`, which
+`GET /api/secrets` reports as `kube_guard`), a share defaults to **renewal by
+the hub**:
+
+1. **One member renews.** A leader duty finds every hub-renewed share past half
+   its token's life — a 24-hour token at 12 hours, a 10-minute one at 5 — and
+   mints the next token with a TokenRequest authenticated by the token the share
+   holds, for the same lifetime. The self-renewal Role permits exactly that and
+   nothing else. The new kubeconfig differs from the old in the token alone
+   (`kubeshare.ReplaceToken`) and is sealed in place under the secret's own id,
+   so every grant keeps pointing at it (`Broker.RenewSecret`). Each renewal is a
+   `secret.renew` row by `hub` naming both expiries.
+2. **Every member updates its sessions.** A monitor session holds the cluster
+   credential it was minted from, and a run's session can outlive the token
+   behind it. Once a minute each member re-derives, for every live session
+   standing on a renewed share, the minimised kubeconfig from the lease's grant
+   — the way a [restored session](#a-hub-restarted-mid-run) is re-derived — and
+   `Registry.UpdateUpstream` swaps it in, refusing anything but a changed bearer
+   token: the server the session is pinned to, its CA, TLS name, proxy and client
+   certificate must be unchanged. The session's connection pool stays; the next
+   request presents the new token. A run dispatched before the renewal keeps
+   working after the token it started with has expired.
+3. **The monitor keeps the permission the hub's.** `serviceaccounts/token` is
+   [refused for every verb](#subresources-that-are-not-data), so a sandbox under
+   a write grant — even one whose namespaces include the ServiceAccount's own —
+   cannot mint itself a token, though the cluster's RBAC would let the
+   ServiceAccount do it (`TestTheMonitorNeverForwardsATokenRequest`).
+4. **A self-renewing share is delivered through the monitor or not at all.** As a
+   file in a sandbox it would be a credential that can extend itself. A hub whose
+   monitor is turned off later refuses its grants at dispatch, with that said on
+   the project's Activity tab, and keeps renewing it for when the monitor is back.
+
+A renewal that fails records why on the share (`kube.renew_error`, shown by
+`cloop remote kube list`) and is audited once per distinct cause, not once a
+minute. One that finds the token already expired — the hub was down for more
+than half its life — or that the cluster no longer accepts it (the ServiceAccount
+deleted) marks the share **lapsed**: nothing the hub holds can authenticate the
+next TokenRequest any more, and the duty leaves it alone. Its owner revives it
+with `cloop remote kube renew`, which mints the next token with their own
+credentials.
+
+### Without the monitor
+
+A hub that does not run the monitor would hand the share's token to the sandbox
+as a file, and with it the self-renewal permission — so none is installed
+(`--renewal manual`; a developer may ask for it on any hub). The developer renews
+from the terminal: `cloop remote kube renew` mints a token with their own
+credentials and posts it to `POST /api/secrets/{id}/renew`, and the hub stores it
+only after the cluster has authenticated it as the share's own ServiceAccount
+(a SelfSubjectReview; on a cluster too old to answer one, the token's claims
+are checked alone and the response says so). A run already holding the old
+kubeconfig keeps it until that token expires; the next dispatch gets the new one.
+
+### Revoking
+
+`cloop remote kube revoke` deletes the ServiceAccount **first**, which
+invalidates every token ever minted for it at once — the hub's, a live session's,
+any copy — then its RoleBindings and Role, then sweeps the share's namespaces for
+anything else carrying its label, and only then deletes the hub's secret, which
+revokes its grants and closes the monitor sessions standing on them. A revoke the
+cluster cannot complete keeps the secret so it can run again; `--force` deletes
+it anyway and prints the `kubectl delete … -l cloop.dev/kube-share=<id>` for
+what is left.
+
+### Proven on a cluster
+
+`TestKubeShareWithAnExecPlugin` in [`tests/kube`](../../tests/kube/share_test.go)
+runs on a kind cluster in CI: a developer ServiceAccount holding `admin` in three
+namespaces, a kubeconfig that signs in only through a fake exec plugin
+(`v1`, relative command, `provideClusterInfo`), a hub with the monitor on and the
+host executor. It shares with `--access write --ttl 10m` — the shortest token the
+API issues — checks the objects and that RBAC alone *would* let the
+ServiceAccount mint its own token, then dispatches a run whose probe reads and
+writes through the monitor and is refused the ServiceAccount's own token, a raw
+TokenRequest for another and `kube-system`. It waits for the hub's renewal and
+for the first token to expire, has the same run read and write again, revokes,
+finds no labelled object anywhere, and has the run confirm it is cut off. About
+thirteen minutes, most of it waiting out the first token.
+
+---
+
 ## What it enforces, and what it does not
 
 **Enforced, outside the sandbox, on every request:**
@@ -838,7 +1010,7 @@ leader's janitor retires the records of sessions that closed or lapsed.
 | Namespace allowlist | Both directions: a named namespace outside the list, and a request that names none while a list exists. |
 | Resource allowlist | When set, matched as RBAC spells it. |
 | Non-resource URLs | Readable only, and only inside the allowlist; discovery by default. |
-| Dangerous subresources | `exec`, `attach`, `portforward`, `proxy` — refused for every verb, not configurable. |
+| Dangerous subresources | `exec`, `attach`, `portforward`, `proxy`, and the TokenRequest API `serviceaccounts/token` — refused for every verb, not configurable. |
 | Protocol upgrades | Refused. SPDY and websocket both. |
 | Impersonation | `Impersonate-*` stripped, never forwarded. |
 | Request body size | Bounded at 3 MiB by default, and **refused rather than truncated**: a declared `Content-Length` over the cap is rejected before a byte is read, and a chunked body that runs over is cut with `body_too_large`. Truncating was worse than either — the API server answered with its own parse error, so the sandbox was told its JSON was malformed when its request was simply too large. Under the default read-only policy no request has a body at all. |
@@ -992,6 +1164,27 @@ second grant for the cluster-scoped part.
 **`pods/exec is not readable through the cloop Kubernetes monitor`** — by design,
 for every verb, and not configurable. A workload that genuinely needs to exec
 needs a kubeconfig grant on a hub without the monitor in that path.
+
+**`serviceaccounts/token is refused by the cloop Kubernetes monitor for every
+verb, under every grant`** — `kubectl create token`, or anything else asking the
+TokenRequest API for a credential, from a sandbox. By design: the token would
+bypass the monitor from then on. A workload holds the access its grant gives it,
+through the monitor, and no credential of its own.
+
+**`kubeconfig … is a share the hub renews, so its ServiceAccount may create
+tokens for itself, and it is delivered only through the Kubernetes access
+monitor`** — a self-renewing [share](#kubernetes-shares-a-cluster-behind-a-credential-plugin)
+granted on a hub that delivers kubeconfigs without the monitor. Turn the monitor
+on, or share the cluster again with `--renewal manual`.
+
+**`cloop remote kube list` shows a share as `hub, failing`** — read the
+`the last renewal failed:` line under the table. `may not create its own token:
+its self-renewal Role or RoleBinding (…-renew) is missing or was changed` means
+somebody edited the Role; recreate the share, or renew it by hand. A share shown
+**`lapsed`** expired before the hub could renew it — the hub was down for more
+than half the token's life, or the ServiceAccount was deleted — and only
+`cloop remote kube renew` (or, if the ServiceAccount is gone, `revoke --force`)
+moves it on.
 
 **`asked to upgrade the connection`** — `kubectl exec`, `attach`, `port-forward`
 or `proxy`, or a client configured to watch over websockets. Ordinary watches

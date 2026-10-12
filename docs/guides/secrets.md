@@ -722,6 +722,133 @@ With the monitor on, the delivered `kubeconfig` points at the monitor and
 carries a short-lived session token instead of the cluster credential, and
 `CLOOP_KUBEGUARD_SESSION` names the session so an operator can revoke it.
 
+### A cluster that signs you in through a plugin (AKS, EKS, GKE)
+
+Managed clusters authenticate people through an **exec credential plugin**:
+`kubelogin` on AKS with Entra ID, `aws eks get-token` on EKS,
+`gke-gcloud-auth-plugin` on GKE. The hub never runs one — it would be running a
+program named in an uploaded file on the control-plane host — and a sandbox has
+neither the plugin nor you to complete its sign-in. So the dashboard refuses
+such a kubeconfig at upload, naming the plugin and the command that works
+instead:
+
+```
+This kubeconfig cannot be stored: user "clusterUser_rg_aks-dev" (context aks-dev) signs in
+through kubelogin (Microsoft Entra ID, as on AKS). … Share the cluster from your own
+terminal instead: …
+
+    cloop remote kube share aks-dev --hub https://cloop.example.com --context aks-dev --namespaces payments
+```
+
+`cloop remote kube share` runs on your machine, against your own kubeconfig,
+over the terminal session [`cloop login`](../getting-started/terminal.md) gave
+you. It runs the plugin there — where `kubectl` would — and leaves the hub
+holding only a kubeconfig for a ServiceAccount that can do what you chose:
+
+```console
+$ cloop remote kube share aks-dev --context aks-dev --namespaces payments,payments-staging
+Sharing context aks-dev (https://aks-dev-dns.hcp.westeurope.azmk8s.io:443) with https://cloop.example.com as "aks-dev":
+  ServiceAccount  payments/cloop-aks-dev-3f9c2a1b (no token mounted into Pods)
+  Read access     payments, payments-staging (RoleBinding cloop-aks-dev-3f9c2a1b -> ClusterRole view in each)
+  Self-renewal    Role cloop-aks-dev-3f9c2a1b-renew in payments: create serviceaccounts/token for cloop-aks-dev-3f9c2a1b only; the hub's Kubernetes monitor refuses it to every sandbox
+  Token           1d, through the TokenRequest API
+Signing in to https://aks-dev-dns.hcp.westeurope.azmk8s.io:443 with kubelogin (Microsoft Entra ID, as on AKS)…
+The cluster knows you as alice@example.com.
+
+Shared. https://cloop.example.com holds the token as your personal secret "aks-dev" (sec_9b1f…).
+  Token expires   2026-10-13 09:14 UTC (in 23h59m)
+  Renewal         by the hub, at half the token's life; `cloop remote kube list` shows it
+```
+
+| It creates | Why |
+| --- | --- |
+| A **ServiceAccount**, labelled `cloop.dev/kube-share=<id>`, with `automountServiceAccountToken: false` | The identity the hub holds a token for. Nothing should run as it |
+| A **RoleBinding** in each `--namespaces` entry to the cluster's `view` role — `edit` with `--access write` | The access, and only there. A ClusterRoleBinding only with `--cluster-wide`, and then read only |
+| With hub renewal, a **Role** allowing `create` on `serviceaccounts/token` with `resourceNames: [<the ServiceAccount>]`, and its RoleBinding | How the hub mints the next token. See below |
+| A **token**, through the TokenRequest API, for `--ttl` (10 minutes to 7 days, default 24h) | Bounded, and possibly shorter: managed API servers cap it, and the command says when |
+
+The secret is personal to you on a hub with single sign-on (`--shared` stores
+an organisation secret, which needs `secret.grant`). Grant it to a project like
+any kubeconfig — from the Secrets panel, or with `cloop secret grant aks-dev
+--to project:<path> --namespaces payments` on the hub — keeping the grant's
+namespaces inside the share's.
+
+**Write access lives somewhere it cannot write.** The `edit` role may create
+Pods and Secrets and mint tokens in its namespace, so a ServiceAccount that can
+write to its own namespace can hand a workload its credential several ways — a
+Pod running as it that prints its token, a token Secret for it — none of which
+passes through the monitor or ends with the share's TTL. `--access write`
+therefore needs `--sa-namespace`, a namespace you control that is not among
+`--namespaces`, and is refused otherwise; cluster-wide write is refused outright.
+Read access binds `view`, which reads neither Secrets nor the logs of a Pod it
+could have started, so a read share's ServiceAccount lives in the first shared
+namespace unless you say otherwise.
+
+**Renewal.** Managed API servers cap how long a token lives, which is how a
+project used to stop working mid-run without a clear reason.
+
+- *The hub renews it* when the hub runs the [Kubernetes access
+  monitor](../architecture/kubernetes-access.md#kubernetes-shares-a-cluster-behind-a-credential-plugin)
+  (`--renewal auto`, the default, picks this; `cloop remote kube list` says
+  which the hub does). At half the token's life one hub process mints the next
+  token with the share's own self-renewal Role and stores it in place — same
+  secret, same grants — and every running monitor session switches to it within
+  a minute, so a run dispatched before the renewal keeps working after the
+  token it started with has expired. The monitor refuses the
+  `serviceaccounts/token` subresource to every sandbox under every grant, so the
+  permission is the hub's alone. Each renewal is a `secret.renew` audit row
+  naming both expiries.
+- *You renew it* otherwise. Without the monitor the token sits in the sandbox,
+  so no self-renewal Role is installed (`--renewal manual` asks for that on any
+  hub) and `cloop remote kube renew aks-dev` mints the next token with your own
+  credentials — the plugin again — and hands it to the hub, which checks with
+  the cluster that it is the share's ServiceAccount before storing it. A run
+  already holding the old kubeconfig keeps it until that token expires; the
+  next dispatch gets the new one.
+
+A self-renewing share is **only ever delivered through the monitor**: its
+ServiceAccount may mint its own tokens, so as a file in a sandbox it would be a
+credential that extends itself. On a hub whose monitor is turned off later, its
+grants are refused at dispatch with that said, and the run is told as below.
+
+```console
+$ cloop remote kube list
+https://cloop.example.com runs the Kubernetes access monitor: it renews the shares made for it.
+NAME     SERVICE ACCOUNT                    NAMESPACES                 ACCESS  EXPIRES                         RENEWAL               GRANTS
+aks-dev  payments/cloop-aks-dev-3f9c2a1b    payments,payments-staging  read    2026-10-13 21:14 UTC (in 23h)   hub, renewed 1h ago   2
+
+$ cloop remote kube renew aks-dev          # the hub renews now; --local mints with your credentials
+$ cloop remote kube revoke aks-dev
+Deleted ServiceAccount payments/cloop-aks-dev-3f9c2a1b
+Deleted RoleBinding payments/cloop-aks-dev-3f9c2a1b
+…
+Deleted secret aks-dev from https://cloop.example.com, revoking its 2 active grant(s).
+```
+
+`revoke` deletes the ServiceAccount first — which invalidates every token ever
+minted for it, the hub's and any copy — then its bindings and Role, then the
+hub's secret, which revokes its grants and closes the monitor sessions standing
+on it. If the cluster cannot be reached or an object cannot be deleted, the
+secret is kept so the revoke can run again; `--force` deletes it anyway and
+prints the `kubectl delete … -l cloop.dev/kube-share=<id>` that removes the rest.
+
+Deleting the secret on the hub instead — from the Secrets panel, or because its
+owner was [offboarded](#when-the-owner-of-a-personal-secret-leaves) — destroys
+the hub's copy of the token and revokes the grants, but the hub holds no
+permission to delete anything in the cluster: the ServiceAccount and its
+bindings stay until somebody removes them, and the token the hub held lapses at
+its expiry. `cloop remote kube revoke` on a share the hub no longer has prints
+the `kubectl` commands that find and remove them by label.
+
+| Flag | Does |
+| --- | --- |
+| `--context`, `--kubeconfig` | Which context of which kubeconfig (default: kubectl's) |
+| `--namespaces a,b`, `--access read\|write`, `--sa-namespace`, `--cluster-wide` | What the ServiceAccount may reach, and where it lives |
+| `--ttl 24h` | The token's life, 10m to 7d |
+| `--renewal auto\|hub\|manual` | Who renews it |
+| `--server https://…` | The API server address the *hub* uses, when it reaches the cluster at another address than you do (a private endpoint) |
+| `--dry-run` | Print the plan, sign in to nothing, create nothing |
+
 ### Several kubeconfig grants on one project
 
 A project can hold more than one kubeconfig grant: two clusters, one cluster
@@ -788,8 +915,12 @@ every variable the workload is handed.
 A grant can stand, and its secret exist, and the broker still not deliver it:
 the Kubernetes monitor is required (`executors.kube_guard.enabled: true`) and is
 not running, the monitor refuses a kubeconfig whose user runs an `exec` plugin
-(AKS `kubelogin`, EKS, GKE) or an `auth-provider`, the payload no longer parses
-as YAML, or no context survives the grant's `--contexts` and `--namespaces`.
+(AKS `kubelogin`, EKS, GKE) or an `auth-provider`, a [self-renewing
+share](#a-cluster-that-signs-you-in-through-a-plugin-aks-eks-gke) meets a hub
+without the monitor, the payload no longer parses as YAML, or no context
+survives the grant's `--contexts` and `--namespaces`. (The dashboard refuses an
+exec-plugin kubeconfig at upload since Task 20416; one stored before that, or
+minted with `cloop secret mint` on the hub, is refused here.)
 The run starts without it either way. Since Task 20413 the refusal is named on
 the lease and written to the project's **Activity** tab as a
 `credential_refused` event on every run it affects, naming the run — `This run
