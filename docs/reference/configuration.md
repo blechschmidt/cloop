@@ -2056,6 +2056,9 @@ ui:
 
 Unset, it is `projects/` in the home directory of the user the hub runs as —
 `/var/lib/cloop/projects` in the packaged image, whose `HOME` is its state volume.
+The Helm chart mounts its state volume's `projects/` there, since everything
+else in its container is read-only and a project may not live inside the state
+directory itself.
 A name is one path segment of letters, digits, dots, hyphens and underscores,
 starting with a letter or digit. A relative `projects_root` is refused at use,
 naming the setting.

@@ -79,6 +79,11 @@ RUN if [ -z "$TARGETARCH" ] || [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # the symptom is a permission error from SQLite, several layers away from the
 # cause.
 RUN mkdir -p /skel/.cloop
+# The projects root: projects/ in the hub's home, where a project created by
+# name goes (ui.projects_root, Task 20418). Present in the image for the same
+# reason as .cloop — a volume seeded here, or a mount point the Helm chart puts
+# its state volume's projects/ on, must belong to the hub's user.
+RUN mkdir -p /skel/projects
 # A drop directory for `cloop executor enroll --bundle-file`, owned by the
 # unprivileged user the runtime stage runs as.
 #

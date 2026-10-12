@@ -147,6 +147,17 @@ spec:
             # in the container is the one holding state.
             - name: state
               mountPath: /var/lib/cloop/.cloop
+            # And its projects/ directory at the projects root, which is
+            # projects/ in the hub's home unless ui.projects_root says
+            # otherwise. A project's directory may not be inside the state
+            # directory — it is what a sandbox is given, and the state beside
+            # it is the hub's — and nothing else in the container is writable,
+            # so without this a project created by name had nowhere to go
+            # (Task 20418). A subPath of the same volume: the rest of the image
+            # stays read-only, and one volume still holds everything.
+            - name: state
+              mountPath: /var/lib/cloop/projects
+              subPath: projects
             {{- if .Values.config.fromConfigMap }}
             # Nested inside that mount, read-only. Kubernetes orders mounts
             # by path depth, so the volume is in place before this lands on

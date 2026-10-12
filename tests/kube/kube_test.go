@@ -232,7 +232,10 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 	// The forge's acme/granted holds one commit and no .cloop/. Everything a
 	// run needs to know — the goal, the task, the provider — exists only on the
 	// hub, so the Pod can only have it from the seed the hub sends (Task 20402).
-	projectDir := "/var/lib/cloop/.cloop/e2e/kube-" + stamp
+	// Under the projects root — the state volume's projects/, which the chart
+	// mounts there — because a project may not live inside the hub's state
+	// directory (Task 20418).
+	projectDir := "/var/lib/cloop/projects/e2e-kube-" + stamp
 	helper := startStateHelper(ctx, t, x, ns, fullname, keep)
 	registerProject(ctx, t, x, ns, helper, projectDir, "https://github.com/"+grantedRepo+".git")
 	params := map[string]string{
@@ -703,9 +706,10 @@ func upgradeRelease(ctx context.Context, t *testing.T, x tool, release, ns, full
 	x.kubectl(ctx, "rollout", "status", "-n", ns, "deploy/"+fullname, "--timeout=5m")
 }
 
-// startStateHelper runs a Pod mounting the hub's state volume, which is how a
-// project directory and the registry entry naming it get into a hub whose image
-// has no shell. ReadWriteOnce admits it: it shares the hub's node.
+// startStateHelper runs a Pod mounting the hub's state volume where the hub
+// does — the state directory, and its projects/ at the projects root — which is
+// how a project directory and the registry entry naming it get into a hub whose
+// image has no shell. ReadWriteOnce admits it: it shares the hub's node.
 func startStateHelper(ctx context.Context, t *testing.T, x tool, ns, fullname string, keep bool) string {
 	t.Helper()
 	name := "kube-e2e-state-helper"
@@ -721,8 +725,11 @@ func startStateHelper(ctx context.Context, t *testing.T, x tool, ns, fullname st
 				"runAsGroup": 65532, "fsGroup": 65532},
 			"containers": []any{map[string]any{
 				"name": "helper", "image": harnessImage, "imagePullPolicy": "Never",
-				"command":      []string{"sleep", "3600"},
-				"volumeMounts": []any{map[string]any{"name": "state", "mountPath": "/var/lib/cloop/.cloop"}},
+				"command": []string{"sleep", "3600"},
+				"volumeMounts": []any{
+					map[string]any{"name": "state", "mountPath": "/var/lib/cloop/.cloop"},
+					map[string]any{"name": "state", "mountPath": "/var/lib/cloop/projects", "subPath": "projects"},
+				},
 			}},
 			"volumes": []any{map[string]any{"name": "state",
 				"persistentVolumeClaim": map[string]any{"claimName": fullname + "-state"}}},

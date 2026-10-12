@@ -328,6 +328,7 @@ for killing it.
 | --- | --- |
 | `/var/lib/cloop` | `WORKDIR` and `HOME`. One writable volume holds everything. |
 | `/var/lib/cloop/.cloop` | `state.db`, artifacts, `config.yaml`, `projects.json` |
+| `/var/lib/cloop/projects` | the projects root (`ui.projects_root`'s default): projects created by name. The Helm chart mounts its state volume's `projects/` here |
 | `/tmp` | tmpfs, needed because the rootfs is read-only |
 
 `cloop ui` resolves `.cloop` against the process working directory — there is
