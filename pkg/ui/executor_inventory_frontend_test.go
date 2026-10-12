@@ -123,6 +123,13 @@ func TestDashboard_ExecutorInventoryIsVisible(t *testing.T) {
 	if !strings.Contains(offline, "legacy") {
 		t.Errorf("the legacy build placeholder is not surfaced:\n%s", offline)
 	}
+	// Task 20421: the rollback-protection prompt reaches the card.
+	if !strings.Contains(offline, "rollback protection does not cover it") {
+		t.Errorf("the device's rollback_note is not on its card:\n%s", offline)
+	}
+	if strings.Contains(current, "rollback protection") {
+		t.Errorf("a device with no rollback_note was warned about rollback protection:\n%s", current)
+	}
 
 	// ---- a container backend -----------------------------------------
 	container := results["container_backend"].HTML

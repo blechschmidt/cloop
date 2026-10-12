@@ -115,6 +115,11 @@ type executorView struct {
 	// UpgradeLabel names UpgradeTarget for a person when it does not name
 	// itself: "this hub's build (a0f3870)" for an edge build (Task 20376).
 	UpgradeLabel string `json:"upgrade_label,omitempty"`
+	// RollbackNote is the warning for a device whose build carries no
+	// sequence, so its installer cannot refuse an older one, with the way to
+	// cover it (Task 20421): executor.RollbackUnprotected, which the doctor's
+	// executors.rollback_protection finding says too.
+	RollbackNote string `json:"rollback_note,omitempty"`
 	// UpdateChannel is the channel the connected device reports following:
 	// "edge" or "stable"; empty when it is offline (Task 20376).
 	UpdateChannel string `json:"update_channel,omitempty"`

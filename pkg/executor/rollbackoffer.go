@@ -103,3 +103,76 @@ func GuardReleaseOffer(subject string, have int, target, note string) (string, s
 	}
 	return target, note
 }
+
+// RollbackUnprotected is the warning for a device whose build carries no
+// sequence (Task 20421), and the way to cover it: its installer has nothing to
+// order an upgrade by, so rollback protection does not hold for it until it
+// runs a build that carries one — every published release before v0.0.5, and
+// any build stamped by hand. The doctor's executors.rollback_protection and
+// executors.edge_lag findings and the Executors panel say the same thing
+// through it.
+//
+// build is what the device reports ("" when it reported nothing), channel the
+// channel it follows ("" for an agent too old to say, which follows releases),
+// and remoteUpgrade whether its agent said it can carry out an upgrade the hub
+// asks for — which no build from before the remote-upgrade helper can.
+func RollbackUnprotected(subject, build, channel string, remoteUpgrade bool) (note, remedy string) {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		subject = "The device's agent"
+	}
+	build = strings.TrimSpace(build)
+	var what string
+	switch {
+	case build == "":
+		what = "an unreported build, which carries no place on main"
+	case version.IsRelease(build):
+		what = fmt.Sprintf("%s, a release from before builds were stamped with their place on main", build)
+	default:
+		what = fmt.Sprintf("%s, a build that carries no place on main", build)
+	}
+	note = fmt.Sprintf("%s runs %s, so its installer has nothing to order an upgrade by: rollback protection does "+
+		"not cover it, and a forced upgrade could still move it to any older release.", subject, what)
+
+	const after = "From then on its installer refuses any build earlier than the one it runs."
+	if channel == ChannelEdge {
+		return note, "Upgrade it once to this hub's build from the Executors panel. " + after
+	}
+	tag, ok := newestSequencedRelease()
+	if !ok {
+		return note, fmt.Sprintf("No published release this hub knows of carries a place on main, so only a build "+
+			"of main can give it one: put the device on the edge channel (`%s` on it — a cloop older than the "+
+			"channel first needs one edge build installed by hand) and upgrade it to this hub's build.", EdgeOptIn)
+	}
+	if remoteUpgrade {
+		return note, fmt.Sprintf("Press Upgrade on its row in the Executors panel to install %s or a later release. %s",
+			tag, after)
+	}
+	return note, fmt.Sprintf("Its agent cannot carry out an upgrade the hub asks for, so upgrade it once on the "+
+		"device, as root: `%s` fetches the latest release (%s or later) and verifies its signature, then `%s` "+
+		"restarts the agent on it and installs the helper the Upgrade button needs. %s",
+		SelfUpgradeCommand, tag, HelperUpgradeCommand, after)
+}
+
+// SelfUpgradeCommand and HelperUpgradeCommand are the on-device steps that move
+// an agent from before the remote-upgrade helper onto the latest release, with
+// its signature verified (Task 20421): every published release has `cloop
+// upgrade`, which replaces the binary in place, and the new binary's
+// `install --upgrade` — finding itself already installed — restarts the
+// service on it and installs the helper.
+const (
+	SelfUpgradeCommand   = "cloop upgrade"
+	HelperUpgradeCommand = "cloop executor agent install --upgrade --remote-upgrade"
+)
+
+// newestSequencedRelease is the newest published release this hub knows of
+// whose binaries carry a sequence.
+func newestSequencedRelease() (string, bool) {
+	rels := knownReleases()
+	for i := len(rels) - 1; i >= 0; i-- {
+		if rels[i].Sequence > 0 {
+			return rels[i].Tag, true
+		}
+	}
+	return "", false
+}

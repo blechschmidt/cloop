@@ -112,3 +112,50 @@ func TestEdgeLagNeedsAStampedHub(t *testing.T) {
 		t.Fatalf("findings = %+v", got)
 	}
 }
+
+// TestRollbackProtectionCoversReleaseChannelDevices (Task 20421): a device on
+// the stable channel — or too old to report a channel — whose build carries no
+// sequence is a warning with the way to cover it; one whose build carries one
+// passes; an edge device is executors.edge_lag's, and a device that never
+// connected has no build to judge.
+func TestRollbackProtectionCoversReleaseChannelDevices(t *testing.T) {
+	dir := t.TempDir()
+	mustInitStateDB(t, dir)
+	seedDevice(t, dir, "s1", "v004", "v0.0.4", map[string]any{"cpus": 4})
+	seedDevice(t, dir, "s2", "stable-old", "v0.0.4", map[string]any{"update_channel": "stable"})
+	seedDevice(t, dir, "s3", "covered", "v0.0.5", map[string]any{"update_channel": "stable", "build_sequence": 4280,
+		"remote_upgrade": true})
+	seedDevice(t, dir, "e1", "edge", "dev+g4a67976", map[string]any{"update_channel": "edge"})
+	seedDevice(t, dir, "n1", "never", "", nil)
+
+	var got []Finding
+	checkRollbackProtection(dir, func(f Finding) { got = append(got, f) })
+	byTitle := map[string]Finding{}
+	for _, f := range got {
+		if f.Check != "executors.rollback_protection" {
+			t.Errorf("finding under check %q", f.Check)
+		}
+		byTitle[f.Title] = f
+	}
+	if len(got) != 3 {
+		t.Fatalf("findings = %+v, want one per device that follows releases and has connected", got)
+	}
+	for _, title := range []string{"Rollback protection of v004", "Rollback protection of stable-old"} {
+		f, ok := byTitle[title]
+		if !ok {
+			t.Errorf("no finding %q", title)
+			continue
+		}
+		if f.Severity != SeverityWarn || !strings.Contains(f.Message, "rollback protection does not cover it") ||
+			!strings.Contains(f.Message, "v0.0.4, a release from before builds were stamped") || f.Remediation == "" {
+			t.Errorf("%s: %s %q (fix %q)", title, f.Severity, f.Message, f.Remediation)
+		}
+	}
+	if f := byTitle["Rollback protection of covered"]; f.Severity != SeverityPass ||
+		!strings.Contains(f.Message, "refuses any build earlier than that") {
+		t.Errorf("a device carrying a sequence: %s %q", f.Severity, f.Message)
+	}
+	if _, ok := byTitle["Rollback protection of edge"]; ok {
+		t.Error("an edge device was judged here as well as under executors.edge_lag")
+	}
+}

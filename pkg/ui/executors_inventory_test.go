@@ -541,3 +541,57 @@ func TestAnnotateInventoryReleasedHubOffersItsOwnRelease(t *testing.T) {
 		t.Errorf("skew note does not end with the helper's advice: %+v", view.VersionSkew)
 	}
 }
+
+// TestAnnotateInventoryWarnsOfAnUnprotectedBuild (Task 20421): a device whose
+// build carries no sequence — a release from before builds were stamped, or a
+// hand-built binary — has a rollback_note saying rollback protection does not
+// cover it and how to cover it, offline from its stored row as well as live;
+// a device whose build carries one has none.
+func TestAnnotateInventoryWarnsOfAnUnprotectedBuild(t *testing.T) {
+	withHubVersion(t, "v0.1.0")
+	ctx := context.Background()
+
+	// Offline, last seen on v0.0.4, from before the remote-upgrade helper.
+	var view executorView
+	row := remoteRow(statedb.ExecutorInventory{AgentVersion: "v0.0.4", OS: "linux"})
+	annotateInventory(ctx, &view, row, nil)
+	note, remedy := executor.RollbackUnprotected("This device's agent", "v0.0.4", "", false)
+	if view.RollbackNote != note+" "+remedy {
+		t.Errorf("rollback_note = %q\nwant %q", view.RollbackNote, note+" "+remedy)
+	}
+	if !strings.Contains(view.RollbackNote, "rollback protection does not cover it") {
+		t.Errorf("the note does not say what is wrong: %q", view.RollbackNote)
+	}
+
+	// Offline, last seen on a build that carries a sequence.
+	raw, err := json.Marshal(map[string]any{"update_channel": "stable", "build_sequence": 4280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.Capabilities = raw
+	view = executorView{}
+	annotateInventory(ctx, &view, row, nil)
+	if view.RollbackNote != "" {
+		t.Errorf("a device carrying a sequence was warned: %q", view.RollbackNote)
+	}
+
+	// Live: the session's own advertisement decides, and a hand-built binary
+	// whose agent can carry an upgrade out is sent to the Upgrade button.
+	ex, err := remote.NewExecutor(remote.Options{ID: "edge-1", Name: "edge-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := connectAnsweringCaps(t, ex, remote.ProtocolVersion, "dev+g4a67976",
+		remote.AgentCapabilities{UpdateChannel: "stable", RemoteUpgrade: true}, nil)
+	defer end()
+	view = executorView{}
+	annotateInventory(ctx, &view, row, ex)
+	note, remedy = executor.RollbackUnprotected("This device's agent", "dev+g4a67976", "stable", true)
+	if view.RollbackNote != note+" "+remedy {
+		t.Errorf("live rollback_note = %q\nwant %q", view.RollbackNote, note+" "+remedy)
+	}
+	encoded, _ := json.Marshal(view)
+	if !strings.Contains(string(encoded), `"rollback_note"`) {
+		t.Errorf("rollback_note missing from the wire payload: %s", encoded)
+	}
+}

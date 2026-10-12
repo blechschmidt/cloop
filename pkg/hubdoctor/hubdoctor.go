@@ -435,6 +435,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkImagePolicy(ctx, dir, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
 	checkEdgeLag(dir, add)
+	checkRollbackProtection(dir, add)
 	checkRunBuilds(add)
 	// After checkExecutors, and not optional about the ordering: the probe
 	// needs a driver in the registry holding a live cluster credential, and

@@ -399,6 +399,9 @@ function _renderExecutors(d) {
     if (ex.version_skew && ex.version_skew.material && ex.version_skew.note) {
       h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.version_skew.note) + '</div>';
     }
+    // Task 20421: a build carrying no sequence is not covered by rollback
+    // protection; the note says how to cover it (the doctor says the same).
+    if (ex.rollback_note) h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.rollback_note) + '</div>';
     if (ex.blocked && ex.blocked_reason) {
       h += '<div class="exec-blocked-note">&#9888; Blocked by policy. ' + esc(ex.blocked_reason) + '</div>';
     }

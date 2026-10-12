@@ -16,6 +16,11 @@ package hubdoctor
 //     were stamped — whose helper cannot order upgrades yet, so the rollback
 //     protection does not cover it until it has been upgraded once.
 //
+// Devices on the stable channel are not compared with the hub's build — they
+// follow releases — but the second warning applies to them as much (Task
+// 20421): every release before v0.0.5 carries no sequence, so a device still on
+// one is named under executors.rollback_protection with the way to cover it.
+//
 // Read from the hub's database: the full capability advertisement every device
 // sent at its last connect is stored with its row, so this works from the CLI,
 // with the hub running or not, and for devices that are offline (their last
@@ -39,10 +44,15 @@ import (
 // this hub's before hub doctor warns.
 const EdgeLagWarnSequences = 20
 
-// edgeDevice is one enrolled device on the edge channel, as last seen.
+// edgeDevice is one enrolled device, as last seen.
 type edgeDevice struct {
 	ID, Name, Version string
 	Sequence          int
+	// Channel is the channel the device reported, "" for an agent too old to
+	// report one; RemoteUpgrade whether it said it can carry out an upgrade
+	// the hub asks for.
+	Channel       string
+	RemoteUpgrade bool
 }
 
 // hubSequence is this build's place on main. A variable so tests can pose as
@@ -50,7 +60,7 @@ type edgeDevice struct {
 var hubSequence = version.BuildSequence
 
 func checkEdgeLag(dir string, add addFn) {
-	devices, err := edgeDevices(dir)
+	devices, err := agentDevices(dir, true)
 	if err != nil {
 		add(Finding{
 			Check: "executors.edge_lag", Title: "Edge devices against this hub's build", Severity: SeverityWarn,
@@ -80,14 +90,10 @@ func checkEdgeLag(dir string, add addFn) {
 		details := map[string]any{"device": d.ID, "version": d.Version, "hub_sequence": hub}
 		switch {
 		case d.Sequence <= 0:
+			msg, fix := executor.RollbackUnprotected(d.Name, d.Version, executor.ChannelEdge, d.RemoteUpgrade)
 			add(Finding{
 				Check: "executors.edge_lag", Title: title, Severity: SeverityWarn,
-				Message: fmt.Sprintf("%s runs %s, an edge build from before builds were stamped with their place on "+
-					"main; its root helper cannot order upgrades yet, so rollback protection does not cover it",
-					d.Name, displayBuild(d.Version)),
-				Remediation: "Upgrade it once to this hub's build from the Executors panel; from then on it refuses " +
-					"any build earlier than the one it runs",
-				Details: details,
+				Message: msg, Remediation: fix, Details: details,
 			})
 		case hub-d.Sequence > EdgeLagWarnSequences:
 			details["sequence"] = d.Sequence
@@ -114,9 +120,50 @@ func checkEdgeLag(dir string, add addFn) {
 	}
 }
 
-// edgeDevices lists the enrolled, unrevoked devices whose last advertisement
-// put them on the edge channel, ordered by name.
-func edgeDevices(dir string) ([]edgeDevice, error) {
+// checkRollbackProtection names each device on the stable channel — or too
+// old to report a channel, which follows releases — whose build carries no
+// sequence, so its installer cannot refuse an older one (Task 20421). Edge
+// devices are checkEdgeLag's.
+func checkRollbackProtection(dir string, add addFn) {
+	devices, err := agentDevices(dir, false)
+	if err != nil {
+		add(Finding{
+			Check: "executors.rollback_protection", Title: "Rollback protection of enrolled devices",
+			Severity: SeverityWarn, Message: fmt.Sprintf("the enrolled devices could not be read: %v", err),
+			Remediation: "Check the storage findings above; the device inventory lives in .cloop/state.db",
+		})
+		return
+	}
+	for _, d := range devices {
+		title := "Rollback protection of " + d.Name
+		details := map[string]any{"device": d.ID, "version": d.Version, "channel": channelLabel(d.Channel)}
+		if d.Sequence <= 0 {
+			msg, fix := executor.RollbackUnprotected(d.Name, d.Version, d.Channel, d.RemoteUpgrade)
+			add(Finding{Check: "executors.rollback_protection", Title: title, Severity: SeverityWarn,
+				Message: msg, Remediation: fix, Details: details})
+			continue
+		}
+		details["sequence"] = d.Sequence
+		add(Finding{Check: "executors.rollback_protection", Title: title, Severity: SeverityPass,
+			Message: fmt.Sprintf("%s runs %s at %s; its installer refuses any build earlier than that", d.Name,
+				displayBuild(d.Version), version.SequenceLabel(d.Sequence)),
+			Details: details})
+	}
+}
+
+// channelLabel names a reported channel, an unreported one as the stable
+// channel it is.
+func channelLabel(c string) string {
+	if c == "" {
+		return executor.ChannelStable
+	}
+	return c
+}
+
+// agentDevices lists the enrolled, unrevoked devices ordered by name: those
+// whose last advertisement put them on the edge channel when edge is set, the
+// rest otherwise.
+func agentDevices(dir string, edge bool) ([]edgeDevice, error) {
 	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, nil // no database, no enrolled devices; storage says the rest
@@ -148,10 +195,18 @@ func edgeDevices(dir string) ([]edgeDevice, error) {
 		}
 		var caps struct {
 			UpdateChannel string `json:"update_channel"`
+			RemoteUpgrade bool   `json:"remote_upgrade"`
 		}
-		if len(row.Capabilities) == 0 || json.Unmarshal(row.Capabilities, &caps) != nil ||
-			caps.UpdateChannel != executor.ChannelEdge {
+		if len(row.Capabilities) > 0 && json.Unmarshal(row.Capabilities, &caps) != nil {
+			// An advertisement that does not parse says nothing about the
+			// device, so it is left out rather than guessed at.
 			continue
+		}
+		if (caps.UpdateChannel == executor.ChannelEdge) != edge {
+			continue
+		}
+		if !row.Inventory.Known() && caps.UpdateChannel == "" {
+			continue // enrolled, never connected: there is no build to judge
 		}
 		name := row.Name
 		if name == "" {
@@ -160,7 +215,8 @@ func edgeDevices(dir string) ([]edgeDevice, error) {
 		// The sequence as the hub reads a disconnected device's, out-of-range
 		// values included — not a second reading of the same JSON.
 		out = append(out, edgeDevice{ID: row.ID, Name: name, Version: row.Inventory.AgentVersion,
-			Sequence: remote.StoredBuildSequence(row.Capabilities)})
+			Sequence: remote.StoredBuildSequence(row.Capabilities), Channel: caps.UpdateChannel,
+			RemoteUpgrade: caps.RemoteUpgrade})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

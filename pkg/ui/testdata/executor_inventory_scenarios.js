@@ -114,6 +114,10 @@ const OFFLINE_DEVICE = {
       + 'Copy the new cloop binary to the device and run '
       + '`cloop executor agent install --upgrade` there.',
   },
+  // Task 20421: its build carries no sequence, so the card says rollback
+  // protection does not cover it.
+  rollback_note: 'This device\'s agent runs a build that carries no place on main, so rollback protection '
+    + 'does not cover it.',
 };
 
 // A container backend: it runs the hub's own binary, so it must render no

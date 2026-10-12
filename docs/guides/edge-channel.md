@@ -168,7 +168,15 @@ policy never offer or send a build earlier than it — 409, whatever `force` say
 `cloop hub doctor` warns (`executors.edge_lag`) about a device on the edge
 channel more than 20 sequences behind the hub's own build, and about one whose
 build carries no sequence yet, which rollback protection does not cover until it
-has been upgraded once.
+has been upgraded once. It warns too (`executors.rollback_protection`, Task
+20421) about a device on the stable channel — or too old to report a channel,
+which follows releases — whose build carries no sequence: every release before
+v0.0.5 and any binary built by hand. The Executors panel shows the same warning
+on the device's card, with the way to cover it: the Upgrade button for an agent
+that can carry an upgrade out, and otherwise, once on the device as root,
+`cloop upgrade` (which fetches the latest release and verifies its signature)
+followed by `cloop executor agent install --upgrade --remote-upgrade` (which
+restarts the agent on it and installs the helper the button needs).
 
 ---
 

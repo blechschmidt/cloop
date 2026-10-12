@@ -130,3 +130,73 @@ func TestGuardReleaseOfferWithdrawsAReleaseTheDeviceWouldRefuse(t *testing.T) {
 		t.Errorf("the hub's own release: %d, %t", seq, known)
 	}
 }
+
+func withReleases(t *testing.T, rels ...version.Release) {
+	t.Helper()
+	prev := knownReleases
+	knownReleases = func() []version.Release { return rels }
+	t.Cleanup(func() { knownReleases = prev })
+}
+
+// TestRollbackUnprotected (Task 20421): a device whose build carries no
+// sequence is told it is not covered, and how to become covered — through the
+// Upgrade button when its agent can carry an upgrade out, on the device once
+// when it cannot, and through the edge channel when no release carries a
+// sequence yet.
+func TestRollbackUnprotected(t *testing.T) {
+	sequenced := version.Release{Tag: "v0.0.5", Protocol: 21, Sequence: 4280}
+	for _, tc := range []struct {
+		name          string
+		releases      []version.Release
+		build         string
+		channel       string
+		remoteUpgrade bool
+		note, remedy  string
+	}{
+		{
+			name: "a release from before stamping, without the helper", releases: []version.Release{
+				{Tag: "v0.0.4", Protocol: 13}, sequenced}, build: "v0.0.4",
+			note: "sgx runs v0.0.4, a release from before builds were stamped with their place on main, so its " +
+				"installer has nothing to order an upgrade by: rollback protection does not cover it, and a forced " +
+				"upgrade could still move it to any older release.",
+			remedy: "Its agent cannot carry out an upgrade the hub asks for, so upgrade it once on the device, as " +
+				"root: `cloop upgrade` fetches the latest release (v0.0.5 or later) and verifies its signature, then " +
+				"`cloop executor agent install --upgrade --remote-upgrade` restarts the agent on it and installs the " +
+				"helper the Upgrade button needs. From then on its installer refuses any build earlier than the one " +
+				"it runs.",
+		},
+		{
+			name: "a hand-built binary whose agent can upgrade", releases: []version.Release{sequenced},
+			build: "dev+g4a67976", channel: ChannelStable, remoteUpgrade: true,
+			note: "sgx runs dev+g4a67976, a build that carries no place on main, so its installer has nothing to " +
+				"order an upgrade by",
+			remedy: "Press Upgrade on its row in the Executors panel to install v0.0.5 or a later release. From then " +
+				"on its installer refuses any build earlier than the one it runs.",
+		},
+		{
+			name: "an edge device is moved to the hub's build", releases: []version.Release{sequenced},
+			build: "dev+g4a67976", channel: ChannelEdge,
+			remedy: "Upgrade it once to this hub's build from the Executors panel. From then on its installer " +
+				"refuses any build earlier than the one it runs.",
+		},
+		{
+			name: "no release carries a sequence yet", releases: []version.Release{{Tag: "v0.0.4", Protocol: 13}},
+			build: "", note: "sgx runs an unreported build, which carries no place on main",
+			remedy: "No published release this hub knows of carries a place on main, so only a build of main can " +
+				"give it one: put the device on the edge channel (`sudo cloop executor agent install --upgrade " +
+				"--channel edge` on it — a cloop older than the channel first needs one edge build installed by " +
+				"hand) and upgrade it to this hub's build.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withReleases(t, tc.releases...)
+			note, remedy := RollbackUnprotected("sgx", tc.build, tc.channel, tc.remoteUpgrade)
+			if !strings.HasPrefix(note, tc.note) {
+				t.Errorf("note:\n  got  %s\n  want %s", note, tc.note)
+			}
+			if remedy != tc.remedy {
+				t.Errorf("remedy:\n  got  %s\n  want %s", remedy, tc.remedy)
+			}
+		})
+	}
+}

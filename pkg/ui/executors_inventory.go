@@ -283,6 +283,28 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 			}
 		}
 	}
+	// Rollback protection (Task 20421): a device whose build carries no
+	// sequence — every release before v0.0.5, any build stamped by hand — has
+	// an installer with nothing to order an upgrade by. The last known build
+	// counts for an offline device, as for the doctor.
+	if inv.Known() || fromSession {
+		storedCaps := struct {
+			UpdateChannel string `json:"update_channel"`
+			RemoteUpgrade bool   `json:"remote_upgrade"`
+		}{}
+		_ = json.Unmarshal(row.Capabilities, &storedCaps)
+		devChannel, remoteUpgrade := storedCaps.UpdateChannel, storedCaps.RemoteUpgrade
+		if live != nil {
+			if caps, ok := live.AgentInventory(); ok {
+				devChannel, remoteUpgrade = caps.UpdateChannel, caps.RemoteUpgrade
+			}
+		}
+		if sequence <= 0 {
+			note, remedy := executor.RollbackUnprotected("This device's agent", inv.AgentVersion, devChannel,
+				remoteUpgrade)
+			view.RollbackNote = note + " " + remedy
+		}
+	}
 	// A device that said, when it connected, that it cannot carry an upgrade
 	// out is warned about rather than shut out: that answer is as old as its
 	// session, and the device answers a request from a preflight it runs then
