@@ -166,6 +166,65 @@ func TestParseErrorReadsAllThreeDialects(t *testing.T) {
 	}
 }
 
+// TestParseErrorKeepsCodesAndDetails: what `cloop remote` renders a refusal
+// from (Task 20417) — apierror's details, and the dashboard dialect's code,
+// remediation and fields of its own — survives parsing.
+func TestParseErrorKeepsCodesAndDetails(t *testing.T) {
+	ae := parseError(403, []byte(`{"error":{"code":"FORBIDDEN","message":"your role does not permit this action",`+
+		`"details":{"required_permission":"project.write","role":"viewer","scope":"global"}}}`))
+	if ae.Code != "FORBIDDEN" || ae.Detail("required_permission") != "project.write" || ae.Detail("role") != "viewer" ||
+		ae.Detail("scope") != "global" {
+		t.Fatalf("apierror with details parsed as %+v", ae)
+	}
+	ae = parseError(409, []byte(`{"error":"host execution is disabled","code":"host_execution_denied",`+
+		`"remediation":"bind it to an isolated executor","alternatives":["a","b"],"executor_id":"local"}`))
+	if ae.Code != "host_execution_denied" || ae.Remediation != "bind it to an isolated executor" ||
+		ae.Detail("alternatives") != "a, b" || ae.Detail("executor_id") != "local" || ae.Detail("code") != "" {
+		t.Fatalf("the dashboard dialect parsed as %+v", ae)
+	}
+	if got := ae.Error(); got != "host execution is disabled (HTTP 409, host_execution_denied) — bind it to an isolated executor" {
+		t.Fatalf("Error() = %q", got)
+	}
+	// OAuth's dialect is unchanged: the "error" is the code.
+	if ae := parseError(400, []byte(`{"error":"authorization_pending","error_description":"not yet"}`)); ae.Code != "authorization_pending" ||
+		ae.Message != "not yet" || ae.Details != nil {
+		t.Fatalf("OAuth error parsed as %+v", ae)
+	}
+}
+
+func TestRenderValueNeverPrintsStructure(t *testing.T) {
+	for _, tc := range []struct {
+		in   any
+		want string
+	}{
+		{nil, ""},
+		{"text", "text"},
+		{true, "yes"},
+		{float64(3), "3"},
+		{1.5, "1.5"},
+		{[]any{"a", float64(2), nil, "c"}, "a, 2, c"},
+		{map[string]any{"b": float64(2), "a": "x", "nil": nil}, "a=x, b=2"},
+		{map[string]any{"list": []any{"p", "q"}}, "list=p, q"},
+	} {
+		if got := RenderValue(tc.in); got != tc.want {
+			t.Errorf("RenderValue(%#v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDashboardURLOpensTheProject(t *testing.T) {
+	c, err := New("https://hub.example.com", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.DashboardURL("/srv/projects/a b"); got != "https://hub.example.com/?project=%2Fsrv%2Fprojects%2Fa+b" {
+		t.Errorf("DashboardURL = %q", got)
+	}
+	if got := c.DashboardURL(""); got != "https://hub.example.com/" {
+		t.Errorf("DashboardURL(\"\") = %q", got)
+	}
+}
+
 // ── the device flow against a fake hub ──────────────────────────────────────
 
 // fakeHub plays the hub's two device endpoints with a script of poll answers.

@@ -53,6 +53,7 @@ const (
 	groupHubAccess  = "hub-access"
 	groupHubOperate = "hub-operate"
 
+	groupRemoteSetup    = "remote-setup"
 	groupRemoteProjects = "remote-projects"
 	groupRemoteAccess   = "remote-access"
 
@@ -388,23 +389,32 @@ var hubCommandGroups = map[string]string{
 }
 
 var remoteGroups = []*cobra.Group{
+	{ID: groupRemoteSetup, Title: "Setting up a project:"},
 	{ID: groupRemoteProjects, Title: "Projects and runs:"},
-	{ID: groupRemoteAccess, Title: "Cluster access:"},
+	{ID: groupRemoteAccess, Title: "Credentials and cluster access:"},
 }
 
 // remoteCommandGroups maps a `cloop remote` subcommand to its group. The
-// split is the one a reader needs: everything above `kube` acts on the hub's
-// projects; `kube` acts on a Kubernetes cluster of yours and leaves the hub a
-// credential for it (Task 20416).
+// split is the order a developer meets them in: setting a project up from a
+// checkout — where it runs, what it reaches (Task 20417) — then working with
+// projects and their runs, then the credentials a project needs and the
+// clusters it may reach (`kube` acts on a Kubernetes cluster of yours and
+// leaves the hub a credential for it, Task 20416).
 var remoteCommandGroups = map[string]string{
+	"init":      groupRemoteSetup,
+	"executors": groupRemoteSetup,
+	"repos":     groupRemoteSetup,
+
 	"projects": groupRemoteProjects,
 	"tasks":    groupRemoteProjects,
 	"add":      groupRemoteProjects,
 	"run":      groupRemoteProjects,
 	"stop":     groupRemoteProjects,
 	"logs":     groupRemoteProjects,
+	"features": groupRemoteProjects,
 
-	"kube": groupRemoteAccess,
+	"grants": groupRemoteAccess,
+	"kube":   groupRemoteAccess,
 }
 
 var remoteKubeGroups = []*cobra.Group{

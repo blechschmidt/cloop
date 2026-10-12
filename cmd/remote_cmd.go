@@ -317,13 +317,18 @@ func remoteClient() (*hubclient.Client, error) {
 	return hubclient.New(h.URL, h.CAFile, h.Credential)
 }
 
-// remoteErr adds the one remedy a refused credential always has.
+// remoteErr renders a hub refusal for a terminal: the hub's message and code,
+// its details as lines, and for a missing permission how to get it (see
+// remote_errors.go). A refused credential gets the one remedy it always has.
 func remoteErr(c *hubclient.Client, err error) error {
 	if err == nil {
 		return nil
 	}
 	if hubclient.IsUnauthorized(err) {
 		return fmt.Errorf("%w — the session has ended: run `cloop login %s` again", err, c.Base)
+	}
+	if ae, ok := hubclient.AsAPIError(err); ok {
+		return &remoteError{hub: c.Base, ae: ae}
 	}
 	return err
 }

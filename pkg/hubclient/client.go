@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,14 @@ const maxResponseBytes = 32 << 20
 // requestTimeout bounds one API call. Streams (FollowLogs) are not calls and
 // are bounded by their context instead.
 const requestTimeout = 60 * time.Second
+
+// longRequestTimeout bounds the calls the hub answers only after a workload of
+// its own has finished: creating a project runs `cloop init` (bounded at five
+// minutes on the hub), creating a feature checks out a worktree (four), and
+// opening a pull request pushes a branch (ten). Each is a little longer than
+// the hub's own bound, so the hub's answer — even a refusal — arrives rather
+// than this client giving up first.
+const longRequestTimeout = 11 * time.Minute
 
 // Client talks to one hub.
 type Client struct {
@@ -97,24 +106,100 @@ type APIError struct {
 	// Status is the HTTP status.
 	Status int
 	// Code is the machine-readable code when the hub sent one: an OAuth
-	// error ("authorization_pending"), or an apierror code ("FORBIDDEN").
+	// error ("authorization_pending"), an apierror code ("FORBIDDEN"), or
+	// the dashboard dialect's own ("executor_audience_denied").
 	Code string
 	// Message is the hub's prose.
 	Message string
+	// Remediation is the hub's "what to do about it", when it sent one apart
+	// from the message.
+	Remediation string
+	// Details is the rest of what the hub said about the refusal: apierror's
+	// "details" object — required_permission, role and scope for a missing
+	// permission — or the dashboard dialect's other fields (executor_id,
+	// alternatives, …). Values are as JSON decodes them.
+	Details map[string]any
 	// IntervalSeconds is the polling interval a device-flow error carried.
 	IntervalSeconds int
 }
 
 func (e *APIError) Error() string {
+	var b strings.Builder
 	switch {
 	case e.Message != "" && e.Code != "" && !strings.Contains(e.Message, e.Code):
-		return fmt.Sprintf("%s (HTTP %d, %s)", e.Message, e.Status, e.Code)
+		fmt.Fprintf(&b, "%s (HTTP %d, %s)", e.Message, e.Status, e.Code)
 	case e.Message != "":
-		return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
+		fmt.Fprintf(&b, "%s (HTTP %d)", e.Message, e.Status)
 	case e.Code != "":
-		return fmt.Sprintf("HTTP %d: %s", e.Status, e.Code)
+		fmt.Fprintf(&b, "HTTP %d: %s", e.Status, e.Code)
+	default:
+		fmt.Fprintf(&b, "HTTP %d", e.Status)
 	}
-	return fmt.Sprintf("HTTP %d", e.Status)
+	if e.Remediation != "" && !strings.Contains(e.Message, e.Remediation) {
+		b.WriteString(" — ")
+		b.WriteString(e.Remediation)
+	}
+	return b.String()
+}
+
+// Detail returns one of the refusal's details rendered as text, "" when the
+// hub sent none by that name.
+func (e *APIError) Detail(key string) string {
+	if e == nil || e.Details == nil {
+		return ""
+	}
+	v, ok := e.Details[key]
+	if !ok {
+		return ""
+	}
+	return RenderValue(v)
+}
+
+// RenderValue renders a decoded JSON value as one line of text: a string as
+// itself, a list joined with commas, an object as key=value pairs in key
+// order. Never Go's map[…] syntax and never raw JSON, which is what a person
+// reading an error in a terminal should not be handed.
+func RenderValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case bool:
+		if x {
+			return "yes"
+		}
+		return "no"
+	case float64:
+		if x == float64(int64(x)) {
+			return fmt.Sprintf("%d", int64(x))
+		}
+		return fmt.Sprintf("%g", x)
+	case json.Number:
+		return x.String()
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := RenderValue(item); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			if s := RenderValue(x[k]); s != "" {
+				parts = append(parts, k+"="+s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	}
+	return fmt.Sprint(v)
 }
 
 // IsUnauthorized reports whether err is the hub refusing the credential.
@@ -123,45 +208,86 @@ func IsUnauthorized(err error) bool {
 	return errors.As(err, &ae) && ae.Status == http.StatusUnauthorized
 }
 
-// parseError reads the hub's three error dialects: OAuth's {"error": code,
-// "error_description": text}, the dashboard's {"error": text}, and apierror's
-// {"error": {"code", "message"}}.
+// AsAPIError returns err's *APIError, if it is one.
+func AsAPIError(err error) (*APIError, bool) {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae, true
+	}
+	return nil, false
+}
+
+// flatErrorKeys are the dashboard dialect's fields parseError reads into
+// APIError's own fields rather than into Details.
+var flatErrorKeys = map[string]bool{
+	"error": true, "error_description": true, "message": true, "interval": true,
+	"code": true, "remediation": true, "ok": true,
+}
+
+// parseError reads the hub's error dialects: OAuth's {"error": code,
+// "error_description": text}, the dashboard's {"error": text} — which may carry
+// "code", "remediation" and fields of its own beside it — and apierror's
+// {"error": {"code", "message", "details"}}.
 func parseError(status int, body []byte) *APIError {
 	e := &APIError{Status: status}
-	var flat struct {
-		Error       json.RawMessage `json:"error"`
-		Description string          `json:"error_description"`
-		Message     string          `json:"message"`
-		Interval    int             `json:"interval"`
-	}
-	if json.Unmarshal(body, &flat) != nil {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
 		e.Message = strings.TrimSpace(string(body))
 		if len(e.Message) > 300 {
 			e.Message = e.Message[:300]
 		}
 		return e
 	}
-	if flat.Interval > 0 {
-		e.IntervalSeconds = flat.Interval
+	text := func(key string) string {
+		var s string
+		if raw, ok := fields[key]; ok {
+			_ = json.Unmarshal(raw, &s)
+		}
+		return strings.TrimSpace(s)
 	}
+	var interval int
+	if raw, ok := fields["interval"]; ok && json.Unmarshal(raw, &interval) == nil && interval > 0 {
+		e.IntervalSeconds = interval
+	}
+
 	var s string
-	if json.Unmarshal(flat.Error, &s) == nil {
-		if flat.Description != "" {
-			e.Code, e.Message = s, flat.Description
-		} else {
-			e.Message = s
+	if raw, ok := fields["error"]; ok && json.Unmarshal(raw, &s) == nil {
+		if desc := text("error_description"); desc != "" {
+			// OAuth: the "error" is the code.
+			e.Code, e.Message = s, desc
+			return e
+		}
+		e.Message = s
+		e.Code = text("code")
+		e.Remediation = text("remediation")
+		for k, raw := range fields {
+			if flatErrorKeys[k] {
+				continue
+			}
+			var v any
+			if json.Unmarshal(raw, &v) == nil && v != nil {
+				if e.Details == nil {
+					e.Details = map[string]any{}
+				}
+				e.Details[k] = v
+			}
 		}
 		return e
 	}
 	var nested struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code        string         `json:"code"`
+		Message     string         `json:"message"`
+		Remediation string         `json:"remediation"`
+		Details     map[string]any `json:"details"`
 	}
-	if json.Unmarshal(flat.Error, &nested) == nil {
-		e.Code, e.Message = nested.Code, nested.Message
+	if raw, ok := fields["error"]; ok && json.Unmarshal(raw, &nested) == nil {
+		e.Code, e.Message, e.Remediation = nested.Code, nested.Message, nested.Remediation
+		if len(nested.Details) > 0 {
+			e.Details = nested.Details
+		}
 	}
 	if e.Message == "" {
-		e.Message = flat.Message
+		e.Message = text("message")
 	}
 	return e
 }
@@ -170,7 +296,16 @@ func parseError(status int, body []byte) *APIError {
 // non-nil, receives the decoded answer. A status of 400 or above is returned
 // as an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	return c.do(ctx, requestTimeout, method, path, query, body, out)
+}
+
+// doLong is Do for a call the hub answers after a workload of its own.
+func (c *Client) doLong(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.do(ctx, longRequestTimeout, method, path, query, body, out)
+}
+
+func (c *Client) do(ctx context.Context, timeout time.Duration, method, path string, query url.Values, body, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	u := c.Base + path
 	if len(query) > 0 {
