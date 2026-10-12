@@ -1116,6 +1116,26 @@ func (b *Broker) Extend(ctx context.Context, leaseID string) (time.Time, error) 
 			"lease %s lapsed at %s and cannot be extended", leaseID, expiresAt.UTC().Format(time.RFC3339))
 	}
 
+	// A lease revoked while this process held it, by a revocation that did
+	// not reach it — the fan-out could not get through, or this process was
+	// not asked — is not kept alive (Task 20419): the holder's janitor takes
+	// it back, and until then it lapses on schedule. A store that cannot say
+	// is an extension tried again at the next tick.
+	whole, revokedGrants, rerr := b.leaseRevoked(leaseID)
+	if rerr != nil {
+		return time.Time{}, fmt.Errorf("secretbroker: extend lease %s: read its revocations: %w", leaseID, rerr)
+	}
+	if whole != nil {
+		return time.Time{}, b.refuseRevoked(ev, *whole, "will not be extended")
+	}
+	for _, id := range grantIDs {
+		if r, revoked := revokedGrants[id]; revoked {
+			ev.GrantID = id
+			return time.Time{}, b.denyf(ev, ErrGrantRevoked, "lease %s holds grant %s, which was %s on the lease",
+				leaseID, id, describeRevocation(r))
+		}
+	}
+
 	earliest, err := b.recheckGrants(ev, leaseID, requester, grantIDs, now)
 	if err != nil {
 		return time.Time{}, err

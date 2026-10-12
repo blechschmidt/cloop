@@ -45,6 +45,12 @@ type memStore struct {
 
 	// tombstones back the TombstoneStore half (tombstone_test.go, Task 20400).
 	tombstones map[string]Tombstone
+
+	// revocations back the LeaseRevocationStore half (leaserevocation_test.go,
+	// Task 20419), keyed by lease id and grant id; revocationErr fails their
+	// reads as a busy database would.
+	revocations   map[[2]string]LeaseRevocation
+	revocationErr error
 }
 
 func newMemStore() *memStore {
@@ -57,7 +63,8 @@ func newMemStore() *memStore {
 		leases:   make(map[string]LeaseRecord),
 		appSlots: make(map[[2]string]AppSlotRecord),
 
-		tombstones: make(map[string]Tombstone),
+		tombstones:  make(map[string]Tombstone),
+		revocations: make(map[[2]string]LeaseRevocation),
 	}
 }
 

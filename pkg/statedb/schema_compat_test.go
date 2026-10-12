@@ -584,8 +584,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// 0066 (terminal sign-in, Task 20412) appends two columns to sessions,
 	// which the :8080 hub's binary reads on every request it authenticates.
 	// 0068 (project claims, Task 20418) is written by the first creation on
-	// a hub sharing its control plane with an older one.
-	for _, v := range []int{35, 36, 41, 65, 66, 68} {
+	// a hub sharing its control plane with an older one. 0069 (lease
+	// revocations and dispatch intents, Task 20419) is applied by the first
+	// member of a new build while older members still serve the cluster.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

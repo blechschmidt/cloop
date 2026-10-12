@@ -238,3 +238,42 @@ func UnmarshalHandleMeta(s string) map[string]string {
 	}
 	return out
 }
+
+// ClaimExecutorHandleMeta sets the meta key of handleID's row to value,
+// provided it holds expect now — absent counts as "" — and reports whether it
+// did (Task 20419). It is a compare-and-swap on the whole meta document: the
+// row is re-read and the write conditioned on what was read, so of two hub
+// processes adopting one workload row only one records itself as its owner,
+// whichever process each runs in. A row that is gone is not claimed.
+func (d *DB) ClaimExecutorHandleMeta(handleID, key, expect, value string) (bool, error) {
+	if strings.TrimSpace(handleID) == "" || strings.TrimSpace(key) == "" {
+		return false, errors.New("statedb: claiming a handle needs its id and a meta key")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var stored string
+	err := d.conn.QueryRow(`SELECT meta_json FROM executor_handles WHERE handle_id = ?`, handleID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("statedb: read executor handle %q: %w", handleID, classifyDriverErr(err))
+	}
+	meta := UnmarshalHandleMeta(stored)
+	if meta[key] != expect {
+		return meta[key] == value, nil
+	}
+	next := make(map[string]string, len(meta)+1)
+	for k, v := range meta {
+		next[k] = v
+	}
+	next[key] = value
+	res, err := d.conn.Exec(
+		`UPDATE executor_handles SET meta_json = ?, updated_at = ? WHERE handle_id = ? AND meta_json = ?`,
+		MarshalHandleMeta(next), formatOptionalTime(time.Now().UTC()), handleID, stored)
+	if err != nil {
+		return false, fmt.Errorf("statedb: claim executor handle %q: %w", handleID, classifyDriverErr(err))
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}

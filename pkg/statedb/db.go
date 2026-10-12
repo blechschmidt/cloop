@@ -1665,3 +1665,24 @@ func decodeReview(raw string) *pm.TaskReview {
 	}
 	return &r
 }
+
+// SetQueryOnly makes every write through this handle fail, as a read-only
+// database file fails it — for root too, unlike a file mode — or allows
+// writes again. It binds this handle's one connection and no other. For a
+// reader that must not write, and for a test that needs a write to fail the
+// way a read-only database fails it (Task 20419).
+func (d *DB) SetQueryOnly(on bool) error {
+	if d == nil {
+		return errors.New("statedb: nil handle")
+	}
+	v := "0"
+	if on {
+		v = "1"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec("PRAGMA query_only=" + v); err != nil {
+		return fmt.Errorf("statedb: query_only=%s: %w", v, classifyDriverErr(err))
+	}
+	return nil
+}

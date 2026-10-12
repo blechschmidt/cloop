@@ -58,6 +58,11 @@ var (
 	// run the lease was issued for (Task 20382) — so this one may neither
 	// extend nor release it.
 	ErrLeaseMoved = errors.New("secretbroker: lease is held by another hub process")
+	// ErrLeaseRevoked: an operator, or a cordon, revoked the lease (Task
+	// 20419). The revocation is recorded, so no hub process may take the
+	// lease over or keep it alive afterwards — including one that adopts its
+	// run after the holder that heard of it died.
+	ErrLeaseRevoked = errors.New("secretbroker: lease revoked")
 
 	// ErrRepoDenied: the repository is outside the grant's allowlist, or
 	// could not be normalised into owner/repo form.

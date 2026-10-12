@@ -206,6 +206,19 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 	ev.ProjectID = rec.Requester.ProjectID
 	ev.RunID = rec.Requester.RunID
 
+	// A revoked lease is never handed on (Task 20419), and whether it was
+	// revoked has to be known first: a store that cannot say is a takeover
+	// tried again, never one made on a guess. The revocation is decisive
+	// whatever else holds — a lapsed lease that was also revoked is refused as
+	// revoked, which is what the process enforcing it needs to know.
+	whole, revokedGrants, rerr := b.leaseRevoked(leaseID)
+	if rerr != nil {
+		return nil, fmt.Errorf("secretbroker: take over lease %s: read its revocations: %w", leaseID, rerr)
+	}
+	if whole != nil {
+		return nil, b.refuseRevoked(ev, *whole, "cannot be taken over")
+	}
+
 	now := b.now()
 	if !now.Before(rec.ExpiresAt) {
 		return nil, b.denyf(ev, ErrLeaseExpired,
@@ -214,6 +227,18 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 	}
 	var withdrawn []WithdrawnGrant
 	for _, id := range rec.GrantIDs {
+		if r, revoked := revokedGrants[id]; revoked {
+			// One grant of the lease revoked on the lease itself (Task 20419):
+			// withdrawn like a revoked grant, or — the lease's only grant —
+			// the whole lease refused.
+			if len(rec.GrantIDs) == 1 {
+				ev.GrantID = id
+				return nil, b.refuseRevoked(ev, r, "holds no other grant, so it cannot be taken over")
+			}
+			withdrawn = append(withdrawn, WithdrawnGrant{GrantID: id,
+				Reason: "grant " + id + " of lease " + leaseID + " " + describeRevocation(r)})
+			continue
+		}
 		_, sentinel, why, final := b.standing(id, rec.Requester, now)
 		if sentinel == nil {
 			continue

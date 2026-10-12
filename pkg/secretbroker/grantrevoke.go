@@ -361,8 +361,17 @@ func (b *Broker) WithdrawnGrants(leaseID string) []WithdrawnGrant {
 		return nil
 	}
 	now := b.now()
+	// One grant revoked on the lease itself counts as withdrawn too (Task
+	// 20419). A store that cannot be read adds nothing: the next pass asks
+	// again.
+	_, revokedGrants, _ := b.leaseRevoked(leaseID)
 	var out []WithdrawnGrant
 	for _, id := range grantIDs {
+		if r, revoked := revokedGrants[id]; revoked {
+			out = append(out, WithdrawnGrant{GrantID: id,
+				Reason: "grant " + id + " of lease " + leaseID + " " + describeRevocation(r)})
+			continue
+		}
 		_, sentinel, why, final := b.standing(id, requester, now)
 		if sentinel == nil || !final || errors.Is(sentinel, ErrGrantExpired) {
 			continue

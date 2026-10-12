@@ -171,3 +171,54 @@ func leaseFromRow(row statedb.SecretLeaseRow) (secretbroker.LeaseRecord, error) 
 		GrantIDs:  doc.GrantIDs,
 	}, nil
 }
+
+// Compile-time proof that the adapter keeps lease revocations (Task 20419).
+var _ secretbroker.LeaseRevocationStore = (*Store)(nil)
+
+// PutLeaseRevocation records a lease revocation.
+func (s *Store) PutLeaseRevocation(r secretbroker.LeaseRevocation) error {
+	return s.db.PutLeaseRevocation(statedb.LeaseRevocationRow{
+		LeaseID: r.LeaseID, GrantID: r.GrantID, Action: r.Action, Reason: r.Reason, Actor: r.Actor,
+		ExecutorID: r.ExecutorID, ProjectID: r.ProjectID, Holder: r.Holder, RevokedAt: r.RevokedAt,
+	})
+}
+
+// LeaseRevocations returns every revocation of one lease.
+func (s *Store) LeaseRevocations(leaseID string) ([]secretbroker.LeaseRevocation, error) {
+	rows, err := s.db.LeaseRevocations(leaseID)
+	if err != nil {
+		return nil, err
+	}
+	return revocationsFromRows(rows), nil
+}
+
+// ListLeaseRevocations returns every revocation, or only the pending ones.
+func (s *Store) ListLeaseRevocations(pendingOnly bool) ([]secretbroker.LeaseRevocation, error) {
+	rows, err := s.db.ListLeaseRevocations(pendingOnly)
+	if err != nil {
+		return nil, err
+	}
+	return revocationsFromRows(rows), nil
+}
+
+// SettleLeaseRevocation marks a pending revocation enforced.
+func (s *Store) SettleLeaseRevocation(leaseID, grantID, by, detail string, at time.Time) (bool, error) {
+	return s.db.MarkLeaseRevocationEnforced(leaseID, grantID, by, detail, at)
+}
+
+// NoteLeaseRevocation records why a revocation is still pending.
+func (s *Store) NoteLeaseRevocation(leaseID, grantID, detail string) error {
+	return s.db.NoteLeaseRevocation(leaseID, grantID, detail)
+}
+
+func revocationsFromRows(rows []statedb.LeaseRevocationRow) []secretbroker.LeaseRevocation {
+	out := make([]secretbroker.LeaseRevocation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, secretbroker.LeaseRevocation{
+			LeaseID: r.LeaseID, GrantID: r.GrantID, Action: r.Action, Reason: r.Reason, Actor: r.Actor,
+			ExecutorID: r.ExecutorID, ProjectID: r.ProjectID, Holder: r.Holder, RevokedAt: r.RevokedAt,
+			EnforcedAt: r.EnforcedAt, EnforcedBy: r.EnforcedBy, Detail: r.Detail,
+		})
+	}
+	return out
+}
