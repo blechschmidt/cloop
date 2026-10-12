@@ -1559,6 +1559,29 @@ group-readable permissions so you can run `chmod 600 .cloop/config.yaml`.
 **Encrypted secrets** (`cloop secret`) are stored in `.cloop/secrets.enc` using
 AES-256-GCM and never written to any AI prompt.
 
+### The root key: `CLOOP_SECRET_KEY`
+
+Every sealed credential, session refresh token and hub CA key, every audit
+checkpoint seal and backup sidecar seal, the key escrow and `.cloop/secrets.enc`
+derive from one root secret. The hub and every command read it through one
+resolver, from the first of these that is set — and refuse to run when two of
+them hold different keys:
+
+| Setting | Holds |
+| --- | --- |
+| `CLOOP_SECRET_KEY_FILE` | absolute path to a file holding the key: a regular file the hub's user owns, mode `0400` or `0600`, outside every `.cloop/` directory (one trailing newline is ignored). A Kubernetes Secret volume — owned by root, mode `0440`, readable through the Pod's `fsGroup` — is accepted too |
+| `$CREDENTIALS_DIRECTORY/cloop-secret-key` | the systemd credential: `LoadCredential=cloop-secret-key:<file>`, or `LoadCredentialEncrypted=` with a file `systemd-creds encrypt` sealed — to the host's credential secret and, where there is one, its TPM |
+| `CLOOP_SECRET_KEY` | the key itself, in the environment — the last resort: readable in `/proc/<pid>/environ` and inherited by children |
+| `CLOOP_SECRET_KEY_PREVIOUS_FILE`, `cloop-secret-key-previous`, `CLOOP_SECRET_KEY_PREVIOUS` | the key a [change of root](../operations/runbook.md#changing-cloop_secret_key-itself) is replacing, read the same way: it opens what it sealed and mints nothing. Refused without a current key, or when it is the current key |
+
+`cloop hub bootstrap` writes the key to `cloop-secret-key` beside `.cloop/`
+(`--key-file`), encrypted with `systemd-creds` when the host can
+(`--systemd-creds auto|always|never`). A serving hub resolves once at startup,
+prints the source and the key's fingerprint, and advertises the fingerprint to
+its cluster peers; a changed file takes effect at a restart. It refuses to start
+when a live sealing key derives from neither configured root. See
+[the root key](../operations/runbook.md#the-root-key) in the runbook.
+
 ### State file integrity (optional HMAC)
 
 Set the `CLOOP_STATE_HMAC_KEY` environment variable to enable HMAC-SHA256

@@ -239,8 +239,14 @@ layer and fails.
 docker run --rm -p 8080:8080 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v cloop-state:/var/lib/cloop --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  -e CLOOP_UI_TOKEN=… -e CLOOP_SECRET_KEY=… cloop-hub:dev
+  -v /srv/cloop/cloop-secret-key:/run/secrets/cloop-secret-key:ro \
+  -e CLOOP_SECRET_KEY_FILE=/run/secrets/cloop-secret-key \
+  -e CLOOP_UI_TOKEN=… cloop-hub:dev
 ```
+
+The root key goes in as a file — owned by UID 65532, mode `0400` — rather than
+as `-e CLOOP_SECRET_KEY=…`, which `docker inspect` shows to anyone who can run it
+(see [the root key](../operations/runbook.md#the-root-key)).
 
 A second target builds the executor agent, which is Alpine rather than
 distroless because materialising a source tree and committing what a task

@@ -4243,6 +4243,16 @@ with every check upstream still passing.
 | `cloop hub key list` neither mints nor promotes — a diagnostic does not modify what it reports | `TestReadOnlyKeyringDoesNotMint`, `TestReadOnlyOpenDoesNotPromote` |
 | Every set registered for rotation is also counted by retirement | `TestRetirementChecksEverySetThatRotates` |
 | Migration 0019 stamps pre-existing rows `legacy`; the first rotation upgrades them in place | `TestMigration0019StampsAndUpgradesPreExistingRows` |
+| The root key is read from one resolver: a key file (absolute, a regular file the hub owns, 0400 or 0600, outside every `.cloop/`), a systemd credential, then the environment; a file another user could read or replace, a path through `.cloop/` and sources that disagree are refused, never ranked | `TestKeyFileRefusals`, `TestKeyFileOwnerRule`, `TestDisagreeingSourcesAreRefused`, `TestAPreviousKeyNeedsACurrentOneAndIsNotIt` |
+| A serving hub pins the roots it started with; a key file changed under it takes effect at a restart | `TestPinHoldsUntilUnpinned` |
+| A sealing key records its root by the fingerprint every checkpoint, escrow and hub member gives it, and keys from before that are attributed once, by derivation | `TestOneKeyHasOneName`, `TestUnattributedKeysAreAttributedOnceByTrialDerivation` |
+| Every live KEK must derive from a configured root: a new key without the previous one, or a mistyped one, refuses rather than forking the registry, and `cloop ui` refuses to start on it | `TestEveryLiveKeyMustDeriveFromAConfiguredRoot`, `TestRootChangeAcrossARollingRestart` (`tests/cluster`) |
+| Only the current root mints; the previous one opens, and its keys stay primary until the retire step, so members restarted and not yet restarted seal under one key | `TestOnlyTheCurrentRootMints`, `TestANewRootBesideThePreviousOpensEverythingAndChangesNothing` |
+| Changing the root under concurrent reads and writes loses nothing: every secret, session refresh token and the hub CA's key opens under the new root alone afterwards, and the old root alone refuses | `TestRootChangeUnderConcurrentLoad`, `TestRetirePreviousMovesEverythingAndShredsTheOldRoot` |
+| The retire step refuses, changing nothing, while a live member advertises another root or none, beside an exclusive hub, and until an escrow of the new key is on record; interrupted, it retires nothing | `TestRetirePreviousWaitsForEveryMemberAndAnEscrow`, `TestRetirePreviousRefusesBesideAnExclusiveHub`, `TestRetirePreviousIsResumableAndRetiresNothingUnfinished` |
+| A member without the new root fails loudly and drops nothing: its seals and reads fail naming the key, and it never writes an empty refresh token over one it could not open | `TestAMemberStillOnTheOldRootFailsLoudlyAfterTheChange`, `TestAMemberWithoutTheNewRootDropsNoRefreshToken` |
+| A backup from before the change restores with the old key as the previous one; checkpoints sealed on both sides of the change verify while it is configured | `TestABackupFromBeforeAChangeOfRootRestoresWithThePreviousRootSet`, `TestCheckpointsAcrossAChangeOfRootVerify` |
+| Derived keys are cached for the process, and a retired key's are wiped from it | `TestDerivedKeysAreCachedForTheProcess` |
 | Session refresh tokens rotate alongside secrets rather than being silently skipped | `TestSessionRefreshTokensRotateAlongsideSecrets` |
 
 `TestPlaintextDataKeysNeverReachDiskOrLogs` cannot grep for a canary the way the
@@ -4292,16 +4302,24 @@ Every paragraph below cites the test or code that pins its residual, and
 cites nothing that exists. A fix that retires a residual changes the test that
 pinned it, so the fix cannot land until its paragraph is rewritten with it.
 
-**Key rotation does not rotate the passphrase.** Every KEK is derived from
-`CLOOP_SECRET_KEY` and a salt stored beside it in the state database, so `cloop
-hub key rotate` limits the lifetime of a *key*, not of the secret the key comes
-from. Someone who has read `hub.env` and can read the database can still derive
-every non-retired KEK: a second process holding nothing but the passphrase
-adopts every key a rotation minted (`TestKeyringAdoptsKeysMintedByAnotherProcess`),
-and only retiring a key destroys its salt (`TestReloadDropsRetiredKeys`).
-Changing the passphrase remains a re-mint, and the
-[runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says so
-plainly rather than letting the new command imply otherwise.
+**Changing the root key does not take back a database that already leaked.**
+`CLOOP_SECRET_KEY` itself changes online since Task 20425 — a rolling restart
+with the new key current and the old one previous, then `cloop hub key rotate
+--retire-previous`, which rewraps every row onto a key of the new root and
+retires every key of the old (`TestRootChangeUnderConcurrentLoad`,
+`TestRetirePreviousMovesEverythingAndShredsTheOldRoot`). But a rewrap moves each
+row's DEK under the new root and keeps the DEK, and every payload's ciphertext,
+as it was (`TestRotationRewrapsWithoutChangingCiphertext`): someone holding the
+old key *and* a copy of the database from before the change unwraps the old
+DEKs, and those open today's payloads. The change ends the old key's use from
+now on; when the database leaked with it, the credentials are re-minted at their
+sources as well, as the
+[runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says. And
+until the retire step has run, the old key still opens everything and the hub
+still seals under its primary — by design, so that a change can be backed out
+and members not yet restarted keep working
+(`TestANewRootBesideThePreviousOpensEverythingAndChangesNothing`): finish the
+change promptly once every member holds the new key.
 
 **A compromised device can fill its own budget, and enough of them the
 hub's.** Returned work is bounded per handle, per executor and per process

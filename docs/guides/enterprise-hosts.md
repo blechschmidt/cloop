@@ -83,15 +83,16 @@ tunnel; pin it to `ui.listen: 127.0.0.1` behind a TLS proxy on the same host.
 `cloop hub doctor` reports where it actually listens (`ui.exposure`). See
 [the Web UI section of the configuration reference](../reference/configuration.md#web-ui-cloop-ui).
 
-Every `cloop secret` command on this page seals or opens a payload, so the hub's
-master key has to be in the environment:
+Every `cloop secret` command on this page seals or opens a payload, so the shell
+needs the hub's master key, read the way the hub reads it — from its key file:
 
 ```bash
-export CLOOP_SECRET_KEY=…   # from the hub's hub.env
+export CLOOP_SECRET_KEY_FILE=/srv/cloop/cloop-secret-key   # the file `cloop hub bootstrap` wrote
 ```
 
 Without it the first `mint` stops with `CLOOP_SECRET_KEY is not set`. It belongs
-in `hub.env` at mode `0600` and never in a repository — see
+in that file, beside `.cloop/` and never in it, at mode `0400` or `0600`, and never
+in a repository or an environment file — see [the root key](../operations/runbook.md#the-root-key),
 [installation](../getting-started/installation.md) for generating it and the
 [runbook](../operations/runbook.md) for backup and rotation. Losing it loses
 every stored secret, grants included — and, under `tls: auto` below, the hub's

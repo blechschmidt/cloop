@@ -15,6 +15,7 @@ would otherwise walk into it.
 - [The git interception proxy](#the-git-interception-proxy)
 - [The Kubernetes access monitor](#the-kubernetes-access-monitor)
 - [Key rotation](#key-rotation)
+- [The root key](#the-root-key)
 - [Upgrade](#upgrade)
 - [Rollback](#rollback)
 - [Fleet operations](#fleet-operations)
@@ -25,20 +26,27 @@ would otherwise walk into it.
 ## Layout
 
 ```
+cloop-secret-key                 0600     CLOOP_SECRET_KEY, beside .cloop/ and never in it
+                                          (cloop-secret-key.cred when systemd-creds sealed it)
 .cloop/
   state.db                                canonical store (SQLite, WAL mode)
   state.db-wal  state.db-shm              WAL sidecars — never copy these by hand
   config.yaml                    0600     operator-written; safe to commit
-  hub.env                        0600     CLOOP_SECRET_KEY, CLOOP_UI_TOKEN — never commit
+  hub.env                        0600     CLOOP_UI_TOKEN — never commit
   tls/cert.pem  tls/key.pem      0600     when the hub terminates TLS itself
   backups/state-<UTC>.db                  + a .db.meta.json sidecar per backup
 ```
 
+A hub bootstrapped before Task 20425 keeps `CLOOP_SECRET_KEY` in `hub.env`
+instead; it keeps working, and [the root key](#the-root-key) says how to move it.
+
 Two rules that prevent most of the bad days:
 
-1. **`hub.env` is not a config file, it is the key to every sealed secret.** Back
-   it up separately from `state.db` and never in the same place — a backup that
-   contains both is a plaintext secret store.
+1. **The root key is not a config file, it is the key to every sealed secret.**
+   Back it up separately from `state.db` and never in the same place — a backup
+   that contains both is a plaintext secret store. That is why the hub refuses
+   to read a key file from inside a `.cloop/` directory: backups, snapshots and
+   a seeded sandbox all carry that directory.
 2. **Never copy `state.db` with `cp`.** Use `cloop db backup`, which produces a
    single self-contained file with no `-wal`/`-shm` dependency.
 
@@ -138,7 +146,7 @@ What it checks, and what each one catches that nothing else does:
 | `oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config |
 | `tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
 | `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one. `ui.static_token`: **warn** while a static token is accepted — exported in the doctor's shell, or reported by a running hub — beside single sign-on with an enforced role policy, saying how long it has gone unused; **pass** once it is retired. Silent without SSO, where the token is the sign-in, and without a policy, where `rbac.enforced` is the finding |
-| `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
+| `secret_key` | where the root key comes from (`secret_key.source`: a source the hub would refuse fails; an environment variable on a host systemd runs, or a copy of a file's key left in the environment, warns); `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs — a weak one is told to change the root, not to rotate; the key that opens this hub's sealing keys, asked of the keyring the broker opens, read-only — a live key no configured root derives fails, because the hub would not start (`secret_key.matches`); a warning for as long as `CLOOP_SECRET_KEY_PREVIOUS` is set (`secret_key.previous`); and the escrow on record (`secret_key.escrow`) |
 | `rbac` | **whether a role policy is in force at all** (`rbac.enforced`: `authz.Enforced`, the answer the request gate acts on — a failure, naming the issuer, for single sign-on with no `role_mappings` and no `default_role`, where every identity the issuer authenticates holds every permission but executor administration; see [when RBAC is in force](../security/model.md#when-rbac-is-in-force)); the mappings parse; the default role's blast radius, reported only where a policy makes it mean something; group bindings with no `groups` scope; and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's; and, where a policy is in force, every live API token it suspends — owner-less, minted while no policy was in force or before the hub recorded how, and not approved since (`api_tokens.unapproved`, a failure naming each; approve the ones you can vouch for, revoke the rest) |
 | `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable wherever signatures are verified — the container and Kubernetes executors, and the hub itself for a device or virtual executor whose sandbox runs a container (Task 20424) — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names, which a device fleet needs from the hub too: the hub resolves a device's tag there before verifying it |
 | `executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`); and each device that follows releases whose build carries no sequence — every release before v0.0.5 — with the way to cover it (`executors.rollback_protection`) |
@@ -407,9 +415,10 @@ find /var/backups/cloop -name 'state-*.db*' -mtime +30 -delete
 ### Escrowing the sealing key
 
 Every key-encryption key derives from `CLOOP_SECRET_KEY`, so rotating them does
-nothing for the one value whose loss is unrecoverable: lose `hub.env` and every
-sealed secret, session and hub CA key goes with it. Escrow it once the hub has
-started:
+nothing for the one value whose loss is unrecoverable: lose the key file and
+every sealed secret, session and hub CA key goes with it. Escrow it once the hub
+has started, and again after every [change of root](#changing-cloop_secret_key-itself)
+— the change refuses to finish until the new key is escrowed:
 
 ```console
 $ cloop hub key escrow export --output /mnt/root-credentials/cloop-hub.escrow
@@ -433,10 +442,14 @@ and the passphrase somewhere else again. The key never touches disk on the way
 out. `--passphrase-file <file>` (or `-` for stdin) replaces the prompt.
 
 The command refuses a `CLOOP_SECRET_KEY` that does not open this hub's sealing
-keys: escrowing the wrong key is worse than escrowing none. The hub records the
+keys: escrowing the wrong key is worse than escrowing none. Mid-way through a
+change of root it escrows the new key and counts the old one beside it, since
+together they open every key and the retire step is waiting for exactly this
+escrow. The hub records the
 escrow's id and the key's fingerprint and nothing else, and `cloop hub doctor`
 reports `secret_key.escrow`: a warning while no escrow is recorded, a **failure**
-when the one on record holds a different key from the one in use.
+when the one on record holds a different key from the one in use — a warning,
+mid-way through a change of root, when it holds the previous key.
 
 ### Restore
 
@@ -463,7 +476,7 @@ nothing — on any "no", each refusal naming the flag that overrides it:
 | checksum mismatch | the file is not the one its sidecar describes | `--skip-checksum` |
 | seal does not verify | the backup and its SHA-256 were changed after it was taken, or the sidecar was | `--skip-checksum` |
 | seal cannot be checked | the sidecar is unsealed (taken before sidecars were sealed, or without a key), sealed under another key, or there is no `CLOOP_SECRET_KEY` here | `--allow-unsealed`; the digest is still checked |
-| sealing keys | the `CLOOP_SECRET_KEY` here cannot derive a key the backup's secrets, sessions or hub CA keys are sealed under | `--accept-secret-loss` |
+| sealing keys | neither the `CLOOP_SECRET_KEY` here nor `CLOOP_SECRET_KEY_PREVIOUS` can derive a key the backup's secrets, sessions or hub CA keys are sealed under | `--accept-secret-loss` |
 
 ```console
 Refused — nothing was changed:
@@ -485,6 +498,15 @@ restore's audit row and in its restore record. The backup file keeps the keys:
 restore it again under the right key to get them back. It needs a
 `CLOOP_SECRET_KEY` — the new one the hub will run on — because a variable
 missing from a shell is not a lost key: with none set the refusal stands.
+
+A backup taken before the hub's key was [changed](#changing-cloop_secret_key-itself)
+holds keys only the old root derives, and a sidecar sealed under it. Restore it
+with the old key as `CLOOP_SECRET_KEY_PREVIOUS` beside the new one — its keys
+open and its seal checks under either — run the restored hub the same way, and
+finish with `cloop hub key rotate --retire-previous` again: the restored keys of
+the old root are live once more, and the retire step moves them onto the new
+one. The restore record is sealed under the new key, and checkpoints sealed
+under the old one still account for what the restore gave up.
 
 `--force` moves the existing database aside as `.pre-restore.<UTC>` first —
 with its `-wal` and `-shm`, which would otherwise be replayed into the restored
@@ -545,22 +567,25 @@ directory. Its configuration does not name the hub's checkpoint file, so pass it
 ### Disaster recovery drill
 
 A backup nobody has restored is a hope. Rehearse the whole recovery — including
-the day `hub.env` is gone — on a scratch directory, not the live hub:
+the day the key file is gone — on a scratch directory, not the live hub:
 
 ```bash
 # 1. The escrow still opens, its passphrase is still known, and it holds the
-#    key this hub runs on. Run it where the hub's environment is loaded.
+#    key this hub runs on. Run it where the hub's key is: CLOOP_SECRET_KEY_FILE
+#    pointing at its key file (or, on an older hub, its hub.env loaded).
 cloop hub key escrow verify /mnt/root-credentials/cloop-hub.escrow
 #    → OPENS, IN USE, OPENS THE HUB, ON RECORD
 
-# 2. A fresh directory with no hub.env, as after losing the host.
+# 2. A fresh directory with no key, as after losing the host.
 mkdir -p /tmp/cloop-drill/.cloop && cd /tmp/cloop-drill
-env -u CLOOP_SECRET_KEY cloop db restore /var/backups/cloop/state-<UTC>.db --check
+alias nokey='env -u CLOOP_SECRET_KEY -u CLOOP_SECRET_KEY_FILE -u CLOOP_SECRET_KEY_PREVIOUS \
+  -u CLOOP_SECRET_KEY_PREVIOUS_FILE -u CREDENTIALS_DIRECTORY'
+nokey cloop db restore /var/backups/cloop/state-<UTC>.db --check
 #    → Refused: there is no CLOOP_SECRET_KEY here to open the backup's sealing keys …
 
-# 3. Recover the key from escrow into this directory's hub.env.
-env -u CLOOP_SECRET_KEY cloop hub key escrow import /mnt/root-credentials/cloop-hub.escrow
-set -a; . .cloop/hub.env; set +a
+# 3. Recover the key from escrow into this directory's key file.
+nokey cloop hub key escrow import /mnt/root-credentials/cloop-hub.escrow
+export CLOOP_SECRET_KEY_FILE=/tmp/cloop-drill/cloop-secret-key
 
 # 4. The backup now restores under it, and its credentials deliver.
 cloop db restore /var/backups/cloop/state-<UTC>.db --check            # → PASS
@@ -576,7 +601,9 @@ cd / && rm -rf /tmp/cloop-drill /tmp/cloop-drill-checkpoints.jsonl
 For the real thing, in order:
 
 1. stop the hub (do not restore under a running process)
-2. if `hub.env` is lost: `cloop hub key escrow import <file>`, and load it
+2. if the key is lost: `cloop hub key escrow import <file>`, and point the hub
+   at the key file it writes (`CLOOP_SECRET_KEY_FILE`, or re-encrypt it for a
+   unit that loads it with `LoadCredentialEncrypted=`)
 3. `cloop db restore <backup> --check`
 4. `cloop db restore <backup> --force --reason "…"`
 5. `cloop db verify`
@@ -1582,28 +1609,89 @@ re-mint the credential rather than to go hunting for a passphrase problem.
 
 #### Changing `CLOOP_SECRET_KEY` itself
 
-Rotating the KEK does **not** change the passphrase — every KEK is derived from
-it. Changing the passphrase is still a re-mint, and cloop now refuses to paper
-over it: a hub started with a passphrase that cannot derive its live keys fails
-to start, naming them, rather than minting a fresh key and quietly forking the
-registry.
+Every KEK is derived from `CLOOP_SECRET_KEY`, so rotating KEKs bounds the life of
+a key and not of the secret every key comes from. Changing that secret is online
+too (Task 20425): a hub holds a **current** root, which mints new KEKs and opens,
+and while a change is in progress a **previous** one, which only opens. Nothing
+is re-minted at a forge or a cluster, and the hub keeps serving throughout.
 
-If you must change the passphrase:
+1. **Generate the new key** and install it beside the old one on every hub
+   member: the new key as `CLOOP_SECRET_KEY` (its file, credential or variable —
+   see [the root key](#the-root-key)), the old one as `CLOOP_SECRET_KEY_PREVIOUS`
+   (`CLOOP_SECRET_KEY_PREVIOUS_FILE`, or the credential `cloop-secret-key-previous`).
+
+   ```bash
+   head -c32 /dev/urandom | base64 | tr -d '=' > /srv/cloop/cloop-secret-key.new
+   ```
+
+2. **Rolling restart.** Restart the members one at a time. Each starts on the
+   new key with the old beside it — every live KEK derives from one of the two,
+   which is the rule a hub starts by — and advertises the new root's fingerprint
+   in its cluster member row. Until step 4 the registry's primary stays the old
+   root's key, so a member restarted and one not yet restarted seal under the
+   same key and read each other's writes; until then the change is backed out
+   by restarting with the old configuration.
+
+   ```console
+   $ cloop ui …
+   Root key: de46939974158c63, from the file /srv/cloop/cloop-secret-key (CLOOP_SECRET_KEY_FILE)
+   Previous root key: 7246e27af489f0e0, from the file /srv/cloop/cloop-secret-key.old (CLOOP_SECRET_KEY_PREVIOUS_FILE) — a change of root is in progress; finish it with `cloop hub key rotate --retire-previous` once every member runs on de46939974158c63
+   ```
+
+3. **Escrow the new key**: `cloop hub key escrow export --output <file off this
+   host>`, in a shell holding both keys. Once the old root is retired the new key
+   is the only thing that opens this hub.
+
+4. **Retire the previous root**, in a shell holding both keys:
+
+   ```console
+   $ cloop hub key rotate --retire-previous --dry-run
+   $ cloop hub key rotate --retire-previous
+   Change of root 7246e27af489f0e0 → de46939974158c63
+     ready   member hub_cb87… (pid 4121 on hub-1): root de46939974158c63, previous 7246e27af489f0e0
+     ready   member hub_50af… (pid 3880 on hub-2): root de46939974158c63, previous 7246e27af489f0e0
+     ready   escrow esc_9d2c… holds the new key
+     minted kek_b876… from the new root and made it primary
+   …
+   Every row is sealed under kek_b876…, and the previous root's 2 key(s) are retired: kek_42a9…, kek_8f0e….
+   ```
+
+   It **refuses**, changing nothing, until every live member advertises the new
+   key as its current root — a member still on the old one would be left unable
+   to read anything once the old keys are gone, and one that advertises nothing
+   predates the advertisement — and until an escrow of the new key is on record.
+   It also refuses beside a hub serving under `ui.cluster.exclusive`, which has
+   no member row to advertise in: stop it for this step. Then it mints a KEK from
+   the new root, rewraps every secret, session refresh token and hub CA key onto
+   it with the same compare-and-swap rotation `rotate` always uses, and retires
+   every KEK of the old root. Interrupted, it retires nothing — re-run it to
+   continue, and it mints nothing the second time. A plain `cloop hub key rotate`
+   mid-change is refused, because it would mint from the new root without those
+   checks.
+
+5. **Drop the previous key** from every member and restart them again. `cloop hub
+   doctor` warns (`secret_key.previous`) for as long as it is set. A member
+   started with only the old key now refuses to start, naming the keys it cannot
+   derive — as does one with a mistyped new key and no previous.
+
+**When the database leaked too, this is not enough.** A rewrap moves each row's
+DEK under the new root's KEK; it does not change the DEK, and it leaves every
+payload's ciphertext as it was. Someone holding the old key *and* a copy of the
+database from before the change can still unwrap the old DEKs, and those open
+today's payloads. The change of root ends the old key's use from now on; it does
+not take back what a copy of the database already gives away. If both leaked,
+re-mint the credentials at their sources as well:
 
 1. `cloop secret grants --all > grants.txt` — record what exists (never the values)
-2. `cloop db backup` and copy the **old** `hub.env` somewhere safe
-3. rotate the underlying credentials at their sources (GitHub, cluster, registry)
-4. set the new `CLOOP_SECRET_KEY`, restart the hub
-5. `cloop secret mint` each secret with its new value
-6. `cloop secret grant` to reconstruct the grants from `grants.txt`
-7. `cloop secret lease --project <p>` to confirm delivery
-8. `cloop hub key escrow export --output <file>` — the escrow on record holds
-   the old key, and `cloop hub doctor` fails until the new one is escrowed
+2. rotate the underlying credentials at their sources (GitHub, cluster, registry)
+3. replace each stored secret with its new value: delete it (Settings → Secrets,
+   or `DELETE /api/secrets/{id}`), `cloop secret mint` it again under the same
+   name — a mint seals under a new DEK — and `cloop secret grant` it again from
+   `grants.txt`
+4. `cloop secret lease --project <p>` to confirm delivery
 
-Because step 3 is required regardless, treat *passphrase* rotation as credential
-rotation. For everything short of that — a scheduled key roll, a suspected key
-exposure, an audit requirement — `cloop hub key rotate` is the procedure, and it
-needs none of the above.
+Session refresh tokens need no re-mint: sign everyone out (`cloop hub session
+revoke --all`) and the next sign-in issues new ones.
 
 #### Upgrading a hub that predates envelope encryption
 
@@ -1643,6 +1731,77 @@ than rotated: `cloop hub scim credential revoke entra --reason "…"` ends both
 secrets now. See [the credential](../guides/scim-provisioning.md#the-credential).
 
 ---
+
+## The root key
+
+`CLOOP_SECRET_KEY` is read through one resolver (`pkg/rootkey`), by the hub and
+by every command that seals or opens anything — the `cloop hub key` commands,
+backup and restore, the escrow, the audit checkpoints, `cloop secret`. Each of
+its two slots is read from three sources, in this order:
+
+| Source | Current key | Previous key (a change of root only) |
+| --- | --- | --- |
+| a file | `CLOOP_SECRET_KEY_FILE=/abs/path` | `CLOOP_SECRET_KEY_PREVIOUS_FILE=/abs/path` |
+| a systemd credential | `cloop-secret-key` in `$CREDENTIALS_DIRECTORY` | `cloop-secret-key-previous` |
+| the environment | `CLOOP_SECRET_KEY` | `CLOOP_SECRET_KEY_PREVIOUS` |
+
+**A key file** is an absolute path to a regular file the hub's user owns, mode
+`0400` or `0600`, outside every `.cloop/` directory; one trailing newline is not
+part of the key. Anything else is refused, and the hub does not start: a file
+another user can read or replace, a path through `.cloop/` — even by a symlink —
+an empty file. The one file the hub accepts without owning it is the shape
+Kubernetes gives a Secret volume: owned by root, readable by the Pod's `fsGroup`
+and nobody else (mode `0440`).
+
+**Two sources that disagree are refused**, never ranked: a key moved into a file
+with a different one left in `hub.env` is two keys, and which one the hub picked
+would decide whether it opens anything. Two that agree are fine, but `cloop hub
+doctor` warns about a copy left in the environment, which keeps every exposure
+the file was meant to end.
+
+**The environment is the last resort.** A variable is in `/proc/<pid>/environ`,
+in `systemctl show`, in `docker inspect` and `kubectl get pod -o yaml`, and in
+every child process that is not scrubbed of it; the doctor warns about one on a
+host systemd runs. `cloop hub bootstrap` writes a credential file instead —
+sealed with `systemd-creds encrypt` when the host can (`--systemd-creds`), so
+reading it needs the host's credential secret or its TPM — and prints a unit that
+loads it:
+
+```ini
+[Service]
+EnvironmentFile=/srv/cloop/.cloop/hub.env
+LoadCredentialEncrypted=cloop-secret-key:/srv/cloop/cloop-secret-key.cred
+# or, unencrypted: LoadCredential=cloop-secret-key:/srv/cloop/cloop-secret-key
+```
+
+To move an existing hub's key out of `hub.env`: write it to a file (`umask 077;
+printf %s "$CLOOP_SECRET_KEY" > /srv/cloop/cloop-secret-key`), seal it if you
+want (`systemd-creds encrypt --name=cloop-secret-key /srv/cloop/cloop-secret-key
+/srv/cloop/cloop-secret-key.cred && shred -u /srv/cloop/cloop-secret-key`), add the
+`LoadCredential(Encrypted)=` line, delete the `CLOOP_SECRET_KEY` line from
+`hub.env`, and restart. The key is the same, so nothing else changes.
+
+In a shell, point commands at the same file: `export
+CLOOP_SECRET_KEY_FILE=/srv/cloop/cloop-secret-key`. A key sealed by
+`systemd-creds` is readable only through systemd: run the command under
+`systemd-run -p LoadCredentialEncrypted=cloop-secret-key:<file> --pty …`, or
+decrypt it to a 0600 file outside `.cloop/` for the length of the operation.
+
+The **Helm chart** mounts the Secret's `CLOOP_SECRET_KEY` at
+`/etc/cloop/root-key/cloop-secret-key`, sets `CLOOP_SECRET_KEY_FILE` and
+`CREDENTIALS_DIRECTORY=/etc/cloop/root-key`, and blanks the variable `envFrom`
+would set. Adding `CLOOP_SECRET_KEY_PREVIOUS` to the Secret is all a change of
+root needs from the chart.
+
+A serving hub **resolves once**, at startup, and prints where from:
+
+```console
+Root key: de46939974158c63, from the file /srv/cloop/cloop-secret-key (CLOOP_SECRET_KEY_FILE)
+```
+
+A key file that changes under a running hub takes effect at its next restart —
+which is how a [change of root](#changing-cloop_secret_key-itself) is rolled out —
+and the fingerprint it prints is the one its cluster member row advertises.
 
 ## Upgrade
 

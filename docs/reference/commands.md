@@ -1329,8 +1329,14 @@ cloop hub key list                         # keys, and whether each is still ope
 cloop hub key rotate --dry-run             # count what would move, write nothing
 cloop hub key rotate                       # mint a new KEK and rewrap onto it
 cloop hub key rotate --continue            # resume onto the current primary
+cloop hub key rotate --retire-previous     # finish changing CLOOP_SECRET_KEY itself
 cloop hub key retire <key-id> --yes        # destroy an old key's salt (irreversible)
 ```
+
+The key is read as the hub reads it: `CLOOP_SECRET_KEY_FILE`, the systemd
+credential `cloop-secret-key`, or `CLOOP_SECRET_KEY`, with
+`CLOOP_SECRET_KEY_PREVIOUS` (or its file or credential) beside it during a change
+of root — see [the root key](configuration.md#the-root-key-cloop_secret_key).
 
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
@@ -1339,12 +1345,14 @@ cloop hub key retire <key-id> --yes        # destroy an old key's salt (irrevers
 | `--dry-run` | `rotate` | `false` | Report what would be rewrapped without writing |
 | `--continue` | `rotate` | `false` | Resume onto the current primary instead of minting a new key |
 | `--batch` | `rotate` | `128` | Rows read per round |
+| `--retire-previous` | `rotate` | `false` | Finish a change of root: refuses until every live hub member advertises the new key as its current root and an escrow of it is on record, then rewraps everything onto a key of `CLOOP_SECRET_KEY` and retires every key of `CLOOP_SECRET_KEY_PREVIOUS`. A plain `rotate` mid-change is refused |
 | `--yes` | `retire` | `false` | Confirm irreversible destruction of the key's salt |
 
 Rotation is safe to interrupt and safe to run against a serving hub; `retire` is
 a deliberate second step and refuses while any row still references the key. The
-full procedure, including upgrading a hub that predates envelope encryption, is
-in the [runbook](../operations/runbook.md#key-rotation).
+full procedure, including upgrading a hub that predates envelope encryption and
+[changing `CLOOP_SECRET_KEY` itself](../operations/runbook.md#changing-cloop_secret_key-itself),
+is in the [runbook](../operations/runbook.md#key-rotation).
 
 These subcommands write to the state database directly rather than through the
 HTTP API, so they require filesystem access to it — the same root-shell caveat
@@ -1361,7 +1369,7 @@ escrow's id and the key's fingerprint.
 cloop hub key escrow export --output /secure/cloop-hub.escrow   # seal the key in this environment
 cloop hub key escrow verify /secure/cloop-hub.escrow            # rehearse: does it open, and open this hub?
 cloop hub key escrow verify /secure/cloop-hub.escrow --record   # record it again after an older restore
-cloop hub key escrow import /secure/cloop-hub.escrow            # recover it into .cloop/hub.env
+cloop hub key escrow import /secure/cloop-hub.escrow            # recover it into the hub's key file
 cloop hub key escrow import /secure/cloop-hub.escrow --stdout   # print CLOOP_SECRET_KEY=… instead
 ```
 
@@ -1369,16 +1377,18 @@ cloop hub key escrow import /secure/cloop-hub.escrow --stdout   # print CLOOP_SE
 |------|-----------|---------|-------------|
 | `--output` | `export` | — | Where to write the escrow file (required). A path inside a `.cloop/` directory is refused |
 | `--force` | `export` | `false` | Replace an existing escrow file at `--output` |
-| `--force` | `import` | `false` | Replace a different key already in the env file; the old file is kept as `<file>.pre-import.<UTC>` |
+| `--force` | `import` | `false` | Replace a different key already in the key or env file; the old file is kept as `<file>.pre-import.<UTC>` |
 | `--passphrase-file` | all | the terminal | Read the passphrase from a file, or `-` for stdin. One trailing newline is stripped |
 | `--record` | `verify` | `false` | Record this escrow as the hub's, once it is proven to open the hub's sealing keys |
-| `--env-file` | `import` | `.cloop/hub.env` | The env file to put the key into; every other line is kept |
+| `--key-file` | `import` | `CLOOP_SECRET_KEY_FILE`, else `cloop-secret-key` in the hub's directory | The key file to put the key into, mode 0600 — not inside `.cloop/` |
+| `--env-file` | `import` | `.cloop/hub.env`, when the hub keeps its key there | The env file to put the key into instead; every other line is kept |
 | `--stdout` | `import` | `false` | Print the assignment instead of writing a file |
 | `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
 
-`export` refuses a key that does not open the hub's sealing keys and a
-passphrase under 15 characters, and reads the file back and opens it before it
-reports success. `verify` exits 1 when the file does not open or does not open
+`export` escrows the current key and refuses one that — with
+`CLOOP_SECRET_KEY_PREVIOUS` beside it, mid-way through a change of root — does
+not open the hub's sealing keys, or a passphrase under 15 characters, and reads
+the file back and opens it before it reports success. `verify` exits 1 when the file does not open or does not open
 the hub. `cloop hub doctor` reports `secret_key.escrow`: a warning while no
 escrow is recorded, a failure when the one on record holds another key than the
 one in use. See the [runbook](../operations/runbook.md#escrowing-the-sealing-key).

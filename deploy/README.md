@@ -43,7 +43,7 @@ the difference is deliberate:
 | `ui.oidc.default_role` | — | `none` (deny-by-default) |
 | `ui.allowed_ws_origins` | unset (any origin) | pinned to the external URL |
 | Dashboard auth | none | token, then SSO |
-| `CLOOP_SECRET_KEY` | unset | generated, 256 bits, mode 0600 |
+| `CLOOP_SECRET_KEY` | unset | generated, 256 bits, in a credential file — never the environment |
 | Container user | — | 65532, read-only rootfs, no capabilities |
 | Listen address | `127.0.0.1` without sign-in, every interface with it | `0.0.0.0`, named — refused without sign-in |
 
@@ -219,15 +219,23 @@ cloop hub bootstrap --external-url https://cloop.example.com
 cloop hub tls-init                # development certificate; skip for a real one
 ```
 
-This writes two files:
+This writes three files:
 
 - **`.cloop/config.yaml`** (mode 0600) — the hosted profile, as commented YAML.
   It is generated from a template rather than marshalled from a struct
   precisely so you can read what was decided for you. Safe to commit.
-- **`.cloop/hub.env`** (mode 0600) — `CLOOP_SECRET_KEY` and `CLOOP_UI_TOKEN`,
-  32 bytes of `crypto/rand` each. **Never commit this.** Directly consumable by
-  systemd's `EnvironmentFile=`, `docker compose --env-file`, or
-  `set -a; . .cloop/hub.env; set +a`.
+- **`cloop-secret-key`** — the root key, `CLOOP_SECRET_KEY`: 32 bytes of
+  `crypto/rand`, **beside `.cloop/`, never in it**, so a backup or snapshot of
+  the database does not carry the key that opens it. Where the host can,
+  `systemd-creds encrypt` seals it (`cloop-secret-key.cred`) to the host's
+  credential secret and, if there is one, its TPM, and no plaintext copy is
+  written; otherwise it is a plain file, mode 0600. `--key-file` moves it,
+  `--systemd-creds always|never` decides.
+- **`.cloop/hub.env`** (mode 0600) — `CLOOP_UI_TOKEN`, 32 bytes of `crypto/rand`.
+  **Never commit this.** Directly consumable by systemd's `EnvironmentFile=`,
+  `docker compose --env-file`, or `set -a; . .cloop/hub.env; set +a`. It does
+  not hold the root key: an environment variable is readable in
+  `/proc/<pid>/environ` and `systemctl show`, and inherited by every child.
 
 The hosted profile turns on the [git interception proxy](../docs/architecture/git-proxy.md)
 and the [Kubernetes access monitor](../docs/architecture/kubernetes-access.md)
@@ -246,7 +254,12 @@ trade for saving one copy-paste.
 The unit applies the systemd equivalents of what the container image gets
 structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 `CapabilityBoundingSet`, `MemoryDenyWriteExecute`, and a single
-`ReadWritePaths` for the state directory.
+`ReadWritePaths` for the state directory. It loads the root key with
+`LoadCredentialEncrypted=cloop-secret-key:<file>.cred` (or `LoadCredential=` for
+a plain file): systemd reads it, and the hub finds it in
+`$CREDENTIALS_DIRECTORY`, readable by the service alone. To run the hub from a
+shell instead, name the plain file: `CLOOP_SECRET_KEY_FILE=/srv/cloop/cloop-secret-key
+cloop ui …` — a key file must be owned by the hub's user, mode 0400 or 0600.
 
 ### Useful flags
 
@@ -256,15 +269,21 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 | `--oidc-issuer`, `--oidc-client-id` | Enable SSO. A client *secret* is optional — without one the hub is a public client and PKCE authenticates the code exchange. Where one is used it is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
 | `--admin-email` | Break-glass admin, matched on the email claim. Repeatable. |
 | `--git-proxy-port`, `--kube-guard-port` | Where the two monitors listen, and the port of the URL sandboxes reach them at on `--external-url`'s host. `8443` and `8444` by default; a default that is `--port` or the external URL's own port moves up by 1000 (a dashboard at `https://hub:8443` gets a git proxy on 9443), while a port you name that collides is refused. |
-| `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. |
+| `--key-file`, `--systemd-creds` | Where the root key is written (outside `.cloop/`; `cloop-secret-key` in `--dir` by default), and whether `systemd-creds` seals it: `auto` when the host can, `always`, or `never`. |
+| `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. To change the key of a hub you keep, see [changing CLOOP_SECRET_KEY](../docs/operations/runbook.md#changing-cloop_secret_key-itself) instead — it is online. |
 
 ### About `CLOOP_SECRET_KEY`
 
 It is the passphrase protecting every payload in the secret broker — brokered
 kubeconfigs, GitHub PATs, egress credentials. Losing it makes them permanently
-unopenable, and changing it has the same effect — unless it was escrowed. Once
-the hub has started, seal it under a passphrase into a file you keep with your
-root credentials, off the host:
+unopenable unless it was escrowed. Changing it is online: a rolling restart with
+the new key as `CLOOP_SECRET_KEY` and the old as `CLOOP_SECRET_KEY_PREVIOUS`, then
+`cloop hub key rotate --retire-previous` ([runbook](../docs/operations/runbook.md#changing-cloop_secret_key-itself)).
+The hub reads it from `CLOOP_SECRET_KEY_FILE`, the systemd credential
+`cloop-secret-key`, or the environment, in that order, and refuses to start when
+two of them disagree ([the root key](../docs/operations/runbook.md#the-root-key)).
+Once the hub has started, seal it under a passphrase into a file you keep with
+your root credentials, off the host:
 
 ```bash
 cloop hub key escrow export --output /secure/cloop-hub.escrow
@@ -284,9 +303,16 @@ docker run --rm -p 8080:8080 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   -v cloop-state:/var/lib/cloop \
-  -e CLOOP_UI_TOKEN=... -e CLOOP_SECRET_KEY=... \
+  -e CLOOP_UI_TOKEN=... \
+  -v /srv/cloop/cloop-secret-key:/run/secrets/cloop-secret-key:ro \
+  -e CLOOP_SECRET_KEY_FILE=/run/secrets/cloop-secret-key \
   cloop-hub:dev
 ```
+
+The root key goes in as a file rather than `-e CLOOP_SECRET_KEY=…`, which
+`docker inspect` would show to anyone who can run it. The bind-mounted file keeps
+its owner and mode, so it must be readable by UID 65532: `chown 65532
+/srv/cloop/cloop-secret-key && chmod 0400 /srv/cloop/cloop-secret-key`.
 
 The image starts `cloop ui --listen 0.0.0.0 --port 8080 --no-browser`. Without
 `CLOOP_UI_TOKEN` (or `ui.oidc` in a mounted config) it refuses to start, which
@@ -415,6 +441,18 @@ helm install cloop deploy/helm/cloop-hub -n cloop \
 means the PVC mounted, the ConfigMap landed inside it, `fsGroup` made it
 writable, and SQLite opened — under `readOnlyRootFilesystem`, `runAsNonRoot`
 and capabilities dropped.
+
+The Secret's `CLOOP_SECRET_KEY` reaches the hub as a file, not an environment
+variable: the chart mounts it at `/etc/cloop/root-key/cloop-secret-key`, sets
+`CLOOP_SECRET_KEY_FILE` and `CREDENTIALS_DIRECTORY=/etc/cloop/root-key`, and
+blanks the variable `envFrom` would otherwise set, so the key is in no
+`kubectl get pod -o yaml` and no process environment. To change it, put the new
+key in the Secret as `CLOOP_SECRET_KEY` and the old one as
+`CLOOP_SECRET_KEY_PREVIOUS`, roll the Deployment, escrow the new key and run
+`cloop hub key rotate --retire-previous` in a Pod; then drop
+`CLOOP_SECRET_KEY_PREVIOUS` and roll it again. With `secrets.create`,
+`secrets.previousSecretKey` is the old key, and the chart rolls the Pods itself
+when either changes.
 
 ### Replicas
 
