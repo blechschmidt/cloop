@@ -1909,8 +1909,18 @@ jobs:
               --oidc-client-id cloop-hub > out.txt
           grep -q 'allow_host_process: false' .cloop/config.yaml
           grep -q 'default_role: none'        .cloop/config.yaml
-          grep -q 'CLOOP_SECRET_KEY='         .cloop/hub.env
+          grep -q 'CLOOP_UI_TOKEN='           .cloop/hub.env
           [ "$(stat -c %a .cloop/hub.env)" = 600 ] || { echo "hub.env is not 0600"; exit 1; }
+          # Task 20425: the root key is in a file of its own beside .cloop/ —
+          # the image has no systemd-creds, so a plain one, 0600 — never in
+          # hub.env, whose lines end up in the hub's environment; and the
+          # printed unit loads it as a systemd credential.
+          if grep -qE '^[[:space:]]*(export[[:space:]]+)?CLOOP_SECRET_KEY=' .cloop/hub.env; then
+            echo "the root key is in hub.env"; exit 1
+          fi
+          [ -s cloop-secret-key ] || { echo "no root key file beside .cloop/"; exit 1; }
+          [ "$(stat -c %a cloop-secret-key)" = 600 ] || { echo "the root key file is not 0600"; exit 1; }
+          grep -q 'LoadCredential=cloop-secret-key:/w/cloop-secret-key' out.txt
           grep -q 'ProtectSystem=strict'      out.txt   # the printed systemd unit
           # Task 20409: both credential monitors on, the hub issuing their
           # certificates, at the external URL's host — and the summary says
