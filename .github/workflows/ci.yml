@@ -1538,8 +1538,10 @@ jobs:
     # -race, before it was wired in here.
     #
     # The failover step (Task 20396) waits out the supervisor's production
-    # probe timing twice — about a minute per lost agent — hence the room.
-    timeout-minutes: 22
+    # probe timing twice — about a minute per lost agent — hence the room. The
+    # revocation step (Task 20419) builds a static cloop for its sandbox image
+    # on top.
+    timeout-minutes: 32
 
     steps:
       - name: Checkout code
@@ -1608,12 +1610,42 @@ jobs:
             exit 1
           fi
 
+      # A revocation outlives the member holding the lease (Task 20419): the
+      # member holding a container run's lease is SIGKILLed, and the lease and
+      # then its grant are revoked through the survivor. The credential must
+      # leave the sandbox, and the survivor must take it back rather than take
+      # the lease over when it adopts the run. Then the same for a host
+      # process, whose dead member's /dev/shm directory must be wiped as soon
+      # as the survivor sees the death. The container scenario builds a static
+      # cloop into a local Alpine image; the hubs are the race-enabled binary.
+      - name: Revoke a dead member's lease
+        timeout-minutes: 12
+        env:
+          CLOOP_CLUSTER_E2E: "1"
+          CLOOP_CLUSTER_BIN: /tmp/cloop-cluster-bin
+          # Leaves /var/tmp/cloop-revoke-e2e-*, the members' logs among it.
+          CLOOP_CLUSTER_KEEP: "1"
+        run: |
+          set -euo pipefail
+          go test ./tests/cluster/ -run 'TestARevokedLeaseOfADeadMembersContainerIsTakenBackNotRestored|TestADeadMembersHostLeaseDirectoryIsWipedAndNotRestored' \
+            -v -count=1 -timeout 11m 2>&1 | tee /tmp/cluster-revoke.log
+          for t in TestARevokedLeaseOfADeadMembersContainerIsTakenBackNotRestored TestADeadMembersHostLeaseDirectoryIsWipedAndNotRestored; do
+            grep -qE "^--- PASS: $t \(" /tmp/cluster-revoke.log || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped (is Docker reachable?)"
+              exit 1
+            }
+          done
+          if grep -rl "WARNING: DATA RACE" /var/tmp/cloop-revoke-e2e-* --include='*.log'; then
+            echo "::error::a hub member reported a data race (files above)"
+            exit 1
+          fi
+
       - name: Member logs on failure
         timeout-minutes: 2
         if: failure()
         run: |
           shopt -s nullglob
-          logs=(/tmp/cloop-cluster-e2e/cloop-cluster-e2e-*/*.log)
+          logs=(/tmp/cloop-cluster-e2e/cloop-cluster-e2e-*/*.log /var/tmp/cloop-revoke-e2e-*/*.log)
           [ ${#logs[@]} -gt 0 ] || { echo "(no member logs)"; exit 0; }
           for f in "${logs[@]}"; do
             echo "── $f ──"
