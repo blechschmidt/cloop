@@ -102,6 +102,31 @@ func TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo(t *testing.T) {
 	}
 }
 
+// TestATagCannotBeSignatureVerifiedWithoutAResolver is the Kubernetes residual
+// under require_signature: the control plane has no image store to resolve a
+// tag in, so there is no digest to check a signature on, and the tag is refused
+// — never verified as a tag, never passed to a kubelet to resolve later. The
+// day the Kubernetes driver resolves tags, this is the test that changes.
+func TestATagCannotBeSignatureVerifiedWithoutAResolver(t *testing.T) {
+	e := Enforcer{
+		Policy: Policy{
+			AllowedRegistries: []string{"ghcr.io"},
+			RequireSignature:  true,
+			CosignPublicKeys:  []string{"/etc/cloop/cosign.pub"},
+		},
+		Verifier: alwaysVerifies{},
+	}
+	_, err := e.Authorize(context.Background(), "ghcr.io/acme/tools:1")
+	var denied *DenyError
+	if !errors.As(err, &denied) || denied.Rule != RuleSignature ||
+		!strings.Contains(denied.Reason, "cannot resolve it to a digest") {
+		t.Fatalf("Authorize(tag) with no resolver = %v, want a %s denial naming the missing digest", err, RuleSignature)
+	}
+	if res, err := e.Authorize(context.Background(), "ghcr.io/acme/tools@"+goodDigest); err != nil || !res.Verified {
+		t.Fatalf("Authorize(digest) with no resolver = %+v, %v; want the pinned image verified", res, err)
+	}
+}
+
 // TestRequireDigestIsEnforcedBeforeAnythingRuns: with require_digest set, a tag
 // is refused at evaluation. It must never reach the resolver, because on an
 // executor with no resolver that would be the difference between a config error
