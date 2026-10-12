@@ -1615,6 +1615,15 @@ around the clock look identical from the grant table alone. A lease is issued
 afterwards from the executor handle; a use with no task is a run-scoped lease,
 which is reported as such rather than as a missing value.
 
+**Who can approve is said, not looked up.** A pending request — as filed, and in
+`GET /api/grant-requests` — carries `approvers`: the accounts and groups the role
+policy gives `secret.grant` hub-wide, administrators only for a fleet-wide
+subject, and never the requester (Task 20417). It names policy, not membership:
+a group binding is reported as the group, since the hub does not know a group's
+members until they sign in. A runtime deny naming one account removes that
+account. `cloop remote grants request` prints the list beside the request's id;
+it is shown only to callers who may file requests (`secret.request`).
+
 Five audit actions cover the lifecycle — [`secret.request`](../reference/audit-events.md#secret),
 `secret.request_approve`, `secret.request_deny`, `secret.request_withdraw`,
 `secret.request_expire` — all on the same hash chain as the grant and lease

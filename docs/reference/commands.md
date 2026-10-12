@@ -1086,7 +1086,7 @@ cloop remote logs <project> [--follow]
 
 | Subcommand | Calls | Permission |
 |------------|-------|------------|
-| `init` | `POST /api/projects/new` (with the executor and the grants you may make), then the `repos add` calls, `POST /api/grant-requests` for what needs an approver, `GET`/`POST /api/projects/{idx}/harness-credential`, and with `--run` `POST /api/run` | `project.write`; `executor.manage` with `--executor`; each grant's own |
+| `init` | `GET /api/me`, `/api/executors`, `/api/secrets` and `/api/secrets/catalog` for its checks; `POST /api/projects/new` (with the executor and the grants you may make), then the `repos add` calls, `POST /api/grant-requests` for what needs an approver, `GET`/`POST /api/projects/{idx}/harness-credential`, and with `--run` `POST /api/run` | `project.write`; `executor.manage` with `--executor`; each grant's own |
 | `executors` | `GET /api/executors`, narrowed to the executors whose access list admits you | `executor.read` |
 | `repos list` | `GET /api/projects/{idx}/repositories` | `project.read` |
 | `repos add` | `GET /api/projects/{idx}/repositories` and `/repositories/available`, then `POST /api/projects/{idx}/repositories` — or `POST /api/grant-requests` where the grant is refused for want of `secret.grant` | `secret.grant` on the project, else `secret.request` |

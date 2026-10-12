@@ -808,7 +808,7 @@ func parseGrantSpec(raw string) (hubclient.ProjectGrant, error) {
 func init() {
 	f := remoteInitCmd.Flags()
 	f.StringVar(&rinitGoal, "goal", "", "What the project should achieve; cloop plans its tasks from it")
-	f.StringVar(&rinitExecutor, "executor", "", "Bind the project to this executor, by id or name (see `cloop remote executors`)")
+	f.StringVar(&rinitExecutor, "executor", "", "Bind the project to this executor, by id or name (see: cloop remote executors)")
 	f.StringSliceVar(&rinitRepos, "repo", nil, "Another GitHub repository the project works on, as owner/name; repeatable")
 	f.StringArrayVar(&rinitGrants, "grant", nil,
 		"Another stored credential to give the project: <secret>[,key=value…]; repeatable")

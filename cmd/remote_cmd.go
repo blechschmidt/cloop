@@ -349,8 +349,10 @@ func quoteArg(s string) string {
 }
 
 func init() {
+	// No backticks in a flag's usage: pflag would read the quoted words as
+	// the flag's value name and print "--hub cloop login".
 	remoteCmd.PersistentFlags().StringVar(&remoteHub, "hub", "",
-		"Hub URL (default: the default hub from `cloop login`, or CLOOP_HUB_URL)")
+		"Hub URL (default: the default hub from cloop login, or CLOOP_HUB_URL)")
 	remoteCmd.PersistentFlags().StringVar(&remoteToken, "token", "",
 		"API token to use instead of the stored session (CLOOP_API_TOKEN: for CLOOP_HUB_URL's hub, or one with no stored session)")
 	remoteProjectsCmd.Flags().BoolVar(&remoteJSON, "json", false, "Print JSON")

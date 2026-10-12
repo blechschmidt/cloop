@@ -239,7 +239,7 @@ $ cloop remote repos add widgets acme/widgets-docs --access write
 $ cloop remote repos remove widgets acme/widgets-docs      # narrows or revokes the grant
 $ cloop remote grants request acme-github-app --project widgets --repo acme/infra \
       --justification "Terraform for the rate limiter (API-412)"
-Requested acme-github-app (repos=acme/infra perms=contents:read) for project:/var/lib/cloop/projects/widgets — request req_9b1f…, waiting for an approver until 2026-10-19 09:14.
+Requested acme-github-app (repos=acme/infra perms=contents:read) for project:/var/lib/cloop/projects/widgets — request req_9b1f…, waiting for an approver until 2026-10-15 09:14.
   Who can approve it: root@example.com (admin); members of group platform (admin); members of group leads (maintainer).
   Take it back with: cloop remote grants withdraw req_9b1f…
 $ cloop remote grants list                                 # your requests, and who can approve the pending ones

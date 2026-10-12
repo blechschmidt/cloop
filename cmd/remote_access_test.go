@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/blechschmidt/cloop/internal/ssohubtest"
 	"github.com/blechschmidt/cloop/pkg/hubclient"
@@ -465,4 +466,24 @@ func TestExplainRefusalRendersEveryDialectReadably(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRemoteFlagUsageHasNoBackticks: pflag reads a backticked word in a
+// flag's usage as the flag's value name, so `cloop login` in --hub's text
+// rendered as "--hub cloop login" in every `cloop remote` help page.
+func TestRemoteFlagUsageHasNoBackticks(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		check := func(f *pflag.Flag) {
+			if strings.Contains(f.Usage, "`") {
+				t.Errorf("%s --%s: usage %q has a backtick, which pflag prints as the value name", c.CommandPath(), f.Name, f.Usage)
+			}
+		}
+		c.LocalFlags().VisitAll(check)
+		c.PersistentFlags().VisitAll(check)
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(remoteCmd)
 }
