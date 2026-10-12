@@ -39,16 +39,44 @@ var maxLegacyStateBytes int64 = 64 * 1024 * 1024
 // ActiveDir resolves the effective working directory for state operations.
 // If a session is active (recorded in .cloop/active_session), it returns
 // the session's isolated directory; otherwise it returns workDir unchanged.
+//
+// The name is read from a file the project's own workload can write, and the
+// hub reads and writes the directory it resolves to on that project's behalf
+// (Task 20418). So a name is honoured only when it is one a session can have —
+// `cloop session` allows letters, digits, hyphens and underscores — and the
+// directory it names is a real one under .cloop/sessions, not a link. A name
+// with a separator or "..", or a sessions directory that is a link, would
+// point the hub at another project's database, or the control plane's; the
+// project's own state is used instead.
 func ActiveDir(workDir string) string {
 	data, err := boundedread.ReadFile(filepath.Join(workDir, activeFile), maxActiveSessionBytes)
 	if err != nil {
 		return workDir
 	}
 	name := strings.TrimSpace(string(data))
-	if name == "" {
+	if name == "" || !validSessionName(name) {
 		return workDir
 	}
-	return filepath.Join(workDir, ".cloop", "sessions", name)
+	sessions := filepath.Join(workDir, ".cloop", "sessions")
+	dir := filepath.Join(sessions, name)
+	for _, p := range []string{sessions, dir} {
+		if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return workDir
+		}
+	}
+	return dir
+}
+
+// validSessionName reports whether name is one `cloop session new` would
+// create: letters, digits, hyphens and underscores (pkg/session).
+func validSessionName(name string) bool {
+	for _, c := range name {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_'
+		if !ok {
+			return false
+		}
+	}
+	return name != ""
 }
 
 // DBPath returns the path to the state.db for the given workdir, accounting
@@ -315,16 +343,38 @@ func Load(workdir string) (*ProjectState, error) {
 // write first, several layers from the cause. A project directory that was
 // moved on the host fails the same way.
 //
-// So the stored path is honoured only while it still resolves to a directory.
-// Otherwise the directory the database was just opened from wins, because that
-// is demonstrably where this project lives from here. The stored column stays
-// as it is: it is a record of where the project was created, and rewriting it
-// from inside a sandbox would let the sandbox's view overwrite the hub's.
+// So the stored path is honoured only while it names the directory the
+// database was read from — the same directory by another spelling, or the
+// project a session directory belongs to. Anything else loses to the
+// directory the database was just opened from, because that is demonstrably
+// where this project lives from here. The stored column stays as it is: it is
+// a record of where the project was created, and rewriting it from inside a
+// sandbox would let the sandbox's view overwrite the hub's.
+//
+// "Anything else" includes a directory that exists. It used to be honoured
+// whenever it did, which let a project's database relocate the project: a
+// workload that wrote another project's path — or the hub's own — into its
+// workdir column had every save the hub made on its behalf land in that
+// directory's database (Task 20418). A copied or restored project likewise
+// wrote back to its original. Neither is a place this project lives.
 func resolveWorkDir(stored, dir string) string {
 	if stored == "" {
 		return dir
 	}
-	if info, err := os.Stat(stored); err == nil && info.IsDir() {
+	if filepath.Clean(stored) == filepath.Clean(dir) {
+		return stored
+	}
+	info, err := os.Stat(stored)
+	if err != nil || !info.IsDir() {
+		return dir
+	}
+	if here, err := os.Stat(dir); err == nil && os.SameFile(info, here) {
+		return stored
+	}
+	// A session's database is a copy of its project's and keeps the project's
+	// directory, which is where its saves have always gone (ActiveDir).
+	if sessions := filepath.Dir(filepath.Clean(dir)); filepath.Base(sessions) == "sessions" &&
+		filepath.Dir(sessions) == filepath.Join(filepath.Clean(stored), ".cloop") {
 		return stored
 	}
 	return dir
