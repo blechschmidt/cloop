@@ -3741,7 +3741,7 @@ device behave differently:
 | The hub runs | The refusal tells you to |
 | --- | --- |
 | a release, e.g. `v0.2.0` | press Upgrade to install that release; a device below protocol v11, which cannot be upgraded remotely, once by hand |
-| an unreleased build of a commit, e.g. `dev+g8b418e2` | put the device on the edge channel (`sudo cloop executor agent install --upgrade --channel edge`, once) and press Upgrade: it installs the hub's own build, signed by CI, once CI has published it. Or, without the channel, build cloop at the hub's commit (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there. Where the newest published release *does* satisfy the need, pressing Upgrade with it is offered as well |
+| an unreleased build of a commit, e.g. `dev+g8b418e2` | put the device on the edge channel (`sudo cloop executor agent install --upgrade --channel edge`, once) and press Upgrade: it installs the hub's own build, signed by CI, once CI has published it. Or, without the channel, build cloop at the hub's commit in a full clone, stamped with its place on `main` (`CGO_ENABLED=0 go build -ldflags "-X github.com/blechschmidt/cloop/pkg/version.Commit=$(git rev-parse HEAD) -X github.com/blechschmidt/cloop/pkg/version.Sequence=$(git rev-list --count --first-parent HEAD)" -o cloop .` — a device whose build carries a sequence refuses a build that carries none, Task 20421), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there. Where the newest published release *does* satisfy the need, pressing Upgrade with it is offered as well |
 | an unreleased build of a dirty tree, or `dev` | the hand-built binary only — no CI build matches it |
 
 For the reference deployment — a hub on `dev+g8b418e2`, a device whose agent
@@ -3758,8 +3758,11 @@ speaks v14, a run carrying firewall rules stored in the hub — the refusal read
 > --upgrade --channel edge` on it, once — a cloop older than the channel first
 > needs one edge build installed by hand) and press Upgrade on its row in the
 > Executors panel: it installs this hub's own build, 8b418e2, signed by CI, once
-> CI has published it. Or build cloop at the hub's commit 8b418e2 as a static
-> binary (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run
+> CI has published it. Or build cloop at the hub's commit 8b418e2, in a full
+> clone, as a static binary (`CGO_ENABLED=0 go build -ldflags "-X
+> github.com/blechschmidt/cloop/pkg/version.Commit=$(git rev-parse HEAD) -X
+> github.com/blechschmidt/cloop/pkg/version.Sequence=$(git rev-list --count
+> --first-parent HEAD)" -o cloop .`), copy it to the device and run
 > `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there
 > (a binary built by hand carries no signed provenance); a plain --upgrade keeps
 > the device's packet-filter grant as it is.

@@ -10,6 +10,8 @@ package executor
 // binary is unstamped or because a release was added.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,6 +36,12 @@ func withKnownReleases(t *testing.T) {
 	t.Cleanup(func() { knownReleases = prev })
 }
 
+// staticBuild is the build the advice names: static, and stamped with its
+// commit and place on main so a device that carries a sequence accepts it.
+const staticBuild = "CGO_ENABLED=0 go build -ldflags \"-X github.com/blechschmidt/cloop/pkg/version.Commit=" +
+	"$(git rev-parse HEAD) -X github.com/blechschmidt/cloop/pkg/version.Sequence=$(git rev-list --count " +
+	"--first-parent HEAD)\" -o cloop ."
+
 const (
 	unreleasedNote15 = "The hub runs an unreleased build (dev+g8b418e2), so no published release may speak v15 yet — " +
 		"the newest this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade button and " +
@@ -48,7 +56,7 @@ const (
 		"edge` on it, once — a cloop older than the channel first needs one edge build installed by hand) and " +
 		"press Upgrade on its row in the Executors panel: it installs this hub's own build, 8b418e2, signed by " +
 		"CI, once CI has published it. Or " + buildAt8b418e2
-	buildAt8b418e2 = "build cloop at the hub's commit 8b418e2 as a static binary (`CGO_ENABLED=0 go build -o cloop .`), " +
+	buildAt8b418e2 = "build cloop at the hub's commit 8b418e2, in a full clone, as a static binary (`" + staticBuild + "`), " +
 		"copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there " +
 		"(a binary built by hand carries no signed provenance); a plain --upgrade keeps the device's packet-filter " +
 		"grant as it is."
@@ -98,7 +106,7 @@ func TestNeedsProtocolNamesTheSourceTheHubWasBuiltFrom(t *testing.T) {
 			"The hub runs an unreleased build (" + tc.hub + "), so no published release may speak v15 yet — the " +
 			"newest this hub knows of, v0.0.4, speaks v13 — and the Executors panel's Upgrade button and " +
 			"auto-update install published releases only. To move the device forward, build cloop " + tc.source +
-			" as a static binary (`CGO_ENABLED=0 go build -o cloop .`), copy it to the device and run `sudo " +
+			", in a full clone, as a static binary (`" + staticBuild + "`), copy it to the device and run `sudo " +
 			"./cloop executor agent install --upgrade --insecure-skip-verify` there (a binary built by hand " +
 			"carries no signed provenance); a plain --upgrade keeps the device's packet-filter grant as it is."
 		if got != want {
@@ -311,5 +319,29 @@ func TestEveryRemedyNamesTheInstallCommand(t *testing.T) {
 				t.Errorf("hub %q: remedy names no install command: %q", hub, s)
 			}
 		}
+	}
+}
+
+// TestStaticBuildStampsWhatTheReleaseStamps: an -X that names a symbol which
+// moved is ignored without a word, and the binary then carries no sequence —
+// which a device whose build carries one refuses. So the advised build stamps
+// exactly the symbols scripts/build-release.sh does.
+func TestStaticBuildStampsWhatTheReleaseStamps(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join(gateModuleRoot(t), "scripts", "build-release.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, symbol := range []string{"pkg/version.Commit=", "pkg/version.Sequence="} {
+		want := "-X github.com/blechschmidt/cloop/" + symbol
+		if !strings.Contains(string(script), want) {
+			t.Errorf("scripts/build-release.sh no longer stamps %s", want)
+		}
+		if !strings.Contains(staticBuildCommand, want) {
+			t.Errorf("the advised build does not stamp %s: %s", want, staticBuildCommand)
+		}
+	}
+	if !strings.Contains(staticBuildCommand, "--first-parent") || !strings.HasPrefix(staticBuildCommand, "CGO_ENABLED=0 ") {
+		t.Errorf("the advised build is not static, or does not count main's first-parent history: %s",
+			staticBuildCommand)
 	}
 }

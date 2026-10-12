@@ -53,8 +53,15 @@ var HubBuild = version.String
 const MinRemoteUpgradeVersion = 11
 
 // staticBuildCommand builds cloop the way a device needs it: one binary with no
-// libc of the build machine's baked in.
-const staticBuildCommand = "CGO_ENABLED=0 go build -o cloop ."
+// libc of the build machine's baked in, stamped with its commit and that
+// commit's first-parent position on main as scripts/build-release.sh stamps
+// them (Task 20421). A device whose installed build carries a sequence refuses
+// one that carries none (rollback protection, Task 20380), so an unstamped
+// build was refused there unless forced — and, forced, left the device with
+// nothing to order its next upgrade by. The count needs the whole history.
+const staticBuildCommand = `CGO_ENABLED=0 go build -ldflags "` +
+	`-X github.com/blechschmidt/cloop/pkg/version.Commit=$(git rev-parse HEAD) ` +
+	`-X github.com/blechschmidt/cloop/pkg/version.Sequence=$(git rev-list --count --first-parent HEAD)" -o cloop .`
 
 // knownReleases is the table of published releases the advice is written
 // from: pkg/version's, unless a test pins it — the sentences these functions
@@ -391,7 +398,7 @@ func isHexRevision(s string) bool {
 // follows it is moved there by the Upgrade button. The hand-built binary stays
 // as the fallback, for a device whose operator has not opted in.
 func (h hubBuildFacts) buildSteps() string {
-	manual := fmt.Sprintf("build cloop %s as a static binary (`%s`), copy it to the device and run `sudo ./%s "+
+	manual := fmt.Sprintf("build cloop %s, in a full clone, as a static binary (`%s`), copy it to the device and run `sudo ./%s "+
 		"--insecure-skip-verify` there (a binary built by hand carries no signed provenance); a plain --upgrade "+
 		"keeps the device's packet-filter grant as it is.", h.source, staticBuildCommand, AgentUpgradeProcedure)
 	if h.commit == "" {
