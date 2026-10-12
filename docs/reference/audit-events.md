@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 182 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 183 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 161 |
+| `control-plane` | the hub's own state.db | 162 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-182 actions in 43 families. Every action is listed: this section is the whole
+183 actions in 43 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (3) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
 
 ### task.*
 
@@ -621,15 +621,18 @@ Payload keys:
 | --- | --- | --- | --- | --- |
 | `sealing_key.escrowed` | `sealing_key` | control-plane | beta | `cloop hub key escrow export` wraps CLOOP_SECRET_KEY under an operator's passphrase, or `cloop hub key escrow verify --record` records a verified escrow again after a restore. |
 | `sealing_key.retired` | `sealing_key` | control-plane | stable | A superseded sealing key is retired once nothing is wrapped under it. |
+| `sealing_key.root_changed` | `sealing_key` | control-plane | stable | `cloop hub key rotate --retire-previous` finishes a change of CLOOP_SECRET_KEY: every hub member held the new root and an escrow of it was on record, every sealed row was rewrapped onto a key of it, and every key of the previous root was retired. Written when the run ends, finished or not. |
 | `sealing_key.rotated` | `sealing_key` | control-plane | stable | The secret store's sealing key is rotated and stored payloads are re-wrapped under the new one. |
 
 Payload keys:
 
 - `sealing_key.escrowed` — `escrow_id`, `key_fingerprint`, `kdf`, `created_at`, `recorded`, `via`
 - `sealing_key.retired` — `key_id`, `via`
+- `sealing_key.root_changed` — `root`, `previous_root`, `minted`, `to_key`, `rewrapped`, `skipped`, `failed`, `retired`, `remaining`, `members`, `escrow_id`, `complete`, `via`
 - `sealing_key.rotated` — `from_primary`, `to_key`, `rewrapped`, `skipped`, `failed`, `complete`, `via`
 
 - `sealing_key.escrowed` — Carries the key's fingerprint, never the key or the passphrase. `cloop hub doctor` compares the escrow on record against the key in use and fails when they differ.
+- `sealing_key.root_changed` — Roots are named by fingerprint, the name every checkpoint and escrow carries, never by value. The rotation and each retirement are recorded as sealing_key.rotated and sealing_key.retired as well.
 - `sealing_key.rotated` — Envelope encryption means rotation re-wraps data keys rather than re-encrypting payloads, so this row is cheap even on a large store.
 
 ### hub_ca.*

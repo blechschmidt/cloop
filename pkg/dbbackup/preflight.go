@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -56,6 +57,12 @@ const (
 type PreflightOptions struct {
 	// Key is the CLOOP_SECRET_KEY the restored hub will run with.
 	Key string
+	// Previous is the CLOOP_SECRET_KEY_PREVIOUS it will run with while a
+	// change of root is in progress (Task 20425): a backup taken before the
+	// change holds keys only the previous root derives, and a sidecar sealed
+	// under it. Both are as good as the current root's, because the restored
+	// hub opens them.
+	Previous string
 	// SkipChecksum, AllowUnsealed and AcceptSecretLoss are RestoreOptions'.
 	SkipChecksum     bool
 	AllowUnsealed    bool
@@ -151,7 +158,10 @@ type Preflight struct {
 	// Keys are the sealing keys the backup depends on, by id.
 	Keys []KeyVerdict
 	// KeyFingerprint names the key checked against; "" when there was none.
-	KeyFingerprint string
+	// PreviousKeyFingerprint names the previous root also checked against,
+	// during a change of root.
+	KeyFingerprint         string
+	PreviousKeyFingerprint string
 
 	// Refusals say why the restore is refused; none when it may go ahead.
 	Refusals []Refusal
@@ -205,7 +215,8 @@ func Inspect(path string, opts PreflightOptions) (*Preflight, error) {
 	if stat.IsDir() {
 		return nil, fmt.Errorf("dbbackup: backup path is a directory: %s", path)
 	}
-	p := &Preflight{Backup: path, SizeBytes: stat.Size(), KeyFingerprint: KeyFingerprint(opts.Key)}
+	p := &Preflight{Backup: path, SizeBytes: stat.Size(), KeyFingerprint: KeyFingerprint(opts.Key),
+		PreviousKeyFingerprint: KeyFingerprint(opts.Previous)}
 
 	if err := validateBackup(path); err != nil {
 		// Nothing else can be read reliably from a file that fails this.
@@ -279,7 +290,7 @@ func (p *Preflight) checkSidecar(path string, opts PreflightOptions) {
 		return
 	}
 
-	p.Seal = meta.Check(opts.Key)
+	p.Seal = meta.Check(opts.Key, opts.Previous)
 	switch p.Seal {
 	case SealValid:
 		p.Sidecar = SidecarSealed
@@ -301,6 +312,9 @@ func (p *Preflight) checkSidecar(path string, opts PreflightOptions) {
 	case SealForeignKey:
 		why = fmt.Sprintf("the sidecar is sealed under key %s, and the %s here is %s", meta.KeyFingerprint,
 			EnvKey, orNone(p.KeyFingerprint))
+		if p.PreviousKeyFingerprint != "" {
+			why += fmt.Sprintf(" (and %s is %s)", rootkey.EnvPrevious, p.PreviousKeyFingerprint)
+		}
 	default:
 		why = "there is no " + EnvKey + " here to check the sidecar's seal with"
 	}
@@ -311,18 +325,22 @@ func (p *Preflight) checkSidecar(path string, opts PreflightOptions) {
 	p.refuse(ErrUnsealed, OverrideAllowUnsealed, "%s", why)
 }
 
-// checkKeys judges every sealing key the backup depends on against the key
+// checkKeys judges every sealing key the backup depends on against the roots
 // the restored hub will run with — the check secretbroker.OpenKeyring makes
-// when the hub starts, made before the swap instead of after it.
+// when the hub starts, made before the swap instead of after it. Either root
+// will do: the restored hub derives from both while a change of root is in
+// progress, and `cloop hub key rotate --retire-previous` moves what the
+// previous one derives.
 func (p *Preflight) checkKeys(facts statedb.SealedFacts, opts PreflightOptions) {
 	records := make([]secretbroker.KEKRecord, 0, len(facts.KEKs))
 	for _, row := range facts.KEKs {
 		records = append(records, secretbroker.KEKRecord{
-			ID: row.ID, Salt: row.Salt, State: row.State, CheckValue: row.CheckValue,
+			ID: row.ID, Salt: row.Salt, State: row.State, CheckValue: row.CheckValue, Root: row.Root,
 		})
 	}
+	roots := []string{opts.Key, opts.Previous}
 	opens := map[string]bool{}
-	for _, c := range secretbroker.CheckKeys(opts.Key, records) {
+	for _, c := range secretbroker.CheckKeys(roots, records) {
 		opens[c.ID] = c.Opens
 	}
 	// With a primary the key derives, the hub starts and any other live key
@@ -347,7 +365,7 @@ func (p *Preflight) checkKeys(facts statedb.SealedFacts, opts PreflightOptions) 
 				v.Why = "the pre-envelope salt is not in the backup, so no key opens these rows"
 				p.note("%d row(s) are sealed the pre-envelope way and the backup holds no salt for them: "+
 					"they were lost before this restore", rows)
-			case secretbroker.LegacyKeyOpens(opts.Key, facts.LegacySalt, facts.LegacySample):
+			case secretbroker.LegacyKeyOpens(roots, facts.LegacySalt, facts.LegacySample):
 				v.Opens = true
 			default:
 				v.Lost, v.Why = true, "the key does not open what the pre-envelope construction sealed"
@@ -397,9 +415,17 @@ func (p *Preflight) checkKeys(facts statedb.SealedFacts, opts PreflightOptions) 
 			"set a new %s and restore with %s", EnvKey, strings.Join(lost, ", "), EnvKey, OverrideAcceptSecretLoss)
 		return
 	}
-	msg := fmt.Sprintf("the %s here (key %s) cannot open the backup's sealing keys %s: every secret, session and "+
-		"hub CA key sealed under them would be unreadable, and the hub would refuse to start on them. Restore the "+
-		"key they were sealed under (`cloop hub key escrow import`)", EnvKey, orNone(p.KeyFingerprint), strings.Join(lost, ", "))
+	msg := fmt.Sprintf("the %s here (key %s) cannot open the backup's sealing keys %s", EnvKey,
+		orNone(p.KeyFingerprint), strings.Join(lost, ", "))
+	if p.PreviousKeyFingerprint != "" {
+		msg = fmt.Sprintf("neither the %s here (key %s) nor %s (key %s) can open the backup's sealing keys %s",
+			EnvKey, orNone(p.KeyFingerprint), rootkey.EnvPrevious, p.PreviousKeyFingerprint, strings.Join(lost, ", "))
+	}
+	msg += ": every secret, session and hub CA key sealed under them would be unreadable, and the hub would " +
+		"refuse to start on them. Restore the key they were sealed under (`cloop hub key escrow import`) — or, " +
+		"when the hub's key was changed since the backup was taken, restore with the old key as " +
+		rootkey.EnvPrevious + " and run the restored hub with it until `cloop hub key rotate --retire-previous` " +
+		"has moved them"
 	if opts.AcceptSecretLoss {
 		p.note("%s — proceeding under %s: those keys are retired in the restored database, and the backup file keeps them",
 			msg, OverrideAcceptSecretLoss)

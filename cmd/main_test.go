@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"testing"
 
@@ -24,6 +25,12 @@ const cliReexecEnv = "CLOOP_CMD_TEST_AS_CLI"
 // See internal/hometest for why this is done once per package rather than
 // per test, and for the leak that motivated it.
 func TestMain(m *testing.M) {
+	// No test reaches the host's systemd-creds: run as root, its first
+	// encryption creates the host's credential secret (Task 20425). A test
+	// that wants the encrypted path installs a stand-in of its own.
+	systemdCredsEncrypt = func(string, []byte, string) error {
+		return errors.New("systemd-creds is not used by tests")
+	}
 	if os.Getenv(cliReexecEnv) == "1" {
 		// A child of a test's hub, whose environment — HOME included — is
 		// already the test's.

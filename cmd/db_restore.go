@@ -40,11 +40,13 @@ type dbRestoreOptions struct {
 	Check            bool
 	// CheckpointFile overrides audit.checkpoints.file.
 	CheckpointFile string
-	// Key is CLOOP_SECRET_KEY; Stderr where the restore record's stderr copy
-	// goes when the configuration asks for one.
-	Key    string
-	Stderr io.Writer
-	Now    func() time.Time
+	// Key is CLOOP_SECRET_KEY and Previous CLOOP_SECRET_KEY_PREVIOUS, from
+	// wherever pkg/rootkey resolved them; Stderr where the restore record's
+	// stderr copy goes when the configuration asks for one.
+	Key      string
+	Previous string
+	Stderr   io.Writer
+	Now      func() time.Time
 }
 
 // runDBRestore is `cloop db restore`. It writes its report to w and returns
@@ -77,6 +79,7 @@ func runDBRestore(w io.Writer, o dbRestoreOptions) int {
 
 	pre, err := dbbackup.Inspect(o.Backup, dbbackup.PreflightOptions{
 		Key:              o.Key,
+		Previous:         o.Previous,
 		SkipChecksum:     o.SkipChecksum,
 		AllowUnsealed:    o.AllowUnsealed,
 		AcceptSecretLoss: o.AcceptSecretLoss,
@@ -113,6 +116,7 @@ func runDBRestore(w io.Writer, o dbRestoreOptions) int {
 	report, err := dbbackup.Restore(o.Backup, dstPath, dbbackup.RestoreOptions{
 		Force:            o.Force,
 		Key:              o.Key,
+		Previous:         o.Previous,
 		SkipChecksum:     o.SkipChecksum,
 		AllowUnsealed:    o.AllowUnsealed,
 		AcceptSecretLoss: o.AcceptSecretLoss,
@@ -182,6 +186,10 @@ func printRestorePreflight(w io.Writer, p *dbbackup.Preflight, dim, warn *color.
 	}
 	if p.KeyFingerprint != "" {
 		fmt.Fprintf(w, "  checked against CLOOP_SECRET_KEY %s\n", p.KeyFingerprint)
+		if p.PreviousKeyFingerprint != "" {
+			fmt.Fprintf(w, "  and CLOOP_SECRET_KEY_PREVIOUS %s (a change of root is in progress)\n",
+				p.PreviousKeyFingerprint)
+		}
 	} else {
 		warn.Fprintln(w, "  no CLOOP_SECRET_KEY: no sealing key can be checked, and no seal")
 	}

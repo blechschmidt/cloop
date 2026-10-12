@@ -113,7 +113,9 @@ func record(dst string, pre *Preflight, opts RestoreOptions) (Recording, error) 
 		return rec, &UnrecordedError{Problems: problems}
 	}
 
-	cpKey, _ := auditcheckpoint.DeriveKey(opts.Key)
+	// Sealed under the current root; checkpoints sealed under the previous one
+	// during a change of root are the hub's own all the same.
+	cpKey, _ := auditcheckpoint.KeyForRoots(opts.Key, opts.Previous)
 	recs, chain, recordPath, note := checkpointsFor(opts.CheckpointFile, dst)
 	if note != "" {
 		rec.Notes = append(rec.Notes, note)

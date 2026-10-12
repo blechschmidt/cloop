@@ -1,6 +1,8 @@
 // Package secret provides AES-256-GCM encrypted project secrets management.
-// Secrets are stored in .cloop/secrets.enc and protected by a passphrase
-// supplied via the CLOOP_SECRET_KEY environment variable or prompted at runtime.
+// Secrets are stored in .cloop/secrets.enc and protected by the hub's root key,
+// CLOOP_SECRET_KEY, resolved by pkg/rootkey from a key file, a systemd
+// credential or the environment. During a change of root the file opens under
+// the previous root as well, and every save seals it under the current one.
 package secret
 
 import (
@@ -18,12 +20,14 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 const (
 	secretsFile = "secrets.enc"
-	// EnvPassphraseKey is the environment variable that holds the passphrase.
-	EnvPassphraseKey = "CLOOP_SECRET_KEY"
+	// EnvPassphraseKey is the environment variable that holds the passphrase:
+	// one of the sources pkg/rootkey resolves it from.
+	EnvPassphraseKey = rootkey.EnvKey
 
 	saltSize  = 32
 	nonceSize = 12
@@ -130,7 +134,7 @@ func Open(workDir string) (*Store, error) {
 	}
 
 	// File exists: need passphrase to decrypt.
-	pass, err := resolvePassphrase(true)
+	roots, err := resolveRoots(true)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +146,19 @@ func Open(workDir string) (*Store, error) {
 	salt := data[:saltSize]
 	encrypted := data[saltSize:]
 
-	key := deriveKey(pass, salt)
-	plaintext, err := decrypt(key, encrypted)
+	// The current root first, then the previous one: a file last saved
+	// before the root changed is sealed under the old key, and is resealed
+	// under the new one by the next Save.
+	var (
+		key       []byte
+		plaintext []byte
+	)
+	for _, pass := range roots {
+		key = deriveKey(pass, salt)
+		if plaintext, err = decrypt(key, encrypted); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("secret: decrypt failed (wrong passphrase?): %w", err)
 	}
@@ -158,8 +173,9 @@ func Open(workDir string) (*Store, error) {
 	return &Store{entries: payload.Secrets, workDir: workDir, passKey: key}, nil
 }
 
-// Save encrypts and writes the store to disk. A new random salt is generated
-// on each save (providing forward secrecy for the encryption layer).
+// Save encrypts and writes the store to disk, under the current root. A new
+// random salt is generated on each save (providing forward secrecy for the
+// encryption layer).
 func (s *Store) Save() error {
 	pass, err := resolvePassphrase(false)
 	if err != nil {
@@ -246,13 +262,27 @@ func (s *Store) InjectIntoPrompt(prompt string) string {
 	return prompt
 }
 
-// resolvePassphrase reads the passphrase from CLOOP_SECRET_KEY.
-// If require is true and the env var is absent, an error is returned.
-// If require is false and the env var is absent, ("", nil) is returned.
+// resolvePassphrase returns the current root (pkg/rootkey), the one a save
+// seals under. If require is true and none is configured, an error is
+// returned; if require is false, ("", nil) is. A root source that is
+// configured and refused is always an error.
 func resolvePassphrase(require bool) (string, error) {
-	pass := os.Getenv(EnvPassphraseKey)
-	if pass == "" && require {
-		return "", fmt.Errorf("secret: %s is not set — cannot decrypt secrets", EnvPassphraseKey)
+	roots, err := resolveRoots(require)
+	if err != nil || len(roots) == 0 {
+		return "", err
 	}
-	return pass, nil
+	return roots[0], nil
+}
+
+// resolveRoots returns the roots the file may be sealed under, current first.
+func resolveRoots(require bool) ([]string, error) {
+	r, err := rootkey.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("secret: %w", err)
+	}
+	roots := r.Values()
+	if len(roots) == 0 && require {
+		return nil, fmt.Errorf("secret: %s is not set — cannot decrypt secrets", EnvPassphraseKey)
+	}
+	return roots, nil
 }

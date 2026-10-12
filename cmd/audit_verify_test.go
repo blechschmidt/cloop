@@ -105,7 +105,7 @@ func TestHubAuditVerifyExitCodes(t *testing.T) {
 // chains, and refuses a record whose seal does not verify.
 func TestHubAuditVerifyAgainstCheckpoints(t *testing.T) {
 	t.Setenv(auditcheckpoint.EnvKey, "cmd-test-key-0123456789abcdef0123456789")
-	key, err := auditcheckpoint.KeyFromEnv()
+	key, err := auditcheckpoint.KeyFromRoots()
 	if err != nil {
 		t.Fatal(err)
 	}

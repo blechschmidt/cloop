@@ -21,7 +21,7 @@ import (
 func TestAnAcknowledgedRestoreIsAWarning(t *testing.T) {
 	const pass = "doctor-restore-key-0123456789abcdef0123"
 	t.Setenv(auditcheckpoint.EnvKey, pass)
-	key, err := auditcheckpoint.KeyFromEnv()
+	key, err := auditcheckpoint.KeyFromRoots()
 	if err != nil {
 		t.Fatal(err)
 	}

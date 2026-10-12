@@ -590,8 +590,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// 0071 (API token mint policy, Task 20422) appends to api_tokens, which
 	// an older member reads on every token-authenticated request, and 0072
 	// (proxy session renewal, the same task) to proxy_sessions, which it
-	// reads when it adopts a run.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72} {
+	// reads when it adopts a run. 0073 (the root a sealing key derives from,
+	// Task 20425) appends to broker_keks, which every member reads whenever
+	// it opens its keyring — on every request that touches a secret.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

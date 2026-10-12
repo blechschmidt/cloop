@@ -320,7 +320,7 @@ func drillLease(t *testing.T, dir string) string {
 // way the cluster leader does, under the key in the environment.
 func drillCheckpoint(t *testing.T, dir, file string) auditcheckpoint.Record {
 	t.Helper()
-	key, err := auditcheckpoint.KeyFromEnv()
+	key, err := auditcheckpoint.KeyFromRoots()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestAProjectRestoreIsAcknowledgedToo(t *testing.T) {
 	appendAudit(t, hub, 2, auditaction.ActionExecutorCordon)
 	appendAudit(t, project, 4, auditaction.ActionTaskUpsert)
 	cps := filepath.Join(t.TempDir(), "audit-checkpoints.jsonl")
-	key, err := auditcheckpoint.KeyFromEnv()
+	key, err := auditcheckpoint.KeyFromRoots()
 	if err != nil {
 		t.Fatal(err)
 	}

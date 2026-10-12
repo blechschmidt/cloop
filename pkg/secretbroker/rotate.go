@@ -476,6 +476,11 @@ type RotationStatus struct {
 	LegacyOpen   bool             `json:"legacy_openable"`
 	Unrotated    int              `json:"unrotated_rows"`
 	Rotations    []RotationRecord `json:"rotations,omitempty"`
+	// ChangingRoot reports a previous root configured on this process
+	// (Task 20425); PreviousRootRows counts the rows still sealed under keys
+	// it derives, which `cloop hub key rotate --retire-previous` moves.
+	ChangingRoot     bool `json:"changing_root,omitempty"`
+	PreviousRootRows int  `json:"previous_root_rows,omitempty"`
 }
 
 // Status assembles the report behind `cloop hub key status`.
@@ -485,6 +490,13 @@ func (r *Rotator) Status(historyLimit int) (RotationStatus, error) {
 		PrimaryKeyID: primary,
 		Keys:         r.keyring.Keys(),
 		LegacyOpen:   r.keyring.HasLegacy(),
+		ChangingRoot: r.keyring.HasPrevious(),
+	}
+	previous := map[string]bool{}
+	for _, k := range st.Keys {
+		if k.DerivedBy == RootPrevious {
+			previous[k.ID] = true
+		}
 	}
 
 	usage := map[string]*KeyUsage{}
@@ -517,6 +529,9 @@ func (r *Rotator) Status(historyLimit int) (RotationStatus, error) {
 			}
 			if id != primary {
 				st.Unrotated += n
+			}
+			if previous[id] {
+				st.PreviousRootRows += n
 			}
 		}
 	}
@@ -565,6 +580,107 @@ func (r *Rotator) RetireKey(id string) error {
 			ErrKeyInUse, strings.Join(blocking, ", "), id)
 	}
 	return r.keyring.RetireKey(id)
+}
+
+// ---------------------------------------------------------------------------
+// Changing the root (Task 20425)
+// ---------------------------------------------------------------------------
+
+// RetirePreviousOptions configures RetirePrevious.
+type RetirePreviousOptions struct {
+	// Actor is recorded on a minted key and the rotation record.
+	Actor string
+	// DryRun counts what would move and names what would be retired, and
+	// writes nothing.
+	DryRun bool
+}
+
+// RetirePreviousReport is the outcome of RetirePrevious.
+type RetirePreviousReport struct {
+	// Minted is the key of the current root the run minted and promoted; ""
+	// when the primary already derived from it.
+	Minted string `json:"minted,omitempty"`
+	// Rotation is the rewrap of every sealed row onto the primary.
+	Rotation RotationReport `json:"rotation"`
+	// Keys are the keys of the previous root: retired, or on a dry run, the
+	// ones that would be. Remaining are those that could not be retired.
+	Keys      []string `json:"keys"`
+	Remaining []string `json:"remaining,omitempty"`
+	Errors    []string `json:"errors,omitempty"`
+	// Complete: every row is under a key of the current root and every key of
+	// the previous root is retired. The previous root opens nothing any more
+	// and can be removed from every member.
+	Complete bool `json:"complete"`
+	DryRun   bool `json:"dry_run,omitempty"`
+}
+
+// RetirePrevious finishes a change of root: it makes the primary a key of the
+// current root — minting one if the primary still derives from the previous
+// root — rewraps every sealed row onto it with the compare-and-swap rotation
+// Rotate always uses, and retires every key of the previous root.
+//
+// It is resumable exactly as Rotate is. A run that is interrupted, or finds a
+// row it cannot rewrap, retires nothing and returns the rotation's error:
+// re-running continues, and mints nothing the second time, because the primary
+// then derives from the current root already.
+//
+// What has to be true before it runs is the caller's to check, because it is
+// about the deployment rather than the registry: every live hub member holds
+// the new root as its current one — a member that does not would be left
+// unable to read anything once the old keys are gone — and an escrow of the
+// new root is on record. `cloop hub key rotate --retire-previous` checks both.
+func (r *Rotator) RetirePrevious(ctx context.Context, opts RetirePreviousOptions) (RetirePreviousReport, error) {
+	out := RetirePreviousReport{DryRun: opts.DryRun}
+	kr := r.keyring
+	if !kr.HasPrevious() {
+		return out, fmt.Errorf("%w: set CLOOP_SECRET_KEY_PREVIOUS (or its file or credential) to the key "+
+			"being replaced; without it the keys it derives cannot be rewrapped", ErrNoPreviousRoot)
+	}
+	// From the registry as it is now, not as it was when the keyring opened:
+	// a key minted or retired by another process since must be counted.
+	if err := kr.Reload(); err != nil {
+		return out, err
+	}
+	newKey := !kr.PrimaryFromCurrent()
+
+	if opts.DryRun {
+		rep, err := r.Rotate(ctx, RotateOptions{NewKey: newKey, DryRun: true})
+		out.Rotation = rep
+		out.Keys = kr.PreviousRootKeys()
+		out.Complete = err == nil && rep.Complete
+		return out, err
+	}
+
+	rep, err := r.Rotate(ctx, RotateOptions{NewKey: newKey, Actor: opts.Actor})
+	out.Rotation = rep
+	if newKey && rep.TargetKeyID != "" && kr.PrimaryID() == rep.TargetKeyID {
+		out.Minted = rep.TargetKeyID
+	}
+	if err != nil {
+		return out, err
+	}
+	if !kr.PrimaryFromCurrent() {
+		// Rotate succeeded onto a primary of the previous root: another
+		// process promoted one underneath this run. Retiring now would retire
+		// the primary's whole root; refuse, and let the re-run mint again.
+		return out, fmt.Errorf("%w: the primary changed to %s, a key of the previous root, during the run; "+
+			"re-run to continue", ErrRotationFailed, kr.PrimaryID())
+	}
+
+	for _, id := range kr.PreviousRootKeys() {
+		if err := r.RetireKey(id); err != nil {
+			out.Remaining = append(out.Remaining, id)
+			out.Errors = appendCapped(out.Errors, fmt.Sprintf("%s: %v", id, err))
+			continue
+		}
+		out.Keys = append(out.Keys, id)
+	}
+	if len(out.Remaining) > 0 {
+		return out, fmt.Errorf("%w: %d key(s) of the previous root could not be retired (%s); re-run to continue",
+			ErrKeyInUse, len(out.Remaining), strings.Join(out.Remaining, ", "))
+	}
+	out.Complete = true
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

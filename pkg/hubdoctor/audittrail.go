@@ -14,6 +14,7 @@ package hubdoctor
 // agree with the chain.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditcheckpoint"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -169,21 +171,36 @@ func checkAuditCheckpoints(dir string, cfg *config.Config, db *statedb.DB, opts 
 		return
 	}
 
-	key, kerr := auditcheckpoint.KeyFromEnv()
-	if kerr != nil {
+	key, kerr := auditcheckpoint.KeyFromRoots()
+	switch {
+	case kerr != nil && !errors.Is(kerr, auditcheckpoint.ErrNoKey):
+		key = nil
+		add(Finding{
+			Check: "audit.checkpoints.signed", Title: "Audit checkpoint seals", Severity: SeverityFail,
+			Message: "the hub's root key is configured and refused, so it will not start and no checkpoint is " +
+				"sealed: " + kerr.Error(),
+			Remediation: "See the secret_key.source finding",
+		})
+	case kerr != nil:
 		key = nil
 		add(Finding{
 			Check: "audit.checkpoints.signed", Title: "Audit checkpoint seals", Severity: SeverityWarn,
 			Message: "checkpoints are written unsigned: there is no " + auditcheckpoint.EnvKey + ", so anyone " +
 				"who can write where they are kept can write a record agreeing with a truncated chain",
-			Remediation: "Export " + auditcheckpoint.EnvKey + " from .cloop/hub.env (`cloop hub bootstrap` writes it) " +
-				"and restart the hub",
+			Remediation: "Give the hub its key (" + rootkey.EnvKeyFile + ", the systemd credential " +
+				rootkey.Credential + ", or " + auditcheckpoint.EnvKey + "; `cloop hub bootstrap` writes one) " +
+				"and restart it",
 		})
-	} else {
+	default:
+		msg := "checkpoints are sealed under the key " + auditcheckpoint.EnvKey + " derives (fingerprint " +
+			key.Fingerprint() + ")"
+		if fp := key.PreviousFingerprint(); fp != "" {
+			msg += "; those sealed under " + rootkey.EnvPrevious + " (" + fp + ") before the change of root " +
+				"verify while it is configured"
+		}
 		add(Finding{
 			Check: "audit.checkpoints.signed", Title: "Audit checkpoint seals", Severity: SeverityPass,
-			Message: "checkpoints are sealed under the key " + auditcheckpoint.EnvKey + " derives (fingerprint " +
-				key.Fingerprint() + ")",
+			Message: msg,
 		})
 	}
 

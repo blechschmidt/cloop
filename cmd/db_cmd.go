@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -431,7 +432,12 @@ Exit codes:
   3  restored, but the record of it is incomplete — the output says what`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		o := dbRestoreOptions{Backup: args[0], Key: os.Getenv(dbbackup.EnvKey), Stderr: os.Stderr}
+		roots, err := rootkey.Resolve()
+		if err != nil {
+			return err
+		}
+		o := dbRestoreOptions{Backup: args[0], Key: roots.Current.Value, Previous: roots.Previous.Value,
+			Stderr: os.Stderr}
 		o.Workdir, _ = os.Getwd()
 		o.Force, _ = cmd.Flags().GetBool("force")
 		o.SkipChecksum, _ = cmd.Flags().GetBool("skip-checksum")

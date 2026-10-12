@@ -51,18 +51,16 @@ package auditcheckpoint
 
 import (
 	"crypto/hmac"
-	"crypto/pbkdf2"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -345,21 +343,19 @@ func (r Record) canonical() []byte {
 
 // ── the key ──────────────────────────────────────────────────────────────────
 
-// keyLabel separates this key from every other use of CLOOP_SECRET_KEY: it is
-// the PBKDF2 salt, so the derived key is useless for anything else and the
-// secret broker's keys are useless for this.
-const keyLabel = "cloop/audit-checkpoint/v1"
-
-// fingerprintLabel derives the fingerprint from the key, so the fingerprint
-// names the key without being a way to compute it.
-const fingerprintLabel = "cloop/audit-checkpoint/key-fingerprint/v1"
+// The key is PBKDF2-HMAC-SHA256 over CLOOP_SECRET_KEY under a label of its
+// own — so it is useless for anything else and the secret broker's keys are
+// useless for this — and its fingerprint is derived from it, so the
+// fingerprint names the key without being a way to compute it. pkg/rootkey
+// holds the derivation, because the secret broker names its roots by the same
+// fingerprint and cannot import this package.
 
 // kdfIterations is the PBKDF2-HMAC-SHA256 work factor. Records are meant to
 // travel through log pipelines, and each one is a test of a guessed
 // passphrase; a key typed by a human must cost real work per guess. Derived
 // once per process and cached, so the cost is paid once. A variable so tests
 // can lower it.
-var kdfIterations = 600_000
+var kdfIterations = rootkey.CheckpointKDFIterations
 
 // ErrNoKey is returned when there is no CLOOP_SECRET_KEY to derive from.
 var ErrNoKey = errors.New("auditcheckpoint: " + EnvKey + " is not set")
@@ -368,6 +364,9 @@ var ErrNoKey = errors.New("auditcheckpoint: " + EnvKey + " is not set")
 type Key struct {
 	raw         []byte
 	fingerprint string
+	// previous checks records sealed under the root being replaced, while a
+	// change of root is in progress (Task 20425). It never seals.
+	previous *Key
 }
 
 // Fingerprint names the key: 16 hex characters, stamped on every record it
@@ -379,32 +378,56 @@ func (k *Key) Fingerprint() string {
 	return k.fingerprint
 }
 
-var keyCache sync.Map // cache id -> *Key
-
-// DeriveKey derives the checkpoint key from passphrase.
+// DeriveKey derives the checkpoint key from passphrase. pkg/rootkey caches the
+// derivation, so the cost is paid once per process.
 func DeriveKey(passphrase string) (*Key, error) {
 	if passphrase == "" {
 		return nil, ErrNoKey
 	}
-	iter := kdfIterations
-	id := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", keyLabel, iter, passphrase)))
-	cacheID := hex.EncodeToString(id[:])
-	if k, ok := keyCache.Load(cacheID); ok {
-		return k.(*Key), nil
-	}
-	raw, err := pbkdf2.Key(sha256.New, passphrase, []byte(keyLabel), iter, sha256.Size)
+	raw, fp, err := rootkey.DeriveCheckpointKey(passphrase, kdfIterations)
 	if err != nil {
 		return nil, fmt.Errorf("auditcheckpoint: derive key: %w", err)
 	}
-	fp := sha256.Sum256(append([]byte(fingerprintLabel+"\x00"), raw...))
-	k := &Key{raw: raw, fingerprint: hex.EncodeToString(fp[:8])}
-	actual, _ := keyCache.LoadOrStore(cacheID, k)
-	return actual.(*Key), nil
+	return &Key{raw: raw, fingerprint: fp}, nil
 }
 
-// KeyFromEnv derives the key from CLOOP_SECRET_KEY, returning ErrNoKey when it
-// is not set.
-func KeyFromEnv() (*Key, error) { return DeriveKey(os.Getenv(EnvKey)) }
+// KeyForRoots derives the key from the current root and, when previous is set,
+// lets it also check records sealed under the previous root: a hub mid-way
+// through a change of root wrote its checkpoints under both, and they all
+// still vouch for the chain. Only the current root seals.
+func KeyForRoots(current, previous string) (*Key, error) {
+	k, err := DeriveKey(current)
+	if err != nil || previous == "" {
+		return k, err
+	}
+	p, err := DeriveKey(previous)
+	if err != nil {
+		return nil, err
+	}
+	k.previous = p
+	return k, nil
+}
+
+// KeyFromRoots derives the key from the hub's roots (pkg/rootkey): the file,
+// the systemd credential or the environment, current and previous. ErrNoKey
+// when no current root is configured; a root source that is configured and
+// refused is an error of its own.
+func KeyFromRoots() (*Key, error) {
+	roots, err := rootkey.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	return KeyForRoots(roots.Current.Value, roots.Previous.Value)
+}
+
+// PreviousFingerprint names the previous root this key also checks under; ""
+// when it checks under the current one only.
+func (k *Key) PreviousFingerprint() string {
+	if k == nil || k.previous == nil {
+		return ""
+	}
+	return k.previous.fingerprint
+}
 
 // seal computes the record's seal under k.
 func (k *Key) seal(r Record) []byte {
@@ -450,6 +473,11 @@ func Check(r Record, k *Key) SealStatus {
 	case k == nil:
 		return SealUnchecked
 	case r.KeyFingerprint != k.fingerprint:
+		if k.previous != nil && r.KeyFingerprint == k.previous.fingerprint {
+			// Sealed before the root changed: as good as one sealed after, for
+			// as long as the previous root is configured to check it.
+			return Check(r, k.previous)
+		}
 		return SealForeignKey
 	}
 	got, err := hex.DecodeString(r.Seal)

@@ -125,8 +125,8 @@ const (
 )
 
 // ErrNoKey is returned when the hub has no sealing key to keep the CA under.
-var ErrNoKey = errors.New("hubca: the hub's certificate authority needs CLOOP_SECRET_KEY, " +
-	"which its private key is sealed under")
+var ErrNoKey = errors.New("hubca: the hub's certificate authority needs CLOOP_SECRET_KEY (or its key file, " +
+	"CLOOP_SECRET_KEY_FILE), which its private key is sealed under")
 
 // Authority is the hub's CA, opened for signing.
 type Authority struct {

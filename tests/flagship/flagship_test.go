@@ -194,12 +194,15 @@ type sandboxEvidence struct {
 	LeaseDir      string
 	LeaseFiles    string
 	SecretKeySeen string
-	UITokenSeen   string
-	GitProxyURL   string
-	SSLCAInfoEnv  string
-	HubCAFile     string
-	ProxyCA       string
-	ForgeCA       string
+	// SecretKeySourceSeen: where the hub reads its key from — a key file's
+	// path, the previous key, a credentials directory — reached the sandbox.
+	SecretKeySourceSeen string
+	UITokenSeen         string
+	GitProxyURL         string
+	SSLCAInfoEnv        string
+	HubCAFile           string
+	ProxyCA             string
+	ForgeCA             string
 }
 
 func TestFlagshipCircuit(t *testing.T) {
@@ -478,6 +481,9 @@ func bootstrapHub(ctx context.Context, t *testing.T, w *world) {
 	t.Helper()
 	mustRun(ctx, t, "hub bootstrap", w.cloop(ctx, w.hubDir,
 		"hub", "bootstrap", "--behind-proxy",
+		// A plain key file: systemd-creds would make the circuit depend on
+		// the host's credential secret, and create it on a host without one.
+		"--systemd-creds", "never",
 		"--port", strconv.Itoa(hubPort),
 		"--external-url", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
 		"--git-proxy-port", strconv.Itoa(gitProxyPort),
@@ -535,6 +541,7 @@ mkdir -p evidence
   echo "lease_dir=${CLOOP_LEASE_DIR:-none}"
   echo "lease_files=$(ls -1 "${CLOOP_LEASE_DIR:-/nonexistent}" 2>/dev/null | sort | tr '\n' ' ')"
   echo "secret_key_present=$([ -n "${CLOOP_SECRET_KEY:-}" ] && echo yes || echo no)"
+  echo "secret_key_source_present=$([ -n "${CLOOP_SECRET_KEY_FILE:-}${CLOOP_SECRET_KEY_PREVIOUS:-}${CLOOP_SECRET_KEY_PREVIOUS_FILE:-}${CREDENTIALS_DIRECTORY:-}" ] && echo yes || echo no)"
   echo "ui_token_present=$([ -n "${CLOOP_UI_TOKEN:-}" ] && echo yes || echo no)"
   echo "git_proxy_url=${CLOOP_GIT_PROXY_URL:-none}"
   echo "git_ssl_cainfo=${GIT_SSL_CAINFO:-none}"
@@ -744,6 +751,11 @@ func runCircuit(t *testing.T, w *world) {
 		if evidence.UITokenSeen != "no" {
 			t.Error("CLOOP_UI_TOKEN is set inside the sandbox: an RBAC-bypassing dashboard token " +
 				"leaked across the isolation boundary")
+		}
+		if evidence.SecretKeySourceSeen != "no" {
+			t.Error("the sandbox is told where the hub reads its root key from (CLOOP_SECRET_KEY_FILE, " +
+				"CLOOP_SECRET_KEY_PREVIOUS or CREDENTIALS_DIRECTORY): the hub's environment crossed the " +
+				"isolation boundary")
 		}
 	})
 
@@ -1006,9 +1018,12 @@ func startHub(t *testing.T, w *world) {
 	cmd := exec.Command(w.bin, "ui",
 		"--port", strconv.Itoa(hubPort), "--no-browser", "--projects", w.project)
 	cmd.Dir = w.hubDir
+	// The root key from the file bootstrap wrote, never the environment
+	// (Task 20425): the hub reads a key file only when it owns it, mode 0600,
+	// which the bootstrap that ran as the same owner made it.
 	cmd.Env = append(w.baseEnv(),
 		"CLOOP_UI_TOKEN="+w.token,
-		"CLOOP_SECRET_KEY="+readEnvFile(t, filepath.Join(w.hubDir, ".cloop", "hub.env"), "CLOOP_SECRET_KEY"),
+		"CLOOP_SECRET_KEY_FILE="+w.keyFile(),
 	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -1339,22 +1354,23 @@ func readEvidenceFromRemote(ctx context.Context, t *testing.T, w *world) sandbox
 	}
 	t.Logf("── sandbox reported ──\n%s", body)
 	return sandboxEvidence{
-		UID:           fields["uid"],
-		GID:           fields["gid"],
-		CapEff:        fields["capeff"],
-		NetIfs:        fields["netifs"],
-		TaskID:        fields["task_id"],
-		TaskStatus:    fields["task_status"],
-		LocalRepos:    fields["local_repos"],
-		LeaseDir:      fields["lease_dir"],
-		LeaseFiles:    fields["lease_files"],
-		SecretKeySeen: fields["secret_key_present"],
-		UITokenSeen:   fields["ui_token_present"],
-		GitProxyURL:   fields["git_proxy_url"],
-		SSLCAInfoEnv:  fields["git_ssl_cainfo"],
-		HubCAFile:     fields["hub_ca_file"],
-		ProxyCA:       fields["proxy_ca"],
-		ForgeCA:       fields["forge_ca"],
+		UID:                 fields["uid"],
+		GID:                 fields["gid"],
+		CapEff:              fields["capeff"],
+		NetIfs:              fields["netifs"],
+		TaskID:              fields["task_id"],
+		TaskStatus:          fields["task_status"],
+		LocalRepos:          fields["local_repos"],
+		LeaseDir:            fields["lease_dir"],
+		LeaseFiles:          fields["lease_files"],
+		SecretKeySeen:       fields["secret_key_present"],
+		SecretKeySourceSeen: fields["secret_key_source_present"],
+		UITokenSeen:         fields["ui_token_present"],
+		GitProxyURL:         fields["git_proxy_url"],
+		SSLCAInfoEnv:        fields["git_ssl_cainfo"],
+		HubCAFile:           fields["hub_ca_file"],
+		ProxyCA:             fields["proxy_ca"],
+		ForgeCA:             fields["forge_ca"],
 	}
 }
 
@@ -1390,9 +1406,17 @@ func (w *world) cloop(ctx context.Context, dir string, args ...string) *exec.Cmd
 			env = append(env, strings.Trim(line, `"`))
 		}
 	}
+	// The root key is not in hub.env since Task 20425: bootstrap writes it to
+	// a file of its own, which every command reads as the hub does.
+	if _, err := os.Stat(w.keyFile()); err == nil {
+		env = append(env, "CLOOP_SECRET_KEY_FILE="+w.keyFile())
+	}
 	cmd.Env = env
 	return cmd
 }
+
+// keyFile is where `cloop hub bootstrap` writes the root key.
+func (w *world) keyFile() string { return filepath.Join(w.hubDir, "cloop-secret-key") }
 
 // mustRun executes cmd and fails the test with its full output on error. The
 // output matters: a cloop subcommand that refuses explains why, and discarding

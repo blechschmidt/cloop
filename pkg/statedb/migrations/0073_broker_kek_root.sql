@@ -1,0 +1,25 @@
+-- 0073_broker_kek_root: which root secret each key-encryption key derives from
+-- (Task 20425).
+--
+-- Every KEK is derived from a root secret — CLOOP_SECRET_KEY — and a salt of
+-- its own. A hub now holds a current root, which mints new keys and opens, and
+-- during a change of root a previous one, which only opens: the new key is
+-- rolled out to every hub member with the old one beside it, and `cloop hub key
+-- rotate --retire-previous` then rewraps every sealed row onto a key of the new
+-- root and retires every key of the old.
+--
+--   root   the fingerprint of the root the key derives from: the name every
+--          audit checkpoint, backup sidecar, key escrow and hub member already
+--          gives that root. '' for a key minted before this column existed;
+--          the first process holding the root that derives it attributes it,
+--          once, by trial derivation, and writes the fingerprint back. A
+--          retired key has no salt left to try and stays ''.
+--
+-- The column records, it does not decide: which root opens a key is settled by
+-- deriving it and checking its check value, never by reading this column, so a
+-- row whose root was edited opens exactly as it did before.
+--
+-- Additive — one defaulted column — so an older hub opens a database carrying
+-- it, writes its keys with root '' and leaves them to be attributed.
+
+ALTER TABLE broker_keks ADD COLUMN root TEXT NOT NULL DEFAULT '';

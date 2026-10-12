@@ -34,6 +34,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/keyescrow"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -65,8 +66,29 @@ var placeholderKeys = []string{
 	"cloop",
 }
 
+// changeRootHint is the remedy for a key that has to be replaced: the
+// procedure, not `cloop hub key rotate` alone, which mints every new
+// key-encryption key from the same root and so replaces nothing that matters
+// about a weak one (Task 20425).
+const changeRootHint = "Change the root key online: generate one (`openssl rand -base64 32`), restart every hub " +
+	"member with it as " + rootkey.EnvKey + " and the old one as " + rootkey.EnvPrevious + ", escrow it " +
+	"(`cloop hub key escrow export`), then `cloop hub key rotate --retire-previous` and drop " +
+	rootkey.EnvPrevious + " — the runbook's \"Changing CLOOP_SECRET_KEY itself\". `cloop hub key rotate` " +
+	"alone derives every new key from the same weak value"
+
 func checkSecretKey(dir string, cfg *config.Config, add addFn) {
-	key := os.Getenv(secretbroker.EnvPassphraseKey)
+	roots, rerr := rootkey.Resolve()
+	if rerr != nil {
+		// Configured and refused: the hub would not start, and nothing else
+		// about the key can be judged until it does.
+		add(Finding{
+			Check: "secret_key.source", Title: "Sealing key source", Severity: SeverityFail,
+			Message:     "the hub's root key is configured and refused, so the hub will not start: " + rerr.Error(),
+			Remediation: "Fix the source the message names; `cloop hub key` commands and the hub read it the same way",
+		})
+		return
+	}
+	key := roots.Current.Value
 	sealed := hasSealedMaterial(dir) || brokerSecretsStored(dir)
 
 	// Unset exactly when the keyring says so (secretbroker.OpenKeyring tests
@@ -87,40 +109,44 @@ func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 		}
 		add(Finding{
 			Check: "secret_key.present", Title: "Sealing key", Severity: sev,
-			Message:     msg,
-			Remediation: "Export " + secretbroker.EnvPassphraseKey + " from .cloop/hub.env (`cloop hub bootstrap` writes it)",
+			Message: msg,
+			Remediation: "Give the hub its key: a file named by " + rootkey.EnvKeyFile + " (mode 0400, outside .cloop/), " +
+				"the systemd credential " + rootkey.Credential + ", or " + rootkey.EnvKey + " — `cloop hub bootstrap` writes one",
 		})
 		return
 	}
+	checkKeySource(roots, add)
 
+	weak := false
 	for _, p := range placeholderKeys {
 		if strings.EqualFold(strings.TrimSpace(key), p) {
 			add(Finding{
 				Check: "secret_key.entropy", Title: "Sealing key strength", Severity: SeverityFail,
 				Message: "the sealing key is a placeholder value from cloop's own documentation; " +
 					"every sealed credential is recoverable by anyone with the database",
-				Remediation: "Generate a real one: `cloop hub key rotate` (or re-run `cloop hub bootstrap`), " +
-					"then re-seal existing secrets",
+				Remediation: changeRootHint,
 			})
-			return
+			weak = true
+			break
 		}
 	}
 
 	bits := shannonBits(key)
 	switch {
+	case weak:
 	case len(key) < minKeyLength:
 		add(Finding{
 			Check: "secret_key.entropy", Title: "Sealing key strength", Severity: SeverityFail,
 			Message: fmt.Sprintf("the sealing key is %d characters; `cloop hub bootstrap` generates 43 "+
 				"(32 bytes of crypto/rand)", len(key)),
-			Remediation: "Replace it with a generated key: `cloop hub key rotate`",
+			Remediation: changeRootHint,
 		})
 	case bits < minKeyEntropyBits:
 		add(Finding{
 			Check: "secret_key.entropy", Title: "Sealing key strength", Severity: SeverityWarn,
 			Message: fmt.Sprintf("the sealing key looks like a passphrase (~%.0f bits by character "+
 				"distribution) rather than generated key material", bits),
-			Remediation: "Replace it with a generated key: `cloop hub key rotate`",
+			Remediation: changeRootHint,
 		})
 	default:
 		add(Finding{
@@ -129,9 +155,63 @@ func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 		})
 	}
 
-	checkKeyOpensKeyring(dir, add)
-	checkKeyEscrow(dir, key, add)
+	checkKeyOpensKeyring(dir, roots, add)
+	checkKeyEscrow(dir, roots, add)
 	_ = cfg
+}
+
+// checkKeySource reports where the root key comes from (Task 20425). An
+// environment variable is in /proc/<pid>/environ, `systemctl show` and the
+// environment of every child not scrubbed of it; on a host where systemd
+// starts the hub, a credential costs one line of the unit and ends all three.
+func checkKeySource(roots rootkey.Roots, add addFn) {
+	cur := roots.Current
+	envCopy := false
+	for _, also := range cur.Also {
+		envCopy = envCopy || also == rootkey.SourceEnvironment
+	}
+	switch {
+	case cur.Source == rootkey.SourceEnvironment && systemdHost():
+		add(Finding{
+			Check: "secret_key.source", Title: "Sealing key source", Severity: SeverityWarn,
+			Message: "the root key is read from the environment variable " + rootkey.EnvKey + " on a host run by " +
+				"systemd: it is readable in /proc/<pid>/environ and `systemctl show`, and inherited by every " +
+				"child process that is not scrubbed of it",
+			Remediation: "Load it as a credential instead: `systemd-creds encrypt --name=" + rootkey.Credential +
+				" <key file> /etc/credstore.encrypted/" + rootkey.Credential + "` and " +
+				"`LoadCredentialEncrypted=" + rootkey.Credential + "` in the unit (or LoadCredential= from a 0400 " +
+				"file outside .cloop/), then remove " + rootkey.EnvKey + " from its EnvironmentFile",
+		})
+	case envCopy:
+		add(Finding{
+			Check: "secret_key.source", Title: "Sealing key source", Severity: SeverityWarn,
+			Message: "the root key is read from " + cur.Describe() + ", and the same key is also set in the " +
+				"environment variable " + rootkey.EnvKey + " — which keeps every exposure the file was meant to end",
+			Remediation: "Remove " + rootkey.EnvKey + " from the hub's environment (its EnvironmentFile, " +
+				"hub.env, the Pod's env)",
+		})
+	default:
+		add(Finding{
+			Check: "secret_key.source", Title: "Sealing key source", Severity: SeverityPass,
+			Message: "the root key is read from " + cur.Describe(),
+		})
+	}
+
+	if prev := roots.Previous; prev.Set() {
+		add(Finding{
+			Check: "secret_key.previous", Title: "Previous root key", Severity: SeverityWarn,
+			Message: "a change of root is in progress: " + rootkey.EnvPrevious + " is set (" + prev.Describe() +
+				"), so everything the old key sealed is still openable with it",
+			Remediation: "Once every hub member runs on the new key, escrow it and run `cloop hub key rotate " +
+				"--retire-previous`; then remove " + rootkey.EnvPrevious + " from every member",
+		})
+	}
+}
+
+// systemdHost reports whether systemd is this host's init (sd_booted(3)).
+var systemdHost = func() bool {
+	fi, err := os.Stat("/run/systemd/system")
+	return err == nil && fi.IsDir()
 }
 
 // checkKeyEscrow reports whether the key is escrowed, and whether the escrow
@@ -143,7 +223,8 @@ func checkSecretKey(dir string, cfg *config.Config, add addFn) {
 // worse than none: it recovers nothing sealed now, while looking like a
 // recovery plan. The hub records only the escrow's id and the key's
 // fingerprint, which is all this compares.
-func checkKeyEscrow(dir, key string, add addFn) {
+func checkKeyEscrow(dir string, roots rootkey.Roots, add addFn) {
+	key := roots.Current.Value
 	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); err != nil {
 		return
@@ -168,7 +249,7 @@ func checkKeyEscrow(dir, key string, add addFn) {
 	case !ok:
 		add(Finding{
 			Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityWarn,
-			Message: "no escrow of " + secretbroker.EnvPassphraseKey + " is recorded: lose .cloop/hub.env and every " +
+			Message: "no escrow of " + secretbroker.EnvPassphraseKey + " is recorded: lose the key and every " +
 				"sealed secret, session and hub CA key is lost with it — no rotation can help, since every key derives from it",
 			Remediation: exportHint + ". After restoring a backup taken before an existing escrow, record it again: " +
 				"`cloop hub key escrow verify <file> --record`",
@@ -187,6 +268,22 @@ func checkKeyEscrow(dir, key string, add addFn) {
 	who := rec.CreatedAt
 	if rec.CreatedBy != "" {
 		who += " by " + rec.CreatedBy
+	}
+	if prev := roots.Previous; fingerprint != rec.KeyFingerprint && prev.Set() {
+		// Mid-way through a change of root the escrow on record may well hold
+		// the old key, which still opens everything until the retire step —
+		// and that step refuses until the new one is escrowed.
+		if pfp, perr := keyescrow.Fingerprint([]byte(prev.Value)); perr == nil && pfp == rec.KeyFingerprint {
+			add(Finding{
+				Check: "secret_key.escrow", Title: "Sealing key escrow", Severity: SeverityWarn,
+				Message: fmt.Sprintf("the escrow on record (%s, made %s) holds the previous root key, %s; the "+
+					"new one, %s, is not escrowed, and `cloop hub key rotate --retire-previous` refuses until it is",
+					rec.ID, who, rec.KeyFingerprint, fingerprint),
+				Remediation: "Escrow the new key: " + exportHint,
+				Details:     map[string]any{"escrow_id": rec.ID, "escrowed_key": rec.KeyFingerprint, "active_key": fingerprint},
+			})
+			return
+		}
 	}
 	if fingerprint != rec.KeyFingerprint {
 		add(Finding{
@@ -213,7 +310,7 @@ func checkKeyEscrow(dir, key string, add addFn) {
 // diagnostic never mints or promotes a key. Strength says nothing about this:
 // a perfectly random key that is not the one the secrets were sealed under
 // passed here, on a hub whose broker refused every lease (Task 20387).
-func checkKeyOpensKeyring(dir string, add addFn) {
+func checkKeyOpensKeyring(dir string, roots rootkey.Roots, add addFn) {
 	dbPath := state.DBPath(dir)
 	if _, err := os.Stat(dbPath); err != nil {
 		return
@@ -227,15 +324,27 @@ func checkKeyOpensKeyring(dir string, add addFn) {
 	if err != nil {
 		return
 	}
-	kr, err := secretbroker.OpenKeyring(store, secretbroker.WithoutKeyCreation())
+	kr, err := secretbroker.OpenKeyring(store, secretbroker.WithoutKeyCreation(),
+		secretbroker.WithKeyringRoots(roots.Current.Value, roots.Previous.Value))
+	var underivable []string
+	if err == nil {
+		underivable = kr.Underivable()
+	}
 	switch {
-	case errors.Is(err, secretbroker.ErrKeyUnavailable):
+	case errors.Is(err, secretbroker.ErrKeyUnavailable) || len(underivable) > 0:
+		// The rule the hub starts by (Task 20425): every live key-encryption
+		// key derives from a configured root, or the hub does not start.
+		msg := "live sealing key(s) " + strings.Join(underivable, ", ") + " derive from no configured root key, " +
+			"so the hub refuses to start, the broker refuses every lease and no sealed secret can be read"
+		if err != nil {
+			msg = "the key does not open this hub's sealing keys, so the broker refuses every lease " +
+				"and no sealed secret can be read: " + err.Error()
+		}
 		add(Finding{
 			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityFail,
-			Message: "the key does not open this hub's sealing keys, so the broker refuses every lease " +
-				"and no sealed secret can be read: " + err.Error(),
-			Remediation: "Set " + secretbroker.EnvPassphraseKey + " to the key these secrets were sealed " +
-				"under (the hub's own environment file has it); `cloop hub key list` names the keys it cannot open",
+			Message: msg,
+			Remediation: "Give the hub the key these secrets were sealed under — and, mid-way through a change of " +
+				"root, the old one as " + rootkey.EnvPrevious + "; `cloop hub key list` names the keys it cannot open",
 		})
 	case err != nil:
 		add(Finding{
@@ -249,10 +358,21 @@ func checkKeyOpensKeyring(dir string, add addFn) {
 			Message: "no sealing key is recorded yet; the hub creates its first from this key when it " +
 				"first needs one",
 		})
-	default:
+	case roots.Previous.Set() && len(kr.PreviousRootKeys()) == 0:
 		add(Finding{
 			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityPass,
-			Message: "the key derives this hub's primary sealing key, " + kr.PrimaryID(),
+			Message: "the key derives this hub's primary sealing key, " + kr.PrimaryID() + ", and every other " +
+				"live one; " + rootkey.EnvPrevious + " derives none and can be removed",
+		})
+	default:
+		msg := "the key derives this hub's primary sealing key, " + kr.PrimaryID()
+		if !kr.PrimaryFromCurrent() && roots.Previous.Set() {
+			msg = "every live sealing key derives from the configured roots; the primary, " + kr.PrimaryID() +
+				", derives from " + rootkey.EnvPrevious + " until `cloop hub key rotate --retire-previous`"
+		}
+		add(Finding{
+			Check: "secret_key.matches", Title: "Sealing key matches", Severity: SeverityPass,
+			Message: msg,
 		})
 	}
 }

@@ -229,6 +229,13 @@ type SessionRefreshUpdate struct {
 	// nothing learned" (neither) without a separate statement for each.
 	ClaimsAsOf     time.Time
 	ClaimsExpireAt time.Time
+
+	// KeepSealed leaves the stored token, its key id and its wrapped key as
+	// they are, whatever Sealed holds (Task 20425). An update from a process
+	// that could not open the stored token — a hub member not yet given the
+	// root it is sealed under — carries no token, and must not erase the one
+	// the row holds as if there had been none.
+	KeepSealed bool
 }
 
 // UpdateSessionRefresh stores a rotated refresh token, stamps the check time,
@@ -253,6 +260,10 @@ func (d *DB) UpdateSessionRefresh(id string, up SessionRefreshUpdate) error {
 
 	set := `refresh_sealed = ?, refresh_key_id = ?, refresh_wrapped_dek = ?, refresh_checked_at = ?`
 	args := []any{up.Sealed, keyID, wrappedDEK, formatOptionalTime(up.CheckedAt)}
+	if up.KeepSealed {
+		set = `refresh_checked_at = ?`
+		args = []any{formatOptionalTime(up.CheckedAt)}
+	}
 	if up.Claims != nil {
 		groups, err := marshalStringSlice(up.Claims.Groups)
 		if err != nil {

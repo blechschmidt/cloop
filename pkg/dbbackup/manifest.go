@@ -256,8 +256,9 @@ func (m *Metadata) seal(key string) error {
 }
 
 // Check reports what m's seal says, checked under key ("" when this process
-// has none).
-func (m *Metadata) Check(key string) SealState {
+// has none) — or, for a sidecar sealed before a change of root, under previous,
+// the root being replaced, while one is configured (Task 20425).
+func (m *Metadata) Check(key, previous string) SealState {
 	switch {
 	case m.Seal == "" && m.KeyFingerprint == "":
 		return SealUnsigned
@@ -271,7 +272,11 @@ func (m *Metadata) Check(key string) SealState {
 		return SealUnchecked
 	}
 	if m.KeyFingerprint != k.fingerprint {
-		return SealForeignKey
+		p, perr := deriveManifestKey(previous)
+		if previous == "" || perr != nil || m.KeyFingerprint != p.fingerprint {
+			return SealForeignKey
+		}
+		k = p
 	}
 	got, err := hex.DecodeString(m.Seal)
 	if err != nil || !hmac.Equal(got, k.sum(m.canonical())) {

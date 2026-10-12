@@ -442,9 +442,10 @@ func openBrokersAt(controlPlaneWorkDir string) (*brokerSet, error) {
 func brokerUnavailableReason(err error) (reason, remediation string) {
 	if errors.Is(err, secretbroker.ErrNoKey) {
 		return "the secret store is not configured on this hub",
-			"Set CLOOP_SECRET_KEY in the hub's environment and restart. It is the passphrase " +
-				"every stored payload is sealed with; without it cloop can neither store nor " +
-				"open a credential. Egress grants need no key and keep working."
+			"Give the hub its CLOOP_SECRET_KEY and restart it: a key file named by CLOOP_SECRET_KEY_FILE " +
+				"(mode 0400, outside .cloop/), the systemd credential cloop-secret-key, or the variable itself. " +
+				"It is the passphrase every stored payload is sealed with; without it cloop can neither store " +
+				"nor open a credential. Egress grants need no key and keep working."
 	}
 	return "the secret store is unavailable: " + err.Error(),
 		"Check the hub's log for the underlying error."

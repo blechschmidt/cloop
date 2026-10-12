@@ -7,13 +7,15 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"os"
+
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // EnvPassphraseKey is the environment variable holding the passphrase that
 // protects sealed payloads. It is the same variable pkg/secret uses, so an
-// existing deployment's key keeps working across the migration.
-const EnvPassphraseKey = "CLOOP_SECRET_KEY"
+// existing deployment's key keeps working across the migration. It is one of
+// three places the key may come from; pkg/rootkey resolves them all.
+const EnvPassphraseKey = rootkey.EnvKey
 
 const (
 	saltSize  = 32
@@ -40,11 +42,18 @@ type Cipher struct {
 	key []byte
 }
 
-// NewCipher derives the payload key from the CLOOP_SECRET_KEY passphrase and
-// the store-wide salt. The salt is created on first use and persisted, so
-// the same passphrase yields the same key across restarts.
+// NewCipher derives the payload key from the hub's current root
+// (pkg/rootkey) and the store-wide salt. The salt is created on first use and
+// persisted, so the same passphrase yields the same key across restarts.
+//
+// A single-key Cipher is what a store with no key registry gets — the test
+// doubles; it has no previous root to open with, because it has no rotation
+// to finish.
 func NewCipher(store Store) (*Cipher, error) {
-	pass := os.Getenv(EnvPassphraseKey)
+	pass, err := rootkey.Current()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRootConfig, err)
+	}
 	if pass == "" {
 		return nil, fmt.Errorf("%w: set it to seal and open secret payloads", ErrNoKey)
 	}

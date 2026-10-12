@@ -2204,6 +2204,21 @@ jobs:
           kubectl -n cloop exec deploy/cloop-cloop-hub -- \
             /usr/local/bin/cloop hub healthcheck --endpoint readyz
 
+      - name: Assert the root key reaches the hub as a file and is in no Pod object
+        # Task 20425. The chart mounts the Secret's CLOOP_SECRET_KEY as a file,
+        # sets CLOOP_SECRET_KEY_FILE, and blanks the variable envFrom would set.
+        # kubelet makes the file root-owned and readable by the Pod's fsGroup —
+        # the one shape of key file the hub accepts without owning it — and the
+        # hub prints where it read its key from at startup.
+        run: |
+          set -euo pipefail
+          if kubectl -n cloop get pods -o yaml | grep -qF 'ci-key'; then
+            echo "the root key is in the Pod object"; exit 1
+          fi
+          kubectl -n cloop logs deploy/cloop-cloop-hub \
+            | grep -F 'Root key:' \
+            | grep -F 'from the file /etc/cloop/root-key/cloop-secret-key (CLOOP_SECRET_KEY_FILE)'
+
       - name: Assert the executor Role grants exactly what the driver calls
         # The Role is the boundary the in-cluster executor runs inside, so
         # widening it is a security change. Every verb on every resource the

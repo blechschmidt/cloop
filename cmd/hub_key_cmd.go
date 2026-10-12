@@ -34,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/hubca"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/sessionstore"
@@ -56,7 +57,13 @@ resumed by running it again.
 
 Retiring an old key is a deliberate second step. It destroys that key's salt,
 so material still sealed under it becomes unrecoverable — which is why
-` + "`retire`" + ` refuses while any row still references the key.`,
+` + "`retire`" + ` refuses while any row still references the key.
+
+CLOOP_SECRET_KEY itself changes online too: restart every hub member with the
+new key as CLOOP_SECRET_KEY and the old one as CLOOP_SECRET_KEY_PREVIOUS,
+escrow the new key, and run ` + "`cloop hub key rotate --retire-previous`" + `. The
+key is read from CLOOP_SECRET_KEY_FILE, the systemd credential
+cloop-secret-key, or the environment — the commands here read it as the hub does.`,
 }
 
 var hubKeyListCmd = &cobra.Command{
@@ -88,8 +95,16 @@ single credential.`,
 			return nil
 		}
 
+		current, previous, ferr := h.keyring.RootFingerprints()
+		if ferr == nil {
+			fmt.Printf("Root key %s", current)
+			if previous != "" {
+				fmt.Printf(", previous %s (a change of root is in progress)", previous)
+			}
+			fmt.Print("\n\n")
+		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSTATE\tOPENABLE\tCREATED\tBY")
+		fmt.Fprintln(w, "ID\tSTATE\tOPENABLE\tROOT\tCREATED\tBY")
 		for _, k := range keys {
 			state := k.State
 			if k.Primary {
@@ -102,10 +117,18 @@ single credential.`,
 			case !k.Openable:
 				openable = "NO"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				k.ID, state, openable, shortTime(k.CreatedAt), orDash(k.CreatedBy))
+			root := orDash(k.Root)
+			if k.DerivedBy == secretbroker.RootPrevious {
+				root += " (previous)"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				k.ID, state, openable, root, shortTime(k.CreatedAt), orDash(k.CreatedBy))
 		}
 		_ = w.Flush()
+		if bad := h.keyring.Underivable(); len(bad) > 0 {
+			color.Red("\n%d live key(s) derive from no root this shell holds: %s. A hub with these roots "+
+				"refuses to start.", len(bad), strings.Join(bad, ", "))
+		}
 
 		if h.keyring.HasLegacy() {
 			color.New(color.Faint).Println(
@@ -165,6 +188,17 @@ var hubKeyStatusCmd = &cobra.Command{
 			_ = w.Flush()
 		}
 
+		if st.ChangingRoot {
+			bold.Println("\nChange of root")
+			if st.PreviousRootRows > 0 {
+				color.Yellow("  %d row(s) still sealed under keys of %s — finish with "+
+					"'cloop hub key rotate --retire-previous'\n", st.PreviousRootRows, rootkey.EnvPrevious)
+			} else {
+				color.Yellow("  %s is set; finish with 'cloop hub key rotate --retire-previous', then remove it "+
+					"from every member\n", rootkey.EnvPrevious)
+			}
+		}
+
 		bold.Println("\nRotation")
 		switch {
 		case st.Unrotated == 0:
@@ -216,7 +250,17 @@ the rows themselves rather than a cursor. Re-run to continue.
 Retiring the old key is deliberately not part of this command. Do it once
 ` + "`cloop hub key status`" + ` reports zero unrotated rows:
 
-  cloop hub key retire <old-key-id>`,
+  cloop hub key retire <old-key-id>
+
+--retire-previous finishes a change of CLOOP_SECRET_KEY itself, with this shell
+holding the new key as CLOOP_SECRET_KEY and the old one as
+CLOOP_SECRET_KEY_PREVIOUS. It refuses until every live hub member advertises the
+new key as its current root and an escrow of the new key is on record; then it
+mints a key from the new root if the primary is not one, rewraps every row onto
+it, and retires every key of the old root:
+
+  cloop hub key rotate --retire-previous --dry-run
+  cloop hub key rotate --retire-previous`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := cmd.Flags().GetString("workdir")
@@ -224,6 +268,10 @@ Retiring the old key is deliberately not part of this command. Do it once
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		resume, _ := cmd.Flags().GetBool("continue")
 		batch, _ := cmd.Flags().GetInt("batch")
+		retirePrevious, _ := cmd.Flags().GetBool("retire-previous")
+		if retirePrevious && resume {
+			return fmt.Errorf("--retire-previous resumes by being run again; drop --continue")
+		}
 
 		h, err := openHubKeyring(workdir, false)
 		if err != nil {
@@ -232,6 +280,15 @@ Retiring the old key is deliberately not part of this command. Do it once
 		defer h.close()
 
 		h.rotator.WithBatch(batch)
+		if retirePrevious {
+			if workdir == "" {
+				workdir, _ = os.Getwd()
+			}
+			return runRetirePrevious(os.Stdout, workdir, h, dryRun, asJSON)
+		}
+		if err := refuseRotationMidChange(h.keyring, resume, dryRun); err != nil {
+			return err
+		}
 
 		// Ctrl-C stops the rotation between rows rather than mid-write. The
 		// signal handler exists to make interruption *boring*: without it a
@@ -354,6 +411,22 @@ rows.`,
 		color.Green("Retired %s. Its salt is gone; it can no longer be derived.", keyID)
 		return nil
 	},
+}
+
+// refuseRotationMidChange refuses a rotation that would mint a key while a
+// change of root is in progress (Task 20425). A key minted here comes from this
+// shell's CLOOP_SECRET_KEY — the new root, mid-change — and promoting it with
+// no check that every hub member holds that root would leave those that do not
+// unable to seal anything. --retire-previous is the rotation that checks.
+// Resuming onto the current primary mints nothing, and neither does a dry run.
+func refuseRotationMidChange(kr *secretbroker.Keyring, resume, dryRun bool) error {
+	if resume || dryRun || !kr.HasPrevious() || kr.PrimaryFromCurrent() {
+		return nil
+	}
+	return fmt.Errorf("a change of root is in progress — %s is set and the primary key derives from it — "+
+		"so a key minted here would come from the new root without checking that every hub member holds "+
+		"it: finish the change with 'cloop hub key rotate --retire-previous', which checks first",
+		rootkey.EnvPrevious)
 }
 
 // ---------------------------------------------------------------------------
@@ -482,13 +555,13 @@ func breakdown(bySet map[string]int) string {
 		return "-"
 	}
 	parts := make([]string, 0, len(bySet))
-	for _, name := range []string{"secrets", "sessions"} {
+	for _, name := range []string{"secrets", "sessions", "hub_tls"} {
 		if n, ok := bySet[name]; ok && n > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", name, n))
 		}
 	}
 	for name, n := range bySet {
-		if name != "secrets" && name != "sessions" && n > 0 {
+		if name != "secrets" && name != "sessions" && name != "hub_tls" && n > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", name, n))
 		}
 	}
@@ -521,6 +594,9 @@ func init() {
 		"resume onto the current primary key instead of minting a new one")
 	hubKeyRotateCmd.Flags().Int("batch", secretbroker.DefaultRotationBatch,
 		"rows to read per round")
+	hubKeyRotateCmd.Flags().Bool("retire-previous", false,
+		"finish a change of root: rewrap everything onto a key of "+rootkey.EnvKey+" and retire every key of "+
+			rootkey.EnvPrevious+", once every hub member holds the new key and it is escrowed")
 	hubKeyRetireCmd.Flags().Bool("yes", false, "confirm irreversible destruction of the key's salt")
 
 	hubKeyCmd.AddCommand(hubKeyListCmd)

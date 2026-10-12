@@ -16,6 +16,7 @@ package cmd
 // mismatch is, and exits 2.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditcheckpoint"
 	"github.com/blechschmidt/cloop/pkg/auditmerge"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -197,15 +199,27 @@ func hubAuditCheckCheckpoints(w io.Writer, reader *auditmerge.Reader, file strin
 		red.Fprintf(w, "\nCHECKPOINTS UNREADABLE  %s\n  %v\n", file, err)
 		return true, nil
 	}
-	key, kerr := auditcheckpoint.KeyFromEnv()
+	key, kerr := auditcheckpoint.KeyFromRoots()
 	if kerr != nil {
+		if !errors.Is(kerr, auditcheckpoint.ErrNoKey) {
+			// A root source configured and refused is a verdict nobody asked
+			// to be skipped: say so instead of quietly checking nothing.
+			red.Fprintf(w, "\nCHECKPOINTS UNCHECKED  %s\n  %v\n", file, kerr)
+			return true, nil
+		}
 		key = nil
 	}
 
 	fmt.Fprintf(w, "\nCheckpoints   %s — %d record(s)\n", file, len(parsed.Records))
-	if key == nil {
+	switch {
+	case key == nil:
 		yellow.Fprintf(w, "  no %s here: seals are not checked, only what the records say\n", auditcheckpoint.EnvKey)
-	} else {
+	case key.PreviousFingerprint() != "":
+		// A change of root is in progress: records sealed before it vouch as
+		// much as those sealed after (Task 20425).
+		dim.Fprintf(w, "  checking seals under key %s (from %s) and %s (from %s)\n", key.Fingerprint(),
+			auditcheckpoint.EnvKey, key.PreviousFingerprint(), rootkey.EnvPrevious)
+	default:
 		dim.Fprintf(w, "  checking seals under key %s (from %s)\n", key.Fingerprint(), auditcheckpoint.EnvKey)
 	}
 	if len(parsed.Malformed) > 0 {

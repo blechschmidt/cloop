@@ -464,3 +464,56 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// A recovered key goes back into the hub's key file the way the hub reads it
+// (Task 20425): the key and a newline, 0600; the same key leaves the file
+// alone; a different one is refused without replace and kept aside with it;
+// and a path the hub would refuse to read — inside .cloop/, relative — is
+// refused here first.
+func TestWriteKeyFile(t *testing.T) {
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cloop-secret-key")
+
+	res, err := WriteKeyFile(path, []byte(testKey), false, now)
+	if err != nil || !res.Created {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != testKey+"\n" {
+		t.Fatalf("the key file holds %q", b)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode %s", fi.Mode().Perm())
+	}
+
+	if res, err := WriteKeyFile(path, []byte(testKey), false, now); err != nil || !res.Unchanged {
+		t.Fatalf("the same key again: %+v %v", res, err)
+	}
+
+	const other = "a-different-key-0123456789abcdefghijklmnopq"
+	if _, err := WriteKeyFile(path, []byte(other), false, now); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("a different key without replace: %v", err)
+	}
+	res, err = WriteKeyFile(path, []byte(other), true, now)
+	if err != nil || res.Previous == "" {
+		t.Fatalf("a different key with replace: %+v %v", res, err)
+	}
+	if b, _ := os.ReadFile(res.Previous); string(b) != testKey+"\n" {
+		t.Errorf("the replaced key was not kept aside: %q", b)
+	}
+	if b, _ := os.ReadFile(path); string(b) != other+"\n" {
+		t.Errorf("the key file holds %q", b)
+	}
+
+	for name, p := range map[string]string{
+		"inside .cloop/": filepath.Join(dir, ".cloop", "cloop-secret-key"),
+		"relative":       "cloop-secret-key",
+	} {
+		if _, err := WriteKeyFile(p, []byte(testKey), true, now); err == nil {
+			t.Errorf("%s: written", name)
+		}
+	}
+	if _, err := WriteKeyFile(filepath.Join(dir, "k2"), []byte("two\nlines"), true, now); err == nil {
+		t.Error("a key with a newline in it was written to a file that would read back as another key")
+	}
+}

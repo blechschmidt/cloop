@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // EnvInstall reports what WriteEnvFile did.
@@ -175,4 +177,99 @@ func WriteEnvFile(path string, key []byte, replace bool, now time.Time) (EnvInst
 		return res, err
 	}
 	return res, nil
+}
+
+// KeyFileInstall reports what WriteKeyFile did; the same shape as EnvInstall.
+type KeyFileInstall = EnvInstall
+
+// WriteKeyFile puts key into the key file at path — the file a symlink there
+// points to — the way the hub reads it from CLOOP_SECRET_KEY_FILE or loads it
+// as a systemd credential: the key and a newline, nothing else, mode 0600
+// (Task 20425).
+//
+// The same care as WriteEnvFile: a file that already holds this key is left
+// alone, one holding a different key is refused unless replace is set and then
+// kept beside it as <path>.pre-import.<UTC>, and a temporary that fails on the
+// way is destroyed with pkg/securewipe. A path inside a .cloop/ directory is
+// refused, because the hub refuses to read a key from there.
+func WriteKeyFile(path string, key []byte, replace bool, now time.Time) (KeyFileInstall, error) {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	res := KeyFileInstall{Path: path}
+	switch {
+	case len(key) == 0:
+		return res, ErrNoKey
+	case !filepath.IsAbs(path):
+		return res, fmt.Errorf("keyescrow: %s is not an absolute path; the hub reads its key file by one", path)
+	case rootkey.InsideCloopDir(path):
+		return res, fmt.Errorf("keyescrow: %s is inside a .cloop/ directory, where the hub refuses to read a key "+
+			"from: keep it apart from the database it protects", path)
+	case bytes.IndexByte(key, 0) >= 0 || bytes.ContainsAny(key, "\r\n"):
+		return res, fmt.Errorf("keyescrow: this %s holds a byte a key file cannot carry; print it with --stdout "+
+			"and store it yourself", EnvKey)
+	}
+
+	existing, err := os.ReadFile(path)
+	defer zero(existing)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		res.Created = true
+	case err != nil:
+		return res, fmt.Errorf("keyescrow: read %s: %w", path, err)
+	default:
+		held := bytes.TrimSuffix(bytes.TrimSuffix(existing, []byte("\n")), []byte("\r"))
+		if subtle.ConstantTimeCompare(held, key) == 1 {
+			res.Unchanged = true
+			return res, nil
+		}
+		if len(held) > 0 && !replace {
+			return res, fmt.Errorf("keyescrow: %s already holds a different key; it may be the only copy of a key "+
+				"something is sealed under. Pass --force to keep it aside as %s.pre-import.<UTC> and install this one",
+				path, filepath.Base(path))
+		}
+	}
+
+	out := make([]byte, 0, len(key)+1)
+	out = append(append(out, key...), '\n')
+	defer zero(out)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return res, fmt.Errorf("keyescrow: %w", err)
+	}
+	if !res.Created {
+		res.Previous = path + ".pre-import." + now.UTC().Format("20060102T150405Z")
+		if err := os.Rename(path, res.Previous); err != nil {
+			return res, fmt.Errorf("keyescrow: keep %s aside: %w", path, err)
+		}
+	}
+	if err := writeAtomically(path, out); err != nil {
+		if res.Previous != "" {
+			if rerr := os.Rename(res.Previous, path); rerr != nil {
+				err = errors.Join(err, fmt.Errorf("keyescrow: put %s back: %w", res.Previous, rerr))
+			} else {
+				res.Previous = ""
+			}
+		}
+		return res, err
+	}
+	return res, nil
+}
+
+// EnvFileHoldsKey reports whether the env file at path assigns the key — the
+// layout a hub bootstrapped before Task 20425 keeps it in.
+func EnvFileHoldsKey(path string) bool {
+	data, err := os.ReadFile(path)
+	defer zero(data)
+	if err != nil {
+		return false
+	}
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		if v, ok := isKeyLine(sc.Text()); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }

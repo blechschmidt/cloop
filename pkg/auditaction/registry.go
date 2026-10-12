@@ -1495,6 +1495,20 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 	{
+		Action: ActionSealingKeyRootChanged,
+		Home:   HomeControlPlane,
+		Entity: "sealing_key",
+		Trigger: "`cloop hub key rotate --retire-previous` finishes a change of CLOOP_SECRET_KEY: every hub member " +
+			"held the new root and an escrow of it was on record, every sealed row was rewrapped onto a key of " +
+			"it, and every key of the previous root was retired. Written when the run ends, finished or not.",
+		Payload: []string{"root", "previous_root", "minted", "to_key", "rewrapped", "skipped", "failed",
+			"retired", "remaining", "members", "escrow_id", "complete", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Roots are named by fingerprint, the name every checkpoint and escrow carries, never by value. " +
+			"The rotation and each retirement are recorded as sealing_key.rotated and sealing_key.retired as well.",
+	},
+	{
 		Action: ActionSealingKeyEscrowed,
 		Home:   HomeControlPlane,
 		Entity: "sealing_key",

@@ -24,6 +24,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hubca"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -41,14 +42,15 @@ func autoMonitorTLS(dir string, m hubca.Monitor, check, title string, ep proxyEn
 	refusal string, now time.Time, add addFn) bool {
 
 	section := m.ConfigKey()
-	if os.Getenv(secretbroker.EnvPassphraseKey) == "" {
+	if key, _ := rootkey.Current(); key == "" {
 		add(Finding{
 			Check: check, Title: title, Severity: SeverityFail,
 			Message: fmt.Sprintf("%s.tls is auto, which issues the certificate from the hub's own CA, "+
 				"and the CA's private key is sealed under %s — which is not set here, so the %s will "+
 				"not start and %s", section, secretbroker.EnvPassphraseKey, m.Label(), refusal),
-			Remediation: "Export " + secretbroker.EnvPassphraseKey + " from .cloop/hub.env (`cloop hub " +
-				"bootstrap` writes it), or give " + section + " a cert_file and key_file instead",
+			Remediation: "Give the hub its key (" + rootkey.EnvKeyFile + ", the systemd credential " +
+				rootkey.Credential + ", or " + rootkey.EnvKey + "; `cloop hub bootstrap` writes one), or give " +
+				section + " a cert_file and key_file instead",
 		})
 		return false
 	}

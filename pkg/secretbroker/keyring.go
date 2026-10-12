@@ -42,19 +42,51 @@ package secretbroker
 // The payload's AAD deliberately excludes the key ID. If it did not, rotation
 // would have to re-encrypt payloads, and the cheapness of rewrapping is the
 // reason online rotation is possible at all.
+//
+// # Roots (Task 20425)
+//
+// Every KEK is derived from a root secret, CLOOP_SECRET_KEY, so rotating KEKs
+// bounds the life of a key and not of the secret every key comes from. A
+// keyring therefore holds up to two roots, resolved by pkg/rootkey: the
+// current one, which mints and opens, and during a change of root the previous
+// one, which only opens. Nothing is ever minted from the previous root, and no
+// key of it is promoted while a key of the current one is there to choose.
+//
+// Changing the root is then online. Every member restarts with the new key as
+// current and the old as previous; `cloop hub key rotate --retire-previous`
+// mints a key from the new root, rewraps every sealed row onto it with the
+// same compare-and-swap rotation always used, and retires every key of the old
+// root. Until that step the registry's primary stays the key it was, so a
+// member restarted with the new root and one not yet restarted seal under the
+// same key and read each other's writes, and the change can be backed out by
+// restarting with the old configuration. After it, a process holding only the
+// old root refuses to start.
+//
+// The rule that refuses it is the one that stops a mistyped key forking the
+// registry, generalised: every live KEK must derive from a configured root. A
+// key that none derives means a key is wrong, or this process was not given
+// the root new material is sealed under — and minting a fresh primary in
+// either case would leave the existing secrets unreadable by whoever then
+// starts with the right one.
+//
+// Which root derives a key is decided by deriving it: the check value says,
+// and the root column of broker_keks only records the answer (by fingerprint,
+// for `cloop hub key list` and the doctor). A key minted before the column
+// existed is attributed once, by the first process whose root derives it.
 
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 const (
@@ -130,7 +162,17 @@ type KEKRecord struct {
 	CreatedAt  time.Time
 	CreatedBy  string
 	RetiredAt  time.Time
+	// Root is the fingerprint of the root secret the key derives from
+	// (pkg/rootkey); "" for a key nobody has attributed yet. A record, not an
+	// authority: which root opens a key is decided by deriving it.
+	Root string
 }
+
+// Which configured root derives a key, as KeyInfo reports it.
+const (
+	RootCurrent  = "current"
+	RootPrevious = "previous"
+)
 
 // Retired reports whether the KEK has been shredded.
 func (k KEKRecord) Retired() bool { return k.State == KEKStateRetired || k.Salt == "" }
@@ -164,6 +206,15 @@ type KeyStore interface {
 	RetireKEK(id string, at time.Time) error
 }
 
+// KeyAttributor is the optional part of a KeyStore that records which root a
+// key derives from (Task 20425). A store without it — the in-memory test
+// doubles — still opens, mints and rotates; its old keys stay unattributed.
+type KeyAttributor interface {
+	// AttributeKEK records root for a key no one has attributed yet, and
+	// reports whether it did. A recorded root is never rewritten.
+	AttributeKEK(id, root string) (bool, error)
+}
+
 // Keyring holds every derivable KEK and performs envelope seal/open.
 //
 // Safe for concurrent use: leases and session reads both go through it from
@@ -172,21 +223,33 @@ type Keyring struct {
 	mu sync.RWMutex
 
 	store KeyStore
-	// keks maps key ID to derived key material for every KEK the current
-	// passphrase can actually open. A KEK whose check value fails is
-	// recorded in `records` but absent here, so reads against it fail with a
-	// specific error instead of a GCM tag mismatch.
+	// keks maps key ID to derived key material for every KEK a configured
+	// root can actually open. A KEK whose check value fails is recorded in
+	// `records` but absent here, so reads against it fail with a specific
+	// error instead of a GCM tag mismatch.
 	keks    map[string][]byte
 	records map[string]KEKRecord
+	// rootOf records which root derived each key in keks: an index into
+	// roots, so 0 is the current root and 1 the previous.
+	rootOf  map[string]int
 	primary string
 
-	// legacy opens pre-envelope rows. Nil on a hub that never had any.
-	legacy *Cipher
+	// roots are what keys derive from, current first. Fixed for the life of
+	// the keyring: a hub resolves its roots once (pkg/rootkey.Pin), and a
+	// keyring that changed roots under work in flight would answer the same
+	// question two ways.
+	roots []string
 
-	// passphrase is remembered only when supplied explicitly, so a keyring
-	// built with WithKeyringPassphrase can still mint keys without the
-	// process environment. Empty means "read CLOOP_SECRET_KEY at use time".
-	passphrase string
+	// legacySalt is the pre-envelope construction's store-wide salt; nil on a
+	// hub that never had one. Its cipher is derived per root, on first use,
+	// into legacy.
+	legacySalt []byte
+	legacy     map[int]*Cipher
+
+	// underivable names the live keys no configured root derives. A keyring
+	// opened to serve refuses to exist with any (see OpenKeyring); a
+	// read-only one reports them, which is what `cloop hub key list` is for.
+	underivable []string
 
 	// lastReload throttles the self-healing registry re-read on the
 	// unknown-key path. Without it, a genuinely unknown key id — a row from
@@ -206,17 +269,29 @@ const reloadInterval = time.Second
 type KeyringOption func(*keyringConfig)
 
 type keyringConfig struct {
-	passphrase string
+	roots      []string
+	rootsGiven bool
 	clock      func() time.Time
 	actor      string
 	create     bool
 }
 
-// WithKeyringPassphrase overrides CLOOP_SECRET_KEY. Tests use it; so does any
-// caller that sources the passphrase from somewhere other than the process
-// environment.
+// WithKeyringPassphrase gives the keyring one root, p, instead of resolving
+// the hub's (pkg/rootkey). Tests use it; so does any caller that holds the key
+// some other way — a backup's preflight, an escrow being checked.
 func WithKeyringPassphrase(p string) KeyringOption {
-	return func(c *keyringConfig) { c.passphrase = p }
+	return func(c *keyringConfig) { c.roots, c.rootsGiven = []string{p}, true }
+}
+
+// WithKeyringRoots gives the keyring a current root and a previous one ("" for
+// none) instead of resolving them.
+func WithKeyringRoots(current, previous string) KeyringOption {
+	return func(c *keyringConfig) {
+		c.roots, c.rootsGiven = []string{current}, true
+		if previous != "" {
+			c.roots = append(c.roots, previous)
+		}
+	}
 }
 
 // WithKeyringClock overrides the time source.
@@ -245,91 +320,91 @@ func WithoutKeyCreation() KeyringOption {
 	return func(c *keyringConfig) { c.create = false }
 }
 
-// OpenKeyring loads the KEK registry, derives every KEK the passphrase can
-// open, and ensures a primary exists.
+// OpenKeyring loads the KEK registry, derives every live KEK from the roots it
+// was given — by default the hub's, resolved through pkg/rootkey — and ensures a
+// primary exists.
 //
-// Derivation is deliberately eager. It costs ~60ms per KEK at 200 000 KDF
-// rounds, once, at startup — versus paying it on the first lease of the day,
-// inside somebody's run, per key. Eager also means an unusable passphrase is
-// a startup failure rather than an intermittent one.
+// Derivation is eager, and goes through a cache that lives as long as the
+// process (keycache.go). A derivation costs ~60ms at 200 000 KDF rounds, and
+// pkg/ui opens a keyring for every request that touches a secret, so without
+// the cache a hub that has rotated a few times would pay a few hundred
+// milliseconds a request; with it, a key is derived once per process. Eager
+// also means an unusable key is an open failure rather than an intermittent
+// one: the rule below is checked against every live key, not the first.
 func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil key store", ErrInvalidSecret)
 	}
 	cfg := keyringConfig{clock: time.Now, create: true}
-	cfg.passphrase = os.Getenv(EnvPassphraseKey)
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.passphrase == "" {
+	if !cfg.rootsGiven {
+		roots, err := rootkey.Resolve()
+		if err != nil {
+			// A source that is configured and wrong is never "no key": the
+			// operator meant to give the hub one, and carrying on without
+			// would degrade quietly into sealing nothing.
+			return nil, fmt.Errorf("%w: %v", ErrRootConfig, err)
+		}
+		cfg.roots = roots.Values()
+	}
+	if len(cfg.roots) == 0 || cfg.roots[0] == "" {
 		return nil, fmt.Errorf("%w: set it to seal and open secret payloads", ErrNoKey)
+	}
+	if len(cfg.roots) > 1 && subtle.ConstantTimeCompare([]byte(cfg.roots[0]), []byte(cfg.roots[1])) == 1 {
+		cfg.roots = cfg.roots[:1]
 	}
 
 	kr := &Keyring{
-		store:      store,
-		keks:       make(map[string][]byte),
-		records:    make(map[string]KEKRecord),
-		passphrase: cfg.passphrase,
-		clock:      cfg.clock,
+		store:   store,
+		keks:    make(map[string][]byte),
+		records: make(map[string]KEKRecord),
+		rootOf:  make(map[string]int),
+		legacy:  make(map[int]*Cipher),
+		roots:   append([]string(nil), cfg.roots...),
+		clock:   cfg.clock,
 	}
 
-	// The legacy cipher is loaded, never created. A hub that has never sealed
+	// The legacy salt is loaded, never created. A hub that has never sealed
 	// anything the old way has no legacy salt, and inventing one would leave
 	// a second live key in the registry that nothing seals under and nobody
 	// rotates.
 	if meta, ok := store.(metaStore); ok {
-		if c, err := loadLegacyCipher(meta, cfg.passphrase); err == nil {
-			kr.legacy = c
-		}
+		kr.legacySalt = loadLegacySalt(meta)
 	}
 
 	records, err := store.ListKEKs()
 	if err != nil {
 		return nil, fmt.Errorf("secretbroker: list sealing keys: %w", err)
 	}
-	// Deriving the primary is enough to answer "is this passphrase right?",
-	// because every KEK is stretched from the same passphrase. So the primary
-	// is derived eagerly and the rest lazily, on the first read that names
-	// them. The difference is not academic: a hub that has rotated ten times
-	// without retiring would otherwise pay ten KDF passes on every construction
-	// of a broker, and pkg/ui builds one per request.
 	for _, rec := range records {
 		kr.records[rec.ID] = rec
 	}
-	for _, rec := range records {
-		if rec.Retired() || rec.State != KEKStatePrimary {
-			continue
-		}
-		if key, derr := deriveKEK(cfg.passphrase, rec); derr == nil {
-			kr.keks[rec.ID] = key
-			kr.primary = rec.ID
-		}
-		break
-	}
-	if kr.primary != "" {
-		return kr, nil
-	}
 
-	// No usable primary. Now the whole registry has to be derived, because the
-	// decision below depends on whether *any* live key resists this passphrase.
+	// Every live key must derive from a configured root (Task 20425).
 	var undecipherable []string
 	for _, rec := range records {
 		if rec.Retired() {
 			continue
 		}
-		key, derr := deriveKEK(cfg.passphrase, rec)
+		key, idx, derr := kr.deriveAny(rec)
 		if derr != nil {
-			// Recorded, live, and not derivable from this passphrase. Keep the
-			// record so reads can name the key precisely, and remember it: the
-			// bootstrap rule below turns on whether any such key exists.
+			// Recorded, live, and derived by no root this process holds.
+			// Keep the record so reads can name the key precisely, and
+			// remember it: the rule below turns on whether any such key exists.
 			undecipherable = append(undecipherable, rec.ID)
 			continue
 		}
 		kr.keks[rec.ID] = key
+		kr.rootOf[rec.ID] = idx
+		if rec.State == KEKStatePrimary {
+			kr.primary = rec.ID
+		}
 	}
+	sort.Strings(undecipherable)
 
-	// Everything below is the "no usable primary" path, and getting its rule
-	// wrong is worse than any bug in the cryptography.
+	// Getting this rule wrong is worse than any bug in the cryptography.
 	//
 	// The naive rule — "no usable primary, so mint one" — is a trap. Start a
 	// hub with a typo in CLOOP_SECRET_KEY and it would mint a *second*
@@ -340,14 +415,28 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 	// after the fork.
 	//
 	// So minting is permitted only when there is genuinely nothing to fork
-	// from. A live key that cannot be derived means the passphrase is wrong,
-	// and the only safe response is to refuse to start.
+	// from, and a process that cannot derive every live key does not serve at
+	// all: a live key no root derives means a key is wrong, or this member was
+	// not given the root new material is sealed under, and the only safe
+	// response to either is to refuse to start — before a seal under the
+	// wrong primary, not after.
+	if len(undecipherable) > 0 {
+		if cfg.create {
+			return nil, kr.refusal(undecipherable)
+		}
+		// A read-only caller — `cloop hub key list`, the doctor — is asking
+		// precisely which keys open, and is answered rather than refused. It
+		// never seals: see the !cfg.create case below.
+		kr.underivable = undecipherable
+	}
+
+	if cfg.create {
+		kr.attribute()
+	}
+
 	switch {
-	case len(undecipherable) > 0:
-		sort.Strings(undecipherable)
-		return nil, fmt.Errorf("%w: %d live sealing key(s) (%s) cannot be derived from the current %s; "+
-			"refusing to mint a new key, which would fork the registry and leave existing secrets unreadable",
-			ErrKeyUnavailable, len(undecipherable), strings.Join(undecipherable, ", "), EnvPassphraseKey)
+	case kr.primary != "":
+		return kr, nil
 
 	case !cfg.create:
 		// A read-only caller. Not an error, and — importantly — not a write
@@ -362,7 +451,7 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 		// partially restored registry. Promoting the newest usable key repairs
 		// it without creating key material, which is strictly safer than
 		// minting: nothing new to keep track of, and no row is orphaned.
-		newest := newestKeyID(kr.records, kr.keks)
+		newest := newestKeyID(kr.records, kr.keks, kr.rootOf)
 		if err := store.PromoteKEK(newest, kr.now()); err != nil {
 			return nil, fmt.Errorf("secretbroker: adopt sealing key %s as primary: %w", newest, err)
 		}
@@ -370,14 +459,101 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 		return kr, nil
 
 	default:
-		rec, key, cerr := kr.mintKEK(cfg.passphrase, cfg.actor)
+		rec, key, cerr := kr.mintKEK(cfg.actor)
 		if cerr != nil {
 			return nil, cerr
 		}
 		kr.records[rec.ID] = rec
 		kr.keks[rec.ID] = key
+		kr.rootOf[rec.ID] = 0
 		kr.markPrimary(rec.ID)
 		return kr, nil
+	}
+}
+
+// refusal is the error a serving keyring is refused with when live keys derive
+// from no configured root. It names the roots the registry records for them
+// and the ones this process holds, by fingerprint, so "the key is wrong" and
+// "this member was not given the new root" read differently.
+func (k *Keyring) refusal(ids []string) error {
+	named := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if fp := k.records[id].Root; fp != "" {
+			named = append(named, id+" (root "+fp+")")
+		} else {
+			named = append(named, id)
+		}
+	}
+	return fmt.Errorf("%w: %d live sealing key(s) — %s — derive from no root this process holds (%s); "+
+		"refusing to mint a new key, which would fork the registry and leave existing secrets unreadable",
+		ErrKeyUnavailable, len(ids), strings.Join(named, ", "), k.describeRoots())
+}
+
+// describeRoots names the configured roots for a message: by variable and
+// fingerprint, never by value.
+func (k *Keyring) describeRoots() string {
+	names := []string{rootkey.EnvKey, rootkey.EnvPrevious}
+	parts := make([]string, 0, len(k.roots))
+	for i, r := range k.roots {
+		fp, err := rootkey.Fingerprint(r)
+		if err != nil {
+			fp = "unknown"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", names[i], fp))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// deriveAny derives rec from the first configured root that opens it, and says
+// which. The current root is tried first; no key derives from both, since each
+// is salted on its own and the previous root may not equal the current.
+func (k *Keyring) deriveAny(rec KEKRecord) ([]byte, int, error) {
+	var lastErr error
+	for i, root := range k.roots {
+		key, err := cachedDeriveKEK(root, rec)
+		if err == nil {
+			return key, i, nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrKeyUnavailable) {
+			break // a corrupt record: no root does better
+		}
+	}
+	return nil, -1, lastErr
+}
+
+// attribute records, once, which root each unattributed live key derives from
+// (Task 20425). Keys minted before broker_keks.root existed have none; the
+// first process holding the root that derives them writes it back. Best
+// effort, on purpose: the derivation is the authority on which root opens a
+// key, so a failed write costs nothing but a retry by the next opener.
+func (k *Keyring) attribute() {
+	ks, ok := k.store.(KeyAttributor)
+	if !ok {
+		return
+	}
+	k.mu.RLock()
+	pending := map[string]int{}
+	for id, rec := range k.records {
+		if idx, derived := k.rootOf[id]; derived && rec.Root == "" && !rec.Retired() {
+			pending[id] = idx
+		}
+	}
+	k.mu.RUnlock()
+	for id, idx := range pending {
+		fp, err := rootkey.Fingerprint(k.roots[idx])
+		if err != nil {
+			continue
+		}
+		if done, err := ks.AttributeKEK(id, fp); err != nil || !done {
+			continue
+		}
+		k.mu.Lock()
+		if rec, ok := k.records[id]; ok {
+			rec.Root = fp
+			k.records[id] = rec
+		}
+		k.mu.Unlock()
 	}
 }
 
@@ -396,14 +572,22 @@ func (k *Keyring) markPrimary(id string) {
 }
 
 // newestKeyID picks the most recently created derivable key, breaking ties by
-// ID so the choice is deterministic across hubs adopting the same registry.
-func newestKeyID(records map[string]KEKRecord, usable map[string][]byte) string {
+// ID so the choice is deterministic across hubs adopting the same registry. A
+// key of the current root beats any key of the previous one: adopting a key is
+// choosing what seals next, and the previous root only opens.
+func newestKeyID(records map[string]KEKRecord, usable map[string][]byte, rootOf map[string]int) string {
 	best := ""
 	for id := range usable {
 		rec := records[id]
 		cur, ok := records[best]
-		if !ok || rec.CreatedAt.After(cur.CreatedAt) ||
-			(rec.CreatedAt.Equal(cur.CreatedAt) && id < best) {
+		switch {
+		case !ok:
+			best = id
+		case rootOf[id] != rootOf[best]:
+			if rootOf[id] < rootOf[best] {
+				best = id
+			}
+		case rec.CreatedAt.After(cur.CreatedAt) || (rec.CreatedAt.Equal(cur.CreatedAt) && id < best):
 			best = id
 		}
 	}
@@ -416,9 +600,15 @@ type metaStore interface {
 	Meta(key string) (string, bool, error)
 }
 
-// mintKEK creates, seals a check value for, and persists a new KEK, then
-// promotes it to primary.
-func (k *Keyring) mintKEK(passphrase, actor string) (KEKRecord, []byte, error) {
+// mintKEK creates, seals a check value for, and persists a new KEK derived
+// from the current root, then promotes it to primary. The previous root never
+// mints: it is there to open what it sealed until that has been rewrapped.
+func (k *Keyring) mintKEK(actor string) (KEKRecord, []byte, error) {
+	root := k.roots[0]
+	fingerprint, err := rootkey.Fingerprint(root)
+	if err != nil {
+		return KEKRecord{}, nil, fmt.Errorf("secretbroker: name the root of a new sealing key: %w", err)
+	}
 	salt := make([]byte, saltSize)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return KEKRecord{}, nil, fmt.Errorf("secretbroker: generate key salt: %w", err)
@@ -427,7 +617,7 @@ func (k *Keyring) mintKEK(passphrase, actor string) (KEKRecord, []byte, error) {
 	if err != nil {
 		return KEKRecord{}, nil, err
 	}
-	key := deriveKey(passphrase, salt)
+	key := deriveKey(root, salt)
 
 	check, err := sealWith(key, kekCheckAAD(id), []byte(kekCheckPlaintext))
 	if err != nil {
@@ -440,6 +630,7 @@ func (k *Keyring) mintKEK(passphrase, actor string) (KEKRecord, []byte, error) {
 		CheckValue: check,
 		CreatedAt:  k.now(),
 		CreatedBy:  actor,
+		Root:       fingerprint,
 	}
 	if err := k.store.PutKEK(rec); err != nil {
 		return KEKRecord{}, nil, fmt.Errorf("secretbroker: persist sealing key: %w", err)
@@ -447,6 +638,8 @@ func (k *Keyring) mintKEK(passphrase, actor string) (KEKRecord, []byte, error) {
 	if err := k.store.PromoteKEK(rec.ID, k.now()); err != nil {
 		return KEKRecord{}, nil, fmt.Errorf("secretbroker: promote sealing key: %w", err)
 	}
+	// Every other keyring this process opens finds it derived already.
+	rememberKEK(root, rec, key)
 	rec.State = KEKStatePrimary
 	return rec, key, nil
 }
@@ -472,6 +665,12 @@ type KeyInfo struct {
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy string    `json:"created_by,omitempty"`
 	RetiredAt time.Time `json:"retired_at,omitempty"`
+	// Root is the fingerprint the registry records for the root the key
+	// derives from; "" when nobody has attributed it.
+	Root string `json:"root,omitempty"`
+	// DerivedBy says which of this process's roots derives it, RootCurrent
+	// or RootPrevious; "" when neither does.
+	DerivedBy string `json:"derived_by,omitempty"`
 }
 
 // Keys returns every known KEK, primary first, then newest.
@@ -486,13 +685,16 @@ func (k *Keyring) Keys() []KeyInfo {
 
 	out := make([]KeyInfo, 0, len(ids))
 	for _, id := range ids {
-		rec := k.records[id]
 		// Force derivation rather than reporting the cache: with lazy
 		// derivation, "openable" would otherwise mean "happens to have been
 		// read already", which is the opposite of the question an operator is
 		// asking before they retire something.
 		key, _, _ := k.lookup(id)
-		out = append(out, KeyInfo{
+		k.mu.RLock()
+		rec := k.records[id]
+		idx, derived := k.rootOf[id]
+		k.mu.RUnlock()
+		info := KeyInfo{
 			ID:        id,
 			State:     rec.State,
 			Primary:   id == primary,
@@ -500,7 +702,12 @@ func (k *Keyring) Keys() []KeyInfo {
 			CreatedAt: rec.CreatedAt,
 			CreatedBy: rec.CreatedBy,
 			RetiredAt: rec.RetiredAt,
-		})
+			Root:      rec.Root,
+		}
+		if key != nil && derived {
+			info.DerivedBy = rootSlot(idx)
+		}
+		out = append(out, info)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Primary != out[j].Primary {
@@ -517,10 +724,83 @@ func (k *Keyring) Keys() []KeyInfo {
 // HasLegacy reports whether pre-envelope material can still be opened on this
 // hub. False with legacy rows present means those rows are unreadable, which
 // `cloop hub key status` reports rather than leaving to be discovered.
-func (k *Keyring) HasLegacy() bool {
+func (k *Keyring) HasLegacy() bool { return k.legacySalt != nil }
+
+// rootSlot names a root by its index in roots.
+func rootSlot(idx int) string {
+	if idx == 0 {
+		return RootCurrent
+	}
+	return RootPrevious
+}
+
+// HasPrevious reports whether this keyring holds a previous root: a change of
+// root is in progress on this process.
+func (k *Keyring) HasPrevious() bool { return len(k.roots) > 1 }
+
+// PrimaryFromCurrent reports whether the primary derives from the current
+// root. False during a change of root until `cloop hub key rotate
+// --retire-previous` has minted a key of the new one, and on a keyring with no
+// primary.
+func (k *Keyring) PrimaryFromCurrent() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return k.legacy != nil
+	idx, ok := k.rootOf[k.primary]
+	return k.primary != "" && ok && idx == 0
+}
+
+// PreviousRootKeys returns the live keys the previous root derives, sorted:
+// what retiring the previous root retires. Every live key is derived first, so
+// the answer does not depend on which ones happen to have been read.
+func (k *Keyring) PreviousRootKeys() []string {
+	if !k.HasPrevious() {
+		return nil
+	}
+	k.mu.RLock()
+	ids := make([]string, 0, len(k.records))
+	for id, rec := range k.records {
+		if !rec.Retired() {
+			ids = append(ids, id)
+		}
+	}
+	k.mu.RUnlock()
+	var out []string
+	for _, id := range ids {
+		if key, _, _ := k.lookup(id); key == nil {
+			continue
+		}
+		k.mu.RLock()
+		idx := k.rootOf[id]
+		k.mu.RUnlock()
+		if idx == 1 {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Underivable names the live keys no configured root derives. Only a
+// read-only keyring can have any (WithoutKeyCreation); one opened to serve is
+// refused instead.
+func (k *Keyring) Underivable() []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return append([]string(nil), k.underivable...)
+}
+
+// RootFingerprints names the roots this keyring derives from; previous is ""
+// when there is none. Each costs a key derivation the first time in a process.
+func (k *Keyring) RootFingerprints() (current, previous string, err error) {
+	if current, err = rootkey.Fingerprint(k.roots[0]); err != nil {
+		return "", "", err
+	}
+	if k.HasPrevious() {
+		if previous, err = rootkey.Fingerprint(k.roots[1]); err != nil {
+			return "", "", err
+		}
+	}
+	return current, previous, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -568,31 +848,33 @@ func (k *Keyring) currentPrimary() (string, []byte, error) {
 		return rec.ID, cached, nil
 	}
 
-	// A key minted by another process. Deriving it costs one KDF pass, once.
-	pass := k.effectivePassphrase()
-	if pass == "" {
-		return "", nil, fmt.Errorf("%w: cannot derive the current sealing key", ErrNoKey)
-	}
-	key, derr := deriveKEK(pass, rec)
+	// A key minted by another process. Deriving it costs one KDF pass, once
+	// per process.
+	key, idx, derr := k.deriveAny(rec)
 	if derr != nil {
-		return "", nil, derr
+		// The member was not given the root new material is now sealed
+		// under — started before a change of root reached it, or with the
+		// wrong key. Sealing anything else instead would leave material its
+		// peers cannot open, so it seals nothing, loudly.
+		return "", nil, fmt.Errorf("%w: the primary sealing key %s%s derives from no root this process holds "+
+			"(%s): restart this hub member with the key every other member runs on", ErrKeyUnavailable,
+			rec.ID, recordedRoot(rec), k.describeRoots())
 	}
 	k.mu.Lock()
 	k.records[rec.ID] = rec
 	k.keks[rec.ID] = key
+	k.rootOf[rec.ID] = idx
 	k.markPrimary(rec.ID)
 	k.mu.Unlock()
 	return rec.ID, key, nil
 }
 
-func (k *Keyring) effectivePassphrase() string {
-	k.mu.RLock()
-	pass := k.passphrase
-	k.mu.RUnlock()
-	if pass == "" {
-		pass = os.Getenv(EnvPassphraseKey)
+// recordedRoot is " (root <fingerprint>)" for a key whose root is recorded.
+func recordedRoot(rec KEKRecord) string {
+	if rec.Root == "" {
+		return ""
 	}
-	return pass
+	return " (root " + rec.Root + ")"
 }
 
 // SealFor seals plaintext under a fresh DEK wrapped by the primary KEK.
@@ -636,18 +918,21 @@ func (k *Keyring) SealFor(aad string, plaintext []byte) (Envelope, error) {
 // turns a five-minute diagnosis into an afternoon.
 func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 	if env.IsLegacy() {
-		k.mu.RLock()
-		legacy := k.legacy
-		k.mu.RUnlock()
-		if legacy == nil {
+		if k.legacySalt == nil {
 			hubmetrics.UnsealFailures.Inc("key_unavailable")
 			return nil, fmt.Errorf("%w: no legacy sealing key on this hub", ErrKeyUnavailable)
 		}
-		out, err := legacy.Unseal(env.Ciphertext)
-		if err != nil {
-			hubmetrics.UnsealFailures.Inc("seal_failed")
+		// Either root may have sealed it: the pre-envelope construction has
+		// no check value to say which, and GCM refuses the wrong one.
+		var err error
+		for i := range k.roots {
+			var out []byte
+			if out, err = k.legacyCipher(i).Unseal(env.Ciphertext); err == nil {
+				return out, nil
+			}
 		}
-		return out, err
+		hubmetrics.UnsealFailures.Inc("seal_failed")
+		return nil, err
 	}
 
 	kek, rec, known := k.lookup(env.KeyID)
@@ -675,8 +960,8 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 				ErrKeyRetired, env.KeyID, formatOrUnknown(rec.RetiredAt))
 		case known:
 			hubmetrics.UnsealFailures.Inc("key_unavailable")
-			return nil, fmt.Errorf("%w: sealing key %s exists but cannot be derived from the current %s",
-				ErrKeyUnavailable, env.KeyID, EnvPassphraseKey)
+			return nil, fmt.Errorf("%w: sealing key %s%s exists but derives from no root this process holds (%s)",
+				ErrKeyUnavailable, env.KeyID, recordedRoot(rec), k.describeRoots())
 		default:
 			hubmetrics.UnsealFailures.Inc("key_unknown")
 			return nil, fmt.Errorf("%w: no sealing key %s in this hub's registry", ErrKeyUnknown, env.KeyID)
@@ -762,17 +1047,7 @@ func (k *Keyring) Rewrap(aad string, env Envelope) (Envelope, error) {
 // material stays readable under its old KEK — that overlap is what lets a
 // rotation run while the hub serves traffic.
 func (k *Keyring) AddKey(actor string) (KeyInfo, error) {
-	k.mu.RLock()
-	pass := k.passphrase
-	k.mu.RUnlock()
-	if pass == "" {
-		pass = os.Getenv(EnvPassphraseKey)
-	}
-	if pass == "" {
-		return KeyInfo{}, fmt.Errorf("%w: cannot derive a new sealing key", ErrNoKey)
-	}
-
-	rec, key, err := k.mintKEK(pass, actor)
+	rec, key, err := k.mintKEK(actor)
 	if err != nil {
 		return KeyInfo{}, err
 	}
@@ -780,12 +1055,13 @@ func (k *Keyring) AddKey(actor string) (KeyInfo, error) {
 	k.mu.Lock()
 	k.records[rec.ID] = rec
 	k.keks[rec.ID] = key
+	k.rootOf[rec.ID] = 0
 	k.markPrimary(rec.ID)
 	k.mu.Unlock()
 
 	return KeyInfo{
 		ID: rec.ID, State: KEKStatePrimary, Primary: true, Openable: true,
-		CreatedAt: rec.CreatedAt, CreatedBy: rec.CreatedBy,
+		CreatedAt: rec.CreatedAt, CreatedBy: rec.CreatedBy, Root: rec.Root, DerivedBy: RootCurrent,
 	}, nil
 }
 
@@ -814,12 +1090,17 @@ func (k *Keyring) RetireKey(id string) error {
 	if err := k.store.RetireKEK(id, at); err != nil {
 		return err
 	}
+	// The salt is gone from the registry; the copies this process derived
+	// go with it, or retirement would shred everything but the memory of
+	// the process that did it.
+	forgetKEK(id)
 
 	k.mu.Lock()
 	if key, ok := k.keks[id]; ok {
 		zero(key)
 		delete(k.keks, id)
 	}
+	delete(k.rootOf, id)
 	if rec, ok := k.records[id]; ok {
 		rec.State = KEKStateRetired
 		rec.Salt = ""
@@ -847,11 +1128,7 @@ func (k *Keyring) lookup(id string) ([]byte, KEKRecord, bool) {
 		return key, rec, known
 	}
 
-	pass := k.effectivePassphrase()
-	if pass == "" {
-		return nil, rec, known
-	}
-	derived, err := deriveKEK(pass, rec)
+	derived, idx, err := k.deriveAny(rec)
 	if err != nil {
 		return nil, rec, known
 	}
@@ -865,6 +1142,7 @@ func (k *Keyring) lookup(id string) ([]byte, KEKRecord, bool) {
 		return existing, k.records[id], true
 	}
 	k.keks[id] = derived
+	k.rootOf[id] = idx
 	return derived, k.records[id], true
 }
 
@@ -878,16 +1156,8 @@ func (k *Keyring) reloadThrottled() bool {
 		return false
 	}
 	k.lastReload = now
-	pass := k.passphrase
 	k.mu.Unlock()
-
-	if pass == "" {
-		pass = os.Getenv(EnvPassphraseKey)
-	}
-	if pass == "" {
-		return false
-	}
-	return k.reload(pass) == nil
+	return k.reload() == nil
 }
 
 // Reload re-reads the KEK registry, adopting keys another process minted and
@@ -897,20 +1167,9 @@ func (k *Keyring) reloadThrottled() bool {
 // unreadable leaves the in-memory state exactly as it was, because a hub that
 // is currently serving reads is better off with a stale key set than with an
 // empty one.
-func (k *Keyring) Reload() error {
-	k.mu.RLock()
-	pass := k.passphrase
-	k.mu.RUnlock()
-	if pass == "" {
-		pass = os.Getenv(EnvPassphraseKey)
-	}
-	if pass == "" {
-		return fmt.Errorf("%w: cannot re-derive sealing keys", ErrNoKey)
-	}
-	return k.reload(pass)
-}
+func (k *Keyring) Reload() error { return k.reload() }
 
-func (k *Keyring) reload(passphrase string) error {
+func (k *Keyring) reload() error {
 	records, err := k.store.ListKEKs()
 	if err != nil {
 		return fmt.Errorf("secretbroker: reload sealing keys: %w", err)
@@ -920,15 +1179,19 @@ func (k *Keyring) reload(passphrase string) error {
 	// holding the write lock across them would stall every concurrent read of
 	// an already-known key for no reason.
 	fresh := map[string][]byte{}
+	freshRoot := map[string]int{}
 	for _, rec := range records {
 		if rec.Retired() {
+			// Retired elsewhere: what this process derived of it goes too.
+			forgetKEK(rec.ID)
 			continue
 		}
 		if key, _, ok := k.lookup(rec.ID); ok && key != nil {
 			continue
 		}
-		if key, derr := deriveKEK(passphrase, rec); derr == nil {
+		if key, idx, derr := k.deriveAny(rec); derr == nil {
 			fresh[rec.ID] = key
+			freshRoot[rec.ID] = idx
 		}
 	}
 
@@ -943,10 +1206,12 @@ func (k *Keyring) reload(passphrase string) error {
 				zero(old)
 				delete(k.keks, rec.ID)
 			}
+			delete(k.rootOf, rec.ID)
 			continue
 		}
 		if key, ok := fresh[rec.ID]; ok {
 			k.keks[rec.ID] = key
+			k.rootOf[rec.ID] = freshRoot[rec.ID]
 		}
 		if rec.State == KEKStatePrimary && k.keks[rec.ID] != nil {
 			k.primary = rec.ID
@@ -961,6 +1226,7 @@ func (k *Keyring) reload(passphrase string) error {
 				zero(old)
 				delete(k.keks, id)
 			}
+			delete(k.rootOf, id)
 			delete(k.records, id)
 		}
 	}
@@ -971,12 +1237,33 @@ func (k *Keyring) reload(passphrase string) error {
 // Derivation and primitives
 // ---------------------------------------------------------------------------
 
-// deriveKEK derives a KEK from the passphrase and verifies it against the
-// record's check value.
+// deriveKEK derives a KEK from a root and verifies it against the record's
+// check value. Callers go through cachedDeriveKEK (keycache.go).
 //
-// Verification is what separates "this key is not for this passphrase" from
-// "this ciphertext is corrupt" at load time rather than at lease time.
+// Verification is what separates "this key is not for this root" from "this
+// ciphertext is corrupt" at load time rather than at lease time.
 func deriveKEK(passphrase string, rec KEKRecord) ([]byte, error) {
+	salt, err := derivable(rec)
+	if err != nil {
+		return nil, err
+	}
+	key := deriveKey(passphrase, salt)
+	got, err := openWith(key, kekCheckAAD(rec.ID), rec.CheckValue)
+	if err != nil {
+		zero(key)
+		return nil, fmt.Errorf("%w: sealing key %s does not derive from this root", ErrKeyUnavailable, rec.ID)
+	}
+	defer zero(got)
+	if subtle.ConstantTimeCompare(got, []byte(kekCheckPlaintext)) != 1 {
+		zero(key)
+		return nil, fmt.Errorf("%w: sealing key %s failed its check value", ErrSealFailed, rec.ID)
+	}
+	return key, nil
+}
+
+// derivable checks what a record must carry before any root is tried against
+// it, and returns its salt.
+func derivable(rec KEKRecord) ([]byte, error) {
 	salt, err := decodeHex(rec.Salt)
 	if err != nil || len(salt) != saltSize {
 		return nil, fmt.Errorf("%w: sealing key %s has a corrupt salt", ErrSealFailed, rec.ID)
@@ -991,33 +1278,39 @@ func deriveKEK(passphrase string, rec KEKRecord) ([]byte, error) {
 		// tampered or corrupt row either way.
 		return nil, fmt.Errorf("%w: sealing key %s has no check value", ErrSealFailed, rec.ID)
 	}
-	key := deriveKey(passphrase, salt)
-	got, err := openWith(key, kekCheckAAD(rec.ID), rec.CheckValue)
-	if err != nil {
-		zero(key)
-		return nil, fmt.Errorf("%w: sealing key %s does not match the current %s",
-			ErrKeyUnavailable, rec.ID, EnvPassphraseKey)
-	}
-	defer zero(got)
-	if subtle.ConstantTimeCompare(got, []byte(kekCheckPlaintext)) != 1 {
-		zero(key)
-		return nil, fmt.Errorf("%w: sealing key %s failed its check value", ErrSealFailed, rec.ID)
-	}
-	return key, nil
+	return salt, nil
 }
 
-// loadLegacyCipher builds the pre-envelope cipher if the store still holds
-// the old salt. It never creates one.
-func loadLegacyCipher(store metaStore, passphrase string) (*Cipher, error) {
+// loadLegacySalt reads the pre-envelope construction's salt if the store still
+// holds it; nil when it does not, or when it is corrupt.
+func loadLegacySalt(store metaStore) []byte {
 	v, ok, err := store.Meta(metaKeySalt)
 	if err != nil || !ok || v == "" {
-		return nil, fmt.Errorf("%w: no legacy salt", ErrKeyUnknown)
+		return nil
 	}
 	salt, derr := decodeHex(v)
 	if derr != nil || len(salt) != saltSize {
-		return nil, fmt.Errorf("%w: legacy salt is corrupt", ErrSealFailed)
+		return nil
 	}
-	return &Cipher{key: deriveKey(passphrase, salt)}, nil
+	return salt
+}
+
+// legacyCipher is the pre-envelope cipher of root i, derived on first use.
+func (k *Keyring) legacyCipher(i int) *Cipher {
+	k.mu.RLock()
+	c := k.legacy[i]
+	k.mu.RUnlock()
+	if c != nil {
+		return c
+	}
+	c = &Cipher{key: cachedLegacyKey(k.roots[i], k.legacySalt)}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if existing := k.legacy[i]; existing != nil {
+		return existing
+	}
+	k.legacy[i] = c
+	return c
 }
 
 func dekAAD(keyID, aad string) []byte {

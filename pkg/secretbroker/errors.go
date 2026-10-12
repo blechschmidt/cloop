@@ -132,9 +132,10 @@ var (
 	// ErrKeyRetired: the material names a KEK whose salt was destroyed. The
 	// material is unrecoverable and the credential must be re-minted.
 	ErrKeyRetired = errors.New("secretbroker: sealing key retired")
-	// ErrKeyUnavailable: the KEK exists but cannot be derived from the
-	// current CLOOP_SECRET_KEY. The material is intact; the passphrase is
-	// wrong.
+	// ErrKeyUnavailable: the KEK exists but cannot be derived from any root
+	// this process holds — CLOOP_SECRET_KEY, or CLOOP_SECRET_KEY_PREVIOUS
+	// while a change of root is in progress. The material is intact; the key
+	// is wrong, or the key belongs to a root this hub member was not given.
 	ErrKeyUnavailable = errors.New("secretbroker: sealing key unavailable")
 	// ErrKeyUnknown: the material names a KEK this hub has no record of —
 	// a database from another hub, or a partially restored backup.
@@ -145,6 +146,15 @@ var (
 	// ErrRotationFailed: a rotation could not rewrap every row. Rotation is
 	// resumable, so this means "run it again", not "start over".
 	ErrRotationFailed = errors.New("secretbroker: key rotation incomplete")
+	// ErrRootConfig: a source of the root key is configured and refused — a
+	// key file with the wrong owner or mode, two sources that disagree
+	// (pkg/rootkey, Task 20425). Never a degraded mode to carry on in, the
+	// way ErrNoKey is: the operator meant to give the hub a key, and what the
+	// hub found is not one it may use.
+	ErrRootConfig = errors.New("secretbroker: the root key's configuration is refused")
+	// ErrNoPreviousRoot: retiring the previous root was asked of a process
+	// that holds none (CLOOP_SECRET_KEY_PREVIOUS).
+	ErrNoPreviousRoot = errors.New("secretbroker: no previous root key is configured")
 
 	// Self-service request errors (Task 20271).
 	//

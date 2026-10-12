@@ -63,7 +63,7 @@ func readCheckpoints(t *testing.T, file string) []auditcheckpoint.Located {
 
 func TestAuditCheckpointsOnePerChainPerWindow(t *testing.T) {
 	t.Setenv(auditcheckpoint.EnvKey, "ui-checkpoint-key-0123456789abcdef0123")
-	key, err := auditcheckpoint.KeyFromEnv()
+	key, err := auditcheckpoint.KeyFromRoots()
 	if err != nil {
 		t.Fatal(err)
 	}

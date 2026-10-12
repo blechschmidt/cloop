@@ -169,7 +169,7 @@ func TestTheSidecarIsASealedManifest(t *testing.T) {
 	for key, want := range map[string]dbbackup.SealState{
 		hubKey: dbbackup.SealValid, otherKey: dbbackup.SealForeignKey, "": dbbackup.SealUnchecked,
 	} {
-		if got := meta.Check(key); got != want {
+		if got := meta.Check(key, ""); got != want {
 			t.Errorf("checked under %q: %s, want %s", key, got, want)
 		}
 	}
@@ -185,7 +185,7 @@ func TestTheSidecarIsASealedManifest(t *testing.T) {
 		c := *meta.Chain
 		m.Chain = &c
 		edit(&m)
-		if got := m.Check(hubKey); got != dbbackup.SealBad {
+		if got := m.Check(hubKey, ""); got != dbbackup.SealBad {
 			t.Errorf("an edited %s checks as %s", name, got)
 		}
 	}

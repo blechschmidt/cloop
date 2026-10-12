@@ -26,6 +26,9 @@ Everything here fails the render rather than warning. A warning during
 {{- if not .Values.secrets.secretKey }}
 {{- fail "secrets.create is true but secrets.secretKey is empty. This is the secret broker's master key; generate one with:\n  head -c32 /dev/urandom | base64 | tr -d '='" }}
 {{- end }}
+{{- if and .Values.secrets.previousSecretKey (eq (toString .Values.secrets.previousSecretKey) (toString .Values.secrets.secretKey)) }}
+{{- fail "secrets.previousSecretKey is secrets.secretKey. A change of root runs the new key as secretKey and the old one as previousSecretKey; the hub refuses two copies of one key." }}
+{{- end }}
 {{/*
   Without OIDC the bearer token is the *only* thing between the network and
   the dashboard. An empty one is not "no token configured", it is

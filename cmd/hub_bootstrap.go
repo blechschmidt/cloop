@@ -30,15 +30,27 @@ package cmd
 //   - Secrets go into a separate .cloop/hub.env at 0600, not into config.yaml.
 //     That file is directly consumable by systemd's EnvironmentFile= and by
 //     `docker compose --env-file`, and keeping it separate means config.yaml
-//     can be committed, diffed and templated without leaking the key.
+//     can be committed, diffed and templated without leaking a token.
+//
+//   - The root key is not one of them (Task 20425). It goes into a credential
+//     file of its own beside .cloop/, never in it — encrypted by systemd-creds
+//     where that works, so a TPM or the host's credential secret is needed to
+//     read it — and the printed unit loads it with LoadCredential(Encrypted)=.
+//     In an environment variable it would be in /proc/<pid>/environ, in
+//     `systemctl show`, and in every child process not scrubbed of it; and in
+//     .cloop/ it would travel with every backup and snapshot of the database
+//     it protects.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,11 +61,39 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // hubEnvFile holds the generated secrets. Separate from config.yaml so the
 // config can be version-controlled and this cannot.
 const hubEnvFile = "hub.env"
+
+// hubKeyFile is the root key's file in the hub's directory, beside .cloop/ —
+// never in it, where the hub refuses to read a key from. Named like the systemd
+// credential it is loaded as.
+const hubKeyFile = rootkey.Credential
+
+// hubKeyCredSuffix marks the systemd-creds encrypted form of the key file.
+const hubKeyCredSuffix = ".cred"
+
+// systemdCredsEncrypt seals key as the systemd credential name into path. A
+// variable so tests stand in for systemd-creds, which creates the host's
+// credential secret the first time it runs as root.
+var systemdCredsEncrypt = func(name string, key []byte, path string) error {
+	bin, err := exec.LookPath("systemd-creds")
+	if err != nil {
+		return fmt.Errorf("systemd-creds is not installed")
+	}
+	if fi, err := os.Stat("/run/systemd/system"); err != nil || !fi.IsDir() {
+		return fmt.Errorf("systemd is not this host's init")
+	}
+	cmd := exec.Command(bin, "encrypt", "--name="+name, "-", path)
+	cmd.Stdin = bytes.NewReader(key)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemd-creds encrypt: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return os.Chmod(path, 0o600)
+}
 
 var hubBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
@@ -73,7 +113,8 @@ to be noticed:
   ui.oidc.default_role: none            deny-by-default; no claim, no access
   ui.tls.*                              TLS paths filled in and required
   ui.allowed_ws_origins                 WebSocket origin pinned to the URL
-  CLOOP_SECRET_KEY                      256 bits from crypto/rand, mode 0600
+  CLOOP_SECRET_KEY                      256 bits from crypto/rand, in a key
+                                        file beside .cloop/, never in it
   CLOOP_UI_TOKEN                        so the dashboard is never open
 
 The git interception proxy and the Kubernetes access monitor are enabled with
@@ -82,9 +123,16 @@ first start and sealed under CLOOP_SECRET_KEY, and tells every sandbox to trust
 it for those two URLs only. Their advertise URLs are derived from
 --external-url; executors must be able to reach both ports there.
 
-Secrets are written to .cloop/hub.env (mode 0600), never into config.yaml —
-so the config can be committed and the env file cannot. The env file is
-consumable as-is by systemd's EnvironmentFile= and by docker compose
+The root key, CLOOP_SECRET_KEY, is written to its own file — --key-file,
+cloop-secret-key in --dir by default — encrypted with systemd-creds when this
+host can (--systemd-creds), so the printed unit loads it with
+LoadCredentialEncrypted=; otherwise as a plain file, mode 0600, which the unit
+loads with LoadCredential= and a shell names with CLOOP_SECRET_KEY_FILE. Never
+an environment variable: those are readable in /proc/<pid>/environ.
+
+The other secrets are written to .cloop/hub.env (mode 0600), never into
+config.yaml — so the config can be committed and the env file cannot. The env
+file is consumable as-is by systemd's EnvironmentFile= and by docker compose
 --env-file.
 
 Bootstrap does not start anything, does not touch an existing config unless
@@ -116,6 +164,14 @@ type hubBootstrapOpts struct {
 	AdminEmails   []string
 	ServiceUser   string
 	Force         bool
+	// KeyFile is where the root key is written; SystemdCreds is auto, always
+	// or never, and KeyEncrypted says the file holds a systemd-creds
+	// credential rather than the key.
+	KeyFile      string
+	SystemdCreds string
+	KeyEncrypted bool
+	// KeyNote says why an auto bootstrap did not encrypt the key.
+	KeyNote string
 }
 
 func runHubBootstrap(cmd *cobra.Command, _ []string) error {
@@ -135,13 +191,15 @@ func runHubBootstrap(cmd *cobra.Command, _ []string) error {
 	// the key but not the config would leave every sealed secret in the
 	// store unopenable, which is a worse outcome than doing nothing.
 	if !opts.Force {
-		for _, p := range []string{configPath, envPath} {
+		for _, p := range []string{configPath, envPath, opts.KeyFile, opts.KeyFile + hubKeyCredSuffix} {
 			if _, statErr := os.Stat(p); statErr == nil {
 				return fmt.Errorf("%s already exists.\n"+
-					"Bootstrap generates a new secret-broker passphrase, and a new passphrase "+
+					"Bootstrap generates a new root key, and a new root key "+
 					"cannot derive the keys that opened the existing payloads.\n"+
 					"To roll the sealing keys without re-minting anything, run "+
-					"'cloop hub key rotate' instead.\n"+
+					"'cloop hub key rotate' instead; to change the root key itself, the runbook's "+
+					"\"Changing CLOOP_SECRET_KEY itself\" does it online with "+
+					"'cloop hub key rotate --retire-previous'.\n"+
 					"Pass --force only if this deployment has no secrets worth keeping", p)
 			}
 		}
@@ -163,7 +221,10 @@ func runHubBootstrap(cmd *cobra.Command, _ []string) error {
 	if err := atomicfile.Write(configPath, rendered, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", configPath, err)
 	}
-	if err := atomicfile.Write(envPath, []byte(renderHubEnv(secretKey, uiToken)), 0o600); err != nil {
+	if err := writeHubKey(opts, []byte(secretKey)); err != nil {
+		return err
+	}
+	if err := atomicfile.Write(envPath, []byte(renderHubEnv(hubKeyPath(opts), uiToken)), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", envPath, err)
 	}
 
@@ -292,7 +353,65 @@ func resolveHubBootstrapOpts(cmd *cobra.Command) (*hubBootstrapOpts, error) {
 	if strings.TrimSpace(o.ServiceUser) == "" {
 		o.ServiceUser = "cloop"
 	}
+
+	o.KeyFile, _ = cmd.Flags().GetString("key-file")
+	o.SystemdCreds, _ = cmd.Flags().GetString("systemd-creds")
+	if strings.TrimSpace(o.KeyFile) == "" {
+		o.KeyFile = filepath.Join(o.Dir, hubKeyFile)
+	}
+	if o.KeyFile, err = filepath.Abs(o.KeyFile); err != nil {
+		return nil, fmt.Errorf("resolve --key-file: %w", err)
+	}
+	if rootkey.InsideCloopDir(o.KeyFile) {
+		// The hub refuses to read a key from there: a key kept beside the
+		// database it protects travels with every backup and snapshot of it.
+		return nil, fmt.Errorf("--key-file %s is inside a .cloop/ directory, where the hub refuses to read a key "+
+			"from; keep it beside .cloop/, not in it", o.KeyFile)
+	}
+	switch o.SystemdCreds {
+	case "auto", "always", "never":
+	default:
+		return nil, fmt.Errorf("--systemd-creds must be auto, always or never (got %q)", o.SystemdCreds)
+	}
 	return o, nil
+}
+
+// writeHubKey writes the root key: as a systemd-creds credential when
+// --systemd-creds allows and this host can encrypt one, as a plain 0600 file
+// otherwise. The plaintext and the credential are never both left behind.
+func writeHubKey(o *hubBootstrapOpts, key []byte) error {
+	if err := os.MkdirAll(filepath.Dir(o.KeyFile), 0o700); err != nil {
+		return fmt.Errorf("create the directory of %s: %w", o.KeyFile, err)
+	}
+	if o.SystemdCreds != "never" {
+		credPath := o.KeyFile + hubKeyCredSuffix
+		err := systemdCredsEncrypt(rootkey.Credential, key, credPath)
+		switch {
+		case err == nil:
+			o.KeyEncrypted = true
+			_ = os.Remove(o.KeyFile) // a plaintext copy from an earlier --force run
+			return nil
+		case o.SystemdCreds == "always":
+			_ = os.Remove(credPath)
+			return fmt.Errorf("--systemd-creds always: %w", err)
+		default:
+			_ = os.Remove(credPath)
+			o.KeyNote = err.Error()
+		}
+	}
+	if err := atomicfile.Write(o.KeyFile, key, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", o.KeyFile, err)
+	}
+	_ = os.Remove(o.KeyFile + hubKeyCredSuffix)
+	return nil
+}
+
+// hubKeyPath is the file the root key was written to.
+func hubKeyPath(o *hubBootstrapOpts) string {
+	if o.KeyEncrypted {
+		return o.KeyFile + hubKeyCredSuffix
+	}
+	return o.KeyFile
 }
 
 // monitorPort settles one monitor's port. One the operator named must be free
@@ -547,21 +666,23 @@ const hubEnvTemplate = `# cloop hub secrets — generated by ` + "`cloop hub boo
 #   compose     docker compose --env-file .cloop/hub.env up
 #   shell       set -a; . .cloop/hub.env; set +a
 
-# Passphrase protecting every payload in the secret broker: kubeconfigs,
-# GitHub PATs, egress credentials. 256 bits from crypto/rand.
+# The root key, CLOOP_SECRET_KEY, is NOT in this file. It is in
+#   %s
+# beside .cloop/ rather than in it, so a backup of the database does not carry
+# the key that opens it. The systemd unit loads it as the credential
+# cloop-secret-key; a shell names it with CLOOP_SECRET_KEY_FILE=<that file>.
+# Never put it back here as an environment variable: those are readable in
+# /proc/<pid>/environ and inherited by every child process.
 #
-# Losing it means every sealed secret becomes unopenable, and changing it has
-# the same effect. Once the hub has started, escrow it under a passphrase:
+# Losing it means every sealed secret becomes unopenable. Once the hub has
+# started, escrow it under a passphrase:
 #   cloop hub key escrow export --output /path/off/this/host/cloop-hub.escrow
 # Keep that file where you keep root credentials, the passphrase somewhere
 # else again, and rehearse recovery with ` + "`cloop hub key escrow verify`" + `.
 # ` + "`cloop hub doctor`" + ` warns until an escrow is recorded.
 #
-# Rotating the *sealing keys* is a different operation and does not need this
-# value to change: run "cloop hub key rotate". Every key-encryption key is
-# derived from this passphrase, so rotation bounds the lifetime of a key, not
-# of the passphrase it comes from.
-CLOOP_SECRET_KEY=%s
+# Rotating the *sealing keys* does not change it: "cloop hub key rotate".
+# Changing it is online too — the runbook's "Changing CLOOP_SECRET_KEY itself".
 
 # Static bearer token for the dashboard and REST API. This is what keeps the
 # hub closed before an identity provider is wired up, and what API automation
@@ -593,8 +714,8 @@ func renderHubConfig(o *hubBootstrapOpts) ([]byte, error) {
 	return []byte(sb.String()), nil
 }
 
-func renderHubEnv(secretKey, uiToken string) string {
-	return fmt.Sprintf(hubEnvTemplate, secretKey, uiToken)
+func renderHubEnv(keyPath, uiToken string) string {
+	return fmt.Sprintf(hubEnvTemplate, keyPath, uiToken)
 }
 
 // systemdUnitTemplate is printed rather than installed. Writing into
@@ -612,6 +733,9 @@ User=%[1]s
 Group=%[1]s
 WorkingDirectory=%[2]s
 EnvironmentFile=%[3]s
+# The root key, as the credential cloop-secret-key in $CREDENTIALS_DIRECTORY:
+# read by systemd, never in the hub's environment.
+%[7]s
 ExecStart=%[4]s ui --port %[5]d --no-browser
 Restart=on-failure
 RestartSec=5s
@@ -650,16 +774,29 @@ func printHubBootstrapSummary(o *hubBootstrapOpts, configPath, envPath string, l
 	dim := color.New(color.Faint)
 
 	header.Println("Bootstrapped a cloop hub")
-	fmt.Printf("  config:  %s\n", configPath)
-	fmt.Printf("  secrets: %s (mode 0600)\n", envPath)
-	fmt.Printf("  url:     %s\n\n", o.ExternalURL)
+	fmt.Printf("  config:   %s\n", configPath)
+	fmt.Printf("  secrets:  %s (mode 0600)\n", envPath)
+	if o.KeyEncrypted {
+		fmt.Printf("  root key: %s (encrypted with systemd-creds; only systemd on this host can read it)\n", hubKeyPath(o))
+	} else {
+		fmt.Printf("  root key: %s (mode 0600)\n", hubKeyPath(o))
+	}
+	fmt.Printf("  url:      %s\n\n", o.ExternalURL)
 
 	fmt.Println("Applied:")
 	fmt.Println("  ✔ host execution disabled — no run can fork a harness on this host")
 	fmt.Println("  ✔ git proxy and Kubernetes monitor on (tls: auto) — forge and cluster credentials stay on the hub")
 	fmt.Println("  ✔ RBAC deny-by-default — an authenticated user with no mapping gets nothing")
 	fmt.Println("  ✔ WebSocket origin pinned to the external URL")
-	fmt.Println("  ✔ CLOOP_SECRET_KEY generated (256 bits, crypto/rand)")
+	if o.KeyEncrypted {
+		fmt.Println("  ✔ CLOOP_SECRET_KEY generated (256 bits, crypto/rand) and sealed with systemd-creds")
+	} else {
+		fmt.Println("  ✔ CLOOP_SECRET_KEY generated (256 bits, crypto/rand) into a key file, never an environment variable")
+		if o.KeyNote != "" {
+			warn.Printf("  ! not encrypted with systemd-creds (%s): the unit loads it with LoadCredential= instead\n",
+				o.KeyNote)
+		}
+	}
 	fmt.Println("  ✔ CLOOP_UI_TOKEN generated — the hub is closed before SSO exists")
 	if o.OIDCIssuer != "" {
 		fmt.Printf("  ✔ OIDC configured against %s\n", o.OIDCIssuer)
@@ -695,9 +832,23 @@ func printHubBootstrapSummary(o *hubBootstrapOpts, configPath, envPath string, l
 	fmt.Println()
 
 	fmt.Println("Start it:")
-	dim.Printf("\n  set -a; . %s; set +a\n  cd %s && cloop ui --port %d --no-browser\n\n", envPath, o.Dir, o.Port)
+	if o.KeyEncrypted {
+		dim.Printf("\n  Under the systemd unit below: only systemd can decrypt %s.\n"+
+			"  For a one-off run from a shell, as root:\n"+
+			"  systemd-run --pty --uid=%s --working-directory=%s -p EnvironmentFile=%s \\\n"+
+			"    -p LoadCredentialEncrypted=%s:%s %s ui --port %d --no-browser\n\n",
+			hubKeyPath(o), o.ServiceUser, o.Dir, envPath, rootkey.Credential, hubKeyPath(o), hubBinaryPath(), o.Port)
+	} else {
+		dim.Printf("\n  set -a; . %s; set +a\n  cd %s && %s=%s cloop ui --port %d --no-browser\n\n",
+			envPath, o.Dir, rootkey.EnvKeyFile, hubKeyPath(o), o.Port)
+		if u, err := user.Lookup(o.ServiceUser); err == nil && u.Uid != strconv.Itoa(os.Getuid()) {
+			dim.Printf("  The unit below loads %s as root, so it may stay yours; to name it with %s from\n"+
+				"  the %s account instead, `chown %s %s` — the hub reads only a key file it owns, mode 0400 or 0600.\n\n",
+				hubKeyPath(o), rootkey.EnvKeyFile, o.ServiceUser, o.ServiceUser, hubKeyPath(o))
+		}
+	}
 
-	fmt.Println("Then escrow the sealing key, so losing hub.env is not the end of every secret:")
+	fmt.Printf("Then escrow the root key, so losing %s is not the end of every secret:\n", hubKeyPath(o))
 	dim.Printf("\n  cloop hub key escrow export --output /path/off/this/host/cloop-hub.escrow\n\n")
 
 	header.Println("systemd unit for a bare-metal host")
@@ -721,6 +872,14 @@ func hubBinaryPath() string {
 }
 
 func systemdUnit(o *hubBootstrapOpts) string {
+	load := "LoadCredential"
+	if o.KeyEncrypted {
+		load = "LoadCredentialEncrypted"
+	}
+	keyPath := hubKeyPath(o)
+	if o.KeyFile == "" {
+		keyPath = filepath.Join(o.Dir, hubKeyFile)
+	}
 	return fmt.Sprintf(systemdUnitTemplate,
 		o.ServiceUser,
 		o.Dir,
@@ -728,6 +887,7 @@ func systemdUnit(o *hubBootstrapOpts) string {
 		hubBinaryPath(),
 		o.Port,
 		o.CloopDir,
+		load+"="+rootkey.Credential+":"+keyPath,
 	)
 }
 
@@ -765,6 +925,10 @@ func registerHubBootstrapFlags(cmd *cobra.Command) {
 		"UNIX user the printed systemd unit runs as")
 	f.Bool("force", false,
 		"overwrite an existing config and key (invalidates every sealed secret)")
+	f.String("key-file", "",
+		"where to write the root key, outside .cloop/ (default: "+hubKeyFile+" in --dir)")
+	f.String("systemd-creds", "auto",
+		"encrypt the root key with systemd-creds: auto (when this host can), always, or never")
 }
 
 func init() {

@@ -15,11 +15,14 @@ var secretCmd = &cobra.Command{
 	Short: "Manage AES-256-GCM encrypted project secrets",
 	Long: `Store sensitive credentials as AES-256-GCM encrypted entries in .cloop/secrets.enc.
 
-The encryption key is derived from the CLOOP_SECRET_KEY environment variable
-(required for all subcommands). Secrets are automatically injected as environment
+The encryption key is derived from CLOOP_SECRET_KEY (required for all
+subcommands), read from the file CLOOP_SECRET_KEY_FILE names, the systemd
+credential cloop-secret-key, or the variable itself. During a change of root
+the file opens under CLOOP_SECRET_KEY_PREVIOUS as well, and every save seals it
+under the current key. Secrets are automatically injected as environment
 variables during task execution — alongside 'cloop env' variables.
 
-  export CLOOP_SECRET_KEY="my-strong-passphrase"
+  export CLOOP_SECRET_KEY_FILE=/srv/cloop/cloop-secret-key
   cloop secret set GITHUB_TOKEN ghp_abc123
   cloop secret get GITHUB_TOKEN
   cloop secret list

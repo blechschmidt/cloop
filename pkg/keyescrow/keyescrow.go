@@ -69,8 +69,8 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/blechschmidt/cloop/pkg/auditcheckpoint"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/securewipe"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -89,8 +89,10 @@ const (
 
 // EnvKey is the variable holding the key an escrow protects: the secret
 // broker's passphrase (secretbroker.EnvPassphraseKey), which every audit
-// checkpoint and backup manifest seal is derived from as well.
-const EnvKey = "CLOOP_SECRET_KEY"
+// checkpoint and backup manifest seal is derived from as well. It may as well
+// come from a key file or a systemd credential (pkg/rootkey); an escrow holds
+// the current one, whichever source it was read from.
+const EnvKey = rootkey.EnvKey
 
 // MinPassphraseLength is the shortest passphrase an escrow accepts, in
 // characters: NIST SP 800-63B rev. 4 asks 15 of a password that is the only
@@ -554,14 +556,14 @@ func CheckPassphrase(passphrase []byte) error {
 // checkpoint line has not, at the cost to a guesser that line already sets: a
 // full PBKDF2 pass per try.
 func Fingerprint(key []byte) (string, error) {
-	k, err := auditcheckpoint.DeriveKey(string(key))
+	fp, err := rootkey.Fingerprint(string(key))
 	if err != nil {
-		if errors.Is(err, auditcheckpoint.ErrNoKey) {
+		if errors.Is(err, rootkey.ErrNoKey) {
 			return "", ErrNoKey
 		}
 		return "", fmt.Errorf("keyescrow: fingerprint: %w", err)
 	}
-	return k.Fingerprint(), nil
+	return fp, nil
 }
 
 // ── what the hub keeps ──────────────────────────────────────────────────────

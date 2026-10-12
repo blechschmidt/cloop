@@ -317,7 +317,7 @@ func (s *Server) auditCheckpointMember() string {
 // out. wrote reports that the records reached at least one destination, which
 // with an error means stderr took them and the file did not.
 func (s *Server) writeAuditCheckpoints(settings config.AuditCheckpointsConfig, reason string, window int64, all bool) (wrote bool, err error) {
-	key, kerr := auditcheckpoint.KeyFromEnv()
+	key, kerr := auditcheckpoint.KeyFromRoots()
 	if kerr != nil {
 		key = nil // unsigned; the doctor says so
 	}

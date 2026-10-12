@@ -41,6 +41,9 @@ type KEKRow struct {
 	CreatedAt  string
 	CreatedBy  string
 	RetiredAt  string
+	// Root is the fingerprint of the root secret the key derives from
+	// (migration 0073); '' until a process holding that root attributes it.
+	Root string
 }
 
 // RotationRow is one row of key_rotations.
@@ -162,16 +165,20 @@ func (d *DB) PutKEK(row KEKRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// An empty root never blanks a recorded one: a record put back by a
+	// caller that read it before it was attributed would otherwise undo the
+	// attribution.
 	if _, err := d.conn.Exec(
-		`INSERT INTO broker_keks(id, salt, state, check_value, created_at, created_by, retired_at)
-		 VALUES (?,?,?,?,?,?,?)
+		`INSERT INTO broker_keks(id, salt, state, check_value, created_at, created_by, retired_at, root)
+		 VALUES (?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   salt=excluded.salt, state=excluded.state, check_value=excluded.check_value,
 		   created_at=excluded.created_at, created_by=excluded.created_by,
-		   retired_at=excluded.retired_at
+		   retired_at=excluded.retired_at,
+		   root=CASE WHEN excluded.root <> '' THEN excluded.root ELSE broker_keks.root END
 		 WHERE broker_keks.state <> 'retired'`,
 		row.ID, row.Salt, defaultString(row.State, "active"), row.CheckValue,
-		row.CreatedAt, row.CreatedBy, row.RetiredAt,
+		row.CreatedAt, row.CreatedBy, row.RetiredAt, row.Root,
 	); err != nil {
 		return fmt.Errorf("statedb: put sealing key %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -182,13 +189,20 @@ func (d *DB) PutKEK(row KEKRow) error {
 func (d *DB) ListKEKs() ([]KEKRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return listKEKs(d.conn)
+	return listKEKs(d.conn, true)
 }
 
-// listKEKs reads the registry through conn, newest first.
-func listKEKs(conn *sql.DB) ([]KEKRow, error) {
+// listKEKs reads the registry through conn, newest first. withRoot is false
+// for a database that predates migration 0073 — a backup read by a restore's
+// preflight, which cannot assume this binary's schema — and every row then
+// reads as unattributed.
+func listKEKs(conn *sql.DB, withRoot bool) ([]KEKRow, error) {
+	root := "''"
+	if withRoot {
+		root = "root"
+	}
 	rows, err := conn.Query(
-		`SELECT id, salt, state, check_value, created_at, created_by, retired_at
+		`SELECT id, salt, state, check_value, created_at, created_by, retired_at, ` + root + `
 		 FROM broker_keks ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list sealing keys: %w", classifyDriverErr(err))
@@ -199,7 +213,7 @@ func listKEKs(conn *sql.DB) ([]KEKRow, error) {
 	for rows.Next() {
 		var row KEKRow
 		if err := rows.Scan(&row.ID, &row.Salt, &row.State, &row.CheckValue,
-			&row.CreatedAt, &row.CreatedBy, &row.RetiredAt); err != nil {
+			&row.CreatedAt, &row.CreatedBy, &row.RetiredAt, &row.Root); err != nil {
 			return nil, fmt.Errorf("statedb: scan sealing key: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)
@@ -221,10 +235,10 @@ func (d *DB) PrimaryKEK() (KEKRow, bool, error) {
 
 	var row KEKRow
 	err := d.conn.QueryRow(
-		`SELECT id, salt, state, check_value, created_at, created_by, retired_at
+		`SELECT id, salt, state, check_value, created_at, created_by, retired_at, root
 		 FROM broker_keks WHERE state = 'primary'`,
 	).Scan(&row.ID, &row.Salt, &row.State, &row.CheckValue,
-		&row.CreatedAt, &row.CreatedBy, &row.RetiredAt)
+		&row.CreatedAt, &row.CreatedBy, &row.RetiredAt, &row.Root)
 	if errors.Is(err, sql.ErrNoRows) {
 		return KEKRow{}, false, nil
 	}
@@ -232,6 +246,29 @@ func (d *DB) PrimaryKEK() (KEKRow, bool, error) {
 		return KEKRow{}, false, fmt.Errorf("statedb: read primary sealing key: %w", classifyDriverErr(err))
 	}
 	return row, true, nil
+}
+
+// SetKEKRoot records the root a key derives from, and reports whether it did
+// (Task 20425). It writes only a key nobody has attributed yet and that is not
+// retired: attribution happens once, by the first process that derives the key,
+// and a recorded root is never rewritten — a process whose roots disagree with
+// it is refused by the keyring, not allowed to relabel the registry.
+func (d *DB) SetKEKRoot(id, root string) (bool, error) {
+	if id == "" || root == "" {
+		return false, fmt.Errorf("statedb: attribute sealing key: empty id or root")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE broker_keks SET root = ? WHERE id = ? AND root = '' AND state <> 'retired'`, root, id)
+	if err != nil {
+		return false, fmt.Errorf("statedb: attribute sealing key %s: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: attribute sealing key %s: %w", id, classifyDriverErr(err))
+	}
+	return n > 0, nil
 }
 
 // PromoteKEK makes id the sole primary.

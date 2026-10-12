@@ -17,6 +17,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
@@ -128,6 +129,25 @@ but not for anything reachable from a network.`,
 			}
 		}
 
+		// The root key, from the one resolver every reader uses (Task 20425):
+		// a key file, a systemd credential or the environment, and during a
+		// change of root the previous key beside it. A source that is
+		// configured and refused — a key file another user could read, two
+		// sources holding different keys — stops the hub here rather than at
+		// the first secret it cannot open. What was resolved is pinned for the
+		// life of the process: its cluster peers are told the roots it started
+		// with, and a key file that changes under it takes effect at the next
+		// restart, which is how a new root is rolled out.
+		roots, err := rootkey.Resolve()
+		if err != nil {
+			return fmt.Errorf("the hub's root key: %w", err)
+		}
+		defer rootkey.Pin(roots)()
+		rootFingerprints := announceRoots(roots)
+		if err := checkHubRoots(workdir, roots); err != nil {
+			return err
+		}
+
 		token := uiToken
 		if token == "" {
 			token = os.Getenv("CLOOP_UI_TOKEN")
@@ -170,7 +190,7 @@ but not for anything reachable from a network.`,
 			}
 			defer lease.Release()
 		} else {
-			node, err = joinHubCluster(workdir, cfg, listen)
+			node, err = joinHubCluster(workdir, cfg, listen, rootFingerprints)
 			if err != nil {
 				return err
 			}

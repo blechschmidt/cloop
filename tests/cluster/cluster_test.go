@@ -105,6 +105,9 @@ type world struct {
 	mu      sync.Mutex
 	// agentExited closes when the enrolled agent's process exits.
 	agentExited chan struct{}
+	// rootEnv replaces the hubs' root key setting when set — the sources a
+	// change of root rolls out (Task 20425).
+	rootEnv []string
 }
 
 type hub struct {
@@ -433,17 +436,20 @@ func (w *world) provisionBinary() {
 
 // env is the hubs' environment: one home, one token, the stub first on PATH.
 func (w *world) env() []string {
-	return []string{
+	env := []string{
 		"HOME=" + w.home,
 		"CLOOP_HOME=" + w.cloopH,
 		"PATH=" + w.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"CLOOP_UI_TOKEN=" + token,
-		// A secret broker, shared by every hub through the one database, so
-		// the project can hold the Claude credential a sandboxed claudecode
-		// run is refused without (Task 20379).
-		"CLOOP_SECRET_KEY=e2e-hub-cluster",
 		"NO_COLOR=1",
 	}
+	if w.rootEnv != nil {
+		return append(env, w.rootEnv...)
+	}
+	// A secret broker, shared by every hub through the one database, so the
+	// project can hold the Claude credential a sandboxed claudecode run is
+	// refused without (Task 20379).
+	return append(env, "CLOOP_SECRET_KEY=e2e-hub-cluster")
 }
 
 // run executes a cloop subcommand to completion in dir.

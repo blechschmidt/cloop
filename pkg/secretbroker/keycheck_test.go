@@ -23,7 +23,7 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 	}
 	records, _ := store.ListKEKs()
 
-	got := CheckKeys(pass, records)
+	got := CheckKeys([]string{pass}, records)
 	if len(got) != 3 {
 		t.Fatalf("%d verdicts for 3 records", len(got))
 	}
@@ -39,12 +39,12 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 		}
 	}
 
-	for _, c := range CheckKeys("another-passphrase-entirely-0123456789", records) {
+	for _, c := range CheckKeys([]string{"another-passphrase-entirely-0123456789"}, records) {
 		if c.Opens {
 			t.Errorf("another passphrase opens %s", c.ID)
 		}
 	}
-	for _, c := range CheckKeys("", records) {
+	for _, c := range CheckKeys([]string{""}, records) {
 		if c.Opens {
 			t.Errorf("no passphrase opens %s", c.ID)
 		}
@@ -61,7 +61,7 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 		}
 	}
 	opened := 0
-	for _, c := range CheckKeys(pass, tampered) {
+	for _, c := range CheckKeys([]string{pass}, tampered) {
 		if c.Opens {
 			opened++
 		}
@@ -86,14 +86,14 @@ func TestLegacyKeyOpensASampleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	saltHex := encodeHex(salt)
-	if !LegacyKeyOpens(pass, saltHex, sample) {
+	if !LegacyKeyOpens([]string{pass}, saltHex, sample) {
 		t.Fatal("the passphrase that sealed it does not open it")
 	}
 	for name, ok := range map[string]bool{
-		"another passphrase": LegacyKeyOpens("not-the-legacy-passphrase-012345", saltHex, sample),
-		"no passphrase":      LegacyKeyOpens("", saltHex, sample),
-		"a corrupt salt":     LegacyKeyOpens(pass, "zz", sample),
-		"no sample":          LegacyKeyOpens(pass, saltHex, nil),
+		"another passphrase": LegacyKeyOpens([]string{"not-the-legacy-passphrase-012345"}, saltHex, sample),
+		"no passphrase":      LegacyKeyOpens([]string{""}, saltHex, sample),
+		"a corrupt salt":     LegacyKeyOpens([]string{pass}, "zz", sample),
+		"no sample":          LegacyKeyOpens([]string{pass}, saltHex, nil),
 	} {
 		if ok {
 			t.Errorf("%s opens it", name)

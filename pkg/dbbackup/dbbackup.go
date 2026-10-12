@@ -61,6 +61,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -128,10 +129,16 @@ type BackupOptions struct {
 }
 
 // Backup creates a hot backup of the SQLite database at srcPath and writes
-// it to outPath, sealing its sidecar under the process's CLOOP_SECRET_KEY.
-// See BackupWithOptions.
+// it to outPath, sealing its sidecar under the hub's current root
+// (pkg/rootkey). See BackupWithOptions.
 func Backup(srcPath, outPath string) (*BackupReport, error) {
-	return BackupWithOptions(srcPath, outPath, BackupOptions{Key: os.Getenv(EnvKey)})
+	key, err := rootkey.Current()
+	if err != nil {
+		// Configured and refused: an unsealed sidecar here would be one a
+		// restore then refuses, written by a backup that reported success.
+		return nil, fmt.Errorf("dbbackup: the key the sidecar is sealed under: %w", err)
+	}
+	return BackupWithOptions(srcPath, outPath, BackupOptions{Key: key})
 }
 
 // BackupWithOptions creates a hot backup of the SQLite database at srcPath
@@ -322,6 +329,11 @@ type RestoreOptions struct {
 	// its seal; the restore record is sealed under it. Restore never reads
 	// the environment itself: the caller says which key it means.
 	Key string
+	// Previous is the CLOOP_SECRET_KEY_PREVIOUS the restored hub will run
+	// with during a change of root (Task 20425): the backup's keys and its
+	// sidecar may derive from it instead, and checkpoints sealed under it are
+	// read as the hub's own. Nothing is sealed under it.
+	Previous string
 
 	// SkipChecksum restores without checking the sidecar at all — no digest,
 	// no seal. For a backup whose sidecar was lost; nothing then vouches that
@@ -408,6 +420,7 @@ func Restore(backupPath, dstPath string, opts RestoreOptions) (*RestoreReport, e
 
 	pre, err := Inspect(backupPath, PreflightOptions{
 		Key:              opts.Key,
+		Previous:         opts.Previous,
 		SkipChecksum:     opts.SkipChecksum,
 		AllowUnsealed:    opts.AllowUnsealed,
 		AcceptSecretLoss: opts.AcceptSecretLoss,

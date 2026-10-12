@@ -8,6 +8,7 @@ package cmd
 // settings survived the round trip as values, not as text.
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
 // bootstrapInto runs the command against dir and returns the loaded config.
@@ -86,22 +88,43 @@ func TestHubBootstrap_WritesSecretsSeparatelyAt0600(t *testing.T) {
 		t.Fatalf("read hub.env: %v", err)
 	}
 
-	key := envValue(string(body), "CLOOP_SECRET_KEY")
+	// The root key is in a file of its own, beside .cloop/ and not in the
+	// environment file (Task 20425).
+	key := readKeyFile(t, filepath.Join(dir, hubKeyFile))
 	if len(key) < 40 {
-		t.Errorf("CLOOP_SECRET_KEY = %q, want 32 random bytes base64url-encoded", key)
+		t.Errorf("the root key = %q, want 32 random bytes base64url-encoded", key)
+	}
+	if v := envValue(string(body), "CLOOP_SECRET_KEY"); v != "" || strings.Contains(string(body), key) {
+		t.Error("the root key is in hub.env, where it ends up in the hub's environment")
+	}
+	if !strings.Contains(string(body), filepath.Join(dir, hubKeyFile)) {
+		t.Error("hub.env does not say where the root key went")
 	}
 	if tok := envValue(string(body), "CLOOP_UI_TOKEN"); len(tok) < 40 {
 		t.Errorf("CLOOP_UI_TOKEN = %q, want a generated token — an unauthenticated hub is not secure-by-default", tok)
 	}
 
 	if runtime.GOOS != "windows" {
-		fi, err := os.Stat(envPath)
-		if err != nil {
-			t.Fatal(err)
+		for _, p := range []string{envPath, filepath.Join(dir, hubKeyFile)} {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := fi.Mode().Perm(); perm != 0o600 {
+				t.Errorf("%s mode = %#o, want 0600", filepath.Base(p), perm)
+			}
 		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Errorf("hub.env mode = %#o, want 0600", perm)
-		}
+	}
+
+	// The hub reads the file it was given exactly as written.
+	t.Setenv(rootkey.EnvKey, "")
+	t.Setenv(rootkey.EnvKeyFile, filepath.Join(dir, hubKeyFile))
+	roots, err := rootkey.Resolve()
+	if err != nil {
+		t.Fatalf("the hub would refuse the key file bootstrap wrote: %v", err)
+	}
+	if roots.Current.Value != key || roots.Current.Source != rootkey.SourceFile {
+		t.Errorf("resolved %s, want the key file's key", roots.Current.Describe())
 	}
 
 	// The master key must not also be in the config, which is the file
@@ -122,11 +145,7 @@ func TestHubBootstrap_KeysAreNotDeterministic(t *testing.T) {
 		if err := runBootstrap(t, dir); err != nil {
 			t.Fatalf("hub bootstrap: %v", err)
 		}
-		b, err := os.ReadFile(filepath.Join(dir, ".cloop", hubEnvFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return envValue(string(b), "CLOOP_SECRET_KEY")
+		return readKeyFile(t, filepath.Join(dir, hubKeyFile))
 	}
 	if a, b := read(), read(); a == b {
 		t.Fatal("two bootstraps produced the same CLOOP_SECRET_KEY")
@@ -251,6 +270,7 @@ func TestHubBootstrap_RefusesToClobberWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	keyBefore := readKeyFile(t, filepath.Join(dir, hubKeyFile))
 
 	err = runBootstrap(t, dir)
 	if err == nil {
@@ -267,6 +287,9 @@ func TestHubBootstrap_RefusesToClobberWithoutForce(t *testing.T) {
 	if string(before) != string(after) {
 		t.Error("the refused bootstrap still modified hub.env")
 	}
+	if readKeyFile(t, filepath.Join(dir, hubKeyFile)) != keyBefore {
+		t.Error("the refused bootstrap still replaced the root key")
+	}
 
 	if err := runBootstrap(t, dir, "--force"); err != nil {
 		t.Fatalf("--force bootstrap: %v", err)
@@ -278,6 +301,108 @@ func TestHubBootstrap_RefusesToClobberWithoutForce(t *testing.T) {
 	if string(forced) == string(before) {
 		t.Error("--force did not regenerate the key material")
 	}
+	if readKeyFile(t, filepath.Join(dir, hubKeyFile)) == keyBefore {
+		t.Error("--force did not regenerate the root key")
+	}
+}
+
+// A key file left by an earlier bootstrap is a deployment too: a bootstrap
+// that kept the config but replaced the key would leave every sealed secret
+// unopenable.
+func TestHubBootstrap_RefusesToReplaceAKeyFileWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, hubKeyFile), []byte("an existing key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runBootstrap(t, dir); err == nil || !strings.Contains(err.Error(), hubKeyFile) {
+		t.Fatalf("bootstrap over an existing key file: %v", err)
+	}
+	if got := readKeyFile(t, filepath.Join(dir, hubKeyFile)); got != "an existing key" {
+		t.Errorf("the key file now holds %q", got)
+	}
+}
+
+// The hub refuses a key file inside .cloop/, so bootstrap refuses to write one
+// there rather than produce a hub that will not start.
+func TestHubBootstrap_RefusesAKeyFileInsideTheStateDir(t *testing.T) {
+	dir := t.TempDir()
+	err := runBootstrap(t, dir, "--key-file", filepath.Join(dir, ".cloop", "key"))
+	if err == nil || !strings.Contains(err.Error(), ".cloop/") {
+		t.Fatalf("bootstrap with a key file inside .cloop/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".cloop", "key")); err == nil {
+		t.Error("the key was written anyway")
+	}
+}
+
+// Where systemd-creds can encrypt it, the key is only ever written encrypted,
+// and the unit loads it with LoadCredentialEncrypted=.
+func TestHubBootstrap_EncryptsTheKeyWithSystemdCreds(t *testing.T) {
+	var sealed []byte
+	stubSystemdCreds(t, func(name string, key []byte, path string) error {
+		if name != rootkey.Credential {
+			t.Errorf("credential name %q, want %q", name, rootkey.Credential)
+		}
+		sealed = append([]byte(nil), key...)
+		return os.WriteFile(path, []byte("Whxqht+dQJax1aZeCGLxmiAAAAABAAAADAAAABAAAAB-encrypted"), 0o600)
+	})
+	dir := t.TempDir()
+	if err := runBootstrap(t, dir); err != nil {
+		t.Fatalf("hub bootstrap: %v", err)
+	}
+	if len(sealed) < 40 {
+		t.Fatalf("systemd-creds was given %q", sealed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hubKeyFile)); err == nil {
+		t.Error("a plaintext key file was written beside the credential")
+	}
+	cred := filepath.Join(dir, hubKeyFile+hubKeyCredSuffix)
+	if _, err := os.Stat(cred); err != nil {
+		t.Fatalf("no credential: %v", err)
+	}
+	env, _ := os.ReadFile(filepath.Join(dir, ".cloop", hubEnvFile))
+	if !strings.Contains(string(env), cred) || strings.Contains(string(env), string(sealed)) {
+		t.Error("hub.env does not point at the credential, or holds the key")
+	}
+	o := &hubBootstrapOpts{Dir: dir, CloopDir: filepath.Join(dir, ".cloop"), Port: 8080, ServiceUser: "cloop",
+		KeyFile: filepath.Join(dir, hubKeyFile), KeyEncrypted: true}
+	if unit := systemdUnit(o); !strings.Contains(unit, "LoadCredentialEncrypted="+rootkey.Credential+":"+cred) {
+		t.Errorf("the unit does not load the credential:\n%s", unit)
+	}
+}
+
+// --systemd-creds always means encrypted or nothing: a host that cannot is
+// told so, and no plaintext key is left behind in its place.
+func TestHubBootstrap_SystemdCredsAlwaysRefusesWhereItCannot(t *testing.T) {
+	stubSystemdCreds(t, func(string, []byte, string) error { return errors.New("no TPM and no host key") })
+	dir := t.TempDir()
+	err := runBootstrap(t, dir, "--systemd-creds", "always")
+	if err == nil || !strings.Contains(err.Error(), "no TPM and no host key") {
+		t.Fatalf("--systemd-creds always on a host that cannot: %v", err)
+	}
+	for _, p := range []string{filepath.Join(dir, hubKeyFile), filepath.Join(dir, hubKeyFile+hubKeyCredSuffix)} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s was written", p)
+		}
+	}
+}
+
+func stubSystemdCreds(t *testing.T, fn func(name string, key []byte, path string) error) {
+	t.Helper()
+	prev := systemdCredsEncrypt
+	systemdCredsEncrypt = fn
+	t.Cleanup(func() { systemdCredsEncrypt = prev })
+}
+
+// readKeyFile reads a key file as the hub does: one trailing newline is not
+// part of the key.
+func readKeyFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return strings.TrimSuffix(string(b), "\n")
 }
 
 func TestHubBootstrap_SystemdUnitConfinesTheHub(t *testing.T) {
@@ -296,6 +421,8 @@ func TestHubBootstrap_SystemdUnitConfinesTheHub(t *testing.T) {
 		"User=cloop",
 		"WorkingDirectory=/srv/cloop",
 		"EnvironmentFile=/srv/cloop/.cloop/hub.env",
+		// The root key as a credential, never an EnvironmentFile line.
+		"LoadCredential=cloop-secret-key:/srv/cloop/cloop-secret-key",
 		"NoNewPrivileges=yes",
 		"ProtectSystem=strict",
 		"CapabilityBoundingSet=",

@@ -287,15 +287,30 @@ secrets:
   # the file with your root credentials. Never let Helm generate it for a
   # cluster you care about.
   #
+  # The hub reads it as a file: the chart mounts the Secret's CLOOP_SECRET_KEY
+  # at /etc/cloop/root-key/cloop-secret-key and sets CLOOP_SECRET_KEY_FILE,
+  # and blanks the variable envFrom would otherwise set — so the key is in no
+  # process environment and in no `kubectl get pod -o yaml`. The Pod's
+  # fsGroup (podSecurityContext) is what lets the hub read it.
+  #
   # Rolling the sealing keys does NOT require changing this value: run
   # "cloop hub key rotate" against the hub. It rewraps every data key onto a
   # fresh key-encryption key while the hub keeps serving, and re-mints nothing.
+  #
+  # Changing the value itself is online too. Put the new key in the Secret as
+  # CLOOP_SECRET_KEY and the old one as CLOOP_SECRET_KEY_PREVIOUS, and roll the
+  # Pods (`kubectl rollout restart`; with secrets.create the chart rolls them
+  # itself). Escrow the new key, then in a Pod:
+  #   cloop hub key rotate --retire-previous
+  # It refuses until every replica runs on the new key and an escrow of it is
+  # on record. Then drop CLOOP_SECRET_KEY_PREVIOUS and roll the Pods again.
   existingSecret: ""
 
   # Chart-managed Secret. For evaluation only: the values land in your
   # values file, in the release's stored manifest and in `helm get manifest`.
   create: false
   secretKey: ""              # CLOOP_SECRET_KEY
+  previousSecretKey: ""      # CLOOP_SECRET_KEY_PREVIOUS — only during a change of root (above)
   uiToken: ""                # CLOOP_UI_TOKEN — retire it once SSO works (above)
   oidcClientSecret: ""       # CLOOP_OIDC_CLIENT_SECRET
 

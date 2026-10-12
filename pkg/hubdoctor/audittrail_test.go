@@ -83,7 +83,7 @@ func TestAuditCheckpointFindings(t *testing.T) {
 
 	t.Run("signed, fresh and agreeing, then truncated", func(t *testing.T) {
 		t.Setenv(auditcheckpoint.EnvKey, "doctor-key-0123456789abcdef0123456789")
-		key, err := auditcheckpoint.KeyFromEnv()
+		key, err := auditcheckpoint.KeyFromRoots()
 		if err != nil {
 			t.Fatal(err)
 		}

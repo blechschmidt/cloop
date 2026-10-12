@@ -17,30 +17,41 @@ import "sort"
 // broker's metadata table, for callers reading a database without a Store.
 const LegacySaltMetaKey = metaKeySalt
 
-// KeyCheck is one sealing key judged against a passphrase.
+// KeyCheck is one sealing key judged against a set of roots.
 type KeyCheck struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
-	// Opens: the passphrase derives the key and it passes its check value.
+	// Opens: one of the roots derives the key and it passes its check value.
 	Opens bool `json:"opens"`
+	// Root is the index in the roots checked of the one that derives it — 0
+	// for the first, the current root — or -1 when none does.
+	Root int `json:"root"`
 	// Retired: the key's salt was destroyed, so nothing derives it — whatever
 	// is still sealed under it was lost before anybody asked.
 	Retired bool `json:"retired,omitempty"`
 }
 
-// CheckKeys reports, for every record, whether passphrase derives it: the
-// check-value test OpenKeyring runs before it will serve. Every live record is
-// derived — about 60 ms each — because a registry with one corrupt row is
-// exactly the case where "the first one opened" says nothing about the rest.
-// Results are ordered by ID. An empty passphrase opens nothing.
-func CheckKeys(passphrase string, records []KEKRecord) []KeyCheck {
+// CheckKeys reports, for every record, whether one of roots derives it: the
+// check-value test OpenKeyring runs before it will serve, asked of every root a
+// hub could hold — the current one and, during a change of root, the previous
+// (Task 20425). Every live record is derived — about 60 ms per root tried —
+// because a registry with one corrupt row is exactly the case where "the first
+// one opened" says nothing about the rest. Results are ordered by ID. Empty
+// roots are skipped; no roots open nothing.
+func CheckKeys(roots []string, records []KEKRecord) []KeyCheck {
 	out := make([]KeyCheck, 0, len(records))
 	for _, rec := range records {
-		c := KeyCheck{ID: rec.ID, State: rec.State, Retired: rec.Retired()}
-		if !c.Retired && passphrase != "" {
-			if key, err := deriveKEK(passphrase, rec); err == nil {
-				zero(key)
-				c.Opens = true
+		c := KeyCheck{ID: rec.ID, State: rec.State, Retired: rec.Retired(), Root: -1}
+		if !c.Retired {
+			for i, root := range roots {
+				if root == "" {
+					continue
+				}
+				if key, err := cachedDeriveKEK(root, rec); err == nil {
+					zero(key)
+					c.Opens, c.Root = true, i
+					break
+				}
 			}
 		}
 		out = append(out, c)
@@ -49,23 +60,31 @@ func CheckKeys(passphrase string, records []KEKRecord) []KeyCheck {
 	return out
 }
 
-// LegacyKeyOpens reports whether passphrase opens sample, a ciphertext the
+// LegacyKeyOpens reports whether one of roots opens sample, a ciphertext the
 // pre-envelope construction sealed under the store-wide salt saltHex.
 //
 // That construction has no check value, so the only way to answer is to open
 // something it sealed. The plaintext is wiped before this returns and never
 // leaves it; the answer is all a caller gets.
-func LegacyKeyOpens(passphrase, saltHex string, sample []byte) bool {
-	if passphrase == "" || len(sample) == 0 {
+func LegacyKeyOpens(roots []string, saltHex string, sample []byte) bool {
+	if len(sample) == 0 {
 		return false
 	}
 	salt, err := decodeHex(saltHex)
 	if err != nil || len(salt) != saltSize {
 		return false
 	}
-	c := &Cipher{key: deriveKey(passphrase, salt)}
-	defer zero(c.key)
-	plain, err := c.Unseal(sample)
-	zero(plain)
-	return err == nil
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		c := &Cipher{key: deriveKey(root, salt)}
+		plain, err := c.Unseal(sample)
+		zero(plain)
+		zero(c.key)
+		if err == nil {
+			return true
+		}
+	}
+	return false
 }

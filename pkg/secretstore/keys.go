@@ -28,6 +28,7 @@ import (
 // is wanted — instead of here.
 var (
 	_ secretbroker.KeyStore      = (*Store)(nil)
+	_ secretbroker.KeyAttributor = (*Store)(nil)
 	_ secretbroker.RotationStore = (*Store)(nil)
 	_ secretbroker.SealedSet     = (*Store)(nil)
 )
@@ -46,6 +47,7 @@ func (s *Store) PutKEK(k secretbroker.KEKRecord) error {
 		CreatedAt:  formatTime(k.CreatedAt),
 		CreatedBy:  k.CreatedBy,
 		RetiredAt:  formatTime(k.RetiredAt),
+		Root:       k.Root,
 	}))
 }
 
@@ -81,6 +83,12 @@ func (s *Store) RetireKEK(id string, at time.Time) error {
 	return translateKeyErr(s.db.RetireKEK(id, at))
 }
 
+// AttributeKEK records the root a key derives from, once (Task 20425).
+func (s *Store) AttributeKEK(id, root string) (bool, error) {
+	ok, err := s.db.SetKEKRoot(id, root)
+	return ok, translateKeyErr(err)
+}
+
 // ---------------------------------------------------------------------------
 // RotationStore
 // ---------------------------------------------------------------------------
@@ -94,6 +102,7 @@ func toKEK(row statedb.KEKRow) secretbroker.KEKRecord {
 		CreatedAt:  parseTime(row.CreatedAt),
 		CreatedBy:  row.CreatedBy,
 		RetiredAt:  parseTime(row.RetiredAt),
+		Root:       row.Root,
 	}
 }
 

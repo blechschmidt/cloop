@@ -19,7 +19,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/offboard"
+	"github.com/blechschmidt/cloop/pkg/rootkey"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
@@ -36,7 +40,9 @@ const envClusterAdvertiseHost = "CLOOP_CLUSTER_ADVERTISE_HOST"
 // joinHubCluster makes this process a member of the cluster serving workdir's
 // control plane. listen is where this process will serve (Task 20393): its
 // display address, and where on this machine the others reach it by default.
-func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*hubcluster.Node, error) {
+// roots are the fingerprints of the root keys it holds, which its member row
+// advertises (Task 20425).
+func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan, roots map[string]string) (*hubcluster.Node, error) {
 	advertise, err := clusterAdvertiseURL(cfg, listen.LocalHost())
 	if err != nil {
 		return nil, err
@@ -48,9 +54,15 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*
 	// Where this process keeps per-user Claude homes, so an offboarding can
 	// tell a stopped member's tree from the ones it reached (Task 20400), and
 	// `cloop hub doctor` finds a denied identity's home left in it (Task 20422).
-	var endpoints map[string]string
+	endpoints := map[string]string{}
 	if root := ui.ClaudeHomesRoot(); root != "" {
-		endpoints = map[string]string{offboard.ClaudeHomesEndpoint: root}
+		endpoints[offboard.ClaudeHomesEndpoint] = root
+	}
+	// Which root keys this member holds, by fingerprint: `cloop hub key rotate
+	// --retire-previous` retires the old root's keys only once every live
+	// member advertises the new one as its current root (Task 20425).
+	for name, fp := range roots {
+		endpoints[name] = fp
 	}
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),
@@ -195,4 +207,76 @@ func acquireExclusiveHub(workdir string, listen exposure.Plan) (*hublease.Lease,
 			live[0].AdvertiseURL)
 	}
 	return lease, nil
+}
+
+// announceRoots says where the root key came from, and returns the fingerprints
+// the member row advertises: rootkey.EndpointCurrent, and EndpointPrevious
+// during a change of root. Never the key itself.
+func announceRoots(roots rootkey.Roots) map[string]string {
+	out := map[string]string{}
+	if !roots.Current.Set() {
+		return out
+	}
+	current, previous, err := roots.Fingerprints()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: name the root key: %v\n", err)
+		return out
+	}
+	out[rootkey.EndpointCurrent] = current
+	fmt.Printf("Root key: %s, from %s\n", current, roots.Current.Describe())
+	if previous != "" {
+		out[rootkey.EndpointPrevious] = previous
+		fmt.Printf("Previous root key: %s, from %s — a change of root is in progress; finish it with "+
+			"`cloop hub key rotate --retire-previous` once every member runs on %s\n",
+			previous, roots.Previous.Describe(), current)
+	}
+	return out
+}
+
+// checkHubRoots applies the rule a hub starts by (Task 20425), before it joins
+// the cluster or serves anything: every live sealing key in the control plane
+// derives from a root this process holds. A member started with a mistyped
+// key — or with only the old root after `cloop hub key rotate
+// --retire-previous` retired it — stops here, naming the keys, instead of
+// serving a dashboard on which every secret, session and hub CA key fails.
+//
+// Read-only: it mints nothing and attributes nothing, so a refused start leaves
+// the control plane as it found it. A hub with no key configured is the
+// documented degraded mode and is not refused; one with no database yet has no
+// registry to check.
+func checkHubRoots(workdir string, roots rootkey.Roots) error {
+	if !roots.Current.Set() {
+		return nil
+	}
+	dbPath := state.DBPath(workdir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil // the hub's own open reports it, with more context
+	}
+	defer db.Close()
+	store, err := secretstore.New(db)
+	if err != nil {
+		return nil
+	}
+	kr, err := secretbroker.OpenKeyring(store, secretbroker.WithoutKeyCreation(),
+		secretbroker.WithKeyringRoots(roots.Current.Value, roots.Previous.Value))
+	if err != nil {
+		return fmt.Errorf("the hub's root key: %w", err)
+	}
+	bad := kr.Underivable()
+	if len(bad) == 0 {
+		return nil
+	}
+	current, previous, _ := roots.Fingerprints()
+	held := rootkey.EnvKey + " " + current
+	if previous != "" {
+		held += ", " + rootkey.EnvPrevious + " " + previous
+	}
+	return fmt.Errorf("%w: the sealing key(s) %s derive from no root this hub holds (%s). It is the wrong key, "+
+		"or this member was not given the root a change of root moved everything onto: start it with the key "+
+		"every other member runs on (`cloop hub key list` names the keys each root opens)",
+		secretbroker.ErrKeyUnavailable, strings.Join(bad, ", "), held)
 }

@@ -266,6 +266,13 @@ func (s *Store) ApplyRefresh(id string, res oidcauth.RefreshResult) error {
 		CheckedAt:      res.CheckedAt,
 		ClaimsAsOf:     res.ClaimsAsOf,
 		ClaimsExpireAt: res.ClaimsExpireAt,
+		// No token to store is not "store no token" (Task 20425). The record
+		// this result was built from carries the token the row holds, or ""
+		// when this process could not open it — see unseal — and a member
+		// that writes that "" back erases a credential it merely could not
+		// read. The row keeps what it has; nothing the hub does clears a
+		// session's token short of deleting the session.
+		KeepSealed: res.RefreshToken == "",
 	}
 	if res.ClaimsAsserted {
 		up.Claims = &statedb.SessionClaims{Groups: res.Groups, Roles: res.Roles}
@@ -309,12 +316,18 @@ func (s *Store) seal(sessionID, refreshToken string) (secretbroker.Envelope, err
 // unseal decrypts a stored refresh token.
 //
 // A failure returns the empty string rather than an error, on purpose. The
-// realistic cause is a rotated or lost CLOOP_SECRET_KEY, and every session
-// predating the rotation would then be undecryptable. Treating that as "this
-// session has no refresh token" costs the IdP-revocation channel for those
+// realistic causes are a lost CLOOP_SECRET_KEY, and — during a change of root
+// (Task 20425) — a hub member not yet restarted with the new root reading a
+// token a restarted one sealed under it. Treating that as "this session has no
+// refresh token" costs this process the IdP-revocation channel for those
 // sessions; treating it as an error would either fail every read — signing the
 // whole fleet out — or, worse, look like a refusal from the provider and
 // terminate them as if the users had been disabled.
+//
+// The token is only unreadable here, not gone: ApplyRefresh never writes the
+// "" back over it, so the member that can open it still has it, and so does
+// this one once it is restarted with the root. The failure is counted by
+// cloop_secret_unseal_failures_total under its reason.
 func (s *Store) unseal(row statedb.SessionRow) string {
 	if len(row.RefreshSealed) == 0 || s.keyring == nil {
 		return ""

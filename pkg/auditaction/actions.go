@@ -439,6 +439,10 @@ const (
 	// an operator's passphrase, or an escrow being recorded again after a
 	// restore (Task 20410).
 	ActionSealingKeyEscrowed Action = "sealing_key.escrowed"
+	// ActionSealingKeyRootChanged records a change of CLOOP_SECRET_KEY itself
+	// being finished: every sealed row moved onto a key of the new root, and
+	// every key of the previous root retired (Task 20425).
+	ActionSealingKeyRootChanged Action = "sealing_key.root_changed"
 
 	// ── hub_ca ─────────────────────────────────────────────────────────────
 

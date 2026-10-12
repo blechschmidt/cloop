@@ -41,7 +41,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.config.fromConfigMap .Values.podAnnotations $mt.caBundle (include "cloop-hub.monitorsEnabled" .) }}
+      {{- if or .Values.config.fromConfigMap .Values.podAnnotations $mt.caBundle (include "cloop-hub.monitorsEnabled" .) .Values.secrets.create }}
       annotations:
         {{- if .Values.config.fromConfigMap }}
         # Roll the Pod when the config changes. Without this a `helm upgrade`
@@ -49,6 +49,13 @@ spec:
         # the old policy running, which is the worst possible outcome for a
         # security setting.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.secrets.create }}
+        # Roll the Pods when the chart-managed Secret changes: a key in it is
+        # read at start, so a new CLOOP_SECRET_KEY, or a previous one added for
+        # a change of root, takes effect by a rolling restart — which is the
+        # procedure (Task 20425).
+        checksum/secrets: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
         {{- with $mt.caBundle }}
         # The monitors read their CA at start; a new one needs a new Pod.
@@ -125,6 +132,24 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # The root key reaches the hub as a file, never as an environment
+            # variable (Task 20425): in the environment it is in
+            # /proc/<pid>/environ and in `kubectl get pod -o yaml`. The Secret
+            # is mounted below; CLOOP_SECRET_KEY_FILE names the current key,
+            # and the directory is read as a credentials directory, so adding
+            # CLOOP_SECRET_KEY_PREVIOUS to the Secret is all a change of root
+            # needs here — nothing in these values changes.
+            - name: CLOOP_SECRET_KEY_FILE
+              value: /etc/cloop/root-key/cloop-secret-key
+            - name: CREDENTIALS_DIRECTORY
+              value: /etc/cloop/root-key
+            # Blank, and so unset to the hub. envFrom below loads every key of
+            # the Secret into the environment, these two included, and an
+            # explicit entry is the one thing that wins over it.
+            - name: CLOOP_SECRET_KEY
+              value: ""
+            - name: CLOOP_SECRET_KEY_PREVIOUS
+              value: ""
             {{- if $extraCA }}
             # Added to the image's own bundle, not substituted for it: Go reads
             # its default certificate file and then every file in these
@@ -187,6 +212,9 @@ spec:
               mountPath: /etc/cloop/extra-ca
               readOnly: true
             {{- end }}
+            - name: root-key
+              mountPath: /etc/cloop/root-key
+              readOnly: true
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- with .Values.livenessProbe }}
@@ -244,6 +272,23 @@ spec:
             name: {{ $extraCA }}
             defaultMode: 0444
         {{- end }}
+        # The root key and, during a change of root, the previous one, named
+        # as the hub reads systemd credentials. Group-readable: the hub runs as
+        # the Pod's fsGroup and never as the files' owner, and this is the one
+        # shape of key file the hub accepts that it does not own — owned by
+        # root, readable by its own group and by nobody else.
+        - name: root-key
+          secret:
+            secretName: {{ include "cloop-hub.secretName" . }}
+            items:
+              - {key: CLOOP_SECRET_KEY, path: cloop-secret-key}
+              - {key: CLOOP_SECRET_KEY_PREVIOUS, path: cloop-secret-key-previous}
+            defaultMode: 0440
+            # A missing item is skipped rather than refusing the Pod, which is
+            # what makes the previous key optional. A missing current key is
+            # not tolerated by the hub, which refuses to start without the
+            # file CLOOP_SECRET_KEY_FILE names.
+            optional: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
