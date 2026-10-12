@@ -90,6 +90,9 @@ var rbacAsks = []struct{ file, fn, callee string }{
 	{"pkg/ui/oidcconfig.go", "wouldDemoteCaller", "authz.Enforced"},
 	{"pkg/hubdoctor/rbac.go", "checkRBAC", "authz.Enforced"},
 	{"pkg/hubdoctor/statictoken.go", "checkStaticToken", "oc.RBACEnforced"},
+	{"pkg/hubdoctor/apitokens.go", "checkUnapprovedTokens", "oc.RBACEnforced"},
+	{"pkg/ui/tokens_api.go", "tokenSuspended", "s.authzActive"},
+	{"pkg/ui/tokens_api.go", "mintedUnder", "s.authzActive"},
 	{"cmd/ui_rbac.go", "reportRBAC", "authz.Enforced"},
 	{"pkg/config/oidc.go", "RBACEnforced", "authz.Enforced"},
 }

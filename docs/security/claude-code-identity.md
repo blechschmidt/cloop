@@ -401,10 +401,20 @@ the peer channel; the CLI asks them over the bus. A member that cannot be asked
 is reported, never assumed empty — see
 [offboarding in the security model](model.md#offboarding-what-a-departed-identity-keeps).
 Under a legal hold (`--keep-credentials`) the login in flight is still cancelled
-and the homes are kept as they are.
+and the homes are kept as they are; the run records the hold on the identity
+first, so nothing removes them later until it is released.
 
-By hand, on a host the run could not reach, recompute the slug and remove the
-directory:
+A copy the offboarding could not reach does not stay (Task 20422): every hub
+member removes, from its own tree, the home of every identity the control plane
+denies hub-wide — as it starts, and hourly after — with the same three steps,
+and records each as `user.claude_home_swept`. It leaves an identity under a
+legal hold alone, and one denied only by a SCIM suspension still in force, which
+a reactivation undoes. A stopped member's tree is swept when that member starts
+again; `cloop hub doctor` fails `offboard.claude_homes` while such a home is
+still on its host, naming each directory.
+
+By hand, on a host no member will run on again, recompute the slug and remove
+the directory:
 
 ```console
 $ slug=$(printf '%s' 'dana@example.com' | sha256sum | cut -c1-32)

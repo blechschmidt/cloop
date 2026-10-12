@@ -49,6 +49,10 @@ type oidcRBACPanelResult struct {
 	FirstConfirm  bool `json:"firstConfirm"`
 	SecondConfirm bool `json:"secondConfirm"`
 
+	// enforce_names_the_tokens_it_suspends
+	TokenQuestion string `json:"tokenQuestion"`
+	SuspendedNote string `json:"suspendedNote"`
+
 	Error string `json:"error"`
 }
 
@@ -143,6 +147,19 @@ func TestDashboard_OIDCPanelShowsTheHubsRBACVerdict(t *testing.T) {
 		}
 		if !strings.Contains(got.NoteAfter, "restart the hub") || got.EnforceShownAfter {
 			t.Errorf("after enforcing: note %q, enforce still shown %v", got.NoteAfter, got.EnforceShownAfter)
+		}
+	})
+
+	t.Run("enforcing names every API token it will suspend", func(t *testing.T) {
+		got := results["enforce_names_the_tokens_it_suspends"]
+		for _, want := range []string{"These 2 API tokens", "suspended", "mallory-admin — admin, minted by mallory@example.com",
+			"deploy — operator"} {
+			if !strings.Contains(got.TokenQuestion, want) {
+				t.Errorf("the enforce question does not say %q:\n%s", want, got.TokenQuestion)
+			}
+		}
+		if !strings.Contains(got.SuspendedNote, "2 API tokens minted with no role policy in force are suspended") {
+			t.Errorf("under the policy the note says %q, want the two suspended tokens counted", got.SuspendedNote)
 		}
 	})
 

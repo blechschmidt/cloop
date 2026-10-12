@@ -292,6 +292,9 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 		ExpiresAt: time.Now().Add(glassesTTLDays * 24 * time.Hour),
 		Kind:      apitoken.KindGlasses,
 		Owner:     owner,
+		// Recorded for what it says; a link has an owner, whose authority the
+		// policy decides, so it never waits for an approval (Task 20422).
+		MintedUnder: s.mintedUnder(),
 	})
 	if err != nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))

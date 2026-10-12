@@ -327,6 +327,11 @@ type Options struct {
 	// substitute one so a machine's own caps cannot decide them; nil means
 	// globalbudget.Load.
 	GlobalBudget func() (globalbudget.GlobalBudgetConfig, error)
+
+	// ClaudeHomesRoot overrides where the doctor's own process keeps
+	// per-user Claude homes, for the leftover-homes check (Task 20422).
+	// Empty is claudecodeauth.HomeRootPath, from this process's environment.
+	ClaudeHomesRoot string
 }
 
 func (o Options) globalBudget() (globalbudget.GlobalBudgetConfig, error) {
@@ -432,6 +437,12 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// still accepted beside an enforced one, and how long it has gone unused
 	// (Task 20406).
 	checkStaticToken(dir, cfg, opts, add)
+	// Beside it: the API tokens the enforced policy suspends because they were
+	// minted while there was none (Task 20422).
+	checkUnapprovedTokens(dir, cfg, opts, add)
+	// What an offboarding could not reach: the Claude Code homes of
+	// identities the control plane denies, still on this host (Task 20422).
+	checkClaudeLeftovers(dir, opts, add)
 	checkImagePolicy(ctx, dir, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
 	checkEdgeLag(dir, add)

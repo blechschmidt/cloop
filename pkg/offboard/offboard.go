@@ -482,6 +482,19 @@ func Run(o Options) (Report, error) {
 		return rep, nil
 	}
 
+	// 0. A hold asked of this run (--keep-credentials) is recorded as one
+	//    placed on the identity, before anything is denied (Task 20422):
+	//    every hub member sweeps the Claude homes of identities the control
+	//    plane denies, and a hold on record is what keeps it from removing
+	//    the ones this run keeps — on a member this run never reaches too.
+	if o.KeepCredentials && plan.Hold == nil {
+		if err := recordRunHold(o, plan, now); err != nil {
+			rep.Failures = append(rep.Failures, Failure{"hold", "the hold was not recorded, so a hub " +
+				"member's sweep may remove a Claude home this run keeps — place it with `cloop hub user hold " +
+				"place`: " + err.Error()})
+		}
+	}
+
 	// 1. Sessions, through the live authenticator when there is one.
 	//
 	//    Ahead of the transaction, and therefore outside it. The trade is
@@ -616,6 +629,27 @@ func Run(o Options) (Report, error) {
 	}
 
 	return rep, nil
+}
+
+// recordRunHold places a legal hold on the identity for an offboarding run
+// asked to keep its credentials, with the run's reason.
+func recordRunHold(o Options, plan Plan, now time.Time) error {
+	key := plan.Target.Key
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("the identity has no owner key to place it on")
+	}
+	ev, err := newEvent(o, plan, auditaction.ActionUserHoldPlace, map[string]any{
+		"hold_reason": o.Reason, "placed_at": now.UTC().Format(time.RFC3339),
+	}, now)
+	if err != nil {
+		return err
+	}
+	by := o.Actor
+	if by == "" {
+		by = "system"
+	}
+	return o.DB.PutLegalHold(statedb.LegalHoldRow{Identity: key, Reason: o.Reason, PlacedAt: now.UTC(),
+		PlacedBy: by}, ev)
 }
 
 // ---------------------------------------------------------------------------

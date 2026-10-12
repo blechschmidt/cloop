@@ -1190,6 +1190,7 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/tokens", Handler: s.handleTokensList, Perm: tokenAdmin, Scope: scopeGlobal},
 		{Pattern: "POST /api/tokens", Handler: s.handleTokenCreate, Perm: tokenAdmin, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/tokens/{id}", Handler: s.handleTokenRevoke, Perm: tokenAdmin, Scope: scopeGlobal},
+		{Pattern: "POST /api/tokens/{id}/approve", Handler: s.handleTokenApprove, Perm: tokenAdmin, Scope: scopeGlobal},
 		// The static admin token (Task 20406): whether one is configured,
 		// its fingerprint and last use, and retiring it on every member
 		// without a restart. token.admin like the rows above — it is the

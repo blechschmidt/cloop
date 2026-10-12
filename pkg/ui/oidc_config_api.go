@@ -157,6 +157,47 @@ type oidcRBACView struct {
 	// CanEnforce is set when the saved block turns single sign-on on with no
 	// policy, so POST /api/config/oidc/enforce has something to write.
 	CanEnforce bool `json:"can_enforce"`
+
+	// AwaitingApproval are the live API tokens a role policy suspends until an
+	// administrator approves each (Task 20422): owner-less, and minted with no
+	// policy in force or before the hub recorded how. The enforce dialog names
+	// them; under the policy, Secrets → API tokens approves them.
+	AwaitingApproval []tokenBrief `json:"awaiting_approval,omitempty"`
+}
+
+// tokenBrief names an API token for a dialog: who minted it, when, with what.
+type tokenBrief struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Prefix    string   `json:"prefix"`
+	Roles     []string `json:"roles"`
+	CreatedBy string   `json:"created_by,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
+}
+
+// tokensAwaitingApproval lists the live tokens a role policy suspends until
+// they are approved (apitoken.Token.AwaitsApproval). Nil when there are none
+// or the tokens cannot be read: the dialog then names none, and the doctor's
+// api_tokens.unapproved is the check that fails loudly.
+func (s *Server) tokensAwaitingApproval() []tokenBrief {
+	mgr, err := s.tokenManager()
+	if err != nil {
+		return nil
+	}
+	tokens, err := mgr.List()
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	var out []tokenBrief
+	for i := range tokens {
+		t := &tokens[i]
+		if t.Active(now) && t.AwaitsApproval() {
+			out = append(out, tokenBrief{ID: t.ID, Name: t.Name, Prefix: t.Prefix, Roles: t.Roles,
+				CreatedBy: t.CreatedBy, CreatedAt: formatTokenTime(t.CreatedAt)})
+		}
+	}
+	return out
 }
 
 // oidcBound is one numeric field's accepted range, as the panel should
@@ -305,6 +346,7 @@ func (s *Server) oidcRBACOf(o config.OIDCConfig) oidcRBACView {
 	// the save path refuses and the restart banner reports.
 	savedOff := o.Enabled && err == nil && !v.SavedEnforced
 	v.CanEnforce = savedOff
+	v.AwaitingApproval = s.tokensAwaitingApproval()
 	switch {
 	case s.oidcEnabled() && !v.Enforced:
 		// Named after the issuer this process signs people in through, which

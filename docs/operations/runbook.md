@@ -139,7 +139,7 @@ What it checks, and what each one catches that nothing else does:
 | `tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
 | `ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one. `ui.static_token`: **warn** while a static token is accepted — exported in the doctor's shell, or reported by a running hub — beside single sign-on with an enforced role policy, saying how long it has gone unused; **pass** once it is retired. Silent without SSO, where the token is the sign-in, and without a policy, where `rbac.enforced` is the finding |
 | `secret_key` | `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs, and the key that opens this hub's sealing keys — asked of the keyring the broker opens, read-only (`secret_key.matches`) |
-| `rbac` | **whether a role policy is in force at all** (`rbac.enforced`: `authz.Enforced`, the answer the request gate acts on — a failure, naming the issuer, for single sign-on with no `role_mappings` and no `default_role`, where every identity the issuer authenticates holds every permission but executor administration; see [when RBAC is in force](../security/model.md#when-rbac-is-in-force)); the mappings parse; the default role's blast radius, reported only where a policy makes it mean something; group bindings with no `groups` scope; and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's |
+| `rbac` | **whether a role policy is in force at all** (`rbac.enforced`: `authz.Enforced`, the answer the request gate acts on — a failure, naming the issuer, for single sign-on with no `role_mappings` and no `default_role`, where every identity the issuer authenticates holds every permission but executor administration; see [when RBAC is in force](../security/model.md#when-rbac-is-in-force)); the mappings parse; the default role's blast radius, reported only where a policy makes it mean something; group bindings with no `groups` scope; and **whether anybody maps to admin** — all judged on the policy as `authz` normalizes it, so `role: Admin` is admin, and a project-scoped admin is not the hub's; and, where a policy is in force, every live API token it suspends — owner-less, minted while no policy was in force or before the hub recorded how, and not approved since (`api_tokens.unapproved`, a failure naming each; approve the ones you can vouch for, revoke the rest) |
 | `images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable where the container or Kubernetes executor verifies signatures — and a warning that enrolled devices do not — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names |
 | `executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`); and each device that follows releases whose build carries no sequence — every release before v0.0.5 — with the way to cover it (`executors.rollback_protection`) |
 | `gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`) |
@@ -2367,6 +2367,8 @@ cloop hub session revoke 3f9c1e7a2b5d48c0 --reason "reported stolen laptop, INC-
 cloop hub session revoke --identity alice@example.com --reason "credential compromise INC-4412"
 
 # 3. Sessions are not the only credential. Revoke any API token the account holds.
+#    A token listed "(unapproved)" was minted while no role policy was in force;
+#    a hub enforcing one refuses it until `cloop hub token approve <id>`.
 cloop hub token list
 cloop hub token revoke <token-id>
 
@@ -2583,13 +2585,21 @@ it wrote into a removed directory survives.
 process that created it, not in the database. The command removes the copy
 under its own, and asks every running hub member over the bus to remove theirs;
 the dashboard asks the other members over the peer channel. A copy that could
-not be reached is a failure that names it:
+not be reached is a failure that names it — and no longer one you clean up by
+hand: every hub member also removes, from its own tree, the Claude home of every
+identity the control plane denies hub-wide, as it starts and hourly after,
+logging it out first where it may and recording each as `user.claude_home_swept`
+(Task 20422). A legal hold keeps the homes (`--keep-credentials` records one on
+the identity before anything is denied — release it with `cloop hub user hold
+release`), and so does a SCIM suspension still in force, which a reactivation
+undoes. `cloop hub doctor` fails `offboard.claude_homes` while a home a sweep
+would remove is still on its host, naming each directory:
 
 | Failure says | What to do |
 | --- | --- |
-| `hub member … did not answer … a build older than this one` | Upgrade that member and re-run, or remove the listed `claude-identities/<slug>` directories under its config directory by hand |
-| `… holds this control plane exclusively (ui.cluster.exclusive)` | That hub reads no bus. Offboard from its dashboard, which removes its copies, or remove them by hand |
-| `… stopped … kept Claude logins under … on <host>` | A stopped member left its tree on a host that is still up. Remove the named directories there |
+| `hub member … did not answer … a build older than this one` | Nothing, once it runs this build or later: it removes the copy at its next sweep, within the hour, or as it restarts. On an older build, upgrade it, or remove the listed `claude-identities/<slug>` directories under its config directory by hand |
+| `… holds this control plane exclusively (ui.cluster.exclusive)` | That hub reads no bus, but sweeps its own tree like any member, within the hour. Offboard from its dashboard to have it now |
+| `… stopped … kept Claude logins under … on <host>` | A stopped member left its tree on a host that is still up. It removes them itself when it starts again; if it never will, remove the named directories there — `cloop hub doctor` on that host names them |
 | `refused to end the Claude logins of …` | A member found no deny binding for that spelling — check `cloop hub role list --identity …` |
 
 Re-running is safe: everything already destroyed is simply not found again.

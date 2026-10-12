@@ -84,6 +84,21 @@ func (m *memStore) Touch(id string, at time.Time) error {
 	return nil
 }
 
+func (m *memStore) Approve(id, by string, at time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tokens[id]
+	if !ok || t.Revoked() {
+		return false, fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
+	if !t.ApprovedAt.IsZero() {
+		return false, nil
+	}
+	t.ApprovedAt, t.ApprovedBy = at, by
+	m.tokens[id] = t
+	return true, nil
+}
+
 func (m *memStore) touchedAt(id string) (time.Time, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -791,5 +806,71 @@ func TestRevokeHookHearsEveryRevocation(t *testing.T) {
 	}
 	if len(heard) != 1 || heard[0] != minted.Token.ID {
 		t.Fatalf("the hook heard %q, want exactly the revoked token's id", heard)
+	}
+}
+
+// TestAwaitsApproval: a hub enforcing a role policy suspends an owner-less
+// token it cannot show was minted under one (Task 20422) — minted with no
+// policy in force, or before the hub recorded which — until it is approved.
+func TestAwaitsApproval(t *testing.T) {
+	owner := &Owner{Email: "alice@example.com"}
+	approved := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		tok  Token
+		want bool
+	}{
+		{"minted with no policy in force", Token{MintedUnder: MintedUnderNoPolicy}, true},
+		{"minted before the hub recorded which", Token{}, true},
+		{"an unknown value is not a policy", Token{MintedUnder: "maybe"}, true},
+		{"minted under the policy", Token{MintedUnder: MintedUnderPolicy}, false},
+		{"minted at the control plane", Token{MintedUnder: MintedByOperator}, false},
+		{"approved since", Token{MintedUnder: MintedUnderNoPolicy, ApprovedAt: approved}, false},
+		{"owner-bound: the policy decides its owner", Token{MintedUnder: MintedUnderNoPolicy, Owner: owner}, false},
+	}
+	for _, c := range cases {
+		if got := c.tok.AwaitsApproval(); got != c.want {
+			t.Errorf("%s: AwaitsApproval = %v, want %v", c.name, got, c.want)
+		}
+	}
+	var none *Token
+	if none.AwaitsApproval() {
+		t.Error("a nil token awaits approval")
+	}
+}
+
+// TestApproveRecordsTheFirstApproval: a mint records what governed it, an
+// approval is recorded once and stands, and a revoked token is not approved.
+func TestApproveRecordsTheFirstApproval(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	m, err := mgr.Mint(MintOptions{Name: "ci", Roles: []string{"admin"}, MintedUnder: MintedUnderNoPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Token.MintedUnder != MintedUnderNoPolicy || !m.Token.AwaitsApproval() {
+		t.Fatalf("minted %q, awaiting %v", m.Token.MintedUnder, m.Token.AwaitsApproval())
+	}
+	if ok, err := mgr.Approve(m.Token.ID, "admin@example.com"); err != nil || !ok {
+		t.Fatalf("Approve = %v, %v", ok, err)
+	}
+	if ok, err := mgr.Approve(m.Token.ID, "mallory@example.com"); err != nil || ok {
+		t.Fatalf("a second Approve = %v, %v; want false, nil", ok, err)
+	}
+	got, err := mgr.Get(m.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ApprovedBy != "admin@example.com" || got.AwaitsApproval() {
+		t.Fatalf("approved by %q, still awaiting %v", got.ApprovedBy, got.AwaitsApproval())
+	}
+	other, err := mgr.Mint(MintOptions{Name: "old", Roles: []string{"viewer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Revoke(other.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Approve(other.Token.ID, "admin@example.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("approving a revoked token: %v, want ErrNotFound", err)
 	}
 }

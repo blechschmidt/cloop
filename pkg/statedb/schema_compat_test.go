@@ -587,7 +587,9 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// a hub sharing its control plane with an older one. 0069 (lease
 	// revocations and dispatch intents, Task 20419) is applied by the first
 	// member of a new build while older members still serve the cluster.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69} {
+	// 0071 (API token mint policy, Task 20422) appends to api_tokens, which
+	// an older member reads on every token-authenticated request.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

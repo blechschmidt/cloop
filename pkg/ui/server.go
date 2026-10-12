@@ -1457,6 +1457,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
 	go s.watchMemberships(watcherCtx)
+	// Every member removes the Claude homes of identities the control plane
+	// denies from its own tree, now and hourly — its tree is its own, so not
+	// a leader duty (Task 20422). See claude_sweep.go.
+	go s.watchDeniedClaudeHomes(watcherCtx)
 	// Which static tokens are retired is read before the listener serves a
 	// request, and kept current with the token's last use by every member on
 	// its own (Task 20406). See static_token.go.

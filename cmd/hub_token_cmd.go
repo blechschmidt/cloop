@@ -101,6 +101,9 @@ Examples:
 			ProjectScope: projects,
 			CreatedBy:    "cli:" + currentUser(),
 			ExpiresAt:    expires,
+			// Whoever can run this holds the hub's database already: no role
+			// policy governs them, and none is waited for (Task 20422).
+			MintedUnder: apitoken.MintedByOperator,
 		})
 		if err != nil {
 			return err
@@ -109,6 +112,7 @@ Examples:
 			"name":          minted.Token.Name,
 			"roles":         minted.Token.Roles,
 			"project_scope": minted.Token.ProjectScope,
+			"minted_under":  minted.Token.MintedUnder,
 			"via":           "cli",
 		})
 
@@ -178,17 +182,31 @@ var hubTokenListCmd = &cobra.Command{
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(w, "ID\tNAME\tROLES\tPROJECTS\tSTATUS\tEXPIRES\tLAST USED")
+		unapproved := 0
 		for i := range tokens {
 			t := &tokens[i]
+			status := tokenStatusLabel(t, now)
+			if t.Active(now) && t.AwaitsApproval() {
+				status += " (unapproved)"
+				unapproved++
+			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				t.ID, truncateField(t.Name, 28),
 				strings.Join(t.Roles, ","),
 				truncateField(scopeLabel(t.ProjectScope), 24),
-				tokenStatusLabel(t, now),
+				status,
 				expiryLabel(t.ExpiresAt),
 				lastUsedLabel(t.LastUsedAt))
 		}
-		return w.Flush()
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		if unapproved > 0 {
+			fmt.Printf("\nunapproved: minted while no role policy was in force (or before the hub recorded it).\n"+
+				"A hub enforcing a role policy refuses %s until `cloop hub token approve <id>` — or revoke it.\n",
+				map[bool]string{true: "it", false: "them"}[unapproved == 1])
+		}
+		return nil
 	},
 }
 
@@ -226,6 +244,60 @@ already-revoked token is a no-op.`,
 			"via":   "cli",
 		})
 		color.New(color.FgGreen).Printf("Revoked token %s (%s).\n", tok.ID, tok.Name)
+		return nil
+	},
+}
+
+var hubTokenApproveCmd = &cobra.Command{
+	Use:   "approve <id>",
+	Short: "Approve an API token minted while no role policy was in force",
+	Long: `Approve a token that a hub enforcing a role policy refuses because it was
+minted while none was in force (Task 20422).
+
+With single sign-on but no role policy every signed-in identity holds every
+role, so anybody signed in could mint a token of any role from the dashboard.
+Such a token — and one minted before the hub recorded under what policy it was
+— is refused once a policy is enforced, until an administrator approves it.
+Approve the ones you can vouch for; revoke the rest.
+
+Like the rest of ` + "`cloop hub token`" + ` this writes the hub's database
+directly and is an operator's act: the dashboard's Approve additionally requires
+the approver to hold every role the token carries.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := cmd.Flags().GetString("workdir")
+
+		mgr, closer, err := openHubTokenManager(workdir)
+		if err != nil {
+			return err
+		}
+		defer closer()
+
+		tok, err := mgr.Get(args[0])
+		if err != nil {
+			return err
+		}
+		if !tok.Active(time.Now()) {
+			return fmt.Errorf("token %s (%s) is revoked or expired; mint a new one instead", tok.ID, tok.Name)
+		}
+		if !tok.AwaitsApproval() {
+			return fmt.Errorf("token %s (%s) does not await approval: it was minted under the role policy or "+
+				"at the control plane, it acts for an owner the policy decides, or it was approved already", tok.ID, tok.Name)
+		}
+		by := "cli:" + currentUser()
+		if _, err := mgr.Approve(tok.ID, by); err != nil {
+			return err
+		}
+		appendTokenAuditEvent(workdir, auditaction.ActionAPITokenApproved, tok.Prefix, map[string]any{
+			"name":          tok.Name,
+			"roles":         tok.Roles,
+			"project_scope": tok.ProjectScope,
+			"minted_under":  tok.MintedUnder,
+			"created_by":    tok.CreatedBy,
+			"created_at":    tok.CreatedAt.UTC().Format(time.RFC3339),
+			"via":           "cli",
+		})
+		color.New(color.FgGreen).Printf("Approved token %s (%s, %s).\n", tok.ID, tok.Name, strings.Join(tok.Roles, ", "))
 		return nil
 	},
 }
@@ -399,7 +471,7 @@ func appendTokenAuditEvent(workdir string, eventType auditaction.Action, prefix 
 }
 
 func init() {
-	for _, c := range []*cobra.Command{hubTokenCreateCmd, hubTokenListCmd, hubTokenRevokeCmd} {
+	for _, c := range []*cobra.Command{hubTokenCreateCmd, hubTokenListCmd, hubTokenRevokeCmd, hubTokenApproveCmd} {
 		c.Flags().String("workdir", "", "hub directory holding .cloop/state.db (default: current directory)")
 	}
 	hubTokenCreateCmd.Flags().StringSlice("role", []string{"viewer"},
@@ -416,5 +488,6 @@ func init() {
 	hubTokenCmd.AddCommand(hubTokenCreateCmd)
 	hubTokenCmd.AddCommand(hubTokenListCmd)
 	hubTokenCmd.AddCommand(hubTokenRevokeCmd)
+	hubTokenCmd.AddCommand(hubTokenApproveCmd)
 	hubCmd.AddCommand(hubTokenCmd)
 }

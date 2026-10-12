@@ -18,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/offboard"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
@@ -45,10 +46,11 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan) (*
 		return nil, err
 	}
 	// Where this process keeps per-user Claude homes, so an offboarding can
-	// tell a stopped member's tree from the ones it reached (Task 20400).
+	// tell a stopped member's tree from the ones it reached (Task 20400), and
+	// `cloop hub doctor` finds a denied identity's home left in it (Task 20422).
 	var endpoints map[string]string
 	if root := ui.ClaudeHomesRoot(); root != "" {
-		endpoints = map[string]string{"claude_homes": root}
+		endpoints = map[string]string{offboard.ClaudeHomesEndpoint: root}
 	}
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),

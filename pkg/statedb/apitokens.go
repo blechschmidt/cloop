@@ -49,10 +49,18 @@ type APITokenRow struct {
 	// how the two drift apart. Never serialized outward for the same reason
 	// Hash is not — it carries a user's email and group memberships.
 	OwnerJSON string `json:"-"`
+
+	// MintedUnder says what governed the mint, ApprovedAt and ApprovedBy an
+	// administrator's approval of a token minted with no role policy in force
+	// (migration 0071). The values are pkg/apitoken's.
+	MintedUnder string    `json:"minted_under,omitempty"`
+	ApprovedAt  time.Time `json:"approved_at,omitempty"`
+	ApprovedBy  string    `json:"approved_by,omitempty"`
 }
 
 const apiTokenColumns = `id, name, hash, prefix, roles_json, project_scope_json,
-	created_by, created_at, expires_at, last_used_at, revoked_at, kind, owner_json`
+	created_by, created_at, expires_at, last_used_at, revoked_at, kind, owner_json,
+	minted_under, approved_at, approved_by`
 
 // PutAPIToken inserts a token row. It is an insert, not an upsert: a token's
 // secret, roles, and scope are fixed at mint time, and silently rewriting an
@@ -81,7 +89,7 @@ func (d *DB) PutAPIToken(row APITokenRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO api_tokens(`+apiTokenColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO api_tokens(`+apiTokenColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Name, row.Hash, row.Prefix, roles, scope,
 		row.CreatedBy,
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -89,6 +97,7 @@ func (d *DB) PutAPIToken(row APITokenRow) error {
 		formatOptionalTime(row.LastUsedAt),
 		formatOptionalTime(row.RevokedAt),
 		row.Kind, row.OwnerJSON,
+		row.MintedUnder, formatOptionalTime(row.ApprovedAt), row.ApprovedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert api token %q: %w", row.ID, classifyDriverErr(err))
@@ -177,6 +186,35 @@ func (d *DB) RevokeAPIToken(id string, at time.Time) error {
 	return nil
 }
 
+// ApproveAPIToken records an administrator's approval of a live token, and
+// reports whether this call recorded it: false when the token was approved
+// already, whose first approval stands. A revoked token cannot be approved;
+// ErrAPITokenNotFound when no token has id, or it is revoked.
+func (d *DB) ApproveAPIToken(id, by string, at time.Time) (bool, error) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE api_tokens SET approved_at = ?, approved_by = ? WHERE id = ? AND revoked_at = '' AND approved_at = ''`,
+		at.UTC().Format(time.RFC3339Nano), by, id)
+	if err != nil {
+		return false, fmt.Errorf("statedb: approve api token %q: %w", id, classifyDriverErr(err))
+	}
+	if n, aerr := res.RowsAffected(); aerr == nil && n > 0 {
+		return true, nil
+	}
+	var live int
+	if err := d.conn.QueryRow(`SELECT COUNT(1) FROM api_tokens WHERE id = ? AND revoked_at = ''`, id).Scan(&live); err != nil {
+		return false, fmt.Errorf("statedb: approve api token %q: %w", id, classifyDriverErr(err))
+	}
+	if live == 0 {
+		return false, fmt.Errorf("%w: %q (or it is revoked)", ErrAPITokenNotFound, id)
+	}
+	return false, nil
+}
+
 // TouchAPIToken records that a token was used. Called off the verification
 // path and coalesced by pkg/apitoken, so a failure here is logged by the
 // caller and never surfaces as an authentication error — a lost timestamp is
@@ -231,15 +269,16 @@ func unmarshalStringSlice(raw string) []string {
 // scanAPITokenRow decodes one row from either a *sql.Row or *sql.Rows.
 func scanAPITokenRow(sc interface{ Scan(...any) error }) (APITokenRow, error) {
 	var (
-		out                                     APITokenRow
-		rolesJSON, scopeJSON                    string
-		createdAt, expiresAt, lastUsed, revoked string
+		out                                               APITokenRow
+		rolesJSON, scopeJSON                              string
+		createdAt, expiresAt, lastUsed, revoked, approved string
 	)
 	if err := sc.Scan(&out.ID, &out.Name, &out.Hash, &out.Prefix, &rolesJSON, &scopeJSON,
 		&out.CreatedBy, &createdAt, &expiresAt, &lastUsed, &revoked,
-		&out.Kind, &out.OwnerJSON); err != nil {
+		&out.Kind, &out.OwnerJSON, &out.MintedUnder, &approved, &out.ApprovedBy); err != nil {
 		return APITokenRow{}, err
 	}
+	out.ApprovedAt = parseOptionalTime(approved)
 	out.Roles = unmarshalStringSlice(rolesJSON)
 	out.ProjectScope = unmarshalStringSlice(scopeJSON)
 	out.CreatedAt = parseOptionalTime(createdAt)

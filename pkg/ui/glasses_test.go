@@ -585,6 +585,9 @@ func TestGlassesLinkNeverExceedsItsOwner(t *testing.T) {
 	// the intersection is what narrows the bound token, not the kind check.
 	plain, perr := mgr.Mint(apitoken.MintOptions{
 		Name: "plain", Roles: []string{"viewer"}, ExpiresAt: time.Now().Add(time.Hour),
+		// Minted as `cloop hub token create` mints, so the policy this hub
+		// enforces does not suspend it for approval (Task 20422).
+		MintedUnder: apitoken.MintedByOperator,
 	})
 	if perr != nil {
 		t.Fatalf("Mint: %v", perr)
@@ -652,6 +655,9 @@ func TestGlassesLinkSeesOnlyItsOwnersProjects(t *testing.T) {
 	// glasses route because a plain PAT is not confined to the glasses surface.
 	plain, perr := mgr.Mint(apitoken.MintOptions{
 		Name: "plain", Roles: []string{"viewer"}, ExpiresAt: time.Now().Add(time.Hour),
+		// Minted as `cloop hub token create` mints, so the policy this hub
+		// enforces does not suspend it for approval (Task 20422).
+		MintedUnder: apitoken.MintedByOperator,
 	})
 	if perr != nil {
 		t.Fatalf("Mint: %v", perr)

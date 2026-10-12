@@ -146,6 +146,24 @@ const scenarios = {
     };
   },
 
+  // Task 20422: the tokens a policy will suspend are named in the question,
+  // and once it is in force the note says how many wait for an approval.
+  async enforce_names_the_tokens_it_suspends() {
+    const waiting = [
+      {id: 'aaaa', name: 'mallory-admin', prefix: 'cloop_pat_aaaa', roles: ['admin'], created_by: 'mallory@example.com'},
+      {id: 'bbbb', name: 'deploy', prefix: 'cloop_pat_bbbb', roles: ['operator'], created_by: ''},
+    ];
+    await boot(view({rbac: {enforced: false, saved_enforced: false, warning: OFF, can_enforce: true,
+      awaiting_approval: waiting}}));
+    const asked = [];
+    globalThis.confirm = msg => { asked.push(msg); return false; };
+    await window.panelAct('settings', 'oidcEnforce');
+    await globalThis.__settle(3);
+    await boot(view({rbac: {enforced: true, saved_enforced: true, default_role: 'none', can_enforce: false,
+      awaiting_approval: waiting}}));
+    return {tokenQuestion: asked[0] || '', suspendedNote: $('oidcRbacNote').textContent};
+  },
+
   async rbac_switch_is_asked_and_resent_on_yes() {
     const h = await boot(view());
     const asked = [];

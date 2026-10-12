@@ -1123,10 +1123,12 @@ var registry = []Entry{
 		Home:      HomeControlPlane,
 		Entity:    "api_token",
 		Trigger:   "A scoped API token or a display-glasses link is minted, from the UI or the CLI.",
-		Payload:   []string{"name", "roles", "project_scope", "expires_at", "kind", "owner"},
+		Payload:   []string{"name", "roles", "project_scope", "expires_at", "kind", "owner", "minted_under"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "`kind` distinguishes a service-account token from a glasses link, which is a token with one narrow role and a URL as its only delivery mechanism.",
+		Note: "`kind` distinguishes a service-account token from a glasses link, which is a token with one " +
+			"narrow role and a URL as its only delivery mechanism. `minted_under` is `policy` when the hub's " +
+			"role policy was in force, `no_policy` when it was not, `operator` from the CLI (Task 20422).",
 	},
 	{
 		Action:    ActionAPITokenRevoked,
@@ -1148,7 +1150,9 @@ var registry = []Entry{
 		Note: "Filed against the token's *public* id (`cloop_pat_<id>`), never the secret " +
 			"half, and against `(unparseable)` when the credential is not even shaped like " +
 			"a token — so a garbage value is not echoed back into the trail. Rate of this " +
-			"action by `ip` is the credential-stuffing signal.",
+			"action by `ip` is the credential-stuffing signal. `awaiting_approval` is a token " +
+			"minted with no role policy in force, refused on a hub that enforces one until an " +
+			"administrator approves it.",
 	},
 	{
 		Action:    ActionAPITokenCreateDenied,
@@ -1159,6 +1163,26 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note:      "The anti-escalation check. A maintainer trying to mint an admin token lands here.",
+	},
+	{
+		Action:    ActionAPITokenApproved,
+		Home:      HomeControlPlane,
+		Entity:    "api_token",
+		Trigger:   "An administrator approves a token minted with no role policy in force, which a hub enforcing one refuses until then (Task 20422).",
+		Payload:   []string{"name", "roles", "project_scope", "minted_under", "created_by", "created_at", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "From the dashboard the approver must hold every role the token carries, under the policy now in " +
+			"force; `via: cli` is an operator at the control plane.",
+	},
+	{
+		Action:    ActionAPITokenApproveDenied,
+		Home:      HomeControlPlane,
+		Entity:    "api_token",
+		Trigger:   "An approval is refused: no role policy is in force, or the approver does not hold the token's roles.",
+		Payload:   []string{"reason", "roles", "project_scope"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
 	},
 
 	// ── static_token ───────────────────────────────────────────────────────
@@ -1720,6 +1744,21 @@ var registry = []Entry{
 			"that could not be asked — a copy there may still hold a refresh token.",
 	},
 	{
+		Action: ActionUserClaudeHomeSwept,
+		Home:   HomeControlPlane,
+		Entity: "user",
+		Trigger: "A hub member, as it starts and then hourly, removes from its own tree the Claude Code home of an " +
+			"identity the control plane denies hub-wide — a copy an offboarding did not reach.",
+		Payload: []string{"identity", "member", "host", "dir", "denies", "had_login", "login_cancelled",
+			"logged_out", "logout", "removed", "error", "trigger"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "One row per home, `trigger` `startup` or `timer`. `logout` says why it was not logged out at Anthropic " +
+			"first — strict no-host-execution, a symbolic link — and `error` why it could not be removed, which the " +
+			"next sweep tries again. An identity under a legal hold, or denied only by a SCIM suspension still in " +
+			"force, keeps its home; `cloop hub doctor` reports the homes left on its host (offboard.claude_homes).",
+	},
+	{
 		Action:    ActionUserOffboardHold,
 		Home:      HomeControlPlane,
 		Entity:    "user",
@@ -1734,13 +1773,16 @@ var registry = []Entry{
 		Action:    ActionUserHoldPlace,
 		Home:      HomeControlPlane,
 		Entity:    "user",
-		Trigger:   "A legal hold is placed on an identity, or its reason restated (`cloop hub user hold`).",
-		Payload:   []string{"identity", "hold_reason", "placed_at", "reason", "via", "os_user"},
+		Trigger:   "A legal hold is placed on an identity, or its reason restated (`cloop hub user hold`), or an offboarding run with --keep-credentials records the hold it was given.",
+		Payload:   []string{"identity", "hold_reason", "placed_at", "reason", "via", "os_user", "identity_input", "subjects", "emails"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "Every offboarding of the identity from then on — an operator's, the identity provider " +
 			"deleting the account, or ui.oidc.scim.offboard_after_days — keeps its personal secrets and " +
-			"Claude Code homes, as --keep-credentials does, and writes user.offboard_hold.",
+			"Claude Code homes, as --keep-credentials does, and writes user.offboard_hold; so does every hub " +
+			"member's sweep of denied identities' Claude homes (Task 20422). An offboarding asked to keep " +
+			"credentials records its hold here before it denies anything, carrying the run's reason as " +
+			"hold_reason and the identity's resolved spellings.",
 	},
 	{
 		Action:    ActionUserHoldRelease,

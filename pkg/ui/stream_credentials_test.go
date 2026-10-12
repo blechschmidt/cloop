@@ -883,7 +883,8 @@ func TestAttach_ARevokedTokenClosesItsTerminalOnTheRecheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.closeTokenManager)
-	minted, err := mgr.Mint(apitoken.MintOptions{Name: "break-glass", Roles: []string{"admin"}, CreatedBy: "root"})
+	minted, err := mgr.Mint(apitoken.MintOptions{Name: "break-glass", Roles: []string{"admin"}, CreatedBy: "root",
+		MintedUnder: apitoken.MintedByOperator})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1574,6 +1574,7 @@ cloop hub token create ci-payments --role operator --project payments --expires-
 cloop hub token list              # id, roles, scope, status, last use
 cloop hub token list --active     # hide revoked and expired
 cloop hub token revoke <id>       # effective on the next request
+cloop hub token approve <id>      # a token minted while no role policy was in force
 ```
 
 Or use the **Tokens** section of the Secrets panel, or `POST /api/tokens`.
@@ -1594,6 +1595,17 @@ Minting requires the `token.admin` permission, which only `admin` holds; the
 API additionally refuses to issue a token stronger or wider than its creator.
 Creation, revocation, and every failed authentication are recorded in the audit
 trail (`cloop events`).
+
+With single sign-on and no role policy every signed-in identity holds every
+role, so a token minted from the dashboard then is only as trustworthy as
+whoever was signed in. The hub records what governed each mint, and once a role
+policy is in force it refuses a token minted with none — or before the hub
+recorded how — until an administrator approves it: **Approve** in the tokens
+section (the approver must hold every role it carries) or `cloop hub token
+approve <id>`. Such a token is listed `suspended`; a token acting for an owner,
+like a glasses link, never is. The enforce question in Settings names every
+token it will suspend, and `cloop hub doctor` fails `api_tokens.unapproved`
+while one remains.
 
 ### Audit-trail retention
 

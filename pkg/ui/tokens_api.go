@@ -6,9 +6,11 @@ package ui
 // `cloop_pat_…` string into an identity the route gates can enforce, and the
 // three RBAC-gated endpoints that mint, list, and revoke them.
 //
-//	GET    /api/tokens        list, never including a secret
-//	POST   /api/tokens        mint one; plaintext returned exactly once
-//	DELETE /api/tokens/{id}   revoke
+//	GET    /api/tokens               list, never including a secret
+//	POST   /api/tokens               mint one; plaintext returned exactly once
+//	DELETE /api/tokens/{id}          revoke
+//	POST   /api/tokens/{id}/approve  approve one minted with no role policy
+//	                                 in force (Task 20422)
 //
 // # Why a token is not a bypass
 //
@@ -33,6 +35,17 @@ package ui
 //     denies, which the 404/403 split reports as nonexistent.
 //   - The plaintext exists once. It is returned by the create call and never
 //     stored, logged, or re-derivable; every later read returns the prefix.
+//
+// # A role policy switched on after the mint (Task 20422)
+//
+// A token minted here has no owner: its authority is its stamped roles, and
+// only CheckDelegation at mint bounded them. While single sign-on runs with no
+// role policy every signed-in identity holds every role, so any of them could
+// mint an admin token — which stayed admin once the policy was enforced, for up
+// to tokenMaxTTLDays. So the mint records what governed it, and a hub that
+// enforces a policy refuses an owner-less token not minted under one until an
+// administrator approves it under that policy, holding its roles
+// (apitoken.Token.AwaitsApproval, tokenSuspended).
 
 import (
 	"context"
@@ -241,10 +254,49 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request) (*
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return nil, false, true
 	}
+	if s.tokenSuspended(tok) {
+		s.auditTokenEvent(tokenAuditRecord{
+			Actor:     "anonymous",
+			EventType: auditaction.ActionAPITokenAuthFailed,
+			TokenID:   tok.Prefix,
+			Extra: map[string]any{
+				"reason": "awaiting_approval",
+				"ip":     ip,
+				"method": r.Method,
+				"path":   r.URL.Path,
+			},
+		})
+		apierror.WriteError(w, apierror.New(apierror.CodeForbidden, tokenSuspendedMessage).
+			WithDetails(map[string]any{"token": tok.ID}))
+		return nil, false, true
+	}
 	if !s.tokenKindAdmitted(w, r, tok) {
 		return nil, false, true
 	}
 	return r.WithContext(context.WithValue(r.Context(), apiTokenCtxKey{}, tok)), true, false
+}
+
+// tokenSuspendedMessage answers a suspended token: what happened and what
+// lifts it. The secret was right, so the caller is entitled to know.
+const tokenSuspendedMessage = "this API token was minted while no role policy was in force on this hub, " +
+	"and is suspended until an administrator who holds its roles approves it — Secrets → API tokens → " +
+	"Approve, or `cloop hub token approve <id>` on the hub"
+
+// mintedUnder says what governs a mint through this hub now (Task 20422): its
+// role policy when one is in force, none when not.
+func (s *Server) mintedUnder() string {
+	if s.authzActive() {
+		return apitoken.MintedUnderPolicy
+	}
+	return apitoken.MintedUnderNoPolicy
+}
+
+// tokenSuspended reports whether this hub refuses tok until an administrator
+// approves it: a role policy is in force here, and tok was not minted under
+// one (apitoken.Token.AwaitsApproval). Asked of s.authzActive, the request
+// gate's own predicate, so a suspension holds exactly where the policy does.
+func (s *Server) tokenSuspended(tok *apitoken.Token) bool {
+	return tok != nil && tok.AwaitsApproval() && s.authzActive()
 }
 
 // glassesPathPrefixes is the entire surface a display-glasses link may reach.
@@ -370,6 +422,17 @@ type tokenView struct {
 	// verification path about whether a credential still works.
 	Status string `json:"status"`
 
+	// MintedUnder says what governed the mint — policy, no_policy or operator
+	// (apitoken.MintedUnder*), "" for a token minted before it was recorded —
+	// and ApprovedAt/ApprovedBy an administrator's approval of one minted with
+	// no policy in force. AwaitsApproval: refused on a hub enforcing a role
+	// policy until approved, which Status reads "suspended" where it is
+	// (Task 20422). Names and times, no credential.
+	MintedUnder    string `json:"minted_under,omitempty"`
+	ApprovedAt     string `json:"approved_at,omitempty"`
+	ApprovedBy     string `json:"approved_by,omitempty"`
+	AwaitsApproval bool   `json:"awaits_approval,omitempty"`
+
 	// Confinement names the extra limit a token's kind imposes beyond its
 	// roles, or is empty when the roles are the whole story (Task 20238).
 	//
@@ -449,9 +512,10 @@ func (s *Server) handleTokensList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	enforced := s.authzActive()
 	views := make([]tokenView, 0, len(tokens))
 	for i := range tokens {
-		views = append(views, toTokenView(&tokens[i], now))
+		views = append(views, toTokenView(&tokens[i], now, enforced))
 	}
 	jsonOK(w, tokensListResponse{
 		Tokens:            views,
@@ -515,6 +579,7 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		ProjectScope: scope,
 		CreatedBy:    actor,
 		ExpiresAt:    expires,
+		MintedUnder:  s.mintedUnder(),
 	})
 	if err != nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
@@ -530,11 +595,12 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 			"roles":         minted.Token.Roles,
 			"project_scope": minted.Token.ProjectScope,
 			"expires_at":    formatTokenTime(minted.Token.ExpiresAt),
+			"minted_under":  minted.Token.MintedUnder,
 		},
 	})
 
 	jsonOK(w, tokenCreateResponse{
-		Token:     toTokenView(&minted.Token, time.Now()),
+		Token:     toTokenView(&minted.Token, time.Now(), s.authzActive()),
 		Plaintext: minted.Plaintext,
 		Warning: "This is the only time this token is shown. cloop stores a salted hash, " +
 			"not the value — it cannot be recovered. Store it in your secret manager now; " +
@@ -585,6 +651,97 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	jsonOK(w, map[string]any{"ok": true, "id": id})
+}
+
+// handleTokenApprove serves POST /api/tokens/{id}/approve: an administrator
+// approves a token minted with no role policy in force, which this hub refuses
+// until then (Task 20422).
+//
+// Only under an enforced policy: on a hub without one every signed-in
+// identity holds token.admin, so an approval given there would be anybody's —
+// including the very minter's whose token it would clear. And only by an
+// approver holding every role the token carries, judged by the anti-escalation
+// rule a mint is, under the policy now in force: approving is minting the
+// token's authority again.
+func (s *Server) handleTokenApprove(w http.ResponseWriter, r *http.Request) {
+	var req struct{}
+	if !decodeSecretsBody(w, r, &req) {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	mgr, ok := s.tokenManagerOr(w)
+	if !ok {
+		return
+	}
+	actor := s.grantFor(r).subjectLabel()
+	refuse := func(code apierror.Code, msg string, tok *apitoken.Token) {
+		extra := map[string]any{"reason": msg}
+		prefix := ""
+		if tok != nil {
+			extra["roles"], extra["project_scope"], prefix = tok.Roles, tok.ProjectScope, tok.Prefix
+		}
+		s.auditTokenEvent(tokenAuditRecord{Actor: actor, EventType: auditaction.ActionAPITokenApproveDenied,
+			TokenID: prefix, Extra: extra})
+		apierror.WriteError(w, apierror.New(code, msg))
+	}
+	if !s.authzActive() {
+		refuse(apierror.CodeConflict, "no role policy is in force on this hub, so no token is suspended "+
+			"and an approval would be given by whoever is signed in: enforce a policy first", nil)
+		return
+	}
+	tok, err := mgr.Get(id)
+	if err != nil {
+		if errors.Is(err, apitoken.ErrNotFound) {
+			apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such token"))
+			return
+		}
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
+		return
+	}
+	if !tok.Active(time.Now()) {
+		refuse(apierror.CodeConflict, "the token is revoked or expired; mint a new one instead", &tok)
+		return
+	}
+	if !tok.AwaitsApproval() {
+		refuse(apierror.CodeConflict, "the token does not await approval: it was minted under the role "+
+			"policy or at the control plane, it has an owner whose authority the policy decides, or it "+
+			"was approved already", &tok)
+		return
+	}
+	if err := apitoken.CheckDelegation(s.delegatorFor(r), tok.Roles, tok.ProjectScope); err != nil {
+		refuse(apierror.CodeForbidden, "only an administrator holding every role the token carries may "+
+			"approve it: "+err.Error(), &tok)
+		return
+	}
+	recorded, err := mgr.Approve(id, actor)
+	if err != nil {
+		if errors.Is(err, apitoken.ErrNotFound) {
+			apierror.WriteError(w, apierror.New(apierror.CodeConflict, "the token was revoked meanwhile"))
+			return
+		}
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
+		return
+	}
+	if recorded {
+		s.auditTokenEvent(tokenAuditRecord{
+			Actor:     actor,
+			EventType: auditaction.ActionAPITokenApproved,
+			TokenID:   tok.Prefix,
+			Extra: map[string]any{
+				"name":          tok.Name,
+				"roles":         tok.Roles,
+				"project_scope": tok.ProjectScope,
+				"minted_under":  tok.MintedUnder,
+				"created_by":    tok.CreatedBy,
+				"created_at":    formatTokenTime(tok.CreatedAt),
+			},
+		})
+	}
+	approved, err := mgr.Get(id)
+	if err != nil {
+		approved = tok
+	}
+	jsonOK(w, toTokenView(&approved, time.Now(), true))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +822,14 @@ func tokenConfinement(t *apitoken.Token) string {
 	return ""
 }
 
-func toTokenView(t *apitoken.Token, now time.Time) tokenView {
+// toTokenView renders t for the panel; enforced is whether this hub enforces a
+// role policy now, which decides whether a token awaiting approval is
+// suspended.
+func toTokenView(t *apitoken.Token, now time.Time, enforced bool) tokenView {
+	status := TokenStatus(t, now)
+	if status == "active" && enforced && t.AwaitsApproval() {
+		status = "suspended"
+	}
 	return tokenView{
 		ID:           t.ID,
 		Name:         t.Name,
@@ -678,7 +842,12 @@ func toTokenView(t *apitoken.Token, now time.Time) tokenView {
 		ExpiresAt:    formatTokenTime(t.ExpiresAt),
 		LastUsedAt:   formatTokenTime(t.LastUsedAt),
 		RevokedAt:    formatTokenTime(t.RevokedAt),
-		Status:       TokenStatus(t, now),
+		Status:       status,
+
+		MintedUnder:    t.MintedUnder,
+		ApprovedAt:     formatTokenTime(t.ApprovedAt),
+		ApprovedBy:     t.ApprovedBy,
+		AwaitsApproval: t.AwaitsApproval(),
 	}
 }
 

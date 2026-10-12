@@ -1791,6 +1791,19 @@ the control plane exclusively, which reads no bus, and a stopped member whose
 advertised tree is on a host the run did reach and was not among the trees it
 reached (`TestOffboardReachesEveryMembersClaudeHome`,
 `TestTheCLIReachesMembersOverTheBus`, `TestAMemberThatDoesNotAnswerIsNamed`).
+Each such copy is then reached by its own member (Task 20422): every member
+removes from its own tree, as it starts and hourly after, the home of every
+identity the control plane denies hub-wide — the person resolved to every
+spelling sessions, token owners, the SCIM directory and the deny rows one
+offboarding wrote together record — logs it out first where it may, and audits
+each as `user.claude_home_swept`. An identity under a legal hold is left alone
+(an offboarding asked to keep credentials records its hold before it denies
+anything), and so is one denied only by a SCIM suspension still in force, which
+keeps stored credentials so a reactivation can restore the person. `cloop hub
+doctor` fails `offboard.claude_homes` while such a home is left on its host
+(`TestClaudeSweep_AMemberTheOffboardingMissedRemovesTheHomeAsItStarts`,
+`TestDeniedIdentitiesFollowsTheDenyAndItsExceptions`,
+`TestAKeptOffboardingRecordsItsHold`, `TestClaudeLeftoversAreReported`).
 Under the Helm chart a hub keeps no Claude home at all: the chart's hub is
 strict by default (`config.allowHostProcess: false`), which refuses dashboard
 sign-in to Claude, and even where it is not, the image's `$HOME` sits on the
@@ -2920,10 +2933,25 @@ has an administrator, so a caller with no session on a hub with no
 (`TestOIDCEnforce_KeepsEveryCurrentAdminAnAdmin`). It is audited as
 [`oidc.rbac.enforced`](../reference/audit-events.md#oidc) under the signed-in
 user's name — on such a hub every row used to name the actor `local` — and,
-like every save of this block, takes effect at the next restart. Afterwards,
-review the API tokens minted while RBAC was off (`cloop hub token list`):
-every signed-in identity held `token.admin` then, and a service-account token
-keeps the roles it was minted with.
+like every save of this block, takes effect at the next restart.
+
+Every signed-in identity held `token.admin` while RBAC was off, and an API
+token minted from the dashboard has no owner — its roles are its whole
+authority — so the hub records what governed each mint (Task 20422): `policy`
+when a role policy was in force, `no_policy` when none was, `operator` for
+`cloop hub token create` at the control plane. Once a policy is in force, an
+owner-less token minted with no policy — or before the hub recorded how — is
+refused with `403` and a sentence saying why, and listed as `suspended`, until
+an administrator approves it: Secrets → API tokens → Approve, which requires the
+approver to hold every role the token carries under the policy now in force,
+or `cloop hub token approve <id>` on the hub. The enforce question names every
+token it will suspend before anything is written, approvals are audited as
+[`api_token.approved`](../reference/audit-events.md#api_token), and `cloop hub
+doctor` fails `api_tokens.unapproved` while any such token is live and
+unapproved (`TestTokens_APolicyEnforcedAfterTheMintSuspendsTheToken`,
+`TestUnapprovedTokensAcrossTheMatrix`). A token acting for an owner never
+waits: its roles are intersected with what the owner may do now, which the
+policy decides.
 
 `ui.oidc.require_rbac: true` makes `cloop ui` refuse to start in that state,
 before it serves anything, so a later edit that drops the policy fails loudly
@@ -3516,6 +3544,7 @@ is here. These make sure it does not outlive its owner's departure — see
 | A shared project granted a deleted personal credential is refused it by name on its next lease, without the offboarding's reason — decided by the cause on the grant, so also under a legal hold and when the secret goes days later, and not for a grant revoked by hand or expired | `TestTheSharedProjectIsToldWhichCredentialItLost`, `TestALeaseRefusesADeletedPersonalCredentialByName`, `TestALegalHoldStillTellsTheSharedProject`, `TestAGrantWithdrawnAtOffboardingIsNamedWhenTheSecretGoesLater`, `TestARefusalIsHandedBackOnlyForWhatTheDeletionTook`, `TestAnExpiredGrantOverADeletedSecretIsNotHandedBack` |
 | A Claude home on another hub member is reached — over the peer channel from the dashboard, over the bus from the CLI — and a member that cannot be asked is named (in `pkg/ui`) | `TestOffboardReachesEveryMembersClaudeHome`, `TestTheCLIReachesMembersOverTheBus`, `TestAMemberThatDoesNotAnswerIsNamed` |
 | A member ends logins on another process's word only for an identity the control plane denies | `TestAMemberEndsLoginsOnlyForADeniedIdentity` |
+| A copy an offboarding could not reach is removed by its own member as it starts and hourly, logged out first and audited; a legal hold — which `--keep-credentials` records — and a SCIM suspension in force keep theirs, an admitted identity's is untouched, and the doctor names what is left on its host (in `pkg/ui`, `pkg/offboard`, `pkg/hubdoctor`) | `TestClaudeSweep_AMemberTheOffboardingMissedRemovesTheHomeAsItStarts`, `TestDeniedIdentitiesFollowsTheDenyAndItsExceptions`, `TestAKeptOffboardingRecordsItsHold`, `TestClaudeLeftoversAreReported` |
 | A hub that runs no program on a request's behalf skips `claude auth logout` and still removes the home; a home that is a symbolic link is removed without being followed | `TestStrictModeSkipsLogoutButStillRemovesTheHome`, `TestASymlinkedHomeIsRemovedWithoutBeingFollowed` |
 
 ### Harness output redaction — `redaction_test.go`
@@ -3762,6 +3791,7 @@ reports it asks (Task 20395; [when RBAC is in force](#when-rbac-is-in-force)).
 | The built binary warns on stderr, and with `require_rbac` refuses to start before binding | `tests/e2e: TestE2ESSOHubWithoutAPolicyWarnsOnStderr`, `TestE2ERequireRBACRefusesToStart` |
 | A save switches RBAC on or off only when the request confirms it, and the panel shows and submits the saved default role | `pkg/ui: TestOIDCSave_DoesNotSwitchRBACAsASideEffect`, `TestOIDCSave_ConfirmsBeforeLeavingSSOWithoutAPolicy`, `TestDashboard_OIDCPanelShowsTheHubsRBACVerdict` |
 | Enforce deny-by-default keeps every current admin an admin, reuses the no-administrator gate, and is audited under the signed-in user | `pkg/ui: TestOIDCEnforce_KeepsEveryCurrentAdminAnAdmin`, `TestOIDCEnforce_ReusesTheNoAdministratorGate`, `TestAuditNamesTheSignedInUserWhenRBACIsOff` |
+| An owner-less API token minted with no role policy in force, or before the hub recorded how, is refused under an enforced policy until an administrator holding its roles approves it; an approval needs a policy in force; tokens minted under the policy, at the control plane or acting for an owner keep working; the enforce question names every token it will suspend; the doctor fails while one is unapproved | `pkg/ui: TestTokens_APolicyEnforcedAfterTheMintSuspendsTheToken`, `TestTokens_NoApprovalWithoutAPolicy`, `TestTokens_WhatIsNeverSuspended`, `TestDashboard_OIDCPanelShowsTheHubsRBACVerdict`; `pkg/hubdoctor: TestUnapprovedTokensAcrossTheMatrix` |
 | :8888's own `ui.oidc` keeps exactly its access | `pkg/ui: TestHub8888AccessIsUnchanged`, `pkg/hubdoctor: TestHub8888IsReportedEnforced`, `cmd: TestReportRBACOnHub8888` |
 
 ### Sessions — `sessions_test.go` and the package suites

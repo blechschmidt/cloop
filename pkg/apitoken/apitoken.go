@@ -227,6 +227,14 @@ type Token struct {
 	// grant.decide. Roles alone are a ceiling, never a grant.
 	Owner *Owner
 
+	// MintedUnder says what governed the mint: one of the MintedUnder*
+	// constants, or "" for a token minted before it was recorded. ApprovedAt
+	// and ApprovedBy are an administrator's approval of a token minted with
+	// no role policy in force (Task 20422) — see AwaitsApproval.
+	MintedUnder string
+	ApprovedAt  time.Time
+	ApprovedBy  string
+
 	// OwnerUnreadable marks a row whose stored owner binding did not decode.
 	// Only List sets it: the verification path refuses such a row outright
 	// (see SQLStore.Get), but a listing has to keep showing it or an operator
@@ -234,6 +242,35 @@ type Token struct {
 	// flag must never be treated as unbound — "we cannot tell whose this is"
 	// is not the same answer as "it belongs to nobody".
 	OwnerUnreadable bool
+}
+
+// What governed a mint (Token.MintedUnder).
+const (
+	// MintedUnderPolicy: minted through the hub while its role policy was in
+	// force, so the minter's roles — which bound the token's — were the
+	// policy's.
+	MintedUnderPolicy = "policy"
+	// MintedUnderNoPolicy: minted through the hub while no role policy was in
+	// force, when every signed-in identity holds every role.
+	MintedUnderNoPolicy = "no_policy"
+	// MintedByOperator: minted at the control plane by `cloop hub token
+	// create`, by whoever holds its database — who holds the hub already.
+	MintedByOperator = "operator"
+)
+
+// AwaitsApproval reports whether a hub enforcing a role policy suspends the
+// token until an administrator approves it (Task 20422): it has no owner, so
+// its authority is its stamped roles alone; it was not minted under a policy
+// or by an operator — a token minted before that was recorded included, since
+// nobody can say; and nobody approved it since.
+//
+// A token with an owner never waits: its authority is intersected with what
+// its owner may do now, which the policy decides.
+func (t *Token) AwaitsApproval() bool {
+	if t == nil || t.Owner != nil || !t.ApprovedAt.IsZero() {
+		return false
+	}
+	return t.MintedUnder != MintedUnderPolicy && t.MintedUnder != MintedByOperator
 }
 
 // Revoked reports whether the token has been withdrawn.
@@ -399,6 +436,10 @@ type MintOptions struct {
 	// Owner binds the token to the identity it acts for. See Token.Owner.
 	Owner *Owner
 
+	// MintedUnder records what governed the mint: MintedUnderPolicy,
+	// MintedUnderNoPolicy or MintedByOperator. See Token.AwaitsApproval.
+	MintedUnder string
+
 	// Now overrides the clock, for tests.
 	Now time.Time
 }
@@ -464,6 +505,7 @@ func Mint(opts MintOptions) (Minted, error) {
 			ExpiresAt:    expires,
 			Kind:         strings.TrimSpace(opts.Kind),
 			Owner:        opts.Owner,
+			MintedUnder:  strings.TrimSpace(opts.MintedUnder),
 		},
 		Plaintext: Prefix + id + "_" + secret,
 	}, nil

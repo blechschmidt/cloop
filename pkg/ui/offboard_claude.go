@@ -64,8 +64,8 @@ const (
 	// memberEndpointClaudeHomes is the member-row endpoint naming where a
 	// member keeps its Claude homes, so a stopped member's tree can be told
 	// apart from the trees the run reached. A path, not a URL: it is read by
-	// processes on the same machine.
-	memberEndpointClaudeHomes = "claude_homes"
+	// processes on the same machine — `cloop hub doctor` included.
+	memberEndpointClaudeHomes = offboard.ClaudeHomesEndpoint
 )
 
 // claudeOffboardRequest is what one process asks another about Claude logins.

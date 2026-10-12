@@ -335,6 +335,11 @@ const (
 	ActionAPITokenAuthFailed Action = "api_token.auth_failed"
 	// ActionAPITokenCreateDenied records a mint refused by the anti-escalation check.
 	ActionAPITokenCreateDenied Action = "api_token.create_denied"
+	// ActionAPITokenApproved records an administrator approving a token minted
+	// with no role policy in force (Task 20422).
+	ActionAPITokenApproved Action = "api_token.approved"
+	// ActionAPITokenApproveDenied records such an approval refused.
+	ActionAPITokenApproveDenied Action = "api_token.approve_denied"
 
 	// ── static_token ───────────────────────────────────────────────────────
 
@@ -504,6 +509,10 @@ const (
 	// ActionUserOffboardHold records an offboarding run under a legal hold,
 	// and what it kept.
 	ActionUserOffboardHold Action = "user.offboard_hold"
+	// ActionUserClaudeHomeSwept records a hub member removing, from its own
+	// tree, the Claude Code home of an identity the control plane denies —
+	// a copy no offboarding reached (Task 20422).
+	ActionUserClaudeHomeSwept Action = "user.claude_home_swept"
 	// ActionUserHoldPlace records a legal hold placed on an identity, which
 	// every later offboarding of it honours (Task 20415).
 	ActionUserHoldPlace Action = "user.hold_place"

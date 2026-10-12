@@ -40,6 +40,11 @@ type Store interface {
 	// Touch records a token's last use. Called off the verification path;
 	// failures are advisory.
 	Touch(id string, at time.Time) error
+
+	// Approve records an administrator's approval of a live token, and
+	// reports whether this call recorded it — false when one was recorded
+	// already, which stands. An unknown or revoked id must wrap ErrNotFound.
+	Approve(id, by string, at time.Time) (bool, error)
 }
 
 // SQLStore is the statedb-backed Store.
@@ -79,6 +84,9 @@ func (s *SQLStore) Put(t Token) error {
 		RevokedAt:    t.RevokedAt,
 		Kind:         t.Kind,
 		OwnerJSON:    owner,
+		MintedUnder:  t.MintedUnder,
+		ApprovedAt:   t.ApprovedAt,
+		ApprovedBy:   t.ApprovedBy,
 	})
 }
 
@@ -146,6 +154,7 @@ func (s *SQLStore) List() ([]Token, error) {
 				CreatedBy: row.CreatedBy, CreatedAt: row.CreatedAt,
 				ExpiresAt: row.ExpiresAt, LastUsedAt: row.LastUsedAt,
 				RevokedAt: row.RevokedAt, Kind: row.Kind,
+				MintedUnder: row.MintedUnder, ApprovedAt: row.ApprovedAt, ApprovedBy: row.ApprovedBy,
 				OwnerUnreadable: true,
 			}
 		}
@@ -163,6 +172,11 @@ func (s *SQLStore) Revoke(id string, at time.Time) error {
 
 func (s *SQLStore) Touch(id string, at time.Time) error {
 	return s.db.TouchAPIToken(id, at)
+}
+
+func (s *SQLStore) Approve(id, by string, at time.Time) (bool, error) {
+	ok, err := s.db.ApproveAPIToken(id, by, at)
+	return ok, translateErr(err)
 }
 
 func fromRow(row statedb.APITokenRow) (Token, error) {
@@ -184,6 +198,9 @@ func fromRow(row statedb.APITokenRow) (Token, error) {
 		RevokedAt:    row.RevokedAt,
 		Kind:         row.Kind,
 		Owner:        owner,
+		MintedUnder:  row.MintedUnder,
+		ApprovedAt:   row.ApprovedAt,
+		ApprovedBy:   row.ApprovedBy,
 	}, nil
 }
 
@@ -358,6 +375,16 @@ func (m *Manager) Revoke(id string) error {
 		m.onRevoke(id)
 	}
 	return nil
+}
+
+// Approve records by's approval of a live token: one minted with no role
+// policy in force, which a hub enforcing one suspends until it is approved
+// (Token.AwaitsApproval). Whether by may approve it is the caller's to decide.
+// It reports whether this call recorded the approval — false when one was
+// recorded already, which stands — and wraps ErrNotFound for an unknown or
+// revoked id.
+func (m *Manager) Approve(id, by string) (bool, error) {
+	return m.store.Approve(strings.TrimSpace(id), strings.TrimSpace(by), m.now())
 }
 
 // Recheck re-reads a token that Verify accepted earlier and reports whether

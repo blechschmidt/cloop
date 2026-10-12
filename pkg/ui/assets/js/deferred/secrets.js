@@ -1580,13 +1580,26 @@
     function _tokRenderBanner() {
       const el = document.getElementById('secTokensBanner');
       if (!el) return;
-      if (!tokState.staticActive) { el.style.display = 'none'; return; }
+      const suspended = tokState.tokens.filter(t => t.status === 'suspended').length;
+      const parts = [];
+      if (tokState.staticActive) {
+        parts.push('<strong>This hub still accepts the static <code>--token</code>.</strong><br>' +
+          'It bypasses RBAC, sees every project, and cannot be revoked for one caller without ' +
+          'breaking the rest. Mint scoped tokens for each caller, then retire it (Settings &rarr; ' +
+          'Static admin token) and drop <code>--token</code> / <code>CLOOP_UI_TOKEN</code>.');
+      }
+      // Task 20422: minted while nobody's roles were checked, so its roles are
+      // whatever its minter asked for. Refused until somebody who holds them
+      // vouches for it under the policy now in force.
+      if (suspended) {
+        parts.push('<strong>' + suspended + ' token' + (suspended === 1 ? ' is' : 's are') + ' suspended.</strong><br>' +
+          (suspended === 1 ? 'It was' : 'They were') + ' minted while no role policy was in force, when anybody ' +
+          'signed in could mint any role. Approve each one you recognise &mdash; you must hold its roles &mdash; ' +
+          'and revoke the rest.');
+      }
+      if (!parts.length) { el.style.display = 'none'; return; }
       el.style.display = '';
-      el.innerHTML = '<span aria-hidden="true">&#9888;</span><span>' +
-        '<strong>This hub still accepts the static <code>--token</code>.</strong><br>' +
-        'It bypasses RBAC, sees every project, and cannot be revoked for one caller without ' +
-        'breaking the rest. Mint scoped tokens for each caller, then retire it (Settings &rarr; ' +
-        'Static admin token) and drop <code>--token</code> / <code>CLOOP_UI_TOKEN</code>.</span>';
+      el.innerHTML = '<span aria-hidden="true">&#9888;</span><span>' + parts.join('<br><br>') + '</span>';
     }
 
     function _tokRender() {
@@ -1622,11 +1635,14 @@
           '<td>' + (t.roles || []).map(r => '<span class="sec-chip kind">' + esc(r) + '</span>').join(' ') +
             (t.confinement ? ' <span class="sec-count" title="' + esc(t.confinement) + '">confined</span>' : '') + '</td>' +
           '<td>' + _tokScopeCell(t.project_scope) + '</td>' +
-          '<td>' + _tokStatusCell(t.status) + '</td>' +
+          '<td>' + _tokStatusCell(t) + '</td>' +
           '<td class="audit-time">' + esc(t.expires_at ? _secFmtTime(t.expires_at) : 'never') + '</td>' +
           '<td class="audit-time sec-hide-sm">' + esc(t.last_used_at ? _secFmtTime(t.last_used_at) : 'never') + '</td>' +
           '<td><div class="sec-actions">' +
             '<button class="btn" data-global-perm="audit.read" data-perm-hide data-tok-audit="' + esc(t.prefix || '') + '">Audit</button>' +
+            (t.status === 'suspended'
+              ? '<button class="btn primary" data-global-perm="token.admin" data-tok-approve="' + esc(t.id) + '">Approve</button>'
+              : '') +
             (revocable
               ? '<button class="btn" data-global-perm="token.admin" data-tok-revoke="' + esc(t.id) + '">Revoke</button>'
               : '') +
@@ -1636,6 +1652,9 @@
 
       body.querySelectorAll('[data-tok-revoke]').forEach(btn => {
         btn.addEventListener('click', () => revokeToken(btn.getAttribute('data-tok-revoke')));
+      });
+      body.querySelectorAll('[data-tok-approve]').forEach(btn => {
+        btn.addEventListener('click', () => approveToken(btn.getAttribute('data-tok-approve')));
       });
       body.querySelectorAll('[data-tok-audit]').forEach(btn => {
         btn.addEventListener('click', () => secretsAuditFor('secret', btn.getAttribute('data-tok-audit')));
@@ -1650,9 +1669,22 @@
       return scope.map(p => '<span class="sec-chip">' + esc(p) + '</span>').join(' ');
     }
 
-    function _tokStatusCell(status) {
+    // A token awaiting approval (Task 20422) is "suspended" where a role policy
+    // is in force, and flagged where none is yet: enforcing one will suspend it.
+    function _tokStatusCell(t) {
+      const status = t.status;
       const cls = status === 'active' ? 'sec-ttl' : 'sec-ttl gone';
-      return '<span class="' + cls + '">' + esc(status || 'unknown') + '</span>';
+      const why = 'Minted while no role policy was in force, so its roles were never checked against one';
+      let html = '<span class="' + cls + '"' + (status === 'suspended' ? ' title="' + esc(why) +
+        '; refused until an admin approves it"' : '') + '>' + esc(status || 'unknown') + '</span>';
+      if (status === 'active' && t.awaits_approval) {
+        html += '<br><span class="sec-count" title="' + esc(why) + '. Enforcing a role policy suspends it until an ' +
+          'admin approves it.">unapproved</span>';
+      }
+      if (t.approved_by) {
+        html += '<br><span class="sec-count">approved by ' + esc(t.approved_by) + '</span>';
+      }
+      return html;
     }
 
     // ── mutations ──
@@ -1665,6 +1697,21 @@
         toast('Token revoked', 'ok');
         loadTokens();
       }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
+    }
+
+    // approveToken lets a token minted with no role policy in force act again
+    // under the one now enforced (Task 20422). The hub refuses unless the
+    // approver holds every role it carries.
+    function approveToken(id) {
+      const t = tokState.tokens.filter(x => x.id === id)[0];
+      if (!t || !confirm('Approve token "' + (t.name || id) + '" with ' + (t.roles || []).join(', ') + '?\n\n' +
+        'It was minted' + (t.created_by ? ' by ' + t.created_by : '') + ' while no role policy was in force, when ' +
+        'anybody signed in could mint any role. Approve it only if you know whose it is and that it should hold ' +
+        'these roles; otherwise revoke it.')) return;
+      api('/api/tokens/' + encodeURIComponent(id) + '/approve', {}).then(ok).then(() => {
+        toast('Token approved', 'ok');
+        loadTokens();
+      }).catch(err => toast('Approve failed: ' + ((err && err.message) || String(err)), 'err'));
     }
 
     // ── mint modal ──

@@ -317,8 +317,11 @@
           : '');
       } else if (r.enforced && r.saved_enforced) {
         note.style.cssText = 'display:block;font-size:12px;color:var(--muted);margin-bottom:8px';
+        const waiting = (r.awaiting_approval || []).length;
         note.textContent = 'RBAC is in force: a signed-in user who matches no mapping gets "' +
-          (r.default_role || 'none') + '".';
+          (r.default_role || 'none') + '".' + (waiting ? ' ' + waiting + ' API token' +
+          (waiting === 1 ? ' minted with no role policy in force is' : 's minted with no role policy in force are') +
+          ' suspended until an admin approves ' + (waiting === 1 ? 'it' : 'each') + ' (Secrets → API tokens).' : '');
       } else {
         note.style.display = 'none';
         note.textContent = '';
@@ -326,10 +329,17 @@
     }
 
     // oidcEnforce writes deny-by-default in one step: default role none, plus an
-    // admin mapping for the caller unless they already are one.
+    // admin mapping for the caller unless they already are one. The question
+    // names every API token the policy will suspend until an admin approves it:
+    // minted while nobody's roles were checked (Task 20422).
     function oidcEnforce() {
+      const waiting = (((oidcState.view || {}).rbac || {}).awaiting_approval) || [];
+      const tokens = waiting.length ? '\n\n' + (waiting.length === 1 ? 'This API token was' : 'These ' +
+        waiting.length + ' API tokens were') + ' minted with no role policy in force and will be suspended ' +
+        'until an admin approves each (Secrets → API tokens):\n' + waiting.map(t => '  • ' + t.name + ' — ' +
+        (t.roles || []).join(', ') + (t.created_by ? ', minted by ' + t.created_by : '')).join('\n') : '';
       if (!confirm('Enforce deny-by-default?\n\nAfter the next restart, a signed-in user who matches no ' +
-        'role mapping gets nothing. Admin emails stay admins, and so do you.')) return;
+        'role mapping gets nothing. Admin emails stay admins, and so do you.' + tokens)) return;
       return apiMethod('POST', '/api/config/oidc/enforce', {}).then(d => {
         if (!d || d.error) { toast(oidcErrText(d), 'err'); return; }
         oidcState.view = d;
