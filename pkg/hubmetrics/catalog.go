@@ -668,6 +668,34 @@ var (
 	})
 )
 
+// Approval notifications (Task 20427): the leader posts a notice to every
+// webhook in notifications.webhooks when a grant request is filed, twelve
+// hours from lapsing, decided, withdrawn or lapsed, and when an API token
+// starts waiting for an administrator.
+//
+// `sink` is the webhook's name, closed for the reason audit forwarding's is:
+// the hub's own configuration declares the values, at most
+// config.NotificationsMaxWebhooks of them, each a short lower-case token.
+// `event` is config.NotifyEvent* (7 values), or `test` for the message
+// Settings sends to check a webhook, and `outcome` ApprovalNotify*. Counters
+// only, so every member may count what it sent: only the leader sends notices
+// (a test goes from whichever member served it), and the sum over a cluster is
+// the cluster's total.
+var ApprovalNotifications = Default.MustRegister(Definition{
+	Name:   "cloop_approval_notifications_total",
+	Help:   "Approval notices handled per webhook, by event and outcome: delivered (the webhook acknowledged it), failed (one send that failed; the notice is retried), dropped (given up on after its retries, refused for good, or a day old), superseded (the request or token was settled before the notice went out, so it was not sent).",
+	Type:   TypeCounter,
+	Labels: []string{"sink", "event", "outcome"},
+})
+
+// What became of one approval notice at one webhook.
+const (
+	ApprovalNotifyDelivered  = "delivered"
+	ApprovalNotifyFailed     = "failed"
+	ApprovalNotifyDropped    = "dropped"
+	ApprovalNotifySuperseded = "superseded"
+)
+
 // What became of audit rows the forwarder handled.
 const (
 	AuditForwardDelivered = "delivered"

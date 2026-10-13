@@ -1442,6 +1442,15 @@
     function approveRequest(id) { _reqOpenDecision(id, 'approve'); }
     function denyRequest(id) { _reqOpenDecision(id, 'deny'); }
 
+    // reviewRequest is where the approvals inbox sends an approver (Task
+    // 20427): the queue read afresh with no state filter — a filtered list
+    // would not hold the pending row — then the decision dialog for it.
+    function reviewRequest(id, action) {
+      const sel = document.getElementById('secRequestsFilter');
+      if (sel) sel.value = '';
+      return loadGrantRequests().then(() => _reqOpenDecision(id, action === 'deny' ? 'deny' : 'approve'));
+    }
+
     function _reqOpenDecision(id, action) {
       const r = reqState.requests.filter(x => x.id === id)[0];
       if (!r) { toast('That request is no longer in the list — refresh', 'err'); return; }
@@ -1712,6 +1721,21 @@
         toast('Token approved', 'ok');
         loadTokens();
       }).catch(err => toast('Approve failed: ' + ((err && err.message) || String(err)), 'err'));
+    }
+
+    // reviewToken is where the approvals inbox sends an administrator for one
+    // token (Task 20427): the list read afresh, the row brought into view, and
+    // the same confirmation and approval as its button.
+    function reviewToken(id) {
+      return loadTokens().then(() => {
+        const row = document.getElementById('secTokensTable');
+        if (row && row.scrollIntoView) row.scrollIntoView({block: 'center'});
+        if (!tokState.tokens.some(t => t.id === id && t.awaits_approval)) {
+          toast('That token no longer waits for approval', 'err');
+          return;
+        }
+        approveToken(id);
+      });
     }
 
     // ── mint modal ──
@@ -2090,7 +2114,7 @@
       revokeGrant, revokeLease, openSecretModal, closeSecretModal, onSecretKindChange,
       submitSecret, openGrantModal, closeGrantModal, onGrantKindChange, submitGrant,
       loadGrantRequests, toggleRequestUses, openRequestModal, closeRequestModal,
-      onRequestSecretChange, submitRequest, withdrawRequest, approveRequest, denyRequest,
+      onRequestSecretChange, submitRequest, withdrawRequest, approveRequest, denyRequest, reviewRequest, reviewToken,
       closeRequestDecideModal, submitDecision, loadTokens, revokeToken, openTokenModal,
       closeTokenModal, submitToken, copyTokenPlaintext, loadSessions, revokeSession,
       offboardPreview

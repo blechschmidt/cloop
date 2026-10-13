@@ -93,11 +93,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-278 endpoints, by the permission each one requires:
+283 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 58 |
+| `public` (no permission) | 60 |
 | `audit.read` | 5 |
 | `config.write` | 15 |
 | `executor.manage` | 28 |
@@ -115,13 +115,15 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
 | `token.admin` | 6 |
-| `user.manage` | 21 |
+| `user.manage` | 24 |
 | `view.prefs` | 2 |
 
 | Method | Path | Permission | Scope |
 |--------|------|------------|-------|
 | GET | `/` | `public` | global |
 | GET | `/api/analytics` | `project.read` | project |
+| GET | `/api/approvals` | `public` | global |
+| GET | `/api/approvals/count` | `public` | global |
 | GET | `/api/audit` | `audit.read` | global |
 | GET | `/api/audit/verify` | `audit.read` | global |
 | GET | `/api/budget` | `project.read` | project |
@@ -156,6 +158,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/config` | `project.read` | project |
 | GET | `/api/config/disk` | `user.manage` | global |
 | PUT | `/api/config/disk` | `user.manage` | global |
+| GET | `/api/config/notifications` | `user.manage` | global |
+| PUT | `/api/config/notifications` | `user.manage` | global |
+| POST | `/api/config/notifications/test` | `user.manage` | global |
 | GET | `/api/config/oidc` | `user.manage` | global |
 | PUT | `/api/config/oidc` | `user.manage` | global |
 | POST | `/api/config/oidc/enforce` | `user.manage` | global |

@@ -2251,6 +2251,61 @@ identity, not under `ui`. A lease revoked from the panel writes a second row
 naming the person who pressed the button: the broker's own release event names
 the executor, which does not answer "who took this away".
 
+### Approvals: the inbox and notifications
+
+A grant request waits on somebody who may decide it, and an API token minted with
+no role policy in force waits on an administrator once a policy is enforced
+(Task 20422). Both used to wait silently — a request lapses after 72 hours
+undecided — so the hub now tells the people who can act (Task 20427):
+
+- **The header badge.** Every dashboard shows, beside the scope hint, how many
+  items wait on whoever is signed in: requests they may decide, tokens they may
+  approve. It is each user's own count — `GET /api/approvals/count`, asked for
+  again whenever the hub broadcasts that a request was filed, decided, withdrawn
+  or lapsed, or a token started waiting, was approved or revoked; the broadcast
+  itself carries an event name and an id, never the row. A change made on the
+  hub's host with `cloop hub grant`, which no dashboard handler sees, is
+  broadcast by the notifier when its next pass finds it — within 30 seconds. The
+  badge also asks again when the soonest deadline passes.
+- **The inbox.** The badge opens a list, soonest deadline first, with each
+  request's requester, credential, subject, allowlist and justification, and each
+  token's roles and minter. **Approve…**, **Deny…** and **Review…** open the
+  decision dialogs of the Secrets tab, which read the item afresh. Below it the
+  signed-in user's own requests show how they ended: approved and by whom,
+  denied with the approver's reason, lapsed — and a dashboard that is open when
+  one of them is decided says so.
+- **The terminal.** `cloop remote approvals list|approve|deny` for an approver
+  signed in with `cloop login`, and `cloop remote grants list` for the
+  requester.
+
+What is in someone's inbox is exactly what the decision routes would let them
+decide: a request filed by somebody else, still pending, aimed at a subject on
+which they hold `secret.grant` — hub-wide, as approving has always required — and,
+for a request aimed at every project or executor or at a label selector, only if
+they are an administrator; a token, only under an enforced role policy, for an
+administrator holding every role it carries. A maintainer of one project, a
+viewer and the requester see nothing to decide. A runtime deny on a project takes
+that project's requests out of the denied approver's inbox, and the decision
+route refuses them the same way.
+
+**Notifications** take the same news to a channel: Slack, a Microsoft Teams
+Workflows trigger (an Adaptive Card), Discord, or any receiver of a JSON POST,
+configured under [`notifications`](../reference/configuration.md#approval-notifications-notifications)
+or in Settings → Notifications by an administrator. The cluster leader posts once
+per cluster when a request is filed, 12 hours before it lapses, when it is
+approved, denied, withdrawn or lapses, and when a token starts waiting. A message
+carries identities, the credential's name and kind, the subject, the deadline and
+a link to the inbox — never credential material, never the justification, and
+every string passes through the credential-pattern scrubber first. The webhook
+URL is the channel's credential: it is posted to over https only, never returned
+by the dashboard's API, and the sender refuses a redirect, a cloud metadata
+address, and a private or loopback receiver its configuration does not name.
+`TestApprovalsInboxListsOnlyWhatTheCallerMayDecide` pins who sees what,
+`TestApprovalRemindersGoOutOncePerCluster` the once-per-cluster reminder,
+`TestClientRefusesCloudMetadataEvenWhenAllowed` and
+`TestClientNeverFollowsARedirect` the sender, and
+`TestRenderedMessagesCarryNoSecretMaterial` the messages.
+
 ### When the owner of a personal secret leaves
 
 Offboarding destroys a departed person's personal secrets and revokes every

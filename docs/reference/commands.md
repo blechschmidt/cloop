@@ -1075,6 +1075,7 @@ cloop remote init [--goal <text>] [--executor <id|name>] [--repo owner/name]... 
 cloop remote executors [--json]
 cloop remote repos list|add|remove <project> ... [--json]
 cloop remote grants request|list|withdraw ... [--json]
+cloop remote approvals list|approve|deny ... [--json]
 cloop remote features start|list|pr <project> ... [--json]
 cloop remote projects [--json]
 cloop remote tasks <project> [--status pending] [--json]
@@ -1094,6 +1095,9 @@ cloop remote logs <project> [--follow]
 | `grants request` | `POST /api/grant-requests` | `secret.request` |
 | `grants list` | `GET /api/grant-requests` | `secret.request` |
 | `grants withdraw` | `POST /api/grant-requests/{id}/withdraw` | `secret.request`, the requester |
+| `approvals list` | `GET /api/approvals` | none: the inbox holds what you may decide, empty for anyone who may decide nothing |
+| `approvals approve` | `GET /api/approvals`, then `POST /api/grant-requests/{id}/approve` or `POST /api/tokens/{id}/approve` | `secret.grant` hub-wide and on the request's subject, never the requester; `token.admin` and the token's roles |
+| `approvals deny` | `GET /api/approvals`, then `POST /api/grant-requests/{id}/deny` | `secret.grant` hub-wide and on the request's subject, never the requester |
 | `features start` | `POST /api/projects/{idx}/features` | `project.write` |
 | `features list` | `GET /api/projects/{idx}/features` | `project.read` |
 | `features pr` | `POST /api/projects/{idx}/features/{slug}/pr` | `project.write` |
@@ -1210,7 +1214,33 @@ A request names a stored credential and the narrowing its kind needs; asking
 confers nothing until an approver with `secret.grant` — never the requester —
 approves it. `request` and `list` print who can approve a pending request: the
 accounts and groups the hub's role policy gives `secret.grant` hub-wide (only
-administrators for a request aimed at every project or executor).
+administrators for a request aimed at every project or executor). `list` also
+says how each of yours ended: approved and by whom, denied with the approver's
+reason, or lapsed undecided.
+
+### `cloop remote approvals`
+
+```bash
+cloop remote approvals list [--json]
+cloop remote approvals approve <id> [--ttl <d>] [--note <text>] [--json]
+cloop remote approvals deny <id> --note <text> [--json]
+```
+
+What waits on you (Task 20427): the access requests you may decide — filed by
+somebody else, for a subject you hold `secret.grant` on, and aimed at every
+project or executor only if you are an administrator — and, under an enforced
+role policy, the API tokens awaiting an administrator holding their roles.
+`list` prints them soonest deadline first, with each request's justification;
+the inbox is the hub's answer for your session, the same one the dashboard's
+header badge counts (`GET /api/approvals`). `approve` takes an id from the list,
+whole — a prefix that names one item when you list could name another once that
+one is decided: a request is approved as asked — `--ttl`, a minute or more, can
+only shorten the grant, and the answer says until when it runs — through
+`POST /api/grant-requests/{id}/approve`, a token through
+`POST /api/tokens/{id}/approve`. `deny` refuses a request with the
+reason its requester reads; a token is never denied, it is revoked. A request
+id that is not in your inbox is still sent, so the hub says why it may not be
+decided — somebody decided it first, it is your own, it lapsed.
 
 ### `cloop remote features`
 

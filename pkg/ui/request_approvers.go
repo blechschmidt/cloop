@@ -55,8 +55,9 @@ func (c *approverCache) forSubject(subject secretbroker.Subject) []string {
 	}
 	// A label selector is open-ended for approval purposes, as the broker
 	// treats it (isWildcardSubject): the set it selects grows after the
-	// approval, whenever a device carrying the label is enrolled.
-	if subject.Wildcard() || subject.Type == secretbroker.SubjectLabel {
+	// approval, whenever a device carrying the label is enrolled. The same
+	// predicate decides what the approvals inbox offers (approvals_api.go).
+	if requestReachesFleet(subject) {
 		return c.wildcard
 	}
 	return c.named

@@ -58,6 +58,8 @@
 //	retention, audit       the janitor's policy for the hub's own directory
 //	backup                 auto-backup of the hub's own directory
 //	github.token           the token the hub hands a host-run pull request
+//	notifications          the webhooks the hub tells approvers through
+//	                       (Task 20427)
 //	orchestrator.min_free_disk_mb
 //	                       the free-space floor: the hub's doctor and admin
 //	                       banner hold its state volume to it, and the hub
@@ -77,7 +79,7 @@
 // a provider written there.
 //
 // A settings panel writes the keys it edits into the overlay once one exists
-// (ui.oidc, ui.telemetry, ui.ci, stt.groq_api_key,
+// (ui.oidc, ui.telemetry, ui.ci, stt.groq_api_key, notifications,
 // orchestrator.min_free_disk_mb), and leaves config.yaml byte for byte as it
 // was.
 

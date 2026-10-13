@@ -418,6 +418,7 @@ func TestRemoteCommandsAllSpeakJSON(t *testing.T) {
 		{"repos list", remoteReposListCmd}, {"repos add", remoteReposAddCmd}, {"repos remove", remoteReposRemoveCmd},
 		{"grants request", remoteGrantsRequestCmd}, {"grants list", remoteGrantsListCmd}, {"grants withdraw", remoteGrantsWithdrawCmd},
 		{"features start", remoteFeaturesStartCmd}, {"features list", remoteFeaturesListCmd}, {"features pr", remoteFeaturesPRCmd},
+		{"approvals list", remoteApprovalsListCmd}, {"approvals approve", remoteApprovalsApproveCmd}, {"approvals deny", remoteApprovalsDenyCmd},
 	} {
 		if c.cmd.Flags().Lookup("json") == nil {
 			t.Errorf("cloop remote %s has no --json", c.name)

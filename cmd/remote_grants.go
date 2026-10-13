@@ -180,6 +180,12 @@ func runRemoteGrantsList(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(out, "%s was approved by %s: grant %s\n", r.ID, orDash(r.DecidedBy), r.GrantID)
 		case r.State == "denied":
 			fmt.Fprintf(out, "%s was denied by %s: %s\n", r.ID, orDash(r.DecidedBy), orDash(r.DecisionNote))
+		case r.State == "expired" && r.Mine:
+			// Nobody decided it (Task 20427): the answer the requester is
+			// owed is that asking again is the way forward.
+			fmt.Fprintf(out, "%s lapsed undecided; file it again with a current reason\n", r.ID)
+		case r.State == "withdrawn" && r.Mine && !strings.EqualFold(strings.TrimSpace(r.DecidedBy), strings.TrimSpace(r.RequestedBy)):
+			fmt.Fprintf(out, "%s was withdrawn by %s: %s\n", r.ID, orDash(termText(r.DecidedBy)), orDash(termText(r.DecisionNote)))
 		}
 	}
 	return nil

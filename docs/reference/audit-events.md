@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 185 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 186 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 164 |
+| `control-plane` | the hub's own state.db | 165 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-185 actions in 44 families. Every action is listed: this section is the whole
+186 actions in 45 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -673,6 +673,16 @@ Payload keys:
 Payload keys, on every action above: `enabled`, `was_enabled`, `sources`, `was_sources`
 
 - `telemetry.config.updated` — Collection is off unless an operator turned it on, and this row is when they did. It exists so that "was this hub recording its users at the time, and who decided that" is answerable afterwards — including by the people who were recorded. `sources` is empty when every front end is collected. A save that changed nothing emits no row.
+
+### notifications.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `notifications.config.updated` | `config` | control-plane | beta | The webhooks the hub tells approvers through — when a grant request or an API token waits on them — are added, changed or removed, or the dashboard link they carry is, from Settings → Notifications. |
+
+Payload keys, on every action above: `webhooks`, `was_webhooks`, `url_changed`, `dashboard_url`, `was_dashboard_url`
+
+- `notifications.config.updated` — A webhook decides where a stream about who asked for which credential leaves the hub, so this row is when that destination was chosen, and by whom. Each webhook is described as `name (type) scheme://host`, or `secret:<name>` when its URL is kept in the secret store, with its events and allowed addresses — never the URL itself, which is the channel's credential. `url_changed` names the webhooks whose URL was replaced. A save that changed nothing emits no row.
 
 ### disk.*
 

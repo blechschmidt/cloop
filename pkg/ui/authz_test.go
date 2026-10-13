@@ -102,7 +102,14 @@ var publicRouteAllowlist = map[string]string{
 		"round trip for the same subject",
 	"POST /api/device/deny": "refusing a code a terminal asked for (Task 20412): self-scoped, browser sessions only, " +
 		"and denying grants nothing",
-	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
+	"GET /api/me": "reports the caller's own permissions; the UI cannot render without it",
+	"GET /api/approvals": "the caller's own approvals inbox (Task 20427): every item is admitted by the rule its " +
+		"decision route enforces — secret.grant hub-wide and on the request's subject, the delegation ceiling for a " +
+		"fleet-wide ask, never one's own request; token.admin and every role of the token under an enforced " +
+		"policy — so a caller who may decide nothing gets an empty list. Gating it would turn the navigation badge " +
+		"into a 403 and an audit row on every broadcast for anyone whose only role is on one project",
+	"GET /api/approvals/count": "the number the navigation badge shows, from the same per-caller computation as " +
+		"GET /api/approvals (Task 20427); with it the caller's own pending request ids, which are theirs to know",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
 	"POST /api/csp-report": "Content-Security-Policy violation reports, sent by the browser itself (Task 20408). " +
 		"Served before authentication too (isCSPReport): the glasses page's credential is a header its script " +

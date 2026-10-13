@@ -2004,4 +2004,10 @@ func (s *Server) broadcastSecretsUpdate(event, id string) {
 	// Every hub member's clients, not only this one's (Task 20354): the
 	// change is to a hub-wide resource another member's dashboard is showing.
 	s.broadcastToAll(wsMessage{Type: "secrets_update", Data: json.RawMessage(payload)})
+	// A request filed, decided, withdrawn or lapsed — or withdrawn by an
+	// offboarding — is a moment the approval notifier reports (Task 20427):
+	// wake it rather than leave the channel to its poll.
+	if strings.HasPrefix(event, "request_") || event == "offboarded" {
+		s.nudgeApprovalNotify()
+	}
 }

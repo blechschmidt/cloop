@@ -1687,6 +1687,29 @@ members until they sign in. A runtime deny naming one account removes that
 account. `cloop remote grants request` prints the list beside the request's id;
 it is shown only to callers who may file requests (`secret.request`).
 
+**Who is told, and what they are told.** A request waits on a person, and until
+Task 20427 nothing told them: it lapsed unless an approver happened to open the
+Secrets tab. Every dashboard now counts, in its header, what waits on the person
+signed in, and `GET /api/approvals` lists it. The list is computed per caller by
+the decision routes' own rules — pending, filed by somebody else, `secret.grant`
+hub-wide and on the request's subject, the delegation ceiling for a fleet-wide
+ask, and for a token `token.admin` plus every role it carries — so it never names
+a request its reader may not decide, and the approve and deny routes enforce the
+subject's scope as the inbox reads it (`TestApprovalsInboxListsOnlyWhatTheCallerMayDecide`,
+`TestApprovalsInboxAndDecisionRouteAgree`). The broadcast that moves the count
+is an event name and an id; each dashboard asks for its own count. Off the hub,
+the cluster leader posts each moment once to the webhooks in `notifications`
+(`TestApprovalRemindersGoOutOncePerCluster`). A message names identities, the
+credential, the subject and a link — no justification, no note, nothing a
+credential could ride in, and every string scrubbed of credential shapes
+(`TestRenderedMessagesCarryNoSecretMaterial`). The webhook URL is never returned
+(`TestNotificationSettingsNeverReturnTheWebhookURL`), and the sender is no
+server-side request forgery primitive: https only, no redirect, no proxy, and the
+address it connects to — checked after DNS — is never a cloud metadata service
+and is a private or loopback one only where the webhook's own configuration names
+it (`TestClientRefusesCloudMetadataEvenWhenAllowed`,
+`TestClientRefusesNonPublicAddressesUnlessAllowed`, `TestClientNeverFollowsARedirect`).
+
 Five audit actions cover the lifecycle — [`secret.request`](../reference/audit-events.md#secret),
 `secret.request_approve`, `secret.request_deny`, `secret.request_withdraw`,
 `secret.request_expire` — all on the same hash chain as the grant and lease

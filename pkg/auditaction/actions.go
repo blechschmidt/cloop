@@ -468,6 +468,12 @@ const (
 	// being switched on or off, or narrowed to particular front ends.
 	ActionTelemetryConfigUpdated Action = "telemetry.config.updated"
 
+	// ── notifications ──────────────────────────────────────────────────────
+
+	// ActionNotificationsConfigUpdated records the webhooks approval notices
+	// are posted to (Task 20427) being changed from Settings.
+	ActionNotificationsConfigUpdated Action = "notifications.config.updated"
+
 	// ── disk ───────────────────────────────────────────────────────────────
 
 	// ActionDiskFloorUpdated records the hub's free-space floor

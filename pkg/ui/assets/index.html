@@ -43,6 +43,8 @@
 <meta name="cloop-audit-src" content="{{asset:audit.js}}">
 <meta name="cloop-quotas-src" content="{{asset:quotas.js}}">
 <meta name="cloop-telemetry-src" content="{{asset:telemetry.js}}">
+<meta name="cloop-timeline-src" content="{{asset:timeline.js}}">
+<meta name="cloop-approvals-src" content="{{asset:approvals.js}}">
 <meta name="cloop-execadmin-src" content="{{asset:execadmin.js}}">
 </head>
 <body>
@@ -82,6 +84,7 @@
     <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
     <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
     <span id="quotaSelfBadge" class="quota-self-badge" aria-live="polite" style="display:none"></span>
+    <button id="approvalsBadge" class="badge paused" data-action="openApprovals" style="display:none;cursor:pointer" title="Grant requests and API tokens waiting on you"></button>
     <!-- Hamburger button (mobile only) -->
     <button class="hamburger-btn" id="hamburgerBtn" data-action="openMobileNav" aria-label="Open navigation menu" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -718,31 +721,7 @@
     </div>
 
     <!-- ══════════════════════════════════════════════════════════ TIMELINE -->
-    <div id="tab-timeline" class="tab-panel">
-      <div class="timeline-toolbar">
-        <span class="section-title" style="margin:0">Gantt Chart</span>
-        <button class="btn" style="padding:3px 10px;font-size:11px" data-action="loadTimeline">Refresh</button>
-        <span id="timelineStatus" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id="timelineEmpty" class="empty-state" style="display:none">
-        <h3>No tasks yet</h3>
-        <p>Run <code>cloop run --pm</code> to generate a task plan, then return here to see the Gantt chart.</p>
-      </div>
-      <div id="timelineChart" class="timeline-chart-wrap">
-        <div style="color:var(--muted);font-size:12px;padding:20px 0">Loading timeline...</div>
-      </div>
-      <div class="timeline-legend" id="timelineLegend" style="display:none">
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#22c55e"></div>Done</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#3b82f6"></div>In Progress</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#9ca3af"></div>Pending</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#ef4444"></div>Failed</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#f97316"></div>Timed Out</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#6b7280"></div>Skipped</div>
-        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#f87171;width:2px;height:14px;border-radius:1px"></div>Now</div>
-      </div>
-      <!-- Tooltip -->
-      <div id="tlTooltip" class="tl-tooltip"></div>
-    </div>
+    <div id="tab-timeline" class="tab-panel"></div>
 
     <!-- ══════════════════════════════════════════════ KNOWLEDGE BASE -->
     <div id="tab-kb" class="tab-panel">

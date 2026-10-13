@@ -213,8 +213,11 @@ func (s *Server) handleGrantRequestsList(w http.ResponseWriter, r *http.Request)
 	views := make([]requestView, 0, len(requests))
 	pending := 0
 	approvers := s.newApproverCache(actor)
+	// Decidable as the decision route will judge it: on the request's own
+	// subject too (Task 20427), so the panel offers no button it refuses.
+	g, scopes := s.grantFor(r), s.newSubjectScopes()
 	for _, req := range requests {
-		v := requestViewOf(req, actor, canDecide, now)
+		v := requestViewOf(req, actor, canDecide && scopes.grants(g, req.Subject), now)
 		if req.Pending(now) {
 			pending++
 			v.Approvers = approvers.forSubject(req.Subject)
@@ -365,6 +368,38 @@ func (s *Server) decideGrantRequest(w http.ResponseWriter, r *http.Request, acti
 	}
 
 	actor := s.auditActor(r)
+	// Deciding takes secret.grant on what the request is for, as well as the
+	// hub-wide secret.grant the route gate checked (Task 20427): a runtime deny
+	// on one project withholds that project's requests from a hub-wide
+	// maintainer, here exactly as in the approvals inbox, so the inbox never
+	// lists a request the hub would refuse to have decided. A request the
+	// broker cannot find is left to the broker to answer; one it cannot read
+	// for any other reason is not decided at all, rather than decided
+	// unchecked.
+	if action != requestActionWithdraw {
+		req, gerr := bs.secret.GetRequest(id)
+		if gerr != nil && !errors.Is(gerr, secretbroker.ErrRequestNotFound) {
+			writeBrokerError(w, gerr, string(action)+" access request")
+			return
+		}
+		if gerr == nil {
+			if scope, ok := s.requestSubjectScope(req.Subject); ok {
+				// The route gate's grant (routes.go pins it), so this is
+				// decided on the claims the gate just confirmed.
+				if d := s.grantFor(r).decide(scope); !d.Allows(authz.PermSecretGrant) {
+					s.auditAuthz(r, d, authz.PermSecretGrant, scope, false)
+					apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
+						"your role does not permit deciding a request for "+req.Subject.String()).
+						WithDetails(map[string]any{
+							"required_permission": string(authz.PermSecretGrant),
+							"role":                string(d.Role),
+							"scope":               scope.String(),
+						}))
+					return
+				}
+			}
+		}
+	}
 	in := secretbroker.DecideInput{
 		RequestID:  id,
 		Actor:      actor,

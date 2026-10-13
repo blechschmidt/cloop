@@ -130,13 +130,15 @@ ceiling of 4096 series.
 
 ### Labels from the operator's configuration
 
-`sink`, on the [audit forwarding](#forwarding-the-trail-off-the-box) families,
-is the one label whose values are not declared in Go source. It is closed
-anyway: its values are the names of the sinks in `audit.forward.sinks` — at most
-16, each a short lower-case token — which only whoever writes the hub's
-configuration can choose, not a tenant or a request. The two gauges are reset
-every scrape, so they name only the sinks in force; the counter keeps a series
-for a sink renamed or removed since the process started.
+`sink`, on the [audit forwarding](#forwarding-the-trail-off-the-box) families
+and on [approval notifications](#approval-notifications), is the one label whose
+values are not declared in Go source. It is closed anyway: its values are the
+names of the sinks in `audit.forward.sinks` — at most 16 — or of the webhooks in
+`notifications.webhooks` — at most 8 — each a short lower-case token, which only
+whoever writes the hub's configuration can choose, not a tenant or a request.
+The two audit gauges are reset every scrape, so they name only the sinks in
+force; the counters keep a series for a sink renamed or removed since the
+process started.
 
 ## Hub clusters: which member exports what
 
@@ -971,6 +973,37 @@ sink that has stopped taking rows as well as one falling behind, because the
 oldest waiting row only ages; the second fires on any row a sink will now never
 receive. `failed` alone is not worth paging on: a collector restarting fails a
 batch or two and the rows go again.
+
+## Approval notifications
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_approval_notifications_total` | counter | `sink`, `event`, `outcome` |
+
+The cluster leader posts to the webhooks in `notifications.webhooks` when a
+grant request is filed, 12 hours before it lapses, when it is approved, denied,
+withdrawn or lapses, and when an API token starts waiting for an administrator
+(Task 20427; see [the configuration reference](../reference/configuration.md#approval-notifications-notifications)).
+`sink` is the webhook's name; `event` is one of `request.filed`,
+`request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`,
+`request.lapsed`, `token.waiting`, or `test` for a message sent from Settings.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `delivered` | the webhook answered 2xx |
+| `failed` | one send that failed; the notice is retried after a backoff, so one notice can count here several times |
+| `dropped` | given up on: 8 failed sends, a refusal retrying cannot change (a 4xx other than 408, 425 or 429, a redirect, an address the guard refuses), or a notice a day old |
+| `superseded` | a filing or reminder not sent because the request was decided before it could go out, or a waiting notice for a token approved or revoked meanwhile |
+
+Only the leader sends, so in a cluster the series come from whichever member led
+at the time; `sum()` over members is the cluster's total.
+
+```promql
+increase(cloop_approval_notifications_total{outcome="dropped"}[1h]) > 0
+```
+
+A dropped notice is an approver who was not told. Settings → Notifications shows
+each webhook's last error.
 
 ## Registry self-monitoring
 

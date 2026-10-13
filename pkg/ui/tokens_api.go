@@ -599,6 +599,12 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	if minted.Token.AwaitsApproval() {
+		// Waiting wherever a role policy is enforced, which on a cluster
+		// whose members disagree may be another member (Task 20427).
+		s.broadcastApprovalsUpdate("token_created", minted.Token.ID)
+	}
+
 	jsonOK(w, tokenCreateResponse{
 		Token:     toTokenView(&minted.Token, time.Now(), s.authzActive()),
 		Plaintext: minted.Plaintext,
@@ -650,6 +656,10 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 			"roles": tok.Roles,
 		},
 	})
+	if tok.AwaitsApproval() {
+		// One fewer waiting on an administrator (Task 20427).
+		s.broadcastApprovalsUpdate("token_revoked", id)
+	}
 	jsonOK(w, map[string]any{"ok": true, "id": id})
 }
 
@@ -737,6 +747,8 @@ func (s *Server) handleTokenApprove(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
+	// Off every administrator's badge (Task 20427).
+	s.broadcastApprovalsUpdate("token_approved", id)
 	approved, err := mgr.Get(id)
 	if err != nil {
 		approved = tok

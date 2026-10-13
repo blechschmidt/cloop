@@ -387,6 +387,11 @@ type Config struct {
 	// record and an unattended hub that fills its disk is an outage.
 	Retention RetentionConfig `yaml:"retention,omitempty"`
 
+	// Notifications tells approvers that a grant request or an API token is
+	// waiting on them, through webhooks (Task 20427). Hub-scope: read by
+	// `cloop ui` with its per-instance overlay merged in.
+	Notifications NotificationsConfig `yaml:"notifications,omitempty"`
+
 	// envShadow records what the file held for each credential the
 	// environment overrode, so Save can write the file's own value back
 	// instead of committing a secret that was deliberately kept out of it.
@@ -3503,6 +3508,10 @@ func (c *Config) validateAndClamp(path string) {
 	// reference belongs — is dropped and recorded as switched off, never
 	// repaired into a sink nobody configured.
 	c.clampAuditForward(path, warn)
+	// Approval notifications (Task 20427): a webhook that is not https, keeps
+	// its URL in two places or names an address range holding a metadata
+	// service is dropped and recorded as switched off.
+	c.clampNotifications(path, warn)
 	// Retention janitor: zero means "use the package default" for every
 	// field, so an out-of-range value falls back to zero and the hub runs the
 	// default policy. That is the conservative reading here — the opposite of
@@ -3775,6 +3784,9 @@ func (c *Config) ValidateNumeric() error {
 		return err
 	}
 	if err := ValidateAuditForward(c.Audit.Forward); err != nil {
+		return err
+	}
+	if err := ValidateNotifications(c.Notifications); err != nil {
 		return err
 	}
 	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {

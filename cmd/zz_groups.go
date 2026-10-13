@@ -414,7 +414,9 @@ var remoteCommandGroups = map[string]string{
 	"features": groupRemoteProjects,
 
 	"grants": groupRemoteAccess,
-	"kube":   groupRemoteAccess,
+	// What waits on an approver, and deciding it (Task 20427).
+	"approvals": groupRemoteAccess,
+	"kube":      groupRemoteAccess,
 }
 
 var remoteKubeGroups = []*cobra.Group{

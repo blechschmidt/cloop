@@ -1013,6 +1013,15 @@ func (s *Server) routeTable() []routeSpec {
 		// unable to look. See telemetry_config_api.go.
 		{Pattern: "GET /api/config/telemetry", Handler: s.handleTelemetrySettings, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "PUT /api/config/telemetry", Handler: s.handleTelemetrySettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		// Approval notifications (Task 20427): the webhooks the hub tells
+		// approvers through. Admin-only, for the reason telemetry is: a
+		// webhook decides where a stream of who-asked-for-what and
+		// which-token-waits leaves the hub for, and giving that to the role
+		// that brokers credentials would let it route its own oversight. The
+		// test sends one fixed message to a configured webhook, nowhere else.
+		{Pattern: "GET /api/config/notifications", Handler: s.handleNotificationsSettings, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/notifications", Handler: s.handleNotificationsSettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/config/notifications/test", Handler: s.handleNotificationsTest, Perm: userMgmt, Scope: scopeGlobal},
 		// The hub's free-space floor (Task 20381): admin only, like every
 		// other hub-scope setting the panel writes.
 		{Pattern: "GET /api/config/disk", Handler: s.handleDiskFloorSettings, Perm: userMgmt, Scope: scopeGlobal},
@@ -1097,6 +1106,14 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/grant-requests/{id}/approve", Handler: s.handleGrantRequestApprove, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/grant-requests/{id}/deny", Handler: s.handleGrantRequestDeny, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "GET /api/grant-requests/{id}/uses", Handler: s.handleGrantRequestUses, Perm: secGrant, Scope: scopeGlobal},
+		// The approvals inbox (Task 20427): the grant requests and API tokens
+		// waiting on the caller, and how many, for the navigation badge.
+		// Ungated like /api/me, and for its reason: the answer is computed
+		// from the caller's own authority — the decision routes' rules,
+		// applied per item — so a caller who may decide nothing gets an empty
+		// inbox rather than a 403 and an audit row on every broadcast.
+		{Pattern: "GET /api/approvals", Handler: s.handleApprovals, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /api/approvals/count", Handler: s.handleApprovalsCount, Perm: public, Scope: scopeGlobal},
 
 		// ── CI/CD federation (Task 20278) ────────────────────────────
 		// Two of these are public and the rest are not, and the split is

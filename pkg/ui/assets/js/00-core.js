@@ -352,7 +352,6 @@ act('switchTab', function(name) {
       if (name === 'tasks')  renderTasks(appState);
       if (name === 'kanban') renderKanban(appState);
     }
-    if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
@@ -376,7 +375,6 @@ act('switchTab', function(name) {
     if (name === 'projects') loadProjects();
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
-    if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();

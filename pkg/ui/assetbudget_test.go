@@ -373,6 +373,15 @@ import (
 // it (565 B), as the dialogs before them. Then hover and drag events got tables
 // of their own, so no click action can run on one, and mountPanel calls only a
 // panel's own functions: 143,776 B. The ceiling stays: 224 B of slack.
+//
+// Task 20427 put the approvals badge in the header — the count of grant
+// requests and API tokens waiting on the signed-in user, which has to be on
+// screen before anything is opened: 580 B wire, 515 B of app.js
+// (33-approvals.js and the realtime cases that move it) and 65 B of
+// index.html. The set measured 143,956 B at HEAD, 44 B of slack, so the
+// Timeline tab moved onto DEFERRED_TABS to pay for it, markup and code
+// (deferred/timeline.js): 2,472 B. Measured after: 142,064 B. The ceiling
+// stays: 1,936 B of slack.
 const eagerWireBudgetBytes = 144_000
 
 // eagerAsset is one member of the first-paint set.

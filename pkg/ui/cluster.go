@@ -626,6 +626,10 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 	case invalidateSCIM:
 		// The directory changed through another member (Task 20415).
 		s.onSCIMInvalidate()
+	case invalidateApprovals:
+		// A grant request or a token changed on another member (Task
+		// 20427): if this member leads, its notifier passes now.
+		s.nudgeLocalApprovalNotify()
 	case invalidateAgent:
 		var p agentInvalidation
 		if err := ev.Decode(&p); err == nil {

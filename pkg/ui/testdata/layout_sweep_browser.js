@@ -677,7 +677,9 @@ async function openTab(name) {
 // check and proves nothing. A tab without an entry is an error.
 
 const TAB_READY = {
-  'overview': hasContent('#goalText', F.project),
+  // The header's approvals badge (Task 20427) counts the fixture's pending
+  // request, so every tab is measured with it showing.
+  'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'`,
   'tasks': hasContent('#taskListFull', F.taskTitle),
   'queue': hasContent('#queueTable', F.taskTitle),
   'kanban': hasContent('#kanbanBoard', F.riskTaskTitle),
@@ -948,6 +950,16 @@ const OPENERS = {
   'request-overlay': {
     open: async () => { await onSecrets('openRequestModal'); },
     ready: visible('#requestSubject'),
+  },
+  // The approvals inbox the header badge opens (Task 20427): the fixture's
+  // pending request, with its long justification, is waiting on the sweep's
+  // administrator.
+  'approvals-overlay': {
+    open: async () => {
+      await cdp.eval(`window.panelAct('approvals', 'open')`);
+      await waitFor(`!!document.querySelector('#approvalsList li')`, 'the fixture request in the approvals inbox');
+    },
+    ready: visible('#approvals-overlay [data-act="close"]'),
   },
   'request-decide-overlay': {
     open: async () => {

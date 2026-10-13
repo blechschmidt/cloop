@@ -914,6 +914,10 @@ type Server struct {
 	// (Task 20426). See audit_forward.go.
 	auditForward auditForwardState
 
+	// approvalNotify is the approval notifier's nudge channel and test knobs
+	// (Task 20427). See approval_notify.go.
+	approvalNotify approvalNotifyState
+
 	// kubeShares is this member's record of Kubernetes share renewals: the
 	// failure each share last reported, and which renewal each live monitor
 	// session last took up (Task 20416). See kubeshare.go.
@@ -1492,6 +1496,13 @@ func (s *Server) Run(ctx context.Context) error {
 	// live in the control plane, so a new leader resumes where the last one's
 	// sinks had got to. See audit_forward.go.
 	s.runLeaderDuty(watcherCtx, "audit-forward", s.watchAuditForward)
+	// Tells approvers that a grant request or an API token is waiting on
+	// them, and announces to dashboards the lapses and waiting tokens no
+	// handler sees happen (Task 20427). A leader duty so a cluster posts each
+	// notice once; the outbox and the webhooks' cursors are in the control
+	// plane, so a new leader resumes where the last one stopped. See
+	// approval_notify.go.
+	s.runLeaderDuty(watcherCtx, "approval-notify", s.watchApprovalNotices)
 	// ui.oidc.scim.offboard_after_days (Task 20415): the full offboarding
 	// for users the identity provider has kept deactivated that long.
 	s.runLeaderDuty(watcherCtx, "scim-offboard", s.watchSCIMOffboards)

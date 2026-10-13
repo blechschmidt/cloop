@@ -249,6 +249,13 @@ var adoptAPISource string
 //go:embed stream_credentials.go
 var streamCredentialsSource string
 
+// approvalsAPISource is pkg/ui/approvals_api.go, which broadcasts
+// approvals_update when a token starts waiting, is approved or revoked (Task
+// 20427).
+//
+//go:embed approvals_api.go
+var approvalsAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -281,7 +288,8 @@ func allUISources() string {
 		"\n" + membersSource +
 		"\n" + diskFloorSource +
 		"\n" + adoptAPISource +
-		"\n" + streamCredentialsSource
+		"\n" + streamCredentialsSource +
+		"\n" + approvalsAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

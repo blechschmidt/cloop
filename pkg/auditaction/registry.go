@@ -1597,6 +1597,22 @@ var registry = []Entry{
 			"`sources` is empty when every front end is collected. A save that changed nothing emits no row.",
 	},
 
+	// ── notifications ──────────────────────────────────────────────────────
+	{
+		Action:    ActionNotificationsConfigUpdated,
+		Home:      HomeControlPlane,
+		Entity:    "config",
+		Trigger:   "The webhooks the hub tells approvers through — when a grant request or an API token waits on them — are added, changed or removed, or the dashboard link they carry is, from Settings → Notifications.",
+		Payload:   []string{"webhooks", "was_webhooks", "url_changed", "dashboard_url", "was_dashboard_url"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "A webhook decides where a stream about who asked for which credential leaves the hub, so this row is when " +
+			"that destination was chosen, and by whom. Each webhook is described as `name (type) scheme://host`, or " +
+			"`secret:<name>` when its URL is kept in the secret store, with its events and allowed addresses — never " +
+			"the URL itself, which is the channel's credential. `url_changed` names the webhooks whose URL was " +
+			"replaced. A save that changed nothing emits no row.",
+	},
+
 	// ── disk ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionDiskFloorUpdated,

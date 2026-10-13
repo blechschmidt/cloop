@@ -364,6 +364,15 @@ function handleRealtimeMsg(type, data, scope) {
         // The Overview's Claude credential card shows a grant (Task 20379).
         if (activeTab === 'overview') loadHarnessCred();
       } catch(_) {}
+      // A request filed, decided, withdrawn or lapsed — or withdrawn by an
+      // offboarding — moves the approvals count, which each client asks for
+      // itself (Task 20427). Lease and grant churn does not.
+      if (/^(request_|offboarded$)/.test((data && data.event) || '')) approvalsChanged(data);
+      break;
+    case 'approvals_update':
+      // A token started waiting, was approved or revoked, or the notifier
+      // recorded a request change no dashboard handler made (Task 20427).
+      approvalsChanged(data);
       break;
     case 'resync':
       // Server signalled that this client fell behind and dropped events.
@@ -474,6 +483,8 @@ function connectWS() {
     // socket belonged to, so a reconnect for a since-abandoned project must
     // still notice a redeploy.
     if (window.refreshBuildInfo) window.refreshBuildInfo();
+    // What a missed broadcast moved (Task 20427).
+    refreshApprovals();
     // A socket for a project the user has already navigated away from must not
     // hydrate the log panel: pUrl() would resolve against the *current*
     // selection, pulling the new project's log on the old project's event.
@@ -557,6 +568,7 @@ function connectSSE() {
     // likely way to *end up* on this path, so leaving the check off it would
     // have missed precisely the case it was written for.
     if (window.refreshBuildInfo) window.refreshBuildInfo();
+    refreshApprovals();
     if (!_scopeAccepts(scope)) return;
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {

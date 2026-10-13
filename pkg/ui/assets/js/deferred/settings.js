@@ -774,6 +774,151 @@
         .finally(() => { if (btn) btn.disabled = false; });
     }
 
+    // ── Notifications (Task 20427) ──────────────────────────────────────────
+    //
+    // The webhooks the hub tells approvers through. A webhook URL is the
+    // credential for its channel, so the hub never sends one back: a row shows
+    // where it posts by host, and the form takes a new URL or leaves the field
+    // empty to keep the stored one. Saving sends the whole list, as the hub
+    // stores it; the notifier picks it up on its next pass.
+    const notifyState = {view: null, editing: ''};
+
+    function _notifyNote(text, bad) {
+      const el = document.getElementById('notifyNote');
+      if (el) { el.textContent = text || ''; el.style.color = bad ? 'var(--red)' : 'var(--muted)'; }
+    }
+
+    function loadNotifications() {
+      if (!canGlobal('user.manage')) return Promise.resolve();
+      return api('/api/config/notifications').then(ok).then(_notifyRender)
+        .catch(err => _notifyNote('Could not read the notification settings: ' + ((err && err.message) || err), true));
+    }
+
+    function _notifyRender(d) {
+      notifyState.view = d;
+      const badge = document.getElementById('notifyBadge');
+      const hooks = Array.isArray(d.webhooks) ? d.webhooks : [];
+      if (badge) {
+        badge.textContent = hooks.length ? hooks.length + ' webhook' + (hooks.length === 1 ? '' : 's') : 'off';
+        badge.className = 'badge ' + (hooks.length ? 'running' : 'unknown');
+      }
+      const dash = document.getElementById('notifyDashboardURL');
+      if (dash) { dash.value = d.dashboard_url || ''; dash.placeholder = d.link ? d.link.replace(/\/?\?approvals=1$/, '') : 'https://hub.example.com'; }
+      const link = document.getElementById('notifyLink');
+      if (link) link.textContent = d.link ? 'Messages link to ' + d.link : 'Messages carry no link: set the dashboard URL, or ui.external_url.';
+      const evs = document.getElementById('notifyEvents');
+      if (evs && !evs.childElementCount) {
+        evs.innerHTML = (d.events || []).map(e => '<label class="tel-src"><input type="checkbox" data-notify-event="' +
+          esc(e) + '" checked>' + esc(e) + '</label>').join('');
+      }
+      const type = document.getElementById('notifyType');
+      if (type && !type.options.length) {
+        type.innerHTML = (d.types || []).map(t => '<option value="' + esc(t) + '">' +
+          esc({slack: 'Slack', teams: 'Microsoft Teams (Workflows)', discord: 'Discord', json: 'Generic JSON'}[t] || t) +
+          '</option>').join('');
+      }
+      const list = document.getElementById('notifyList');
+      if (list) {
+        list.innerHTML = hooks.length ? '<table class="audit-table"><thead><tr><th>Name</th><th>Type</th><th>Posts to</th>' +
+          '<th>Events</th><th>Deliveries</th><th></th></tr></thead><tbody>' + hooks.map(_notifyRow).join('') + '</tbody></table>'
+          : '<div class="audit-empty">No webhooks. Approvers learn about requests only by opening the dashboard.</div>';
+      }
+      const refused = document.getElementById('notifyRefused');
+      if (refused) {
+        refused.style.display = (d.refused || []).length ? '' : 'none';
+        refused.textContent = (d.refused || []).length ? 'Switched off at load: ' + d.refused.join('; ') : '';
+      }
+    }
+
+    function _notifyRow(w) {
+      const st = w.status || {};
+      let health = (st.delivered || 0) + ' sent';
+      if (st.dropped) health += ', ' + st.dropped + ' dropped';
+      if (st.failures) health += ', retrying';
+      if (st.last_error) health += '<br><span class="sec-count" title="' + esc(st.last_error_at || '') + '">' + esc(st.last_error) + '</span>';
+      const name = esc(w.name);
+      // A URL read from the environment is the operator's to set, on every
+      // member; say so where it is missing on the one that answered.
+      const unset = w.url_env && !w.url_env_set ? '<br><span class="sec-count">not set on this member</span>' : '';
+      return '<tr><td>' + name + '</td><td>' + esc(w.type) + '</td><td>' + esc(w.destination) + unset + '</td>' +
+        '<td>' + esc((w.events || []).length ? w.events.join(', ') : 'all') + '</td><td>' + health + '</td>' +
+        '<td style="white-space:nowrap"><button class="btn" data-act="notifyTest" data-arg="' + name + '">Test</button> ' +
+        '<button class="btn" data-act="notifyEdit" data-arg="' + name + '">Edit</button> ' +
+        '<button class="btn danger" data-act="notifyRemove" data-arg="' + name + '">Remove</button></td></tr>';
+    }
+
+    // _notifyInputs is the list as the hub has it, in the shape PUT takes: no
+    // URL, so each keeps its stored one.
+    function _notifyInputs() {
+      return ((notifyState.view && notifyState.view.webhooks) || []).map(w => ({
+        name: w.name, type: w.type, events: w.events || [], allow_addresses: w.allow_addresses || [],
+        ca_file: w.ca_file || '', timeout: w.timeout || '',
+      }));
+    }
+
+    function _notifySave(webhooks, done) {
+      const body = {webhooks};
+      const dash = document.getElementById('notifyDashboardURL');
+      if (dash) body.dashboard_url = dash.value.trim();
+      return apiMethod('PUT', '/api/config/notifications', body).then(ok).then(d => {
+        _notifyRender(d);
+        _notifyNote('');
+        toast(done || 'Notifications saved', 'ok');
+      }).catch(err => _notifyNote('Save failed: ' + ((err && err.message) || err), true));
+    }
+
+    function notifyEdit(name) {
+      const w = ((notifyState.view && notifyState.view.webhooks) || []).filter(x => x.name === name)[0];
+      if (!w) return;
+      notifyState.editing = name;
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+      set('notifyName', w.name); set('notifyType', w.type); set('notifyURL', '');
+      set('notifyURLEnv', w.url_env || ''); set('notifyAllow', (w.allow_addresses || []).join(', '));
+      const url = document.getElementById('notifyURL');
+      if (url) url.placeholder = w.url_set ? 'stored — leave empty to keep it' : 'https://hooks.slack.com/services/…';
+      document.querySelectorAll('#notifyEvents input[data-notify-event]').forEach(cb => {
+        cb.checked = !(w.events || []).length || w.events.includes(cb.getAttribute('data-notify-event'));
+      });
+    }
+
+    function notifyAdd() {
+      const val = id => ((document.getElementById(id) || {}).value || '').trim();
+      const name = val('notifyName').toLowerCase();
+      if (!name) { _notifyNote('Name the webhook.', true); return; }
+      const boxes = Array.from(document.querySelectorAll('#notifyEvents input[data-notify-event]'));
+      const picked = boxes.filter(cb => cb.checked).map(cb => cb.getAttribute('data-notify-event'));
+      if (!picked.length) { _notifyNote('Choose at least one event, or remove the webhook.', true); return; }
+      const hook = {
+        name, type: val('notifyType'), url: val('notifyURL'), url_env: val('notifyURLEnv'),
+        events: picked.length === boxes.length ? [] : picked,
+        allow_addresses: val('notifyAllow').split(/[\s,]+/).filter(Boolean),
+      };
+      const list = _notifyInputs().filter(w => w.name !== name && w.name !== notifyState.editing);
+      const prev = _notifyInputs().filter(w => w.name === name)[0];
+      if (prev) { hook.ca_file = prev.ca_file; hook.timeout = prev.timeout; }
+      list.push(hook);
+      return _notifySave(list, 'Webhook ' + name + ' saved').then(() => {
+        notifyState.editing = '';
+        ['notifyName', 'notifyURL', 'notifyURLEnv', 'notifyAllow'].forEach(id => {
+          const el = document.getElementById(id); if (el) el.value = '';
+        });
+      });
+    }
+
+    function notifyRemove(name) {
+      if (!confirm('Remove the webhook ' + name + '? The hub stops posting to it at once.')) return;
+      return _notifySave(_notifyInputs().filter(w => w.name !== name), 'Webhook ' + name + ' removed');
+    }
+
+    function saveNotifyDashboard() { return _notifySave(_notifyInputs(), 'Dashboard link saved'); }
+
+    function notifyTest(name) {
+      _notifyNote('Sending a test message to ' + name + '…');
+      return api('/api/config/notifications/test', {name}).then(ok)
+        .then(() => { _notifyNote(''); toast('Test message delivered to ' + name, 'ok'); })
+        .catch(err => _notifyNote('Test failed: ' + ((err && err.message) || err), true));
+    }
+
 
     // _telTime renders a hub-side timestamp, as the Telemetry tab does.
     function _telTime(s) {
@@ -1730,6 +1875,7 @@
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
       loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadStaticToken(); loadTelemetryPolicy();
+      loadNotifications();
       loadCIPanel();
       loadGitHubApps(); loadUSBSettings(); loadGlassesLink();
       window.loadHiddenProjects(); window.loadBuildInfo();
@@ -1740,7 +1886,7 @@
       clearSTTCfg, confirmReset, saveProvider, saveCCModel, loadOIDCSettings, oidcAddMapping,
       saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadSCIM, scimMint, scimRotate, scimRevoke,
       holdPlace, holdRelease, loadStaticToken, retireStaticToken,
-      loadTelemetryPolicy,
+      loadTelemetryPolicy, loadNotifications, notifyAdd, notifyEdit, notifyRemove, notifyTest, saveNotifyDashboard,
       onTelemetryPolicyToggle, saveTelemetryPolicy, ghAppDiscover, ghAppSaveInstallation,
       loadGitHubApps, loadCISettings, saveCISettings, copyCISnippet, loadCIRules, ciNewRule,
       ciCancelRule, ciSaveRule, ciTestRule, loadCISessions, loadCIExchanges, loadCIPanel,
@@ -2032,6 +2178,39 @@
             <span id="telemetryPolicyStored" style="font-size:12px;color:var(--muted)"></span>
           </div>
           <div id="telemetryPolicyNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <div class="settings-section" id="notifySection" data-global-perm="user.manage" data-perm-hide>
+          <h3>Notifications <span id="notifyBadge" class="badge"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Tell approvers when an access request or an API token is waiting on them &mdash; when a request is filed,
+            12 hours before it lapses, when it is decided, withdrawn or lapses, and when a token starts waiting.
+            Messages carry identities, credential names, subjects and a link to the dashboard; never a credential or a
+            requester's justification. Posted by the cluster leader, once, over https only.
+          </p>
+          <div id="notifyList" style="margin-bottom:12px"></div>
+          <div id="notifyRefused" class="sec-banner" style="display:none;margin-bottom:12px"></div>
+          <div style="padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-weight:600;margin-bottom:8px">Add or change a webhook</div>
+            <div class="form-row"><label for="notifyName">Name</label>
+              <input type="text" id="notifyName" class="input" placeholder="approvers-slack" autocomplete="off" maxlength="32"></div>
+            <div class="form-row"><label for="notifyType">Type</label><select id="notifyType" class="form-select"></select></div>
+            <div class="form-row"><label for="notifyURL">Webhook URL</label>
+              <input type="password" id="notifyURL" class="input" placeholder="https://hooks.slack.com/services/…" autocomplete="off"></div>
+            <div class="form-row"><label for="notifyURLEnv">or the hub's environment variable holding it</label>
+              <input type="text" id="notifyURLEnv" class="input" placeholder="CLOOP_NOTIFY_APPROVERS" autocomplete="off"></div>
+            <div class="form-row"><label>Events</label><div id="notifyEvents" style="display:flex;gap:12px;flex-wrap:wrap"></div></div>
+            <div class="form-row"><label for="notifyAllow">Private receiver addresses</label>
+              <input type="text" id="notifyAllow" class="input" placeholder="only for a receiver inside your network, e.g. 10.20.0.15" autocomplete="off"></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn settings-save" data-act="notifyAdd">Save webhook</button>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px"><label for="notifyDashboardURL">Dashboard URL in messages</label>
+            <input type="text" id="notifyDashboardURL" class="input" autocomplete="off">
+            <button class="btn" data-act="saveNotifyDashboard">Save</button></div>
+          <div id="notifyLink" style="font-size:12px;color:var(--muted)"></div>
+          <div id="notifyNote" style="font-size:12px;color:var(--muted);margin-top:8px;white-space:pre-wrap"></div>
         </div>
 
         <div class="settings-section" id="ghAppPanel" data-global-perm="secret.grant" data-perm-hide>

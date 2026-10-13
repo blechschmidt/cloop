@@ -39,6 +39,7 @@ function panelHelpers() {
     fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
     fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta},
     quota: {label: _quotaLabel, labels: _quotaLabels, fmt: _quotaFmt, saturation: _quotaSaturation},
+    tl: {state: () => appState, active: _filterActive, apply: applyFilters, badge: updateFilterBadge},
   });
 }
 
@@ -81,7 +82,8 @@ function mountPanel(fns, tab, html, dialogs) {
 
 // The tabs whose markup and code arrive on their first open (Task 20386). The
 // panel's open() runs on every visit, as their bundled loaders used to.
-const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry'];
+// Timeline joined them in Task 20427, to pay for the approvals badge.
+const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'timeline'];
 function openDeferredTab(name) {
   const box = document.getElementById('tab-' + name);
   if (!_deferred[name]) box.innerHTML = '<p class="deferred-note">Loading…</p>';

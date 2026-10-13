@@ -594,8 +594,9 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// Task 20425) appends to broker_keks, which every member reads whenever
 	// it opens its keyring — on every request that touches a secret. 0074
 	// (audit forward cursors, Task 20426) is created by the first leader of a
-	// new build in a control plane an older member still serves.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74} {
+	// new build in a control plane an older member still serves, and so is
+	// 0075 (the approval notices outbox and its cursors, Task 20427).
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74, 75} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

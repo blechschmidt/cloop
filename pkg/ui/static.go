@@ -118,6 +118,10 @@ var bundleFiles = []string{
 	// 18-shortcuts.js's boot, both of which run after every fragment has been
 	// evaluated, so it only has to load before the IIFE closes.
 	"assets/js/32-renew.js",
+	// The approvals badge in the header (Task 20427): the count of grant
+	// requests and API tokens waiting on this user. The inbox it opens is
+	// deferred/approvals.js.
+	"assets/js/33-approvals.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. Numbered
@@ -155,6 +159,12 @@ var deferredScripts = []struct{ token, path string }{
 	{"audit.js", "assets/js/deferred/audit.js"},
 	{"quotas.js", "assets/js/deferred/quotas.js"},
 	{"telemetry.js", "assets/js/deferred/telemetry.js"},
+	// The Timeline tab (Task 20427): deferred to pay for the approvals badge
+	// first paint now carries.
+	{"timeline.js", "assets/js/deferred/timeline.js"},
+	// The approvals inbox the badge opens (Task 20427): what waits on the
+	// caller, and what became of their own requests.
+	{"approvals.js", "assets/js/deferred/approvals.js"},
 	// The executor dialogs — history, sandbox, virtual executors, firewall,
 	// limits, access, enrollment and upgrades — fetched on the first open of
 	// any of them through panelAct (Task 20386).

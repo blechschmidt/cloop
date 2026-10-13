@@ -248,6 +248,7 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// send in plaintext off the host or keep its copy inside .cloop/, so
 		// the file's own text is judged here.
 		checkAuditForward(rawCfg, add)
+		checkNotifications(rawCfg, add)
 
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
@@ -521,6 +522,19 @@ func checkAuditForward(cfg *config.Config, add func(Finding)) {
 		add(Finding{
 			Severity: SeverityError,
 			Field:    "config.audit.forward",
+			Message:  err.Error(),
+		})
+	}
+}
+
+// checkNotifications runs the strict notifications validator `cloop config
+// set` uses, against what the file says rather than what Load kept (Task
+// 20427).
+func checkNotifications(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateNotifications(cfg.Notifications); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.notifications",
 			Message:  err.Error(),
 		})
 	}

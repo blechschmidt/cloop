@@ -1788,6 +1788,86 @@ the same overlay on every member. Changes are recorded as
 the sink, after a failed send, and at least hourly. The procedure, delivery semantics and SIEM
 examples are in [the runbook](../operations/runbook.md#forwarding-the-trail-off-the-box).
 
+### Approval notifications (`notifications`)
+
+Two decisions wait on somebody who may make them: a self-service grant request,
+which needs a holder of `secret.grant` (and an administrator for one aimed at
+every project or executor), and an API token a role policy suspends until an
+administrator approves it. The dashboard's header counts what waits on whoever
+is signed in, and its inbox lists it — see
+[the secrets guide](../guides/secrets.md#approvals-the-inbox-and-notifications).
+`notifications:` takes the same news to where approvers already are (Task
+20427). The cluster leader posts once per cluster: when a request is filed,
+12 hours before it lapses, when it is approved, denied, withdrawn or lapses,
+and when a token starts waiting. **Off unless webhooks are listed.**
+
+```yaml
+notifications:
+  dashboard_url: https://hub.example.com
+  webhooks:
+    - name: approvers
+      type: slack
+      url_env: CLOOP_NOTIFY_APPROVERS      # the hub's environment holds the URL
+    - name: security-team
+      type: teams
+      url_env: CLOOP_NOTIFY_SECURITY
+      events: [request.filed, request.reminder, token.waiting]
+    - name: ticketing
+      type: json
+      url: https://hooks.corp.example/cloop/approvals
+      allow_addresses: [10.20.0.15]       # the receiver is on the internal network
+      ca_file: /etc/cloop/corp-ca.pem
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `dashboard_url` | `ui.external_url`, then the origin of `ui.oidc.redirect_url` | The address every message links to, opened on the approvals inbox (`/?approvals=1`). With none of the three, messages carry no link. |
+| `webhooks` | — | At most 8 destinations, each described below. |
+
+Every webhook:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Keys the webhook's delivery cursor and its metric label; a webhook added under a new name hears what happens from then on, not the backlog. |
+| `type` | required | `slack` (an incoming webhook), `teams` (a Microsoft Teams Workflows trigger — "Post to a channel when a webhook request is received" — sent an Adaptive Card), `discord` (one embed, every mention switched off), or `json` (one object: `event`, `title`, `link`, `at`, and `request` or `token`). |
+| `url`, `url_env` | one of them | The webhook's address, `https://` only — it is the credential for its channel, so it never crosses the network in the clear, loopback included. `url` keeps it in this file (the Settings panel writes it there and no API returns it); `url_env` names an environment variable of the hub process holding it, `CLOOP_NOTIFY_` followed by upper-case letters, digits or `_` — the form for a file kept in version control (a Kubernetes Secret mapped into the environment, a systemd `EnvironmentFile`). It is read at every send, on whichever member leads, so set it on every member. Not the hub's secret store: a maintainer may delete and re-mint a shared secret, and the URL decides who hears about every request. |
+| `events` | every event | Any of `request.filed`, `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`, `request.lapsed`, `token.waiting`. |
+| `allow_addresses` | — | IP addresses or CIDR prefixes a receiver on a loopback, private, link-local or carrier-grade-NAT address may be reached at. A prefix of every address, a cloud metadata service, or a prefix containing one is refused. |
+| `ca_file` | — | A PEM bundle added to the system roots for this webhook. |
+| `timeout` | `10s` | How long one POST may take, `1s`–`1m`. |
+
+The sender checks the address it actually connects to, after DNS — so a public
+name resolving to a private address, or rebinding to one, is refused at the
+connect — and refuses a cloud metadata service whatever `allow_addresses` says.
+It follows no redirect (a 3xx is a failed send), uses no proxy from the
+environment, sends at most 32 KiB and reads at most 8 KiB of the answer. A
+message carries identities, the credential's name and kind, the subject, the
+deadline and the link — never credential material, never the requester's
+justification or an approver's note — and every string in it passes through the
+[credential-pattern scrubber](credential-patterns.md) first.
+
+A receiver that fails is retried with a growing backoff (30 seconds, doubling,
+at most 30 minutes); a notice is dropped after 8 failed sends, on a refusal that
+retrying cannot change (a 4xx other than 408, 425 and 429, a redirect, a refused
+address), or once it is a day old. A filing or a reminder for a request decided
+before it could go out is not sent. Deliveries are counted in
+[`cloop_approval_notifications_total`](../operations/metrics.md#approval-notifications).
+
+A webhook that fails validation is dropped at load and recorded as switched off;
+`cloop hub doctor` reports it, and `cloop config set` and `cloop config validate`
+refuse it. Settings → Notifications edits the section (administrators only),
+writing it into the hub's overlay once it has one, and sends a test message to a
+configured webhook; each change is an
+[`notifications.config.updated`](audit-events.md#notifications) row. A webhook
+removed there forgets its place at once, so adding it back starts from what
+happens next; one dropped from a file is forgotten a day later. Only the leader
+sends, under its own configuration, so a cluster's members should run the same
+section: a webhook only some members configure is sent to while one of them
+leads. Decisions are picked up from the time the leader last scanned, less two
+minutes, so members' clocks must agree to within that — run NTP. Delivery is at
+least once: for the moment two members both believe they lead, a notice can be
+posted twice.
+
 ### Disk retention
 
 `retention:` governs the janitor the hub runs on a timer to keep `.cloop`
