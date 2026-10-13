@@ -1727,6 +1727,36 @@ a fault. While on, credentials are scrubbed before storage and the table trims
 itself at 50,000 rows. The Telemetry tab shows the same data, gated on
 `audit.read`. See [front-end telemetry](../operations/telemetry.md).
 
+### `cloop hub audit forward`
+
+Where the audit trail goes as it is written, and whether it gets there. The
+forwarding itself is the cluster leader's duty inside `cloop ui`; these read
+what it leaves in the control plane, so they answer with the hub up or down.
+
+```bash
+cloop hub audit forward status            # each sink: backlog, lag, last error, per-chain cursors
+cloop hub audit forward status --json     # the same for a monitoring script
+cloop hub audit forward verify siem.jsonl # verify the chains in what a sink received
+cloop hub audit prune --before 90d        # stops at the slowest sink's cursor
+cloop hub audit prune --before 90d --force
+```
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--port` | `status` | The hub whose configuration to read; its `config.ui-<port>.yaml` overlay is merged |
+| `--json` | `status`, `verify` | Emit JSON |
+| `--hub` | `prune` | Hub directory whose forwarding cursors bound the prune (default: this database, and the hub it names) |
+| `--force` | `prune` | Prune rows a sink has not acknowledged; it never receives them |
+
+`status` exits 1 when a sink is refused at load, has never delivered (a sink no
+hub has started yet included), or lags beyond `audit.forward.max_lag`. `verify`
+reads a JSON sink's file, a collector's export, HEC events or syslog lines, and
+exits 2 on a gap, a fork (one id with two hashes), a bad hash, a broken link,
+or a file holding no forwarded record (a CEF stream cannot be verified); a
+repeated row is counted, not reported. `cloop db maintain` takes `--audit-hub` and
+`--force-audit-prune` for the same hold. See
+[forwarding the trail off the box](../operations/runbook.md#forwarding-the-trail-off-the-box).
+
 ---
 
 ## Network egress

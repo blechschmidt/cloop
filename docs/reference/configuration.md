@@ -1689,6 +1689,105 @@ with `cloop hub audit verify --checkpoints <file>` — the
 what it can find. Like the rest of `audit`, the section is read from the hub's
 effective configuration, overlay included, at every window.
 
+### Audit forwarding (`audit.forward`)
+
+Checkpoints pin how long each chain is; `audit.forward` ships what the rows say
+off the hub as they are written (Task 20426). The cluster leader tails every
+chain — the control plane's and each registered project's — and sends each row
+to every sink, advancing a cursor per sink and chain in the control plane only
+once the sink acknowledges. **Off unless sinks are listed.**
+
+```yaml
+audit:
+  forward:
+    hostname: hub-prod-1
+    max_lag: 15m
+    sinks:
+      - name: siem
+        type: syslog
+        address: siem.corp.example:6514
+        format: json
+        ca_file: /etc/cloop/siem-ca.pem
+        client_cert: /etc/cloop/hub-client.pem
+        client_key_secret: siem-client-key
+      - name: splunk
+        type: https
+        variant: splunk_hec
+        url: https://splunk.corp.example:8088/services/collector/event
+        token_secret: splunk-hec
+      - name: archive
+        type: file
+        path: /mnt/audit/cloop/audit.jsonl
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `hostname` | the host name | printable ASCII, no spaces | Names this hub in what it sends: the syslog HOSTNAME, `hub` in every JSON record, the HEC `host`, the CEF `dvchost`. The host name follows the cluster leader, so a cluster should set it. |
+| `max_lag` | `15m` | `1m`–`168h` | How old the oldest row a sink has not acknowledged may be before `cloop hub doctor` and `cloop hub audit forward status` report the sink. |
+| `sinks` | — | at most 16 | The destinations. Each is described below. |
+
+Every sink:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Keys the sink's cursors, its metric label and its rows in the audit trail; renaming a sink starts it again from `start`. |
+| `type` | required | `syslog`, `https` or `file`. |
+| `format` | `json` | `json` — the `cloop audit-log export --format jsonl` record with `source`, `dir` and `hub` — or `cef`, the export's CEF line. An `https` sink sends `json`. |
+| `batch_size` | `500` | Rows read, sent and acknowledged as one, `1`–`5000`. |
+| `timeout` | `30s` | How long one send may take, `1s`–`10m`. |
+| `start` | `oldest` | Where the sink begins on a chain it has never sent: every row still in the database, or `latest` — the chain's head when the forwarder first meets it. |
+| `ca_file` | — | A PEM bundle added to the system roots for this sink. |
+| `client_cert`, `client_key_secret` | — | Mutual TLS: the certificate file, and the secret holding its private key. Both or neither. |
+| `server_name` | from the address | The name the receiver's certificate is checked against. |
+| `allow_plaintext_loopback` | `false` | Acknowledges a plaintext sink (`transport: tcp`, an `http://` URL) to a **loopback** address. Plaintext to any other address is refused whatever this says. |
+
+`syslog` — RFC 5424 messages in RFC 5425 octet-counted framing:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `address` | required | `host:port` of the receiver; 6514 is the registered port for syslog over TLS. |
+| `transport` | `tls` | `tls`, or `tcp` to a loopback collector with `allow_plaintext_loopback`. |
+| `facility` | `local0` | A syslog facility name: `auth`, `audit`, `local0`–`local7`, … |
+| `app_name` | `cloop` | The APP-NAME field, at most 48 characters. |
+| `max_message_bytes` | `8192` | `2048`–`1048576`. A row larger than this is sent with its payload left out, and the record says so. |
+
+A syslog batch counts as acknowledged once the receiver's TCP stack has
+acknowledged every byte on a connection it has not closed — the protocol has no
+acknowledgement of its own.
+
+`https` — one POST per batch:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `url` | required | `https://…`, or `http://` to a loopback collector with `allow_plaintext_loopback`. Must not carry `user:password@`, or a query parameter whose name reads as a credential (`token`, `key`, `secret`, `sig`, `auth`, …). |
+| `variant` | NDJSON | `splunk_hec` wraps each record as a HEC event and checks the reply's `code`. |
+| `token_secret` | — | The secret holding the token presented in `Authorization`. Required for `splunk_hec`. |
+| `auth_scheme` | `bearer` | `bearer`, `apikey` (Elasticsearch), `basic` (the secret holds `user:password`) or `splunk`; `splunk_hec` always uses `splunk`. |
+| `splunk_index`, `splunk_sourcetype`, `splunk_source` | token default, `cloop:audit`, `cloop` | The HEC envelope's fields. |
+| `max_batch_bytes` | `1048576` | `65536`–`67108864` bytes per POST; a batch always carries at least one row. |
+
+A batch is acknowledged by a 2xx (and, for HEC, `code` 0). A redirect is a
+failed send, never followed, and no proxy from the environment is used.
+
+`file` — appended to and fsynced after each batch, mode 0600:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `path` | required | An absolute path outside every `.cloop/` directory, symlinks resolved. Its directory must exist — the sink never creates it — so put the file in a subdirectory that only exists on the mounted volume: an unmounted mount point is an existing, empty directory. |
+
+Secrets are named, never written here: a shared `env` secret in the hub's
+secret store (`cloop secret mint <name> --kind env --file …`), as `name`, or
+`name#KEY` for one key of a secret holding several. A sink that fails
+validation — plaintext off the host, a file inside `.cloop/`, credentials in a
+URL, a missing field — is dropped at load and recorded as switched off;
+`cloop hub doctor` fails it, and `cloop config set` and `cloop config validate`
+refuse it. Every member of a hub cluster must run the same section — only the
+leader forwards, under its own configuration — so keep it in `config.yaml`, or
+the same overlay on every member. Changes are recorded as
+`audit.forward.configured` rows. The hub reads a sink's secrets when it starts
+the sink, after a failed send, and at least hourly. The procedure, delivery semantics and SIEM
+examples are in [the runbook](../operations/runbook.md#forwarding-the-trail-off-the-box).
+
 ### Disk retention
 
 `retention:` governs the janitor the hub runs on a timer to keep `.cloop`

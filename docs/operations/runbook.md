@@ -1013,15 +1013,289 @@ What checkpoints cannot do is stop someone deleting records from the file.
 That is what off-box storage is for, and why the doctor warns when the newest
 control-plane checkpoint is more than three intervals old.
 
-Regular export off-box remains the way to keep the *content* of the trail, not
-just its length:
+Checkpoints pin a chain's *length*. Its *content* leaves the box through the
+forwarder, below; `cloop audit-log export` remains for backfill.
+
+### Forwarding the trail off the box
+
+Whoever can write `state.db` can delete rows. A checkpoint says that they were
+deleted; only a copy kept somewhere else says what they were. `audit.forward`
+makes the cluster leader ship every row of every chain — the control plane's
+and each registered project's — to one or more sinks as it is written:
+
+```yaml
+audit:
+  forward:
+    hostname: hub-prod-1         # names this hub in what it sends; set it in a cluster
+    max_lag: 15m                 # `cloop hub doctor` warns past this (default 15m)
+    sinks:
+      - name: siem               # syslog: RFC 5424 messages, RFC 5425 framing
+        type: syslog
+        address: siem.corp.example:6514
+        format: json             # or cef
+        ca_file: /etc/cloop/siem-ca.pem
+        client_cert: /etc/cloop/hub-client.pem
+        client_key_secret: siem-client-key
+      - name: splunk             # https: an NDJSON POST, or Splunk HEC events
+        type: https
+        variant: splunk_hec
+        url: https://splunk.corp.example:8088/services/collector/event
+        token_secret: splunk-hec
+        splunk_index: cloop_audit
+      - name: archive            # file: appended and fsynced
+        type: file
+        path: /mnt/audit/cloop/audit.jsonl
+```
+
+Every key is in the [configuration reference](../reference/configuration.md#audit-forwarding-auditforward).
+Every member of a hub cluster must run the same `audit.forward` — keep it in
+`config.yaml`, or the same overlay on every member — because only the leader
+forwards, under its own configuration: members that disagree record the
+configuration as changed at every leadership change, and each retires the
+other's cursors, which lifts their hold on retention.
+
+**Credentials are secrets, never configuration.** A HEC token, an API key, the
+private key of a client certificate: each is a shared `env` secret in the
+hub's secret store, which a sink names. There is no field that could hold the
+value itself, and a URL carrying `user:password@` is refused.
+
+```console
+$ cloop secret mint splunk-hec      --kind env --file hec-token.txt
+$ cloop secret mint siem-client-key --kind env --file hub-client.key
+```
+
+A secret holding one value is presented as it is; one holding several
+(`{"API_KEY":"…","USER":"…"}`) is named `name#KEY`. A personal secret is
+refused — the hub presents only the organisation's credentials as itself. The
+hub reads the secret when it starts a sink, after any failed send, and at least
+hourly, so a rotated value is presented within the hour; point the sink's
+`token_secret` at a new secret to switch at once.
+
+**A file sink's directory must exist**; the sink never creates it, so a
+directory that is missing fails the send. An unmounted mount point is still an
+existing, empty directory, though, so put the file in a subdirectory that only
+exists on the mounted volume (`/mnt/audit/cloop/`, not `/mnt/audit/`): a
+volume that is not mounted then fails loudly instead of the rows landing on the
+root disk beneath it.
+
+**What is refused at load.** Plaintext — `transport: tcp`, or an `http://`
+URL — unless the address is loopback *and* the sink says
+`allow_plaintext_loopback: true`: a local rsyslog or forwarder is the one place
+plaintext is a deployment choice. A file sink inside any `.cloop/` directory. A
+sink that fails these is switched off, not repaired, and `cloop hub doctor`
+fails `audit.forward.sink`. So is a URL passing a credential-looking query
+parameter (`?api_key=`, `?token=`): those go in the secret store too.
+
+**What is refused on the wire.** The forwarder checks the address each socket
+is about to connect to, after DNS, so a name cannot resolve its way past it: a
+cloud metadata service (the [one table](../guides/firewall.md#cloud-metadata-services) the
+firewall uses) is refused for every sink, and a plaintext sink reaches only a
+literal loopback address. The https sink follows no redirect — a 3xx is a
+failed send, not an instruction to carry the trail and its token elsewhere —
+and ignores `HTTPS_PROXY`.
+
+**Delivery.** Each sink has a cursor per chain in the control plane: the newest
+row it acknowledged, by id and `row_hash`. A batch (`batch_size`, default 500
+rows; `max_batch_bytes`, default 1 MiB) is read from the database after the
+cursor, sent, and the cursor advanced only once the sink acknowledges:
+
+| Sink | Acknowledged when |
+| --- | --- |
+| `https` | the collector answers 2xx — and, for HEC, a body whose `code` is 0 |
+| `file` | the batch is written and fsynced; a batch cut short is truncated back off the file, so a retry never lands after a half line |
+| `syslog` | the receiver's TCP stack has acknowledged every byte, on a connection it has not closed. RFC 5425 has no acknowledgement of its own, so a receiver that crashes holding acknowledged bytes loses them; use `https` where the collector itself must confirm |
+
+Delivery is **at-least-once**. A leader that dies after a sink acknowledged and
+before the cursor moved leaves the batch to its successor, which sends it again;
+a receiver recognises the repeat by its `row_hash`, the idempotency key. Only the
+leader forwards, so a cluster sends each row once per sink, not once per member.
+
+A sink that is down costs the hub nothing an audit append waits on: it has its
+own goroutine and its own database handles, it backs off from a second to five
+minutes, and its backlog stays in the database — the forwarder holds at most
+one batch in memory however far behind it falls. A new sink begins with every
+row still in the database (`start: oldest`); `start: latest` begins at each
+chain's head. Rows already pruned into archives, or written before the hub
+could forward, are backfilled with `cloop audit-log export` (below).
+
+**What a sink receives.** `format: json` is the record `cloop audit-log export
+--format jsonl` writes, with the chain it came from and the hub that sent it:
+
+```json
+{"id":4182,"timestamp":"2026-10-13T09:14:02.118409Z","actor":"alice@corp.example","event_type":"secret.grant","entity_type":"secret","entity_id":"s_7f3c","payload":{"decision":"allowed","secret_name":"gh-deploy"},"prev_hash":"9c1e…","row_hash":"4b07…","source":"project","dir":"/srv/projects/api","hub":"hub-prod-1"}
+```
+
+Over syslog it is the MSG of an RFC 5424 message — `<PRI>1 TIMESTAMP HOSTNAME
+cloop - MSGID - MSG`, with the event type as MSGID, facility `local0` unless
+`facility` says otherwise, and severity warning for a denial, notice for a
+credential or executor event, informational for the rest. A row larger than
+`max_message_bytes` (default 8192) is sent with its payload left out, saying so
+(`payload_truncated`, `payload_bytes`, `payload_sha256`, an excerpt). `format:
+cef` is the export's CEF line, adding `dvchost` (the hub), `cs5` (the chain's
+role) and `cs6` (its directory) beside `cs2` (`row_hash`) and `cs3`
+(`prev_hash`); CEF truncates payloads, so a chain is verifiable from it by its
+links, not its hashes.
+
+**Verifying what a sink holds.** Every record carries `prev_hash` and
+`row_hash`, so the copy is the chain itself, checkable without the hub:
+
+```console
+$ cloop hub audit forward verify /mnt/audit/cloop/audit.jsonl
+OK      control-plane /srv/cloop  ids 1…18213, 18213 row(s), 500 repeat(s)
+OK      project       /srv/projects/api  ids 1…912, 912 row(s), 0 repeat(s)
+```
+
+It reads a JSON sink's file, a collector's export of the records (HEC events
+are unwrapped), or syslog lines with the record after the header, and reports
+per chain the ids missing, ids received with two different hashes (a **fork**:
+the chain changed under the forwarder — a tail truncated and written past, a
+restored backup, a rewrite), records that do not hash to their `row_hash`, and
+broken links. A receiver can do the same itself: `row_hash` is SHA-256 over
+`v1`, `prev_hash`, `id`, `timestamp`, `actor`, `event_type`, `entity_type`,
+`entity_id` and the payload, tab-separated, with the payload as the chain
+holds it — the record's `payload` verbatim when it is JSON, or the string it
+holds when it is a JSON string.
+
+**When the chain moves under a sink.** A cursor whose row the chain no longer
+holds — a prune forced past it, a tail truncated after it was sent, a rewrite —
+is a discontinuity. The forwarder resumes from the newest point it acknowledged
+that the chain still holds, so the sink receives the chain as it now stands
+beside what it already has, and records an
+[`audit.forward.discontinuity`](../reference/audit-events.md#auditforward) row
+naming the sink, the chain, the reason and any rows lost; that row is
+forwarded like any other. A change of the sinks themselves is recorded as
+[`audit.forward.configured`](../reference/audit-events.md#auditforward), by
+the first leader to run under it, however the file was edited.
+
+**Watching it.**
+
+```console
+$ cloop hub audit forward status
+✓ siem  syslog json → tls://siem.corp.example:6514
+  backlog 0 row(s), lag 0s, delivered 18213 row(s), last acknowledged 2s ago
+! splunk  https json → https://splunk.corp.example:8088/services/collector/event
+  lags 2h14m3s behind, beyond audit.forward.max_lag (15m0s): 3210 row(s) waiting; last error: POST … answered 503 Service Unavailable
+```
+
+It exits 1 when a sink is refused, has never delivered — a sink no hub has
+started yet included — or lags beyond `max_lag`; `cloop hub doctor` reports the same as
+`audit.forward.sink`, `audit.forward.lag` and `audit.forward`, and the hub's
+stderr carries `[audit-forward]` lines when a sink starts and stops failing.
+The [metrics](metrics.md#forwarding-the-trail-off-the-box) are
+`cloop_audit_forward_rows_total`, `cloop_audit_forward_lag_seconds` and
+`cloop_audit_forward_backlog_rows`.
+
+**Retention waits for the sinks.** `cloop hub audit prune` and `cloop db
+maintain` stop at the newest row every live sink has acknowledged, and say which
+sink held the rest; `--force` (`--force-audit-prune`) prunes past it, those rows
+reach the sink only through the archive, and the forwarder records the loss. A
+sink removed from the configuration stops holding retention once the leader
+has run without it.
+
+#### Splunk
+
+Create an HTTP Event Collector token whose allowed indexes include the one the
+sink names, store it, and point an `https` sink at the collector's event
+endpoint with `variant: splunk_hec` (the `splunk` sink above). Each row arrives
+as one event with `sourcetype=cloop:audit`, its record under `event`. A resent
+row is a second event with the same `row_hash`, so searches deduplicate on it:
+
+```spl
+index=cloop_audit sourcetype="cloop:audit" | dedup row_hash | table _time hub source dir event_type actor entity_id
+```
+
+Splunk truncates an event at `TRUNCATE` characters (10000 by default) for its
+source type; the largest rows cloop writes are a few kilobytes, but raise it for
+`cloop:audit` if a payload is bigger. A JSON reply whose `code` is not 0 is a
+refusal and the batch is sent again — except one refusing the data itself
+(invalid format, a blank event), after which that chain backs off on its own
+while the others carry on. cloop sends a request channel, so a token with
+indexer acknowledgement on accepts the batch; `code` 0 then means received, not
+yet indexed, and cloop does not poll for the acknowledgement.
+
+#### Elastic
+
+Logstash's `http` input takes the NDJSON body as one event per line, and
+Elasticsearch deduplicates a resend for free when the document id is the
+`row_hash`:
+
+```conf
+input {
+  http {
+    port => 8443
+    ssl_enabled => true
+    ssl_certificate => "/etc/logstash/tls.crt"
+    ssl_key => "/etc/logstash/tls.key"
+    user => "cloop"
+    password => "${CLOOP_INGEST_PASSWORD}"
+    codec => json_lines
+  }
+}
+output {
+  elasticsearch {
+    hosts => ["https://es.corp.example:9200"]
+    index => "cloop-audit"
+    document_id => "%{row_hash}"
+  }
+}
+```
+
+```yaml
+      - name: elastic
+        type: https
+        url: https://logstash.corp.example:8443/
+        auth_scheme: basic
+        token_secret: logstash-ingest    # an env secret holding "cloop:<password>"
+```
+
+(Option names are Logstash 8's; earlier versions spell `ssl_enabled` as `ssl`.)
+Elastic Agent's syslog/TCP inputs take the `syslog` sink instead, with
+octet-counted framing (`framing: rfc6587`).
+
+#### Microsoft Sentinel
+
+Sentinel's *Common Event Format (CEF) via AMA* connector reads CEF from a Linux
+log forwarder: rsyslog receives the messages and the Azure Monitor Agent ships
+them into `CommonSecurityLog`. Send CEF over TLS to the forwarder's rsyslog:
+
+```yaml
+      - name: sentinel
+        type: syslog
+        format: cef
+        address: cef-forwarder.corp.example:6514
+        ca_file: /etc/cloop/forwarder-ca.pem
+```
+
+```conf
+# /etc/rsyslog.d/10-cloop-tls.conf on the forwarder
+global(DefaultNetstreamDriver="gtls"
+       DefaultNetstreamDriverCAFile="/etc/rsyslog.d/tls/ca.pem"
+       DefaultNetstreamDriverCertFile="/etc/rsyslog.d/tls/cert.pem"
+       DefaultNetstreamDriverKeyFile="/etc/rsyslog.d/tls/key.pem")
+module(load="imtcp" StreamDriver.Name="gtls" StreamDriver.Mode="1" StreamDriver.AuthMode="anon")
+input(type="imtcp" port="6514")
+```
+
+Collect facility `local0` (or the sink's `facility`) in the connector's data
+collection rule. CEF's custom strings land in `DeviceCustomString1…6`, so
+`row_hash` is `DeviceCustomString2`:
+
+```kusto
+CommonSecurityLog
+| where DeviceVendor == "cloop"
+| summarize arg_max(TimeGenerated, *) by RowHash = DeviceCustomString2
+| project TimeGenerated, Hub = DeviceName, Chain = DeviceCustomString6, DeviceEventClassID, SourceUserName
+```
+
+#### Backfill with export
+
+Rows already pruned into archives, rows written before a sink was configured
+with `start: latest`, or a time range a collector lost are exported on demand:
 
 ```console
 $ cloop audit-log list --entity secret --since 7d
-$ cloop audit-log list --actor alice@example.com --type run.start --json
-
-$ cloop audit-log export --format jsonl --since 24h --verify --output /var/log/cloop/audit.jsonl
-$ cloop audit-log export --format cef  --since 24h --verify | logger -t cloop -p local0.notice
+$ cloop audit-log export --format jsonl --since 2026-09-01 --until 2026-10-01 --verify --output backfill.jsonl
+$ cloop audit-log export --format cef --since 24h --verify | logger -t cloop -p local0.notice
 ```
 
 | Format | Use |
@@ -1093,7 +1367,9 @@ audit:
 A prune never simply deletes. It streams the prefix to a JSONL archive,
 chain-verifies every row on the way out, digests the file, and only then
 removes the rows — recording an *anchor* holding the boundary hash, the id the
-chain resumes at, and the archive's SHA-256.
+chain resumes at, and the archive's SHA-256. It never removes a row an
+[audit sink](#forwarding-the-trail-off-the-box) has not acknowledged unless
+forced: the prune stops at the slowest sink's cursor and names it.
 
 ```console
 $ cloop hub audit prune --before 90d --dry-run
@@ -3014,8 +3290,9 @@ every secret ever leased to it is disclosed and rotate accordingly.
 
 **`cloop audit-log verify` exits 2.**
 Do not vacuum or maintain — that rewrites pages. Snapshot the file, `cloop db
-verify` to separate corruption from tampering, and compare against your last
-off-box export to find where the histories diverge.
+verify` to separate corruption from tampering, and compare against what your
+audit sinks received (`cloop hub audit forward verify` on their copy) to find
+where the histories diverge.
 
 **`cloop hub audit verify` exits 3.**
 The chains are intact and record events that could not be appended.
@@ -3030,8 +3307,10 @@ Stop the hub before anything else writes, snapshot `state.db`, and keep the
 checkpoint file and its off-box copies as they are. A restore that was
 deliberate explains itself — check backups taken or restored around the time
 the finding names; one nobody ran, or a truncation, is an incident: the rows
-after the last checkpoint the chain agrees with are the ones to recover from an
-export, and the window in which they went is the one to investigate.
+after the last checkpoint the chain agrees with are the ones to recover from
+your audit sinks' copy — the forwarder sent them as they were written — and the
+window in which they went is the one to investigate. The hub's next forward
+records an `audit.forward.discontinuity` row naming the cursor it lost.
 
 **`/readyz` fails but `/healthz` passes.**
 Read the `check` field first — it names which gate failed.
