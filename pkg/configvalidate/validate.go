@@ -244,6 +244,11 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// where the operator's own text is judged.
 		checkAuditCheckpoints(rawCfg, add)
 
+		// 2e''''. Audit forwarding (Task 20426): Load drops a sink that would
+		// send in plaintext off the host or keep its copy inside .cloop/, so
+		// the file's own text is judged here.
+		checkAuditForward(rawCfg, add)
+
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
 
@@ -504,6 +509,18 @@ func checkAuditCheckpoints(cfg *config.Config, add func(Finding)) {
 		add(Finding{
 			Severity: SeverityError,
 			Field:    "config.audit.checkpoints",
+			Message:  err.Error(),
+		})
+	}
+}
+
+// checkAuditForward runs the strict audit.forward validator `cloop config set`
+// uses, against what the file says rather than what Load kept.
+func checkAuditForward(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateAuditForward(cfg.Audit.Forward); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.audit.forward",
 			Message:  err.Error(),
 		})
 	}

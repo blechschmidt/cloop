@@ -2137,6 +2137,51 @@ var registry = []Entry{
 			"`accepted_loss` is true when the restore went ahead under --accept-secret-loss, and " +
 			"`lost_keys` lists the sealing keys whose material it gave up, each with the rows sealed under it.",
 	},
+
+	// ── audit.forward ──────────────────────────────────────────────────────
+	{
+		Action: ActionAuditForwardConfigured,
+		Home:   HomeControlPlane,
+		Entity: "config",
+		Trigger: "The cluster leader starts forwarding under an audit.forward configuration that differs from " +
+			"the one it last recorded: a sink added, removed, or changed in where or how it sends.",
+		Payload: []string{
+			"added", "removed", "changed", "sinks", "refused", "previous_fingerprint", "fingerprint", "file",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Detected rather than reported by an editor: the leader compares a fingerprint of the sinks it " +
+			"runs under — config.yaml merged with the hub's per-port overlay — against the one stored in the " +
+			"control plane, so an edit made with any tool, while the hub was down or up, is recorded by the " +
+			"next leader to run under it. `sinks` describes every sink in force (name, type, format, endpoint, " +
+			"the secret-store references it reads — names, never values — and whether it sends plaintext to " +
+			"loopback); `added`, `removed` and `changed` are sink names; `refused` names sinks the loader " +
+			"switched off. The row is forwarded like any other, so the sinks that remain see what changed " +
+			"about the ones that left.",
+	},
+	{
+		Action: ActionAuditForwardDiscontinuity,
+		Home:   HomeControlPlane,
+		Entity: "audit",
+		Trigger: "A sink's cursor no longer lines up with the chain it tails — its row was pruned past, " +
+			"truncated away or rewritten — and the forwarder resumes from the last point that does.",
+		Payload: []string{
+			"sink", "source", "dir", "reason", "cursor_id", "cursor_row_hash", "resumed_from_id",
+			"resume_prev_hash", "lost_rows",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`reason` is pruned (rows were pruned before the sink acknowledged them, `lost_rows` of them — " +
+			"a prune forced past the sink's cursor; they are in the prune's sealed archive, not at the sink), " +
+			"truncated (the chain now ends before the cursor), rewritten (the cursor's row has another hash), or " +
+			"broken (the cursor's row is intact and what follows it does not continue it: `lost_rows` rows are " +
+			"missing inside the chain, or a row was relinked; the rows are forwarded as they stand). " +
+			"For truncated and rewritten the forwarder resends from the newest point it acknowledged that the chain still " +
+			"holds, so the sink receives the chain as it now stands beside what it already has: two rows with " +
+			"one id and different hashes are the evidence, and `cloop hub audit verify --checkpoints` names " +
+			"the truncation. Recorded in the control plane's chain whichever chain broke, because the cursor " +
+			"is the control plane's.",
+	},
 }
 
 // Shared payload shapes. These are families whose members all go through one

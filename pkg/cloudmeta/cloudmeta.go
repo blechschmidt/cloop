@@ -131,6 +131,86 @@ func Lookup(addr netip.Addr) (Service, bool) {
 	return Service{}, false
 }
 
+// The IPv6 ranges that carry an IPv4 address inside them.
+//
+// Each is a way to write "169.254.169.254" that no IPv6 comparison recognises,
+// so Unwrap unwraps them all before any check runs. They are enumerated rather
+// than approximated by "check the low 32 bits of every IPv6 address", which
+// would misread a legitimate public address whose suffix happens to look like
+// an RFC1918 one (2606:4700::7f00:1 is not loopback).
+var (
+	// nat64WKP is the well-known NAT64 prefix (RFC 6052 §2.1), v4 in the
+	// low 32 bits.
+	nat64WKP = netip.MustParsePrefix("64:ff9b::/96")
+	// nat64LocalUse is the local-use NAT64 prefix (RFC 8215). It is a /48,
+	// so RFC 6052 §2.2 scatters the v4 around the reserved u-octet at
+	// bits 64-71 rather than placing it contiguously.
+	nat64LocalUse = netip.MustParsePrefix("64:ff9b:1::/48")
+	// v4Translated is the IPv4-translatable form (RFC 6145), distinct from
+	// the v4-mapped ::ffff:0:0/96 that Addr.Unmap already handles.
+	v4Translated = netip.MustParsePrefix("::ffff:0:0:0/96")
+	// sixToFour is RFC 3056, which embeds the v4 address in bits 16-47.
+	// Deprecated, and still worth unwrapping: a host with a 6to4 route
+	// configured will happily forward it.
+	sixToFour = netip.MustParsePrefix("2002::/16")
+)
+
+// Unwrap reduces an address to the IPv4 address it spells, when it is one of
+// the IPv6 encodings that carry an IPv4 address inside them — v4-mapped,
+// NAT64 (well-known and local-use), IPv4-translatable, 6to4 and the deprecated
+// IPv4-compatible form — and returns it unchanged otherwise.
+//
+// It belongs here because the question every caller asks of the result is
+// whether it is a metadata service: pkg/egressbroker checks a sandbox's
+// destination with it, and the audit forwarder the address its own dialer is
+// about to connect to (Task 20426).
+func Unwrap(addr netip.Addr) netip.Addr {
+	addr = addr.Unmap()
+	if !addr.Is6() {
+		return addr
+	}
+	b := addr.As16()
+	switch {
+	case nat64WKP.Contains(addr), v4Translated.Contains(addr):
+		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	case sixToFour.Contains(addr):
+		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
+	case nat64LocalUse.Contains(addr):
+		// RFC 6052 §2.2: for a /48 prefix the v4 occupies bits 48-63 and
+		// 72-95, skipping the reserved u-octet at byte 8.
+		return netip.AddrFrom4([4]byte{b[6], b[7], b[9], b[10]})
+	}
+	// The deprecated "IPv4-compatible" form (::a.b.c.d): twelve zero bytes
+	// followed by a v4 address. Excluded are :: itself and ::1, which the
+	// unspecified and loopback predicates already name correctly.
+	if !addr.IsUnspecified() && !addr.IsLoopback() {
+		allZero := true
+		for _, v := range b[:12] {
+			if v != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		}
+	}
+	return addr
+}
+
+// LookupDialed reports the service at addr seen through every spelling
+// Unwrap understands: the check for an address a process is about to connect
+// to, where the spelling is whatever the resolver returned.
+func LookupDialed(addr netip.Addr) (Service, bool) {
+	if !addr.IsValid() {
+		return Service{}, false
+	}
+	if s, ok := Lookup(addr); ok {
+		return s, true
+	}
+	return Lookup(Unwrap(addr))
+}
+
 // Canonical returns p the way every allow list compares prefixes: masked, and
 // an IPv4-mapped prefix as the IPv4 prefix it spells — ::ffff:169.254.0.0/112
 // is 169.254.0.0/16, and treating it as anything else would let a spelling

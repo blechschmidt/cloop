@@ -44,6 +44,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,6 +82,18 @@ type Options struct {
 	// highly repetitive archive.
 	Uncompressed bool
 
+	// Hold is how far the audit sinks forwarding this chain have all got
+	// (Task 20426): the newest row every live cursor has acknowledged, from
+	// auditforward.RetentionHold. Nil means no sink forwards the chain.
+	// Unless Force is set the prune stops at it, so retention never removes a
+	// row a configured sink has not received.
+	Hold *statedb.AuditForwardHold
+
+	// Force prunes past Hold. Rows a sink has not acknowledged are sealed and
+	// removed anyway, and reach that sink only through the archive; the
+	// forwarder records the loss as an audit.forward.discontinuity row.
+	Force bool
+
 	// Now is injected by tests. Production leaves it nil.
 	Now func() time.Time
 }
@@ -103,6 +116,20 @@ type Report struct {
 
 	// Pruned reports that rows were actually deleted.
 	Pruned bool
+
+	// Clamped reports that the cutoff was clamped to Options.Hold: rows
+	// older than the cutoff that a sink has not acknowledged were kept.
+	// HeldBy names the slowest sink, HeldThroughID the newest row it has
+	// acknowledged, and Requested is the prefix the cutoff alone would have
+	// removed. Candidate is what was removed instead.
+	Clamped       bool
+	HeldBy        string
+	HeldThroughID int64
+	Requested     statedb.AuditPruneCandidate
+
+	// ForcedPast names the sinks a forced prune removed unacknowledged rows
+	// from under, in name order.
+	ForcedPast []string
 }
 
 // ResolveCutoff turns a retention window in days into an instant.
@@ -138,6 +165,27 @@ func Prune(db *statedb.DB, opts Options) (*Report, error) {
 		return nil, err
 	}
 	rep := &Report{DryRun: opts.DryRun, Cutoff: opts.Before.UTC(), Candidate: cand}
+	if h := opts.Hold; h != nil && cand.Count > 0 && cand.ThroughID > h.ThroughID {
+		if opts.Force {
+			for sink, at := range h.Sinks {
+				if at < cand.ThroughID {
+					rep.ForcedPast = append(rep.ForcedPast, sink)
+				}
+			}
+			sort.Strings(rep.ForcedPast)
+		} else {
+			// The sinks come first: a prune that removed rows a sink has not
+			// received would leave that sink unable to receive them, and the
+			// operator who asked for 90 days asked for a bounded database, not
+			// for a hole in their SIEM.
+			rep.Clamped, rep.HeldBy, rep.HeldThroughID, rep.Requested = true, h.Sink, h.ThroughID, cand
+			cand, err = db.PlanAuditPruneThrough(opts.Before, h.ThroughID)
+			if err != nil {
+				return nil, err
+			}
+			rep.Candidate = cand
+		}
+	}
 	if cand.Count == 0 {
 		return rep, nil
 	}

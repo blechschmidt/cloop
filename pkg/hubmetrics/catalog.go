@@ -629,6 +629,53 @@ var (
 	})
 )
 
+// Audit forwarding (Task 20426): the leader ships every chain's rows to the
+// sinks in audit.forward, advancing a cursor per sink and chain only once the
+// sink acknowledges.
+//
+// `sink` is the one label in the catalog whose values are not declared in Go
+// source, and it is closed anyway: the values are the names of the configured
+// sinks, which the hub's own configuration declares — at most
+// config.AuditForwardMaxSinks of them, each a short lower-case token — not
+// anything a tenant or a request can choose. The counter can accumulate a
+// series for a sink renamed or removed since the process started, which is
+// bounded by how often an operator edits the file; the two gauges are
+// collector-backed and Reset every scrape, so they name only the sinks in
+// force. `outcome` is AuditForward*.
+//
+// The gauges describe the shared database — the same rows, cursors and
+// backlog whichever member reads them — so only the leader exports them.
+var (
+	AuditForwardRows = Default.MustRegister(Definition{
+		Name:   "cloop_audit_forward_rows_total",
+		Help:   "Audit rows the forwarder handled, by sink and outcome: delivered (the sink acknowledged them), truncated (acknowledged with the payload left out to fit the sink's message size), failed (a send that failed; the rows are sent again), lost (rows the sink can no longer receive: pruned before it acknowledged them, or missing from the chain).",
+		Type:   TypeCounter,
+		Labels: []string{"sink", "outcome"},
+	})
+
+	AuditForwardLag = Default.MustRegister(Definition{
+		Name:   "cloop_audit_forward_lag_seconds",
+		Help:   "Age of the oldest audit row the sink has not acknowledged, across every chain the hub serves; 0 when it is caught up. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"sink"},
+	})
+
+	AuditForwardBacklog = Default.MustRegister(Definition{
+		Name:   "cloop_audit_forward_backlog_rows",
+		Help:   "Audit rows written but not yet acknowledged by the sink, across every chain the hub serves. The backlog is read from the database, never held in memory. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"sink"},
+	})
+)
+
+// What became of audit rows the forwarder handled.
+const (
+	AuditForwardDelivered = "delivered"
+	AuditForwardTruncated = "truncated"
+	AuditForwardFailed    = "failed"
+	AuditForwardLost      = "lost"
+)
+
 // Audit metric label values.
 const (
 	// The role of the database handle an audit append went through

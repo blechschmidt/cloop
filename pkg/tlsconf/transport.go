@@ -145,6 +145,11 @@ type ClientOptions struct {
 	// ServerName overrides SNI / hostname verification. Empty lets the
 	// dialer derive it from the URL, which is what production wants.
 	ServerName string
+	// Certificates are presented when the server asks for a client
+	// certificate — mutual TLS to an audit sink (Task 20426). The private key
+	// arrives from the hub's secret store, never from a file the config
+	// names.
+	Certificates []tls.Certificate
 }
 
 // ClientConfig builds the tls.Config for an outbound connection.
@@ -162,8 +167,9 @@ func ClientConfig(opts ClientOptions) (*tls.Config, error) {
 		min = tls.VersionTLS12
 	}
 	cfg := &tls.Config{
-		MinVersion: min,
-		ServerName: opts.ServerName,
+		MinVersion:   min,
+		ServerName:   opts.ServerName,
+		Certificates: opts.Certificates,
 	}
 	if path := strings.TrimSpace(opts.RootCAFile); path != "" {
 		pem, err := os.ReadFile(path)

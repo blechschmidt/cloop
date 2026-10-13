@@ -384,3 +384,73 @@ func TestEventTypeAliasesStatedbType(t *testing.T) {
 		t.Fatal("Event must alias statedb.AuditEvent")
 	}
 }
+
+// A JSONL record carries its payload exactly: verbatim when the encoder writes
+// it back byte for byte, as a JSON string otherwise — so the row_hash beside it
+// can be recomputed from the record (Task 20426). encoding/json compacts a raw
+// payload and escapes <, > and &, which would otherwise rewrite the bytes the
+// hash covers.
+func TestJSONLPayloadIsExact(t *testing.T) {
+	for _, payload := range []string{
+		`{"a":1,"b":"two"}`,
+		`{ "spaced" : true }`,
+		`{"html":"<b>&</b>"}`,
+		`not json`,
+		`"a json string"`,
+		`  `,
+	} {
+		var buf bytes.Buffer
+		ev := Event{ID: 1, EventType: "task.upsert", Payload: payload}
+		if err := Write(&buf, []Event{ev}, Options{Format: FormatJSONL}); err != nil {
+			t.Fatal(err)
+		}
+		var rec struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+			t.Fatalf("%q: %v", payload, err)
+		}
+		got := string(rec.Payload)
+		if got != payload {
+			var s string
+			if err := json.Unmarshal(rec.Payload, &s); err != nil || s != payload {
+				t.Errorf("payload %q came back as %s, neither verbatim nor a string holding it", payload, rec.Payload)
+			}
+		}
+	}
+}
+
+// Provenance labels the record with its chain and hub; a payload limit leaves
+// a long payload out and says so, with its length, digest and an excerpt.
+func TestJSONLProvenanceAndPayloadLimit(t *testing.T) {
+	var buf bytes.Buffer
+	ev := Event{ID: 9, EventType: "task.upsert", Payload: `{"x":"` + strings.Repeat("z", 500) + `"}`}
+	err := Write(&buf, []Event{ev}, Options{
+		Format:           FormatJSONL,
+		JSONPayloadLimit: 100,
+		Provenance:       &Provenance{Source: "project", Dir: "/srv/p", Hub: "hub-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := buf.String()
+	for _, want := range []string{`"source":"project"`, `"dir":"/srv/p"`, `"hub":"hub-1"`,
+		`"payload_truncated":true`, `"payload_bytes":508`, `"payload_sha256":"`, `"payload_excerpt":"{\"x\":\"zzz`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("record lacks %s:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, `"payload":`) {
+		t.Errorf("a cut payload is still in the record as if whole:\n%s", line)
+	}
+
+	buf.Reset()
+	if err := Write(&buf, []Event{ev}, Options{Format: FormatCEF, Provenance: &Provenance{Source: "project", Dir: "/srv/p", Hub: "hub-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"dvchost=hub-1", "cs5Label=chainSource cs5=project", "cs6Label=chainDir cs6=/srv/p"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("CEF record lacks %s:\n%s", want, buf.String())
+		}
+	}
+}

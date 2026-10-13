@@ -910,6 +910,10 @@ type Server struct {
 	// wrote off the database (Task 20404). See audit_checkpoints.go.
 	auditCheckpoints auditCheckpointState
 
+	// auditForward is the leader's audit forwarder while it leads
+	// (Task 20426). See audit_forward.go.
+	auditForward auditForwardState
+
 	// kubeShares is this member's record of Kubernetes share renewals: the
 	// failure each share last reported, and which renewal each live monitor
 	// session last took up (Task 20416). See kubeshare.go.
@@ -1482,6 +1486,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// keeps a leader change from skipping or doubling one. See
 	// audit_checkpoints.go.
 	s.runLeaderDuty(watcherCtx, "audit-checkpoints", s.watchAuditCheckpoints)
+	// Ships every chain's rows to the sinks in audit.forward as they are
+	// written (Task 20426). A leader duty so a cluster sends each row once per
+	// sink, not once per member; the cursors it advances on acknowledgement
+	// live in the control plane, so a new leader resumes where the last one's
+	// sinks had got to. See audit_forward.go.
+	s.runLeaderDuty(watcherCtx, "audit-forward", s.watchAuditForward)
 	// ui.oidc.scim.offboard_after_days (Task 20415): the full offboarding
 	// for users the identity provider has kept deactivated that long.
 	s.runLeaderDuty(watcherCtx, "scim-offboard", s.watchSCIMOffboards)

@@ -20,7 +20,9 @@
 package auditexport
 
 import (
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,6 +91,29 @@ type Options struct {
 	// kilobytes, and a step payload can be large. 0 selects the default;
 	// negative disables truncation.
 	MaxPayloadBytes int
+
+	// JSONPayloadLimit bounds the payload of a JSONL record, for a transport
+	// with a message size limit (the audit forwarder's syslog sink, Task
+	// 20426). Zero, the default, never cuts: an export is lossless. A
+	// payload over the limit is left out of the record, which says so —
+	// payload_truncated, the payload's length and SHA-256, and an excerpt —
+	// rather than arriving cut and looking whole.
+	JSONPayloadLimit int
+
+	// Provenance labels each record with the chain it came from and the hub
+	// that sent it, for a stream that mixes chains (Task 20426). Nil leaves
+	// the records as a single-chain export writes them.
+	Provenance *Provenance
+}
+
+// Provenance is where a row came from.
+type Provenance struct {
+	// Source is the chain's role: control-plane or project.
+	Source string
+	// Dir is the directory whose .cloop/state.db holds the chain.
+	Dir string
+	// Hub names the hub that sent the row. Empty leaves it out.
+	Hub string
 }
 
 // defaultCEFPayloadBytes keeps a record comfortably inside the ~8 KiB most
@@ -104,7 +129,7 @@ func Write(w io.Writer, events []Event, opts Options) error {
 	case FormatCEF:
 		return writeCEF(w, events, opts)
 	case FormatJSONL, "":
-		return writeJSONL(w, events)
+		return writeJSONL(w, events, opts)
 	}
 	return fmt.Errorf("auditexport: unknown format %q", opts.Format)
 }
@@ -129,9 +154,20 @@ type jsonlRecord struct {
 	Payload    json.RawMessage `json:"payload,omitempty"`
 	PrevHash   string          `json:"prev_hash"`
 	RowHash    string          `json:"row_hash"`
+
+	// Present only when Options.JSONPayloadLimit cut the payload out.
+	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
+	PayloadBytes     int    `json:"payload_bytes,omitempty"`
+	PayloadSHA256    string `json:"payload_sha256,omitempty"`
+	PayloadExcerpt   string `json:"payload_excerpt,omitempty"`
+
+	// Present only with Options.Provenance.
+	Source string `json:"source,omitempty"`
+	Dir    string `json:"dir,omitempty"`
+	Hub    string `json:"hub,omitempty"`
 }
 
-func writeJSONL(w io.Writer, events []Event) error {
+func writeJSONL(w io.Writer, events []Event, opts Options) error {
 	enc := json.NewEncoder(w)
 	for _, ev := range events {
 		rec := jsonlRecord{
@@ -144,7 +180,18 @@ func writeJSONL(w io.Writer, events []Event) error {
 			PrevHash:   ev.PrevHash,
 			RowHash:    ev.RowHash,
 		}
-		rec.Payload = payloadAsRawJSON(ev.Payload)
+		if limit := opts.JSONPayloadLimit; limit > 0 && len(ev.Payload) > limit {
+			sum := sha256.Sum256([]byte(ev.Payload))
+			rec.PayloadTruncated = true
+			rec.PayloadBytes = len(ev.Payload)
+			rec.PayloadSHA256 = hex.EncodeToString(sum[:])
+			rec.PayloadExcerpt = truncate(ev.Payload, limit)
+		} else {
+			rec.Payload = payloadAsRawJSON(ev.Payload)
+		}
+		if p := opts.Provenance; p != nil {
+			rec.Source, rec.Dir, rec.Hub = p.Source, p.Dir, p.Hub
+		}
 		if err := enc.Encode(rec); err != nil {
 			return fmt.Errorf("auditexport: encode event %d: %w", ev.ID, err)
 		}
@@ -153,13 +200,23 @@ func writeJSONL(w io.Writer, events []Event) error {
 }
 
 // payloadAsRawJSON returns the payload as embeddable JSON: verbatim when it
-// is valid JSON, otherwise wrapped as a JSON string.
+// is JSON the encoder writes back byte for byte, otherwise as a JSON string
+// holding it exactly.
+//
+// "Byte for byte" is the point. encoding/json compacts a RawMessage and
+// escapes <, > and &, so a payload stored with whitespace or one of those
+// would arrive rewritten — still the same JSON value, and no longer the bytes
+// the row's hash covers. A receiver recomputing row_hash (an audit sink, the
+// checkpoint verifier reading a seal) tries the field verbatim and then
+// unquoted, and one of the two is always the stored payload.
 func payloadAsRawJSON(payload string) json.RawMessage {
-	if strings.TrimSpace(payload) == "" {
+	if payload == "" {
 		return nil
 	}
-	if json.Valid([]byte(payload)) {
-		return json.RawMessage(payload)
+	if strings.TrimSpace(payload) != "" && json.Valid([]byte(payload)) {
+		if b, err := json.Marshal(json.RawMessage(payload)); err == nil && string(b) == payload {
+			return json.RawMessage(payload)
+		}
 	}
 	quoted, err := json.Marshal(payload)
 	if err != nil {
@@ -243,7 +300,7 @@ func writeCEF(w io.Writer, events []Event, opts Options) error {
 			strconv.Itoa(severityFor(ev)),
 		}, "|")
 
-		ext := cefExtension(ev, maxPayload)
+		ext := cefExtension(ev, maxPayload, opts.Provenance)
 		if _, err := fmt.Fprintf(w, "%s|%s\n", header, ext); err != nil {
 			return fmt.Errorf("auditexport: write cef record %d: %w", ev.ID, err)
 		}
@@ -273,6 +330,11 @@ func eventName(ev Event) string {
 	}
 	return fmt.Sprintf("%s %s", ev.EventType, entity)
 }
+
+// Severity is an event's importance on CEF's 0–10 scale, the ranking the CEF
+// header carries: what the audit forwarder maps onto a syslog severity, so the
+// two formats rank an event alike (Task 20426).
+func Severity(ev Event) int { return severityFor(ev) }
 
 // severityFor maps an event onto CEF's 0–10 scale.
 //
@@ -311,7 +373,7 @@ func severityFor(ev Event) int {
 // (rt, suser, act, cat, externalId, outcome) and custom-string slots
 // otherwise, each paired with its Label as the specification requires — an
 // unlabelled cs1 is meaningless to a collector.
-func cefExtension(ev Event, maxPayload int) string {
+func cefExtension(ev Event, maxPayload int, prov *Provenance) string {
 	pairs := [][2]string{
 		{"rt", strconv.FormatInt(ev.Timestamp.UTC().UnixMilli(), 10)},
 		{"externalId", strconv.FormatInt(ev.ID, 10)},
@@ -339,6 +401,20 @@ func cefExtension(ev Event, maxPayload int) string {
 			[2]string{"cs4Label", "payload"},
 			[2]string{"cs4", payload},
 		)
+	}
+	if prov != nil {
+		// dvchost is CEF's own name for the device that reported the event;
+		// the chain is two more labelled custom strings, so a collector can
+		// verify each chain of a mixed stream on its own.
+		if prov.Hub != "" {
+			pairs = append(pairs, [2]string{"dvchost", prov.Hub})
+		}
+		if prov.Source != "" {
+			pairs = append(pairs, [2]string{"cs5Label", "chainSource"}, [2]string{"cs5", prov.Source})
+		}
+		if prov.Dir != "" {
+			pairs = append(pairs, [2]string{"cs6Label", "chainDir"}, [2]string{"cs6", prov.Dir})
+		}
 	}
 
 	var b strings.Builder

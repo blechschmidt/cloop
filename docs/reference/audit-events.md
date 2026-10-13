@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 183 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 185 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 162 |
+| `control-plane` | the hub's own state.db | 164 |
 | `project` | the project's .cloop/state.db | 17 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-183 actions in 43 families. Every action is listed: this section is the whole
+185 actions in 44 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2)
+[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -845,4 +845,19 @@ Payload keys:
 
 - `audit.gap` — Home is whichever chain lost the events: a failed write to the hub's control-plane database is recorded there, a failed write to a project's database in that project's chain — the gap has to sit in the chain it is a gap in. `actions` counts the lost events by action name and `reasons` by cause (locked, readonly, full, io, closed, other), each a list of {name, events} so redaction cannot withhold a count. `recorded` says what wrote the row (recovery, flush, shutdown, exit) and `adopted_from` names processes that exited owing it. `cloop hub audit verify` reports a chain holding gap rows as intact with gaps and exits 3.
 - `audit.restored` — Home is whichever chain was restored: the control plane's, or a project's restored with the same command — the record has to sit in the history it interrupts. The row takes the id after the restored head, an id the superseded checkpoints saw with another hash; the restore record `cloop db restore` seals to the checkpoint sinks pins it, and is what lets `cloop hub audit verify --checkpoints` report the restore as acknowledged rather than as a truncation. `accepted_loss` is true when the restore went ahead under --accept-secret-loss, and `lost_keys` lists the sealing keys whose material it gave up, each with the rows sealed under it.
+
+### audit.forward.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `audit.forward.configured` | `config` | control-plane | beta | The cluster leader starts forwarding under an audit.forward configuration that differs from the one it last recorded: a sink added, removed, or changed in where or how it sends. |
+| `audit.forward.discontinuity` | `audit` | control-plane | beta | A sink's cursor no longer lines up with the chain it tails — its row was pruned past, truncated away or rewritten — and the forwarder resumes from the last point that does. |
+
+Payload keys:
+
+- `audit.forward.configured` — `added`, `removed`, `changed`, `sinks`, `refused`, `previous_fingerprint`, `fingerprint`, `file`
+- `audit.forward.discontinuity` — `sink`, `source`, `dir`, `reason`, `cursor_id`, `cursor_row_hash`, `resumed_from_id`, `resume_prev_hash`, `lost_rows`
+
+- `audit.forward.configured` — Detected rather than reported by an editor: the leader compares a fingerprint of the sinks it runs under — config.yaml merged with the hub's per-port overlay — against the one stored in the control plane, so an edit made with any tool, while the hub was down or up, is recorded by the next leader to run under it. `sinks` describes every sink in force (name, type, format, endpoint, the secret-store references it reads — names, never values — and whether it sends plaintext to loopback); `added`, `removed` and `changed` are sink names; `refused` names sinks the loader switched off. The row is forwarded like any other, so the sinks that remain see what changed about the ones that left.
+- `audit.forward.discontinuity` — `reason` is pruned (rows were pruned before the sink acknowledged them, `lost_rows` of them — a prune forced past the sink's cursor; they are in the prune's sealed archive, not at the sink), truncated (the chain now ends before the cursor), rewritten (the cursor's row has another hash), or broken (the cursor's row is intact and what follows it does not continue it: `lost_rows` rows are missing inside the chain, or a row was relinked; the rows are forwarded as they stand). For truncated and rewritten the forwarder resends from the newest point it acknowledged that the chain still holds, so the sink receives the chain as it now stands beside what it already has: two rows with one id and different hashes are the evidence, and `cloop hub audit verify --checkpoints` names the truncation. Recorded in the control plane's chain whichever chain broke, because the cursor is the control plane's.
 

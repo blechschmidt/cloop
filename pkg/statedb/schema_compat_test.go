@@ -592,8 +592,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// (proxy session renewal, the same task) to proxy_sessions, which it
 	// reads when it adopts a run. 0073 (the root a sealing key derives from,
 	// Task 20425) appends to broker_keks, which every member reads whenever
-	// it opens its keyring — on every request that touches a secret.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73} {
+	// it opens its keyring — on every request that touches a secret. 0074
+	// (audit forward cursors, Task 20426) is created by the first leader of a
+	// new build in a control plane an older member still serves.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

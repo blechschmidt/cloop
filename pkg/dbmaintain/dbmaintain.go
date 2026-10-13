@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditforward"
 	"github.com/blechschmidt/cloop/pkg/auditretention"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
@@ -95,6 +96,15 @@ type RetentionOptions struct {
 
 	// Actor is recorded on the anchor.
 	Actor string
+
+	// ControlPlane is the control-plane database whose audit-forward cursors
+	// hold this chain (Task 20426). Empty looks in the database itself and in
+	// the control plane its forwarded-by record names; see
+	// auditforward.RetentionHold.
+	ControlPlane string
+
+	// Force prunes past the rows the audit sinks have acknowledged.
+	Force bool
 }
 
 // Report summarises a maintain run.
@@ -236,7 +246,7 @@ func runOnDB(db *statedb.DB, dbPath string, opts Options) (rep *Report, err erro
 	if opts.DryRun {
 		rep.EstimatedReclaim = before.FreelistBytes()
 		if opts.Retention != nil {
-			pr, err := pruneAudit(db, *opts.Retention, true)
+			pr, err := pruneAudit(db, dbPath, *opts.Retention, true)
 			if err != nil {
 				return rep, err
 			}
@@ -246,7 +256,7 @@ func runOnDB(db *statedb.DB, dbPath string, opts Options) (rep *Report, err erro
 	}
 
 	if opts.Retention != nil {
-		pr, err := pruneAudit(db, *opts.Retention, false)
+		pr, err := pruneAudit(db, dbPath, *opts.Retention, false)
 		if err != nil {
 			return rep, err
 		}
@@ -337,16 +347,28 @@ func runOnDB(db *statedb.DB, dbPath string, opts Options) (rep *Report, err erro
 
 // pruneAudit applies the retention window, translating dbmaintain's options
 // into an auditretention run.
-func pruneAudit(db *statedb.DB, ro RetentionOptions, dryRun bool) (*auditretention.Report, error) {
+func pruneAudit(db *statedb.DB, dbPath string, ro RetentionOptions, dryRun bool) (*auditretention.Report, error) {
 	if ro.Days <= 0 {
 		return nil, fmt.Errorf("dbmaintain: retention requested with a non-positive window (%d days)", ro.Days)
 	}
-	rep, err := auditretention.Prune(db, auditretention.Options{
+	// What the audit sinks have acknowledged bounds the prune. A hold that
+	// cannot be read stops it: pruning blind is how rows a sink never
+	// received would be removed.
+	opts := auditretention.Options{
 		Before:    auditretention.ResolveCutoff(ro.Days, time.Now().UTC()),
 		ExportDir: ro.ExportDir,
 		Actor:     ro.Actor,
 		DryRun:    dryRun,
-	})
+		Force:     ro.Force,
+	}
+	hold, held, _, err := auditforward.RetentionHold(db, dbPath, ro.ControlPlane)
+	if err != nil {
+		return nil, fmt.Errorf("dbmaintain: audit retention: read what the audit sinks have acknowledged: %w", err)
+	}
+	if held {
+		opts.Hold = &hold
+	}
+	rep, err := auditretention.Prune(db, opts)
 	if err != nil {
 		return nil, fmt.Errorf("dbmaintain: audit retention: %w", err)
 	}

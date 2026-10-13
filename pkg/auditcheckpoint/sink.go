@@ -34,35 +34,7 @@ func CheckFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	dir := filepath.Dir(filepath.Clean(path))
-	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return fmt.Errorf("checkpoint directory %s: %w", dir, err)
-	}
-	if config.PathInsideCloopDir(real) {
-		return fmt.Errorf("%q resolves to %s, inside a .cloop/ directory", path, real)
-	}
-	// The file itself may be a link too, and appending follows it — creating
-	// the target if it does not exist, so a link that resolves nowhere yet is
-	// refused rather than trusted.
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			target, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return fmt.Errorf("%q is a symlink that does not resolve: %v", path, err)
-			}
-			if config.PathInsideCloopDir(target) {
-				return fmt.Errorf("%q resolves to %s, inside a .cloop/ directory", path, target)
-			}
-			if fi, err = os.Stat(target); err != nil {
-				return fmt.Errorf("%q: %v", path, err)
-			}
-		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%q is not a regular file", path)
-		}
-	}
-	return nil
+	return config.CheckOutsideCloopOnDisk(path)
 }
 
 // Write appends recs to the file with one fsync, then prints them to stderr.

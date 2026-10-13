@@ -21,8 +21,6 @@ package cmd
 // the database, which is what `verify-seals` does.
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +33,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blechschmidt/cloop/pkg/auditexport"
+	"github.com/blechschmidt/cloop/pkg/auditforward"
 	"github.com/blechschmidt/cloop/pkg/auditmerge"
 	"github.com/blechschmidt/cloop/pkg/auditretention"
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -74,6 +73,8 @@ var (
 	hubAuditPruneDryRun    bool
 	hubAuditPruneActor     string
 	hubAuditPruneNoGzip    bool
+	hubAuditPruneHub       string
+	hubAuditPruneForce     bool
 )
 
 var hubAuditPruneCmd = &cobra.Command{
@@ -93,10 +94,19 @@ Safe to run against a live hub: the seal reads in bounded batches and the
 truncation is one transaction. It does not VACUUM, so the file does not shrink
 until 'cloop db maintain' runs — that one does need the hub stopped.
 
+The prune stops at the newest row every audit sink forwarding this chain has
+acknowledged (audit.forward): rows a sink has not received are kept, and the
+report says which sink is holding them. The cursors are read from this
+database, and from the hub it names when it is a project the hub forwards;
+--hub names the hub directory instead. --force prunes past them anyway — those
+rows then reach the sink only through the archive, and the hub records the
+loss as an audit.forward.discontinuity row.
+
 Examples:
   cloop hub audit prune --before 90d --dry-run
   cloop hub audit prune --before 2026-01-01
-  cloop hub audit prune --export-dir /srv/audit-archive --before 30d`,
+  cloop hub audit prune --export-dir /srv/audit-archive --before 30d
+  cloop hub audit prune --before 30d --force   # a sink is gone for good`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log, err := openAuditLog()
 		if err != nil {
@@ -121,19 +131,45 @@ Examples:
 			actor = "cli"
 		}
 
-		rep, err := auditretention.Prune(log.DB(), auditretention.Options{
+		opts := auditretention.Options{
 			Before:       cutoff,
 			ExportDir:    exportDir,
 			Actor:        actor,
 			DryRun:       hubAuditPruneDryRun,
 			Uncompressed: hubAuditPruneNoGzip,
-		})
+			Force:        hubAuditPruneForce,
+		}
+		// What the audit sinks have acknowledged bounds the prune. A hold
+		// that cannot be read stops it rather than pruning blind.
+		controlPlane := ""
+		if hubAuditPruneHub != "" {
+			controlPlane = state.DBPath(hubAuditPruneHub)
+		}
+		hold, held, _, err := auditforward.RetentionHold(log.DB(), log.Path(), controlPlane)
+		if err != nil {
+			return fmt.Errorf("read what the audit sinks have acknowledged (pass --hub to name the hub): %w", err)
+		}
+		if held {
+			opts.Hold = &hold
+		}
+		rep, err := auditretention.Prune(log.DB(), opts)
 		if err != nil {
 			return err
 		}
 
 		bold := color.New(color.Bold)
 		dim := color.New(color.Faint)
+		warn := color.New(color.FgYellow, color.Bold)
+
+		if rep.Clamped {
+			warn.Printf("Kept %d row(s) older than %s: audit sink %q has acknowledged only through id %d.\n",
+				rep.Requested.Count-rep.Candidate.Count, cutoff.Format(time.RFC3339), rep.HeldBy, rep.HeldThroughID)
+			dim.Println("  They are pruned once it has them; --force prunes them now, and the sink never receives them.")
+		}
+		if len(rep.ForcedPast) > 0 {
+			warn.Printf("Forced past what audit sink(s) %s have acknowledged: those rows reach them only through the archive.\n",
+				strings.Join(rep.ForcedPast, ", "))
+		}
 
 		if rep.Candidate.Count == 0 {
 			fmt.Printf("Nothing to prune: no audit rows older than %s.\n",
@@ -651,31 +687,16 @@ func hubAuditDBPath(dir string) string {
 // The event is serialised by auditexport — the same writer
 // `cloop audit-log export --format jsonl` uses — so a merged stream and a
 // single-chain one parse identically, and a consumer's jq does not have to know
-// which command produced the file. That package serialises audit rows and has
-// nowhere to put provenance, so source and dir are appended to the object it
-// produced. Declaring a parallel record type instead would duplicate a wire
-// contract that already exists, leaving two copies to keep in step by hand.
+// which command produced the file. The chain each row came from is the
+// record's provenance (source, dir), which the audit forwarder sends in the
+// same fields (Task 20426).
 func hubAuditWriteJSONL(w io.Writer, rows []auditmerge.Row) error {
-	var buf bytes.Buffer
 	for _, r := range rows {
-		buf.Reset()
-		if err := auditexport.Write(&buf, []auditexport.Event{r.AuditEvent}, auditexport.Options{
-			Format: auditexport.FormatJSONL,
+		if err := auditexport.Write(w, []auditexport.Event{r.AuditEvent}, auditexport.Options{
+			Format:     auditexport.FormatJSONL,
+			Provenance: &auditexport.Provenance{Source: r.Source.String(), Dir: r.Dir},
 		}); err != nil {
 			return fmt.Errorf("encode %s: %w", r.Ref(), err)
-		}
-		obj := bytes.TrimRight(buf.Bytes(), "\n")
-		if len(obj) == 0 || obj[len(obj)-1] != '}' {
-			return fmt.Errorf("encode %s: expected one JSON object from auditexport, got %q", r.Ref(), obj)
-		}
-		// Marshalled rather than quoted by hand: a directory path may contain a
-		// quote or a backslash, and one such row would otherwise emit a line
-		// that breaks the whole stream for whatever is parsing it. Marshalling
-		// a string cannot fail.
-		source, _ := json.Marshal(r.Source.String())
-		dir, _ := json.Marshal(r.Dir)
-		if _, err := fmt.Fprintf(w, "%s,\"source\":%s,\"dir\":%s}\n", obj[:len(obj)-1], source, dir); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -754,6 +775,10 @@ func init() {
 		"write the archive as plain JSONL instead of gzip (roughly 10x larger)")
 	hubAuditPruneCmd.Flags().StringVar(&hubAuditPruneActor, "actor", "",
 		"identity to record on the anchor (default: cli)")
+	hubAuditPruneCmd.Flags().StringVar(&hubAuditPruneHub, "hub", "",
+		"hub directory whose audit forwarding cursors bound the prune (default: this database, and the hub it names)")
+	hubAuditPruneCmd.Flags().BoolVar(&hubAuditPruneForce, "force", false,
+		"prune rows an audit sink has not acknowledged yet; it never receives them")
 	hubAuditListCmd.Flags().StringVar(&hubAuditListActor, "actor", "", "Filter by actor (exact match)")
 	hubAuditListCmd.Flags().StringVar(&hubAuditListEntity, "entity", "", "Filter by entity_type (task, plan, config, secret, executor, permission)")
 	hubAuditListCmd.Flags().StringVar(&hubAuditListEntityID, "entity-id", "", "Filter by entity_id within --entity")
@@ -780,5 +805,6 @@ func init() {
 	hubAuditCmd.AddCommand(hubAuditPruneCmd)
 	hubAuditCmd.AddCommand(hubAuditAnchorsCmd)
 	hubAuditCmd.AddCommand(hubAuditVerifySealsCmd)
+	hubAuditCmd.AddCommand(hubAuditForwardCmd)
 	hubCmd.AddCommand(hubAuditCmd)
 }

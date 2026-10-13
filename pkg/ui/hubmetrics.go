@@ -187,6 +187,11 @@ func registerHubCollectors() {
 			Families: []*hubmetrics.Metric{hubmetrics.StateDBWALBytes},
 			Collect:  withScrape(collectStateDBWAL),
 		},
+		hubmetrics.CollectorSpec{
+			Name:     "audit_forward",
+			Families: []*hubmetrics.Metric{hubmetrics.AuditForwardLag, hubmetrics.AuditForwardBacklog},
+			Collect:  withScrape(collectAuditForward),
+		},
 	)
 }
 

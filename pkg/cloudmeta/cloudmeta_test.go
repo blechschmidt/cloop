@@ -222,3 +222,25 @@ func TestSentencesNameTheServiceAndTheAlternative(t *testing.T) {
 		t.Errorf("plural remedy %q", r)
 	}
 }
+
+// LookupDialed sees a metadata service through every spelling a resolver
+// could return for it (Task 20426): the audit forwarder's dialer checks the
+// address it is about to connect to with it.
+func TestLookupDialedSeesThroughEmbeddedIPv4(t *testing.T) {
+	for _, s := range []string{
+		"169.254.169.254", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe", "2002:a9fe:a9fe::",
+		"::169.254.169.254", "::ffff:0:a9fe:a9fe", "64:ff9b:1:a9fe:a9:fe00::", "fd00:ec2::254",
+	} {
+		if _, ok := LookupDialed(netip.MustParseAddr(s)); !ok {
+			t.Errorf("%s is not seen as a metadata service", s)
+		}
+	}
+	for _, s := range []string{"8.8.8.8", "64:ff9b::808:808", "::1", "2606:4700::6810:84e5"} {
+		if svc, ok := LookupDialed(netip.MustParseAddr(s)); ok {
+			t.Errorf("%s is reported as %s", s, svc.Describe())
+		}
+	}
+	if got := Unwrap(netip.MustParseAddr("64:ff9b::7f00:1")); got != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("Unwrap(64:ff9b::7f00:1) = %s", got)
+	}
+}

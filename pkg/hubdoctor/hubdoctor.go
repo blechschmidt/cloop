@@ -473,6 +473,9 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// whether it is complete, and whether shortening it would be noticed
 	// (Task 20404).
 	checkAuditTrail(dir, cfg, opts, add)
+	// Beside it: whether the trail's content leaves the box, and whether
+	// every sink it goes to keeps up (Task 20426).
+	checkAuditForward(dir, cfg, opts, add)
 	checkAdmission(dir, cfg, opts, add)
 	// Last, and after checkExecutors for the same reason the NetworkPolicy
 	// probe is: it dispatches to the registry reconciliation builds. Running

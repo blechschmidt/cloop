@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -399,15 +400,26 @@ type AuditPruneCandidate struct {
 // it, so a clock that went backwards produces a visibly wrong count instead of
 // a silently over-broad delete.
 func (d *DB) PlanAuditPrune(cutoff time.Time) (AuditPruneCandidate, error) {
+	return d.PlanAuditPruneThrough(cutoff, math.MaxInt64)
+}
+
+// PlanAuditPruneThrough is PlanAuditPrune with the prefix also bounded by an
+// id: rows above maxID are not eligible however old they are, and a maxID
+// below 1 leaves nothing eligible. Retention uses it to stop at the newest row
+// every live audit sink has acknowledged (Task 20426).
+func (d *DB) PlanAuditPruneThrough(cutoff time.Time, maxID int64) (AuditPruneCandidate, error) {
+	var c AuditPruneCandidate
+	if maxID < 1 {
+		return c, nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	var c AuditPruneCandidate
 	cut := cutoff.UTC().Format(time.RFC3339Nano)
 
 	var through sql.NullInt64
 	if err := d.conn.QueryRow(
-		`SELECT MAX(id) FROM audit_events WHERE timestamp < ?`, cut,
+		`SELECT MAX(id) FROM audit_events WHERE timestamp < ? AND id <= ?`, cut, maxID,
 	).Scan(&through); err != nil {
 		return c, fmt.Errorf("statedb audit: plan prune: %w", classifyDriverErr(err))
 	}

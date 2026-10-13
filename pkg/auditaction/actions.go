@@ -607,4 +607,16 @@ const (
 	// chain that was restored: the history it gave up, who and why
 	// (Task 20410).
 	ActionAuditRestored Action = "audit.restored"
+
+	// ── audit.forward ──────────────────────────────────────────────────────
+
+	// ActionAuditForwardConfigured records the hub's audit forwarding
+	// configuration changing — sinks added, removed or altered — as the
+	// cluster leader first runs under it (Task 20426).
+	ActionAuditForwardConfigured Action = "audit.forward.configured"
+	// ActionAuditForwardDiscontinuity records a sink's cursor that the chain
+	// it tails no longer continues: rows pruned before the sink acknowledged
+	// them, a tail truncated or rewritten after it did, and where forwarding
+	// resumed (Task 20426).
+	ActionAuditForwardDiscontinuity Action = "audit.forward.discontinuity"
 )

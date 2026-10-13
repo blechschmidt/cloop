@@ -128,6 +128,16 @@ identities the hub is accounting *right now*, not the number it has ever seen,
 so a tenant cannot grow them by churning. Both also carry a raised but finite
 ceiling of 4096 series.
 
+### Labels from the operator's configuration
+
+`sink`, on the [audit forwarding](#forwarding-the-trail-off-the-box) families,
+is the one label whose values are not declared in Go source. It is closed
+anyway: its values are the names of the sinks in `audit.forward.sinks` — at most
+16, each a short lower-case token — which only whoever writes the hub's
+configuration can choose, not a tenant or a request. The two gauges are reset
+every scrape, so they name only the sinks in force; the counter keeps a series
+for a sink renamed or removed since the process started.
+
 ## Hub clusters: which member exports what
 
 When several `cloop ui` processes serve one control plane (a
@@ -151,7 +161,8 @@ cloop_executor_heartbeat_age_seconds_max  cloop_quota_enforcement_enabled
 cloop_secret_kek_rotation_records         cloop_quota_limit
 cloop_secret_kek_rotation_active          cloop_quota_usage
 cloop_sessions_live                       cloop_quota_identities
-cloop_statedb_wal_bytes
+cloop_statedb_wal_bytes                   cloop_audit_forward_lag_seconds
+cloop_audit_forward_backlog_rows
 ```
 
 `sum()` and `max()` over the cluster therefore both give the right answer. A
@@ -922,6 +933,44 @@ sum(increase(cloop_audit_checkpoints_total[30m])) == 0
 The second catches checkpoints stopping altogether — no leader, or a window
 marker that will not advance. See the
 [runbook](runbook.md#audit-chain-verification).
+
+### Forwarding the trail off the box
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_audit_forward_rows_total` | counter | `sink`, `outcome` |
+| `cloop_audit_forward_lag_seconds` | gauge | `sink` |
+| `cloop_audit_forward_backlog_rows` | gauge | `sink` |
+
+The cluster leader ships every chain's rows to the sinks in `audit.forward`,
+advancing each sink's cursor only once the sink acknowledges (Task 20426; see
+the [runbook](runbook.md#forwarding-the-trail-off-the-box)).
+`cloop_audit_forward_rows_total` counts what it handled, per sink:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `delivered` | the sink acknowledged the rows |
+| `truncated` | acknowledged, with the payload left out to fit a syslog sink's `max_message_bytes` — the record says so, with the payload's length and SHA-256 |
+| `failed` | a send that failed; the rows stay in the database and are sent again, so one row can count here many times |
+| `lost` | rows the sink can no longer receive: pruned before it acknowledged them — a prune forced past its cursor, the rows now only in the prune's archive — or missing from the chain; an `audit.forward.discontinuity` row says which |
+
+`cloop_audit_forward_lag_seconds` is the age of the oldest row the sink has not
+acknowledged, across every chain, and 0 when it is caught up;
+`cloop_audit_forward_backlog_rows` is how many rows are waiting. Both are read
+by the leader from its forwarder and exported by the leader alone, so a
+follower's scrape has neither, and during a leadership hand-over they are
+briefly absent.
+
+```promql
+max by (sink) (cloop_audit_forward_lag_seconds) > 900
+increase(cloop_audit_forward_rows_total{outcome="lost"}[1h]) > 0
+```
+
+The first is the doctor's `audit.forward.max_lag` as an alert — it covers a
+sink that has stopped taking rows as well as one falling behind, because the
+oldest waiting row only ages; the second fires on any row a sink will now never
+receive. `failed` alone is not worth paging on: a collector restarting fails a
+batch or two and the rows go again.
 
 ## Registry self-monitoring
 

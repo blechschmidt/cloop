@@ -55,7 +55,9 @@ func checkLoadRepairs(cfg *config.Config, add addFn) {
 			continue
 		}
 		if r.SwitchedOff != "" {
-			if sectionsWithOwnCheck[r.SwitchedOff] {
+			// An audit sink's refusal is reported by checkAuditForward, which
+			// says what the hub forwards without it (Task 20426).
+			if sectionsWithOwnCheck[r.SwitchedOff] || strings.HasPrefix(r.SwitchedOff, "audit.forward.sinks") {
 				continue
 			}
 			add(Finding{

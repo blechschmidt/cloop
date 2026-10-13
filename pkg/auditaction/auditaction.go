@@ -122,6 +122,7 @@ var multiSegmentFamilies = []string{
 	"stt.credential",
 	"secret.lease",
 	"project.member",
+	"audit.forward",
 }
 
 // Stability says how much a consumer may rely on an action's name and payload.

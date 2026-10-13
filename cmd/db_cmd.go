@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditretention"
@@ -13,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -146,6 +148,8 @@ Exit codes:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		auto, _ := cmd.Flags().GetBool("auto")
 		pruneAudit, _ := cmd.Flags().GetBool("prune-audit")
+		auditHub, _ := cmd.Flags().GetString("audit-hub")
+		forceAudit, _ := cmd.Flags().GetBool("force-audit-prune")
 
 		workdir, _ := os.Getwd()
 		dbPath := filepath.Join(workdir, ".cloop", "state.db")
@@ -165,6 +169,10 @@ Exit codes:
 				Days:      cfg.Audit.RetentionDays,
 				ExportDir: exportDir,
 				Actor:     "cli",
+				Force:     forceAudit,
+			}
+			if auditHub != "" {
+				retention.ControlPlane = state.DBPath(auditHub)
 			}
 		} else if pruneAudit {
 			return fmt.Errorf("--prune-audit needs a retention window: set audit.retention_days in .cloop/config.yaml")
@@ -228,6 +236,15 @@ Exit codes:
 		}
 
 		if r := rep.Retention; r != nil {
+			if r.Clamped {
+				warn.Printf("  audit retention: kept %d row(s) older than the cutoff that audit sink %q has not "+
+					"acknowledged (it has id %d); --force-audit-prune removes them anyway\n",
+					r.Requested.Count-r.Candidate.Count, r.HeldBy, r.HeldThroughID)
+			}
+			if len(r.ForcedPast) > 0 && !r.DryRun {
+				warn.Printf("  audit retention: forced past what audit sink(s) %s acknowledged; those rows are "+
+					"only in the archive now\n", strings.Join(r.ForcedPast, ", "))
+			}
 			switch {
 			case r.Candidate.Count == 0:
 				dim.Printf("  audit retention: nothing older than %s\n", r.Cutoff.Format(time.RFC3339))
@@ -458,6 +475,8 @@ func init() {
 	dbMaintainCmd.Flags().Bool("dry-run", false, "Report DB size and reclaimable estimate without running VACUUM/ANALYZE")
 	dbMaintainCmd.Flags().Bool("auto", false, "Run only if DB has grown >20% since the last recorded vacuum")
 	dbMaintainCmd.Flags().Bool("prune-audit", false, "Apply audit.retention_days before vacuuming (see 'cloop hub audit prune')")
+	dbMaintainCmd.Flags().String("audit-hub", "", "Hub directory whose audit forwarding cursors bound the prune (default: this database, and the hub it names)")
+	dbMaintainCmd.Flags().Bool("force-audit-prune", false, "Prune audit rows an audit sink has not acknowledged yet")
 	dbBackupCmd.Flags().String("output", "", "Output path for the backup file (default: .cloop/backups/state-<UTC>.db)")
 	dbRestoreCmd.Flags().Bool("force", false, "Overwrite an active destination database; the previous file is preserved as .pre-restore.<timestamp>")
 	dbRestoreCmd.Flags().String("reason", "", "Why the database is being restored (required; recorded with the restore)")

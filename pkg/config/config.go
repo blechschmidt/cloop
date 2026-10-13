@@ -553,6 +553,10 @@ type AuditConfig struct {
 	// Checkpoints configures the signed head checkpoints the cluster leader
 	// writes off the database (Task 20404).
 	Checkpoints AuditCheckpointsConfig `yaml:"checkpoints,omitempty"`
+
+	// Forward ships every chain's rows to syslog, HTTPS or file sinks as
+	// they are written (Task 20426). See auditforward.go.
+	Forward AuditForwardConfig `yaml:"forward,omitempty"`
 }
 
 // AuditCheckpointsConfig is where and how often the hub writes the head of
@@ -3494,6 +3498,11 @@ func (c *Config) validateAndClamp(path string) {
 		warn("audit.checkpoints.file", err.Error()+"; the checkpoint file is disabled")
 		c.Audit.Checkpoints.File = ""
 	}
+	// Audit forwarding (Task 20426): a sink that fails validation — plaintext
+	// off the host, a file inside .cloop/, a credential where a secret
+	// reference belongs — is dropped and recorded as switched off, never
+	// repaired into a sink nobody configured.
+	c.clampAuditForward(path, warn)
 	// Retention janitor: zero means "use the package default" for every
 	// field, so an out-of-range value falls back to zero and the hub runs the
 	// default policy. That is the conservative reading here — the opposite of
@@ -3763,6 +3772,9 @@ func (c *Config) ValidateNumeric() error {
 			AuditRetentionDaysLower, AuditRetentionDaysUpper, c.Audit.RetentionDays)
 	}
 	if err := ValidateAuditCheckpoints(c.Audit.Checkpoints); err != nil {
+		return err
+	}
+	if err := ValidateAuditForward(c.Audit.Forward); err != nil {
 		return err
 	}
 	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {
