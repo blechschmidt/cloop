@@ -161,6 +161,12 @@ Seven pages in order, indexed at
   running concurrently and proposed as a GitHub pull request when done. What a
   feature inherits from its project (executor, grants, roles) and why, where it
   may run, and how removal protects uncommitted work.
+- **[Task attachments](guides/attachments.md)** — the files a run makes for a
+  person to look at — reports, charts, screenshots, exports, logs — attached to
+  its task: the outbox an agent copies them into, `cloop task attachments`, the
+  previews and downloads in a task's details, what comes back from a remote
+  executor, the limits, and how the hub serves a run's files without letting
+  one script the dashboard.
 - **[Reviewing tasks before they are published](guides/review-gate.md)** — the
   review gate: a second model, configured per project and free to differ from
   the one doing the work, that reads each task's changes before anything is

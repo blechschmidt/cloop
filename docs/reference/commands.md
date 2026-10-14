@@ -275,6 +275,32 @@ cloop task reset <id>              # reset to pending
 cloop task remove <id>             # remove from plan
 ```
 
+#### `cloop task attachments`
+
+The files attached to a task: what its runs left in their outbox
+(`.cloop/attachments/outbox/<task-id>/`, named to the agent in
+`$CLOOP_TASK_ATTACHMENTS`) and files attached by hand. See
+[Task attachments](../guides/attachments.md).
+
+```bash
+cloop task attachments <id>                      # list (alias: list, ls)
+cloop task attachments add <id> <file>...        # attach by hand
+cloop task attachments get <id> <attachment>     # save under its own name
+cloop task attachments remove <id> <attachment>  # delete (audited)
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | `false` | Print machine-readable JSON (every subcommand) |
+| `--name` | | `add`: attach the file under this name (one file only) |
+| `--note` | | `add`: a note shown with the attachment |
+| `-o, --output` | the attachment's name | `get`: where to save it; `-` prints it to stdout |
+| `--force` | `false` | `get`: overwrite an existing file |
+
+`<attachment>` is an attachment's id, an id prefix of at least six characters,
+or its name. Limits: 32 MiB a file, 100 files and 128 MiB a task, 1 GiB a
+project.
+
 ### `cloop diff`
 
 Show git changes in the current project.

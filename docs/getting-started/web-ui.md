@@ -221,6 +221,12 @@ needs restarting. Three things bound it:
 With **max-parallel** above 1 the same order decides which tasks start: the top
 *N* of the queue, where *N* is the worker count.
 
+**Attachments** are the files a run made for you to look at — a report, a
+chart, a screenshot, a log. A task with some carries a 📎 count; open it, and
+its details list them with **Preview** for images and text, **Download** for
+anything, and **Delete**. An agent attaches a file by copying it into the
+outbox its prompt names. See [Task attachments](../guides/attachments.md).
+
 The same plan is visible other ways: **Kanban** as four columns (Pending, In
 Progress, Done, Failed/Skipped) with draggable cards, **Timeline** as a Gantt
 chart, **Dependencies** as a graph, and **Activity** as a per-task log of every
