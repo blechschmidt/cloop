@@ -304,6 +304,10 @@ var taskShowCmd = &cobra.Command{
 				}
 			}
 		}
+		if task.AttachmentCount > 0 {
+			fmt.Printf("\nAttachments: %d", task.AttachmentCount)
+			dimColor.Printf("  (cloop task attachments %d)\n", task.ID)
+		}
 		if task.ArtifactPath != "" {
 			fmt.Printf("\nArtifact: %s\n", task.ArtifactPath)
 			if taskShowArtifact {

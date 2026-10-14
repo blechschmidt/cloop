@@ -144,7 +144,10 @@ func TestAttachRoutesCarrySandboxAttach(t *testing.T) {
 
 	found := 0
 	for _, rs := range s.routeTable() {
-		if !strings.Contains(rs.Pattern, "/attach") {
+		// A path segment named attach — not one that merely starts with it,
+		// like a task's /attachments (Task 20428), which serve files and are
+		// gated as reads of the project.
+		if !hasPathSegment(rs.Pattern, "attach") {
 			continue
 		}
 		found++
@@ -583,4 +586,18 @@ func TestAttachStillAuthorized_SeesASessionRevocation(t *testing.T) {
 	if !srv.attachStillAuthorized(attachOpen{cred: streamCredential{static: true}, workDir: open.workDir}) {
 		t.Error("a terminal opened with the static token lost its authority")
 	}
+}
+
+// hasPathSegment reports whether a route pattern's path has a segment equal to
+// seg.
+func hasPathSegment(pattern, seg string) bool {
+	if _, path, ok := strings.Cut(pattern, " "); ok {
+		pattern = path
+	}
+	for _, part := range strings.Split(pattern, "/") {
+		if part == seg {
+			return true
+		}
+	}
+	return false
 }

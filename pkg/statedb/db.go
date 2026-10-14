@@ -478,6 +478,10 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	// this binary does not know to its default, on every save — so a binary
 	// one migration behind erased whatever that migration added, and an
 	// ADD COLUMN on plan_tasks was only "additive" until the first save.
+	var (
+		droppedAttachments []string
+		droppedOutboxes    []int
+	)
 	if s.Plan != nil {
 		// Diff before the write: afterwards the previous payloads are gone, and
 		// "what changed" is unanswerable. The fingerprint table is updated in
@@ -491,6 +495,13 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		// same reason: the cursor it advances must commit or roll back with
 		// the statuses it describes (Task 20282).
 		edges, err = diffTaskLifecycle(tx, s.Plan.Tasks)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// The attachments of a task this save drops, or whose id it stores
+		// afresh, go with it (Task 20428). Read before upsertTasks writes
+		// plan_tasks, which is what says which ids were already stored.
+		droppedAttachments, droppedOutboxes, err = settleTaskAttachmentsTx(tx, s.Plan.Tasks)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -512,6 +523,7 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	if err := tx.Commit(); err != nil {
 		return nil, nil, nil, classifyDriverErr(err)
 	}
+	d.removeAttachmentFiles(droppedAttachments, droppedOutboxes)
 	return changed, deleted, edges, nil
 }
 
@@ -873,11 +885,20 @@ func (d *DB) DeleteTask(id int) error {
 		d.mu.Unlock()
 		return err
 	}
+	// And the attachments: the next task given this id must not open with a
+	// predecessor's files (Task 20428).
+	attachments, err := deleteTaskAttachmentsTx(tx, id)
+	if err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
 	d.mu.Unlock()
+	d.removeAttachmentFiles(attachments, []int{id})
 
 	AuditTaskDelete(d, id, "")
 	return nil
@@ -1003,14 +1024,16 @@ var taskColumns = []string{
 	"risk_score", "impact_score", "retry_budget",
 }
 
-// taskSelect reads every task column, then the task's run id and quarantine.
-// Neither is a plan_tasks column: the run id lives in task_runs, which
-// SaveState's lifecycle diff maintains (Task 20282), and the quarantine in
-// task_quarantine, which only a failover and an explicit reset write (Task
-// 20391, task_quarantine.go).
+// taskSelect reads every task column, then the task's run id, quarantine and
+// attachment count. None is a plan_tasks column: the run id lives in
+// task_runs, which SaveState's lifecycle diff maintains (Task 20282), the
+// quarantine in task_quarantine, which only a failover and an explicit reset
+// write (Task 20391, task_quarantine.go), and the count is of the task's rows
+// in task_attachments (Task 20428, task_attachments.go).
 var taskSelect = `SELECT ` + strings.Join(taskColumns, ", ") + `,
 		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), ''),
-		` + quarantineSelect + `
+		` + quarantineSelect + `,
+		` + attachmentCountSelect + `
 	FROM plan_tasks`
 
 // upsertTaskSQL writes every column of taskColumns, updating all but the id
@@ -1092,7 +1115,7 @@ func newTaskScanner() *taskScanner {
 		&t.Assignee, &t.ExternalURL, &sc.lists.Links, &t.TDDStatus, &t.TDDScore,
 		&t.SprintID, &t.ComplexitySize, &t.StoryPoints, &sc.lists.OnSuccess, &sc.lists.OnFailure,
 		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
-		&t.RunID, &sc.quarantineJSON,
+		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
 	}
 	return sc
 }

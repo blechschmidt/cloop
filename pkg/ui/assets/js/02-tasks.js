@@ -272,6 +272,7 @@ function renderTasks(s) {
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtTimeEstimate(t)+
           fmtReviewChip(t)+
+          fmtFilesChip(t)+
         '</div>'+
         fmtBackgroundWork(t)+
         fmtAbortedOutcome(t)+
@@ -343,6 +344,12 @@ function fmtReviewChip(t) {
   const txt = r.blocked ? 'review: not published' : (r.verdict === 'approved' ? 'reviewed ✓' : 'review: ' + r.verdict.replace('_', ' '));
   return '<span' + (r.blocked ? ' style="color:var(--red)"' : '') + ' title="' +
     esc('Review gate' + (r.model ? ' (' + r.model + ')' : '') + ': ' + r.verdict.replace('_', ' ')) + '">🔍 ' + esc(txt) + '</span>';
+}
+
+// fmtFilesChip counts the files a task's runs attached (Task 20428); its
+// details list them.
+function fmtFilesChip(t) {
+  return t && t.attachment_count ? '<span title="Attached files — open the task to see them">📎 ' + t.attachment_count + '</span>' : '';
 }
 
 // fmtDurationShort renders a second count as the coarsest useful unit.

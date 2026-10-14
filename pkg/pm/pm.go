@@ -294,6 +294,15 @@ type Task struct {
 	// nothing else. A run's save holds a copy of the plan loaded before the
 	// mark existed, and must be able to neither write it back nor away.
 	Quarantine *TaskQuarantine `json:"quarantine,omitempty"`
+	// AttachmentCount is how many files are attached to the task (Task
+	// 20428): reports, charts, screenshots and exports a run left in its
+	// outbox, or files attached by hand.
+	//
+	// Derived, and not a plan_tasks column: the readers count the task's rows
+	// in task_attachments, which only an attach and a delete write. A run's
+	// save holds a copy of the plan loaded before its files were attached, and
+	// must not be able to write a count back over them.
+	AttachmentCount int `json:"attachment_count,omitempty"`
 	// Stop says why this task's execution was ended from outside its run, set
 	// by whoever settles the run for the one save that records the end — the
 	// hub, for a workload its executor stopped at its disk limit (Task 20405).

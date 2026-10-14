@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 186 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 187 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -77,10 +77,10 @@ whichever one happened to be opened.
 | Home | Meaning | Actions |
 | --- | --- | --- |
 | `control-plane` | the hub's own state.db | 165 |
-| `project` | the project's .cloop/state.db | 17 |
+| `project` | the project's .cloop/state.db | 18 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
-Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
+Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.attachment_delete`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
 
 Recorded in whichever chain the decision was scoped to: `audit.gap`, `audit.restored`, `authz.denied`, `authz.granted`.
 
@@ -88,15 +88,16 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-186 actions in 45 families. Every action is listed: this section is the whole
+187 actions in 45 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (7) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
+| `task.attachment_delete` | `task` | project | stable | A person deletes a file attached to a task, from the dashboard or with `cloop task attachments remove`. |
 | `task.delete` | `task` | project | stable | A task disappears from the plan between two saves, or is deleted outright. |
 | `task.dispatch` | `task` | project | stable | A task is handed to an executor, recording where it will run and what it was given. |
 | `task.finish` | `task` | project | stable | A dispatched task reaches a terminal outcome — done, failed, skipped, timed out, or aborted. |
@@ -107,6 +108,7 @@ vocabulary of the `event_type` column.
 
 Payload keys:
 
+- `task.attachment_delete` — `id`, `attachment_id`, `name`, `size`, `sha256`
 - `task.delete` — `id`
 - `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `spec_sha256`, `setup_sha256`, `lease_ids`
 - `task.finish` — `task_id`, `outcome`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `reason`, `started_at`, `completed_at`, `duration_ms`, `abort_class`, `abort_cleared`, `fail_count`, `write_back_commit`
@@ -115,6 +117,7 @@ Payload keys:
 - `task.status` — `id`, `old_status`, `new_status`
 - `task.upsert` — `id`, `title`, `status`, `priority`, `role`, `description`
 
+- `task.attachment_delete` — Attaching is not audited: a run's files are recorded in the project's event journal, which names the run. A file deleted with its task is covered by that task's `task.delete`.
 - `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables.
 - `task.finish` — `outcome` carries the terminal status; `reason` carries why, when there is one.
 - `task.quarantine` — `nodes` lists each executor that went down under the task with when it went unreachable. A marked task runs again only after an explicit reset, recorded as task.quarantine_release.

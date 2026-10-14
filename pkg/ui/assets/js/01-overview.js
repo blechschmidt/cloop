@@ -33,7 +33,7 @@ function deferredPanel(name, helpers) {
 let _ph;
 function panelHelpers() {
   return _ph || (_ph = {
-    api, apiMethod, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating,
+    api, apiMethod, authHeaders, parse: parseAPIResponse, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating,
     mount: mountPanel, panel: deferredPanel, fmtBytes: _duFmtBytes,
     execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
     fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
@@ -643,6 +643,7 @@ function _eventVisuals(kind) {
     // output said TASK_DONE was not accepted as done.
     case 'task_background':     return { glyph:'⏳', cls:'ev-task-bg',     label:'background'};
     case 'task_review':         return { glyph:'🔍', cls:'ev-task-review', label:'review'};
+    case 'task_attachments':    return { glyph:'📎', cls:'ev-task-status', label:'files'};
     // A run that produced no work — a provider limit, a rejected credential,
     // a harness that refused to start. Distinct from 'failed': the task went
     // back in the queue rather than being judged, so the row must not read as

@@ -183,6 +183,11 @@ var (
 	// (Task 20390): it was retired, minted by a binary that predates the
 	// table, or never recorded — a session nothing could restore.
 	ErrCISessionNotFound = errors.New("statedb: CI session not found")
+
+	// ErrAttachmentNotFound indicates no task_attachments row names the
+	// attachment on the task asked about (Task 20428): it was deleted, it
+	// belongs to another task, or it never existed.
+	ErrAttachmentNotFound = errors.New("statedb: attachment not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
@@ -259,7 +264,8 @@ func HTTPStatus(err error) int {
 	case err == nil:
 		return http.StatusOK
 	case errors.Is(err, ErrTaskNotFound), errors.Is(err, ErrProjectNotFound),
-		errors.Is(err, ErrExecutorNotFound), errors.Is(err, ErrAPITokenNotFound):
+		errors.Is(err, ErrExecutorNotFound), errors.Is(err, ErrAPITokenNotFound),
+		errors.Is(err, ErrAttachmentNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrStaleVersion):
 		return http.StatusConflict

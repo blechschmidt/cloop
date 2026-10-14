@@ -106,7 +106,7 @@ function renderKanban(s) {
           (t.description ? '<div class="kb-card-desc">'+esc(t.description)+'</div>' : '')+
           tags+
           '<div class="kb-card-meta">'+
-            dl+
+            dl+fmtFilesChip(t)+
             '<span class="kb-taskid">#'+t.id+'</span>'+
           '</div>'+
         '</div>'

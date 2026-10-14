@@ -158,6 +158,30 @@ func TestArtifactScanReachesSubdirectories(t *testing.T) {
 	}
 }
 
+// TestArtifactScanCoversAttachments: a file a run attached to its task is its
+// output too (Task 20428), and the dashboard serves it to every viewer of the
+// project, so a credential in one is reported like one in a transcript.
+func TestArtifactScanCoversAttachments(t *testing.T) {
+	work := t.TempDir()
+	store := filepath.Join(work, ".cloop", "attachments")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pat := "cloop_pat_0123456789abcdef_" + strings.Repeat("d5", 32)
+	if err := os.WriteFile(filepath.Join(store, strings.Repeat("e", 32)), []byte("curl -H 'Authorization: Bearer "+pat+"'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var shapes Finding
+	checkSecretsInArtifacts(work, func(f Finding) {
+		if f.Name == "Credentials in task artifacts" {
+			shapes = f
+		}
+	})
+	if shapes.Level != Fail || !strings.Contains(shapes.Message, ".cloop/attachments/"+strings.Repeat("e", 32)) {
+		t.Errorf("a credential in an attachment was not reported: %+v", shapes)
+	}
+}
+
 // TestOpenArtifactRefusesWhatIsNotARegularFile: between the walk that found a
 // regular file and the open, an agent that can write the directory can swap
 // it for a FIFO, which would block the open until a writer came, or for a

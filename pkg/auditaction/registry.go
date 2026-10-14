@@ -110,6 +110,16 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note:      "`via` names the reset — the dashboard, `cloop task reset`, `cloop task bulk reset`; the actor is who pressed it.",
 	},
+	{
+		Action:    ActionTaskAttachmentDelete,
+		Home:      HomeProject,
+		Entity:    "task",
+		Trigger:   "A person deletes a file attached to a task, from the dashboard or with `cloop task attachments remove`.",
+		Payload:   []string{"id", "attachment_id", "name", "size", "sha256"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "Attaching is not audited: a run's files are recorded in the project's event journal, which names the run. A file deleted with its task is covered by that task's `task.delete`.",
+	},
 
 	// ── run ────────────────────────────────────────────────────────────────
 	{

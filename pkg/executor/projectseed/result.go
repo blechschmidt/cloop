@@ -47,15 +47,19 @@ package projectseed
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 	"unicode/utf8"
 
+	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -95,6 +99,19 @@ const (
 	// maxEventMessageBytes and maxEventDetailBytes bound one journal row.
 	maxEventMessageBytes = 8 << 10
 	maxEventDetailBytes  = 16 << 10
+
+	// maxResultAttachments bounds the files one result describes (Task 20428).
+	maxResultAttachments = 200
+	// attachmentCarryBytes is how much of a run's attached files travels in
+	// its result, all files together. The transport carries the whole result
+	// in one frame (executor.MaxProjectResultBytes, compressed), images and
+	// PDFs barely compress, and the plan, steps and journal need room too —
+	// so a file past this stays in the executor's workspace and the hub
+	// records that it did.
+	attachmentCarryBytes = 384 << 10
+	// maxAttachmentTextBytes bounds an attachment's name, task title and
+	// reason as they travel.
+	maxAttachmentTextBytes = 4 << 10
 )
 
 // ErrNoSeed reports that a workload was started without a seed. Such a
@@ -132,6 +149,9 @@ type Result struct {
 	Events []Event `json:"events,omitempty"`
 	// Costs are the cost rows the run recorded.
 	Costs []Cost `json:"costs,omitempty"`
+	// Attachments are the files the run attached to tasks (Task 20428), with
+	// their bytes when the result had room for them.
+	Attachments []Attachment `json:"attachments,omitempty"`
 	// Omitted says what the device left out to fit the transport, one
 	// sentence each, so the hub can say so instead of presenting a partial
 	// history as a whole one.
@@ -161,6 +181,29 @@ type Event struct {
 	Step      int       `json:"step"`
 	Message   string    `json:"message,omitempty"`
 	Details   string    `json:"details,omitempty"`
+}
+
+// Attachment is one file the run attached to a task (Task 20428).
+//
+// Data is the file — scrubbed like every other field — when the result had
+// room for it, and empty otherwise, with Left saying why: the hub records the
+// attachment either way, so a person looking at the task learns the file
+// exists and where it is. Size and SHA256 describe Data when it travels, and
+// are the device's account of the file when it does not; the hub checks the
+// one and only reports the other.
+type Attachment struct {
+	TaskID int `json:"task_id"`
+	// TaskTitle is the title the task had in the seed — or, for a task the
+	// run created, as it left it. The hub attaches the file only to the task
+	// the run worked on: one the hub deleted or retitled while the run was
+	// out, and whose id now belongs to another, does not get it.
+	TaskTitle string    `json:"task_title,omitempty"`
+	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	Data      []byte    `json:"data,omitempty"`
+	Left      string    `json:"left,omitempty"`
 }
 
 // Cost is one cost-ledger row. It carries no identity: who pays for a run is
@@ -299,7 +342,96 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 			"executor to make room for its recoveries", n))
 	}
 	r.Omitted = append(r.Omitted, notes...)
+	r.Attachments, notes, err = carryAttachments(dir, dbPath, base.Plan, after.Plan, scrub)
+	if err != nil {
+		return nil, err
+	}
+	r.Omitted = append(r.Omitted, notes...)
 	return r, nil
+}
+
+// carryAttachments reads the files the run attached, in the order they were
+// attached, and carries each whose bytes fit what is left of
+// attachmentCarryBytes. The rest travel as a description.
+//
+// Every file is read through attachments.Open, rooted at dir: one the
+// workload replaced with a link, or with anything but a plain file, is
+// described as such rather than read. The agent reading this runs outside the
+// workload's sandbox and may be able to read what the workload cannot.
+func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(string) string) ([]Attachment, []string, error) {
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("projectseed: open %s to read the run's attachments: %w", dbPath, err)
+	}
+	rows, err := db.AllTaskAttachments()
+	db.Close()
+	if err != nil {
+		return nil, nil, fmt.Errorf("projectseed: read the run's attachments: %w", err)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.Before(rows[j].CreatedAt) })
+	var notes []string
+	if n := len(rows) - maxResultAttachments; n > 0 {
+		notes = append(notes, fmt.Sprintf("the run attached %d files; the newest %d were left in the executor's workspace",
+			len(rows), n))
+		rows = rows[:maxResultAttachments]
+	}
+	title := func(id int) string {
+		for _, p := range []*pm.Plan{base, after} {
+			if p == nil {
+				continue
+			}
+			if t := p.TaskByID(id); t != nil {
+				return t.Title
+			}
+		}
+		return ""
+	}
+	budget := int64(attachmentCarryBytes)
+	out := make([]Attachment, 0, len(rows))
+	for _, row := range rows {
+		a := Attachment{TaskID: row.TaskID, TaskTitle: scrub(title(row.TaskID)), Name: scrub(row.Name),
+			Size: min(max(row.Size, 0), attachments.MaxFileBytes), SHA256: row.SHA256, CreatedAt: row.CreatedAt}
+		switch {
+		case row.Unavailable != "":
+			a.Left = scrub(row.Unavailable)
+		case row.Size > budget:
+			a.Left = fmt.Sprintf("left in the executor's workspace: at %s it did not fit in what is left of the %s "+
+				"of attachments a run's result carries", attachments.HumanBytes(row.Size),
+				attachments.HumanBytes(attachmentCarryBytes))
+		default:
+			data, err := readAttachment(dbPath, row)
+			if err != nil {
+				a.Left = "left in the executor's workspace: " + scrub(err.Error())
+				break
+			}
+			// Scrubbed like any text the run produced; the size and digest
+			// sent are of what is sent.
+			data = []byte(scrub(string(data)))
+			sum := sha256.Sum256(data)
+			a.Data, a.Size, a.SHA256 = data, int64(len(data)), hex.EncodeToString(sum[:])
+			budget -= a.Size
+		}
+		out = append(out, a)
+	}
+	return out, notes, nil
+}
+
+// readAttachment reads one stored attachment of the run, refusing what is not
+// a plain file inside dir.
+func readAttachment(dbPath string, row statedb.AttachmentRow) ([]byte, error) {
+	f, _, err := attachments.Open(dbPath, row)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, row.Size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != row.Size {
+		return nil, fmt.Errorf("it changed while it was read")
+	}
+	return data, nil
 }
 
 // settledEvents renders the recoveries SettleFromVerdicts made as the journal
@@ -402,6 +534,11 @@ func fingerprint(t *pm.Task) string {
 	if c.Review != nil {
 		c.Review.ReviewedAt = c.Review.ReviewedAt.UTC()
 	}
+	// Counted by whichever database loads the task: the seed carries the
+	// hub's count and the device's database counts its own files, so the two
+	// differ without the task having changed. A run's attachments travel as
+	// Result.Attachments (Task 20428).
+	c.AttachmentCount = 0
 	b, err := json.Marshal(c)
 	if err != nil {
 		// Unreachable for a pm.Task; treat as changed, which costs only bytes.
@@ -601,6 +738,21 @@ func encodeResult(r *Result) ([]byte, error) {
 			return "journal event details were dropped to fit the transport"
 		},
 		func(r *Result) string {
+			n := 0
+			for i := range r.Attachments {
+				if len(r.Attachments[i].Data) > 0 {
+					r.Attachments[i].Data = nil
+					r.Attachments[i].Left = "left in the executor's workspace: the run's result had no room for it"
+					n++
+				}
+			}
+			if n == 0 {
+				return ""
+			}
+			return fmt.Sprintf("%s attached by the run %s left in the executor's workspace to fit the transport",
+				plural(n, "file", "files"), map[bool]string{true: "was", false: "were"}[n == 1])
+		},
+		func(r *Result) string {
 			if len(r.Steps) == 0 {
 				return ""
 			}
@@ -686,6 +838,25 @@ func DecodeResult(data []byte) (*Result, error) {
 		return nil, fmt.Errorf("projectseed: the result carries %d events, more than %d", len(r.Events), maxResultEvents)
 	case len(r.Costs) > maxResultCosts:
 		return nil, fmt.Errorf("projectseed: the result carries %d cost rows, more than %d", len(r.Costs), maxResultCosts)
+	case len(r.Attachments) > maxResultAttachments:
+		return nil, fmt.Errorf("projectseed: the result carries %d attachments, more than %d",
+			len(r.Attachments), maxResultAttachments)
+	}
+	for i, a := range r.Attachments {
+		switch {
+		case a.TaskID <= 0:
+			return nil, fmt.Errorf("projectseed: attachment %d names no task", i)
+		case a.Size < 0 || a.Size > attachments.MaxFileBytes:
+			// No device attaches a file this size, and a size nobody bounded
+			// is what the hub's accounting would then add up.
+			return nil, fmt.Errorf("projectseed: attachment %d claims %d bytes, outside 0..%d",
+				i, a.Size, attachments.MaxFileBytes)
+		case len(a.Data) > 0 && int64(len(a.Data)) != a.Size:
+			return nil, fmt.Errorf("projectseed: attachment %d carries %d bytes but claims %d", i, len(a.Data), a.Size)
+		case len(a.Name) > maxAttachmentTextBytes || len(a.TaskTitle) > maxAttachmentTextBytes ||
+			len(a.Left) > maxAttachmentTextBytes || len(a.SHA256) > 64:
+			return nil, fmt.Errorf("projectseed: attachment %d carries an oversized field", i)
+		}
 	}
 	for i, tc := range r.Tasks {
 		if tc.After == nil || tc.After.ID <= 0 {

@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-283 endpoints, by the permission each one requires:
+286 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -102,7 +102,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 15 |
 | `executor.manage` | 28 |
 | `executor.read` | 3 |
-| `project.read` | 52 |
+| `project.read` | 54 |
 | `project.share` | 3 |
 | `project.write` | 12 |
 | `run.start` | 4 |
@@ -113,7 +113,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `secret.request` | 4 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
-| `task.mutate` | 27 |
+| `task.mutate` | 28 |
 | `token.admin` | 6 |
 | `user.manage` | 24 |
 | `view.prefs` | 2 |
@@ -337,6 +337,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/tasks/{id}` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/attach` | `sandbox.attach` | project |
 | GET | `/api/tasks/{id}/attach/info` | `sandbox.attach` | project |
+| GET | `/api/tasks/{id}/attachments` | `project.read` | project |
+| GET | `/api/tasks/{id}/attachments/{aid}` | `project.read` | project |
+| DELETE | `/api/tasks/{id}/attachments/{aid}` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/blocker` | `project.read` | project |
 | POST | `/api/tasks/{id}/clear-aborted` | `task.mutate` | project |
 | POST | `/api/tasks/{id}/decompose` | `task.mutate` | project |

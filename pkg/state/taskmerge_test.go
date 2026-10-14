@@ -307,9 +307,10 @@ var runFields = []string{
 // derivedFields are not stored as themselves: RunID is read from task_runs,
 // ChainInput is rebuilt from the chained predecessor's output at dispatch,
 // Quarantine is read from task_quarantine, which no save writes (Task 20391),
-// and Stop is never stored at all — it rides one save into its task.finish
-// row (Task 20405).
-var derivedFields = []string{"ID", "RunID", "ChainInput", "Quarantine", "Stop"}
+// Stop is never stored at all — it rides one save into its task.finish
+// row (Task 20405) — and AttachmentCount is counted from task_attachments,
+// which no save writes (Task 20428).
+var derivedFields = []string{"ID", "RunID", "ChainInput", "Quarantine", "Stop", "AttachmentCount"}
 
 // TestEveryTaskFieldIsClassified: a new pm.Task field has to be put on one
 // side on purpose. Left off both lists, it would be written back from a

@@ -926,6 +926,8 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 		artifactBody += partialOutput + "\n"
 	}
 	artifactBody += "TASK_FAILED (timeout)\n"
+	// What the agent attached before its budget ran out is still its work.
+	o.collectAttachments(task, true)
 	if ap, aErr := artifact.WriteTaskArtifact(o.config.WorkDir, task, artifactBody); aErr != nil {
 		dimColor.Printf("  artifact write error (ignored): %v\n", aErr)
 	} else {
@@ -1314,6 +1316,11 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	defer span.End()
 	ctx = spanCtx
 
+	o.sweepAttachments()
+	// An attempt the run left early — stopped, paused, requeued — has not
+	// collected its outbox. On an executor whose workspace is thrown away
+	// with the run, this is the last chance before the result is read.
+	defer o.drainOutboxes()
 	for {
 		var runErr error
 		if o.wantParallel() {
@@ -2123,6 +2130,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// in-flight task is attributable too (Task 20244), and record the
 		// dispatch in the audit trail while the placement facts are in hand
 		// (Task 20282).
+		// Whatever an earlier attempt left in the task's outbox and never saw
+		// collected — the run was stopped, or died — is attached under the
+		// run that made it, before this attempt takes the task's run id.
+		o.collectAttachments(task, false)
 		f := o.beginTaskExecution(task)
 		execID, execKind, execIso := f.ExecutorID, f.ExecutorKind, f.Isolation
 		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started on executor %s (kind: %s, isolation: %s, provider: %s)",
@@ -2255,6 +2266,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			prompt = learningMem + prompt
 		}
 		prompt = withGateSection(prompt, activeGate.promptSection())
+		// Attachments (Task 20428): the outbox the agent copies files into for
+		// this attempt, named in its prompt and in its environment.
+		outbox := o.openOutbox(task, o.router.For(task.Role))
+		prompt = withGateSection(prompt, outbox.promptSection())
 
 		// Prompt A/B testing: track the currently recommended variant for this
 		// task's role. Used to record outcomes and to select a replacement on
@@ -2348,13 +2363,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// streamed: three passes interleaved on the terminal read as one.
 			maOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 			maOpts = o.withBackgroundWaitNotice(maOpts, s, task, nil)
-			maOpts.Env = activeGate.env()
+			maOpts.Env = agentEnv(activeGate, outbox)
 			maRes, maErr := multiagent.RunTask(taskCtx, taskProvider, maOpts, multiagent.Brief{
 				Task:           task,
 				Goal:           s.Goal,
 				Instructions:   s.Instructions,
 				ProjectContext: projCtxStr,
-				Notice:         activeGate.promptSection(),
+				Notice:         activeGate.promptSection() + outbox.promptSection(),
 			})
 			if maErr != nil {
 				if requeueIfInterrupted("while the multi-agent pipeline was running") {
@@ -2414,7 +2429,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Running consensus (n=%d) on critical task %d...\n", o.config.ConsensusN, task.ID)
 				consensusProviders := o.buildConsensusProviders(taskProvider)
 				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in consensus mode
-				opts.Env = activeGate.env()
+				opts.Env = agentEnv(activeGate, outbox)
 				cOutput, cReport, cErr := consensus.RunConsensus(
 					taskCtx,
 					consensusProviders,
@@ -2469,7 +2484,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				opts, wasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				opts = o.withBackgroundWaitNotice(opts, s, task, nil)
-				opts.Env = activeGate.env()
+				opts.Env = agentEnv(activeGate, outbox)
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2757,7 +2772,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
 				healOpts, healWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
-				healOpts.Env = activeGate.env()
+				healOpts.Env = agentEnv(activeGate, outbox)
 				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					if runInterrupted(ctx) {
@@ -2855,7 +2870,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"Make your best judgment for ALL decisions and proceed to full completion. " +
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
-					clarifyOpts.Env = activeGate.env()
+					clarifyOpts.Env = agentEnv(activeGate, outbox)
 					clarifyResult, clarifyErr := safeComplete(taskCtx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						if runInterrupted(ctx) {
@@ -2972,7 +2987,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			fixOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 			fixOpts = o.withBackgroundWaitNotice(fixOpts, s, task, nil)
-			fixOpts.Env = activeGate.env()
+			fixOpts.Env = agentEnv(activeGate, outbox)
 			gateOut = o.passGate(provideraudit.WithTaskContext(taskCtx, task.ID, task.Title), activeGate, gateInput{
 				task: task, goal: s.Goal, conventions: s.Instructions, prompt: prompt,
 				output: taskOutput, signal: signal, sessionID: taskSessionID, background: taskBackground,
@@ -3489,6 +3504,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Attach what the attempt left in the task's outbox (Task 20428).
+		o.collectAttachments(task, true)
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, taskOutput)
 		// If consensus was used, append the decision report to the artifact.
@@ -4345,6 +4362,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			o.clearVerdict(t.ID)
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
+			o.collectAttachments(t, false)
 			facts[i] = o.beginTaskExecution(t)
 		}
 		// Stored before the starts are announced or anything runs: a task the
@@ -4413,6 +4431,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// detector flags. Workers receive a fully-built prompt string and
 		// touch no shared plan state during the provider call.
 		prebuiltPrompts := make([]string, len(ready))
+		// Each task's attachment outbox (Task 20428), prepared here with its
+		// prompt so the workers touch neither the plan nor the store.
+		roundOutboxes := make([]*taskOutbox, len(ready))
 		for i, t := range ready {
 			o.ensureChainInput(s.Plan, t)
 			prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
@@ -4426,6 +4447,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 				prompt = learningMem + prompt
 			}
+			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))
+			prompt = withGateSection(prompt, roundOutboxes[i].promptSection())
 			prebuiltPrompts[i] = prompt
 		}
 
@@ -4566,7 +4589,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				opts.WorkDir = workDir
 				gate := roundGates[idx]
 				prompt = withGateSection(prompt, gate.promptSection())
-				opts.Env = gate.env()
+				opts.Env = agentEnv(gate, roundOutboxes[idx])
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(roundCtx, t)
 				defer tTaskCancel()
@@ -5247,6 +5270,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 			}
 
+			// Attach what the attempt left in the task's outbox (Task 20428).
+			o.collectAttachments(task, true)
 			// Persist full AI response as a Markdown artifact file.
 			o.writeTaskArtifact(task, result.Output)
 

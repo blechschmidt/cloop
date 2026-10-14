@@ -689,6 +689,13 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/blocker", Handler: s.handleTaskBlocker, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/details", Handler: s.handleTaskDetails, Perm: read, Scope: scopeProject},
+		// Attachments (Task 20428): the files a run attached to a task. Reading
+		// one is `read` — it is the run's output, beside the transcript a
+		// viewer already sees; deleting one is `task`. See attachments_api.go
+		// for how the bytes are served.
+		{Pattern: "GET /api/tasks/{id}/attachments", Handler: s.handleTaskAttachments, Perm: read, Scope: scopeProject},
+		{Pattern: "GET /api/tasks/{id}/attachments/{aid}", Handler: s.handleTaskAttachmentGet, Perm: read, Scope: scopeProject},
+		{Pattern: "DELETE /api/tasks/{id}/attachments/{aid}", Handler: s.handleTaskAttachmentDelete, Perm: task, Scope: scopeProject},
 		// Aborted-outcome verdicts (Task 20224). Both change what the plan
 		// believes about itself — clearing one is what allows the plan to be
 		// counted complete — so they are `task`, not `read`. Neither spends a

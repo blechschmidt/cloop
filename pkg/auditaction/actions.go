@@ -30,6 +30,9 @@ const (
 	// ActionTaskQuarantineRelease records an explicit reset releasing such a
 	// task.
 	ActionTaskQuarantineRelease Action = "task.quarantine_release"
+	// ActionTaskAttachmentDelete records a person deleting a file attached to
+	// a task (Task 20428).
+	ActionTaskAttachmentDelete Action = "task.attachment_delete"
 
 	// ── run ────────────────────────────────────────────────────────────────
 

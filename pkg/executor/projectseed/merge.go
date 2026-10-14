@@ -34,7 +34,11 @@ package projectseed
 //     from the hub's own table where it knows the model.
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -43,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -116,12 +121,32 @@ type MergeReport struct {
 	// project's review gate is on (Task 20357): the device's cloop predates
 	// the gate, so it ran them — and published their work — unreviewed.
 	Unreviewed []int
+	// Attached counts the run's files stored on the hub (Task 20428),
+	// LeftBehind names, one sentence each, the ones recorded without their
+	// bytes — left in the executor's workspace, or refused here — and
+	// NotRecorded the ones the hub has no task for.
+	Attached    int
+	LeftBehind  []string
+	NotRecorded []string
+
+	// runTasks are the hub's ids of the tasks the run worked on: those it
+	// changed that the hub still holds under the title they were sent with,
+	// and those it created. Only they take the run's attachments.
+	runTasks map[int]bool
 }
 
 // Changed reports whether the merge altered the hub's project at all.
 func (m MergeReport) Changed() bool {
 	return len(m.Updated) > 0 || len(m.Added) > 0 || m.StatusTo != "" ||
-		m.Steps > 0 || m.Events > 0 || m.Costs > 0
+		m.Steps > 0 || m.Events > 0 || m.Costs > 0 || m.Attached > 0 || len(m.LeftBehind) > 0
+}
+
+// markRunTask records that the hub task id is one the run worked on.
+func (m *MergeReport) markRunTask(id int) {
+	if m.runTasks == nil {
+		m.runTasks = map[int]bool{}
+	}
+	m.runTasks[id] = true
 }
 
 // Summary renders the report as one journal message.
@@ -153,6 +178,9 @@ func (m MergeReport) Summary() string {
 	if m.Costs > 0 {
 		recorded = append(recorded, plural(m.Costs, "cost row", "cost rows"))
 	}
+	if m.Attached > 0 {
+		recorded = append(recorded, plural(m.Attached, "attached file", "attached files"))
+	}
 	if len(recorded) > 0 {
 		parts = append(parts, "recorded "+strings.Join(recorded, ", "))
 	}
@@ -175,6 +203,12 @@ func (m MergeReport) Summary() string {
 	}
 	if len(m.Omitted) > 0 {
 		msg += " The executor left out: " + strings.Join(m.Omitted, "; ") + "."
+	}
+	if len(m.LeftBehind) > 0 {
+		msg += " Attachments recorded without their file: " + strings.Join(m.LeftBehind, "; ") + "."
+	}
+	if len(m.NotRecorded) > 0 {
+		msg += " Attachments not recorded: " + strings.Join(m.NotRecorded, "; ") + "."
 	}
 	if len(m.Unreviewed) > 0 {
 		var each []string
@@ -246,6 +280,7 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 			}
 			continue
 		}
+		rep.markRunTask(id)
 		if !outcomeChanged(tc.Before, after) {
 			// The run touched the task without changing its outcome — a note
 			// added, say. Notes are history, and history is kept.
@@ -329,6 +364,7 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		st.Plan.Tasks = append(st.Plan.Tasks, t)
 		byID[newID] = t
 		rep.Added = append(rep.Added, newID)
+		rep.markRunTask(newID)
 	}
 
 	taskRef := func(id int) int {
@@ -439,19 +475,30 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 			workDir, st.WorkDir)
 	}
 	rep, rec := Merge(st, r, prov, scrub, time.Now())
-	if !rep.Changed() {
+	if !rep.Changed() && len(r.Attachments) == 0 {
 		return rep, nil
 	}
-	// LoadLite left Steps nil and SaveState upserts only the rows it is
-	// given, so this writes the run's steps without rewriting the history.
-	st.Steps = rec.Steps
-	if err := st.SaveDirect(); err != nil {
-		// Nothing was persisted, so there is nothing for a report to claim.
-		return MergeReport{}, fmt.Errorf("projectseed: save the merged project at %s: %w", workDir, err)
+	if rep.Changed() {
+		// LoadLite left Steps nil and SaveState upserts only the rows it is
+		// given, so this writes the run's steps without rewriting the history.
+		st.Steps = rec.Steps
+		if err := st.SaveDirect(); err != nil {
+			// Nothing was persisted, so there is nothing for a report to claim.
+			return MergeReport{}, fmt.Errorf("projectseed: save the merged project at %s: %w", workDir, err)
+		}
+	}
+	// What follows the plan is recorded in full even when one part fails: a
+	// result is taken from the executor once, so whatever is not recorded now
+	// is gone. The attachments come first, after the plan they attach to.
+	var errs []error
+	if len(r.Attachments) > 0 {
+		if err := applyAttachments(workDir, r.Attachments, rep.Renumbered, prov, scrub, &rep); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if len(rec.Events) > 0 {
 		if err := recordEvents(workDir, rec.Events); err != nil {
-			return rep, err
+			errs = append(errs, err)
 		}
 	}
 	for _, c := range rec.Costs {
@@ -459,10 +506,98 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 		// also reaches the JSONL mirror and the hub's global budget ledger —
 		// exactly where a run on the hub itself would have put it.
 		if err := cost.AppendLedger(workDir, c); err != nil {
-			return rep, fmt.Errorf("projectseed: record the run's cost for task #%d: %w", c.TaskID, err)
+			errs = append(errs, fmt.Errorf("projectseed: record the run's cost for task #%d: %w", c.TaskID, err))
+			break
 		}
 	}
-	return rep, nil
+	return rep, errors.Join(errs...)
+}
+
+// applyAttachments stores the files a run brought back and records the ones
+// it did not (Task 20428).
+//
+// Everything here came from the device and is checked as such: the task is
+// the hub's numbering of it, the name is cleaned and scrubbed, the bytes must
+// match the digest sent with them and are scrubbed again with the hub's own
+// knowledge of what it leased, and the hub's limits apply as they would to a
+// run on the hub. A file refused here is recorded without its bytes, saying
+// why, so the task still shows it was made.
+func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, prov Provenance,
+	scrub func(string) string, rep *MergeReport) error {
+	if scrub == nil {
+		scrub = func(s string) string { return s }
+	}
+	dbPath := state.DBPath(workDir)
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("projectseed: open %s to store the run's attachments: %w", workDir, err)
+	}
+	defer db.Close()
+	for _, a := range in {
+		taskID := a.TaskID
+		if to, ok := renumbered[taskID]; ok {
+			taskID = to
+		}
+		name := attachments.CleanName(scrub(a.Name))
+		// The task the run worked on, or none: an id the hub deleted and gave
+		// to another task while the run was out must not inherit its files.
+		if !rep.runTasks[taskID] {
+			h, err := db.LoadTask(taskID)
+			if err != nil || a.TaskTitle == "" || h.Title != scrub(a.TaskTitle) {
+				rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf(
+					"%s: the hub's task #%d is not the task the run attached it to; the file stayed in the executor's workspace",
+					name, taskID))
+				continue
+			}
+		}
+		meta := attachments.Meta{
+			Name: scrub(a.Name), Source: statedb.AttachmentSourceRun, RunID: prov.RunID,
+			AddedBy: "agent", CreatedAt: a.CreatedAt,
+		}
+		if meta.CreatedAt.IsZero() || meta.CreatedAt.After(time.Now()) {
+			meta.CreatedAt = time.Now()
+		}
+		left := truncate(scrub(a.Left), 512)
+		if len(a.Data) > 0 {
+			sum := sha256.Sum256(a.Data)
+			u, err := db.TaskAttachmentUsage(taskID)
+			switch {
+			case err != nil:
+				left = "not stored on the hub: " + err.Error()
+			case a.SHA256 != "" && !strings.EqualFold(a.SHA256, hex.EncodeToString(sum[:])):
+				left = "not stored on the hub: its bytes did not match the digest the executor sent"
+			case attachments.Room(u, int64(len(a.Data))) != "":
+				left = "not stored on the hub: " + attachments.Room(u, int64(len(a.Data)))
+			default:
+				data := []byte(scrub(string(a.Data)))
+				if _, err := attachments.Put(db, dbPath, taskID, meta, bytes.NewReader(data), attachments.MaxFileBytes, nil); err != nil {
+					if errors.Is(err, statedb.ErrTaskNotFound) {
+						rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d is not in the hub's plan", name, taskID))
+						continue
+					}
+					left = "not stored on the hub: " + err.Error()
+					break
+				}
+				rep.Attached++
+				continue
+			}
+		}
+		if left == "" {
+			left = "left in the executor's workspace"
+		}
+		// A row without its file takes no room, but it is a row: the task's
+		// file count still bounds how many a run may leave.
+		if u, err := db.TaskAttachmentUsage(taskID); err != nil || u.TaskFiles+1 > attachments.MaxTaskFiles {
+			rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d has no room for another attachment", name, taskID))
+			continue
+		}
+		if _, err := attachments.Record(db, taskID, meta, a.Size, a.SHA256, left); err != nil {
+			rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		rep.LeftBehind = append(rep.LeftBehind, fmt.Sprintf("%s (task #%d) — %s", name, taskID, left))
+	}
+	return nil
 }
 
 // recordEvents writes the run's journal rows through one database handle.

@@ -35,6 +35,9 @@ var notPlanTaskColumns = map[string]string{
 		"deleted only by the explicit reset that releases it (Task 20391); the readers join it in, and " +
 		"neither SaveState nor UpsertTask writes it, so a run saving a copy loaded before the mark can " +
 		"neither erase it nor write one back (TestQuarantineSurvivesAStaleSave)",
+	"AttachmentCount": "derived: the readers count the task's rows in task_attachments, which only an attach " +
+		"and a delete write (Task 20428); a save from a copy loaded before a run attached a file can neither " +
+		"erase the file nor store a count (TestAttachmentCountIsReadNotSaved)",
 }
 
 // TestEveryTaskFieldSurvivesTheDatabase saves a task with every field set and

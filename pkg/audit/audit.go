@@ -311,9 +311,11 @@ var secretKeyPattern = regexp.MustCompile(
 )
 
 // artifactDirs are where a task's output comes to rest: the permanent task
-// artifact, and the live output and verdict files beside it. Relative to the
-// project root, slash-separated for messages.
-var artifactDirs = []string{".cloop/tasks", ".cloop/artifacts"}
+// artifact, the live output and verdict files beside it, and the files a run
+// attached to its task (Task 20428) — an agent that copied its debug log into
+// the outbox copied whatever its tools printed. Relative to the project root,
+// slash-separated for messages.
+var artifactDirs = []string{".cloop/tasks", ".cloop/artifacts", ".cloop/attachments"}
 
 // checkSecretsInArtifacts scans task output for two different things and
 // reports them separately, because they have different remedies. A value from
@@ -348,12 +350,12 @@ func checkSecretsInArtifacts(workDir string, add addFn) {
 		add(Finding{
 			Name:    "Env secrets in task artifacts",
 			Level:   Pass,
-			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/) to scan",
+			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/, .cloop/attachments/) to scan",
 		})
 		add(Finding{
 			Name:    "Credentials in task artifacts",
 			Level:   Pass,
-			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/) to scan",
+			Message: "No task artifacts (.cloop/tasks/, .cloop/artifacts/, .cloop/attachments/) to scan",
 		})
 		return
 	}

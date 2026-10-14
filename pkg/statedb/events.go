@@ -219,6 +219,15 @@ const (
 	// may never have seen — a ceiling set on the hub — and the effect, a run
 	// that stopped mid-task, is what they see.
 	EventDiskLimit EventType = "disk_limit"
+
+	// EventTaskAttachments records the files an attempt left in its task's
+	// outbox (Task 20428): which were attached, and which were not and why —
+	// a link, a file over a limit. The details carry both lists.
+	//
+	// On the project's journal because it is the only record of a run having
+	// attached anything: attaching is not an audited action, and a refused
+	// file leaves no row of its own.
+	EventTaskAttachments EventType = "task_attachments"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

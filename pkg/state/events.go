@@ -66,6 +66,7 @@ const (
 	EventEgress            = statedb.EventEgress
 	EventFailover          = statedb.EventFailover
 	EventDiskLimit         = statedb.EventDiskLimit
+	EventTaskAttachments   = statedb.EventTaskAttachments
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
 )

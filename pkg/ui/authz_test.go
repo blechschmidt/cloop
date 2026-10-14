@@ -559,6 +559,7 @@ func TestEnforcementAcrossRoles(t *testing.T) {
 		{http.MethodPost, "/api/tasks", `{"title":"x"}`},
 		{http.MethodPost, "/api/task/add", `{"title":"x"}`},
 		{http.MethodDelete, "/api/tasks/1", ""},
+		{http.MethodDelete, "/api/tasks/1/attachments/" + strings.Repeat("a", 32), ""},
 		{http.MethodPost, "/api/options/toggle", `{"flag":"auto_evolve","value":true}`},
 		{http.MethodPost, "/api/reset", `{}`},
 		{http.MethodPost, "/api/executors/enroll", `{}`},
@@ -626,6 +627,7 @@ func TestEnforcementAcrossRoles(t *testing.T) {
 		{http.MethodPost, "/api/run", `{}`},
 		{http.MethodPost, "/api/tasks", `{"title":"x"}`},
 		{http.MethodGet, "/api/analytics", ""},
+		{http.MethodGet, "/api/tasks/1/attachments", ""},
 	}
 	for _, r := range unmappedProjectRoutes {
 		t.Run("unmapped 404 on "+r.method+" "+r.path, func(t *testing.T) {

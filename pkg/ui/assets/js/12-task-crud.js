@@ -554,6 +554,10 @@ function _renderTaskDetails(d) {
       '<div class="td-text">'+esc(t.failure_diagnosis)+'</div></div>';
   }
 
+  // Attachments (Task 20428): drawn by a deferred panel, fetched only for a
+  // task that has some.
+  if (t.attachment_count) html += '<div class="td-section" id="td-files"><h3>Attachments ('+t.attachment_count+')</h3><div class="td-empty">Loading…</div></div>';
+
   if (t.annotations && t.annotations.length) {
     const annos = t.annotations.slice().reverse().map(a => {
       const when = a.timestamp ? _fmtDateTime(a.timestamp) : '';
@@ -597,6 +601,7 @@ function _renderTaskDetails(d) {
 
   body.innerHTML = html;
   _tdLoadReproductions(t.id);
+  if (t.attachment_count) panelAct('attachments', 'show', t.id);
 }
 
 // Triggered from the task list. Ignore clicks that originated on action

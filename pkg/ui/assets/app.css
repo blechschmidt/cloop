@@ -1160,6 +1160,17 @@
   .td-empty { font-size:12px; color:var(--muted); font-style:italic; }
   .td-anno { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:12px; }
   .td-anno-head { color:var(--muted); font-size:11px; margin-bottom:3px; }
+  .td-file { border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px; }
+  .td-file-row { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:flex-start; }
+  .td-file-icon { font-size:18px; line-height:1.2; }
+  .td-file-main { flex:1 1 180px; min-width:0; display:flex; flex-direction:column; gap:2px; }
+  .td-file-name { font-size:13px; font-weight:600; overflow-wrap:anywhere; }
+  .td-file-meta { font-size:11px; color:var(--muted); overflow-wrap:anywhere; }
+  .td-file-gone { color:#d29922; }
+  .td-file-acts { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
+  .td-file-acts .btn { padding:3px 9px; font-size:12px; }
+  .td-file-preview { margin-top:8px; }
+  .td-file-img { display:block; max-width:100%; max-height:60vh; border-radius:4px; background:#fff; }
   .td-link-row a { color:var(--accent); }
 
   /* ── Reproduction verdicts (Task 20221) ── */

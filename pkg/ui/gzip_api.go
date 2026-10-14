@@ -112,6 +112,12 @@ func (g *gzipResponseWriter) eligible() bool {
 	if strings.HasPrefix(ct, "text/event-stream") {
 		return false
 	}
+	// A file body — an attachment's bytes (Task 20428) — goes out as stored:
+	// it is often compressed already, and a Range request and the length the
+	// client is told both describe the identity body.
+	if h.Get("Content-Disposition") != "" {
+		return false
+	}
 	// 204 and 304 carry no body; compressing one would advertise an encoding
 	// for content that is not there.
 	if g.status == http.StatusNoContent || g.status == http.StatusNotModified {

@@ -165,6 +165,9 @@ var deferredScripts = []struct{ token, path string }{
 	// The approvals inbox the badge opens (Task 20427): what waits on the
 	// caller, and what became of their own requests.
 	{"approvals.js", "assets/js/deferred/approvals.js"},
+	// The attachments of a task, in its details (Task 20428): fetched the
+	// first time a task with attached files is opened.
+	{"attachments.js", "assets/js/deferred/attachments.js"},
 	// The executor dialogs — history, sandbox, virtual executors, firewall,
 	// limits, access, enrollment and upgrades — fetched on the first open of
 	// any of them through panelAct (Task 20386).

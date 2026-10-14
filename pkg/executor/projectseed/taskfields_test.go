@@ -15,8 +15,10 @@ import (
 // derives them itself. ChainInput is json:"-" and rebuilt from the chained
 // predecessor's output when the orchestrator dispatches the task. Stop is
 // json:"-" and stored nowhere: the hub sets it for the one save that records
-// a stopped execution (Task 20405).
-var seedDerived = []string{"ChainInput", "Stop"}
+// a stopped execution (Task 20405). AttachmentCount is counted by the
+// database that loads the task: a device's counts only what its own run
+// attached (Task 20428).
+var seedDerived = []string{"ChainInput", "Stop", "AttachmentCount"}
 
 // TestSeedCarriesEveryTaskField: a task arrives on the device as the hub holds
 // it, every field — an assignment, a sprint, a branch, a retry budget — and
