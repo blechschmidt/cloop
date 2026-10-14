@@ -327,6 +327,11 @@ jobs:
         # of the timeout; the whole workflow took 17m54s, against 26m47s on
         # 1417b88f and 34m03s on 73de7f62.
         #
+        # pkg/orchestrator followed it out (Task 20428): 1,059.5 s, 58.9% of the
+        # timeout on 534f24f6, and 1,097 s on a12fa1d8 — over the 60% budget
+        # with every test passing. It runs in the "Test pkg/orchestrator" shard
+        # jobs below, the same way.
+        #
         # The packages come from scripts/race-packages.sh, which is go list's
         # set in a different order: the few packages that take minutes first.
         # go test starts packages in the order they are named, so in go list's
@@ -337,7 +342,7 @@ jobs:
         # for the budget gate; pipefail so tee cannot hide go test's verdict.
         run: |
           set -o pipefail
-          pkgs=$(./scripts/race-packages.sh --without pkg/ui)
+          pkgs=$(./scripts/race-packages.sh --without pkg/ui --without pkg/orchestrator)
           # shellcheck disable=SC2086 # one word per package, on purpose
           go test -race -timeout "$RACE_TIMEOUT" -coverprofile=coverage.out -covermode=atomic $pkgs 2>&1 | tee race.log
 
@@ -485,14 +490,79 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  orchestrator-shards:
+    name: Test pkg/orchestrator (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # pkg/orchestrator under -race, split the way pkg/ui is (see ui-shards):
+    # by its top-level tests (scripts/test-shards.py), balanced by the table in
+    # scripts/test-durations/pkg-orchestrator.txt (Task 20428). In Build and
+    # Test's race step it was the longest package, and on a12fa1d8 it went
+    # past the 60% budget there (1,097 s of 1,800) with every test passing:
+    # each test that runs a plan opens its database many times, and SQLite
+    # parses the whole schema on every open, which -race multiplies about
+    # ninefold. Two shards measured 238 s each locally against its 482 s.
+    timeout-minutes: 40 # the -timeout below fires first, and says which test
+    strategy:
+      fail-fast: false # a red shard should not hide the other's verdict
+      matrix:
+        shard: [1, 2]
+    env:
+      RACE_TIMEOUT: 30m
+      ORCH_GO_FLAGS: -race -cover -covermode=atomic
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The test suite does not depend on a clean home directory
+        # See Build and Test.
+        run: ./scripts/home-decoys.sh seed
+
+      - name: Every pkg/orchestrator test is in exactly one shard
+        run: ./scripts/test-shards.py ./pkg/orchestrator/ --shards ${{ strategy.job-total }} --go-flags "$ORCH_GO_FLAGS" check
+
+      - name: Test this shard with race detector and coverage
+        id: shard
+        run: |
+          set -o pipefail
+          run=$(./scripts/test-shards.py ./pkg/orchestrator/ --shards ${{ strategy.job-total }} --go-flags "$ORCH_GO_FLAGS" regex ${{ matrix.shard }})
+          # shellcheck disable=SC2086 # the flags are words, on purpose
+          go test $ORCH_GO_FLAGS -timeout "$RACE_TIMEOUT" -coverprofile=coverage.out -run "$run" ./pkg/orchestrator/ 2>&1 | tee shard.log
+
+      - name: The shard stayed within 60% of its -timeout
+        # The same budget as Build and Test's race step.
+        if: ${{ !cancelled() && steps.shard.outcome != 'skipped' }}
+        run: |
+          ./scripts/test-budget.py --timeout "$RACE_TIMEOUT" shard.log \
+            --note "This is shard ${{ matrix.shard }} of ${{ strategy.job-total }}: add a shard to the matrix, or refresh scripts/test-durations/pkg-orchestrator.txt if the shards have drifted apart."
+
+      - name: The seeded home directory was left untouched
+        if: always()
+        run: ./scripts/home-decoys.sh verify
+
+      - name: Upload this shard's coverage
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-part-orchestrator-${{ matrix.shard }}
+          path: coverage.out
+          retention-days: 1
+          if-no-files-found: error
+
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
-    # The race step's profile and the pkg/ui shards', merged into the one
-    # report Build and Test uploaded before pkg/ui was split out of it (Task
-    # 20414). A block several shards ran is one block with their counts added,
-    # so pkg/ui's coverage reads as if it had run in one binary.
-    needs: [build-and-test, ui-shards]
+    # The race step's profile and the pkg/ui and pkg/orchestrator shards',
+    # merged into the one report Build and Test uploaded before those packages
+    # were split out of it (Tasks 20414, 20428). A block several shards ran is
+    # one block with their counts added, so a sharded package's coverage reads
+    # as if it had run in one binary.
+    needs: [build-and-test, ui-shards, orchestrator-shards]
     timeout-minutes: 5
 
     steps:
@@ -511,12 +581,13 @@ jobs:
         run: |
           shopt -s nullglob
           ui=(coverage-parts/coverage-part-ui-*/coverage.out)
+          orch=(coverage-parts/coverage-part-orchestrator-*/coverage.out)
           race=coverage-parts/coverage-part-race/coverage.out
-          if [ ! -f "$race" ] || [ "${#ui[@]}" -eq 0 ]; then
-            echo "::error::the race step's profile or every pkg/ui shard's is missing:" coverage-parts/*/*
+          if [ ! -f "$race" ] || [ "${#ui[@]}" -eq 0 ] || [ "${#orch[@]}" -eq 0 ]; then
+            echo "::error::the race step's profile, or every shard's of pkg/ui or pkg/orchestrator, is missing:" coverage-parts/*/*
             exit 1
           fi
-          ./scripts/merge-coverage.sh "$race" "${ui[@]}" > coverage.out
+          ./scripts/merge-coverage.sh "$race" "${ui[@]}" "${orch[@]}" > coverage.out
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v5

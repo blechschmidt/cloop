@@ -4,12 +4,13 @@
 # coverage", and `make test-unit`), one per line, the longest-running first.
 #
 #   scripts/race-packages.sh                     # every package: make test-unit
-#   scripts/race-packages.sh --without pkg/ui    # all but pkg/ui: CI's race step
+#   scripts/race-packages.sh --without pkg/ui --without pkg/orchestrator
+#                                                # CI's race step: all but those two
 #
 # --without leaves a package out for a caller that tests it some other way.
-# CI's race step does that for pkg/ui, which runs in shard jobs of its own
-# (scripts/test-shards.py, Task 20414); make test-unit still tests the whole
-# package in one binary. A package named by --without must exist, like one in
+# CI's race step does that for pkg/ui and pkg/orchestrator, which run in shard
+# jobs of their own (scripts/test-shards.py, Tasks 20414 and 20428); make
+# test-unit still tests each whole, in one binary. A package named by --without must exist, like one in
 # the slow list, so that a renamed package fails here instead of quietly
 # coming back into the step it was taken out of.
 #

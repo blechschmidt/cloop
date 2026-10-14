@@ -464,12 +464,12 @@ func TestWorkflowShardsWhatTheRaceStepLeavesOut(t *testing.T) {
 		t.Errorf("the race step leaves out %v, and the shard jobs split %v: a package left out and not sharded is not tested at all", left, sharded)
 	}
 	for _, pkg := range sharded {
-		if !regexp.MustCompile(`go test \$UI_GO_FLAGS -timeout "\$RACE_TIMEOUT" -coverprofile=\S+ -run "\$run" \./` + regexp.QuoteMeta(pkg) + `/`).MatchString(wf) {
+		if !regexp.MustCompile(`go test \$[A-Z]+_GO_FLAGS -timeout "\$RACE_TIMEOUT" -coverprofile=\S+ -run "\$run" \./` + regexp.QuoteMeta(pkg) + `/`).MatchString(wf) {
 			t.Errorf("no shard step runs %s with its shard's -run regex under the race step's timeout", pkg)
 		}
 	}
-	if n := strings.Count(wf, `test-budget.py --timeout "$RACE_TIMEOUT"`); n < 2 {
-		t.Errorf("the time budget is checked %d times, want the race step and the shards", n)
+	if n := strings.Count(wf, `test-budget.py --timeout "$RACE_TIMEOUT"`); n < 1+len(sharded) {
+		t.Errorf("the time budget is checked %d times, want the race step and each sharded package's shards", n)
 	}
 	timeouts := set(`RACE_TIMEOUT: (\S+)`)
 	if len(timeouts) != 1 {
