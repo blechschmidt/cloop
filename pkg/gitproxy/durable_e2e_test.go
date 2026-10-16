@@ -9,7 +9,6 @@
 package gitproxy_test
 
 import (
-	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -85,7 +84,7 @@ func TestRestoredSessionServesTheSandboxAfterARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.handler.Store(http.Handler(px))
+	h.setHandler(px)
 
 	// Before the restore the sandbox's credential is worth nothing here.
 	h.commit(t, dir, "before.txt", "before the restore\n")

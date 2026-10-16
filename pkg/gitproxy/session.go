@@ -1,6 +1,7 @@
 package gitproxy
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -162,6 +163,28 @@ type Session struct {
 	// onEnd is MintRequest.OnEnd, run once by end.
 	onEnd   func()
 	endOnce sync.Once
+
+	// scans bounds the push scans running for this session at once
+	// (pushgate.go).
+	scansOnce sync.Once
+	scans     chan struct{}
+}
+
+// maxScansPerSession is how many of one session's pushes are scanned at once;
+// a third waits for a slot.
+const maxScansPerSession = 2
+
+// acquireScan waits for one of the session's scan slots, or for ctx to end,
+// and returns the function that gives it back.
+func (s *Session) acquireScan(ctx context.Context) (func(), error) {
+	s.scansOnce.Do(func() { s.scans = make(chan struct{}, maxScansPerSession) })
+	select {
+	case s.scans <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-s.scans }) }, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	}
 }
 
 // Used reports whether the session ever authenticated a request.

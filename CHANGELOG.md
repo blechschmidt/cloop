@@ -12,6 +12,32 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **The git proxy refuses a push that carries a credential the run was
+  given.** It used to decide on a push's command list and stream the pack to
+  the forge unread, so a workload that committed its leased env secret, the
+  token in its kubeconfig, its registry auth or its egress proxy's password
+  published it through the one choke point every proxied push crosses — and
+  GitHub's push protection knows vendor shapes, not an internal key granted as
+  an env secret. The proxy now inflates every pack as it streams — commits,
+  trees, blobs, tags, the bytes each delta inserts, ref names, push options —
+  and matches the exact values the run's lease and spec delivered, as
+  delivered, base64-encoded at every alignment and percent-encoded, plus as
+  defence in depth the forge token it holds itself. The forge never gets the
+  pack's checksum until the scan finds nothing; a push that carries one is
+  aborted upstream, so receive-pack never sees a whole pack and no ref moves,
+  and git prints each object, its path and commit, and the grant and secret
+  the value came from, never the value. The refusal is a
+  `gitproxy.push_secret_refused` audit row, a `git_push_refused` row in the
+  run's history and a line in the task's details, counted in
+  `cloop_gitproxy_push_scans_total`. `executors.git_proxy.push_scan` is
+  `values` by default whenever the proxy runs, `shapes` to add pkg/redact's
+  credential formats, or `off`; a project may tighten it, never loosen it; a
+  push past `push_scan_max_object_mb`, `push_scan_max_push_mb` or
+  `push_scan_seconds`, or a pack the proxy cannot read, is refused naming why.
+  It stops an accident and a naive leak, not a workload transforming a value on
+  purpose, and after a hub restart an adopted run is scanned only for its env
+  secrets and PATs; the architecture page says what else it cannot see
+  (Task 20436).
 - **The git proxy reads a SHA-256 push's all-zero object id as zero.** It
   compared against SHA-1's forty zeros only, so a SHA-256 repository's delete
   read as an update — which a session that may update and not delete then

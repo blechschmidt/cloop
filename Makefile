@@ -109,7 +109,8 @@ e2e-stack:
 ##                workspace credential is bound to a host other than its
 ##                grant's (pkg/executor/gitcreds), and the one host comparison
 ##                every path uses is stable and folds nothing a resolver would
-##                not (pkg/forgehost).
+##                not (pkg/forgehost); and the git proxy's pack reader, which
+##                never hands the forge a pack it refused (pkg/gitproxy).
 ##
 ## This list is the single source of truth. CI's Parser fuzzing job runs this
 ## same target with a shorter budget rather than repeating the targets in YAML,
@@ -130,7 +131,8 @@ FUZZ_TARGETS := \
 	./pkg/executor/resultframe/:FuzzScanner \
 	./pkg/executor/resultframe/:FuzzRoundTrip \
 	./pkg/executor/gitcreds/:FuzzNoCredentialLeavesItsGrantsHost \
-	./pkg/forgehost/:FuzzCanonical
+	./pkg/forgehost/:FuzzCanonical \
+	./pkg/gitproxy/:FuzzPackScan
 
 ## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
 ## two of its distinctions matter locally as much as in CI: Go intermittently

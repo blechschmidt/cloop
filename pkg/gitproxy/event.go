@@ -16,14 +16,21 @@ const (
 	EventSessionClosed EventKind = "session_closed"
 	// EventSessionRenewed records a session's deadline moved by Renew.
 	EventSessionRenewed EventKind = "session_renewed"
-	// EventPushAllowed records a push whose every command passed policy. It is
-	// emitted before forwarding, so it describes what was authorised, not what
-	// the remote ultimately accepted.
+	// EventPushAllowed records a push whose every command passed policy — and,
+	// unless the push scan is off, whose pack carried none of the run's
+	// credentials. It is emitted before the forge's verdict is forwarded, so
+	// it describes what was authorised, not what the remote ultimately
+	// accepted.
 	EventPushAllowed EventKind = "push_allowed"
 	// EventPushDenied records a push refused by policy. This is the row that
 	// matters: it is the evidence that the boundary held, and the only place a
 	// sandbox's attempt to reach a protected branch is written down.
 	EventPushDenied EventKind = "push_denied"
+	// EventPushSecretRefused records a push refused because it carries a
+	// credential the session's run was given (Task 20436). Its Findings name
+	// the objects and the grant and secret each value came from — never the
+	// value.
+	EventPushSecretRefused EventKind = "push_secret_refused"
 	// EventFetch records a read through the proxy.
 	EventFetch EventKind = "fetch"
 	// EventRejected records a request refused before policy ran at all —
@@ -46,11 +53,21 @@ type Event struct {
 	ProjectID string    `json:"project_id,omitempty"`
 	TaskID    string    `json:"task_id,omitempty"`
 	Actor     string    `json:"actor,omitempty"`
-	// Refs are the ref names the request touched.
+	// RunID is the run the session serves, on a push_secret_refused row: what
+	// the hub files the refusal in the run's history by.
+	RunID string `json:"run_id,omitempty"`
+	// Refs are the ref names the request touched, with any of the run's
+	// credentials a name carries taken out.
 	Refs []string `json:"refs,omitempty"`
 	// Detail is a human-readable reason or summary.
-	Detail string    `json:"detail,omitempty"`
-	At     time.Time `json:"at"`
+	Detail string `json:"detail,omitempty"`
+	// Findings are where a push_secret_refused push carries a credential.
+	Findings []ScanFinding `json:"findings,omitempty"`
+	// Scan is set on a push the scan refused (Task 20436): ScanResultSecret
+	// on a push_secret_refused row, ScanResultLimit or ScanResultUnreadable
+	// on a push_denied one.
+	Scan string    `json:"scan,omitempty"`
+	At   time.Time `json:"at"`
 }
 
 // String renders the event as one log line.

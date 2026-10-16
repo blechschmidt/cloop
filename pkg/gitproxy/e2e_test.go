@@ -117,7 +117,7 @@ type harness struct {
 	reg      *gitproxy.Registry
 	// handler is what proxySrv serves; swapping it stands a new proxy — a
 	// restarted hub process — behind the same URL (Task 20383).
-	handler atomic.Value // http.Handler
+	handler atomic.Value // handlerBox
 
 	upstream string // https://<forge>/acme/tool.git — never reaches the client
 
@@ -134,6 +134,10 @@ type harness struct {
 
 	mu     sync.Mutex
 	events []gitproxy.Event
+
+	// allowedBefore is how many push_allowed rows a push scan test expects
+	// before the push it asserts was refused (pushscan_e2e_test.go).
+	allowedBefore int
 }
 
 func newHarness(t *testing.T) *harness {
@@ -205,7 +209,8 @@ func (h *harness) startProxy(t *testing.T) {
 	t.Helper()
 
 	h.proxySrv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, _ := h.handler.Load().(http.Handler)
+		box, _ := h.handler.Load().(handlerBox)
+		handler := box.Handler
 		if handler == nil {
 			http.Error(w, "proxy handler not installed yet", http.StatusServiceUnavailable)
 			return
@@ -229,8 +234,15 @@ func (h *harness) startProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitproxy.New: %v", err)
 	}
-	h.handler.Store(http.Handler(px))
+	h.setHandler(px)
 }
+
+// handlerBox gives every handler the harness serves one concrete type, which
+// is what atomic.Value requires of the values stored in it.
+type handlerBox struct{ http.Handler }
+
+// setHandler swaps what the proxy's URL serves.
+func (h *harness) setHandler(x http.Handler) { h.handler.Store(handlerBox{x}) }
 
 // --- the forge ---------------------------------------------------------------
 

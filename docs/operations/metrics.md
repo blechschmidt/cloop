@@ -666,11 +666,17 @@ back for a human.
 | `cloop_gitproxy_pushes_total` | counter | `result` |
 | `cloop_gitproxy_push_denials_total` | counter | `reason` |
 | `cloop_gitproxy_anonymous_requests_total` | counter | — |
+| `cloop_gitproxy_push_scans_total` | counter | `result` |
+| `cloop_gitproxy_push_scanned_bytes_total` | counter | — |
+| `cloop_gitproxy_push_scan_seconds` | histogram | — |
 
 This is the boundary a sandbox pushes through, so its denial counter is a
 security signal and not only an operational one. `reason` is
 `ref_not_allowed`, `delete_denied`, `create_denied`, `update_denied`,
-`no_write`, `too_many_commands` or `push_cert`. `no_write` is part of the
+`no_write`, `too_many_commands` or `push_cert`, and from the push scan
+(Task 20436) `secret_in_push` — the push carries a credential its run was
+given — `scan_limit` or `unreadable_pack`. Any `secret_in_push` is worth a
+look: a run tried to publish a credential. `no_write` is part of the
 vocabulary but no code path produces it today: a session that may not push is
 refused before any command is parsed — at the receive-pack advertisement, or at
 the push itself when a client skips discovery — so that refusal is a
@@ -689,6 +695,23 @@ above it is something other than git knocking.
 
 ```promql
 rate(cloop_gitproxy_push_denials_total{reason="ref_not_allowed"}[5m]) > 0.1
+```
+
+**The push scan.** Every push the policy allows is inflated and scanned for
+the credentials its run was given on its way to the forge
+([how](../architecture/git-proxy.md#the-push-scan)).
+`cloop_gitproxy_push_scans_total` counts them by `result`: `clean`, `secret`
+(refused for a credential), `limit` (refused at an
+`executors.git_proxy.push_scan_*` limit), `unreadable` (a pack the proxy could
+not read, refused), `incomplete` (the sandbox or the forge went away
+mid-scan) and `unscanned` (`push_scan: off`). The scanned-bytes counter and the
+duration histogram — time spent inflating and matching, not waiting on either
+side — say what the scan costs the hub; a push nearing
+`executors.git_proxy.push_scan_seconds` is about to be refused for it.
+
+```promql
+increase(cloop_gitproxy_push_denials_total{reason="secret_in_push"}[1h]) > 0
+histogram_quantile(0.99, sum by (le) (rate(cloop_gitproxy_push_scan_seconds_bucket[1h])))
 ```
 
 ## Kubernetes access monitor

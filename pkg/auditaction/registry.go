@@ -993,7 +993,7 @@ var registry = []Entry{
 		Action:    ActionGitProxyPushAllowed,
 		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
-		Trigger:   "A push is checked against the session's branch allowlist and forwarded.",
+		Trigger:   "A push is checked against the session's branch allowlist, scanned for the credentials its run was given (unless executors.git_proxy.push_scan is off), and forwarded.",
 		Payload:   gitProxyPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
@@ -1002,12 +1002,27 @@ var registry = []Entry{
 		Action:    ActionGitProxyPushDenied,
 		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
-		Trigger:   "A push is refused because it names a ref the session may not write.",
-		Payload:   gitProxyPayload,
+		Trigger:   "A push is refused because it names a ref the session may not write — or because its pack could not be scanned for the run's credentials: past a push_scan limit, or unreadable.",
+		Payload:   gitProxyScanPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "The row that matters in this family: it is the only place a sandbox's " +
-			"attempt to write outside its lane is recorded. `refs` names what it tried to push.",
+			"attempt to write outside its lane is recorded. `refs` names what it tried to push. A push the " +
+			"scan could not finish carries `scan` (`limit` or `unreadable`) and `run_id`, and `detail` names " +
+			"the limit and its setting (Task 20436).",
+	},
+	{
+		Action:    ActionGitProxyPushSecretRefused,
+		Home:      HomeControlPlane,
+		Entity:    "gitproxy",
+		Trigger:   "A push the branch policy allowed is refused because it carries a credential the session's run was given: an env value, a kubeconfig token or client key, registry auth, an egress proxy credential, a GitHub token — as delivered, base64-encoded or percent-encoded — found in a commit, tree, blob, tag, delta insert, ref name or push option.",
+		Payload:   gitProxyScanPayload,
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`findings` name each object, its path and commit where the pack says, and the grant and secret " +
+			"the value came from; nothing records the value. The forge got no complete pack and no ref moved. " +
+			"A push refused because it could not be scanned — past a `push_scan_*` limit, or a pack the proxy " +
+			"cannot read — is a `gitproxy.push_denied` row with `scan` set (Task 20436).",
 	},
 	{
 		Action:    ActionGitProxyFetch,
@@ -2460,6 +2475,12 @@ var (
 	}
 
 	gitProxyPayload = []string{"kind", "session_id", "repo", "project_id", "task_id", "refs", "detail"}
+
+	// gitProxyScanPayload is a push the scan refused (Task 20436): the run it
+	// came from, what the scan found and where — objects, paths, commits and
+	// the grant and secret each value was delivered through, never a value.
+	gitProxyScanPayload = []string{"kind", "session_id", "repo", "project_id", "task_id", "refs", "detail",
+		"scan", "run_id", "findings"}
 
 	kubeGuardPayload = []string{
 		"kind", "session_id", "cluster", "context", "verb", "resource", "namespace",

@@ -63,6 +63,14 @@ const (
 	DenyTooManyCommands DenyReason = "too_many_commands"
 	// DenyPushCert: signed pushes are not supported.
 	DenyPushCert DenyReason = "push_cert"
+	// DenySecretInPush: the push carries a credential the session's run was
+	// given (Task 20436).
+	DenySecretInPush DenyReason = "secret_in_push"
+	// DenyScanLimit: the push could not be scanned within the proxy's size or
+	// time limits, so it is refused rather than forwarded unread.
+	DenyScanLimit DenyReason = "scan_limit"
+	// DenyUnreadablePack: the proxy could not read the push's pack.
+	DenyUnreadablePack DenyReason = "unreadable_pack"
 )
 
 // AllDenyReasons is every classification, for tests that assert the docs and
@@ -70,6 +78,7 @@ const (
 var AllDenyReasons = []DenyReason{
 	DenyRefNotAllowed, DenyDelete, DenyCreate, DenyUpdate,
 	DenyNoWrite, DenyTooManyCommands, DenyPushCert,
+	DenySecretInPush, DenyScanLimit, DenyUnreadablePack,
 }
 
 // RefDenial is a policy refusal carrying both its prose and its class.

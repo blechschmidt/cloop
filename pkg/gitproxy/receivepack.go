@@ -1,6 +1,7 @@
 package gitproxy
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -136,6 +137,25 @@ var errPushCert = errors.New("signed pushes (push-cert) are not supported by the
 // without full certificate parsing, and a proxy that silently passed one
 // through would be a branch allowlist with a documented bypass.
 func ParseReceivePack(body io.Reader) (*ReceivePack, io.Reader, error) {
+	head, raw, rest, err := parseReceivePackSplit(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return head, io.MultiReader(bytes.NewReader(raw), rest), nil
+}
+
+// parseReceivePackSplit is ParseReceivePack returning the command section's
+// raw bytes and the rest of the body apart: the push scan reads the rest — the
+// push options and the pack — and forwards the command section untouched.
+func parseReceivePackSplit(body io.Reader) (*ReceivePack, []byte, io.Reader, error) {
+	head, pr, err := parseCommandSection(body)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return head, pr.raw, pr.br, nil
+}
+
+func parseCommandSection(body io.Reader) (*ReceivePack, *pktReader, error) {
 	pr := newPktReader(body, maxCommandSectionBytes)
 	out := &ReceivePack{}
 
@@ -190,12 +210,9 @@ func ParseReceivePack(body io.Reader) (*ReceivePack, io.Reader, error) {
 		out.Commands = append(out.Commands, cmd)
 	}
 
-	if len(out.Commands) == 0 {
-		// Git sends this to probe; there is nothing to authorise and nothing to
-		// forward a decision about. Callers treat it as a no-op push.
-		return out, pr.tail(nil), nil
-	}
-	return out, pr.tail(nil), nil
+	// No commands at all is git probing: there is nothing to authorise and
+	// nothing to forward a decision about. Callers treat it as a no-op push.
+	return out, pr, nil
 }
 
 // parseCommand splits one "<old> <new> <ref>" line.

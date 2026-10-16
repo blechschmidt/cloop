@@ -324,6 +324,9 @@ const (
 	ActionGitProxyPushAllowed Action = "gitproxy.push_allowed"
 	// ActionGitProxyPushDenied records a push refused by branch policy.
 	ActionGitProxyPushDenied Action = "gitproxy.push_denied"
+	// ActionGitProxyPushSecretRefused records a push refused because it
+	// carries a credential the session's run was given (Task 20436).
+	ActionGitProxyPushSecretRefused Action = "gitproxy.push_secret_refused"
 	// ActionGitProxyFetch records a read passing through the proxy.
 	ActionGitProxyFetch Action = "gitproxy.fetch"
 	// ActionGitProxyRejected records a request refused before policy evaluation.

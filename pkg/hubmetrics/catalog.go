@@ -415,9 +415,33 @@ var (
 
 	GitProxyDenials = Default.MustRegister(Definition{
 		Name:   "cloop_gitproxy_push_denials_total",
-		Help:   "Pushes refused, by reason (ref_not_allowed, delete_denied, create_denied, update_denied, no_write, too_many_commands, push_cert). A sandbox repeatedly hitting ref_not_allowed is probing the allowlist.",
+		Help:   "Pushes refused, by reason (ref_not_allowed, delete_denied, create_denied, update_denied, no_write, too_many_commands, push_cert, and from the push scan secret_in_push, scan_limit, unreadable_pack). A sandbox repeatedly hitting ref_not_allowed is probing the allowlist; any secret_in_push is a run that tried to publish a credential it was given.",
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
+	})
+
+	// The push scan (Task 20436): every push the policy allows is inflated
+	// and scanned for the run's credentials on its way to the forge.
+	GitProxyPushScans = Default.MustRegister(Definition{
+		Name:   "cloop_gitproxy_push_scans_total",
+		Help:   "Pushes the policy allowed, by what their scan found (clean, secret, limit, unreadable, incomplete — the sandbox or the forge went away mid-scan — or unscanned, with executors.git_proxy.push_scan: off).",
+		Type:   TypeCounter,
+		Labels: []string{"result"},
+	})
+
+	GitProxyPushScanBytes = Default.MustRegister(Definition{
+		Name: "cloop_gitproxy_push_scanned_bytes_total",
+		Help: "Bytes the push scan inflated and scanned. Its rate against cloop_gitproxy_push_scan_seconds says what the scan costs the hub.",
+		Type: TypeCounter,
+	})
+
+	// Buckets from 10 ms, a push of a few small objects, to the 300 s default
+	// of executors.git_proxy.push_scan_seconds.
+	GitProxyPushScanSeconds = Default.MustRegister(Definition{
+		Name:    "cloop_gitproxy_push_scan_seconds",
+		Help:    "Time one push's scan spent inflating and matching, not waiting on the sandbox or the forge. Pushes nearing executors.git_proxy.push_scan_seconds are about to be refused for it.",
+		Type:    TypeHistogram,
+		Buckets: []float64{0.01, 0.05, 0.25, 1, 5, 15, 60, 300},
 	})
 
 	// Counted rather than audited: see Proxy.reject.

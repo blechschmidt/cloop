@@ -58,6 +58,7 @@
 package gitproxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -136,6 +137,14 @@ type Options struct {
 	// an underscore, so no repository path can be taken for one (as for
 	// ForgeRouteSegment) — and is matched at a "/" boundary.
 	Routes []Route
+
+	// PushScan decides how a push through a session is scanned for the
+	// credentials its run holds (Task 20436): the mode, the values, the
+	// limits. nil scans every push in ScanValues mode for the one value the
+	// proxy knows without being told — the session's own upstream token —
+	// within the default limits. Whatever it returns, the session's upstream
+	// token is matched too.
+	PushScan PushScanFunc
 }
 
 // Route is a path prefix on the proxy's listener served by another handler.
@@ -400,7 +409,14 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 		defer closer.Close()
 	}
 
-	head, replay, err := ParseReceivePack(body)
+	// What the push is scanned for, decided before anything about it is
+	// recorded: a ref can be named after a credential — so can a malformed
+	// command line a refusal would quote — and no row about this push may
+	// carry one (Task 20436).
+	scan := p.pushScanFor(sess)
+	m := newMatcher(scan.Secrets)
+
+	head, raw, rest, err := parseReceivePackSplit(body)
 	if err != nil {
 		sess.denied.Add(1)
 		status := http.StatusBadRequest
@@ -409,7 +425,7 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 			hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
 			hubmetrics.GitProxyDenials.Inc(string(DenyPushCert))
 		}
-		p.rejectSession(w, r, sess, status, err.Error())
+		p.rejectSession(w, r, sess, status, m.redact(err.Error()))
 		return
 	}
 
@@ -421,11 +437,13 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 		return
 	}
 
+	refs := m.redactAll(refNames(head.Commands))
+
 	if len(head.Commands) > pol.MaxCommands {
 		sess.denied.Add(1)
 		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
 		hubmetrics.GitProxyDenials.Inc(string(DenyTooManyCommands))
-		p.emitPush(r, sess, EventPushDenied, head.Commands,
+		p.emitPush(r, sess, EventPushDenied, refs,
 			fmt.Sprintf("%d ref updates exceeds the %d this session allows", len(head.Commands), pol.MaxCommands))
 		p.refuse(w, r, sess, head, nil,
 			fmt.Sprintf("push carries %d ref updates; this session allows %d", len(head.Commands), pol.MaxCommands))
@@ -448,21 +466,51 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 			}
 		}
 		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
-		p.emitPush(r, sess, EventPushDenied, head.Commands, strings.Join(refused, "; "))
+		p.emitPush(r, sess, EventPushDenied, refs, m.redact(strings.Join(refused, "; ")))
 		p.refuse(w, r, sess, head, decisions, "")
 		return
 	}
 
-	hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultAllowed)
-	p.emitPush(r, sess, EventPushAllowed, head.Commands, summarize(head.Commands))
+	if scan.Mode != ScanOff {
+		// The pack is scanned on its way to the forge, which gets its last
+		// checksum only once the scan found nothing (pushgate.go).
+		p.scanPushAndForward(w, r, sess, head, raw, rest, scan, m)
+		return
+	}
 
-	up, err := p.upstreamRequest(r, sess, "/"+receivePackService, replay)
+	hubmetrics.GitProxyPushScans.Inc(ScanResultUnscanned)
+	hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultAllowed)
+	p.emitPush(r, sess, EventPushAllowed, refs, m.redact(summarize(head.Commands))+
+		"; not scanned ("+SettingPushScan+": off)")
+
+	up, err := p.upstreamRequest(r, sess, "/"+receivePackService, io.MultiReader(bytes.NewReader(raw), rest))
 	if err != nil {
 		p.upstreamFailed(w, r, sess, err)
 		return
 	}
 	sess.pushes.Add(1)
 	p.forward(w, r, sess, up, receiveResultMediaType)
+}
+
+// pushScanFor is how a push through sess is scanned: the hook's answer, with
+// the session's own upstream token added to the values and the limits filled.
+func (p *Proxy) pushScanFor(sess *Session) PushScan {
+	scan := PushScan{Mode: ScanValues}
+	if p.opts.PushScan != nil {
+		scan = p.opts.PushScan(sess)
+	}
+	scan.Mode = scan.Mode.Normalize()
+	scan.Limits = scan.Limits.withDefaults()
+	secrets := make([]ScanSecret, 0, len(scan.Secrets)+1)
+	secrets = append(secrets, scan.Secrets...)
+	// The proxy holds this one, so the sandbox never did — unless something
+	// put it there. Matched as defence in depth.
+	for _, pw := range sess.upstreamPasswords() {
+		secrets = append(secrets, ScanSecret{Value: pw, Grant: sess.GrantID,
+			Field: "the token the proxy presents upstream for this session"})
+	}
+	scan.Secrets = secrets
+	return scan
 }
 
 // handleUploadPack proxies a fetch.
@@ -819,11 +867,13 @@ func (p *Proxy) rejectSession(w http.ResponseWriter, r *http.Request, sess *Sess
 	http.Error(w, "cloop git proxy: "+oneLine(detail), status)
 }
 
-func (p *Proxy) emitPush(r *http.Request, sess *Session, kind EventKind, cmds []RefUpdate, detail string) {
+// emitPush records a decision about a push. refs are its ref names with any of
+// the run's credentials already taken out.
+func (p *Proxy) emitPush(r *http.Request, sess *Session, kind EventKind, refs []string, detail string) {
 	p.reg.emit(Event{
 		Kind: kind, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
 		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
-		Refs: refNames(cmds), Detail: detail, At: p.reg.now(),
+		Refs: refs, Detail: detail, At: p.reg.now(),
 	})
 }
 
