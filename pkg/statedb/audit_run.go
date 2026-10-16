@@ -175,3 +175,49 @@ func AuditAdoptRequested(d *DB, in AdoptRequestInput) {
 		}),
 	})
 }
+
+// FirewallDeniedInput is one deny path's refusals in a finished run (Task
+// 20437).
+type FirewallDeniedInput struct {
+	ProjectPath string
+	RunID       string
+	ExecutorID  string
+	Fingerprint string
+	Total       DenialRuleTotal
+}
+
+// AuditFirewallDenied records what one deny path of a run's sandbox firewall
+// refused, in all: aggregated per run and rule, so a workload that sprays its
+// firewall costs the trail a row per rule, not one per packet.
+func AuditFirewallDenied(d *DB, in FirewallDeniedInput) {
+	payload := map[string]any{
+		"project":      in.ProjectPath,
+		"run_id":       in.RunID,
+		"executor_id":  in.ExecutorID,
+		"rule":         in.Total.Rule,
+		"count":        in.Total.Count,
+		"destinations": in.Total.Destinations,
+	}
+	if in.Total.Why != "" {
+		payload["why"] = in.Total.Why
+	}
+	if len(in.Total.Top) > 0 {
+		payload["top"] = in.Total.Top
+	}
+	if in.Fingerprint != "" {
+		payload["fingerprint"] = in.Fingerprint
+	}
+	if !in.Total.FirstSeen.IsZero() {
+		payload["first_seen"] = in.Total.FirstSeen.UTC().Format(time.RFC3339)
+	}
+	if !in.Total.LastSeen.IsZero() {
+		payload["last_seen"] = in.Total.LastSeen.UTC().Format(time.RFC3339)
+	}
+	emit(d, &AuditEvent{
+		Actor:      "hub",
+		EventType:  string(auditaction.ActionRunFirewallDenied),
+		EntityType: "plan",
+		EntityID:   in.ProjectPath,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}

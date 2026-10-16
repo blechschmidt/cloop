@@ -222,6 +222,10 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	// success it cannot stand behind. See executor.LeaseIndex.Adopt.
 	e.leases.Adopt(saved)
 
+	// Its refusals are attributed to it again (Task 20437): the bridge and
+	// the addresses are on the row, and neither changes while it runs.
+	e.trackDenials(rec, denialFromMeta(saved.Meta))
+
 	// Re-arm the timeout. The deadline is persisted as an absolute instant, so
 	// what resumes is the *remaining* time: a hub down for twenty minutes
 	// gives a one-hour workload its last forty, rather than restarting the

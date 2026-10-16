@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 211 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 212 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -77,10 +77,10 @@ whichever one happened to be opened.
 | Home | Meaning | Actions |
 | --- | --- | --- |
 | `control-plane` | the hub's own state.db | 189 |
-| `project` | the project's .cloop/state.db | 18 |
+| `project` | the project's .cloop/state.db | 19 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
-Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.reexecuted`, `state.save`, `step.append`, `task.attachment_delete`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
+Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.firewall_denied`, `run.reexecuted`, `state.save`, `step.append`, `task.attachment_delete`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
 
 Recorded in whichever chain the decision was scoped to: `audit.gap`, `audit.restored`, `authz.denied`, `authz.granted`.
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-211 actions in 48 families. Every action is listed: this section is the whole
+212 actions in 48 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -131,6 +131,7 @@ Payload keys:
 | `run.adopt_requested` | `plan` | project | stable | Somebody asks a project's running host-process run to adopt the hub's build at its next task boundary. |
 | `run.cap_paused` | `plan` | project | stable | A Claude Code subscription cap stops the run before it dispatches its next task. |
 | `run.cap_resumed` | `plan` | project | stable | The hub restarts a cap-paused run after its window rolled over, without a human. |
+| `run.firewall_denied` | `plan` | project | stable | A run ends whose sandbox firewall refused connections: one row per deny path that refused any, with the totals. |
 | `run.reexecuted` | `plan` | project | stable | A run replaces its own image with a newer build at a task boundary, keeping its process. |
 
 Payload keys:
@@ -138,11 +139,13 @@ Payload keys:
 - `run.adopt_requested` — `project`, `request_id`, `pid`, `run_build`, `hub_build`, `behind`
 - `run.cap_paused` — `project`, `windows`, `utilization`, `cap`, `resumes_at`, `detail`
 - `run.cap_resumed` — `project`, `paused_detail`, `resumes_at`, `resumed_at`
+- `run.firewall_denied` — `project`, `run_id`, `executor_id`, `rule`, `why`, `count`, `destinations`, `top`, `first_seen`, `last_seen`, `fingerprint`
 - `run.reexecuted` — `project`, `run_id`, `pid`, `from`, `to`, `reason`, `reexecs`
 
 - `run.adopt_requested` — Gated like starting a run. The request names the run's process, so it is acted on by that run or by none; what the run then did is its run.reexecuted row, or a refusal in the project's journal.
 - `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
 - `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone.
+- `run.firewall_denied` — Aggregated per run and rule (Task 20437), never per packet: `count` is the refusals the sandbox's packet log reported — rate-limited to ten a second per deny path, so a flood is at least this many — `destinations` how many distinct destinations, `top` up to eight of them as `dst:port/proto`. `rule` is the deny path's tag (`default`, `deny:<prefix>`, `meta:<prefix>`, `block:<prefix>`, `xlat:<prefix>`), or `unitemised` for what the run's capped aggregate counted without itemising; `why` is the hub's sentence for it. Each destination is also a `network_blocked` row in the run's history. Absent for a run on Kubernetes, whose NetworkPolicy has no portable log, and for one on a device whose agent predates protocol v24.
 - `run.reexecuted` — Written by the new image. Together with task.dispatch it answers "which build ran this task": a run's tasks before this row ran on `from`, after it on `to`.
 
 ### feature.*

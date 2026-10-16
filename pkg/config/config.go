@@ -1446,6 +1446,13 @@ type ContainerEgressFilterConfig struct {
 	// most common way this section gets misconfigured.
 	Resolvers []string `yaml:"resolvers,omitempty"`
 
+	// DropDenied discards a sandbox's denied packets silently instead of
+	// refusing them (Task 20437). Left off, a blocked connection is answered
+	// with a TCP reset or an ICMP "administratively prohibited", so the
+	// workload fails at once rather than after its own timeout; on, the
+	// sandbox cannot tell the filter from a host that is not there.
+	DropDenied bool `yaml:"drop_denied,omitempty"`
+
 	// Broker is the egress proxy endpoint, as an address:port literal. Only
 	// needed alongside direct egress; on an internal network the broker is
 	// reachable because it shares the bridge.

@@ -823,6 +823,47 @@ sandbox trying to reach the hub's own network.
 rate(cloop_egress_denials_total{reason="destination_blocked"}[5m]) > 0
 ```
 
+## Sandbox firewall refusals
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_firewall_denials_total` | counter | `executor_kind`, `rule` |
+| `cloop_firewall_denial_reports_dropped_total` | counter | `reason` |
+
+A sandbox's IP firewall refuses a blocked connection and logs it, rate-limited,
+to an NFLOG group (Task 20437). The hub reads that log for its own container
+executor, and each edge device's agent reads its own and reports per run over
+its session (protocol v24). Both families are recorded as the hub records each
+batch on its run, so they are per process: a device's refusals are counted by
+the member holding its session.
+
+`rule` on `cloop_firewall_denials_total` is the deny path that refused the
+packet: `default` (no allow named it), `deny` (a deny list), `meta` (a cloud
+metadata service), `block` (the rest of the hard-block set: private, loopback,
+link-local, CGNAT, multicast), `xlat` (an IPv6 translation prefix), or
+`unitemised` for refusals a run's capped aggregate counted without itemising.
+The log is limited to ten lines a second per deny path, so a flood counts as at
+least that rate rather than as every packet; Kubernetes executors report
+nothing, because a NetworkPolicy has no portable log of what it refused.
+
+`cloop_firewall_denial_reports_dropped_total` counts the reports the hub did
+not record, by `reason`:
+
+| `reason` | Meaning |
+| --- | --- |
+| `late` | a device reported after its workload's final status |
+| `no_sink` | the process received a report with no hub in it to record it |
+| `rate` | a device sent a run's reports faster than the per-run limit |
+| `malformed` | the report failed validation (bounds, addresses, rules) |
+| `unknown_run` | no run in this process owns the handle |
+| `queue_full` | the recorder was behind and the report was discarded |
+
+A run trying to reach something the firewall denies shows up here first:
+
+```promql
+sum by (rule) (rate(cloop_firewall_denials_total[5m])) > 0
+```
+
 ## Model relay
 
 | Metric | Type | Labels |

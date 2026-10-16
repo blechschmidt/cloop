@@ -440,6 +440,9 @@ type record struct {
 	// at (Task 20405), recorded with the kill intent and withdrawn with it.
 	// Status reports it as OutcomeDiskLimit once the workload is killed.
 	diskBreach *executor.DiskLimitBreach
+	// denials is the sandbox's refusal attribution (Task 20437), nil when its
+	// ruleset does not log to this process. Released by finish.
+	denials *denialTrack
 }
 
 // New returns a container executor, detecting the runtime described by opts.
@@ -817,6 +820,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	}
 	var rulesNetwork string
 	var gateway netip.Addr
+	var denials *denialTrack
 	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter() || spec.EgressRules != nil) &&
 		req.Network != NetworkNone {
 		c := confineTo(spec)
@@ -826,6 +830,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		}
 		network, dns := sbxNet.name, sbxNet.dns
 		gateway = sbxNet.gateway
+		denials = sbxNet.denials
 		if c.rules != nil {
 			rulesNetwork = network
 			defer func() {
@@ -955,6 +960,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		}
 	}
 
+	// The address the engine gave the sandbox, which is what attributes its
+	// refusals to this handle (Task 20437). Read before the handle exists so
+	// it is on the handle's row; a container that sends before this returns
+	// has its log lines held until it is claimed.
+	if denials != nil {
+		// A sandbox that has already exited has no address left to read: it
+		// is tracked by its bridge alone, which attributes its refusals while
+		// it is the only run there (pkg/denylog's Track).
+		if addrs, aerr := e.containerAddrs(ctx, req.Name, req.Network); aerr == nil {
+			denials.addrs = addrs
+		}
+	}
+
 	// Deliberately not retaining spec: Spec.Env holds the caller's secret
 	// values, and a finished handle stays queryable for a long time. Nothing
 	// after Start needs them, so they are dropped as soon as the container
@@ -997,6 +1015,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	e.pruneLocked()
 	store := e.store
 	e.mu.Unlock()
+	e.trackDenials(rec, denials)
 
 	// Bound as soon as the handle exists, which is the earliest point at which
 	// there is a handle to bind.
@@ -1052,7 +1071,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// sampling the workload it adopts — and so does where its credential
 		// files are staged, so an adopter wipes, revokes and refreshes them
 		// (Task 20419).
-		Meta: withStageMeta(executor.WithRunID(withDiskMeta(handleMeta(e.rt.Name, feature), disk), spec), stage),
+		Meta: denialMeta(withStageMeta(executor.WithRunID(withDiskMeta(handleMeta(e.rt.Name, feature), disk), spec), stage), denials),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this sandbox. Names and paths only — the credential
@@ -2422,6 +2441,9 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// stop answering HoldsLease while still holding the credential.
 	if state.Terminal() {
 		e.leases.Release(rec.id)
+		// Before the network goes: the monitor keeps the sandbox's address
+		// attributed for the log lines the kernel still holds (Task 20437).
+		releaseDenials(rec)
 		e.releaseRulesNetwork(rec.rulesNetwork)
 	}
 

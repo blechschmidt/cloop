@@ -537,7 +537,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// project's — after the sandbox, whose scope and DisableNetwork they fold
 	// in, and before the workspace, whose capability gate then sees the
 	// network the workload will really have (Task 20363).
-	spec, err = applyFirewall(spec, ex, workDir)
+	spec, fwRes, err := applyFirewallResolved(spec, ex, workDir)
 	if err != nil {
 		lease.Close()
 		return nil, executor.Handle{}, err
@@ -685,6 +685,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	}
 	egress.bindHandle(ex, handle.ID)
 	egressHandedOff = true
+	// What its firewall refuses is the run's (Task 20437), explained by the
+	// levels just composed for it.
+	bindDenialRoute(ex, handle.ID, runID, workDir, denialLevels(ex, fwRes, spec))
 	forwards.bindHandle(ex, handle.ID)
 	forwardsHandedOff = true
 	// Bound before anything can read the run's owner row: the lease ids it
@@ -708,6 +711,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		intent.forget()
 		endPushScan()
 	}()
+
 	if forwards != nil {
 		// Forwarded devices go back with the workload (Task 20430): one this
 		// process attached for a container on its host is detached here,

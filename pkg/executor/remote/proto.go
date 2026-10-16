@@ -254,7 +254,17 @@ const (
 	// refuse the relay's certificate, so the hub relays no run to such a
 	// device — the run gets its credential the way it did before the relay,
 	// and its journal says why. See MinNodeCAVersion.
-	ProtocolVersion = 23
+	//
+	// v24 adds the denials frame (Task 20437, denialproto.go): the agent reads
+	// its sandboxes' packet log — every deny path of their firewalls refuses
+	// and logs to an NFLOG group — and reports each workload's refusals by
+	// destination, port, protocol and rule, capped, every few seconds and once
+	// more before its terminal status. The hello gains denial_log and
+	// denial_log_issue. Gated on the sending side, like project_result: an
+	// agent sends the frame only on a v24 session, and an older agent's
+	// sandboxes are filtered exactly as strictly, only unreported — the hub
+	// says so where their refusals would be shown. See MinDenialLogVersion.
+	ProtocolVersion = 24
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -955,6 +965,13 @@ type AgentCapabilities struct {
 	// firewall-capable agent older than the field.
 	PacketFilter      bool   `json:"packet_filter,omitempty"`
 	PacketFilterIssue string `json:"packet_filter_issue,omitempty"`
+	// DenialLog reports that the agent reads its sandboxes' packet log and
+	// reports what their firewalls refused (Task 20437): it bound an NFLOG
+	// group with the CAP_NET_ADMIN its packet filter already has.
+	// DenialLogIssue says why not when it cannot. Absent below v24, which the
+	// hub reads as "cannot".
+	DenialLog      bool   `json:"denial_log,omitempty"`
+	DenialLogIssue string `json:"denial_log_issue,omitempty"`
 	// ForwardedUSB reports that the agent can attach a forwarded USB device
 	// on its host — vhci_hcd is loaded and the agent may write its attach
 	// file — and ForwardedL2 that it can create a TAP and move it into a

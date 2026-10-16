@@ -170,6 +170,24 @@ var registry = []Entry{
 		Note: "Written by the new image. Together with task.dispatch it answers \"which build ran this " +
 			"task\": a run's tasks before this row ran on `from`, after it on `to`.",
 	},
+	{
+		Action:  ActionRunFirewallDenied,
+		Home:    HomeProject,
+		Entity:  "plan",
+		Trigger: "A run ends whose sandbox firewall refused connections: one row per deny path that refused any, with the totals.",
+		Payload: []string{"project", "run_id", "executor_id", "rule", "why", "count", "destinations", "top",
+			"first_seen", "last_seen", "fingerprint"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Aggregated per run and rule (Task 20437), never per packet: `count` is the refusals the " +
+			"sandbox's packet log reported — rate-limited to ten a second per deny path, so a flood is at " +
+			"least this many — `destinations` how many distinct destinations, `top` up to eight of them as " +
+			"`dst:port/proto`. `rule` is the deny path's tag (`default`, `deny:<prefix>`, `meta:<prefix>`, " +
+			"`block:<prefix>`, `xlat:<prefix>`), or `unitemised` for what the run's capped aggregate counted " +
+			"without itemising; `why` is the hub's sentence for it. Each destination is also a " +
+			"`network_blocked` row in the run's history. Absent for a run on Kubernetes, whose NetworkPolicy " +
+			"has no portable log, and for one on a device whose agent predates protocol v24.",
+	},
 
 	// ── feature ────────────────────────────────────────────────────────────
 	{

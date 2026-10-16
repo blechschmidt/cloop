@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/denylog"
 	"github.com/blechschmidt/cloop/pkg/deviceforward"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/install"
@@ -519,6 +520,8 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 		mode, _, _, issue := a.remoteUpgradeReadiness()
 		caps.RemoteUpgrade = mode != remoteUpgradeUnavailable
 		caps.RemoteUpgradeIssue = issue
+		// Whether its sandboxes' refusals reach the hub (Task 20437).
+		caps.DenialLog, caps.DenialLogIssue = denialLogCapability(caps.PacketFilter)
 	}
 	return caps
 }
@@ -535,6 +538,13 @@ func (a *Agent) channel() provenance.Channel {
 // Run connects and serves until ctx is cancelled or the control plane refuses
 // this agent permanently.
 func (a *Agent) Run(ctx context.Context) error {
+	// What this device's sandbox firewalls refuse goes to the hub (Task
+	// 20437) — only from an agent that probes its host, which is the one that
+	// installs firewalls: a test agent in another process's tests must not
+	// take that process's sink.
+	if a.cfg.HostProbes {
+		defer denylog.SetSink(a.sendDenials)()
+	}
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {

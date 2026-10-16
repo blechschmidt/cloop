@@ -221,7 +221,7 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	}
 	for name, want := range map[string][]string{
 		"full": {"sandboxes can open TCP connections to the public Internet and 10.8.0.0/24 on any port",
-			"and query DNS at 1.1.1.1", "Never reachable: 203.0.113.0/24.", "Everything else is dropped."},
+			"and query DNS at 1.1.1.1", "Never reachable: 203.0.113.0/24.", "Everything else is refused at once, and shown on the run that tried it."},
 		"ports":   {"on ports 443, 8443"},
 		"noDNS":   {"With no DNS resolver, host names will not resolve."},
 		"nothing": {"nothing is allowed, so sandboxes get no network at all"},

@@ -71,7 +71,7 @@ func TestDashboard_FirewallPanels(t *testing.T) {
 
 	need("summary", "the sentence", res["summary"].HTML,
 		"In effect: TCP to the public Internet on port 443; DNS via 1.1.1.1:53; never 203.0.113.0/24. "+
-			"Everything else is dropped.",
+			"Everything else is refused.",
 		"In effect: no network: nothing is reachable.")
 
 	var body map[string]any

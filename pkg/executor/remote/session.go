@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // LogAckBytes is how much output may accumulate before the control plane
@@ -46,6 +47,10 @@ type Session struct {
 	// before negotiation lowered it to this hub's (version holds that). Set
 	// once, like agentVersion.
 	agentProtocol int
+
+	// denials bounds how often each handle's refusal reports are taken
+	// (Task 20437); it has its own lock.
+	denials denialLimiter
 
 	mu       sync.Mutex
 	caps     AgentCapabilities
@@ -470,10 +475,40 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		s.trackHandle(f.Handle)
 		return false
 
+	case TypeDenials:
+		// What a device's sandbox firewall refused (Task 20437). Never fatal:
+		// a report the hub cannot take costs the diagnostic, not the run.
+		if !SupportsDenialLog(s.version) {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, "denials on a session below protocol v24")
+			return false
+		}
+		if !s.denials.allow(f.Handle, s.nowFn()) {
+			hubmetrics.FirewallDenialReportsDropped.Inc("rate")
+			return false
+		}
+		payload, err := DecodeDenials(f)
+		if err != nil {
+			hubmetrics.FirewallDenialReportsDropped.Inc("malformed")
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if err := s.ex.applyDenials(f.Handle, payload); err != nil {
+			code := CodeProtocol
+			if errors.Is(err, executor.ErrHandleNotFound) {
+				code = CodeUnknownHandle
+				hubmetrics.FirewallDenialReportsDropped.Inc("unknown_run")
+			}
+			writeError(ctx, s.conn, f.ID, code, err.Error())
+		}
+		return false
+
 	case TypeStatus:
 		payload, err := DecodeStatus(f)
 		if err != nil {
 			return false
+		}
+		if payload.Status.State.Terminal() {
+			s.denials.forget(f.Handle)
 		}
 		s.ex.applyStatus(f.Handle, payload)
 		// A status frame is both an unsolicited terminal notification and the

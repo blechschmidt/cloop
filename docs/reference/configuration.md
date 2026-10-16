@@ -350,6 +350,7 @@ executors:
       resolvers: []                # DNS servers it may query directly
       broker: ""                   # egress proxy endpoint, address:port literal
       host_patterns: []            # the L7 allowlist this filter cannot enforce
+      drop_denied: false           # drop denied packets instead of refusing them
 ```
 
 | Key | Meaning |
@@ -362,6 +363,7 @@ executors:
 | `resolvers` | DNS servers the sandbox may query directly, as address literals (`10.7.0.10`, or with a port). Opened on UDP *and* TCP |
 | `broker` | The egress proxy endpoint, as an `address:port` literal. Only needed alongside direct egress — on an internal network the broker shares the bridge |
 | `host_patterns` | Records the L7 allowlist this filter cannot enforce, so the rendered ruleset and the preflight report can name what was widened |
+| `drop_denied` | Discards a denied packet silently instead of refusing it. Left off, a blocked connection is answered with a TCP reset or an ICMP "administratively prohibited", so the workload fails at once rather than after its own timeout, and the refusal is logged and shown on the run ([diagnosing a blocked connection](../guides/firewall.md#diagnosing-a-blocked-connection)) |
 
 **Off by default, and the default is load-bearing.** Silently firewalling an
 existing deployment on upgrade would break it in a way that looks like a network

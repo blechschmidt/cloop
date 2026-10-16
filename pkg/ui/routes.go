@@ -689,6 +689,9 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/blocker", Handler: s.handleTaskBlocker, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/details", Handler: s.handleTaskDetails, Perm: read, Scope: scopeProject},
+		// What the task's runs' firewalls and the egress proxy refused (Task
+		// 20437): its details' Network section.
+		{Pattern: "GET /api/tasks/{id}/network", Handler: s.handleTaskNetwork, Perm: read, Scope: scopeProject},
 		// Attachments (Task 20428): the files a run attached to a task. Reading
 		// one is `read` — it is the run's output, beside the transcript a
 		// viewer already sees; deleting one is `task`. See attachments_api.go
@@ -1000,6 +1003,9 @@ func (s *Server) routeTable() []routeSpec {
 		// rules, which is fleet reconnaissance for whoever cannot change them.
 		{Pattern: "/api/firewall", Handler: s.handleProjectFirewall, Methods: []string{"GET", "PUT", "POST"},
 			Perm: cfgWrite, MethodPerms: map[string]authz.Permission{http.MethodGet: read}, Scope: scopeProject},
+		// The card's recently blocked list (Task 20437), answered like the
+		// card: to config.write, and to anyone else with visible:false.
+		{Pattern: "GET /api/firewall/blocked", Handler: s.handleFirewallBlocked, Perm: read, Scope: scopeProject},
 
 		// ── Compliance audit trail ───────────────────────────────────
 		// Admin-only, and global: the trail records the actions of every

@@ -1865,7 +1865,8 @@ compiles and prints.
 | `--format` | `rules` | `rules`, `nft`, `nft-bridge` or `networkpolicy` |
 | `--table` | `cloop_sbx_preview` | nft table / NetworkPolicy name |
 | `--bridge` | | Host interface to filter; required by `--format nft-bridge` |
-| `--check` | | Report the verdict for one `address:port` and exit 1 if dropped |
+| `--check` | | Report the verdict for one `address:port` and exit 1 if denied |
+| `--drop-denied` | | Render every deny as a silent drop instead of a refusal |
 
 `--format nft` renders the in-namespace form (output, input and forward chains,
 all defaulting to drop); `nft-bridge` renders the host-side form that filters
@@ -1882,32 +1883,34 @@ IP-layer egress filter  mode filtered, 35 rules, from flags
 
   allow  127.0.0.0/8                any          sandbox-local loopback [namespace-local]
   allow  ::1/128                    any          sandbox-local loopback [namespace-local]
-  drop   64:ff9b::/96               any          NAT64 translation prefix
-  drop   64:ff9b:1::/48             any          NAT64 translation prefix (RFC 8215)
-  drop   ::ffff:0:0:0/96            any          IPv4-translatable prefix
-  drop   2002::/16                  any          6to4 translation prefix
-  drop   ::/96                      any          IPv4-compatible prefix (deprecated)
+  deny   64:ff9b::/96               any          NAT64 translation prefix
+  deny   64:ff9b:1::/48             any          NAT64 translation prefix (RFC 8215)
+  deny   ::ffff:0:0:0/96            any          IPv4-translatable prefix
+  deny   2002::/16                  any          6to4 translation prefix
+  deny   ::/96                      any          IPv4-compatible prefix (deprecated)
   allow  10.8.0.0/24            tcp 6443         granted CIDR (waives private (RFC1918/ULA))
-  drop   100.100.100.200/32         any          cloud metadata service (100.100.100.200)
-  drop   168.63.129.16/32           any          cloud metadata service (168.63.129.16)
-  drop   169.254.169.254/32         any          cloud metadata service (169.254.169.254)
+  deny   100.100.100.200/32         any          cloud metadata service (100.100.100.200)
+  deny   168.63.129.16/32           any          cloud metadata service (168.63.129.16)
+  deny   169.254.169.254/32         any          cloud metadata service (169.254.169.254)
   ...
-  drop   169.254.170.23/32          any          cloud metadata service (169.254.170.23)
-  drop   0.0.0.0/32                 any          unspecified address
-  drop   127.0.0.0/8                any          loopback
-  drop   224.0.0.0/4                any          multicast
-  drop   169.254.0.0/16             any          link-local
-  drop   10.0.0.0/8                 any          private (RFC1918/ULA)
-  drop   172.16.0.0/12              any          private (RFC1918/ULA)
-  drop   192.168.0.0/16             any          private (RFC1918/ULA)
-  drop   100.64.0.0/10              any          carrier-grade NAT (RFC6598)
-  drop   fd00:ec2::254/128          any          cloud metadata service (fd00:ec2::254)
+  deny   169.254.170.23/32          any          cloud metadata service (169.254.170.23)
+  deny   0.0.0.0/32                 any          unspecified address
+  deny   127.0.0.0/8                any          loopback
+  deny   224.0.0.0/4                any          multicast
+  deny   169.254.0.0/16             any          link-local
+  deny   10.0.0.0/8                 any          private (RFC1918/ULA)
+  deny   172.16.0.0/12              any          private (RFC1918/ULA)
+  deny   192.168.0.0/16             any          private (RFC1918/ULA)
+  deny   100.64.0.0/10              any          carrier-grade NAT (RFC6598)
+  deny   fd00:ec2::254/128          any          cloud metadata service (fd00:ec2::254)
   ...
-  drop   ::/128                     any          unspecified address
-  drop   ff00::/8                   any          multicast
-  drop   fe80::/10                  any          link-local
-  drop   fc00::/7                   any          private (RFC1918/ULA)
-  drop   everything else                         default deny
+  deny   ::/128                     any          unspecified address
+  deny   ff00::/8                   any          multicast
+  deny   fe80::/10                  any          link-local
+  deny   fc00::/7                   any          private (RFC1918/ULA)
+  deny   everything else                         default deny
+
+  every deny is refused at once: a TCP reset, or an ICMP "administratively prohibited"
 ```
 
 The granted `10.8.0.0/24` is allowed *before* `10.0.0.0/8` is dropped: that
@@ -1937,12 +1940,12 @@ most useful thing this command reports.
 
 **Asking about one address — `--check`.** The verdict is on stdout and *also*
 in the exit status: **0** when the packet would leave, **1** when it would be
-dropped. An operator automating "is this sandbox still confined" should not
+denied. An operator automating "is this sandbox still confined" should not
 have to parse prose.
 
 ```console
 $ cloop egress firewall --internet --ports 443 --check 169.254.169.254:80
-DROP  169.254.169.254 169.254.169.254:80/tcp — cloud metadata service (169.254.169.254)
+DENY  169.254.169.254 169.254.169.254:80/tcp — cloud metadata service (169.254.169.254)
 $ echo $?
 1
 
@@ -1952,7 +1955,7 @@ $ echo $?
 0
 
 $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --check 10.8.0.5:22
-DROP  10.8.0.5 10.8.0.5:22/tcp — private (RFC1918/ULA)
+DENY  10.8.0.5 10.8.0.5:22/tcp — private (RFC1918/ULA)
 $ echo $?
 1
 ```
@@ -1976,6 +1979,11 @@ $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --resolver 10.88.0.1 \
 add table inet cloop_sbx_container
 delete table inet cloop_sbx_container
 table inet cloop_sbx_container {
+	chain deny {
+		meta l4proto tcp reject with tcp reset comment "refused: connection reset"
+		reject with icmpx type admin-prohibited comment "refused: administratively prohibited"
+	}
+
 	chain forward {
 		type filter hook forward priority 0; policy accept;
 		iifname != "br-8e9671342cdf" return comment "not this sandbox"
@@ -1983,12 +1991,12 @@ table inet cloop_sbx_container {
 		ct state invalid counter drop
 		ip daddr 10.88.0.1/32 udp dport 53 counter accept comment "DNS resolver"
 		ip daddr 10.88.0.1/32 tcp dport 53 counter accept comment "DNS resolver (truncated answers retry over TCP)"
-		ip6 daddr 64:ff9b::/96 counter drop comment "NAT64 translation prefix"
+		ip6 daddr 64:ff9b::/96 counter jump deny comment "NAT64 translation prefix"
 		…
 		ip daddr 10.8.0.0/24 tcp dport 6443 counter accept comment "granted CIDR (waives private (RFC1918/ULA))"
-		ip daddr 169.254.169.254/32 counter drop comment "cloud metadata service (169.254.169.254)"
+		ip daddr 169.254.169.254/32 counter jump deny comment "cloud metadata service (169.254.169.254)"
 		…
-		counter drop comment "default deny"
+		counter jump deny comment "default deny"
 	}
 
 	chain input {
@@ -1998,9 +2006,14 @@ table inet cloop_sbx_container {
 }
 ```
 
-The chain policy is `accept` and the drop is explicit, because base chains on
-the same hook all run: a `policy drop` here would take down every other
-container on the host. Each chain returns immediately for traffic that is not
+Every deny path jumps to the `deny` chain, which refuses: a TCP reset, or an
+ICMP "administratively prohibited", so a blocked connect fails at once rather
+than after a timeout (`--drop-denied` renders a plain drop instead). The chain
+policy is `accept` and the deny is explicit, because base chains on the same
+hook all run: a `policy drop` here would take down every other container on the
+host. The driver installs the same ruleset with a rate-limited `log … group N`
+statement ahead of each deny path, which is how a run's refusals reach its
+history; this preview has no group to log to, so it shows none. Each chain returns immediately for traffic that is not
 from this sandbox's bridge. The `add table` / `delete table` / `table` preamble
 makes a re-apply replace rather than accumulate — `add` is a no-op on an
 existing table, which is what makes the `delete` safe on a first run — and

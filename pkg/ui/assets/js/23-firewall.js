@@ -51,6 +51,8 @@ function _fwForm(p, r) {
     + field('Deny', 'Denylist', (r.deny_cidrs || []).join('\n'), 'Never reachable, over any protocol.', 2) + '</div>'
     + '<div class="form-row">' + field('Ports', 'Ports', (r.allow_ports || []).join(', '), 'TCP ports; empty means every port.')
     + field('Dns', 'DNS resolvers', (r.resolvers || []).join(', '), 'Reachable on UDP and TCP.') + '</div>'
+    + '<label class="sec-own-opt"><input type="checkbox" id="' + p + 'Drop"' + (r.drop_denied ? ' checked' : '')
+    + ' data-action-change="fwSync" data-arg="' + p + '"><span><strong>Drop denied connections silently</strong> — instead of refusing them at once.</span></label>'
     + '<div class="evx-sum" id="' + p + 'Sum"></div>';
 }
 
@@ -61,12 +63,14 @@ function _fwRead(p) {
     allow_public_internet: !!(document.getElementById(p + 'Pub') || {}).checked,
     allow_cidrs: list('Allow'), deny_cidrs: list('Deny'),
     allow_ports: list('Ports').map(Number), resolvers: list('Dns'),
+    drop_denied: !!(document.getElementById(p + 'Drop') || {}).checked,
   };
 }
 
 act('fwSync', function(p) {
   const s = document.getElementById(p + 'Sum');
-  if (s) s.textContent = 'In effect: ' + _fwSum(_fwRead(p)) + '. Everything else is dropped.';
+  const r = _fwRead(p);
+  if (s) s.textContent = 'In effect: ' + _fwSum(r) + '. Everything else is ' + (r.drop_denied ? 'dropped.' : 'refused.');
 }, ARG);
 
 // _fwMeta renders the hub's notes on a stored rule set whose allowlist holds a
@@ -166,9 +170,12 @@ function _pfwRender(d, note) {
     + note + '<div id="pfwWarn"></div>' + _fwForm('pfw', d.configured ? d.rules : (d.governing || {}))
     + '<div class="modal-footer">'
     + (d.configured ? '<button class="btn danger" data-action="clearProjectFirewall">Remove rules</button>' : '')
-    + '<button class="btn primary" data-action="saveProjectFirewall">Save rules</button></div></div></div>';
+    + '<button class="btn primary" data-action="saveProjectFirewall">Save rules</button></div></div></div>'
+    + '<div id="pfwBlocked"></div>';
   fwSync('pfw');
   pfwShown = _pfwReading();
+  // Recently blocked (Task 20437): deferred/network.js.
+  if (d.blocked) panelAct('network', 'card', d);
 }
 
 // _pfwRefresh brings a card being edited up to date around its form.

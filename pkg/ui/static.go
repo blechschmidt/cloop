@@ -174,6 +174,10 @@ var deferredScripts = []struct{ token, path string }{
 	// The attachments of a task, in its details (Task 20428): fetched the
 	// first time a task with attached files is opened.
 	{"attachments.js", "assets/js/deferred/attachments.js"},
+	// What a run's firewall refused (Task 20437): a task's Network section and
+	// the firewall card's recently blocked list, fetched when either has
+	// something to show.
+	{"network.js", "assets/js/deferred/network.js"},
 	// The executor dialogs — history, sandbox, virtual executors, firewall,
 	// limits, access, enrollment and upgrades — fetched on the first open of
 	// any of them through panelAct (Task 20386).

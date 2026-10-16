@@ -677,6 +677,8 @@ function _eventVisuals(kind) {
     // A run moving to a newer build at a task boundary, or why it did not.
     case 'run_reexecuted':      return { glyph:'↻', cls:'ev-session',     label:'new build' };
     case 'run_adoption':        return { glyph:'↻', cls:'ev-other',       label:'build'     };
+    // What a run's sandbox firewall refused (Task 20437).
+    case 'network_blocked':     return { glyph:'⛔', cls:'ev-task-fail',   label:'blocked'   };
     default:                    return { glyph:'•', cls:'ev-other',       label:kind || ''  };
   }
 }

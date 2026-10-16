@@ -91,6 +91,13 @@ func installFirewallSource() {
 // records the result on spec, refusing the dispatch when they do not nest or
 // cannot be enforced there. A workload under no stored rule set is unchanged.
 func applyFirewall(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, error) {
+	spec, _, err := applyFirewallResolved(spec, ex, workDir)
+	return spec, err
+}
+
+// applyFirewallResolved is applyFirewall that also returns what it resolved:
+// the levels a run's refusals are explained by (Task 20437).
+func applyFirewallResolved(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, fwpolicy.Resolution, error) {
 	installFirewallSource()
 	res, err := fwpolicy.Resolve(&spec, ex, workDir)
 	if err != nil {
@@ -99,7 +106,7 @@ func applyFirewall(spec executor.Spec, ex executor.Executor, workDir string) (ex
 			Step:    state.NoStep,
 			Message: "firewall refused this run: " + err.Error(),
 		})
-		return spec, err
+		return spec, res, err
 	}
 	if res.Applied() {
 		// The project's own event log, where whoever wonders why a fetch timed
@@ -110,5 +117,5 @@ func applyFirewall(spec executor.Spec, ex executor.Executor, workDir string) (ex
 			Message: fmt.Sprintf("%s on executor %s", res.Describe(), ex.ID()),
 		})
 	}
-	return spec, nil
+	return spec, res, nil
 }

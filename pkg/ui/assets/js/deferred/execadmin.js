@@ -626,6 +626,10 @@
             'Limits the public Internet and the allowlist to these TCP ports. Empty means every port.')
           + _evxField('DNS resolvers', '<input class="form-input" id="evxDns" value="' + esc((f.resolvers || []).join(', '))
             + '"' + ev + '>', 'Reachable for DNS over UDP and TCP, and what sandboxes resolve names through.') + '</div>'
+          + '<label class="sec-own-opt"><input type="checkbox" id="evxDrop"' + (f.drop_denied ? ' checked' : '')
+          + ' data-change="evxSync"><span><strong>Drop denied connections silently</strong> — instead of refusing them at once with a reset or '
+          + 'an ICMP “administratively prohibited”, so a sandbox cannot tell a filtered destination from one that is '
+          + 'not there, and waits out its own timeout instead.</span></label>'
           + '<div class="evx-sum" id="evxFwSum"></div>')
         + opt('open', 'evxNetOpen', 'Unfiltered', d.device_firewall ? 'not available: the device’s firewall bounds every sandbox on it.'
           : 'a network of the engine’s, with no firewall. On <code>bridge</code>, sandboxes reach '
@@ -674,7 +678,9 @@
           + (dns.length ? ', and query DNS at ' + esc(dns.join(', ')) : '') + '.'
         : 'sandboxes can only query DNS at ' + esc(dns.join(', ')) + '.');
       if (deny.length) s += ' Never reachable: ' + esc(deny.join(', ')) + '.';
-      s += ' Everything else is dropped.';
+      s += (document.getElementById('evxDrop') || {}).checked
+        ? ' Everything else is dropped silently.'
+        : ' Everything else is refused at once, and shown on the run that tried it.';
       const noDNS = to.length > 0 && !dns.length;
       return [noDNS, noDNS ? s + ' <b>With no DNS resolver, host names will not resolve.</b>' : s];
     }
@@ -721,6 +727,7 @@
           allow_public_internet: !!(document.getElementById('evxPublic') || {}).checked,
           allow_cidrs: _evxList('evxAllow'), deny_cidrs: _evxList('evxDeny'),
           allow_ports: _evxList('evxPorts').map(Number), resolvers: _evxList('evxDns'),
+          drop_denied: !!(document.getElementById('evxDrop') || {}).checked,
         };
       }
       const body = {name: _evxVal('evxName'), spec: spec};

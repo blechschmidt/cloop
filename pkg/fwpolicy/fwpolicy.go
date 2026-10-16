@@ -67,7 +67,9 @@ import (
 type Rules = executor.FirewallRules
 
 // Effective returns child as it is enforced under parent: child's own allows,
-// ports and resolvers, with parent's deny list added to child's.
+// ports and resolvers, with parent's deny list added to child's — and parent's
+// DropDenied, which a level below inherits like a deny (Task 20437): silence a
+// device asked for is not the project's to turn back into a refusal.
 //
 // A nil parent bounds nothing and adds nothing. The result is normalized.
 func Effective(parent *Rules, child Rules) (Rules, error) {
@@ -82,6 +84,7 @@ func Effective(parent *Rules, child Rules) (Rules, error) {
 	if err != nil {
 		return Rules{}, fmt.Errorf("the governing rule set is unreadable: %w", err)
 	}
+	c.DropDenied = c.DropDenied || p.DropDenied
 	if len(p.DenyCIDRs) == 0 {
 		return c, nil
 	}
@@ -237,7 +240,7 @@ func Constrain(parent *Rules, child Rules) (Rules, []string) {
 		return c, nil
 	}
 
-	out := Rules{DenyCIDRs: c.DenyCIDRs}
+	out := Rules{DenyCIDRs: c.DenyCIDRs, DropDenied: c.DropDenied}
 	var notes []string
 	cDeny := append(prefixes(c.DenyCIDRs), prefixes(p.DenyCIDRs)...)
 	// The parent's allows without its deny list: the child inherits that list
@@ -458,6 +461,12 @@ func Fingerprint(r Rules) string {
 	fmt.Fprintf(h, "public=%t\nallow=%s\ndeny=%s\nports=%v\nresolvers=%s\n",
 		n.AllowPublicInternet, strings.Join(n.AllowCIDRs, ","), strings.Join(n.DenyCIDRs, ","),
 		n.AllowPorts, strings.Join(n.Resolvers, ","))
+	// Only when set, so every rule set saved before Task 20437 keeps the
+	// fingerprint — and the bridge and table — it had. A drop_denied rule
+	// set renders a different table, so it must never share one.
+	if n.DropDenied {
+		fmt.Fprint(h, "drop=true\n")
+	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
@@ -477,6 +486,7 @@ func Input(r Rules) (netfilter.Input, error) {
 		AllowCIDRs:          prefixes(n.AllowCIDRs),
 		DenyCIDRs:           prefixes(n.DenyCIDRs),
 		AllowAllPorts:       (n.AllowPublicInternet || len(n.AllowCIDRs) > 0) && len(n.AllowPorts) == 0,
+		DropDenied:          n.DropDenied,
 	}
 	for _, p := range n.AllowPorts {
 		in.AllowPorts = append(in.AllowPorts, uint16(p))

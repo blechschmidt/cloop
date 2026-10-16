@@ -341,6 +341,10 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// progress is recovered from the run's own account rather than from a plan
 	// that never heard it started (Task 20339).
 	s.collectRunResult(workDir, ex, handleID)
+	// Its firewall's last refusals recorded, and its summary and audit rows
+	// written (Task 20437) — after the merge above, so a device run's tasks
+	// have the times its refusals are matched to them by.
+	endRunDenials(ex, handleID)
 	// A run behind the model relay (Task 20435): its session ends, and its
 	// ledger is brought to what the relay counted — after the merge above, so
 	// a device run's own report is in it to compare with.

@@ -81,6 +81,12 @@ type EgressFilter struct {
 	// the one the filter already has.
 	DenyCIDRs []string
 
+	// DropDenied discards denied packets silently rather than refusing them
+	// (Task 20437; executors.container.egress_filter.drop_denied). The
+	// default refusal makes a blocked connect fail at once; this keeps the
+	// timeout for an operator who would rather a sandbox could not tell.
+	DropDenied bool
+
 	// AllowAllPorts waives the port restriction that accompanies a
 	// destination allow. It is not operator-settable — pkg/config has no key
 	// for it — and exists for the per-project scopes in effectiveFilter,
@@ -161,6 +167,7 @@ func (f EgressFilter) input() (netfilter.Input, error) {
 		AllowPublicInternet: f.AllowPublicInternet,
 		AllowAllPorts:       f.AllowAllPorts,
 		HostPatterns:        f.HostPatterns,
+		DropDenied:          f.DropDenied,
 	}
 	for i, c := range f.AllowCIDRs {
 		p, err := netip.ParsePrefix(strings.TrimSpace(c))
@@ -587,6 +594,10 @@ type sandboxNet struct {
 	// gateway is the network's gateway, when the workload's proxy route asked
 	// for it while the network was being built.
 	gateway netip.Addr
+	// denials is what attributes the sandbox's refusals once it has an
+	// address (Task 20437): set when the ruleset installed logs to a group
+	// this process reads. The addresses are filled in after the start.
+	denials *denialTrack
 }
 
 // provisionNetwork is installFirewall with everything the caller needs back.
@@ -669,11 +680,17 @@ func (e *Executor) provisionNetwork(ctx context.Context, c confinement) (sandbox
 	if err != nil {
 		return sandboxNet{}, err
 	}
+	fp := tableFingerprint(c, f)
+	logOpts := denialLogOptions(fp)
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
 		Table:  firewallTable(e.id, c),
 		Bridge: bridge,
+		Log:    logOpts,
 	}); err != nil {
 		return sandboxNet{}, err
+	}
+	if logOpts != nil {
+		out.denials = &denialTrack{fingerprint: fp, bridge: bridge}
 	}
 	out.dns = sandboxResolvers(f.Resolvers)
 	return out, nil
@@ -789,6 +806,8 @@ func (e *Executor) effectiveFilter(c confinement) (EgressFilter, error) {
 		// The operator's denylist survives every narrowing: a scope removes
 		// reach, and dropping a deny would add some back.
 		DenyCIDRs: f.DenyCIDRs,
+		// And so does how a deny looks to the sandbox.
+		DropDenied: f.DropDenied,
 	}
 	if len(out.Resolvers) == 0 {
 		// DNS is the failure this check exists to prevent, and it is invisible
@@ -934,6 +953,7 @@ func FilterFromRules(fw *executor.FirewallRules, network string) (EgressFilter, 
 		AllowPorts:          append([]int(nil), fw.AllowPorts...),
 		AllowAllPorts:       allowsDestinations && len(fw.AllowPorts) == 0,
 		Resolvers:           append([]string(nil), fw.Resolvers...),
+		DropDenied:          fw.DropDenied,
 	}, NetworkBridge
 }
 
@@ -962,6 +982,7 @@ func (e *Executor) OwnRules() *executor.FirewallRules {
 		AllowCIDRs:          append([]string(nil), f.AllowCIDRs...),
 		DenyCIDRs:           append([]string(nil), f.DenyCIDRs...),
 		Resolvers:           append([]string(nil), f.Resolvers...),
+		DropDenied:          f.DropDenied,
 	}
 	if !f.AllowAllPorts {
 		r.AllowPorts = append([]int(nil), f.AllowPorts...)

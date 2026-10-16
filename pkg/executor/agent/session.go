@@ -1103,6 +1103,9 @@ func (a *Agent) sendFinal(ctx context.Context, sess *deviceSession, wl *workload
 	if !done || already {
 		return false
 	}
+	// The sandbox's last refusals go first (Task 20437): the status closes
+	// the run's stream on the hub.
+	a.flushFinalDenials(ctx, wl)
 	frame, err := sess.frame(remote.TypeStatus, "", wl.handleID, remote.StatusPayload{
 		Status: status,
 		// Now accurate: the pump has drained, so this really is the total.

@@ -251,6 +251,14 @@ const (
 	// one who reads the refusal in git's output is the agent: the people
 	// running the project learn of it here, and on the task it happened in.
 	EventGitPushRefused EventType = "git_push_refused"
+
+	// EventNetworkBlocked records what a run's sandbox firewall refused (Task
+	// 20437): a destination the first time the run is refused it under a
+	// task — "blocked 203.0.113.7:443/tcp x14, not in the project's allow
+	// list" — and, when the run ends, its refusals in all. The details carry
+	// the run, the rule and the counts as fields; never anything a packet
+	// carried beyond its addresses and ports.
+	EventNetworkBlocked EventType = "network_blocked"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

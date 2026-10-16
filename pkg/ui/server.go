@@ -991,6 +991,10 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// handler can call executor.Resolve (Task 20156). The port names this
 	// hub's per-instance overlay, whose hub-scope settings the executors are
 	// started from (Task 20364).
+	// What a sandbox's firewall refuses is recorded here (Task 20437) —
+	// installed first, so a container sandbox the bootstrap reattaches to is
+	// attributed again.
+	installDenialRecorder()
 	bootstrapExecutors(workdir, port)
 	srv := &Server{
 		Cluster:         node,
@@ -1020,6 +1024,8 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	ensureGrantRevocationHook()
 	// The model relay charges and checks this server's quotas (Task 20435).
 	setModelRelayServer(srv)
+	// And refusals recorded from now on reach this server's dashboards.
+	srv.notifyDenials()
 	return srv
 }
 
@@ -5108,7 +5114,7 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonOK(w, map[string]interface{}{
+	out := map[string]interface{}{
 		"ok":                 true,
 		"task":               task,
 		"artifact_body":      artifactBody,
@@ -5117,7 +5123,13 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 		"live_body":          liveBody,
 		"live_truncated":     liveTruncated,
 		"live_path":          livePath,
-	})
+	}
+	// Whether the modal draws a Network section (Task 20437): what the
+	// task's runs were refused, or why nothing could be recorded.
+	if n := s.networkSummary(workDir, task); n != nil {
+		out["network"] = n
+	}
+	jsonOK(w, out)
 }
 
 // handleReorderTasks reassigns priorities from the given task ID order (POST /api/tasks/reorder).

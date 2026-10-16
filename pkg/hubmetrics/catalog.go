@@ -507,6 +507,32 @@ var (
 	})
 )
 
+// Sandbox firewall refusals (Task 20437): what a sandbox's IP firewall
+// refused, as its packet log reported it — read by the hub for its own
+// container executor and by each device's agent for its sandboxes. Recorded by
+// pkg/ui as each batch is recorded on its run, so both are per process.
+//
+// executor_kind is pkg/executor.Kind*; rule is the deny path's kind
+// (pkg/netfilter tags: default, deny, meta, block, xlat) or unitemised for the
+// refusals a run's capped aggregate counted without itemising. reason is
+// pkg/ui's closed list: late, no_sink, rate, malformed, unknown_run,
+// queue_full.
+var (
+	FirewallDenials = Default.MustRegister(Definition{
+		Name:   "cloop_firewall_denials_total",
+		Help:   "Connections a sandbox's IP firewall refused, as its packet log reported them, by executor kind and the deny path that refused them (default, deny, meta, block, xlat, unitemised). The log is rate-limited per deny path, so a flood counts as at least the rate.",
+		Type:   TypeCounter,
+		Labels: []string{"executor_kind", "rule"},
+	})
+
+	FirewallDenialReportsDropped = Default.MustRegister(Definition{
+		Name:   "cloop_firewall_denial_reports_dropped_total",
+		Help:   "Reports of sandbox firewall refusals the hub did not record, by reason: late (after the run's final status), no_sink (no hub in this process), rate (a device past its per-run report rate), malformed (failed validation), unknown_run (a handle no run here owns), queue_full (the recorder was behind).",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+)
+
 // The model relay for sandboxed runs (Task 20435): a run's Claude credential
 // kept on the hub, its calls relayed and metered. Recorded by pkg/ui in the
 // process holding each session, so every family is per process; the identity

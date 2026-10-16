@@ -53,6 +53,9 @@ type firewallRequest struct {
 	DenyCIDRs           []string `json:"deny_cidrs"`
 	AllowPorts          []int    `json:"allow_ports"`
 	Resolvers           []string `json:"resolvers"`
+	// DropDenied keeps the silent drop for a denied connection instead of the
+	// refusal (Task 20437). A level below inherits it.
+	DropDenied bool `json:"drop_denied"`
 	// Clear removes the rule set, leaving the level to the ones above it.
 	// Distinct from saving an empty rule set, which means "reach nothing" — the
 	// strongest thing a firewall can say, and one the form must be able to say.
@@ -71,6 +74,7 @@ func (req firewallRequest) rules() (executor.FirewallRules, error) {
 		DenyCIDRs:           req.DenyCIDRs,
 		AllowPorts:          req.AllowPorts,
 		Resolvers:           req.Resolvers,
+		DropDenied:          req.DropDenied,
 	}.Normalize()
 	if err != nil {
 		return executor.FirewallRules{}, err
@@ -167,6 +171,10 @@ type projectFirewallView struct {
 	// Metadata is the stored rule set's metadata findings, as on the device's
 	// view.
 	Metadata []string `json:"metadata,omitempty"`
+	// Blocked says whether the card has a recently blocked list to draw
+	// (Task 20437): its length, or why nothing can be recorded. Nil when
+	// there is neither.
+	Blocked *blockedSummary `json:"blocked,omitempty"`
 }
 
 // errFirewallExceeds carries a refused save from inside a transaction to the
@@ -776,6 +784,7 @@ func (s *Server) projectFirewallView(db *statedb.DB, workDir string) (projectFir
 		return view, nil
 	}
 	view.ExecutorID, view.ExecutorKind = ex.ID(), ex.Kind()
+	view.Blocked = blockedSummaryFor(workDir, ex)
 	levels, pos, err := governingLevels(db, ex, nil, nil)
 	if err != nil {
 		return view, err

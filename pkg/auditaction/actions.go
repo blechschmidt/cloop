@@ -48,6 +48,10 @@ const (
 	// ActionRunReexecuted records a run replacing its own image with a newer
 	// build at a task boundary, keeping its process (Task 20389).
 	ActionRunReexecuted Action = "run.reexecuted"
+	// ActionRunFirewallDenied records, when a run ends, what one deny path of
+	// its sandbox's firewall refused in all (Task 20437): one row per run and
+	// rule, never one per packet.
+	ActionRunFirewallDenied Action = "run.firewall_denied"
 
 	// ── feature ────────────────────────────────────────────────────────────
 

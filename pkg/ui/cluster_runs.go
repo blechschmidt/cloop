@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 )
@@ -638,8 +639,39 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	s.takeOverRunLeases(workDir, ex, meta.Handle, meta.Leases)
 	s.takeOverWorkspaceLease(workDir, ex, meta.Handle, meta.Workspace)
 	s.restoreRunEgress(workDir, ex, meta.Handle, meta.Egress)
+	// What its firewall refuses from here on is recorded on the run (Task
+	// 20437). The levels are re-read: the dispatch's are gone with the
+	// process that composed them.
+	s.adoptRunDenials(workDir, ex, meta)
 	go watchAdoptedSessions(ex, meta.Handle)
 	s.resumeRun(workDir, ex, meta.Handle)
+}
+
+// adoptRunDenials routes an adopted run's refusals to it.
+func (s *Server) adoptRunDenials(workDir string, ex executor.Executor, meta runOwnerMeta) {
+	runID := ""
+	if meta.Provenance != nil {
+		runID = meta.Provenance.RunID
+	}
+	if runID == "" {
+		if store := s.clusterHandleStoreFor(); store != nil {
+			if recs, err := store.ListHandles(ex.ID()); err == nil {
+				for _, rec := range recs {
+					if rec.HandleID == meta.Handle {
+						runID = rec.Meta[executor.MetaRunID]
+					}
+				}
+			}
+		}
+	}
+	spec := executor.Spec{WorkDir: workDir}
+	installFirewallSource()
+	res, err := fwpolicy.Resolve(&spec, ex, workDir)
+	if err != nil {
+		res = fwpolicy.Resolution{}
+	}
+	// Ended where every run is settled: runEnded, once its stream closes.
+	bindDenialRoute(ex, meta.Handle, runID, workDir, denialLevels(ex, res, spec))
 }
 
 // settleOrphanedLostRun deals with an orphaned owner row whose run a failover

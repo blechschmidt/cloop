@@ -29,6 +29,12 @@ package executor
 // allows; empty means every port, because in this form the address list is
 // the bound an admin is drawing and a mandatory port list would only invite
 // "1-65535" typed by hand.
+//
+// A denied connection is refused — a TCP reset, an ICMP "administratively
+// prohibited" — so the workload's connect fails at once and the developer
+// sees why (Task 20437). DropDenied keeps the old silent drop for a level
+// that asks for it, and a level below inherits it: it changes what a sandbox
+// sees, never what it reaches.
 
 import (
 	"fmt"
@@ -71,6 +77,11 @@ type FirewallRules struct {
 	// Resolvers are DNS servers the sandbox may query and is configured to
 	// use, as address literals with an optional port (default 53).
 	Resolvers []string `json:"resolvers,omitempty"`
+	// DropDenied discards a denied packet silently instead of refusing it
+	// (Task 20437). Off, a blocked connect fails at once with ECONNREFUSED or
+	// EHOSTUNREACH; on, it waits out the workload's own timeout, so a sandbox
+	// cannot tell a filtered destination from one that is not there.
+	DropDenied bool `json:"drop_denied,omitempty"`
 }
 
 // HasDestination reports whether the rules make anything reachable.
@@ -85,7 +96,7 @@ func (r FirewallRules) HasDestination() bool {
 // Errors name the field and the zero-based index, because that is what a form
 // can attach to an input.
 func (r FirewallRules) Normalize() (FirewallRules, error) {
-	out := FirewallRules{AllowPublicInternet: r.AllowPublicInternet}
+	out := FirewallRules{AllowPublicInternet: r.AllowPublicInternet, DropDenied: r.DropDenied}
 
 	var err error
 	if out.AllowCIDRs, err = normalizeCIDRList("allow_cidrs", r.AllowCIDRs, false); err != nil {
@@ -322,6 +333,11 @@ func (r FirewallRules) Describe() string {
 	}
 	if len(parts) == 0 {
 		return "no destination allowed"
+	}
+	// Last, and only when set: what a sandbox sees of a denial, not what it
+	// reaches. Part of the description because drivers are keyed by it.
+	if r.DropDenied {
+		parts = append(parts, "denied packets dropped silently")
 	}
 	return strings.Join(parts, "; ")
 }

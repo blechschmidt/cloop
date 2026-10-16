@@ -177,7 +177,7 @@ func TestVirtualExecutorNetworkAccess_InBrowser(t *testing.T) {
 		}
 		for _, c := range []struct{ name, text, want string }{
 			{"defaults", r.SummaryDefault, "sandboxes can open TCP connections to the public Internet on any port, " +
-				"and query DNS at 1.1.1.1. Everything else is dropped."},
+				"and query DNS at 1.1.1.1. Everything else is refused at once"},
 			{"typed", r.SummaryTyped, "to the public Internet and 10.8.0.0/24 on any port"},
 			{"typed", r.SummaryTyped, "Never reachable: 203.0.113.0/24."},
 			{"nothing allowed", r.SummaryNothing, "nothing is allowed, so sandboxes get no network at all"},

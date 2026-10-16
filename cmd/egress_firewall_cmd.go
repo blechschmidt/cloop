@@ -42,6 +42,7 @@ var (
 	egressFirewallInternetFlag bool
 	egressFirewallCIDRsFlag    []string
 	egressFirewallPortsFlag    []int
+	egressFirewallDropFlag     bool
 )
 
 var egressFirewallCmd = &cobra.Command{
@@ -212,6 +213,7 @@ func egressFirewallInput() (netfilter.Input, string, error) {
 		}
 		in.Resolvers = append(in.Resolvers, ap)
 	}
+	in.DropDenied = egressFirewallDropFlag
 	return in, source, nil
 }
 
@@ -238,8 +240,9 @@ func loadEgressGrant(id string) (egressbroker.Grant, error) {
 // egressFirewallCheck answers the one-address question.
 //
 // The exit status carries the verdict so the command composes into a script:
-// 0 when the packet would leave, 1 when it would be dropped. An operator
-// automating "is this sandbox still confined" should not have to parse prose.
+// 0 when the packet would leave, 1 when it would be denied — refused, or
+// dropped under --drop-denied. An operator automating "is this sandbox still
+// confined" should not have to parse prose.
 func egressFirewallCheck(p netfilter.Policy, target string) error {
 	proto := netfilter.ProtoTCP
 	spec := strings.TrimSpace(target)
@@ -260,7 +263,7 @@ func egressFirewallCheck(p netfilter.Policy, target string) error {
 		fmt.Printf("%s %s %s/%s — %s\n", color.GreenString("ALLOW"), ap.Addr(), ap.String(), proto, reason)
 		return nil
 	}
-	fmt.Printf("%s %s %s/%s — %s\n", color.RedString("DROP "), ap.Addr(), ap.String(), proto, reason)
+	fmt.Printf("%s %s %s/%s — %s\n", color.RedString("DENY "), ap.Addr(), ap.String(), proto, reason)
 	exitProcess(1)
 	return nil
 }
@@ -276,7 +279,7 @@ func egressFirewallPrintRules(p netfilter.Policy, source string) {
 	for _, r := range p.Rules {
 		verdict := color.GreenString("allow")
 		if r.Verdict == netfilter.VerdictDrop {
-			verdict = color.RedString("drop ")
+			verdict = color.RedString("deny ")
 		}
 		scope := ""
 		if r.Scope == netfilter.ScopeLocal {
@@ -300,7 +303,12 @@ func egressFirewallPrintRules(p netfilter.Policy, source string) {
 		fmt.Printf("%s %s%s\n", line, color.New(color.Faint).Sprint(r.Reason), scope)
 	}
 	fmt.Printf("  %s  %-22s %-3s %-12s %s\n",
-		color.RedString("drop "), "everything else", "", "", color.New(color.Faint).Sprint("default deny"))
+		color.RedString("deny "), "everything else", "", "", color.New(color.Faint).Sprint("default deny"))
+	how := "refused at once: a TCP reset, or an ICMP \"administratively prohibited\""
+	if p.DropDenied {
+		how = "dropped silently (--drop-denied)"
+	}
+	fmt.Printf("\n  %s\n", color.New(color.Faint).Sprint("every deny is "+how))
 }
 
 func init() {
@@ -311,10 +319,11 @@ func init() {
 	f.StringVar(&egressFirewallBridgeFlag, "bridge", "", "host interface to filter (--format nft-bridge)")
 	f.StringVar(&egressFirewallBrokerFlag, "broker", "", "egress proxy endpoint the sandbox may reach (address:port)")
 	f.StringSliceVar(&egressFirewallResolverFlag, "resolver", nil, "DNS server the sandbox may query directly")
-	f.StringVar(&egressFirewallCheckFlag, "check", "", "report the verdict for one address:port and exit 1 if dropped")
+	f.StringVar(&egressFirewallCheckFlag, "check", "", "report the verdict for one address:port and exit 1 if denied")
 	f.BoolVar(&egressFirewallInternetFlag, "internet", false, "allow every public address on --ports")
 	f.StringSliceVar(&egressFirewallCIDRsFlag, "cidrs", nil, "address ranges the sandbox may reach directly")
 	f.IntSliceVar(&egressFirewallPortsFlag, "ports", nil, "destination ports")
+	f.BoolVar(&egressFirewallDropFlag, "drop-denied", false, "drop denied packets silently instead of refusing them")
 
 	egressCmd.AddCommand(egressFirewallCmd)
 }

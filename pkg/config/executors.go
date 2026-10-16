@@ -608,6 +608,7 @@ func (c ContainerEgressFilterConfig) driverFilter() container.EgressFilter {
 		Resolvers:           c.Resolvers,
 		Broker:              strings.TrimSpace(c.Broker),
 		HostPatterns:        c.HostPatterns,
+		DropDenied:          c.DropDenied,
 	}
 }
 
