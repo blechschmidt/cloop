@@ -113,7 +113,7 @@ func TestDenyListWarnsAboutShadowedInfrastructure(t *testing.T) {
 }
 
 // TestDenyListRendersIntoNftables: the deny rules reach the bridge chain as
-// drops that precede every accept, with the operator-facing comment.
+// denies that precede every accept, with the operator-facing comment.
 func TestDenyListRendersIntoNftables(t *testing.T) {
 	p, err := Compile(Input{
 		AllowPublicInternet: true,
@@ -133,8 +133,8 @@ func TestDenyListRendersIntoNftables(t *testing.T) {
 	if deny < 0 {
 		t.Fatalf("the denied range is not in the forward chain:\n%s", forward)
 	}
-	if !strings.Contains(forward[deny:], "drop") || !strings.Contains(forward, "operator deny list") {
-		t.Errorf("the denied range is not rendered as a commented drop:\n%s", forward)
+	if !strings.Contains(forward[deny:], "counter jump deny") || !strings.Contains(forward, "operator deny list") {
+		t.Errorf("the denied range is not rendered as a commented deny:\n%s", forward)
 	}
 	for _, accept := range []string{"1.1.1.1", "0.0.0.0/0"} {
 		if i := strings.Index(forward, accept); i >= 0 && i < deny {

@@ -80,10 +80,18 @@ import (
 type Verdict uint8
 
 const (
-	// VerdictDrop discards the packet silently. Silence rather than a
-	// rejection is deliberate: a sandbox probing for reachable networks
-	// learns nothing from a timeout, whereas an ICMP unreachable confirms
-	// that something is listening on the other side of the filter.
+	// VerdictDrop keeps the packet from its destination. What the sandbox
+	// sees is the renderer's to decide, and since Task 20437 it is a
+	// refusal: a TCP reset, or an ICMP "administratively prohibited", so the
+	// workload's connect fails at once with ECONNREFUSED or EHOSTUNREACH.
+	//
+	// It used to be silence, on the theory that a sandbox probing for
+	// reachable networks learns nothing from a timeout. The sandbox is ours,
+	// though, and so is its firewall: what silence actually bought was a
+	// harness waiting out a TCP timeout on every blocked fetch and retrying
+	// for minutes, and a developer reading that as an outage. The refusal
+	// says only that something refused — the filter, or a host that is not
+	// there. Policy.DropDenied keeps silence for the operator who wants it.
 	VerdictDrop Verdict = iota
 	// VerdictAllow forwards the packet.
 	VerdictAllow
@@ -94,7 +102,7 @@ func (v Verdict) String() string {
 	if v == VerdictAllow {
 		return "allow"
 	}
-	return "drop"
+	return "deny"
 }
 
 // Proto narrows a rule to one transport, or to all of them.
@@ -165,6 +173,12 @@ type Rule struct {
 	// NetworkPolicy has no order, so its renderer turns each carve into an
 	// except on every later allow that contains it.
 	Carve bool
+	// Tag names the deny path a drop is, for the packet log (Task 20437):
+	// "deny:<prefix>" for a deny-list entry, "meta:<prefix>" for a cloud
+	// metadata service, "block:<prefix>" for the rest of the hard-block set
+	// and "xlat:<prefix>" for an IPv6 translation prefix. Empty on an allow.
+	// The implicit final drop is TagDefault. See logtag.go.
+	Tag string
 }
 
 // String renders the rule as a single readable line.
@@ -204,6 +218,10 @@ type Policy struct {
 	// output of every backend, because an operator reading a ruleset needs
 	// to see that "*.github.com" became "the Internet".
 	Warnings []string
+	// DropDenied renders every deny as silence rather than a refusal (Task
+	// 20437). It changes what the sandbox sees, never what it reaches, so
+	// Evaluate ignores it. See Input.DropDenied.
+	DropDenied bool
 }
 
 // Mode is the shape of an authorisation, derived by Compile and used for
@@ -309,6 +327,14 @@ type Input struct {
 	// HostPatterns is the L7 allowlist this policy could not enforce. It is
 	// used only to write an accurate warning.
 	HostPatterns []string
+
+	// DropDenied discards denied packets silently instead of refusing them
+	// (Task 20437). The default is the refusal — a TCP reset, an ICMP
+	// "administratively prohibited" — because a workload that waits out a
+	// timeout on every blocked connection reads as an outage and retries for
+	// minutes. An operator who would rather a sandbox could not tell a filter
+	// from a missing host keeps silence with this.
+	DropDenied bool
 }
 
 // Compile turns an authorisation into an ordered filter.
@@ -384,7 +410,7 @@ func Compile(in Input) (Policy, error) {
 			"ports; the list would be ignored — set one or the other", len(ports))
 	}
 
-	p := Policy{Mode: modeFor(len(brokers) > 0, wantsDestinations)}
+	p := Policy{Mode: modeFor(len(brokers) > 0, wantsDestinations), DropDenied: in.DropDenied}
 
 	// 1. Loopback inside the namespace. A fresh network namespace has
 	// exactly one other thing on 127.0.0.0/8: the sandbox itself.
@@ -411,6 +437,7 @@ func Compile(in Input) (Policy, error) {
 			Proto:   ProtoAny,
 			Reason:  "operator deny list",
 			Denied:  true,
+			Tag:     denyTag(TagKindDeny, d),
 		})
 	}
 
@@ -462,6 +489,7 @@ func Compile(in Input) (Policy, error) {
 				Proto:   ProtoAny,
 				Reason:  b.Reason,
 				Carve:   true,
+				Tag:     denyTag(TagKindTranslation, b.Prefix),
 			})
 		}
 	}
@@ -476,6 +504,7 @@ func Compile(in Input) (Policy, error) {
 			Proto:   ProtoAny,
 			Reason:  s.Reason() + ", inside an allowed range that does not name it",
 			Carve:   true,
+			Tag:     denyTag(TagKindMetadata, s.Prefix()),
 		})
 	}
 
@@ -500,11 +529,16 @@ func Compile(in Input) (Policy, error) {
 		if b.Translation {
 			continue
 		}
+		kind := TagKindBlock
+		if b.Metadata {
+			kind = TagKindMetadata
+		}
 		p.Rules = append(p.Rules, Rule{
 			Verdict: VerdictDrop,
 			Prefix:  b.Prefix,
 			Proto:   ProtoAny,
 			Reason:  b.Reason,
+			Tag:     denyTag(kind, b.Prefix),
 		})
 	}
 
@@ -636,7 +670,7 @@ func (p Policy) Evaluate(addr netip.Addr, port uint16, proto Proto) (Verdict, st
 // sandbox to talk to itself, a conversation that never reaches an interface
 // and that the proxy, sitting on another host, has no opinion about.
 func (p Policy) WireOnly() Policy {
-	out := Policy{Mode: p.Mode, Warnings: p.Warnings}
+	out := Policy{Mode: p.Mode, Warnings: p.Warnings, DropDenied: p.DropDenied}
 	for _, r := range p.Rules {
 		if r.Scope == ScopeWire {
 			out.Rules = append(out.Rules, r)

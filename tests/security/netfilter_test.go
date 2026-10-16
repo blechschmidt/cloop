@@ -328,7 +328,7 @@ func TestHostSideFilterCoversHostBoundServices(t *testing.T) {
 	// Count the drops rather than merely finding them: one occurrence means
 	// only one chain carries the block set, which is the bug.
 	for _, blocked := range []string{"172.16.0.0/12", "10.0.0.0/8", "169.254.169.254/32"} {
-		if n := strings.Count(script, blocked+" counter drop"); n < 2 {
+		if n := strings.Count(script, blocked+" counter jump deny"); n < 2 {
 			t.Errorf("%s is dropped in %d chain(s), want 2 — the other hook is unfiltered", blocked, n)
 		}
 	}

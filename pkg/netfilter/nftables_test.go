@@ -117,8 +117,8 @@ func TestBridgeChainPolicyIsAcceptAndDropsExplicitly(t *testing.T) {
 	if !strings.Contains(out, `iifname != "br-abc123" return`) {
 		t.Errorf("bridge form does not return early for traffic from other interfaces:\n%s", out)
 	}
-	if !strings.Contains(out, "counter drop comment \"default deny\"") {
-		t.Errorf("bridge form has no explicit terminal drop:\n%s", out)
+	if !strings.Contains(out, "counter jump deny comment \"default deny\"") {
+		t.Errorf("bridge form has no explicit terminal deny:\n%s", out)
 	}
 
 	// The terminal drop has to be the *last* rule: a rule after it would be
@@ -134,8 +134,8 @@ func TestBridgeChainPolicyIsAcceptAndDropsExplicitly(t *testing.T) {
 	if got := strings.TrimSpace(lines[len(lines)-2]); got != "}" {
 		t.Errorf("script does not end by closing the chain, got %q", got)
 	}
-	if got := strings.TrimSpace(lines[len(lines)-3]); !strings.HasPrefix(got, "counter drop") {
-		t.Errorf("last rule in the forward chain is %q, want an explicit counter drop", got)
+	if got := strings.TrimSpace(lines[len(lines)-3]); !strings.HasPrefix(got, "counter jump deny") {
+		t.Errorf("last rule in the forward chain is %q, want an explicit counter jump deny", got)
 	}
 }
 
@@ -238,8 +238,8 @@ func TestEveryWireRuleIsRendered(t *testing.T) {
 				}
 				// The verdict has to be on the same line, or the rule was
 				// rendered as something other than what it means. nft spells
-				// an allow "accept".
-				want := "counter drop"
+				// an allow "accept"; every deny jumps to the deny chain.
+				want := "counter jump deny"
 				if r.Verdict == VerdictAllow {
 					want = "counter accept"
 				}
@@ -553,17 +553,20 @@ func TestBridgeFormFiltersBothHooks(t *testing.T) {
 	// Both chains have to carry the block set, not just one: a drop that
 	// exists only in the forward chain does not protect the host.
 	for _, chain := range splitChains(t, out) {
+		if chain.name == "deny" {
+			continue // the verdict chain, jumped to from both hooks
+		}
 		if !strings.Contains(chain.body, "iifname != \"br-abc123\" return") {
 			t.Errorf("chain %s does not scope itself to the sandbox bridge:\n%s", chain.name, chain.body)
 		}
 		for _, blocked := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.169.254/32"} {
-			if !strings.Contains(chain.body, blocked+" counter drop") {
+			if !strings.Contains(chain.body, blocked+" counter jump deny") {
 				t.Errorf("chain %s does not drop %s — a sandbox could reach it on that hook",
 					chain.name, blocked)
 			}
 		}
-		if !strings.Contains(chain.body, "counter drop comment \"default deny\"") {
-			t.Errorf("chain %s has no terminal drop:\n%s", chain.name, chain.body)
+		if !strings.Contains(chain.body, "counter jump deny comment \"default deny\"") {
+			t.Errorf("chain %s has no terminal deny:\n%s", chain.name, chain.body)
 		}
 		// policy accept, never drop: base chains on one hook all run, and a
 		// drop policy here would take down the host's own traffic and every

@@ -98,6 +98,26 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A connection a sandbox's firewall blocks fails at once, and the run says
+  what blocked it.** The firewall ended in a silent drop, so a blocked fetch
+  waited out a TCP timeout, the harness retried for minutes, and nothing said
+  which address had been refused by which rule. Every deny path now refuses —
+  a TCP reset (`ECONNREFUSED`), otherwise an ICMP "administratively
+  prohibited" — and logs the packet, rate-limited, to an NFLOG group under a
+  prefix naming the rule set's fingerprint and the rule. The hub reads it for
+  its own container executor and each device's agent for its sandboxes
+  (protocol v24, no privilege beyond the packet-filter grant), aggregates it
+  per run by destination, port, protocol and rule — 64 itemised, the rest
+  counted — and keeps addresses and ports only. A run's history gets `blocked
+  203.0.113.7:443/tcp x14, not in the project's allow list` and a summary when
+  it ends; the task's details get a Network section beside the egress proxy's
+  refusals; the project's firewall card lists what was recently blocked, with
+  **Propose allow rule** for admins, saved through the usual containment
+  checks; and `run.firewall_denied` (one row per run and rule) and
+  `cloop_firewall_denials_total` record it. `drop_denied` keeps the silent
+  drop on any rule set, and a Kubernetes executor says its denials are not
+  observable (Task 20437).
+
 - **Settings → Hub health: the hub doctor's checks, run by the hub on itself.**
   `cloop hub doctor` ran only in a shell on the hub host, in its directory, with
   both configuration files in reach, so an administrator of a Helm or compose
@@ -162,6 +182,13 @@ schema and the hub's HTTP API may change in any release.
   `cloop egress test --to executor:<id>` tests with them (Task 20432).
 
 ### Fixed
+
+- **IPv6 works behind a sandbox firewall.** The bridge filter's hook for
+  traffic to the host covered the multicast and link-local ranges neighbour
+  discovery uses, so a sandbox on an IPv6-enabled network could not resolve its
+  gateway and every IPv6 connect failed with "no route to host". Neighbour
+  discovery and multicast listener reports with this host are now let through
+  (Task 20437).
 
 - **A refusal Claude Code words as a failed sign-in is no longer retried as
   one.** Claude Code prints "Failed to authenticate" for a `403` as for a

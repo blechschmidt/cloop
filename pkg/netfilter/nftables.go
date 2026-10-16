@@ -14,10 +14,17 @@ import (
 // whole apply atomic — nft commits a -f script as one transaction, so there
 // is no instant at which the sandbox is running under half a ruleset.
 //
-// Both chains default to drop. Egress is the direction that matters — a
+// Both chains default to deny. Egress is the direction that matters — a
 // sandbox exfiltrating data or moving laterally is sending, not receiving —
 // but a default-deny input chain costs one more chain and removes the
 // question of what else on the bridge can reach into the sandbox.
+//
+// A denied connection the sandbox opened is refused rather than dropped
+// (Task 20437): every deny path jumps to one `deny` chain, which answers TCP
+// with a reset and everything else with an ICMP "administratively
+// prohibited", so a blocked connect fails at once instead of after a timeout.
+// Policy.DropDenied turns that chain into a plain drop. With LogOptions each
+// deny path also logs, rate-limited, to an NFLOG group — see logtag.go.
 
 // nftMaxNameLen bounds a table name. The kernel's limit is 256; staying well
 // under it leaves room for the family prefix in error messages and keeps a
@@ -45,6 +52,11 @@ type NftablesOptions struct {
 	// forward chains that default to drop, for a filter installed inside
 	// the sandbox's own namespace.
 	Bridge string
+
+	// Log, when set, gives every deny path a rate-limited log statement to
+	// the NFLOG group it names (Task 20437). Nil renders none — a process
+	// that cannot read the group has no use for its entries.
+	Log *LogOptions
 }
 
 // RenderNftables renders the policy as a script for `nft -f -`.
@@ -58,6 +70,14 @@ func RenderNftables(p Policy, opts NftablesOptions) (string, error) {
 	}
 	if opts.Bridge != "" {
 		if err := ValidateInterfaceName(opts.Bridge); err != nil {
+			return "", err
+		}
+	}
+	if opts.Log != nil {
+		// Checked once here rather than per rule: a fingerprint that could
+		// not be logged under must fail the render, not quietly leave every
+		// deny path unlogged.
+		if _, err := LogPrefix(opts.Log.Fingerprint, TagDefault); err != nil {
 			return "", err
 		}
 	}
@@ -79,11 +99,12 @@ func RenderNftables(p Policy, opts NftablesOptions) (string, error) {
 	fmt.Fprintf(&b, "add table inet %s\n", opts.Table)
 	fmt.Fprintf(&b, "delete table inet %s\n", opts.Table)
 	fmt.Fprintf(&b, "table inet %s {\n", opts.Table)
+	renderDenyChain(&b, p)
 
 	if opts.Bridge != "" {
-		renderBridgeChain(&b, p, opts.Bridge)
+		renderBridgeChain(&b, p, opts)
 	} else {
-		renderNamespaceChains(&b, p)
+		renderNamespaceChains(&b, p, opts)
 	}
 
 	b.WriteString("}\n")
@@ -111,7 +132,8 @@ func RenderNftables(p Policy, opts NftablesOptions) (string, error) {
 // Instead each chain returns immediately for traffic that is not ours (return
 // from a base chain applies the chain policy, which is accept) and ends with
 // an explicit drop that only packets from this sandbox's bridge can reach.
-func renderBridgeChain(b *strings.Builder, p Policy, bridge string) {
+func renderBridgeChain(b *strings.Builder, p Policy, opts NftablesOptions) {
+	bridge := opts.Bridge
 	// WireOnly: a packet to 127.0.0.1 never leaves the sandbox's namespace,
 	// so a loopback allow here would not be harmless clutter — it would read
 	// as "this sandbox may reach the host's loopback", which is the opposite
@@ -127,8 +149,11 @@ func renderBridgeChain(b *strings.Builder, p Policy, bridge string) {
 		// filter would be stateless, which for TCP means nothing works.
 		b.WriteString("\t\tct state established,related counter accept\n")
 		b.WriteString("\t\tct state invalid counter drop\n")
-		writeRules(b, wire, "\t\t")
-		b.WriteString("\t\tcounter drop comment \"default deny\"\n")
+		if hook == "input" {
+			writeNeighbourDiscovery(b, "\t\t")
+		}
+		writeRules(b, wire, "\t\t", opts.Log)
+		writeDefaultDeny(b, "\t\t", opts.Log)
 		b.WriteString("\t}\n")
 		if hook == "forward" {
 			b.WriteString("\n")
@@ -136,24 +161,84 @@ func renderBridgeChain(b *strings.Builder, p Policy, bridge string) {
 	}
 }
 
+// writeNeighbourDiscovery opens IPv6's link-local control traffic between the
+// sandbox and the host it is attached to (Task 20437).
+//
+// IPv4 resolves its gateway with ARP, which no inet table sees. IPv6 does it
+// with ICMPv6 to a multicast group and the gateway's own address, which the
+// block set covers — so under any filter a sandbox on an IPv6-enabled bridge
+// could not resolve its gateway, and every IPv6 connect failed with "no route
+// to host" after the neighbour cache gave up. Found by the netns rig in
+// pkg/denylog, whose log showed the solicitations being refused.
+//
+// Only on the hook that delivers to the host — and, inside a sandbox's own
+// namespace, both ways — and only what RFC 4861 lets cross no router: the hop limit of 255 a neighbour discovery packet must
+// carry is one nothing forwarded can have. The listener reports are what the
+// sandbox's kernel sends when it joins the solicited-node group; refusing them
+// opens nothing and would fill the run's history with its own startup.
+func writeNeighbourDiscovery(b *strings.Builder, indent string) {
+	b.WriteString(indent + "icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } " +
+		"ip6 hoplimit 255 counter accept comment \"IPv6 neighbour discovery with this host\"\n")
+	b.WriteString(indent + "icmpv6 type { mld-listener-report, mld2-listener-report } " +
+		"counter accept comment \"IPv6 multicast listener reports\"\n")
+}
+
+// denyChain names the chain every deny path jumps to.
+const denyChain = "deny"
+
+// renderDenyChain renders the one place a deny's wire behaviour is decided:
+// a refusal, unless the policy asks for silence.
+//
+// A regular chain rather than the verdict written on every rule, because the
+// reset is only legal in a rule that has matched TCP: written inline, each
+// deny path would be two rules, and the next change to how a deny behaves
+// would be a change to sixty of them. `reject with tcp reset` here follows
+// `meta l4proto tcp`, and the icmpx form answers both families in an inet
+// table — ICMP type 3 code 13 for IPv4, ICMPv6 type 1 code 1 for IPv6.
+func renderDenyChain(b *strings.Builder, p Policy) {
+	fmt.Fprintf(b, "\tchain %s {\n", denyChain)
+	if p.DropDenied {
+		b.WriteString("\t\tdrop comment \"denied silently (drop_denied)\"\n")
+	} else {
+		b.WriteString("\t\tmeta l4proto tcp reject with tcp reset comment \"refused: connection reset\"\n")
+		b.WriteString("\t\treject with icmpx type admin-prohibited comment \"refused: administratively prohibited\"\n")
+	}
+	b.WriteString("\t}\n\n")
+}
+
+// writeDefaultDeny renders the implicit final deny, and its log statement.
+func writeDefaultDeny(b *strings.Builder, indent string, log *LogOptions) {
+	if log != nil {
+		if line, ok := logRule("", log.Fingerprint, TagDefault, log); ok {
+			b.WriteString(indent + line + "\n")
+		}
+	}
+	b.WriteString(indent + "counter jump " + denyChain + " comment \"default deny\"\n")
+}
+
 // renderNamespaceChains renders the in-namespace form: three chains that
 // default to drop, because inside the sandbox's own namespace there is no
 // other traffic to be careful of.
-func renderNamespaceChains(b *strings.Builder, p Policy) {
+func renderNamespaceChains(b *strings.Builder, p Policy, opts NftablesOptions) {
 	b.WriteString("\tchain output {\n")
 	b.WriteString("\t\ttype filter hook output priority 0; policy drop;\n")
 	b.WriteString("\t\tct state established,related counter accept\n")
 	b.WriteString("\t\tct state invalid counter drop\n")
-	writeRules(b, p, "\t\t")
-	b.WriteString("\t\tcounter comment \"default deny\"\n")
+	writeNeighbourDiscovery(b, "\t\t")
+	writeRules(b, p, "\t\t", opts.Log)
+	// Sandbox-originated, so refused like every other deny; the chain's drop
+	// policy stays as the backstop it was.
+	writeDefaultDeny(b, "\t\t", opts.Log)
 	b.WriteString("\t}\n\n")
 
 	// Inbound: nothing initiates a connection into a sandbox. Loopback is
-	// the sandbox talking to itself and has to survive.
+	// the sandbox talking to itself and has to survive. Dropped, not refused:
+	// the refusal is for what the sandbox sends, and nothing here is.
 	b.WriteString("\tchain input {\n")
 	b.WriteString("\t\ttype filter hook input priority 0; policy drop;\n")
 	b.WriteString("\t\tct state established,related counter accept\n")
 	b.WriteString("\t\tiifname \"lo\" counter accept comment \"sandbox-local loopback\"\n")
+	writeNeighbourDiscovery(b, "\t\t")
 	b.WriteString("\t\tcounter comment \"default deny\"\n")
 	b.WriteString("\t}\n\n")
 
@@ -166,12 +251,18 @@ func renderNamespaceChains(b *strings.Builder, p Policy) {
 	b.WriteString("\t}\n")
 }
 
-// writeRules renders the policy's rules at the given indent.
-func writeRules(b *strings.Builder, p Policy, indent string) {
+// writeRules renders the policy's rules at the given indent, each deny path
+// preceded by its log statement when log is set.
+func writeRules(b *strings.Builder, p Policy, indent string, log *LogOptions) {
 	for _, r := range p.Rules {
 		line, ok := renderNftRule(r)
 		if !ok {
 			continue
+		}
+		if log != nil && r.Verdict != VerdictAllow && r.Tag != "" {
+			if l, ok := logRule(nftMatch(r), log.Fingerprint, r.Tag, log); ok {
+				b.WriteString(indent + l + "\n")
+			}
 		}
 		b.WriteString(indent + line + "\n")
 	}
@@ -204,8 +295,27 @@ func ValidateInterfaceName(name string) error {
 // renderNftRule renders one rule, or reports false when the rule has no
 // nftables expression.
 func renderNftRule(r Rule) (string, bool) {
-	if !r.Prefix.IsValid() {
+	match := nftMatch(r)
+	if match == "" {
 		return "", false
+	}
+	parts := []string{match, "counter"}
+	if r.Verdict == VerdictAllow {
+		parts = append(parts, "accept")
+	} else {
+		parts = append(parts, "jump "+denyChain)
+	}
+	if r.Reason != "" {
+		parts = append(parts, "comment \""+escapeNftComment(r.Reason)+"\"")
+	}
+	return strings.Join(parts, " "), true
+}
+
+// nftMatch renders what a rule matches — its family and destination, its
+// transport and ports — or "" when the rule has no nftables expression.
+func nftMatch(r Rule) string {
+	if !r.Prefix.IsValid() {
+		return ""
 	}
 	var parts []string
 
@@ -237,17 +347,7 @@ func renderNftRule(r Rule) (string, bool) {
 	} else if r.Proto != ProtoAny {
 		parts = append(parts, "meta l4proto "+r.Proto.String())
 	}
-
-	parts = append(parts, "counter")
-	if r.Verdict == VerdictAllow {
-		parts = append(parts, "accept")
-	} else {
-		parts = append(parts, "drop")
-	}
-	if r.Reason != "" {
-		parts = append(parts, "comment \""+escapeNftComment(r.Reason)+"\"")
-	}
-	return strings.Join(parts, " "), true
+	return strings.Join(parts, " ")
 }
 
 // ipv maps the address-family word to the nfproto keyword.

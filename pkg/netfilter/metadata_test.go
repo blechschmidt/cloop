@@ -175,10 +175,13 @@ func TestRenderedRulesetDropsTheServiceAheadOfTheAllow(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			out := mustRenderNft(t, p, opts)
 			chains := strings.Split(out, "\tchain ")[1:]
-			if name == "bridge" && len(chains) != 2 {
-				t.Fatalf("want the forward and input chains, got %d", len(chains))
+			if name == "bridge" && len(chains) != 3 {
+				t.Fatalf("want the deny, forward and input chains, got %d", len(chains))
 			}
 			for _, chain := range chains {
+				if strings.HasPrefix(chain, "deny ") {
+					continue // the verdict chain carries no destination rules
+				}
 				if strings.HasPrefix(chain, "input") && name == "namespace" {
 					continue // the in-namespace input chain carries no destination rules
 				}
@@ -186,9 +189,9 @@ func TestRenderedRulesetDropsTheServiceAheadOfTheAllow(t *testing.T) {
 					continue
 				}
 				for _, pair := range [][2]string{
-					{"ip daddr 169.254.169.254/32 counter drop", "ip daddr 169.254.0.0/16 tcp dport 80 counter accept"},
-					{"ip daddr 169.254.0.23/32 counter drop", "ip daddr 169.254.0.0/16 tcp dport 80 counter accept"},
-					{"ip6 daddr fd00:ec2::254/128 counter drop", "ip6 daddr fc00::/7 tcp dport 80 counter accept"},
+					{"ip daddr 169.254.169.254/32 counter jump deny", "ip daddr 169.254.0.0/16 tcp dport 80 counter accept"},
+					{"ip daddr 169.254.0.23/32 counter jump deny", "ip daddr 169.254.0.0/16 tcp dport 80 counter accept"},
+					{"ip6 daddr fd00:ec2::254/128 counter jump deny", "ip6 daddr fc00::/7 tcp dport 80 counter accept"},
 				} {
 					drop, accept := strings.Index(chain, pair[0]), strings.Index(chain, pair[1])
 					if drop < 0 || accept < 0 || drop > accept {
