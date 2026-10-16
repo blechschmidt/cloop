@@ -141,6 +141,8 @@ var bundleFiles = []string{
 var deferredScripts = []struct{ token, path string }{
 	// The Members card on a project's Overview (Task 20366).
 	{"members.js", "assets/js/deferred/members.js"},
+	// The Forwarded devices card on a project's Overview (Task 20430).
+	{"devices.js", "assets/js/deferred/devices.js"},
 	// The Claude credential card and dialog (Task 20379).
 	{"harness.js", "assets/js/deferred/harness.js"},
 	// The offboarding form in the Secrets tab (Task 20261), deferred by Task

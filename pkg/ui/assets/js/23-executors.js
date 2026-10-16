@@ -510,6 +510,8 @@ ACTIONS.loadForwarders      = () => panelAct('execadmin', 'loadForwarders');
 ACTIONS.openForwarderEnroll = () => panelAct('execadmin', 'openForwarderEnroll');
 ACTIONS.forwarderRevoke     = fwdAct('forwarderRevoke');
 ACTIONS.forwarderExpose     = fwdAct('forwarderExpose');
+ACTIONS.forwarderBind       = fwdAct('forwarderBind');
+ACTIONS.forwarderUnbind     = fwdAct('forwarderUnbind');
 
 // _execAt resolves a card index to its executor, or null. Indices, never
 // names: an executor name or an operator-typed reason in markup is the bug

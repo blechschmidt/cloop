@@ -171,6 +171,29 @@ func (s *Server) approvalsFor(r *http.Request, now time.Time) approvalsView {
 		}
 	}
 
+	// Device forwarder binding requests (Task 20430), rendered as the grant
+	// requests they are filed beside and decided by executor.manage.
+	for _, req := range s.forwarderRequestsAsAccess() {
+		if mayDecideForwarderRequest(global, actor, req, now) {
+			view := requestViewOf(req, actor, true, now)
+			item := approvalItem{Kind: "grant_request", ID: req.ID, Request: &view}
+			if !req.ExpiresAt.IsZero() {
+				item.Deadline = req.ExpiresAt.UTC().Format(time.RFC3339)
+				item.DeadlineInSeconds = int64(req.ExpiresAt.Sub(now) / time.Second)
+				deadlines = append(deadlines, req.ExpiresAt)
+			}
+			v.Items = append(v.Items, item)
+			v.GrantRequests++
+			continue
+		}
+		if !sameRequester(req.RequestedBy, actor) || len(v.Mine) >= approvalsMineMax {
+			continue
+		}
+		if req.Pending(now) || (!req.DecidedAt.IsZero() && now.Sub(req.DecidedAt) <= approvalsMineWindow) {
+			v.Mine = append(v.Mine, requestViewOf(req, actor, false, now))
+		}
+	}
+
 	for _, t := range s.tokensAwaitingFor(r, global, now) {
 		brief := tokenBrief{ID: t.ID, Name: t.Name, Prefix: t.Prefix, Roles: t.Roles,
 			CreatedBy: t.CreatedBy, CreatedAt: formatTokenTime(t.CreatedAt)}

@@ -379,16 +379,35 @@ func (f *Forwarder) handleOpen(ctx context.Context, conn frameConn, mx *mux, cha
 		f.cfg.logf("open device for channel %d: %v", channel, err)
 		return
 	}
-	f.sendOpenAck(ctx, conn, channel, true, "")
+	f.sendOpenAckWith(ctx, conn, channel, OpenAckPayload{OK: true, Device: exportedOf(local, f.cfg.Source)})
 	splice(ch, local)
 }
 
+// exportedOf describes what an opened stream serves: the stream's own answer
+// when it has one (a USB stream knows its bus id), else the configured device.
+func exportedOf(local any, src LocalSource) *ExportedDevice {
+	if d, ok := local.(interface{ Exported() *ExportedDevice }); ok {
+		if e := d.Exported(); e != nil {
+			return e
+		}
+	}
+	dev := src.Device()
+	if dev.Kind == KindL2 {
+		return &ExportedDevice{Kind: KindL2, Interface: dev.Interface}
+	}
+	return nil
+}
+
 func (f *Forwarder) sendOpenAck(ctx context.Context, conn frameConn, channel uint32, ok bool, msg string) {
+	f.sendOpenAckWith(ctx, conn, channel, OpenAckPayload{OK: ok, Error: msg})
+}
+
+func (f *Forwarder) sendOpenAckWith(ctx context.Context, conn frameConn, channel uint32, ack OpenAckPayload) {
 	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	_ = conn.WriteFrame(wctx, Frame{
 		Type:    TypeOpenAck,
 		Channel: channel,
-		Payload: marshalJSON(OpenAckPayload{OK: ok, Error: msg}),
+		Payload: marshalJSON(ack),
 	})
 }

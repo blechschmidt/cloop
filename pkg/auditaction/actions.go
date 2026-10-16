@@ -175,11 +175,37 @@ const (
 	// ActionForwarderRevoke records a forwarder's enrollment token or
 	// credential being revoked.
 	ActionForwarderRevoke Action = "forwarder.revoke"
-	// ActionForwarderExpose records a forwarded device being exposed for
-	// consumption — a loopback USB/IP import endpoint opened, or a TAP bridged
-	// — so "when did this on-prem device become reachable, and who opened it"
-	// is answerable from the trail.
+	// ActionForwarderExpose records an operator probing a forwarded device
+	// through the hub (Task 20430): a stream opened to the forwarder and, for
+	// USB, a device list read through it — proof the device is reachable,
+	// which hands it to nothing. (Before Task 20430 it opened a loopback
+	// import endpoint, which is gone.)
 	ActionForwarderExpose Action = "forwarder.expose"
+	// ActionForwarderBind records a binding that makes a forwarder's device
+	// available to a project's runs, optionally only on one virtual executor
+	// (Task 20430) — minted by an operator or by approving a request.
+	ActionForwarderBind Action = "forwarder.bind"
+	// ActionForwarderUnbind records a binding revoked: by an operator, by the
+	// forwarder's own revocation, or by its TTL lapsing. A run holding the
+	// device has it detached.
+	ActionForwarderUnbind Action = "forwarder.unbind"
+	// ActionForwarderBindRequest records a request for a binding, filed
+	// through the same request flow as secret grant requests.
+	ActionForwarderBindRequest Action = "forwarder.bind_request"
+	// ActionForwarderBindRequestApprove, -Deny, -Withdraw and -Expire record
+	// a binding request's decision.
+	ActionForwarderBindRequestApprove  Action = "forwarder.bind_request_approve"
+	ActionForwarderBindRequestDeny     Action = "forwarder.bind_request_deny"
+	ActionForwarderBindRequestWithdraw Action = "forwarder.bind_request_withdraw"
+	ActionForwarderBindRequestExpire   Action = "forwarder.bind_request_expire"
+	// ActionForwarderAttach records a forwarded device attached for a run:
+	// the hub relaying the forwarder's stream to the executor that gives it
+	// to the run's sandbox.
+	ActionForwarderAttach Action = "forwarder.attach"
+	// ActionForwarderDetach records a forwarded device taken back from a run,
+	// and why: the run ended, the binding or forwarder was revoked, a side
+	// disconnected.
+	ActionForwarderDetach Action = "forwarder.detach"
 
 	// ── workspace ──────────────────────────────────────────────────────────
 

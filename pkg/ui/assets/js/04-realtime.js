@@ -348,6 +348,7 @@ function handleRealtimeMsg(type, data, scope) {
       // connectivity in one place.
       try {
         if (activeTab === 'executors') panelIf('execadmin', 'loadForwarders');
+        if (activeTab === 'overview') panelIf('devices', 'load');
         if (activeTab === 'audit') panelIf('audit', 'refresh');
       } catch(_) {}
       break;

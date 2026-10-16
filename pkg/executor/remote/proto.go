@@ -233,7 +233,19 @@ const (
 	// workload's git would refuse the proxy's certificate, so the hub refuses
 	// a dispatch that would talk to the proxy and names the upgrade, rather
 	// than fall back to delivering the forge credential. See MinGitCAVersion.
-	ProtocolVersion = 21
+	//
+	// v22 adds the device channel (Task 20430, deviceproto.go): device_open,
+	// device_opened, device_data and device_close, which carry a device
+	// forwarder's stream from the hub to the agent; the start frame's
+	// forwarded_devices, naming the channels its sandbox is given; and the
+	// hello's forwarded_usb and forwarded_l2, saying whether the device can
+	// attach each kind. The agent attaches a USB device through vhci_hcd with
+	// a socketpair and an L2 segment through a TAP, with no listener, and
+	// gives it to the sandbox. Gated on the hub side: an older agent would
+	// ignore forwarded_devices and start the sandbox without the hardware, so
+	// a dispatch whose project holds a forwarder binding is refused there and
+	// names the upgrade. See MinForwardedDeviceVersion.
+	ProtocolVersion = 22
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -924,6 +936,15 @@ type AgentCapabilities struct {
 	// firewall-capable agent older than the field.
 	PacketFilter      bool   `json:"packet_filter,omitempty"`
 	PacketFilterIssue string `json:"packet_filter_issue,omitempty"`
+	// ForwardedUSB reports that the agent can attach a forwarded USB device
+	// on its host — vhci_hcd is loaded and the agent may write its attach
+	// file — and ForwardedL2 that it can create a TAP and move it into a
+	// container sandbox (Task 20430). The issues say why not. Absent below
+	// v22, which the hub reads as "cannot".
+	ForwardedUSB      bool   `json:"forwarded_usb,omitempty"`
+	ForwardedUSBIssue string `json:"forwarded_usb_issue,omitempty"`
+	ForwardedL2       bool   `json:"forwarded_l2,omitempty"`
+	ForwardedL2Issue  string `json:"forwarded_l2_issue,omitempty"`
 	// OCIRuntimes are the low-level runtimes the device's container engine
 	// has registered ("runc", "runsc", "kata"), so the dashboard can offer
 	// them instead of asking an admin to type a name the device may not know.
@@ -1262,6 +1283,12 @@ type StartPayload struct {
 	// picks an engine and a runtime: those are fully described by Sandbox,
 	// which is also what keeps such a virtual executor usable on a v8 agent.
 	Virtual *VirtualStart `json:"virtual,omitempty"`
+	// ForwardedDevices names the device channels opened for this handle that
+	// its sandbox is given (Task 20430, protocol v22). Each was opened by a
+	// device_open frame ahead of this one and answered device_opened, so the
+	// device is attached on the agent's host by the time this arrives; the
+	// agent refuses a start naming a channel it does not hold for the handle.
+	ForwardedDevices []string `json:"forwarded_devices,omitempty"`
 }
 
 // VirtualStart is the part of a virtual executor's configuration only the

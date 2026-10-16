@@ -46,6 +46,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Header names on a forwarded request.
@@ -574,4 +576,73 @@ func writePeerError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// DialStream opens a WebSocket to a peer's internal endpoint, signed as this
+// member, and returns it as a byte stream (Task 20430): how a member that
+// needs a device stream another member holds — a device forwarder's tunnel
+// lives on one member, the agent it is relayed to may be on another — reaches
+// it over the peer channel. path carries its query. The response headers are
+// returned beside the stream, for what the owner reports about it.
+//
+// The stream is not tied to ctx beyond the dial: it lives until either side
+// closes it, which is what a relay held for a run needs.
+func (n *Node) DialStream(ctx context.Context, to Member, path string) (net.Conn, http.Header, error) {
+	if n == nil || n.peer == nil {
+		return nil, nil, errors.New("hubcluster: not a cluster member")
+	}
+	target, err := n.memberURL(to)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := n.unresponsiveErr(to.ID); err != nil {
+		return nil, nil, fmt.Errorf("hubcluster: dial %s on %s: %w", path, to.ID, err)
+	}
+	u := *target
+	u.Path = path
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		u.Path, u.RawQuery = path[:i], path[i+1:]
+	}
+	// Signed over the request the dial will send — same method, same URI — so
+	// the owner's verify sees exactly what was signed.
+	probe, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hubcluster: build stream request: %w", err)
+	}
+	n.peer.sign(probe, to.ID, "")
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	}
+	dctx, cancel := context.WithTimeout(ctx, n.peer.timeout)
+	defer cancel()
+	ws, resp, err := websocket.Dial(dctx, u.String(), &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: n.peer.transport},
+		HTTPHeader: probe.Header,
+	})
+	if err != nil {
+		var hdr http.Header
+		msg := ""
+		if resp != nil {
+			hdr = resp.Header
+			if resp.Body != nil {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				msg = strings.TrimSpace(string(b))
+				var e struct {
+					Error string `json:"error"`
+				}
+				if json.Unmarshal(b, &e) == nil && e.Error != "" {
+					msg = e.Error
+				}
+			}
+			if resp.StatusCode != 0 && msg != "" {
+				return nil, hdr, &CallError{Member: to.ID, Status: resp.StatusCode, Message: msg}
+			}
+		}
+		return nil, hdr, fmt.Errorf("hubcluster: dial %s on %s: %w", path, to.ID, err)
+	}
+	ws.SetReadLimit(1 << 20)
+	return websocket.NetConn(context.Background(), ws, websocket.MessageBinary), resp.Header, nil
 }

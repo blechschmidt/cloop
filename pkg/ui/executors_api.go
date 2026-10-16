@@ -1778,6 +1778,19 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		writeSandboxDenied(w, "sandbox_grant_denied", grantDenied.Error(), grantDenied.Remediation(), nil)
 		return
 	}
+	// A device forwarder bound to the project is offline, or the executor
+	// cannot give its device to a sandbox (Task 20430). 409s: the binding and
+	// the executor disagree, and the refusal names which forwarder or why.
+	var fwdOffline *forwarderOfflineError
+	if errors.As(err, &fwdOffline) {
+		writeSandboxDenied(w, "forwarder_offline", fwdOffline.Error(), fwdOffline.Remediation(), nil)
+		return
+	}
+	var fwdRefused *forwardedDevicesRefusedError
+	if errors.As(err, &fwdRefused) {
+		writeSandboxDenied(w, "forwarded_device_unsupported", fwdRefused.Error(), fwdRefused.Remediation(), nil)
+		return
+	}
 	// It holds the grant, and the hub cannot serve it to this run: no proxy,
 	// or no route to it from where the run would go (Task 20378).
 	var egressDenied *egressUnservableError
@@ -1911,6 +1924,7 @@ var executorRefusals = []error{
 	remote.ErrProjectSeedUnsupported,
 	remote.ErrSandboxModeUnsupported,
 	remote.ErrVirtualExecutorUnsupported,
+	remote.ErrForwardedDevicesUnsupported,
 }
 
 // isExecutorRefusal reports whether err is one of executorRefusals.

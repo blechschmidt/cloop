@@ -98,6 +98,7 @@ func (s *Server) interruptRun(workDir string) stopDelivery {
 				// rather than when it finishes winding down: pausing writes
 				// the project's state, which needs no network (Task 20378).
 				closeRunEgress(run.handleID, "the run was stopped")
+				closeRunForwards(run.handleID, "the run was stopped")
 				if statusErr == nil && run.ex.Kind() == executor.KindLocalProcess {
 					reached = st.PID
 				}

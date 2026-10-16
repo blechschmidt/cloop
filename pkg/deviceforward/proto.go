@@ -200,6 +200,11 @@ type OpenPayload struct {
 type OpenAckPayload struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Device describes what the forwarder opened (Task 20430): for USB the
+	// on-prem bus id a consumer's OP_REQ_IMPORT must name. Additive, so an
+	// older forwarder that omits it still interoperates; the hub then falls
+	// back to the bus id the forwarder's hello resolved.
+	Device *ExportedDevice `json:"device,omitempty"`
 }
 
 // ErrorPayload carries a non-fatal error.

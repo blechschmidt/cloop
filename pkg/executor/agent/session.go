@@ -79,6 +79,10 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	// the workload's credentials unattended on the device — which is exactly
 	// the unattributed process the audit trail exists to rule out.
 	defer a.closeAttachSessions()
+	// Forwarded devices die with the link too (Task 20430): their relay runs
+	// through the hub over this connection, and a device left attached with
+	// nothing behind it would be a vhci port the kernel keeps retrying.
+	defer a.closeAllDevices("the agent's connection to the hub ended")
 
 	welcome, err := a.handshake(ctx, sess, isEnrollment)
 	if err != nil {
@@ -476,6 +480,17 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 		case remote.TypeAttachClose:
 			a.handleAttachClose(ctx, sess, frame)
 
+		case remote.TypeDeviceOpen:
+			// Registered inline so the data the hub sends right behind the
+			// open finds its channel; the attach itself runs on its own.
+			a.handleDeviceOpen(ctx, sess, frame)
+
+		case remote.TypeDeviceData:
+			a.handleDeviceData(ctx, sess, frame)
+
+		case remote.TypeDeviceClose:
+			a.handleDeviceClose(ctx, sess, frame)
+
 		case remote.TypeBranchChunk:
 			// Inline, on purpose: the chunks of a shipped branch precede their
 			// start frame on this connection, and handling them in order here
@@ -815,9 +830,12 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// device's live sysfs first, because the groups its device nodes need are
 	// part of the driver it is started by.
 	var runner payloadDriver
-	if payload.Virtual != nil {
+	switch {
+	case payload.Virtual != nil:
 		runner, err = a.virtualRunner(payload, &spec, handleID)
-	} else {
+	case a.cfg.ContainerDriver != nil && payload.Sandbox.Normalize().Mode == executor.SandboxModeContainer:
+		runner, err = a.cfg.ContainerDriver(payload.Sandbox.Normalize())
+	default:
 		runner, err = a.drivers.driverFor(payload.Sandbox, a.local)
 	}
 	if err != nil {
@@ -847,10 +865,47 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		spec.HostMounts = append(spec.HostMounts, placed.hostMounts()...)
 	}
 
+	// The forwarded devices the hub attached here for this workload (Task
+	// 20430), given to its sandbox like any other device or interface. Only a
+	// container sandbox may have them: on the host they would belong to the
+	// whole machine. The hub refuses that dispatch before it gets here; this
+	// is the device's own copy of the rule.
+	if len(payload.ForwardedDevices) > 0 {
+		nodes, ifaces, fwdEnv, derr := a.claimDevices(handleID, payload.ForwardedDevices)
+		if derr == nil && payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer {
+			derr = fmt.Errorf("forwarded devices are given only to a container sandbox, and this payload runs on %s's host", deviceName())
+		}
+		if derr != nil {
+			a.closeDevicesFor(handleID, "the workload did not start")
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error:    derr.Error(),
+			})
+			return
+		}
+		// Copied, not appended in place, for the reason virtualRunner copies.
+		spec.Devices = append(append([]executor.HostDevice(nil), spec.Devices...), nodes...)
+		spec.Interfaces = append(append([]executor.HostInterface(nil), spec.Interfaces...), ifaces...)
+		spec.Env = executor.WithForwardedEnv(spec.Env, fwdEnv)
+	}
+
+	// A root agent's container workload runs as its work root's owner, which
+	// is who the driver reads the workspace's owner as (Task 20430).
+	if payload.Sandbox.Normalize().Mode == executor.SandboxModeContainer {
+		if herr := a.handOverWorkspace(spec.WorkDir); herr != nil {
+			a.closeDevicesFor(handleID, "the workload did not start")
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{HandleID: handleID, Error: herr.Error()})
+			return
+		}
+	}
+
 	handle, err := runner.Start(context.WithoutCancel(ctx), spec)
 	if err != nil {
 		// Release the reservation: nothing is running, and holding the slot
 		// would leak capacity on every failed start.
+		a.closeDevicesFor(handleID, "the workload did not start")
 		a.forget(handleID)
 		refusal := remote.StartedPayload{HandleID: handleID, Error: err.Error()}
 		// A workspace already over its disk limit goes back with its
@@ -979,6 +1034,10 @@ func (a *Agent) pumpOutput(wl *workload) {
 	wl.status = status
 	wl.finished = true
 	wl.mu.Unlock()
+	// The sandbox is gone, so its forwarded devices are detached now rather
+	// than once the outcome has been delivered (Task 20430): a device must not
+	// stay attached to this host while the log tail and write-back go out.
+	a.closeDevicesFor(wl.handleID, "the run ended")
 
 	// Flush before reporting terminal status: the control plane closes the
 	// log stream when the terminal status arrives, so any output sent after
@@ -1286,6 +1345,10 @@ func (a *Agent) forget(handleID string) {
 	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
 	a.mu.Unlock()
+	// The workload's forwarded devices go back with it (Task 20430); a
+	// workload that ended normally has given them back already, below in
+	// pumpOutput, and this covers every other exit.
+	a.closeDevicesFor(handleID, "the workload ended")
 	// A shipped branch nobody will build from is just disk.
 	a.dropBranchTransfer(handleID)
 	if wl != nil {

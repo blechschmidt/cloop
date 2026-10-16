@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 190 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 199 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 168 |
+| `control-plane` | the hub's own state.db | 177 |
 | `project` | the project's .cloop/state.db | 18 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-190 actions in 46 families. Every action is listed: this section is the whole
+199 actions in 46 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`forwarder.*`](#forwarder) (3) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (17) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (4) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -246,16 +246,35 @@ Payload keys:
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
+| `forwarder.attach` | `forwarder` | control-plane | beta | A run starts with a forwarded device: the hub relays the forwarder's stream to the executor that attaches it and gives it to the run's sandbox. |
+| `forwarder.bind` | `forwarder` | control-plane | beta | A forwarder's device is made available to a project's runs, optionally only on one virtual executor, by an operator or by approving a request. |
+| `forwarder.bind_request` | `forwarder` | control-plane | beta | Someone without executor.manage asks for a forwarder binding through the grant-request flow. |
+| `forwarder.bind_request_approve` | `forwarder` | control-plane | beta | An administrator approves a forwarder binding request, minting the binding. |
+| `forwarder.bind_request_deny` | `forwarder` | control-plane | beta | An administrator denies a forwarder binding request. |
+| `forwarder.bind_request_expire` | `forwarder` | control-plane | beta | A forwarder binding request lapses undecided. |
+| `forwarder.bind_request_withdraw` | `forwarder` | control-plane | beta | The requester withdraws a pending forwarder binding request. |
+| `forwarder.detach` | `forwarder` | control-plane | beta | A forwarded device is taken back from a run: the run ended, its binding or forwarder was revoked, or a side disconnected. |
 | `forwarder.enroll` | `forwarder` | control-plane | stable | An operator mints an enrollment token for a device forwarder. |
-| `forwarder.expose` | `forwarder` | control-plane | beta | A forwarded device is exposed for consumption: a loopback USB/IP import endpoint is opened, or a TAP is bridged. |
+| `forwarder.expose` | `forwarder` | control-plane | beta | An operator probes a forwarded device through the hub: a stream opened to the forwarder and, for USB, its device list read, handing the device to nothing. |
 | `forwarder.revoke` | `forwarder` | control-plane | stable | A device forwarder's enrollment token or long-lived credential is revoked. |
+| `forwarder.unbind` | `forwarder` | control-plane | beta | A forwarder binding is revoked by an operator, by the forwarder's own revocation, or by its TTL lapsing; a run holding the device has it detached. |
 
 Payload keys:
 
+- `forwarder.attach` — `action`, `forwarder_id`, `binding_id`, `project`, `executor_id`, `handle_id`, `run_id`
+- `forwarder.bind` — `action`, `forwarder_id`, `binding_id`, `project`, `virtual_executor`, `expires_at`, `request_id`
+- `forwarder.bind_request` — `action`, `forwarder_id`, `request_id`, `project`, `virtual_executor`, `ttl_seconds`
+- `forwarder.bind_request_approve` — `action`, `forwarder_id`, `request_id`, `binding_id`, `expires_at`
+- `forwarder.bind_request_deny` — `action`, `forwarder_id`, `request_id`, `note`
+- `forwarder.bind_request_expire` — `action`, `forwarder_id`, `request_id`
+- `forwarder.bind_request_withdraw` — `action`, `forwarder_id`, `request_id`
+- `forwarder.detach` — `action`, `forwarder_id`, `binding_id`, `project`, `executor_id`, `handle_id`, `reason`
 - `forwarder.enroll` — `action`, `forwarder_id`, `name`, `device`, `expires_at`
-- `forwarder.expose` — `action`, `forwarder_id`, `device`, `port`
+- `forwarder.expose` — `action`, `forwarder_id`, `device`, `reachable`, `member`
 - `forwarder.revoke` — `action`, `forwarder_id`, `kind`
+- `forwarder.unbind` — `action`, `forwarder_id`, `binding_id`, `project`, `reason`
 
+- `forwarder.bind` — Gated on executor.manage, like enrollment. A run of the project gets the device in its sandbox while the binding is in force.
 - `forwarder.enroll` — A forwarder bridges one on-prem USB or layer-2 device to the hub and runs no workload; it is not an executor.
 
 ### workspace.*

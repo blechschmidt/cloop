@@ -70,6 +70,11 @@ type Session struct {
 	// because an attach session cannot survive one: the shell runs on the
 	// device, so a dropped link is a dead terminal, not a resumable one.
 	attaches attachRegistry
+
+	// devices routes forwarded-device frames to the channel that owns them
+	// (Task 20430). Scoped to the connection for attach's reason: the device
+	// is attached on the agent's host, and a dropped link ends the relay.
+	devices deviceRegistry
 }
 
 // AcceptOptions parameterises the server-side handshake.
@@ -301,6 +306,9 @@ func (s *Session) closeWithReason(reason string) error {
 		// than in the read loop's defer covers the watchdog path too, which
 		// closes the session without the read loop having returned yet.
 		s.closeAttachSessions("agent connection closed: " + reason)
+		// And every forwarded device on it: the agent detaches its end when
+		// the link drops, and this end's relay to the forwarder must stop.
+		s.closeDeviceChannels("agent connection closed: " + reason)
 		_ = s.conn.Close(reason)
 	})
 	return nil
@@ -476,6 +484,10 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 
 	case TypeAttachData, TypeAttachClose, TypeAttachOpened:
 		s.handleAttachFrame(ctx, f)
+		return false
+
+	case TypeDeviceData, TypeDeviceClose, TypeDeviceOpened:
+		s.handleDeviceFrame(ctx, f)
 		return false
 
 	case TypeStarted, TypeRevoked, TypeSecretRefreshed, TypeUpgrading, TypeHarnessInstalled, TypeInventory, TypeError:

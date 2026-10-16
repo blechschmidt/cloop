@@ -129,10 +129,17 @@ const _overviewIdx = () => selectedProjectIdx === null ? 0 : selectedProjectIdx;
 const _membersOff = () => !myOIDC || _noProject();
 function loadProjectMembers() {
   loadHarnessCred();
+  loadProjectForwards();
   if (_membersOff()) return;
   return deferredPanel('members', {
     api, apiMethod, esc, toast, left: clearProjectSelection, idx: _overviewIdx, hidden: _membersOff,
   }).then(p => p.load()).catch(() => {});
+}
+// The Forwarded devices card (Task 20430): what a device forwarder brings to
+// the project's runs, and the way to bind or ask for one.
+function loadProjectForwards() {
+  if (_noProject()) return;
+  return deferredPanel('devices', {api, apiMethod, esc, toast, idx: _overviewIdx}).then(p => p.load()).catch(() => {});
 }
 // The Claude credential card and dialog (Task 20379). opts.open shows the
 // dialog — for opts.idx, the grid's project, and with opts.refusal, the 409

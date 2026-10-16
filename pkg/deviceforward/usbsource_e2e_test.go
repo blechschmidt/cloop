@@ -2,25 +2,27 @@
 
 package deviceforward
 
-// Real end-to-end USB forward, exercising the kernel path: a forwarder exports
-// a host USB device, the hub presents a loopback import endpoint, and the
-// standard `usbip attach` imports the device onto this host's vhci — the same
-// chain a cloud consumer would use, collapsed onto one box.
+// Real end-to-end USB forward, exercising both kernels' halves on one box: a
+// forwarder exports a host USB device to usbip-host through usbip_sockfd, the
+// hub opens a stream to it, and ImportUSB attaches that stream to this host's
+// vhci_hcd through the controller's attach file — no usbipd, no `usbip
+// attach`, and no listening socket anywhere (Task 20430).
 //
-// Opt-in, because it needs root, the usbip tool, the usbip-host and vhci_hcd
-// modules, and a real USB device to bind:
+// Opt-in, because it needs root, the usbip tool (for the forwarder's bind),
+// the usbip-host and vhci_hcd modules, and a real USB device to bind:
 //
 //	CLOOP_FORWARD_USB_E2E=1 CLOOP_FORWARD_USB_BUSID=1-1 \
 //	  CLOOP_FORWARD_USB_VID=0627 CLOOP_FORWARD_USB_PID=0001 \
 //	  go test ./pkg/deviceforward -run TestUSBForwardEndToEnd -v
 //
-// It binds the named device to usbip-host for the duration and restores it.
+// It binds the named device to usbip-host for the duration and restores it,
+// and it detaches only the vhci port it attached: a device an operator
+// imported by hand stays exactly where it is.
 
 import (
 	"context"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +35,7 @@ func TestUSBForwardEndToEnd(t *testing.T) {
 		t.Skip("set CLOOP_FORWARD_USB_E2E=1 (needs root, usbip, a real device) to run")
 	}
 	if os.Geteuid() != 0 {
-		t.Skip("needs root to bind a device to usbip-host")
+		t.Skip("needs root to bind a device to usbip-host and attach to vhci_hcd")
 	}
 	if _, err := exec.LookPath("usbip"); err != nil {
 		t.Skip("usbip tool not installed")
@@ -43,7 +45,7 @@ func TestUSBForwardEndToEnd(t *testing.T) {
 	pid := envOr("CLOOP_FORWARD_USB_PID", "0001")
 
 	store := newMemStore()
-	match := executor.USBMatch{VendorID: vid, ProductID: pid}
+	match := executor.USBMatch{VendorID: vid, ProductID: pid, Port: busid}
 	token, _, err := Mint(store, MintOptions{Name: "bench", Device: ForwardedDevice{Kind: KindUSB, USB: &match}})
 	if err != nil {
 		t.Fatal(err)
@@ -61,50 +63,79 @@ func TestUSBForwardEndToEnd(t *testing.T) {
 		Source: src, Logf: t.Logf,
 	})
 	ids := waitConnected(t, hub, 1)
+	t.Cleanup(func() { _ = exec.Command("usbip", "unbind", "-b", busid).Run() })
 
-	ep, err := hub.ListenUSB(ids[0])
+	before := vhciPortsInUse(t)
+
+	stream, err := hub.OpenDevice(ctx, ids[0], "attach")
+	if err != nil {
+		t.Fatalf("OpenDevice: %v", err)
+	}
+	if stream.Exported.BusID != busid {
+		t.Fatalf("the forwarder's acknowledgement names bus id %q, want %q", stream.Exported.BusID, busid)
+	}
+	ledger, err := OpenLedger(t.TempDir(), t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ep.Close()
-
-	// Attach, then make sure we always detach and the device is restored.
-	t.Cleanup(func() {
-		out, _ := exec.Command("usbip", "port").CombinedOutput()
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "Port ") {
-				port := strings.TrimSuffix(strings.Fields(line)[1], ":")
-				_ = exec.Command("usbip", "detach", "-p", port).Run()
-			}
-		}
-		_ = exec.Command("usbip", "unbind", "-b", busid).Run()
-	})
-
-	attachCtx, acancel := context.WithTimeout(ctx, 20*time.Second)
-	defer acancel()
-	out, err := exec.CommandContext(attachCtx, "usbip", "--tcp-port", strconv.Itoa(ep.Port()),
-		"attach", "-r", "127.0.0.1", "-b", busid).CombinedOutput()
+	ictx, icancel := context.WithTimeout(ctx, 30*time.Second)
+	defer icancel()
+	imp, err := ImportUSB(ictx, stream, stream.Exported.BusID, ImportOptions{Ledger: ledger, Logf: t.Logf})
 	if err != nil {
-		t.Fatalf("usbip attach failed: %v: %s", err, out)
+		t.Fatalf("ImportUSB: %v", err)
 	}
-	t.Logf("usbip attach: %s", out)
+	t.Cleanup(func() { _ = imp.Close() })
 
-	// Give the kernel a moment, then confirm the device is imported.
+	if before[imp.Port] {
+		t.Fatalf("the import took vhci port %d, which was already in use before it", imp.Port)
+	}
+	if imp.Device.VendorID != vid || imp.Device.ProductID != pid {
+		t.Fatalf("the imported device enumerated as %s:%s, want %s:%s", imp.Device.VendorID, imp.Device.ProductID, vid, pid)
+	}
+	if _, err := os.Stat(imp.Device.Node); err != nil {
+		t.Fatalf("the imported device's usbfs node %s is not on this host: %v", imp.Device.Node, err)
+	}
+	if got := len(ledger.Entries()); got != 1 {
+		t.Fatalf("the ledger records %d attachments, want 1", got)
+	}
+	t.Logf("imported %s at vhci port %d as %s (%s)", imp.Device.Label(), imp.Port, imp.Device.Port, imp.Device.Node)
+
+	// Closing detaches exactly the port the import attached, and nothing else.
+	if err := imp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	var portOut string
-	for time.Now().Before(deadline) {
-		b, _ := exec.Command("usbip", "port").CombinedOutput()
-		portOut = string(b)
-		if strings.Contains(strings.ToLower(portOut), strings.ToLower(vid+":"+pid)) {
-			break
+	for time.Now().Before(deadline) && vhciPortsInUse(t)[imp.Port] {
+		time.Sleep(100 * time.Millisecond)
+	}
+	after := vhciPortsInUse(t)
+	if after[imp.Port] {
+		t.Fatalf("vhci port %d is still in use after Close", imp.Port)
+	}
+	for p := range before {
+		if !after[p] {
+			t.Fatalf("vhci port %d, in use before the test, was detached by it", p)
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
-	if !strings.Contains(strings.ToLower(portOut), strings.ToLower(vid+":"+pid)) {
-		t.Fatalf("imported device %s:%s not found in usbip port:\n%s", vid, pid, portOut)
+	if got := len(ledger.Entries()); got != 0 {
+		t.Fatalf("the ledger still records %d attachments after Close", got)
 	}
-	t.Logf("device imported over the forwarder:\n%s", portOut)
+}
+
+// vhciPortsInUse lists the vhci ports that hold a device right now.
+func vhciPortsInUse(t *testing.T) map[int]bool {
+	t.Helper()
+	ps, err := VHCI{}.ports()
+	if err != nil {
+		t.Fatalf("read vhci status: %v", err)
+	}
+	out := map[int]bool{}
+	for _, p := range ps {
+		if p.State != vdevStateNull {
+			out[p.Port] = true
+		}
+	}
+	return out
 }
 
 func envOr(k, def string) string {

@@ -16,6 +16,7 @@ package deviceforward
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -105,6 +106,13 @@ func openRawSocket(ifindex int) (int, error) {
 		syscall.Close(fd)
 		return -1, fmt.Errorf("deviceforward: bind raw socket: %w", err)
 	}
+	// The per-frame auxiliary data, which says what the kernel and the NIC
+	// did to a frame on its way in: a checksum left to offload, a VLAN tag
+	// stripped. See l2frame.go.
+	if err := syscall.SetsockoptInt(fd, solPacket, packetAuxdata, 1); err != nil {
+		syscall.Close(fd)
+		return -1, fmt.Errorf("deviceforward: request frame auxiliary data: %w", err)
+	}
 	// Promiscuous mode, so frames for the device under test are seen.
 	mreq := packetMreq{ifindex: int32(ifindex), typ: packetMrPromisc}
 	if err := setPacketMembership(fd, mreq); err != nil {
@@ -124,12 +132,72 @@ type rawPacketConn struct {
 }
 
 func (c *rawPacketConn) ReadPacket(p []byte) (int, error) {
-	n, _, err := syscall.Recvfrom(c.fd, p, 0)
-	if err != nil {
-		return 0, err
+	oob := make([]byte, 64)
+	for {
+		// Four bytes short of the buffer, so a VLAN tag the NIC stripped can
+		// be put back in place.
+		if len(p) < 64 {
+			return 0, fmt.Errorf("%w: frame buffer too small", ErrProtocol)
+		}
+		n, oobn, _, from, err := syscall.Recvmsg(c.fd, p[:len(p)-4], oob, syscall.MSG_TRUNC)
+		if err != nil {
+			return 0, err
+		}
+		// An ETH_P_ALL socket also sees every frame the interface transmits,
+		// including the ones this forwarder just injected from the tunnel.
+		// Carrying those back would echo each of the sandbox's own frames to
+		// it (Task 20430), so only frames the segment delivered go up.
+		if ll, ok := from.(*syscall.SockaddrLinklayer); ok && ll.Pkttype == packetOutgoing {
+			continue
+		}
+		if n > len(p)-4 {
+			// Larger than a frame: offloads merged several into one. A
+			// truncated frame is not a frame; it is dropped, as a wire
+			// would drop it.
+			continue
+		}
+		status, tpid, tci, ok := auxdata(oob[:oobn])
+		if ok && status&tpStatusVLANValid != 0 {
+			if status&tpStatusVLANTPIDOK == 0 {
+				tpid = 0x8100
+			}
+			n = insertVLAN(p, n, tpid, tci)
+		}
+		if ok && status&tpStatusCsumNotReady != 0 {
+			completeL4Checksum(p[:n])
+		}
+		return n, nil
 	}
-	return n, nil
 }
+
+// auxdata reads the struct tpacket_auxdata PACKET_AUXDATA delivered with a
+// frame: its status, and the VLAN tag a NIC stripped from it.
+func auxdata(oob []byte) (status uint32, tpid, tci uint16, ok bool) {
+	msgs, err := syscall.ParseSocketControlMessage(oob)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	for _, m := range msgs {
+		if m.Header.Level != solPacket || m.Header.Type != packetAuxdata || len(m.Data) < 20 {
+			continue
+		}
+		// u32 tp_status, tp_len, tp_snaplen; u16 tp_mac, tp_net, tp_vlan_tci,
+		// tp_vlan_tpid — host byte order.
+		status = binary.NativeEndian.Uint32(m.Data[0:4])
+		tci = binary.NativeEndian.Uint16(m.Data[16:18])
+		tpid = binary.NativeEndian.Uint16(m.Data[18:20])
+		return status, tpid, tci, true
+	}
+	return 0, 0, 0, false
+}
+
+const (
+	solPacket     = 263 // SOL_PACKET
+	packetAuxdata = 8   // PACKET_AUXDATA
+)
+
+// packetOutgoing is PACKET_OUTGOING, the sll_pkttype of a frame this host sent.
+const packetOutgoing = 4
 
 func (c *rawPacketConn) WritePacket(p []byte) error {
 	ll := syscall.SockaddrLinklayer{Ifindex: c.ifindex, Halen: 6}
@@ -162,7 +230,6 @@ type packetMreq struct {
 // setPacketMembership adds a membership (promiscuous mode) on an AF_PACKET
 // socket.
 func setPacketMembership(fd int, mreq packetMreq) error {
-	const solPacket = 263   // SOL_PACKET
 	const addMembership = 1 // PACKET_ADD_MEMBERSHIP
 	_, _, errno := syscall.Syscall6(syscall.SYS_SETSOCKOPT,
 		uintptr(fd), uintptr(solPacket), uintptr(addMembership),

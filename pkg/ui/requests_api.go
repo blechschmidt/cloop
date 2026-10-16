@@ -147,6 +147,16 @@ type createRequestBody struct {
 	Registries []string `json:"registries,omitempty"`
 	EnvKeys    []string `json:"env_keys,omitempty"`
 	Writable   bool     `json:"writable,omitempty"`
+
+	// Source "forwarder" asks for a device forwarder binding instead of a
+	// secret grant (Task 20430): ForwarderID's device for Project's runs,
+	// optionally only on VirtualExecutor, with an L2 segment's Interface.
+	// TTLMinutes, WaitMinutes and Justification mean what they mean above.
+	Source          string              `json:"source,omitempty"`
+	ForwarderID     string              `json:"forwarder_id,omitempty"`
+	Project         string              `json:"project,omitempty"`
+	VirtualExecutor string              `json:"virtual_executor,omitempty"`
+	Interface       *forwardedInterface `json:"interface,omitempty"`
 }
 
 // decideRequestBody is POST /api/grant-requests/{id}/{approve,deny}.
@@ -224,6 +234,24 @@ func (s *Server) handleGrantRequestsList(w http.ResponseWriter, r *http.Request)
 		}
 		views = append(views, v)
 	}
+	// Device forwarder binding requests (Task 20430), on the same list: the
+	// caller's own, or every one when they may decide them.
+	global := g.decide(authz.GlobalScope)
+	mayBind := global.Allows(authz.PermExecutorManage)
+	for _, req := range s.forwarderRequestsAsAccess() {
+		if filter.State != "" && req.State != filter.State {
+			continue
+		}
+		if (!mayBind || filter.RequestedBy != "") && !sameRequester(req.RequestedBy, actor) {
+			continue
+		}
+		v := requestViewOf(req, actor, mayDecideForwarderRequest(global, actor, req, now), now)
+		if req.Pending(now) {
+			pending++
+		}
+		views = append(views, v)
+	}
+	sort.SliceStable(views, func(i, j int) bool { return views[i].CreatedAt.After(views[j].CreatedAt) })
 	jsonOK(w, map[string]any{
 		"requests": views,
 		// pending_count is the queue depth the header badge shows. Counted over
@@ -242,6 +270,12 @@ func (s *Server) handleGrantRequestCreate(w http.ResponseWriter, r *http.Request
 	}
 	var body createRequestBody
 	if !decodeSecretsBody(w, r, &body) {
+		return
+	}
+	// A device forwarder binding, asked through the same flow (Task 20430).
+	// Branched before the broker is opened: it needs no secret broker.
+	if strings.EqualFold(strings.TrimSpace(body.Source), "forwarder") {
+		s.createForwarderBindingRequest(w, r, body)
 		return
 	}
 	subject, err := secretbroker.ParseSubject(body.Subject)
@@ -355,6 +389,12 @@ func (s *Server) decideGrantRequest(w http.ResponseWriter, r *http.Request, acti
 	// An empty body is legitimate for withdraw and approve, so a decode failure
 	// is only fatal when there was something to decode.
 	if r.ContentLength > 0 && !decodeSecretsBody(w, r, &body) {
+		return
+	}
+	// A device forwarder binding request (Task 20430) is decided by its own
+	// rule — executor.manage, as binding one takes — and needs no broker.
+	if isForwarderRequestID(id) {
+		s.decideForwarderBindingRequest(w, r, id, action, body)
 		return
 	}
 

@@ -1458,6 +1458,13 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
+	// Every member re-checks the forwarded devices it relays to runs against
+	// their bindings and forwarders, and the leader stamps lapsed bindings
+	// (Task 20430). See forwarder_dispatch.go. The ledger of devices this
+	// process may attach in process is opened — and what a previous process
+	// left swept — before the first dispatch can need it.
+	_ = hubDeviceLedger()
+	s.startForwarderSupervision(watcherCtx)
 	// Every member watches its own state volume against the free-space floor
 	// (Task 20381): each one's disk is its own. See diskfloor.go.
 	go s.watchHubDisk(watcherCtx)
@@ -1709,6 +1716,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// what this member owned now rather than after the membership TTL.
 	if n := s.clusterNode(); n != nil {
 		s.releaseAgentOwnership()
+		s.releaseForwarderOwnership()
 		if cerr := n.Close(); cerr != nil && err == nil {
 			err = fmt.Errorf("leave hub cluster: %w", cerr)
 		}

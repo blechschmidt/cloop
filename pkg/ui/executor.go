@@ -536,6 +536,23 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		return nil, executor.Handle{}, err
 	}
 
+	// The devices a device forwarder carries, for a project bound to one
+	// (Task 20430). After the sandbox and the firewall, which settle whether
+	// the workload has a network a segment could join and which runtime its
+	// sandbox runs under; refused here when a bound forwarder is offline or
+	// the executor cannot give the device to a sandbox.
+	spec, forwards, err := applyForwardedDevices(spec, ex, workDir, runID)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+	forwardsHandedOff := false
+	defer func() {
+		if !forwardsHandedOff {
+			forwards.close("the run did not start")
+		}
+	}()
+
 	// The run's egress session on the hub's proxy, when its project holds a
 	// grant (Task 20378). After the sandbox and the firewall, which decide
 	// whether there is a network to reach the proxy over and what a route to
@@ -628,6 +645,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	}
 	egress.bindHandle(ex, handle.ID)
 	egressHandedOff = true
+	forwards.bindHandle(ex, handle.ID)
+	forwardsHandedOff = true
 	// Bound before anything can read the run's owner row: the lease ids it
 	// carries are how a process adopting the run takes the lease over
 	// (Task 20382).
@@ -648,6 +667,16 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		// The workload is over: nothing is left for the intent to name.
 		intent.forget()
 	}()
+	if forwards != nil {
+		// Forwarded devices go back with the workload (Task 20430): one this
+		// process attached for a container on its host is detached here,
+		// and an agent's device channel is closed if the driver has not.
+		go func() {
+			defer recoverGoroutine("forwarded devices: " + handle.ID)
+			watchWorkloadExit(ex, handle.ID)
+			closeRunForwards(handle.ID, "the run ended")
+		}()
+	}
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
 	if len(spec.ProjectSeed) > 0 {
 		// The project went out as a copy, so its outcome has to come back:

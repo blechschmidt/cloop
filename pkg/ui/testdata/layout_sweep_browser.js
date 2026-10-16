@@ -915,6 +915,17 @@ const OPENERS = {
     },
     ready: `${textOf('#fwdEnrollCommand')}.includes('cloop forward')`,
   },
+  'forwarder-bind-overlay': {
+    // A device forwarder's Bind dialog (Task 20430), opened from its card,
+    // with the project list it chooses from filled in.
+    open: async () => {
+      await openTab('executors');
+      await waitFor(visible(`#tab-executors button[data-action="forwarderBind"]`), 'the forwarder card\'s Bind button');
+      await click(`#tab-executors button[data-action="forwarderBind"]`);
+      await waitFor(visible('#fwdBindProject'), 'the forwarder bind form');
+    },
+    ready: `(document.getElementById('fwdBindProject') || {options: []}).options.length > 0`,
+  },
   'executor-detail-overlay': {
     open: async () => { await onExecutors('openExecutorDetail'); },
     ready: `!!document.querySelector('#execDetailBody .exec-detail-verdict')`,

@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,10 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { executor.DefaultRegistry.Unbind(primary) })
+	// A device forwarder bound to the project (Task 20430), so the Executors
+	// tab draws a forwarder card with its bindings and the Overview its
+	// Forwarded devices card.
+	seedLayoutForwarder(t, primary, s)
 
 	if _, err := kb.Add(primary, s.TaskTitle, layoutLong("Runbook:", s.URL, "and", s.RepoPath),
 		[]string{s.Tag}); err != nil {
@@ -390,6 +395,27 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
 		},
+	}
+}
+
+// seedLayoutForwarder enrolls a device forwarder with a long name and binds it
+// to the project.
+func seedLayoutForwarder(t *testing.T, dir string, s sweepStrings) {
+	t.Helper()
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatalf("open control plane: %v", err)
+	}
+	defer db.Close()
+	dev := `{"kind":"usb","usb":{"vendor_id":"0627","product_id":"0001"},"label":` + strconv.Quote("Bench tablet beside "+s.Device) + `}`
+	if err := db.PutForwarder(statedb.ForwarderRow{ForwarderID: "layoutfwd0001", Name: s.Device + "-forwarder",
+		SecretHash: "00", DeviceJSON: dev}); err != nil {
+		t.Fatalf("PutForwarder: %v", err)
+	}
+	if err := db.PutForwarderBinding(statedb.ForwarderBindingRow{ID: "fbd_layout0001", ForwarderID: "layoutfwd0001",
+		Project: dir, CreatedBy: s.Email, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(48 * time.Hour),
+		Note: layoutLong("Bench", s.URL)}); err != nil {
+		t.Fatalf("PutForwarderBinding: %v", err)
 	}
 }
 

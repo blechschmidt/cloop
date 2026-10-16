@@ -98,8 +98,11 @@ func (s *USBSource) Probe(ctx context.Context) (bool, string, *executor.USBDevic
 	return true, "", &d
 }
 
-// Open binds the device and returns a stream that performs the USB/IP
-// handshake and then relays the kernel's URB traffic.
+// Open resolves the device and returns a stream that answers the consumer's
+// opening USB/IP request. Nothing is bound yet: a device list is answered from
+// sysfs and binds nothing, and only an accepted import binds the device to
+// usbip-host and hands the connection to the kernel (Task 20430). A probe
+// therefore never takes the device away from the host it is plugged into.
 func (s *USBSource) Open(ctx context.Context) (io.ReadWriteCloser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,32 +113,13 @@ func (s *USBSource) Open(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.bind(ctx, info.BusID); err != nil {
-		return nil, err
-	}
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		s.unbind(context.Background(), info.BusID)
-		return nil, fmt.Errorf("deviceforward: socketpair: %w", err)
-	}
-	fdA, fdB := fds[0], fds[1]
-	fb := os.NewFile(uintptr(fdB), "usbip-fdB")
-	conn, err := net.FileConn(fb) // dups fdB
-	_ = fb.Close()
-	if err != nil {
-		syscall.Close(fdA)
-		s.unbind(context.Background(), info.BusID)
-		return nil, fmt.Errorf("deviceforward: wrap socketpair: %w", err)
-	}
 	s.active = true
-	s.bound = info.BusID
 	st := &usbStream{
 		src:       s,
 		info:      info,
 		devDir:    devDir,
 		allowed:   info.BusID,
-		fdA:       fdA,
-		conn:      conn,
+		fdA:       -1,
 		respReady: make(chan struct{}),
 	}
 	return st, nil
@@ -157,10 +141,71 @@ func (s *USBSource) streamClosed(busid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active = false
-	if s.bound == busid {
+	if busid != "" && s.bound == busid {
 		s.unbind(context.Background(), busid)
 		s.bound = ""
 	}
+}
+
+// prepareImport binds the device to usbip-host and makes the socketpair whose
+// one end the kernel will be handed, for an import the policy accepted.
+func (s *USBSource) prepareImport(busid string) (fdA int, conn net.Conn, err error) {
+	if err := s.bind(context.Background(), busid); err != nil {
+		return -1, nil, err
+	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		s.unbind(context.Background(), busid)
+		return -1, nil, fmt.Errorf("deviceforward: socketpair: %w", err)
+	}
+	fb := os.NewFile(uintptr(fds[1]), "usbip-fdB")
+	conn, err = net.FileConn(fb) // dups fdB
+	_ = fb.Close()
+	if err != nil {
+		syscall.Close(fds[0])
+		s.unbind(context.Background(), busid)
+		return -1, nil, fmt.Errorf("deviceforward: wrap socketpair: %w", err)
+	}
+	s.mu.Lock()
+	s.bound = busid
+	s.mu.Unlock()
+	return fds[0], conn, nil
+}
+
+// importedOverUSBIP reports whether a device's sysfs directory sits under a
+// vhci_hcd root hub, i.e. the device was attached to this host over USB/IP.
+func importedOverUSBIP(dir string) bool {
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(real, "/vhci_hcd.")
+}
+
+// exportedInterfaces reads a device's interface records for a device list:
+// the class triple of each interface of the active configuration.
+func exportedInterfaces(devDir, busid string, cfg uint8) []usbipInterface {
+	var out []usbipInterface
+	prefix := fmt.Sprintf("%s:%d.", busid, cfg)
+	entries, err := os.ReadDir(devDir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		d := filepath.Join(devDir, e.Name())
+		out = append(out, usbipInterface{
+			Class:    uint8(hexSafe(readSysAttr(d, "bInterfaceClass"))),
+			SubClass: uint8(hexSafe(readSysAttr(d, "bInterfaceSubClass"))),
+			Protocol: uint8(hexSafe(readSysAttr(d, "bInterfaceProtocol"))),
+		})
+		if len(out) >= 32 {
+			break
+		}
+	}
+	return out
 }
 
 // handoff gives the kernel one end of the socketpair for a device.
@@ -222,6 +267,13 @@ func (s *USBSource) resolve() (usbipDevice, string, error) {
 			continue
 		}
 		if s.match.Port != "" && name != s.match.Port {
+			continue
+		}
+		// A device imported onto this host over USB/IP — a vhci_hcd port —
+		// is never forwarded again: re-exporting it would layer one USB/IP
+		// session on another, and on a host that is itself a consumer it
+		// would be the very device another forwarder carries, looping back.
+		if importedOverUSBIP(dir) {
 			continue
 		}
 		info := readUsbipDevice(name, dir)
@@ -288,24 +340,39 @@ func usbDeviceDirName(name string) bool {
 	return name[0] >= '0' && name[0] <= '9'
 }
 
-// usbStream is one open USB/IP stream: it answers the client's import, hands
-// the connection to the kernel, then relays URB bytes.
+// usbStream is one open USB/IP stream: it answers the consumer's opening
+// request, and for an accepted import hands the connection to the kernel and
+// then relays URB bytes.
 type usbStream struct {
 	src     *USBSource
 	info    usbipDevice
 	devDir  string
 	allowed string
 
-	fdA  int      // kernel's end of the socketpair, closed after handoff
-	conn net.Conn // our end, relayed to the tunnel after handoff
+	fdA  int      // kernel's end of the socketpair, closed after handoff; -1 before
+	conn net.Conn // our end, relayed to the tunnel after handoff; nil before
 
 	mu        sync.Mutex
 	reqbuf    []byte
 	opResp    []byte
-	opDone    bool
+	opDone    bool // an import was accepted: relay to the kernel
+	answered  bool // a device list was answered: EOF once the reply is read
+	bound     string
 	respReady chan struct{}
 	closed    bool
 	closeOnce sync.Once
+}
+
+// Exported describes the device this stream serves, for the open
+// acknowledgement a consumer reads its bus id from.
+func (s *usbStream) Exported() *ExportedDevice {
+	return &ExportedDevice{
+		Kind:      KindUSB,
+		BusID:     s.info.BusID,
+		VendorID:  fmt.Sprintf("%04x", s.info.IDVendor),
+		ProductID: fmt.Sprintf("%04x", s.info.IDProduct),
+		Speed:     s.info.Speed,
+	}
 }
 
 func (s *usbStream) signalResp() {
@@ -325,15 +392,16 @@ func (s *usbStream) Read(p []byte) (int, error) {
 			s.mu.Unlock()
 			return n, nil
 		}
-		if s.closed {
+		if s.closed || s.answered {
 			s.mu.Unlock()
 			return 0, io.EOF
 		}
 		relay := s.opDone
+		conn := s.conn
 		ready := s.respReady
 		s.mu.Unlock()
 		if relay {
-			return s.conn.Read(p)
+			return conn.Read(p)
 		}
 		<-ready
 	}
@@ -341,7 +409,7 @@ func (s *usbStream) Read(p []byte) (int, error) {
 
 func (s *usbStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	if s.closed {
+	if s.closed || s.answered {
 		s.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
@@ -371,8 +439,29 @@ func (s *usbStream) Write(p []byte) (int, error) {
 		s.mu.Unlock()
 		return 0, cerr
 	}
+	if req.Code == opReqDevlist {
+		// The device list names the one device this forwarder carries, read
+		// from sysfs. Nothing is bound and nothing reaches the kernel; the
+		// server side of USB/IP closes the connection after the list.
+		dev := exportedUSB{Device: s.info, Interfaces: exportedInterfaces(s.devDir, s.info.BusID, s.info.BConfigurationValue)}
+		s.opResp = buildOpRepDevlist([]exportedUSB{dev})
+		s.answered = true
+		s.signalResp()
+		s.mu.Unlock()
+		return len(p), nil
+	}
 	extra := append([]byte(nil), s.reqbuf[consumed:]...)
+	fdA, conn, err := s.src.prepareImport(s.info.BusID)
+	if err != nil {
+		s.opResp = buildOpRepImport(usbipDevice{}, 1)
+		s.signalResp()
+		s.mu.Unlock()
+		return 0, err
+	}
+	s.fdA, s.conn, s.bound = fdA, conn, s.info.BusID
 	if err := s.src.handoff(s.devDir, s.fdA); err != nil {
+		s.opResp = buildOpRepImport(usbipDevice{}, 1)
+		s.signalResp()
 		s.mu.Unlock()
 		return 0, err
 	}
@@ -384,7 +473,7 @@ func (s *usbStream) Write(p []byte) (int, error) {
 	s.signalResp()
 	s.mu.Unlock()
 	if len(extra) > 0 {
-		if _, werr := s.conn.Write(extra); werr != nil {
+		if _, werr := conn.Write(extra); werr != nil {
 			return 0, werr
 		}
 	}
@@ -399,12 +488,14 @@ func (s *usbStream) Close() error {
 			syscall.Close(s.fdA)
 			s.fdA = -1
 		}
+		conn := s.conn
+		bound := s.bound
 		s.signalResp()
 		s.mu.Unlock()
-		if s.conn != nil {
-			_ = s.conn.Close()
+		if conn != nil {
+			_ = conn.Close()
 		}
-		s.src.streamClosed(s.info.BusID)
+		s.src.streamClosed(bound)
 	})
 	return nil
 }

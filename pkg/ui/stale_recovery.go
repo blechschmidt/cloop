@@ -333,6 +333,8 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// takes, including one adopted from another hub member, whose watcher —
 	// and whose session — were on the member that dispatched it.
 	closeRunEgress(handleID, "the run ended")
+	// And its forwarded devices (Task 20430), for the same reason.
+	closeRunForwards(handleID, "the run ended")
 	// First: a run on an executor that does not share this filesystem kept
 	// its outcomes in its own copy of the project, and everything below reads
 	// this hub's. Merging it before recovery means a task the run left in

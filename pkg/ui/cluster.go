@@ -635,6 +635,17 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		if err := ev.Decode(&p); err == nil {
 			s.applyAgentInvalidation(p)
 		}
+	case invalidateForwarder:
+		// A forwarder or binding revoked on another member or by the CLI
+		// (Task 20430): cut what this member holds of it, once the database
+		// confirms it.
+		var p forwarderInvalidation
+		if err := ev.Decode(&p); err == nil {
+			go func() {
+				defer recoverGoroutine("forwarder revocation")
+				s.onForwarderInvalidation(p)
+			}()
+		}
 	case invalidateProjects:
 		s.refreshProjectStatuses()
 		s.broadcastProjectsUpdate()

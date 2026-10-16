@@ -597,8 +597,9 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// new build in a control plane an older member still serves, and so is
 	// 0075 (the approval notices outbox and its cursors, Task 20427). 0077
 	// (device forwarders, Task 20429) adds two new tables a newer hub writes
-	// while an older one still serves the same control-plane database.
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74, 75, 77} {
+	// while an older one still serves the same control-plane database, and so
+	// does 0078 (forwarder bindings and their requests, Task 20430).
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74, 75, 77, 78} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

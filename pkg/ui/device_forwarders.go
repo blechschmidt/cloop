@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/deviceforward"
@@ -34,7 +35,15 @@ var (
 	forwarderHubOnce sync.Once
 	forwarderHubInst *deviceforward.Hub
 	forwarderHubErr  error
+	// forwarderHubLive is forwarderHubInst for readers outside the Once:
+	// the dispatch path asks whether this process holds a forwarder's
+	// session without building the hub (Task 20430).
+	forwarderHubLive atomic.Pointer[deviceforward.Hub]
 )
+
+// activeForwarderHub returns the process's forwarder hub if it has been
+// built, without building it.
+func activeForwarderHub() *deviceforward.Hub { return forwarderHubLive.Load() }
 
 // forwarderHub returns the process-wide forwarder hub, building it on first use.
 //
@@ -72,6 +81,10 @@ func (s *Server) forwarderHub() (*deviceforward.Hub, error) {
 			// Executors panel's.
 			OnStatusChange: s.makeForwarderStatusMirror(db),
 			OnConnect:      s.makeForwarderConnectMirror(db),
+			// A revocation recorded where this process could not hear of it —
+			// the CLI, a member that missed the bus — still ends the session
+			// within this (Task 20430).
+			RevocationRecheck: deviceforward.DefaultRevocationRecheck,
 			Logf: func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			},
@@ -82,16 +95,26 @@ func (s *Server) forwarderHub() (*deviceforward.Hub, error) {
 			return
 		}
 		forwarderHubInst = hub
+		forwarderHubLive.Store(hub)
 	})
 	return forwarderHubInst, forwarderHubErr
 }
 
 // makeForwarderStatusMirror keeps device_forwarders.status in step with live
-// connectivity and broadcasts the change to open dashboards.
+// connectivity and broadcasts the change to open dashboards. In a cluster only
+// the member that holds a forwarder's tunnel speaks for it (Task 20430): one a
+// forwarder left a moment after it reconnected elsewhere writes nothing, so it
+// cannot overwrite the new holder's "online".
 func (s *Server) makeForwarderStatusMirror(db *statedb.DB) func(string, string, time.Time) {
 	return func(forwarderID, status string, at time.Time) {
 		if status == "offline" {
-			closeForwarderExposure(forwarderID)
+			// The relays this member ran for the forwarder ended with its
+			// session; close what is left of them now rather than at their
+			// relay's next read.
+			closeForwardsForForwarder(forwarderID, "the forwarder disconnected")
+			if !s.forwarderGoneHere(forwarderID) {
+				return
+			}
 		}
 		if err := db.SetForwarderStatus(forwarderID, status, at); err != nil {
 			fmt.Fprintf(os.Stderr, "ui: record forwarder %s status %s: %v\n", forwarderID, status, err)
@@ -106,6 +129,10 @@ func (s *Server) makeForwarderStatusMirror(db *statedb.DB) func(string, string, 
 // credential row's copy so a list before any dashboard reload shows it.
 func (s *Server) makeForwarderConnectMirror(db *statedb.DB) func(deviceforward.ForwarderRecord, deviceforward.HelloPayload) {
 	return func(rec deviceforward.ForwarderRecord, hello deviceforward.HelloPayload) {
+		// Recorded as held here before anything can ask for its device: a
+		// member dispatching a run looks the holder up in the shared owner
+		// rows (Task 20430).
+		s.recordForwarderHeld(rec, hello)
 		_ = db.TouchForwarder(rec.ForwarderID, time.Now())
 		s.broadcastToAll(wsMessage{Type: "forwarder_status", Data: forwarderStatusPayload(rec.ForwarderID, "online")})
 	}

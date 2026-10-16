@@ -2,9 +2,10 @@
 
 package deviceforward
 
-// Real layer-2 forward over a veth pair: a forwarder captures one end, the hub
-// bridges it to a TAP, and a frame sent on the far end of the veth arrives on
-// the TAP — the same path a cloud sandbox would share an on-prem segment over.
+// Real layer-2 forward over a veth pair: a forwarder captures one end, a
+// consumer bridges the hub's stream to a TAP, and a frame sent on the far end of
+// the veth arrives on the TAP — the same path a cloud sandbox would share an
+// on-prem segment over.
 //
 // Opt-in, because it needs root and creates network interfaces:
 //
@@ -62,9 +63,13 @@ func TestL2ForwardEndToEnd(t *testing.T) {
 	})
 	ids := waitConnected(t, hub, 1)
 
-	bridge, err := hub.AttachL2(ctx, ids[0], "cloopfwdtap")
+	stream, err := hub.OpenDevice(ctx, ids[0], "test")
 	if err != nil {
-		t.Fatalf("AttachL2: %v", err)
+		t.Fatalf("OpenDevice: %v", err)
+	}
+	bridge, err := BridgeTAP(stream, "cloopfwdtap")
+	if err != nil {
+		t.Fatalf("BridgeTAP: %v", err)
 	}
 	defer bridge.Close()
 	run("link", "set", bridge.Name(), "up")
@@ -132,4 +137,35 @@ func netInterfaceByName(name string) (int, error) {
 		return 0, err
 	}
 	return ifi.Index, nil
+}
+
+// TestTAPReadsBlockUntilAFrameArrives is the regression test for a bridge that
+// ended the moment it started: the TAP's descriptor was registered with Go's
+// poller before it was attached to an interface, the poller recorded the
+// unattached descriptor's error, and every read failed "not pollable" (Task
+// 20430). A TAP's read must wait for a frame. Needs root, for the TAP; the TAP
+// is not persistent and goes with the descriptor.
+func TestTAPReadsBlockUntilAFrameArrives(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to create a TAP")
+	}
+	for i := 0; i < 3; i++ {
+		f, name, err := openTAP("")
+		if err != nil {
+			t.Skipf("cannot create a TAP here: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.Read(make([]byte, 2048))
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			f.Close()
+			t.Fatalf("a read on the fresh TAP %s returned at once: %v", name, err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		f.Close()
+		<-done
+	}
 }

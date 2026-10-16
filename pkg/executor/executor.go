@@ -454,6 +454,13 @@ type Spec struct {
 	// from the host: an interface belongs to exactly one network namespace,
 	// so for the life of the workload the executor cannot use it.
 	Interfaces []HostInterface `json:"interfaces,omitempty"`
+	// ForwardedDevices are on-prem devices a device forwarder carries, bound
+	// to this run's project by an operator (Task 20430). Unlike Devices and
+	// Interfaces they do not exist on the executor until its driver attaches
+	// them, so they carry the way to reach the forwarder rather than a host
+	// path; see forwarded.go. json:"-" because that way is a live stream,
+	// which nothing may persist or replay.
+	ForwardedDevices []ForwardedDevice `json:"-"`
 	// EgressScope confines this workload's IP-layer network reach
 	// independently of the other workloads on the same executor.
 	//
@@ -681,6 +688,9 @@ func (s Spec) Validate() error {
 	// /dev/mem has to hold on the re-hydrated spec a driver actually starts
 	// from, not only on the one the broker minted.
 	if err := ValidateDevices(s.Devices); err != nil {
+		return err
+	}
+	if err := ValidateForwardedDevices(s.ForwardedDevices, s.DisableNetwork); err != nil {
 		return err
 	}
 	if err := ValidateInterfaces(s.Interfaces); err != nil {

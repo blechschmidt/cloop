@@ -196,6 +196,13 @@ func (s *Server) approvalNotifySnapshot(context.Context) (approvalnotify.Snapsho
 		return snap, err
 	}
 	snap.Requests, snap.RequestsKnown = reqs, true
+	// Device forwarder binding requests (Task 20430) notify like the grant
+	// requests they are filed beside.
+	if fwd, ferr := db.ListForwarderBindingRequests(""); ferr == nil {
+		for _, q := range fwd {
+			snap.Requests = append(snap.Requests, forwarderRequestAsAccess(db, q))
+		}
+	}
 
 	// Without an enforced policy no token is suspended: nothing is waiting,
 	// and that is known.

@@ -17,7 +17,9 @@ package deviceforward
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -42,10 +44,21 @@ type HubOptions struct {
 	// accepts same-origin and no-Origin (an agent sets no Origin). The caller
 	// passes the hub's own origin policy so the two endpoints judge alike.
 	CheckOrigin func(*http.Request) (bool, string)
+	// RevocationRecheck is how often a live session re-reads its forwarder's
+	// record and ends itself if the credential was revoked meanwhile (Task
+	// 20430). It is the backstop under the immediate cut a revocation makes on
+	// the member holding the session: a revocation recorded by a process that
+	// could not reach this one — the CLI, another hub member — still ends the
+	// session within this interval. Zero means DefaultRevocationRecheck.
+	RevocationRecheck time.Duration
 	// Logf receives operational messages. Now overrides the clock.
 	Logf func(format string, args ...any)
 	Now  func() time.Time
 }
+
+// DefaultRevocationRecheck bounds how long a revoked forwarder's live session
+// can outlast its revocation when nothing told the holding process at once.
+const DefaultRevocationRecheck = 5 * time.Second
 
 func (o HubOptions) now() time.Time {
 	if o.Now != nil {
@@ -97,14 +110,53 @@ func (h *Hub) Connected() []string {
 }
 
 // OpenStream opens a fresh stream to a connected forwarder's device. The
-// caller splices it to a consumer (a loopback connection, a TAP) and closes it
-// when done.
-func (h *Hub) OpenStream(ctx context.Context, forwarderID, purpose string) (*muxChannel, error) {
+// caller splices it to a consumer and closes it when done.
+func (h *Hub) OpenStream(ctx context.Context, forwarderID, purpose string) (io.ReadWriteCloser, error) {
+	ds, err := h.OpenDevice(ctx, forwarderID, purpose)
+	if err != nil {
+		return nil, err
+	}
+	return ds, nil
+}
+
+// DeviceStream is an open stream to a forwarder's device, with what is known
+// about the device: the enrolled descriptor, which is authoritative, and what
+// the forwarder reported opening, which for USB names the bus id a consumer's
+// import must carry.
+type DeviceStream struct {
+	io.ReadWriteCloser
+	ForwarderID string
+	Device      ForwardedDevice
+	Exported    ExportedDevice
+}
+
+// OpenDevice opens a fresh stream to a connected forwarder's device (Task
+// 20430). It is the one way a consumer reaches a forwarded device: the hub
+// hands the stream to an executor agent over the agent's own tunnel, or
+// attaches it in-process for a sandbox on its own host. There is no listener.
+func (h *Hub) OpenDevice(ctx context.Context, forwarderID, purpose string) (*DeviceStream, error) {
 	s, ok := h.Session(forwarderID)
 	if !ok {
 		return nil, ErrForwarderOffline
 	}
-	return s.openStream(ctx, purpose)
+	ch, ack, err := s.openStream(ctx, purpose)
+	if err != nil {
+		return nil, err
+	}
+	ds := &DeviceStream{ReadWriteCloser: ch, ForwarderID: forwarderID, Device: s.rec.Device}
+	if ack.Device != nil {
+		ds.Exported = *ack.Device
+	}
+	ds.Exported.Kind = s.rec.Device.Kind
+	if ds.Exported.Kind == KindUSB && ds.Exported.BusID == "" && s.hello.Resolved != nil {
+		// A forwarder older than the acknowledgement's device field: the bus id
+		// its hello resolved is the one it exports.
+		ds.Exported.BusID = s.hello.Resolved.Port
+	}
+	if ds.Exported.Kind == KindL2 && ds.Exported.Interface == "" {
+		ds.Exported.Interface = s.rec.Device.Interface
+	}
+	return ds, nil
 }
 
 // Resolved returns what a connected forwarder reported its USB identity
@@ -208,6 +260,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.opts.OnStatusChange(rec.ForwarderID, "online", now)
 	}
 
+	go h.watchRevocation(sess)
 	sess.run(r.Context())
 
 	h.deregister(rec.ForwarderID, sess)
@@ -215,6 +268,36 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.opts.OnStatusChange(rec.ForwarderID, "offline", h.opts.now())
 	}
 	h.opts.logf("deviceforward: forwarder %s disconnected", rec.ForwarderID)
+}
+
+// watchRevocation ends a live session whose forwarder record is revoked or
+// gone. The store is the authority; this only reads it.
+func (h *Hub) watchRevocation(s *session) {
+	every := h.opts.RevocationRecheck
+	if every <= 0 {
+		every = DefaultRevocationRecheck
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.Done():
+			return
+		case <-t.C:
+		}
+		rec, err := h.opts.Store.GetForwarder(s.rec.ForwarderID)
+		switch {
+		case err == nil && !rec.Revoked():
+			continue
+		case err != nil && !errors.Is(err, ErrForwarderNotFound):
+			// A storage hiccup is not a revocation; look again next tick.
+			continue
+		}
+		h.opts.logf("deviceforward: forwarder %s was revoked; ending its live session", s.rec.ForwarderID)
+		s.sendBye("credential revoked", false)
+		s.close()
+		return
+	}
 }
 
 // handshake reads the hello and sends the welcome.

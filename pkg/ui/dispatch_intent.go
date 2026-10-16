@@ -182,6 +182,7 @@ func refuseUnrecordedDispatch(ex executor.Executor, handleID string, lease *secr
 		closeSession(controlPlaneDir(), sessionID, statedb.ExecutorSessionFailed)
 	}
 	egress.close("the dispatch could not be recorded")
+	closeRunForwards(handleID, "the dispatch could not be recorded")
 	lease.Close()
 	fmt.Fprintf(os.Stderr, "ui: %v — workload %s on %s was stopped and its credentials taken back\n",
 		cause, handleID, ex.ID())

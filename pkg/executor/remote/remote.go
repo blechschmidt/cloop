@@ -92,6 +92,17 @@ type handleState struct {
 	// answered with "terminate" — see Abandon.
 	abandoned     bool
 	abandonReason string
+	// devices are the forwarded-device channels opened for this workload
+	// (Task 20430), closed — detaching each device on the agent's host — when
+	// the handle closes. Written before the start frame and read-only after.
+	devices []*DeviceStream
+}
+
+// closeDevices ends the workload's forwarded-device channels.
+func (h *handleState) closeDevices(reason string) {
+	for _, d := range h.devices {
+		d.Abort(reason)
+	}
 }
 
 // takeWorkspaceRelease returns the parked workspace release, at most once.
@@ -770,6 +781,16 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		return executor.Handle{}, err
 	}
 
+	// Forwarded devices (Task 20430): refused here, before anything is leased,
+	// when the device cannot attach them into a sandbox — an agent too old for
+	// the device channel, a host-mode executor with no sandbox to give them to,
+	// a device that cannot attach the kind.
+	if len(spec.ForwardedDevices) > 0 {
+		if err := e.canTakeForwardedDevices(sess, executor.ForwardedKinds(spec.ForwardedDevices), sandbox); err != nil {
+			return executor.Handle{}, err
+		}
+	}
+
 	// The image the project names, under the hub's trust policy (Task 20424):
 	// its signature verified here when the policy requires one, because
 	// nothing on the device verifies it, and the dispatch then names the
@@ -996,6 +1017,23 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// Start gate's braces, exactly as above.
 	if len(spec.ProjectSeed) > 0 && SupportsProjectSeed(sess.Version()) {
 		payload.ProjectSeed = spec.ProjectSeed
+	}
+
+	// Forwarded devices are attached on the device before the start frame
+	// that names them (Task 20430): a USB device must have enumerated on the
+	// agent's host before the container given its node is created. Each
+	// channel is spliced to the forwarder's stream at once; dropHandle and the
+	// handle's close end them.
+	if len(spec.ForwardedDevices) > 0 {
+		devs, err := e.openForwardedDevices(ctx, sess, handleID, spec.ForwardedDevices)
+		if err != nil {
+			e.dropHandle(handleID)
+			return executor.Handle{}, err
+		}
+		hs.devices = devs
+		for _, d := range devs {
+			payload.ForwardedDevices = append(payload.ForwardedDevices, d.ID())
+		}
 	}
 
 	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, payload)
@@ -1383,6 +1421,7 @@ func (e *Executor) dropHandle(handleID string) {
 		hs.mu.Unlock()
 		hs.bus.Close()
 		hs.finishWorkspaceRelease()
+		hs.closeDevices("the workload never started")
 	}
 }
 
@@ -1735,6 +1774,10 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 		e.releaseLeases(handleID)
 		// The write-back, if there was one, has run on the device by now.
 		hs.finishWorkspaceRelease()
+		// Forwarded devices go back with the run (Task 20430): the agent
+		// detaches its end too, but this end's relay to the forwarder must
+		// not outlive the workload either.
+		hs.closeDevices("the run ended")
 		// And the durable row: nothing can reattach to a workload the device
 		// has already reported terminal, and a row that outlived its process
 		// would be re-adopted on the next boot, offered by nobody, and then

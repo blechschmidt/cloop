@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/deviceforward"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/install"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
@@ -113,6 +114,14 @@ type Config struct {
 	// active, and whether it could tell. Tests set it so that nothing they run
 	// queries the machine's systemd; nil asks `systemctl is-active`.
 	UnitActive func(unit string) (active, known bool)
+	// Devices attaches forwarded devices on this host (Task 20430). Nil is
+	// the host's own kernel — vhci_hcd for USB, a TAP for L2 — which is what
+	// every caller but a test wants.
+	Devices DeviceAttacher
+	// ContainerDriver builds the driver for a container-mode payload outside
+	// a virtual executor. Nil is the container driver; tests substitute one
+	// that needs no engine, to exercise what the agent hands a sandbox.
+	ContainerDriver func(executor.SandboxSettings) (executor.Executor, error)
 	// Channel is the update channel this device follows (Task 20376), from
 	// the unit's channel drop-in by way of CLOOP_UPDATE_CHANNEL. Empty is
 	// stable. It is reported in the hello, so the hub knows what to offer,
@@ -149,7 +158,12 @@ type Agent struct {
 	// attaches holds the live interactive sessions on this device
 	// (Task 20265). It locks itself.
 	attaches attachTable
-	root     string
+	// devices holds the forwarded devices attached on this host (Task
+	// 20430), and ledger records them for the next process to sweep. Both
+	// lock themselves.
+	devices deviceTable
+	ledger  *deviceforward.Ledger
+	root    string
 
 	// Transport settings resolved once in New and read-only thereafter, so
 	// the reconnect loop never re-derives them and cannot drift mid-life.
@@ -419,6 +433,9 @@ func New(cfg Config) (*Agent, error) {
 	a.root = root
 	a.cfg.WorkDirRoot = root
 	a.clearBranchIncoming()
+	// Undo what a previous agent process left attached — a vhci port, a TAP —
+	// before this one attaches anything (Task 20430).
+	a.openDeviceLedger()
 	return a, nil
 }
 
@@ -483,6 +500,12 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 		opts.ProbeOCIRuntimes = probeOCIRuntimes
 	}
 	caps := Detect(opts)
+	// Whether forwarded devices can be attached here (Task 20430): a probe of
+	// the kernel and this process's privileges, so only an agent with host
+	// probes — or a configured attacher — claims it.
+	if a.cfg.Devices != nil || a.cfg.HostProbes {
+		caps.ForwardedUSB, caps.ForwardedUSBIssue, caps.ForwardedL2, caps.ForwardedL2Issue = a.deviceAttacher().Support()
+	}
 	// The channel is configuration rather than a probe, so it is reported
 	// always; whether the device can carry out an upgrade is a probe of the
 	// install around it, and only an agent with host probes asks (Task 20376).

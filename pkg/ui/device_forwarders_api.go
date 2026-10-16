@@ -1,18 +1,19 @@
 // Device forwarder REST API (Task 20429): list the forwarders this hub knows,
-// mint enrollment tokens, revoke, and expose a connected forwarder's device
-// for consumption. RBAC-gated exactly like the executor fleet routes —
-// executor.read to look, executor.manage to change — because a forwarder is
-// part of the same fleet-administration surface even though it is not an
-// executor.
+// mint enrollment tokens, revoke, and probe a connected forwarder's device —
+// and, since Task 20430, bind a forwarder to a project and list and decide its
+// binding requests (forwarder_bindings.go). RBAC-gated exactly like the
+// executor fleet routes — executor.read to look, executor.manage to change —
+// because a forwarder is part of the same fleet-administration surface even
+// though it is not an executor.
 
 package ui
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
@@ -31,6 +32,12 @@ func (s *Server) forwarderRoutes() []routeSpec {
 		{Pattern: "POST /api/forwarders/enroll", Handler: s.handleForwarderEnroll, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/forwarders/{id}", Handler: s.handleForwarderDelete, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
 		{Pattern: "POST /api/forwarders/{id}/expose", Handler: s.handleForwarderExpose, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
+		// Bindings (Task 20430): which projects' runs get a forwarder's device.
+		{Pattern: "GET /api/forwarders/bindings", Handler: s.handleForwarderBindingsList, Perm: authz.PermExecutorRead, Scope: scopeGlobal},
+		{Pattern: "POST /api/forwarders/{id}/bindings", Handler: s.handleForwarderBind, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/forwarders/bindings/{bid}", Handler: s.handleForwarderUnbind, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
+		{Pattern: "GET /api/forwarders/requests", Handler: s.handleForwarderRequestsList, Perm: authz.PermSecretRequest, Scope: scopeGlobal},
+		{Pattern: "GET /api/projects/{idx}/forwarders", Handler: s.handleProjectForwarders, Perm: authz.PermExecutorRead, Scope: scopeProjectIdx},
 	}
 }
 
@@ -44,11 +51,17 @@ type forwarderView struct {
 	Owner     string                        `json:"owner,omitempty"`
 	Status    string                        `json:"status"`
 	Connected bool                          `json:"connected"`
-	LastSeen  string                        `json:"last_seen,omitempty"`
-	Revoked   bool                          `json:"revoked"`
-	Available bool                          `json:"available"`
-	Detail    string                        `json:"detail,omitempty"`
-	Resolved  *executor.USBDevice           `json:"resolved,omitempty"`
+	// ConnectedVia names the hub member holding the forwarder's tunnel when
+	// that is another member (Task 20430): connectivity is read from the
+	// cluster's shared owner rows, not from this member's own sessions.
+	ConnectedVia string `json:"connected_via,omitempty"`
+	// Bindings counts the bindings in force.
+	Bindings  int                 `json:"bindings"`
+	LastSeen  string              `json:"last_seen,omitempty"`
+	Revoked   bool                `json:"revoked"`
+	Available bool                `json:"available"`
+	Detail    string              `json:"detail,omitempty"`
+	Resolved  *executor.USBDevice `json:"resolved,omitempty"`
 }
 
 func (s *Server) handleForwardersList(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +106,17 @@ func (s *Server) handleForwardersList(w http.ResponseWriter, r *http.Request) {
 				v.Detail = hp.Detail
 				v.Resolved = hp.Resolved
 			}
+		} else if member, meta, held := s.forwarderPeerView(row.ForwarderID); held {
+			v.Connected, v.ConnectedVia = true, member
+			v.Status = "online"
+			v.Available, v.Detail, v.Resolved = meta.Available, meta.Detail, meta.Resolved
+		} else if !v.Connected && v.Status == "online" {
+			// The row says online but no live member holds the tunnel: the
+			// member that held it died without saying so.
+			v.Status = "offline"
+		}
+		if bs, err := db.ListForwarderBindings(statedb.ForwarderBindingFilter{ForwarderID: row.ForwarderID, ActiveAt: time.Now()}); err == nil {
+			v.Bindings = len(bs)
 		}
 		out = append(out, v)
 	}
@@ -200,20 +224,44 @@ func (s *Server) handleForwarderDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	closeForwarderExposure(id)
-	if _, err := deviceforward.Revoke(store, id, time.Now()); err != nil {
+	now := time.Now()
+	kind, err := deviceforward.Revoke(store, id, now)
+	if err != nil {
 		jsonErr(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if hub, herr := s.forwarderHub(); herr == nil {
-		hub.DropSession(id, "credential revoked")
+	actor := s.auditActor(r)
+	s.auditForwarderAction(r, auditaction.ActionForwarderRevoke, id, map[string]any{"kind": kind})
+	// A revoked forwarder's bindings go with it (Task 20430), each audited, and
+	// its live session and every run's device are cut on every member at once
+	// — not only on this one, which may not hold the tunnel.
+	fwdID := id
+	if kind == "enrollment+forwarder" || kind == "enrollment" {
+		if rec, gerr := store.GetEnrollment(id); gerr == nil && rec.RedeemedAgentID != "" {
+			fwdID = rec.RedeemedAgentID
+		}
 	}
-	s.auditForwarderAction(r, auditaction.ActionForwarderRevoke, id, map[string]any{"kind": "forwarder"})
+	if bids, berr := db.RevokeForwarderBindingsOf(fwdID, actor, "the forwarder was revoked", now); berr == nil {
+		for _, bid := range bids {
+			statedb.AuditForwarderLifecycle(db.AsControlPlane(), statedb.ForwarderAuditInput{
+				Action: auditaction.ActionForwarderUnbind, ForwarderID: fwdID, Actor: actor,
+				Detail: map[string]any{"binding_id": bid, "reason": "the forwarder was revoked"},
+			})
+		}
+	}
+	s.announceForwarderRevocation(forwarderInvalidation{ForwarderID: fwdID, Reason: "the forwarder was revoked"})
+	s.broadcastForwarderBindings(fwdID)
 	writeJSONStatus(w, http.StatusOK, map[string]any{"revoked": id})
 }
 
-// handleForwarderExpose opens a loopback consumption endpoint for a connected
-// forwarder's device, so an operator — or an executor host — can attach it.
+// handleForwarderExpose probes a forwarder's device through the hub (Task
+// 20430). It opens a stream to the device — on the hub member holding the
+// forwarder's tunnel, which a request reaching any other member is forwarded
+// to — and, for USB, reads the device list the forwarder exports through it.
+// The device is handed to nothing: an import happens only for a run whose
+// project holds a binding, on the executor that runs its sandbox. (Until Task
+// 20430 this opened a loopback import endpoint on the hub, which any process
+// on the hub host could connect to; that endpoint is gone.)
 func (s *Server) handleForwarderExpose(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -223,9 +271,7 @@ func (s *Server) handleForwarderExpose(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "forwarder id is required", http.StatusBadRequest)
 		return
 	}
-	hub, err := s.forwarderHub()
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+	if s.routeToOwner(w, r, ownerForwarder, id) {
 		return
 	}
 	db, err := s.controlPlaneDB()
@@ -240,41 +286,42 @@ func (s *Server) handleForwarderExpose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dev := unmarshalForwarderDevice(row.DeviceJSON)
-
-	switch dev.Kind {
-	case deviceforward.KindUSB:
-		ep, err := exposeForwarderUSB(hub, id)
-		if err != nil {
-			jsonErr(w, exposeErrorMessage(err), http.StatusConflict)
+	hub, err := s.forwarderHub()
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	result := map[string]any{"kind": string(dev.Kind), "device": dev.Describe(), "member": s.hubInstanceID()}
+	ds, err := hub.OpenDevice(ctx, id, "probe")
+	if err != nil {
+		result["reachable"] = false
+		result["error"] = exposeErrorMessage(err)
+		s.auditForwarderAction(r, auditaction.ActionForwarderExpose, id, map[string]any{
+			"device": dev.Describe(), "reachable": false, "member": s.hubInstanceID(),
+		})
+		writeJSONStatus(w, http.StatusConflict, result)
+		return
+	}
+	if dev.Kind == deviceforward.KindUSB {
+		probe, perr := deviceforward.ProbeUSB(ctx, ds)
+		if perr != nil {
+			result["reachable"] = false
+			result["error"] = perr.Error()
+			writeJSONStatus(w, http.StatusConflict, result)
 			return
 		}
-		busid := "<busid>"
-		if hp := hub.Resolved(id); hp != nil && hp.Resolved != nil {
-			busid = hp.Resolved.Port
-		}
-		s.auditForwarderAction(r, auditaction.ActionForwarderExpose, id, map[string]any{
-			"device": dev.Describe(), "port": ep.Port(),
-		})
-		writeJSONStatus(w, http.StatusOK, map[string]any{
-			"kind":    "usb",
-			"port":    ep.Port(),
-			"busid":   busid,
-			"command": fmt.Sprintf("usbip --tcp-port %d attach -r 127.0.0.1 -b %s", ep.Port(), busid),
-			"note":    "Run the command on the host that should import the device; it binds loopback only.",
-		})
-	case deviceforward.KindL2:
-		// A layer-2 forward is consumed as a TAP, which needs the host's
-		// CAP_NET_ADMIN; opening one from the dashboard process is only
-		// possible where the hub runs privileged. Report how it is consumed
-		// rather than attempting it unconditionally.
-		s.auditForwarderAction(r, auditaction.ActionForwarderExpose, id, map[string]any{"device": dev.Describe()})
-		writeJSONStatus(w, http.StatusOK, map[string]any{
-			"kind": "l2",
-			"note": "This interface is consumed as a TAP on the executor host; bind the project to that executor and grant the interface. A TAP cannot be opened from the dashboard process.",
-		})
-	default:
-		jsonErr(w, "unknown device kind", http.StatusBadRequest)
+		result["exported"] = probe
+	} else {
+		_ = ds.Close()
+		result["exported"] = map[string]any{"interface": ds.Exported.Interface}
 	}
+	result["reachable"] = true
+	s.auditForwarderAction(r, auditaction.ActionForwarderExpose, id, map[string]any{
+		"device": dev.Describe(), "reachable": true, "member": s.hubInstanceID(),
+	})
+	writeJSONStatus(w, http.StatusOK, result)
 }
 
 // forwarderConnectURL is the forwarder dial URL for this request's host.
@@ -304,46 +351,12 @@ func unmarshalForwarderDevice(s string) deviceforward.ForwardedDevice {
 	return d
 }
 
-// --- exposure lifecycle ---------------------------------------------------
-
-// forwarderExposures tracks the loopback import endpoints opened for connected
-// USB forwarders, so a second expose reuses the first and a disconnect closes
-// it. Package-level because the forwarder hub is a process-wide singleton.
-var (
-	forwarderExposuresMu sync.Mutex
-	forwarderExposures   = map[string]*deviceforward.ImportEndpoint{}
-)
-
-func exposeForwarderUSB(hub *deviceforward.Hub, id string) (*deviceforward.ImportEndpoint, error) {
-	forwarderExposuresMu.Lock()
-	defer forwarderExposuresMu.Unlock()
-	if ep, ok := forwarderExposures[id]; ok {
-		return ep, nil
-	}
-	ep, err := hub.ListenUSB(id)
-	if err != nil {
-		return nil, err
-	}
-	forwarderExposures[id] = ep
-	return ep, nil
-}
-
-func closeForwarderExposure(id string) {
-	forwarderExposuresMu.Lock()
-	ep := forwarderExposures[id]
-	delete(forwarderExposures, id)
-	forwarderExposuresMu.Unlock()
-	if ep != nil {
-		_ = ep.Close()
-	}
-}
-
 func exposeErrorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	if err == deviceforward.ErrForwarderOffline {
-		return "the forwarder is offline; it must be connected before its device can be exposed"
+	if errors.Is(err, deviceforward.ErrForwarderOffline) {
+		return "the forwarder is offline; it must be connected before its device can be reached"
 	}
 	return err.Error()
 }

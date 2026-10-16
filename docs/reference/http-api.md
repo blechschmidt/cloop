@@ -93,15 +93,15 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-290 endpoints, by the permission each one requires:
+295 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 60 |
 | `audit.read` | 5 |
 | `config.write` | 15 |
-| `executor.manage` | 31 |
-| `executor.read` | 4 |
+| `executor.manage` | 33 |
+| `executor.read` | 6 |
 | `project.read` | 54 |
 | `project.share` | 3 |
 | `project.write` | 12 |
@@ -110,7 +110,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
 | `secret.own` | 14 |
-| `secret.request` | 4 |
+| `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
 | `task.mutate` | 28 |
@@ -215,8 +215,12 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/fleet/autoupdate` | `executor.read` | global |
 | PUT | `/api/fleet/autoupdate` | `executor.manage` | global |
 | GET | `/api/forwarders` | `executor.read` | global |
+| GET | `/api/forwarders/bindings` | `executor.read` | global |
+| DELETE | `/api/forwarders/bindings/{bid}` | `executor.manage` | global |
 | POST | `/api/forwarders/enroll` | `executor.manage` | global |
+| GET | `/api/forwarders/requests` | `secret.request` | global |
 | DELETE | `/api/forwarders/{id}` | `executor.manage` | global |
+| POST | `/api/forwarders/{id}/bindings` | `executor.manage` | global |
 | POST | `/api/forwarders/{id}/expose` | `executor.manage` | global |
 | POST | `/api/github-app/installations` | `secret.grant` | global |
 | GET | `/api/glasses/dictate` | `project.read` | project |
@@ -275,6 +279,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/projects/{idx}/features/{slug}` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/features/{slug}/pr` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/features/{slug}/pr/refresh` | `project.write` | project-index |
+| GET | `/api/projects/{idx}/forwarders` | `executor.read` | project-index |
 | GET | `/api/projects/{idx}/harness-credential` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/harness-credential` | `secret.own` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |

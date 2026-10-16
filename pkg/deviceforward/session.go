@@ -132,16 +132,17 @@ func (s *session) deliverAck(channel uint32, ack OpenAckPayload) {
 	}
 }
 
-// openStream asks the forwarder to open its device and returns a stream to it.
-func (s *session) openStream(ctx context.Context, purpose string) (*muxChannel, error) {
+// openStream asks the forwarder to open its device and returns a stream to it,
+// with the forwarder's acknowledgement (which describes what it opened).
+func (s *session) openStream(ctx context.Context, purpose string) (*muxChannel, OpenAckPayload, error) {
 	select {
 	case <-s.done:
-		return nil, ErrForwarderOffline
+		return nil, OpenAckPayload{}, ErrForwarderOffline
 	default:
 	}
 	ch, ok := s.mux.allocate()
 	if !ok {
-		return nil, ErrForwarderOffline
+		return nil, OpenAckPayload{}, ErrForwarderOffline
 	}
 	ackCh := make(chan OpenAckPayload, 1)
 	s.mu.Lock()
@@ -158,34 +159,36 @@ func (s *session) openStream(ctx context.Context, purpose string) (*muxChannel, 
 	if err != nil {
 		s.failOpen(ch.ID())
 		_ = ch.Close()
-		return nil, err
+		return nil, OpenAckPayload{}, err
 	}
 
+	timer := time.NewTimer(openTimeout)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		s.failOpen(ch.ID())
 		_ = ch.Close()
-		return nil, ctx.Err()
-	case <-time.After(openTimeout):
+		return nil, OpenAckPayload{}, ctx.Err()
+	case <-timer.C:
 		s.failOpen(ch.ID())
 		_ = ch.Close()
-		return nil, ErrChannelRefused
+		return nil, OpenAckPayload{}, ErrChannelRefused
 	case <-s.done:
 		_ = ch.Close()
-		return nil, ErrForwarderOffline
+		return nil, OpenAckPayload{}, ErrForwarderOffline
 	case ack, ok := <-ackCh:
 		if !ok {
 			_ = ch.Close()
-			return nil, ErrForwarderOffline
+			return nil, OpenAckPayload{}, ErrForwarderOffline
 		}
 		if !ack.OK {
 			_ = ch.Close()
 			if ack.Error != "" {
-				return nil, wrapRefused(ack.Error)
+				return nil, ack, wrapRefused(ack.Error)
 			}
-			return nil, ErrChannelRefused
+			return nil, ack, ErrChannelRefused
 		}
-		return ch, nil
+		return ch, ack, nil
 	}
 }
 

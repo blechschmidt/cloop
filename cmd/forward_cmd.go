@@ -22,6 +22,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/deviceforward"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/forwarderstore"
@@ -239,15 +240,19 @@ is stored. Revoke a leak with ` + "`cloop forward revoke <id>`" + `.`,
 		defer db.Close()
 
 		encoded, rec, err := deviceforward.MintBundle(store, deviceforward.MintOptions{
-			Name:   name,
-			Device: dev,
-			TTL:    ttl,
-			Server: server,
-			Pin:    pin,
+			Name:      name,
+			Device:    dev,
+			TTL:       ttl,
+			Server:    server,
+			Pin:       pin,
+			CreatedBy: operatorActor(),
 		})
 		if err != nil {
 			return err
 		}
+		auditForwarderCLI(db, auditaction.ActionForwarderEnroll, rec.ID, map[string]any{
+			"name": rec.Name, "device": dev.Describe(), "expires_at": rec.ExpiresAt.UTC().Format(time.RFC3339),
+		})
 
 		header := color.New(color.FgCyan, color.Bold)
 		header.Printf("Device forwarder enrollment token minted\n\n")
@@ -273,11 +278,35 @@ var forwardRevokeCmd = &cobra.Command{
 			return err
 		}
 		defer db.Close()
-		kind, err := deviceforward.Revoke(store, args[0], time.Now())
+		now := time.Now()
+		kind, err := deviceforward.Revoke(store, args[0], now)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Revoked %s %q.\n", kind, args[0])
+		auditForwarderCLI(db, auditaction.ActionForwarderRevoke, args[0], map[string]any{"kind": kind})
+		// The forwarder's bindings go with it (Task 20430), and the running
+		// hubs cut its live session and detach its device from every run.
+		fwdID := args[0]
+		if rec, gerr := store.GetEnrollment(args[0]); gerr == nil && rec.RedeemedAgentID != "" {
+			fwdID = rec.RedeemedAgentID
+		}
+		if kind == "enrollment" {
+			return nil
+		}
+		bids, berr := db.RevokeForwarderBindingsOf(fwdID, operatorActor(), "the forwarder was revoked", now)
+		for _, bid := range bids {
+			auditForwarderCLI(db, auditaction.ActionForwarderUnbind, fwdID, map[string]any{
+				"binding_id": bid, "reason": "the forwarder was revoked",
+			})
+		}
+		if len(bids) > 0 {
+			fmt.Printf("Revoked its %d binding(s): %s\n", len(bids), strings.Join(bids, ", "))
+		}
+		if berr != nil {
+			return fmt.Errorf("revoke the forwarder's bindings: %w", berr)
+		}
+		announceForwarderRevocation(db, fwdID, "", "the forwarder was revoked")
 		return nil
 	},
 }

@@ -366,14 +366,20 @@ func (a *Agent) closeAttachSessions() {
 }
 
 // sendAttach writes one attach frame, dropping it if the link is gone.
+//
+// Stamped at the session's negotiated version, like every other frame this
+// agent sends (Task 20430). It used to stamp this build's maximum, so an agent
+// newer than its hub had its first attach_data refused as an out-of-range
+// envelope — which ends the whole session, every workload's control traffic
+// with it.
 func (a *Agent) sendAttach(sess *deviceSession, handle string, t remote.FrameType, payload any) {
-	frame, err := remote.NewFrame(t, "", handle, payload)
+	frame, err := sess.frame(t, "", handle, payload)
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), attachSendTimeout)
 	defer cancel()
-	_ = sess.conn.WriteFrame(ctx, frame)
+	_ = sess.write(ctx, frame)
 }
 
 // attachEnv is the environment for a session command on the device.

@@ -47,10 +47,16 @@ type TAPBridge struct{}
 // Name returns the empty string off Linux.
 func (b *TAPBridge) Name() string { return "" }
 
+// Done is never closed off Linux; no bridge exists.
+func (b *TAPBridge) Done() <-chan struct{} { return nil }
+
 // Close is a no-op off Linux.
 func (b *TAPBridge) Close() error { return nil }
 
-// AttachL2 reports that L2 forwarding needs Linux.
-func (h *Hub) AttachL2(ctx context.Context, forwarderID, tapName string) (*TAPBridge, error) {
+// BridgeTAP reports that L2 forwarding needs Linux.
+func BridgeTAP(stream io.ReadWriteCloser, tapName string) (*TAPBridge, error) {
+	if stream != nil {
+		_ = stream.Close()
+	}
 	return nil, fmt.Errorf("deviceforward: layer-2 forwarding needs Linux (TAP), not %s", runtime.GOOS)
 }

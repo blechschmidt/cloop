@@ -135,9 +135,19 @@ func TestEnrollConnectAndStream(t *testing.T) {
 	ids := waitConnected(t, hub, 1)
 	fwdID := ids[0]
 
-	// The credential was persisted on enrollment.
-	if _, ok, err := LoadCredential(credPath); err != nil || !ok {
-		t.Fatalf("credential not saved: ok=%v err=%v", ok, err)
+	// The credential was persisted on enrollment. The hub registers the
+	// session as soon as it has sent the welcome, so the forwarder may still be
+	// writing the credential the welcome carried: wait for it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, ok, err := LoadCredential(credPath)
+		if err == nil && ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("credential not saved: ok=%v err=%v", ok, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Open a stream and exercise the data path both ways.

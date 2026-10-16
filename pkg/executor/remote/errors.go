@@ -114,6 +114,15 @@ var (
 	// proxy exists to rule out.
 	ErrGitCAUnsupported = errors.New("remote: agent cannot trust the hub's git proxy certificate")
 
+	// ErrForwardedDevicesUnsupported: the run's project holds a device
+	// forwarder binding (Task 20430), and this executor cannot attach the
+	// device into a sandbox — its agent predates the device channel
+	// (MinForwardedDeviceVersion), it runs payloads on its host with no
+	// sandbox to give the device to, or the device cannot attach the kind.
+	// Refused rather than dispatched: an older agent would ignore the channel
+	// list and start the sandbox without the hardware the run was promised.
+	ErrForwardedDevicesUnsupported = errors.New("remote: agent cannot attach a forwarded device")
+
 	// ErrSandboxModeUnavailable: the control plane could not read this
 	// executor's configured sandbox mode, so it does not know whether the
 	// payload is supposed to be contained. Dispatch fails rather than

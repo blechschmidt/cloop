@@ -66,6 +66,10 @@ func (s *Server) clusterInternalBypass(next http.Handler) http.Handler {
 			s.handleClusterRevokeLease(w, r)
 		case r.URL.Path == clusterAPIAgentOp && r.Method == http.MethodPost:
 			s.handleClusterAgentOp(w, r)
+		case r.URL.Path == clusterAPIForwarderStream && r.Method == http.MethodGet:
+			// A device stream for a run another member dispatches (Task
+			// 20430); the forwarder's tunnel is held here.
+			s.handleClusterForwarderStream(w, r)
 		case r.URL.Path == clusterAPIOffboardClaude && r.Method == http.MethodPost:
 			s.handleClusterOffboardClaude(w, r)
 		case r.URL.Path == clusterAPIGrantRevoked && r.Method == http.MethodPost:

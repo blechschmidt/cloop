@@ -1429,13 +1429,21 @@
     // Executors tab. The list lives in the eager DOM (#fwdList) like #execList,
     // so its card buttons dispatch through bundled ACTIONS (fwdAct); the dialogs
     // are this deferred panel's and route through data-act.
+    //
+    // Each card lists the forwarder's bindings (Task 20430): the projects whose
+    // runs get its device in their sandbox, until when, and on which virtual
+    // executor. Binding takes executor.manage; anyone else asks from the
+    // project's Overview, through the grant-request flow.
     let fwdData = null;
+    let fwdBindings = [];
+    let fwdBindTarget = null;
 
     function loadForwarders() {
       if (!canGlobal('executor.read')) return Promise.resolve(null);
       const list = document.getElementById('fwdList');
-      return api('/api/forwarders').then(d => {
+      return Promise.all([api('/api/forwarders'), api('/api/forwarders/bindings').catch(() => ({bindings: []}))]).then(([d, b]) => {
         fwdData = d || {};
+        fwdBindings = (b && b.bindings) || [];
         _renderForwarders(fwdData);
         return fwdData;
       }).catch(err => {
@@ -1446,6 +1454,30 @@
 
     function _fwdAt(idx) {
       return (fwdData && fwdData.forwarders && fwdData.forwarders[idx]) || null;
+    }
+
+    // _fwdUntil says how long a binding has left.
+    function _fwdUntil(iso) {
+      const ms = Date.parse(iso) - Date.now();
+      if (!(ms > 0)) return 'lapsing';
+      if (ms < 3600000) return 'for ' + Math.max(1, Math.round(ms / 60000)) + 'm';
+      if (ms < 172800000) return 'for ' + Math.round(ms / 3600000) + 'h';
+      return 'for ' + Math.round(ms / 86400000) + 'd';
+    }
+
+    function _fwdBindingRows(f, manage) {
+      const rows = [];
+      fwdBindings.forEach((b, bi) => {
+        if (b.forwarder_id !== f.id) return;
+        const where = esc(b.project_name || b.project) + (b.virtual_executor ? ' <span style="color:var(--muted)">on ' + esc(b.virtual_executor) + '</span>' : '');
+        const until = b.expires_at ? ' <span style="color:var(--muted)">' + esc(_fwdUntil(b.expires_at)) + '</span>' : '';
+        const used = (b.in_use && b.in_use.length) ? ' <span class="badge" style="font-size:10.5px">in use</span>' : '';
+        const unbind = manage ? '<button class="btn" style="padding:2px 8px;font-size:11px;margin-left:auto" data-action="forwarderUnbind" data-arg="' + bi + '">Unbind</button>' : '';
+        rows.push('<div style="display:flex;align-items:center;gap:6px;font-size:11.5px;margin-top:4px;min-width:0">'
+          + '<span style="min-width:0;overflow-wrap:anywhere">&rarr; ' + where + until + used + '</span>' + unbind + '</div>');
+      });
+      if (!rows.length) return '<div style="font-size:11.5px;color:var(--muted);margin-top:6px">Bound to no project.</div>';
+      return '<div style="margin-top:6px">' + rows.join('') + '</div>';
     }
 
     function _renderForwarders(d) {
@@ -1460,7 +1492,8 @@
       const manage = canGlobal('executor.manage');
       list.innerHTML = fwds.map((f, i) => {
         const dot = f.connected ? 'online' : (f.revoked ? 'unknown' : 'offline');
-        const status = f.revoked ? 'revoked' : (f.connected ? 'connected' : 'offline');
+        let status = f.revoked ? 'revoked' : (f.connected ? 'connected' : 'offline');
+        if (f.connected && f.connected_via) status += ' via ' + f.connected_via;
         let detail = '';
         if (f.connected && !f.available && f.detail) {
           detail = '<div style="font-size:11.5px;color:var(--red);margin-top:4px">' + esc(f.detail) + '</div>';
@@ -1470,18 +1503,20 @@
           resolved = '<div style="font-size:11px;color:var(--muted);margin-top:2px">resolved: '
             + esc(f.resolved.node) + '</div>';
         }
-        const expose = (manage && f.connected && f.kind === 'usb' && !f.revoked)
-          ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderExpose" data-arg="' + i + '">Expose</button>' : '';
+        const test = (manage && f.connected && !f.revoked)
+          ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderExpose" data-arg="' + i + '">Test</button>' : '';
+        const bind = (manage && !f.revoked)
+          ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderBind" data-arg="' + i + '">Bind…</button>' : '';
         const revoke = (manage && !f.revoked)
           ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderRevoke" data-arg="' + i + '">Revoke</button>' : '';
         return '<div class="exec-card">'
-          + '<div style="display:flex;align-items:center;gap:8px">'
+          + '<div style="display:flex;align-items:center;gap:8px;min-width:0">'
           + '<span class="exec-dot ' + dot + '"></span>'
-          + '<strong style="font-size:13px">' + esc(f.name || f.id) + '</strong>'
-          + '<span style="font-size:11px;color:var(--muted);margin-left:auto">' + esc(status) + '</span></div>'
-          + '<div style="font-size:12px;color:var(--muted);margin-top:6px">' + esc(f.device_str || f.kind) + '</div>'
-          + resolved + detail
-          + '<div style="display:flex;gap:6px;margin-top:10px">' + expose + revoke + '</div>'
+          + '<strong style="font-size:13px;min-width:0;overflow-wrap:anywhere">' + esc(f.name || f.id) + '</strong>'
+          + '<span style="font-size:11px;color:var(--muted);margin-left:auto;text-align:right">' + esc(status) + '</span></div>'
+          + '<div style="font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere">' + esc(f.device_str || f.kind) + '</div>'
+          + resolved + detail + (f.revoked ? '' : _fwdBindingRows(f, manage))
+          + '<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">' + test + bind + revoke + '</div>'
           + '</div>';
       }).join('');
     }
@@ -1570,25 +1605,93 @@
         .catch(() => toast('Failed to revoke forwarder', 'err'));
     }
 
+    // forwarderExpose probes the device through the hub (Task 20430): a stream
+    // to the forwarder and, for USB, its device list. Nothing is attached.
     function forwarderExpose(idx) {
       const f = _fwdAt(idx);
       if (!f) return;
+      const box = document.getElementById('fwdExposeResult');
       api('/api/forwarders/' + encodeURIComponent(f.id) + '/expose', {}).then(d => {
-        if (!d || d.error) { toast((d && d.error) || 'Failed to expose device', 'err'); return; }
-        const box = document.getElementById('fwdExposeResult');
         if (!box) return;
-        const parts = ['<div class="exec-banner" style="margin-top:4px"><div>'];
-        parts.push('<strong style="font-size:12.5px">' + esc(f.name || f.id) + '</strong>');
-        if (d.command) parts.push('<div class="exec-token" style="margin-top:6px">' + esc(d.command) + '</div>');
-        if (d.note) parts.push('<div style="font-size:11.5px;color:var(--muted);margin-top:6px">' + esc(d.note) + '</div>');
-        parts.push('</div></div>');
-        box.innerHTML = parts.join('');
-      }).catch(() => toast('Failed to expose device', 'err'));
+        const ok = d && d.reachable;
+        const ex = (d && d.exported) || {};
+        const what = f.kind === 'usb'
+          ? (ex.vendor_id ? 'exports ' + ex.vendor_id + ':' + ex.product_id + ' as ' + ex.bus_id + ' (' + (ex.interfaces || 0) + ' interface(s))' : '')
+          : (ex.interface ? 'opened interface ' + ex.interface : '');
+        box.innerHTML = '<div class="exec-banner" style="margin-top:4px"><div style="min-width:0">'
+          + '<strong style="font-size:12.5px">' + esc(f.name || f.id) + '</strong> '
+          + (ok ? '<span style="color:var(--green)">reachable</span>' : '<span style="color:var(--red)">not reachable</span>')
+          + '<div style="font-size:11.5px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere">'
+          + esc(ok ? what : ((d && d.error) || 'the probe failed')) + '</div></div></div>';
+      }).catch(err => toast((err && err.message) || 'Failed to reach the device', 'err'));
+    }
+
+    function forwarderBind(idx) {
+      const f = _fwdAt(idx);
+      if (!f) return;
+      fwdBindTarget = f;
+      const title = document.getElementById('fwdBindTitle');
+      if (title) title.textContent = 'Bind ' + (f.name || f.id);
+      const err = document.getElementById('fwdBindError');
+      if (err) err.style.display = 'none';
+      const l2 = document.getElementById('fwdBindL2');
+      if (l2) l2.style.display = f.kind === 'l2' ? 'block' : 'none';
+      ['fwdBindVX', 'fwdBindTarget', 'fwdBindAddress', 'fwdBindNote'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.value = '';
+      });
+      const ttl = document.getElementById('fwdBindTTL'); if (ttl) ttl.value = '24';
+      const sel = document.getElementById('fwdBindProject');
+      api('/api/projects').then(d => {
+        if (!sel) return;
+        const ps = ((d && d.projects) || []).filter(p => !p.parent);
+        sel.innerHTML = ps.map(p => '<option value="' + esc(p.path) + '">' + esc(p.name || p.path) + '</option>').join('');
+      }).catch(() => {});
+      openOverlay('forwarder-bind-overlay', {dismiss: closeForwarderBind, focus: sel});
+    }
+
+    function closeForwarderBind() {
+      closeOverlay('forwarder-bind-overlay');
+      fwdBindTarget = null;
+    }
+
+    function submitForwarderBind() {
+      const f = fwdBindTarget;
+      if (!f) return;
+      const val = id => ((document.getElementById(id) || {}).value || '').trim();
+      const errEl = document.getElementById('fwdBindError');
+      const body = {project: val('fwdBindProject'), virtual_executor: val('fwdBindVX'), note: val('fwdBindNote')};
+      const hours = parseFloat(val('fwdBindTTL') || '24');
+      if (hours > 0) body.ttl_minutes = Math.round(hours * 60);
+      if (f.kind === 'l2' && (val('fwdBindTarget') || val('fwdBindAddress'))) {
+        body.interface = {target: val('fwdBindTarget'), address: val('fwdBindAddress')};
+      }
+      api('/api/forwarders/' + encodeURIComponent(f.id) + '/bindings', body).then(d => {
+        if (!d || d.error) {
+          if (errEl) { errEl.textContent = (d && d.error) || 'Binding failed'; errEl.style.display = 'block'; }
+          return;
+        }
+        toast('Bound ' + (f.name || f.id), 'ok');
+        closeForwarderBind();
+        loadForwarders();
+      }).catch(e => {
+        if (errEl) { errEl.textContent = (e && e.message) || 'Binding failed'; errEl.style.display = 'block'; }
+      });
+    }
+
+    function forwarderUnbind(bi) {
+      const b = fwdBindings[bi];
+      if (!b) return;
+      if (!confirm('Unbind ' + (b.forwarder_name || b.forwarder_id) + ' from ' + (b.project_name || b.project) +
+          '? A run holding the device has it detached at once.')) return;
+      apiMethod('DELETE', '/api/forwarders/bindings/' + encodeURIComponent(b.id))
+        .then(() => { toast('Unbound', 'ok'); loadForwarders(); })
+        .catch(() => toast('Failed to unbind', 'err'));
     }
 
     return h.mount({
       loadForwarders, openForwarderEnroll, closeForwarderEnroll, onFwdKindChange,
       submitForwarderEnroll, copyForwarderCommand, forwarderRevoke, forwarderExpose,
+      forwarderBind, closeForwarderBind, submitForwarderBind, forwarderUnbind,
       openExecutorDetail, closeExecutorDetail, openExecutorTaskRef, openExecutorSandbox,
       closeExecutorSandbox, onExecSandboxModeChange, saveExecutorSandbox, clearExecutorSandbox,
       openExecutorVirtual, closeExecutorVirtual, refreshExecutorVirtual, evxSync,
@@ -1599,6 +1702,50 @@
       closeEnrollModal, submitEnroll, copyEnrollCommand, copyEnrollInstall, upgradeExecutor,
       editFleetAutoUpdate, revokeExecutor, cordonExecutor, uncordonExecutor, drainExecutor
     }, null, null, `
+      <div id="forwarder-bind-overlay" data-overlay="flex" data-dismiss="closeForwarderBind" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+          <h2 id="fwdBindTitle" style="font-size:15px;font-weight:600;margin-bottom:6px;overflow-wrap:anywhere">Bind forwarder</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+            Every run of the project gets the device in its sandbox while the binding lasts: the hub relays the forwarder to
+            the executor that runs the sandbox, which attaches it there. A run whose forwarder is offline is refused.
+          </p>
+          <div class="form-group">
+            <label class="form-label" for="fwdBindProject">Project</label>
+            <select class="form-input form-select" id="fwdBindProject"></select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="fwdBindVX">Only on virtual executor (optional)</label>
+              <input class="form-input" id="fwdBindVX" placeholder="virtual executor id">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="fwdBindTTL">Lasts (hours)</label>
+              <input class="form-input" id="fwdBindTTL" type="number" min="1" max="2160" value="24">
+            </div>
+          </div>
+          <div id="fwdBindL2" style="display:none">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="fwdBindTarget">Interface in the sandbox</label>
+                <input class="form-input" id="fwdBindTarget" placeholder="fwd0">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="fwdBindAddress">Address (optional CIDR)</label>
+                <input class="form-input" id="fwdBindAddress" placeholder="10.77.0.2/24">
+              </div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="fwdBindNote">Note (optional)</label>
+            <input class="form-input" id="fwdBindNote" maxlength="1024">
+          </div>
+          <div id="fwdBindError" class="form-error" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn" data-act="closeForwarderBind">Cancel</button>
+            <button class="btn primary" id="fwdBindSubmitBtn" data-act="submitForwarderBind">Bind</button>
+          </div>
+        </div>
+      </div>
       <div id="forwarder-enroll-overlay" data-overlay="flex" data-dismiss="closeForwarderEnroll" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
           <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a device forwarder</h2>

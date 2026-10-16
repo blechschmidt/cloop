@@ -387,6 +387,7 @@ func (s *Server) letGoOfLostRun(run dispatchedRun, reason string) {
 		reason = "its executor stopped answering and the run was failed over"
 	}
 	closeRunEgress(run.handleID, reason)
+	closeRunForwards(run.handleID, reason)
 	closeRunLeases(run.ex.ID(), run.handleID)
 	abandonWorkload(run.ex, run.handleID, reason)
 	if run.cancel != nil {
