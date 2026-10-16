@@ -128,6 +128,33 @@ is.
 
 ---
 
+## Cross-cutting: on-prem hardware through a device forwarder
+
+A [device forwarder](../guides/device-forwarders.md) is a minimal process on
+an on-prem machine that carries one USB device or one network segment to the
+hub over an outbound tunnel (Task 20429). A binding gives it to one project's
+runs (Task 20430): at dispatch the hub relays the forwarder's stream to the
+executor that starts the run's sandbox — over the agent's own tunnel to an
+executor agent, or into its own process for a container on its host — and that
+executor attaches the device and gives it to the sandbox alone. The asset is
+the hardware: a hardware security module, a board under test, a seat on a lab
+segment.
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S**poofing | A rogue process enrols as a forwarder, or a forwarder claims to carry another device | Single-use, TTL-bounded enrollment tokens with their own prefixes and tables, so a forwarder credential never authenticates as an executor; only hashes are stored; the device chosen at enrollment is authoritative and the hello's claim is ignored | The enrollment token is a bearer secret in transit to the on-prem machine, as an agent's is |
+| **S**poofing | A compromised hub, or a peer of the forwarder, asks it for a device it was not configured for | The forwarder answers the USB/IP opening itself and refuses any bus id but the one it carries; it never forwards a device that is itself imported over USB/IP (`TestParseUSBIPRequest`, `TestForwarderNeverCarriesAnImportedDevice`) | A compromised hub reaches the one configured device, which is what the forwarder exists to offer |
+| **I**nformation disclosure | Any process on a consuming host reaches the device — before Task 20430 the hub opened an unauthenticated loopback import endpoint any process on the hub host, a host-process run among them, could import from | There is no listener anywhere: the executor that runs the sandbox speaks the USB/IP client handshake itself and hands vhci_hcd one end of a socketpair, or bridges a TAP; the device is attached only for a run of a bound project and given only to its container sandbox — a host-process run, a host-mode agent and a kernel-isolated runtime are refused (`TestForwardedDeviceOnlyReachesASandbox`, `TestHostModeExecutorIsRefusedForwardedDevices`, `TestForwardedDevices`) | While attached, the usbfs node exists on the executor's host, where root can open it; the agent attaching USB runs as root, or with write access to vhci_hcd's attach file |
+| **I**nformation disclosure | A project that holds no binding gets the device | The dispatch reads the bindings in force for the run's project — and, for one narrowed to a virtual executor, only on that executor — and opens nothing otherwise (`TestUnboundProjectGetsNoForwardedDevices`) | — |
+| **I**nformation disclosure | A sandbox given one forwarded USB device reaches the executor host's other USB devices | The sandbox gets the forwarded device's node and no other USB node: the runtime's device cgroup admits reads and writes to that node alone, and with every capability dropped the sandbox cannot make another (`TestForwardedDevices` checks it holds exactly one) | The sandbox's read-only `/sys` lists every USB device on its host — vendor, product, serial number — as any container's does; it can open none of them |
+| **E**levation of privilege | A maintainer binds someone else's hardware to their project | Binding takes `executor.manage` at the global scope, as enrolling does; a project-scoped role does not suffice; a maintainer may only ask through the grant-request flow, and an administrator other than the requester decides (`TestForwarderBindingRoutesDeclareTheirPermissions`, `TestForwarderBindingRequestFlow`) | — |
+| **E**levation of privilege | An executor agent older than the device channel ignores the start's device list and runs the sandbox without — or a host-mode agent with — the hardware | Placement refuses: below protocol v22 through `executor.NeedsProtocol`, naming the upgrade; a host-mode agent and one that reports it cannot attach the kind with the agent's own reason (`TestOldAgentIsRefusedForwardedDevices`, `TestAgentThatCannotAttachIsRefusedTheDevice`) | — |
+| **T**ampering | Revoking a binding or a forwarder leaves the device in a running sandbox | A revocation cuts at once on the member that took it and is announced on the bus to every other — the member holding the forwarder's tunnel drops the session, every member detaches the device from the runs it relays it to; each member also re-checks what it holds every few seconds, and a lapsed TTL detaches the same way (`TestRevokedBindingDetachesTheDeviceMidRun`, `TestBindingRevokedElsewhereDetachesAtTheRecheck`, `TestLapsedBindingDetachesOnceAudited`, `TestRevokedDeviceDetachesMidRun`) | Detach takes milliseconds on the member that revoked and up to a bus poll elsewhere; a member that misses the announcement detaches at its next re-check, seconds later |
+| **T**ampering | A sweep of attachments a crashed process left detaches a device an operator imported by hand | A process records each vhci port and TAP it attaches in its own ledger; a sweep reads only dead processes' ledgers and detaches a port only while it carries the recorded device id (`TestDetachTouchesOnlyWhatThisProcessAttached`, `TestLedgerRecordsAndSweepsOnlyTheDead`) | — |
+| **R**epudiation | Nobody can say which run held the hardware, or who granted it | `forwarder.bind`, `forwarder.unbind`, the request and decision rows, and `forwarder.attach` / `forwarder.detach` with the run's handle and the reason (`TestRevokedBindingDetachesTheDeviceMidRun`) | — |
+| **D**enial of service | A busy or stalled device stream stalls the agent's tunnel, which carries every workload's control traffic | Each device channel has a bounded inbox; a consumer that falls behind ends its channel rather than blocking the shared read loop or buffering without bound (`TestDeviceStreamOverflowEndsTheChannel`) | A device that saturates the uplink slows the other traffic on it; channels are interleaved by frame, not shaped |
+| **I**nformation disclosure | A forwarded network segment bypasses the sandbox's firewall | By design: the segment is a link-layer seat, the binding is the decision to give it, and the interface is moved into the sandbox's own namespace, where its traffic never touches the sandbox bridge's filter | Treat a segment binding as granting whatever that segment can reach |
+
 ## Cross-cutting: the sandbox's network position
 
 The hub's reachability into private networks is on the asset list at the top of

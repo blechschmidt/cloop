@@ -2085,6 +2085,37 @@ and names it; the others were still collected.
 
 ---
 
+## Device forwarders
+
+A device forwarder carries one on-prem USB device or network segment to the hub
+over an outbound tunnel; a binding gives it to one project's runs. See
+[the guide](../guides/device-forwarders.md) for the whole flow. Every command but
+the first acts on the control plane in the current directory.
+
+### `cloop forward`
+
+Run the forwarder on the on-prem machine: `cloop forward --bundle <bundle>` the
+first time, plain `cloop forward` after (the credential is saved `0600` at
+`~/.cloop/forwarder.json`). `--usb vendor:product[:serial]` or `--interface
+<name>` names the device when no bundle does.
+
+### `cloop forward enroll` / `list` / `revoke <id>`
+
+`enroll --name N (--usb V:P[:S] | --interface I)` mints a single-use token and
+prints the `cloop forward --bundle …` command; `list` shows the forwarders;
+`revoke` revokes a token or a forwarder, its bindings with it, and tells the
+running hubs, which cut its live session and detach its device from every run.
+
+### `cloop forward bind <forwarder-id>` / `bindings` / `unbind <binding-id>`
+
+`bind --project DIR [--virtual-executor ID] [--ttl 24h] [--target NAME
+--address CIDR --gateway IP --mtu N] [--note TEXT]` makes the forwarder's device
+available to the project's runs (only on that virtual executor, when given) for
+the TTL — at most 90 days. `bindings [--project DIR] [--all]` lists them;
+`unbind [--reason TEXT]` revokes one and tells the running hubs, which detach the
+device from a run holding it. Each is audited (`forwarder.bind`,
+`forwarder.unbind`).
+
 ## Executor internals
 
 Commands an executor runs on your behalf. They are documented because you will

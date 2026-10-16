@@ -202,6 +202,7 @@ request about it that reaches another member is forwarded there:
 | --- | --- |
 | A run in progress | Stop, attach, reset, voice; a second Start is refused with `409` and the owner's id |
 | An edge agent's connection | Dispatch to the agent, upgrades, virtual executors, lease revocation on cordon, failover redispatch |
+| A device forwarder's connection | The dashboard's probe of its device; a run's device stream, which the member dispatching the run opens over the peer channel (Task 20430) |
 | An OIDC login | The callback — the `state` the IdP echoes names the member that began it |
 | A Claude Code login | Its code submission and cancel |
 | A chat, a suggestion run, an auto-PR | Their follow-up requests |
@@ -236,6 +237,16 @@ database.
   forgotten. A member acts on another process's word only for an identity the
   control plane denies, and a member that does not answer is reported — see
   [offboarding](../security/model.md#offboarding-what-a-departed-identity-keeps).
+- **Device forwarders** (Task 20430). Every member lists a forwarder from the
+  shared records — connected, and through which member, from its owner row —
+  rather than from its own sessions alone. A revoked forwarder or binding, on
+  any member or from `cloop forward revoke|unbind`, is announced on the bus
+  (topic `invalidate`, key `forwarder`): the member holding the forwarder's
+  tunnel drops it at once, and every member detaches the device from the runs
+  it relays it to. Each acts only on what the database confirms, and each
+  re-checks what it holds every few seconds, so a member that missed the
+  notice still detaches in seconds; the holder's own session also re-reads its
+  forwarder's record every five.
 - **Refreshing an OIDC session** takes a cluster-wide lock, so a refresh token
   that the provider rotates is redeemed once.
 - **`config.yaml` and `projects.json`** are written under a file lock.

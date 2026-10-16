@@ -106,7 +106,7 @@ record and the derived agent credential revoked, and the hub sends `bye` with
 `reconnect=false` so the agent stops rather than backing off and retrying.
 
 **Protocol versioning.** Frames carry a version; the hub accepts
-`[MinProtocolVersion, ProtocolVersion]` = `[1, 20]` and stamps every outbound
+`[MinProtocolVersion, ProtocolVersion]` = `[1, 22]` and stamps every outbound
 frame with the version the session negotiated, not with its own maximum — a v1
 agent rejects a v2 envelope as out of range, so stamping the maximum would make
 negotiation decorative (`TestSessionStampsNegotiatedVersionOnOutboundFrames`).
@@ -4286,6 +4286,30 @@ entropy, so the DEKs become known to the test and to nobody else. Salts are
 subtracted (they are stored hex-encoded by design), and the test fails if the
 recorder saw fewer keys than the run should have produced, so it cannot pass by
 scanning nothing.
+
+### Forwarded devices — `forwarder_bindings_test.go`, `device_e2e_test.go` and the package suites
+
+A device forwarder (Task 20429) carries one on-prem USB device or network
+segment to the hub; a binding (Task 20430) gives it to one project's runs. The
+device reaches exactly one place — the sandbox of a bound project's run — and is
+attached there by the executor that runs that sandbox, with no listener on any
+host.
+
+| Guarantee | Test |
+| --- | --- |
+| A project with no binding in force — or one bound only through another project or another virtual executor — dispatches with no forwarded device, and no stream to any forwarder is opened | `TestUnboundProjectGetsNoForwardedDevices` |
+| A dispatch whose bound forwarder has no live session anywhere in the cluster is refused, naming the forwarder | `TestBoundForwarderOfflineRefusesTheDispatch` |
+| A forwarded device is given only to a container sandbox: a host-process run, an agent in host mode, an agent too old for the device channel (named with the upgrade) and an agent that cannot attach the kind are each refused before any stream is opened | `TestForwardedDeviceOnlyReachesASandbox`, `TestHostModeExecutorIsRefusedForwardedDevices`, `TestOldAgentIsRefusedForwardedDevices`, `TestAgentThatCannotAttachIsRefusedTheDevice` |
+| The agent attaches the device before the start frame that names it, with the bus id the forwarder exports, gives it to the sandbox under the binding's name, and its bytes cross the tunnel both ways | `TestForwardedDeviceReachesTheSandboxOverTheAgentTunnel` |
+| Revoking a binding through the dashboard detaches the device from a run already holding it; a revocation recorded elsewhere (the CLI) detaches it at the member's next re-check; a binding whose TTL runs out detaches it and is recorded once; the run's end detaches it; revoking the forwarder revokes its bindings | `TestRevokedBindingDetachesTheDeviceMidRun`, `TestBindingRevokedElsewhereDetachesAtTheRecheck`, `TestLapsedBindingDetachesOnceAudited`, `TestRunEndDetachesTheDevice`, `TestForwarderRevocationCascadesToBindings` |
+| On the agent, the hub closing the device's stream detaches it within seconds while the run goes on; the run ending detaches it | `TestRevokedDeviceDetachesMidRun`, `TestRunEndDetachesTheDeviceOnTheAgent` |
+| Binding takes `executor.manage` at the global scope; a maintainer may only ask, through the grant-request flow, cannot decide the request, and the approval is never the requester's own | `TestForwarderBindingRoutesDeclareTheirPermissions`, `TestForwarderBindingRequestFlow` |
+| A binding names a live forwarder and a real project, lasts at most 90 days, and is not made twice | `TestForwarderBindingValidation` |
+| A device channel's frames are validated on receipt; a consumer that stops reading ends its channel and never stalls the connection's read loop | `TestDeviceOpenValidation`, `TestDeviceStreamCarriesAndEnds`, `TestDeviceStreamOverflowEndsTheChannel` |
+| Nothing detaches a vhci port it did not attach: a port is detached only while it carries the device id recorded for it, and a startup sweep reads only dead processes' ledgers | `TestDetachTouchesOnlyWhatThisProcessAttached`, `TestLedgerRecordsAndSweepsOnlyTheDead`, `TestVHCIStatusAndFreePorts` |
+| A forwarder imports nothing but the one device it carries: another bus id is refused on the wire, a device imported onto its host over USB/IP is never forwarded again, and the dashboard's probe reads the device list without binding the device | `TestParseUSBIPRequest`, `TestForwarderNeverCarriesAnImportedDevice`, `TestForwarderAnswersADeviceListWithoutBinding`, `TestUSBIPClientCodec` |
+| A forwarded segment carries the frames that were on the wire: offloaded checksums are completed and stripped VLAN tags restored | `TestCompleteL4ChecksumTCPv4`, `TestCompleteL4ChecksumUDPv6`, `TestInsertVLANRestoresTheTag`, `TestTAPReadsBlockUntilAFrameArrives` |
+| End to end, on real hardware (opt-in, root): a forwarded USB device appears in a container sandbox on a second agent and leaves it within a second of an unbind; a forwarded segment lets the sandbox resolve and reach a peer on it; the hub's own container executor attaches in process; with the forwarder on one hub member and the agent on another, the device is relayed over the peer channel and a revocation through the other member cuts the session | `TestForwardedDevices`, `TestUSBForwardEndToEnd`, `TestL2ForwardEndToEnd` |
 
 ### Agent protocol and transport — `framing_test.go`, `transport_test.go`
 

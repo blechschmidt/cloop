@@ -159,9 +159,10 @@ Seven pages in order, indexed at
   binary that bridges one USB device or network interface to the hub over a
   single outbound connection and does nothing else, so an agent in an isolated
   cloud sandbox can reach on-prem hardware without that machine running the
-  agent. How to enroll one, how a USB device is carried over USB/IP with no
-  `usbipd` and no open port, how a layer-2 interface is carried to a TAP, and
-  what a forwarder cannot do.
+  agent. How to enroll one, bind its device to a project (or ask for that), what
+  happens at dispatch — the executor that runs the sandbox attaches the device
+  itself, with no listener anywhere — how it is detached, how a cluster relays
+  it, and what a forwarder cannot do.
 - **[Developing features in parallel](guides/features.md)** — several lines of
   work on one repository at once: a git worktree per feature on its own branch,
   each with its own task list and its own auto-evolve and innovate settings,
