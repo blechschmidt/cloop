@@ -123,14 +123,25 @@ func (h *Hub) Revoke(forwarderID string) error {
 	if _, err := Revoke(h.opts.Store, forwarderID, h.opts.now()); err != nil {
 		return err
 	}
+	h.DropSession(forwarderID, "credential revoked")
+	return nil
+}
+
+// DropSession ends a forwarder's live session without touching storage.
+//
+// It exists for the caller that persists a revocation against the control-plane
+// database directly — the source of truth a cluster shares — and then wants the
+// live connection this member happens to hold cut, rather than routing the
+// whole revocation through this hub's own store. It is a no-op when this member
+// holds no session for the forwarder.
+func (h *Hub) DropSession(forwarderID, reason string) {
 	h.mu.RLock()
 	s := h.sessions[forwarderID]
 	h.mu.RUnlock()
 	if s != nil {
-		s.sendBye("credential revoked", false)
+		s.sendBye(reason, false)
 		s.close()
 	}
-	return nil
 }
 
 // ServeHTTP upgrades a forwarder connection and runs its session.

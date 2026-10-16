@@ -184,15 +184,29 @@ func (s *Server) handleForwarderDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "forwarder id is required", http.StatusBadRequest)
 		return
 	}
-	hub, err := s.forwarderHub()
+	// Persist the revocation against this request's control-plane database —
+	// the source of truth — rather than through the process-wide hub's own
+	// store, then cut any live session this member holds. In a single hub the
+	// two databases are one; keeping the write here is what makes the handler
+	// correct on a member that is not the one the forwarder dialled.
+	db, err := s.controlPlaneDB()
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer db.Close()
+	store, err := forwarderstore.New(db)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	closeForwarderExposure(id)
-	if err := hub.Revoke(id); err != nil {
+	if _, err := deviceforward.Revoke(store, id, time.Now()); err != nil {
 		jsonErr(w, err.Error(), http.StatusNotFound)
 		return
+	}
+	if hub, herr := s.forwarderHub(); herr == nil {
+		hub.DropSession(id, "credential revoked")
 	}
 	s.auditForwarderAction(r, auditaction.ActionForwarderRevoke, id, map[string]any{"kind": "forwarder"})
 	writeJSONStatus(w, http.StatusOK, map[string]any{"revoked": id})

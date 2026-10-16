@@ -264,6 +264,9 @@ var approvalsAPISource string
 //go:embed routes.go
 var routesSource string
 
+//go:embed device_forwarders.go
+var deviceForwardersSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -289,7 +292,8 @@ func allUISources() string {
 		"\n" + diskFloorSource +
 		"\n" + adoptAPISource +
 		"\n" + streamCredentialsSource +
-		"\n" + approvalsAPISource
+		"\n" + approvalsAPISource +
+		"\n" + deviceForwardersSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
