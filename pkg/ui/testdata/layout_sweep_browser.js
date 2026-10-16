@@ -1100,6 +1100,10 @@ async function crawlScenario(out, name, scope, open) {
   out.scenarios.push(rec);
   current = name;
   const t0 = Date.now();
+  // A breadcrumb on stderr, which the test prints only when the crawl fails:
+  // a driver killed at its deadline otherwise says nothing about where it
+  // stalled.
+  if (XSS) process.stderr.write('crawl: ' + name + '\n');
   let nav = navigations;
   // enter reaches the scenario: from wherever the last press left the page if
   // it can, quickly, and from a fresh page if not.
@@ -1141,6 +1145,7 @@ async function crawlScenario(out, name, scope, open) {
   }
   blocking = false;
   rec.ms = Date.now() - t0;
+  if (XSS) process.stderr.write('crawl: ' + name + ' done in ' + rec.ms + 'ms\n');
   return rec;
 }
 
@@ -1159,6 +1164,7 @@ async function crawlAll(out) {
     // A signed-in user's session, minted by the test through the provider.
     await cdp.send('Network.setCookie', {name: 'cloop_session', value: CONFIG.cookie, url: BASE, httpOnly: true});
   }
+  process.stderr.write('crawl: boot\n');
   await boot();
   // A narrower crawl a test names itself: a tab, what shows it is ready, and
   // the part of the page to press.

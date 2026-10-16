@@ -461,6 +461,13 @@ func seedLayoutDevice(t *testing.T, dir string, s sweepStrings) string {
 	row := statedb.ExecutorRow{ID: id, Name: s.Device, Kind: executor.KindRemoteAgent, Capabilities: raw}
 	if s.DeviceLabel != "" {
 		row.Labels = map[string]string{"rack": s.DeviceLabel}
+		// On the device's credential too: the Executors panel shows the labels
+		// the hub records there, the ones label grants are matched against
+		// (Task 20432), so that is where the label must be to reach the page.
+		if err := db.PutAgentCredential(statedb.AgentCredentialRow{AgentID: id, Name: s.Device,
+			SecretHash: "layout-sweep-device-credential", Labels: row.Labels}); err != nil {
+			t.Fatalf("PutAgentCredential: %v", err)
+		}
 	}
 	if err := db.UpsertExecutor(row); err != nil {
 		t.Fatalf("UpsertExecutor: %v", err)
