@@ -386,6 +386,10 @@ type harnessGrantRef struct {
 
 // harnessReport is what the preflight found for one project on one executor.
 type harnessReport struct {
+	// HubRelay: no grant satisfies the run, and the model relay will spend
+	// the hub's own key for it, as an administrator allowed (Task 20435).
+	HubRelay bool
+
 	WorkDir      string
 	Provider     string
 	ExecutorID   string
@@ -539,6 +543,13 @@ func harnessPreflight(workDir string, ex executor.Executor, who harnessWho, prov
 	}
 	rep.judge(offers, who, sandboxEnvAllowlist(workDir), now)
 	if rep.State != "ok" {
+		// The hub's own key, spent by the model relay where an administrator
+		// allowed it for this project or executor (Task 20435): the sandbox
+		// never holds it, and the relay spends it only for a credential kind
+		// proven through it against the real API.
+		if len(offers) > 0 && hubRelaySatisfies(workDir, ex, rep.Provider) {
+			rep.State, rep.HubRelay = "ok", true
+		}
 		return rep
 	}
 	withheld := requester

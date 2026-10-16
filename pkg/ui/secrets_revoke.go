@@ -194,6 +194,10 @@ func (s *Server) revokeLeaseHereReaching(ctx context.Context, leaseID, grantID, 
 		}
 	}
 	if sl == nil {
+		// The model relay sessions the lease feeds end first, with this
+		// revocation's reason, so a run's next model call is told why rather
+		// than only that its lease was released (Task 20435).
+		closeModelRelaySessions(leaseID, reason)
 		sl, held = liveLeases.revoke(leaseID)
 	}
 	out.WipedLocally = held

@@ -1230,6 +1230,103 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 
+	// ── model_relay ────────────────────────────────────────────────────────
+	// The hub's model relay for sandboxed runs (Task 20435): a run's Claude
+	// credential stays on the hub, and the sandbox presents a session that
+	// stands on the run's lease. A relayed call that is allowed is counted in
+	// the session and the relay's metrics, not written here one row per call:
+	// a run makes hundreds, and what a reviewer needs is the decisions.
+	{
+		Action:    ActionModelRelaySessionMinted,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "A run on an isolating executor is dispatched with a model relay session in place of its Claude credential.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionModelRelaySessionClosed,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "A run's relay session ends: its run ended or did not start, its lease was released, revoked or lapsed, its grant was revoked, or it expired.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`input_tokens` and `output_tokens` are what the session spent in all, as the API counted it; " +
+			"`input_tokens` includes cache reads and writes.",
+	},
+	{
+		Action:    ActionModelRelaySessionSuspended,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "A hub process stops serving a recorded relay session without ending it: it is stopping gracefully, or another process took the session's record over with the run's lease.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionModelRelaySessionRestored,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "The hub process adopting a run takes its relay session over with the run's lease, re-deriving the credential from the grant and holding the session to today's model allowlist.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionModelRelayDenied,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "A relayed model call is refused before it reaches the API: its model is not allowed, the identity paying for the run has spent a daily budget, or the request is not one a run may make.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "`reason` is the relay's refusal code: `budget_exhausted`, `model_not_allowed`, `path_not_allowed`, `method_not_allowed`, `body_too_large` or `body_malformed`.",
+	},
+	{
+		Action:    ActionModelRelayRejected,
+		Home:      HomeControlPlane,
+		Entity:    "model_relay_session",
+		Trigger:   "A model call presents the token of a relay session that has ended, and is refused with the reason it ended.",
+		Payload:   modelRelayPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "A call with no usable token at all is counted in `cloop_model_relay_requests_total` and not written here.",
+	},
+	{
+		Action:    ActionModelRelayUsageGap,
+		Home:      HomeControlPlane,
+		Entity:    "project",
+		Trigger:   "A relayed run ends and the usage it reported to its project's ledger differs from what the relay counted from the API's own responses.",
+		Payload:   []string{"project", "run_id", "session_ids", "payer", "relay_tokens", "relay_usd", "reported_tokens", "reported_usd", "gap_tokens", "gap_usd"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "The relay's count is what the payer was charged; the run's ledger gains a row bringing its total to it. " +
+			"A claudecode run reports no tokens at all, so its whole relayed spend shows as the gap.",
+	},
+	{
+		Action:    ActionModelRelayNotRelayed,
+		Home:      HomeControlPlane,
+		Entity:    "project",
+		Trigger:   "The model relay is on, and a run on an isolating executor is dispatched with its Claude credential delivered to the sandbox as before.",
+		Payload:   []string{"project", "run_id", "executor_id", "credential_kind", "reason"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`reason` says why: the credential's kind has not been proven through the relay against the real API, " +
+			"or the device's agent predates handing the hub's CA to the harness.",
+	},
+	{
+		Action:    ActionModelRelayModelsSet,
+		Home:      HomeControlPlane,
+		Entity:    "project",
+		Trigger:   "A project's maintainer narrows, or clears, the models its relayed runs may use.",
+		Payload:   []string{"project", "models"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "An empty `models` clears the project's list, and the hub's allowlist applies to its runs again.",
+	},
+
 	// ── authz ──────────────────────────────────────────────────────────────
 	{
 		Action:    ActionAuthzGranted,
@@ -2377,6 +2474,15 @@ var (
 		"kind", "session_id", "rule_id", "rule_name", "project", "subject",
 		"repository", "ref", "workflow", "actor", "run_id", "method", "path",
 		"model", "status", "reason", "input_tokens", "output_tokens", "detail", "at",
+	}
+
+	// modelRelayPayload is a run relay session's event (Task 20435): which
+	// run, lease, grant and executor it serves, who pays, what kind of
+	// credential it spends — never the credential or the session token.
+	modelRelayPayload = []string{
+		"kind", "session_id", "project", "run_id", "lease_id", "grant_id", "executor_id",
+		"payer", "upstream_kind", "method", "path", "model", "status", "reason",
+		"input_tokens", "output_tokens", "detail", "at",
 	}
 
 	// ciRulePayload is what the CI panel records about a rule change. `models`

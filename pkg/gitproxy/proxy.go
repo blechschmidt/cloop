@@ -127,6 +127,21 @@ type Options struct {
 	// Credentials naming a session this registry knows — right or wrong
 	// token, live or expired — are always decided here.
 	Fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
+
+	// Routes hands requests under other path prefixes on the proxy's
+	// listener to other handlers, ahead of git routing: the hub serves its
+	// model relay for sandboxed runs beside the git proxy (Task 20435), so a
+	// sandbox reaches both at one address, over one certificate, through one
+	// firewall rule. A prefix must begin "/_" — no forge owner begins with
+	// an underscore, so no repository path can be taken for one (as for
+	// ForgeRouteSegment) — and is matched at a "/" boundary.
+	Routes []Route
+}
+
+// Route is a path prefix on the proxy's listener served by another handler.
+type Route struct {
+	Prefix  string
+	Handler http.Handler
 }
 
 // New returns a proxy over reg.
@@ -136,6 +151,14 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 	}
 	if _, err := NormalizeBaseURL(reg.BaseURL); err != nil {
 		return nil, err
+	}
+	for _, rt := range opts.Routes {
+		p := rt.Prefix
+		if !strings.HasPrefix(p, "/_") || strings.HasSuffix(p, "/") || strings.Count(p, "/") != 1 ||
+			p == "/"+ForgeRouteSegment || rt.Handler == nil {
+			return nil, fmt.Errorf("gitproxy: route %q must be one path segment beginning \"/_\", not %q, with a handler",
+				p, "/"+ForgeRouteSegment)
+		}
 	}
 	rt := opts.Transport
 	if rt == nil {
@@ -227,6 +250,12 @@ func (p *Proxy) Close() error {
 // repository, which would let a sandbox fetch by path and bypass every check
 // below.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	for _, rt := range p.opts.Routes {
+		if r.URL.Path == rt.Prefix || strings.HasPrefix(r.URL.Path, rt.Prefix+"/") {
+			rt.Handler.ServeHTTP(w, r)
+			return
+		}
+	}
 	forge, repoPath, endpoint, ok := splitRoutedPath(r.URL.Path)
 	if !ok {
 		p.reject(w, r, http.StatusNotFound, "", "not a git smart-HTTP endpoint")

@@ -17,7 +17,7 @@ import (
 // parts so no literal here has the shape a secret scanner refuses a push over.
 func grantHarnessCredential(t *testing.T, run func(dir string, args ...string) string, hubDir, project string) {
 	t.Helper()
-	token := "sk-" + "ant-oat01-" + strings.Repeat("e2eHarness", 4) + "Qx7_Lm2-Pz9"
+	token := harnessCredentialToken()
 	payload, err := json.Marshal(map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": token})
 	if err != nil {
 		t.Fatal(err)
@@ -25,4 +25,11 @@ func grantHarnessCredential(t *testing.T, run func(dir string, args ...string) s
 	run(hubDir, "secret", "mint", "e2e-claude-credential", "--kind", "env", "--value", string(payload))
 	run(hubDir, "secret", "grant", "e2e-claude-credential", "--to", "project:"+project,
 		"--env-keys", "CLAUDE_CODE_OAUTH_TOKEN", "--ttl", "2h")
+}
+
+// harnessCredentialToken is the token grantHarnessCredential grants: a scene
+// that must prove where it does not reach (the model relay's, Task 20435)
+// looks for it by value.
+func harnessCredentialToken() string {
+	return "sk-" + "ant-oat01-" + strings.Repeat("e2eHarness", 4) + "Qx7_Lm2-Pz9"
 }

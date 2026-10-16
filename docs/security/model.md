@@ -4171,6 +4171,35 @@ not installed.
 | git is trusted in a work tree root owns — a Pod's emptyDir — by its exact path and in no other directory, so git's ownership check still refuses one another user owns | `pkg/executor/gitprovision: TestRootOwnedTrust`; `pkg/executor/kubernetes: TestBuildPod_HarnessGitTrustsTheWorkspace` |
 | Live, on CI's kind cluster, against the hub the Helm chart installs — on one replica and on a hub cluster of three: a Pod's workspace is provisioned through the proxy, its own git is held to the grant's repository and branches and the refusals are audited, no forge or cluster token is readable in the Pod or its object, and the run's Pod, Secrets and NetworkPolicy are deleted | `tests/kube: TestGitProxyAndKubeGuardOnKubernetes` |
 
+### Model relay — `modelrelay_test.go`, `sessionrecords_test.go` and the package suites
+
+The [relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs) is
+optional, so most of its rows live with the packages, as the git proxy's do; the
+conformance row in `tests/security` runs a real hub with it on, and the
+end-to-end row runs the built binary with a stub harness that calls it through
+`curl --cacert $NODE_EXTRA_CA_CERTS`, against a stand-in for the API.
+
+| Guarantee | Test |
+| --- | --- |
+| A relayed run's Claude credential is nowhere the workload can read — its environment, its files, its harness's `/proc/<pid>/environ` — nor in the hub's database; the sandbox holds a session token, and the API sees the run's credential | `tests/security: TestARelayedRunNeverHoldsItsClaudeCredential`; `tests/e2e: TestE2EModelRelayKeepsTheCredentialOnTheHub`; `pkg/ui: TestModelRelayKeepsTheRunsCredentialOnTheHub` |
+| Each session spends its own run's credential, and a session holding none is never relayed with another's | `pkg/claudeproxy: TestRunRelay_EachSessionSpendsItsOwnCredential`, `TestRunRelay_ASessionWithoutACredentialIsNeverRelayedWithAnother` |
+| Usage is counted from the API's own answer, streamed or not, with cache reads and writes priced at their own rates, and charged to the identity the dispatch resolved; at the run's end its ledger is brought to the relay's count and the gap recorded | `pkg/claudeproxy: TestRunRelay_OnSpendReportsWhatTheUpstreamCounted`; `pkg/cost: TestEstimateCachedPricesCacheTokensAtTheirOwnRates`; `pkg/ui: TestModelRelaySettlesTheRunsLedger` |
+| A call once the payer's daily budget is spent is refused before the API with a `403` naming the cap, and counts nothing; Claude Code stops on it, and cloop does not retry it as an authentication failure | `pkg/claudeproxy: TestRunRelay_AdmitRefusesBeforeTheUpstreamAndCountsNothing`; `pkg/ui: TestModelRelayRefusesPastThePayersBudget`; `pkg/provider/claudecode: TestClassifyCLIError` |
+| Revoking the session's grant, or releasing or revoking its lease — including one this process did not issue — refuses the next call with the reason, told to the token's holder alone, and is audited | `pkg/ui: TestModelRelaySessionEndsWithItsGrantAndItsLease`; `pkg/claudeproxy: TestRunRelay_ClosedSessionsExplainThemselvesToTheirTokenOnly`; `tests/security: TestARelayedRunNeverHoldsItsClaudeCredential` |
+| A session lasts as long as its lease: the keepalive's extension moves it in memory and in its record, and a renewal whose record another process took ends it here | `pkg/ui: TestModelRelayFollowsItsLeaseKeepalive`; `pkg/claudeproxy: TestRunRelay_ExtendMovesTheDeadlineWithTheLease`, `TestRunRelay_ARenewalWhoseRecordWentElsewhereEndsTheSession` |
+| A hub restart keeps the session: the process adopting the run restores it with the lease — its credential re-derived from the grant, never read from the record, its models held to today's, its spend carried over — and serves the call held meanwhile | `pkg/ui: TestModelRelaySessionSurvivesAHubRestart`; `pkg/claudeproxy: TestRunRelay_RestoreTakesTheCredentialFromTheCallerNeverTheRecord`; `tests/e2e: TestE2EModelRelayKeepsTheCredentialOnTheHub` |
+| A session's record holds no credential at any step of its life — minted, relayed, extended, checkpointed, suspended, taken over, restored, closed | `tests/security: TestSessionRecordsHoldNoCredential` |
+| The relay fails closed: one that is not running, has no listener, or whose section does not load — at startup or edited since — refuses the dispatch rather than hand the run its credential, and a faulty section is never read as the wider default | `pkg/ui: TestModelRelayRefusesWhenItCannotServe`, `TestModelRelayBrokenSectionRefusesRatherThanDelivers`, `TestModelRelayProjectModelsNarrowTheHubs`; `pkg/config: TestModelRelayLoadRefusesWhatItCannotRun` |
+| Only credential kinds proven against the real API are relayed; another keeps today's delivery, and the run, the audit trail and the card say so | `pkg/ui: TestModelRelayLeavesAnUnprovenCredentialAsBefore` |
+| A project's model list narrows the hub's and never widens it, and a call for a model outside it is refused before the API | `pkg/ui: TestModelRelayProjectModelsNarrowTheHubs`, `TestLiveModelRelay` |
+| `max_tokens` is clamped, and an extended-thinking budget is held below it rather than relayed for the API to refuse | `pkg/claudeproxy: TestRunRelay_ThinkingBudgetFollowsAClampedMaxTokens` |
+| The hub's own `anthropic.api_key` is spent only for a project or executor an administrator listed | `pkg/config: TestModelRelayHubCredentialAllowedIsExplicit` |
+| Relay tokens carry a prefix of their own, which a CI relay does not accept, and which every credential scanner recognises | `pkg/claudeproxy: TestRunRelay_PrefixesKeepRelaysApart`; `pkg/redact: TestEveryScannerCoversEveryCredential` |
+| The harness's Node is handed a file holding the hub's CA and nothing else — in a container, on the host, in a Pod and on a device — and an agent too old to place it is never sent a relayed run | `pkg/executor: TestGitCAForNodeHoldsTheHubCAAlone`; `pkg/executor/container: TestStageGitCAHandsTheBundleToNodeOnlyWhenAsked`; `pkg/executor/localprocess: TestHostProcessHandsTheHubCAToNodeOnlyWhenAsked`; `pkg/executor/kubernetes: TestBuildPod_HubCAForNodeReachesTheHarness`; `pkg/executor/remote: TestAnAgentBeforeNodeCAIsRefusedARelayedRun`, `TestACurrentAgentIsSentTheCAForNode` |
+| On the git proxy's listener the relay answers its own prefix ahead of git, and git everything else | `pkg/gitproxy: TestRoutesServeTheirPrefixAheadOfGit` |
+| cloop's own `anthropic` provider is pointed at the relay as well, with the session token as its key | `pkg/ui: TestModelRelayEnvForTheAnthropicProvider` |
+| Live, opt-in: real calls relayed to the real API with a real credential — the sandbox's spec holds no credential, a plain and a streamed call are answered, the payer is charged what the API reported, a model outside the allowlist is refused before the API | `pkg/ui: TestLiveModelRelay` |
+
 ### Result write-back — `writeback_bundle_test.go`
 
 The return leg of the guarantee above, and the only channel in cloop that runs
@@ -4511,7 +4540,13 @@ lease delivered, not of a credential the workload obtained some other way or
 derived from a leased one; `cloop audit` reports the shapes it recognises in
 artifacts afterwards (`TestArtifactScanReportsShapesAndConfiguredValuesSeparately`),
 which is detection, not prevention. Scope grants so that the blast radius of
-such a disclosure is a single repo for a few hours.
+such a disclosure is a single repo for a few hours. Behind the [model
+relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs) a
+sandboxed run's Claude OAuth token is no longer among them: the workload holds a
+session token instead, worth its run's model calls until the run's lease ends
+(`TestARelayedRunNeverHoldsItsClaudeCredential`). An Anthropic API key is not
+relayed yet and still reaches the sandbox (`TestModelRelayLeavesAnUnprovenCredentialAsBefore`),
+as does every credential of a hub with the relay off.
 
 **Shape matching knows only the shapes it was given.** A credential format the
 registry has not heard of — a new vendor's key, or a reshaped token like
@@ -4520,16 +4555,25 @@ scanner until a detector and a fixture are added. The registry is the place to
 add it, once; the corpus is what proves all four scanners then agree
 (`TestEveryScannerCoversEveryCredential`, `TestEveryDetectorIsHeldToTheCorpus`).
 
-**A daily budget bounds honest overspend, not a hostile workload.** The hub
-charges the identity it resolved at dispatch, which the workload cannot
-influence (`TestBillingIgnoresTheIdentityWrittenInsideTheSandbox`) — but the
-*amount* it charges is whatever the run reported, and the provider call happens
-inside the sandbox. A workload that under-reports its own tokens spends past its
-cap, and no accounting in the control plane can see it: only a negative amount
-is refused (`TestNegativeAmountsCannotCancelABatch`). `daily_token_budget` and
-`daily_cost_usd` are cost controls against runaway plans and honest overruns;
-containment is the [isolation model's](#the-no-host-execution-guarantee) job,
-not the ledger's.
+**A daily budget bounds honest overspend, not a hostile workload — unless the
+model relay counts it.** The hub charges the identity it resolved at dispatch,
+which the workload cannot influence (`TestBillingIgnoresTheIdentityWrittenInsideTheSandbox`)
+— but without the relay the *amount* it charges is whatever the run reported,
+and the provider call happens inside the sandbox. A workload that under-reports
+its own tokens spends past its cap, and no accounting in the control plane can
+see it: only a negative amount is refused (`TestNegativeAmountsCannotCancelABatch`).
+Behind the [model relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs)
+the call happens on the hub, which counts each response's usage from the API's
+own answer and refuses the next call once a cap is spent
+(`TestModelRelayRefusesPastThePayersBudget`, `TestModelRelaySettlesTheRunsLedger`).
+What remains there is the size of a call: the check admits a call while the
+budget has room and charges it when it completes, so the last call admitted —
+and every call in flight beside it — can carry the payer past the cap, by at
+most what those calls spend, each bounded by `max_output_tokens`. Runs the relay
+does not carry — a host executor, another provider, a credential kind not yet
+relayed — are as before: `daily_token_budget` and `daily_cost_usd` are cost
+controls against runaway plans and honest overruns, and containment is the
+[isolation model's](#the-no-host-execution-guarantee) job, not the ledger's.
 
 **An `egress_proxy` secret's allowlist is enforced outside the broker.** For
 kubeconfig, registry and env secrets the broker *rewrites the payload* before
@@ -4587,7 +4631,35 @@ instead, because their runtime keeps a copy only removing the workload destroys
 task in either sandbox mode, keep the variable until they exit
 (`TestLoopbackRevokeScrubsMaterialMidRun`, `TestScrubEnvClearsBothRetainedCopies`).
 Files and egress are genuinely revoked everywhere. Use `action=kill` for the
-others, and prefer credential delivery that lands in a file.
+others, and prefer credential delivery that lands in a file. A Claude credential
+behind the [model relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs)
+is the exception that needs neither: it never entered the task, and revoking its
+grant or lease refuses the task's next model call with the reason
+(`TestModelRelaySessionEndsWithItsGrantAndItsLease`). The session token stays
+in the task's environment, worth nothing once its session has ended.
+
+**A relay session token works wherever the relay is reachable.** It is a
+bearer token, bound to its run's lease and the hub's model allowlist but not to
+the sandbox that holds it: a workload that sends it elsewhere lets whoever
+receives it spend the run's credential, at the run's payer's expense, from any
+host that can reach the relay's listener, until the run's lease ends — when it
+is refused, as every call of an ended session is
+(`TestModelRelaySessionEndsWithItsGrantAndItsLease`). The relay meters such
+calls like the run's own and holds them to the payer's budget, so the exposure
+is bounded by the lease and the budget rather than by a credential's own life;
+keep the git proxy's listener, which the relay shares by default, off networks
+the sandbox does not need.
+
+**Node trusts the hub's CA for every host.** With the relay on the git proxy's
+listener under `tls: auto`, the harness is handed the hub's CA through
+`NODE_EXTRA_CA_CERTS`, and Node adds it to its trust for every TLS connection
+the process makes — not for the relay's URL alone, as git's per-URL setting is
+scoped. The file holds the hub's CA and nothing else
+(`TestGitCAForNodeHoldsTheHubCAAlone`), and the CA's key is sealed on the hub
+and never leaves it, so the trust is worth something only to whoever holds the
+hub's sealing key; but an attacker with that key could present a certificate for
+any host to a relayed harness. `listener: dashboard` with a certificate the
+sandbox already trusts adds nothing to its trust.
 
 **A revocation cannot reach an offline agent.** It is queued and replayed on
 reconnect, and reported as `unreachable` in the meantime

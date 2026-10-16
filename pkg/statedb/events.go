@@ -228,6 +228,18 @@ const (
 	// attached anything: attaching is not an audited action, and a refused
 	// file leaves no row of its own.
 	EventTaskAttachments EventType = "task_attachments"
+
+	// EventModelRelay records what the hub's model relay did for a run (Task
+	// 20435): that its model calls go through the relay and its Claude
+	// credential stays on the hub, why a run the relay would serve was
+	// dispatched with its credential as before, a session refused or ended,
+	// and at the run's end what the relay counted against what the run
+	// reported. Never the credential or the session's token.
+	//
+	// On the project's journal because the developer watching the run is the
+	// one whose harness was refused a model or a budget, and whose spend the
+	// relay measured.
+	EventModelRelay EventType = "model_relay"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

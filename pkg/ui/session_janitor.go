@@ -161,6 +161,9 @@ func servedHere(row statedb.ProxySessionRow) bool {
 	case statedb.ProxySessionEgress:
 		svc := activeEgressProxy()
 		return svc != nil && svc.broker.Session(row.SessionID) != nil
+	case statedb.ProxySessionModel:
+		svc := activeModelRelay()
+		return svc != nil && svc.reg.Known(row.SessionID)
 	}
 	return false
 }

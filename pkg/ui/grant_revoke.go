@@ -561,6 +561,9 @@ func closeGrantSessions(lease *secretbroker.Lease, grantID, reason string) {
 		}
 		svc.reg.CloseForGrant(lease.ID, grantID, reason)
 	}
+	// The model relay's session spending the grant's Claude credential (Task
+	// 20435): the next call is refused with the reason, at once.
+	closeModelRelayGrantSessions(lease.ID, grantID, reason)
 }
 
 // ── the janitor's half ───────────────────────────────────────────────────────

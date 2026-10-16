@@ -341,6 +341,10 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// progress is recovered from the run's own account rather than from a plan
 	// that never heard it started (Task 20339).
 	s.collectRunResult(workDir, ex, handleID)
+	// A run behind the model relay (Task 20435): its session ends, and its
+	// ledger is brought to what the relay counted — after the merge above, so
+	// a device run's own report is in it to compare with.
+	s.settleModelRelayRun(workDir)
 	// One Status call answers both questions: what the project's journal
 	// says about the end, and how the run is counted.
 	var verdict runVerdict

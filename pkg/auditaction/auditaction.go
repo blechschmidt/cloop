@@ -119,6 +119,7 @@ var multiSegmentFamilies = []string{
 	"ci.exchange",
 	"ci.relay",
 	"ci.config",
+	"model_relay.session",
 	"stt.credential",
 	"secret.lease",
 	"project.member",

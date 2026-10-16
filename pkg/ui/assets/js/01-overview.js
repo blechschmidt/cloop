@@ -148,7 +148,7 @@ function loadProjectForwards() {
 function loadHarnessCred(opts) {
   if (!opts && _noProject()) return;
   return deferredPanel('harness', {
-    api, esc, toast, openOverlay, closeOverlay, idx: _overviewIdx,
+    api, apiMethod, esc, toast, openOverlay, closeOverlay, idx: _overviewIdx,
   }).then(p => p.load(opts)).catch(() => opts && opts.refusal && toast(opts.refusal.error, 'err'));
 }
 // harnessRefused handles a dispatch's 409 for a sandbox with no Claude login:

@@ -18,6 +18,10 @@
 // who may grant them here), whether a token may be stored, and the refusal
 // text. A pasted token goes into one request body and is cleared from the
 // field as soon as it is sent; nothing here keeps or logs it.
+//
+// When the hub runs its model relay (Task 20435) the card says whether the
+// credential goes through it — kept on the hub, spent there for each run — and
+// the dialog shows the models the project's runs may use, narrowed here.
 (function () {
   'use strict';
 
@@ -42,7 +46,8 @@
       c.style.display = 'none';
       c.innerHTML = '<div class="stat-label">Claude credential <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>' +
         '<div class="stat-value" style="font-size:13px;margin-top:4px"><span id="harnessCredChip"></span></div>' +
-        '<div class="stat-sub" id="harnessCredSub"></div>';
+        '<div class="stat-sub" id="harnessCredSub"></div>' +
+        '<div class="stat-sub" id="harnessCredRelay" style="display:none"></div>';
       c.addEventListener('click', function () { open(h.idx()); });
       c.addEventListener('keydown', function (ev) {
         if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(h.idx()); }
@@ -89,9 +94,16 @@
       chip.innerHTML = '<span aria-hidden="true">●</span>' + h.esc(t.short);
       chip.title = t.text;
       el('harnessCredSub').textContent = grantedBy(d) || 'none granted';
-      c.title = d.state === 'ok'
+      const r = d.relay;
+      const rl = el('harnessCredRelay');
+      if (rl) {
+        rl.style.display = r ? '' : 'none';
+        rl.textContent = !r ? '' : r.relayed ? 'through the hub relay' : 'not relayed';
+      }
+      c.title = (d.state === 'ok'
         ? 'This project’s sandbox signs in to Claude with ' + grantedBy(d) + '. Click to grant another.'
-        : (d.reason || 'This project’s sandbox has no Claude login.') + ' Click to grant one.';
+        : (d.reason || 'This project’s sandbox has no Claude login.') + ' Click to grant one.') +
+        (r && r.relayed ? ' Its model calls go through the hub relay: the credential stays on the hub.' : '');
     }
 
     function load() {
@@ -118,6 +130,8 @@
           '<div id="hcRefusal" role="alert" style="display:none;font-size:12px;padding:8px 10px;border-radius:4px;' +
             'background:rgba(248,81,73,0.12);border:1px solid var(--red);margin-bottom:12px;line-height:1.5"></div>' +
           '<div id="hcCurrent" style="font-size:12px;margin-bottom:14px;line-height:1.5"></div>' +
+          '<div id="hcRelay" style="display:none;font-size:12px;margin-bottom:14px;line-height:1.5;padding:8px 10px;' +
+            'border:1px solid var(--border);border-radius:4px"></div>' +
           '<div class="form-group" id="hcPickGroup">' +
             '<label class="form-label" for="hcSecret">Grant a secret you have</label>' +
             '<select class="form-select" id="hcSecret"></select>' +
@@ -195,6 +209,8 @@
           : 'Now: no Claude credential is granted to this project.';
       }
 
+      renderRelay(d);
+
       const cands = Array.isArray(d.candidates) ? d.candidates : [];
       const sel = el('hcSecret');
       sel.innerHTML = cands.length
@@ -221,6 +237,41 @@
         const first = !sel.disabled ? sel : (d.can_paste ? el('hcToken') : el('hcCancel'));
         if (first) first.focus();
       }
+    }
+
+    // The model relay (Task 20435): whether this project's credential goes
+    // through it, the models its runs get, and a field narrowing them.
+    function renderRelay(d) {
+      const box = el('hcRelay');
+      const r = d.relay;
+      if (!r) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = '';
+      const own = Array.isArray(r.project_models) ? r.project_models : [];
+      box.innerHTML = '<div><strong>' + (r.relayed ? 'Through the hub relay' : 'Not relayed') + '</strong>' +
+        (r.relayed ? ' — the credential stays on the hub. Each run’s sandbox gets a session in its place, and ' +
+          'what the API counts is charged to whoever starts the run.' : '') + '</div>' +
+        (r.note ? '<div style="color:var(--muted);margin-top:4px">' + h.esc(r.note) + '</div>' : '') +
+        '<div style="margin-top:6px">Models: <code>' + h.esc((r.models || []).join(', ') || 'none') + '</code>' +
+          (own.length ? ' (narrowed for this project)' : '') + '</div>' +
+        '<div class="form-group" style="margin:8px 0 0"><label class="form-label" for="hcModels">Narrow for this project</label>' +
+          '<div style="display:flex;gap:6px"><input class="form-input" id="hcModels" spellcheck="false" ' +
+            'placeholder="claude-sonnet-*, claude-haiku-*"><button class="btn" type="button" id="hcModelsSave">Save</button></div>' +
+          '<div class="form-hint">Globs, comma-separated, within the hub’s ' + h.esc((r.hub_models || []).join(', ')) +
+            '. Empty uses the hub’s.</div></div>';
+      el('hcModels').value = own.join(', ');
+      el('hcModelsSave').addEventListener('click', saveModels);
+    }
+
+    function saveModels() {
+      const idx = dialogIdx;
+      const models = el('hcModels').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      showError('');
+      h.apiMethod('PUT', '/api/projects/' + idx + '/model-relay', {models: models}).then(function (d) {
+        if (!d || d.error) { showError((d && d.error) || 'The models were not saved'); return; }
+        h.toast(models.length ? 'Models narrowed for this project' : 'The hub’s models apply again', 'ok');
+        if (h.idx() === idx) renderCard(d);
+        if (dialogIdx === idx) renderDialog(d);
+      }).catch(function (err) { fail('save the models', err); });
     }
 
     function neededText(d) {

@@ -375,6 +375,27 @@ const (
 	// ActionCIConfigUpdated records the relay's own settings changing.
 	ActionCIConfigUpdated Action = "ci.config.updated"
 
+	// ── model_relay ────────────────────────────────────────────────────────
+
+	// ActionModelRelaySessionMinted records a run dispatched with a model relay session in place of its Claude credential.
+	ActionModelRelaySessionMinted Action = "model_relay.session.minted"
+	// ActionModelRelaySessionClosed records a run's relay session ending.
+	ActionModelRelaySessionClosed Action = "model_relay.session.closed"
+	// ActionModelRelaySessionSuspended records a hub process that stops serving a recorded relay session without ending it.
+	ActionModelRelaySessionSuspended Action = "model_relay.session.suspended"
+	// ActionModelRelaySessionRestored records the process adopting a run restoring its relay session with the lease.
+	ActionModelRelaySessionRestored Action = "model_relay.session.restored"
+	// ActionModelRelayDenied records a relayed model call refused before it reached the API.
+	ActionModelRelayDenied Action = "model_relay.denied"
+	// ActionModelRelayRejected records a call presenting the token of an ended relay session.
+	ActionModelRelayRejected Action = "model_relay.rejected"
+	// ActionModelRelayUsageGap records a relayed run whose reported usage differs from the relay's count.
+	ActionModelRelayUsageGap Action = "model_relay.usage_gap"
+	// ActionModelRelayNotRelayed records a run the relay would serve dispatched with its credential delivered as before.
+	ActionModelRelayNotRelayed Action = "model_relay.not_relayed"
+	// ActionModelRelayModelsSet records a project's own model allowlist for its relayed runs changing.
+	ActionModelRelayModelsSet Action = "model_relay.models_set"
+
 	// ── authz ──────────────────────────────────────────────────────────────
 
 	// ActionAuthzGranted records a privileged permission being exercised.

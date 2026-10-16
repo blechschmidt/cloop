@@ -1018,6 +1018,8 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// And the broker hands it every grant revoked in this process, to take
 	// back from the workloads holding it (Task 20403).
 	ensureGrantRevocationHook()
+	// The model relay charges and checks this server's quotas (Task 20435).
+	setModelRelayServer(srv)
 	return srv
 }
 
@@ -1698,6 +1700,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// that simply stop; a recorded one is suspended for the process that
 	// adopts its run. Nil-safe when none is configured.
 	activeGitProxy().Close()
+	// And the model relay the same way (Task 20435): a run's recorded
+	// session is suspended for the process that adopts the run, with its
+	// spend written to the record; any other is closed.
+	closeModelRelay()
 	// Then the GitHub App tokens those suspended sessions presented, on the
 	// leases this process holds, are destroyed — after the proxy stopped
 	// serving, so no request still in flight presents one. Whichever process
@@ -2054,7 +2060,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
 	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
-		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r)
+		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r)
 }
 
 // The SCIM service (Task 20415, isSCIMEndpoint) is the second kind too: an

@@ -381,6 +381,10 @@ func positives(r *rand.Rand) []Positive {
 	add(Positive{Name: "cloop-ci-token/relay-environment", Detector: "cloop-ci-token",
 		Text:    "ANTHROPIC_BASE_URL=https://hub.example.com/api/ci/claude\nANTHROPIC_AUTH_TOKEN=" + ci,
 		Secrets: []string{ci}, Keep: []string{"ANTHROPIC_BASE_URL=https://hub.example.com/api/ci/claude", "ANTHROPIC_AUTH_TOKEN="}})
+	relay := "cloop_relay_" + pick(r, hexChars, 24) + "." + pick(r, hexChars, 64)
+	add(Positive{Name: "cloop-relay-token/sandbox-environment", Detector: "cloop-relay-token",
+		Text:    "ANTHROPIC_BASE_URL=https://hub.example.com:8443/_anthropic\nANTHROPIC_AUTH_TOKEN=" + relay,
+		Secrets: []string{relay}, Keep: []string{"ANTHROPIC_BASE_URL=https://hub.example.com:8443/_anthropic", "ANTHROPIC_AUTH_TOKEN="}})
 	clet := "clet1." + generated(r, b64url, 16) + "." + generated(r, b64url, 43) + "." + pick(r, hexChars, 32)
 	add(Positive{Name: "cloop-enrollment-token/install-command", Detector: "cloop-enrollment-token",
 		Text:    "curl -fsSL https://hub.example.com/install.sh | sh -s -- --token " + clet + " --name edge-01",

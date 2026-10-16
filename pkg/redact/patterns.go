@@ -527,6 +527,14 @@ var specs = []spec{
 		keywords:   []string{"cloop_ci_"},
 	},
 	{
+		name:  "cloop-relay-token",
+		label: "cloop model relay session token",
+		recognises: "`cloop_relay_<id>.<secret>`, the session token a sandboxed run presents to the hub's model " +
+			"relay in place of its Claude credential (Task 20435).",
+		pattern:  `(?P<kind>cloop_relay_)[0-9A-Za-z\-]{4,}\.[0-9A-Za-z_\-]{8,}`,
+		keywords: []string{"cloop_relay_"},
+	},
+	{
 		name:       "cloop-enrollment-token",
 		label:      "cloop executor enrollment token",
 		recognises: "`clet1.<id>.<secret>.<mac>`, the single-use token an edge device enrolls with.",

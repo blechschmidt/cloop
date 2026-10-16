@@ -544,6 +544,9 @@ func (sl *secretLease) startKeepalive(tick time.Duration) {
 				// run lives and the lease extends (Task 20422).
 				if extending {
 					sl.renewWorkspaceSessions(ctx)
+					// And the run's model relay session, which lasts as long
+					// as its lease (Task 20435).
+					sl.extendModelRelaySessions()
 				}
 				// A GitHub App token in the sandbox's files is renewed before
 				// GitHub's hour ends (Task 20375), for as long as the lease
@@ -736,6 +739,12 @@ func (sl *secretLease) Close() {
 			// same way, and outlive a released lease in exactly the same way
 			// if nothing closes them.
 			closeKubeGuardSessions(sl.lease)
+			// And the model relay's (Task 20435): the session spends the
+			// run's Claude credential, so it ends with the lease that credential
+			// was granted through — the run over or not started, the lease
+			// revoked or lapsed.
+			closeModelRelaySessions(sl.lease.ID, "the lease it stands on was released: its run ended or "+
+				"did not start, or the lease was revoked or lapsed")
 		}
 		sl.restoreMu.Unlock()
 

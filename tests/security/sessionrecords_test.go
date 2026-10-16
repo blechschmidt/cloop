@@ -7,7 +7,8 @@ package security
 // proxy_sessions, and the GitHub App tokens behind them in app_token_slots, so
 // the hub process that adopts the run after the one serving it stops can bring
 // them back; since Task 20390 so is a workspace's pinned git proxy session,
-// and every CI relay session is recorded in ci_sessions. Those rows outlive the
+// and every CI relay session is recorded in ci_sessions; since Task 20435 so
+// is a run's model relay session, which spends the run's Claude credential. Those rows outlive the
 // process, the run and every revocation, and are copied into every backup of
 // the control plane — exactly where a token must not be. The restore
 // re-derives every upstream credential from the lease's grants or the hub's
@@ -335,6 +336,65 @@ users:
 	_, ciSecret, _ := strings.Cut(strings.TrimPrefix(minted.Token, claudeproxy.TokenPrefix), ".")
 	sig := assertion[strings.LastIndex(assertion, ".")+1:]
 
+	// A run's model relay session (Task 20435): minted with the Claude OAuth
+	// token its grant holds, relaying one call, extended with its lease,
+	// checkpointed with its spend, suspended as a stopping hub does,
+	// restored by another process with the token re-derived, closed.
+	relayToken := "sk-ant-" + "oat01-record-canary-relay-credential-0123456789"
+	modelReg := claudeproxy.NewRegistryWithPrefix("", "cloop_relay_")
+	modelReg.Store = sessionrecord.NewModelStore(db, holder, func(string) sessionrecord.ModelSpend {
+		return sessionrecord.ModelSpend{USD: 0.01, Models: map[string]sessionrecord.ModelTokens{"claude-sonnet-5": {Input: 3, Output: 4}}}
+	}, nil)
+	relayUp := claudeproxy.Upstream{BaseURL: upstream.URL, AuthToken: relayToken, OAuth: true}
+	relayMinted, err := modelReg.Mint(claudeproxy.MintRequest{
+		Policy: claudeproxy.Policy{Models: []string{"claude-*"}}, Project: "/srv/guarded", RunID: "run_guarded",
+		LeaseID: lease.ID, GrantID: "g-relay", ExecutorID: "edge-1", Payer: "alice@corp.example",
+		TTL: 15 * time.Minute, Claims: json.RawMessage(`{"workdir":"/srv/guarded","provider":"claudecode","key":"CLAUDE_CODE_OAUTH_TOKEN"}`),
+		Upstream: &relayUp,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelPx, err := claudeproxy.New(modelReg, claudeproxy.Options{PathPrefix: "/_anthropic", SessionUpstreams: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/_anthropic/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-5","max_tokens":8,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+relayMinted.Token)
+	rec = httptest.NewRecorder()
+	modelPx.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("model relay = %d %s", rec.Code, rec.Body)
+	}
+	if _, err := modelReg.Extend(relayMinted.Session.ID, time.Now().Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	modelReg.Checkpoint()
+	modelReg.SuspendAll("the hub is shutting down")
+	modelRow, err := db.GetProxySession(statedb.ProxySessionModel, relayMinted.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelRec, _, err := sessionrecord.ModelRecord(modelRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.TakeProxySession(statedb.ProxySessionModel, relayMinted.Session.ID, "hub_conformance",
+		"hub_conformance_2"); err != nil || !ok {
+		t.Fatalf("take over the model relay session: %v %v", ok, err)
+	}
+	modelReg2 := claudeproxy.NewRegistryWithPrefix("", "cloop_relay_")
+	modelReg2.Store = sessionrecord.NewModelStore(db, func() string { return "hub_conformance_2" }, nil, nil)
+	if _, err := modelReg2.Restore(claudeproxy.RestoreRequest{Record: modelRec, From: "hub_conformance",
+		Upstream: &relayUp}); err != nil {
+		t.Fatal(err)
+	}
+	modelReg2.CloseForLease(lease.ID, "the lease it stands on was released")
+	modelSum := sha256.Sum256([]byte(relayMinted.Token))
+	guards.hashes[relayMinted.Session.ID] = hex.EncodeToString(modelSum[:])
+	_, relaySecret, _ := strings.Cut(strings.TrimPrefix(relayMinted.Token, "cloop_relay_"), ".")
+
 	// An egress session, redeemed durably.
 	estore, err := secretstore.NewEgressStore(db)
 	if err != nil {
@@ -360,7 +420,8 @@ users:
 
 	// Every credential the run involved.
 	secrets := []string{recordPAT, recordClusterToken, kubeconfig, app.PrivateKey, wsApp.PrivateKey, red.Token,
-		red.ProxyURL, minted.Token, ciSecret, hubAnthropicKey, assertion, sig}
+		red.ProxyURL, minted.Token, ciSecret, hubAnthropicKey, assertion, sig,
+		relayToken, relayMinted.Token, relaySecret}
 	secrets = append(secrets, guards.tokens...)
 	for _, m := range gh.Minted() {
 		secrets = append(secrets, m.Token)
@@ -414,9 +475,9 @@ users:
 		}
 	}
 	// git ×4 (lease-path App and PAT, workspace App and PAT), kube ×1,
-	// egress ×1; one guarded, one file and one workspace slot (the PAT's
-	// workspace lease was released with its session); one CI session.
-	if rows["proxy_sessions"] != 6 || rows["app_token_slots"] != 3 || rows["ci_sessions"] != 1 {
+	// egress ×1, model ×1; one guarded, one file and one workspace slot (the
+	// PAT's workspace lease was released with its session); one CI session.
+	if rows["proxy_sessions"] != 7 || rows["app_token_slots"] != 3 || rows["ci_sessions"] != 1 {
 		t.Fatalf("rows scanned = %v; the run did not record what it should have", rows)
 	}
 }

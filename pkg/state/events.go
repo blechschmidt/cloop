@@ -67,6 +67,7 @@ const (
 	EventFailover          = statedb.EventFailover
 	EventDiskLimit         = statedb.EventDiskLimit
 	EventTaskAttachments   = statedb.EventTaskAttachments
+	EventModelRelay        = statedb.EventModelRelay
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
 )

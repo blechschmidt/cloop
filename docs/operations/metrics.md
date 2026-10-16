@@ -800,6 +800,60 @@ sandbox trying to reach the hub's own network.
 rate(cloop_egress_denials_total{reason="destination_blocked"}[5m]) > 0
 ```
 
+## Model relay
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_model_relay_requests_total` | counter | `outcome` |
+| `cloop_model_relay_refusals_total` | counter | `reason` |
+| `cloop_model_relay_tokens_total` | counter | `kind` |
+| `cloop_model_relay_cost_usd_total` | counter | — |
+| `cloop_model_relay_sessions_live` | gauge | — |
+| `cloop_model_relay_usage_gap_tokens_total` | counter | `direction` |
+
+With [`executors.model_relay`](../reference/configuration.md#the-model-relay-for-sandboxed-runs)
+on, a run on an isolating executor presents a relay session instead of its
+Claude credential, and the hub spends the credential upstream (Task 20435).
+Every family is per process: a session is served by the member holding its
+run's lease, which records its calls; in a hub cluster the sum is the hub's. A
+hub with the relay off exports the families with no samples.
+
+`cloop_model_relay_requests_total` counts every call that reached the relay.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `allowed` | relayed to the API with the run's credential; its usage is in the families below |
+| `refused` | a policy or budget refusal, answered without reaching the API — `cloop_model_relay_refusals_total` says which |
+| `ended` | presented the token of a session that has ended — its run is over, or its grant or lease was revoked — and was told why with a 403 |
+| `rejected` | carried no usable token: a stray request, or a harness probing the base URL |
+
+| `reason` | Meaning |
+| --- | --- |
+| `budget_exhausted` | the identity paying for the run has spent its `daily_token_budget` or `daily_cost_usd` |
+| `model_not_allowed` | the model is outside the hub's allowlist or the project's narrower one |
+| `path_not_allowed`, `method_not_allowed` | the call is not to the Messages, token-counting or models API |
+| `body_too_large`, `body_malformed` | the request could not be read or exceeded the body limit |
+
+`cloop_model_relay_tokens_total` is what the API reported spending on relayed
+calls — `kind` is `input` (uncached), `output`, `cache_read` and `cache_write` —
+and `cloop_model_relay_cost_usd_total` is the same priced, cache tokens at
+their own rates. These are what each run's payer is charged; the identity
+itself is never a label, and what each one spent today is in
+`cloop_quota_usage`. `cloop_model_relay_sessions_live` counts the sessions a
+process serves, about one per relayed run in flight.
+
+`cloop_model_relay_usage_gap_tokens_total` is the difference, at each relayed
+run's end, between the tokens the run wrote to its own ledger and what the relay
+counted: `unreported` when the relay counted more, `overreported` when less.
+The `claudecode` provider writes no token counts at all, so every one of its
+relayed tokens is `unreported` — a baseline, not an alarm. The ratio is what to
+watch for the `anthropic` provider, which does report.
+
+```promql
+sum(rate(cloop_model_relay_refusals_total{reason="budget_exhausted"}[15m])) > 0
+sum by (kind) (increase(cloop_model_relay_tokens_total[1d]))
+```
+
 ## Sessions restored with an adopted run
 
 | Metric | Type | Labels |
@@ -814,8 +868,9 @@ GitHub App token slots that keep its tokens alive past GitHub's hour. Each one
 it tries is counted here, by the process that adopted the run. Since Task 20390
 a CI relay session whose holder stopped is restored by the process receiving
 the job's next call, and counted by it under `kind` `ci` (its `refused` means
-its rule was deleted, disabled or no longer admits the pipeline). `kind` is
-`git`, `kube`, `egress`, `app_token` or `ci`.
+its rule was deleted, disabled or no longer admits the pipeline). Since Task
+20435 a run's model relay session comes back with its lease, under `kind`
+`model`. `kind` is `git`, `kube`, `egress`, `app_token`, `ci` or `model`.
 
 | `outcome` | Meaning |
 | --- | --- |

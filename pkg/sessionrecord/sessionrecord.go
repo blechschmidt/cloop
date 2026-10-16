@@ -501,10 +501,191 @@ func CIRecord(row statedb.CISessionRow) (claudeproxy.SessionRecord, CIProvenance
 	}, prov, nil
 }
 
+// ── model relay ──────────────────────────────────────────────────────────────
+
+// ModelScope is a model relay session's scope_json (Task 20435): the model
+// policy it enforces, the kind of credential it spends — never the
+// credential, which the process restoring it re-derives from the lease the
+// session stands on — the identity its spend is charged to, and the hub's own
+// account of the run it serves, opaque here.
+type ModelScope struct {
+	Policy       claudeproxy.Policy `json:"policy"`
+	UpstreamKind string             `json:"upstream_kind"`
+	Payer        string             `json:"payer,omitempty"`
+	Run          json.RawMessage    `json:"run,omitempty"`
+}
+
+// ModelTokens is what one model spent through a session.
+type ModelTokens struct {
+	Input      int64 `json:"input_tokens"`
+	Output     int64 `json:"output_tokens"`
+	CacheRead  int64 `json:"cache_read_input_tokens,omitempty"`
+	CacheWrite int64 `json:"cache_creation_input_tokens,omitempty"`
+}
+
+// ModelSpend is what a session has spent, priced, per model — the account the
+// hub charged to its payer as each response arrived, recorded so a process
+// adopting the run carries it on.
+type ModelSpend struct {
+	USD    float64                `json:"usd"`
+	Models map[string]ModelTokens `json:"models,omitempty"`
+}
+
+// Clone copies s.
+func (s ModelSpend) Clone() ModelSpend {
+	out := ModelSpend{USD: s.USD}
+	if len(s.Models) > 0 {
+		out.Models = make(map[string]ModelTokens, len(s.Models))
+		for k, v := range s.Models {
+			out.Models[k] = v
+		}
+	}
+	return out
+}
+
+// ModelCounters is a model relay session's counters_json.
+type ModelCounters struct {
+	Usage claudeproxy.Usage `json:"usage"`
+	Spend ModelSpend        `json:"spend"`
+}
+
+// ModelStore is a claudeproxy.SessionStore over the control plane's database,
+// recording run relay sessions in proxy_sessions with kind "model". Its writes
+// after the insert are fenced on the holder, like the other stores'.
+type ModelStore struct {
+	base
+	// Spend reports what a session has spent, per model, for its counters:
+	// the hub keeps that account, the registry keeps only token totals. Nil
+	// records none.
+	Spend func(id string) ModelSpend
+}
+
+// NewModelStore returns a store writing as holder.
+func NewModelStore(db *statedb.DB, holder func() string, spend func(id string) ModelSpend,
+	onError func(kind, id, what string, err error)) ModelStore {
+	return ModelStore{base: base{DB: db, Holder: holder, OnError: onError}, Spend: spend}
+}
+
+func (m ModelStore) counters(id string, u claudeproxy.Usage) (string, error) {
+	c := ModelCounters{Usage: u}
+	if m.Spend != nil {
+		c.Spend = m.Spend(id)
+	}
+	raw, err := json.Marshal(c)
+	return string(raw), err
+}
+
+// SaveSession implements claudeproxy.SessionStore.
+func (m ModelStore) SaveSession(rec claudeproxy.SessionRecord) error {
+	holder, err := m.holder()
+	if err != nil {
+		return err
+	}
+	scope, err := json.Marshal(ModelScope{Policy: rec.Policy, UpstreamKind: rec.UpstreamKind,
+		Payer: rec.Payer, Run: rec.Claims})
+	if err != nil {
+		return err
+	}
+	counters, err := m.counters(rec.ID, rec.Usage)
+	if err != nil {
+		return err
+	}
+	return m.DB.PutProxySession(statedb.ProxySessionRow{
+		Kind: statedb.ProxySessionModel, SessionID: rec.ID, TokenSHA256: rec.TokenSHA256,
+		LeaseID: rec.LeaseID, GrantID: rec.GrantID, Holder: holder, RunID: rec.RunID,
+		ProjectID: rec.Project, ExecutorID: rec.ExecutorID, Actor: rec.Payer,
+		Scope: string(scope), Counters: counters, IssuedAt: rec.IssuedAt, ExpiresAt: rec.ExpiresAt,
+		RenewedAt: rec.RenewedAt,
+	})
+}
+
+// CheckpointSession implements claudeproxy.SessionStore. A checkpoint that
+// lands on no row reports claudeproxy.ErrRecordGone, so the registry stops
+// serving a session another process holds now or a revocation closed.
+func (m ModelStore) CheckpointSession(id string, u claudeproxy.Usage, _ time.Time) error {
+	holder, err := m.holder()
+	if err != nil {
+		return err
+	}
+	raw, err := m.counters(id, u)
+	if err != nil {
+		return err
+	}
+	ok, err := m.DB.CheckpointProxySession(statedb.ProxySessionModel, id, holder, raw)
+	if err == nil && !ok {
+		return claudeproxy.ErrRecordGone
+	}
+	return m.report(statedb.ProxySessionModel, id, "checkpoint its counters", err)
+}
+
+// RenewSession implements claudeproxy.SessionRenewer.
+func (m ModelStore) RenewSession(id string, expiresAt, renewedAt time.Time) error {
+	holder, err := m.holder()
+	if err != nil {
+		return err
+	}
+	ok, err := m.DB.RenewProxySession(statedb.ProxySessionModel, id, holder, expiresAt, renewedAt)
+	if err == nil && !ok {
+		return claudeproxy.ErrRecordGone
+	}
+	return m.report(statedb.ProxySessionModel, id, "record its renewal", err)
+}
+
+// CloseSession implements claudeproxy.SessionStore.
+func (m ModelStore) CloseSession(id, reason string, at time.Time, u claudeproxy.Usage) error {
+	raw, err := m.counters(id, u)
+	if err != nil {
+		return err
+	}
+	return m.closeRow(statedb.ProxySessionModel, id, reason, at, raw)
+}
+
+// ModelRecord reads a row back into what claudeproxy.Registry.Restore takes,
+// and the spend its counters recorded. The run binding comes back as the
+// record's Claims.
+func ModelRecord(row statedb.ProxySessionRow) (claudeproxy.SessionRecord, ModelSpend, error) {
+	scope, err := ModelScopeOf(row)
+	if err != nil {
+		return claudeproxy.SessionRecord{}, ModelSpend{}, err
+	}
+	c, err := ModelCountersOf(row)
+	if err != nil {
+		return claudeproxy.SessionRecord{}, ModelSpend{}, err
+	}
+	return claudeproxy.SessionRecord{
+		ID: row.SessionID, TokenSHA256: row.TokenSHA256, Policy: scope.Policy, Project: row.ProjectID,
+		RunID: row.RunID, LeaseID: row.LeaseID, GrantID: row.GrantID, ExecutorID: row.ExecutorID,
+		Payer: scope.Payer, UpstreamKind: scope.UpstreamKind, Claims: scope.Run,
+		IssuedAt: row.IssuedAt, ExpiresAt: row.ExpiresAt, RenewedAt: row.RenewedAt, Usage: c.Usage,
+	}, c.Spend, nil
+}
+
+// ModelScopeOf decodes a model row's scope.
+func ModelScopeOf(row statedb.ProxySessionRow) (ModelScope, error) {
+	var scope ModelScope
+	if err := json.Unmarshal([]byte(row.Scope), &scope); err != nil {
+		return ModelScope{}, fmt.Errorf("decode the scope of model relay session %s: %w", row.SessionID, err)
+	}
+	return scope, nil
+}
+
+// ModelCountersOf decodes a model row's counters; an empty document is zero.
+func ModelCountersOf(row statedb.ProxySessionRow) (ModelCounters, error) {
+	var c ModelCounters
+	if raw := row.Counters; raw != "" && raw != "{}" {
+		if err := json.Unmarshal([]byte(raw), &c); err != nil {
+			return ModelCounters{}, fmt.Errorf("decode the counters of model relay session %s: %w", row.SessionID, err)
+		}
+	}
+	return c, nil
+}
+
 // Interface checks.
 var (
-	_ gitproxy.SessionStore     = GitStore{}
-	_ kubeguard.SessionStore    = KubeStore{}
-	_ egressbroker.SessionStore = EgressStore{}
-	_ claudeproxy.SessionStore  = CIStore{}
+	_ gitproxy.SessionStore      = GitStore{}
+	_ kubeguard.SessionStore     = KubeStore{}
+	_ egressbroker.SessionStore  = EgressStore{}
+	_ claudeproxy.SessionStore   = CIStore{}
+	_ claudeproxy.SessionStore   = ModelStore{}
+	_ claudeproxy.SessionRenewer = ModelStore{}
 )

@@ -838,6 +838,10 @@ type ExecutorsConfig struct {
 	// KubeGuard configures the Kubernetes access monitor that keeps the
 	// cluster credential on the hub and decides every API request.
 	KubeGuard KubeGuardConfig `yaml:"kube_guard,omitempty"`
+
+	// ModelRelay keeps a sandboxed run's Claude credential on the hub and
+	// meters its spend there (Task 20435). See ModelRelayConfig.
+	ModelRelay ModelRelayConfig `yaml:"model_relay,omitempty"`
 }
 
 // KubeGuardConfig configures the Kubernetes access monitor (Task 20277).
@@ -3680,6 +3684,29 @@ func (c *Config) validateAndClamp(path string) {
 	section("executors.kube_guard", &c.Executors.KubeGuard.Enabled, func() []string {
 		return clampKubeGuardConfig(&c.Executors.KubeGuard)
 	})
+
+	// The model relay (Task 20435) is the exception. Off, a run's Claude
+	// credential is delivered into its sandbox again — the outcome an
+	// operator turns the relay on to end — so a section it cannot run as
+	// written stays on and is marked Broken: the hub starts no relay and
+	// refuses the runs it would have relayed until the section loads. The
+	// repair is recorded as a switch-off all the same, since the relay is
+	// not running, and is dropped once a later file mends the section.
+	mr := &c.Executors.ModelRelay
+	for _, msg := range clampModelRelayConfig(mr) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.model_relay", msg
+		}
+		warn(field, detail)
+	}
+	if mr.Enabled && mr.Broken != "" {
+		c.loadRepairs = append(c.loadRepairs, LoadRepair{
+			File: path, Field: "executors.model_relay.enabled", SwitchedOff: "executors.model_relay",
+			Detail: "it cannot run as written, so every run it would relay is refused rather than handed its " +
+				"Claude credential: " + mr.Broken,
+		})
+	}
 }
 
 // LoadRepair is one value Load could not honour as written, and what it did
@@ -3725,7 +3752,8 @@ func (c *Config) LoadRepairs() []LoadRepair {
 }
 
 // sectionEnabled reports the Enabled switch of a section validateAndClamp can
-// turn off.
+// turn off — for the model relay, which it marks Broken instead, whether the
+// section is on and loads.
 func (c *Config) sectionEnabled(key string) bool {
 	switch key {
 	case "executors.container":
@@ -3738,6 +3766,8 @@ func (c *Config) sectionEnabled(key string) bool {
 		return c.Executors.GitProxy.Enabled
 	case "executors.kube_guard":
 		return c.Executors.KubeGuard.Enabled
+	case "executors.model_relay":
+		return c.Executors.ModelRelay.Enabled && c.Executors.ModelRelay.Broken == ""
 	}
 	return false
 }

@@ -26,6 +26,12 @@ const (
 	ProxySessionGit    = "git"
 	ProxySessionKube   = "kube"
 	ProxySessionEgress = "egress"
+	// ProxySessionModel is a run's model relay session (Task 20435): the
+	// session a sandboxed harness presents in place of its Claude credential,
+	// standing on the run's lease like a git session does. scope_json holds
+	// its model policy, the kind of credential it spends and the run it
+	// serves; counters_json what it has spent, per model.
+	ProxySessionModel = "model"
 )
 
 // ProxySessionRow is one minted session. It says who serves the session, what

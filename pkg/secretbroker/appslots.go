@@ -534,6 +534,34 @@ func (b *Broker) KubeconfigUpstream(leaseID, grantID string) ([]byte, error) {
 	return MinimizeKubeconfig(plaintext, g.Constraints)
 }
 
+// EnvUpstream re-derives one variable of an env secret a lease this broker
+// holds was issued — the Claude credential a model relay session spends
+// upstream (Task 20435), for the hub process restoring the session with the
+// lease. The grant is checked as an extension checks it, and the variable must
+// be one the grant delivers: a record cannot name a key the grant withholds.
+func (b *Broker) EnvUpstream(leaseID, grantID, key string) (string, error) {
+	g, s, err := b.heldGrant(leaseID, grantID)
+	if err != nil {
+		return "", err
+	}
+	if s.Kind != KindEnv {
+		return "", wrapf(ErrInvalidKind, "grant %s carries a %s secret, not an env secret", g.ID, s.Kind)
+	}
+	if !deliverableEnvKey(g.Constraints, key) {
+		return "", wrapf(ErrInvalidKind, "grant %s does not deliver %s", g.ID, key)
+	}
+	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
+	if err != nil {
+		return "", fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
+	}
+	defer zero(plaintext)
+	v, ok := jsonUnmarshalEnv(plaintext, s.Name)[key]
+	if !ok || strings.TrimSpace(v) == "" {
+		return "", wrapf(ErrInvalidKind, "env secret %s holds no %s", s.Name, key)
+	}
+	return v, nil
+}
+
 // heldGrant returns a grant of a lease this broker holds, and its secret, after
 // the checks Extend makes: not revoked or expired, still issued to the lease's
 // requester, its secret still there. A refusal is a denied secret.renew row.

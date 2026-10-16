@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -228,6 +229,10 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 
 	px, err := gitproxy.New(reg, gitproxy.Options{
 		Fallback: clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
+		// The model relay for sandboxed runs (Task 20435), served beside the
+		// proxy so a sandbox reaches both at one address, over one
+		// certificate, through one firewall rule.
+		Routes: []gitproxy.Route{{Prefix: modelRelayMount, Handler: http.HandlerFunc(serveModelRelayOnGitProxy)}},
 	})
 	if err != nil {
 		certs.close()

@@ -483,6 +483,68 @@ var (
 	})
 )
 
+// The model relay for sandboxed runs (Task 20435): a run's Claude credential
+// kept on the hub, its calls relayed and metered. Recorded by pkg/ui in the
+// process holding each session, so every family is per process; the identity
+// paying is never a label — what each identity spent is the quota gauges'.
+var (
+	ModelRelayRequests = Default.MustRegister(Definition{
+		Name:   "cloop_model_relay_requests_total",
+		Help:   "Model calls that reached the relay, by outcome: allowed (relayed to the API), refused (a policy or budget refusal, never relayed), ended (presented a session that has ended, told why), rejected (no usable session token at all).",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
+
+	ModelRelayRefusals = Default.MustRegister(Definition{
+		Name:   "cloop_model_relay_refusals_total",
+		Help:   "Relayed model calls refused before they reached the API, by reason (budget_exhausted, model_not_allowed, path_not_allowed, method_not_allowed, body_too_large, body_malformed). Sustained budget_exhausted is a run working past its payer's daily budget; model_not_allowed a harness asking for a model the project's allowlist leaves out.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+
+	ModelRelayTokens = Default.MustRegister(Definition{
+		Name:   "cloop_model_relay_tokens_total",
+		Help:   "Tokens the API reported spending on relayed calls, by kind (input, output, cache_read, cache_write). What the relay charges each run's payer.",
+		Type:   TypeCounter,
+		Labels: []string{"kind"},
+	})
+
+	ModelRelayCostUSD = Default.MustRegister(Definition{
+		Name: "cloop_model_relay_cost_usd_total",
+		Help: "Estimated USD of relayed calls, priced from the API's counts with cache reads and writes at their own rates.",
+		Type: TypeCounter,
+	})
+
+	ModelRelaySessionsLive = Default.MustRegister(Definition{
+		Name: "cloop_model_relay_sessions_live",
+		Help: "Model relay sessions this process serves.",
+		Type: TypeGauge,
+	})
+
+	ModelRelayUsageGap = Default.MustRegister(Definition{
+		Name:   "cloop_model_relay_usage_gap_tokens_total",
+		Help:   "Tokens by which relayed runs' own reports differed from the relay's count at run end, by direction: unreported (the relay counted more than the run reported) or overreported. A claudecode run reports none, so its whole spend is unreported.",
+		Type:   TypeCounter,
+		Labels: []string{"direction"},
+	})
+)
+
+// Model relay label values.
+const (
+	ModelRelayAllowed  = "allowed"
+	ModelRelayRefused  = "refused"
+	ModelRelayEnded    = "ended"
+	ModelRelayRejected = "rejected"
+
+	ModelRelayInput      = "input"
+	ModelRelayOutput     = "output"
+	ModelRelayCacheRead  = "cache_read"
+	ModelRelayCacheWrite = "cache_write"
+
+	ModelRelayUnreported   = "unreported"
+	ModelRelayOverreported = "overreported"
+)
+
 // What a hub process adopting a run brings back of what the run's lease feeds
 // (Task 20383): its git proxy, Kubernetes monitor and egress sessions, and its
 // GitHub App token slots — and, since Task 20390, the CI relay sessions a hub
@@ -491,7 +553,7 @@ var (
 var (
 	SessionRestores = Default.MustRegister(Definition{
 		Name:   "cloop_proxy_session_restores_total",
-		Help:   "Sessions and GitHub App token slots a hub process adopting a run, or receiving a CI job's call, tried to bring back, by kind (git, kube, egress, app_token, ci) and outcome (restored; refused — its grant or rule was revoked, expired or narrowed while no process held it; expired — it lapsed first; lost — another process restored it first; failed — its credential could not be re-derived for a reason that may pass, and it is retried).",
+		Help:   "Sessions and GitHub App token slots a hub process adopting a run, or receiving a CI job's call, tried to bring back, by kind (git, kube, egress, app_token, ci, model) and outcome (restored; refused — its grant or rule was revoked, expired or narrowed while no process held it; expired — it lapsed first; lost — another process restored it first; failed — its credential could not be re-derived for a reason that may pass, and it is retried).",
 		Type:   TypeCounter,
 		Labels: []string{"kind", "outcome"},
 	})
@@ -504,6 +566,7 @@ const (
 	RestoreKindEgress   = "egress"
 	RestoreKindAppToken = "app_token"
 	RestoreKindCI       = "ci"
+	RestoreKindModel    = "model"
 
 	RestoreRestored = "restored"
 	RestoreRefused  = "refused"

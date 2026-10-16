@@ -338,6 +338,43 @@ one that does not is refused separately by
 [strict no-host-execution](model.md#the-no-host-execution-guarantee) rather than
 being quietly credited with isolation it never claimed.
 
+### Behind the model relay the credential stays on the hub
+
+A grant delivers the credential *into* the sandbox, where the workload holds
+the plaintext for the whole run. With
+[`executors.model_relay`](../reference/configuration.md#the-model-relay-for-sandboxed-runs)
+on (Task 20435; off by default) it does not: the dispatch still settles the
+preflight above and still leases the grant — that is what decides whether the
+run may start and whose credential it spends, Withhold included — but takes the
+Claude credential back out of the environment it built and mints a relay
+session on the run's lease in its place. The sandbox gets `ANTHROPIC_BASE_URL`
+pointing at the hub and a session token; the hub spends the credential against
+the API, so:
+
+- **The workload never holds it.** Not in its environment, its files or its
+  harness's `/proc/<pid>/environ` (`TestARelayedRunNeverHoldsItsClaudeCredential`),
+  and a session token printed or committed is worth the run's model calls until
+  the run ends, nothing more.
+- **A revocation reaches the running task.** Revoking the grant or the lease
+  ends the session, and the task's next model call is refused with the reason —
+  which a delivered variable never allowed (`TestModelRelaySessionEndsWithItsGrantAndItsLease`).
+- **Spend is measured, not reported.** Each response's usage is counted from the
+  API's own answer and charged to the identity that started the run, and a call
+  past its `daily_token_budget` or `daily_cost_usd` is refused before it
+  reaches the API (`TestModelRelayRefusesPastThePayersBudget`).
+- **Models are the hub's to allow.** The hub's allowlist, narrowed per project
+  and never widened by one, decides which models a run may call.
+
+The relay carries only credential kinds proven end to end against the real API
+through it. A Claude OAuth token is; an Anthropic API key is not yet, so a
+project granted one keeps today's delivery, and its card says *not relayed*
+(`TestModelRelayLeavesAnUnprovenCredentialAsBefore`). The hub's own
+`anthropic.api_key` is never spent for a run unless an administrator lists the
+project or executor in `executors.model_relay.hub_credential`. See [the Claude
+credential of a sandboxed
+run](../guides/secrets.md#with-the-model-relay-on-the-claude-credential-stays-on-the-hub)
+for what a run shows.
+
 ---
 
 ## Callers with no identity
@@ -434,9 +471,13 @@ but after an offboarding there is none: the identity is denied.
   user (or Anthropic) can revoke the OAuth grant.
 - **It does not separate quota.** Each user spends their own subscription,
   which is the point — but cloop enforces no ceiling across users. Use
-  [quotas](model.md#quotas-how-much-not-whether) for hub-side limits.
+  [quotas](model.md#quotas-how-much-not-whether) for hub-side limits; a run
+  behind the [model relay](#behind-the-model-relay-the-credential-stays-on-the-hub)
+  is held to them call by call, on what the API counted.
 - **It does not reach isolating executors** with a directory, as above; there a
-  user's own Claude login is a personal `env` grant, spent only on their runs.
+  user's own Claude login is a personal `env` grant, spent only on their runs —
+  and, behind the model relay, spent by the hub on their behalf rather than
+  handed to the sandbox.
 - **It does not survive a hostile host.** Every identity's directory lives under
   one uid on one filesystem. `0700` stops other *users* of that machine; it
   stops nothing that already runs as the hub, which includes any agent executed

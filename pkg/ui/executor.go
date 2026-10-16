@@ -130,6 +130,10 @@ func bootstrapExecutors(dir string, port int) {
 	// starts before it is bound would be told the hub hosts none. Every
 	// cluster member binds its own; see egressproxy.go.
 	ensureEgressProxy(cfg, dir, port)
+	// The model relay for sandboxed runs (Task 20435), before anything can
+	// dispatch: a run that starts before it runs would be refused. It serves
+	// on the git proxy's listener, started above, or on the hub's own.
+	ensureModelRelay(cfg, dir)
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
 	// driver in through the door the policy exists to close. (The eviction
@@ -596,6 +600,30 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// certificate the hub issued (Task 20409): after the lease and the
 	// workspace, the two things that point a sandbox's git at the proxy.
 	spec = applyGitProxyTrust(spec)
+	// The run's Claude credential stays on the hub when the model relay is
+	// on (Task 20435): taken out of what the lease delivered, and spent by a
+	// relay session standing on the lease — so every return below that
+	// closes the lease ends the session too. After the git proxy's trust,
+	// whose CA the relay on that listener is verified with.
+	spec, relaySession, err := applyModelRelay(spec, ex, workDir, lease, relayDispatch{
+		runID: runID, payer: identity, provider: clear.relayProviderFor(ex, workDir), run: true,
+	})
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+	// Whether the spend drain charges this run's ledger or the relay already
+	// charged it (model_relay_spend.go) — recorded either way, so a mark an
+	// earlier relayed run left is cleared — and taken back if the run does
+	// not start.
+	setRelayedRun(workDir, relaySession)
+	if relaySession != "" {
+		defer func() {
+			if err != nil {
+				setRelayedRun(workDir, "")
+			}
+		}()
+	}
 	// A feature's branch, bundled for the executor to build its tree from
 	// (Task 20367). The driver has read it by the time Start returns.
 	if f := spec.BranchBundleFile; f != "" {
@@ -993,6 +1021,14 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		defer os.Remove(f)
 	}
 	spec = applyGitProxyTrust(spec)
+	// The subcommand's Claude credential stays on the hub too (Task 20435):
+	// its relay session stands on the lease this call closes.
+	spec, _, err = applyModelRelay(spec, ex, workDir, lease, relayDispatch{
+		runID: runID, payer: clear.relayPayerFor(), provider: clear.relayProviderFor(ex, workDir),
+	})
+	if err != nil {
+		return nil, err
+	}
 	// The ceilings apply here too. A subcommand is a smaller workload than a
 	// harness, not an exempt one — `cloop suggest` on a repository whose
 	// sandbox.yaml asks for 900g would otherwise be the way around a cap that

@@ -12,6 +12,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A sandboxed run's Claude credential can stay on the hub: the model relay.**
+  With `executors.model_relay` on — it is off by default — a `claudecode` or
+  `anthropic` run on a container, a Pod, an enrolled device or a virtual
+  executor is no longer handed its Claude OAuth token. The hub mints a session
+  on the run's secret lease, gives the sandbox `ANTHROPIC_BASE_URL` and a
+  `cloop_relay_…` token in its place, and spends the credential against the API
+  itself. The session ends with the lease, so revoking the grant reaches a
+  running device task at its next model call, which a delivered variable never
+  allowed; it survives a hub restart with its run, renews with the lease, and
+  any cluster member serves it. The relay counts each response's usage from the
+  API's own answer, charges it to whoever started the run in
+  `daily_token_budget` and `daily_cost_usd`, refuses the next call once either
+  is spent — with a `403` naming the cap, which Claude Code stops on rather than
+  retrying — and when the run ends books the gap between its count and what the
+  run reported (`model_relay.usage_gap`). The hub's model allowlist, which a
+  project's maintainers can narrow from its Claude credential card, decides the
+  models a run may call. It rides the git proxy's listener by default, the
+  hub's CA handed to the harness's Node in a file of its own through
+  `NODE_EXTRA_CA_CERTS` (agent protocol v23; an older device keeps today's
+  delivery, and the run's history says so), or the dashboard's. Only credential
+  kinds proven against the real API are relayed: an OAuth token is; an
+  Anthropic API key still reaches the sandbox, and the card says *not relayed*.
+  A relay that should serve a run and cannot, or a section that does not load,
+  refuses the run rather than hand it the credential (Task 20435).
 - **A grant to a label selector reaches the executors the hub records with
   those labels, and nothing a device says about itself counts.** A grant to
   `label:region=eu,gpu=true` was accepted, listed and audited, and delivered

@@ -252,6 +252,13 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 		return nil, err
 	}
 	spec = applyGitProxyTrust(spec)
+	// An agent re-run's Claude credential stays on the hub too (Task 20435),
+	// behind a relay session standing on the lease this call closes.
+	if spec, _, err = applyModelRelay(spec, ex, rs.ProjectDir, lease, relayDispatch{
+		runID: runID, payer: harnessClear.relayPayerFor(), provider: harnessClear.relayProviderFor(ex, rs.ProjectDir),
+	}); err != nil {
+		return nil, err
+	}
 	// A reproduction runs under the same ceilings as the run it reproduces.
 	// Exempting it would make the verdict meaningless in the one direction that
 	// matters: a commit that only builds in more memory than its project is

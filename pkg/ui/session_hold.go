@@ -233,6 +233,17 @@ func proxySessionHold(w http.ResponseWriter, r *http.Request, owner, internalPat
 		token, _ = cutBearerToken(r.Header.Get("Authorization"))
 		kind, db, local = statedb.ProxySessionKube, svc.auditDB, svc.proxy
 		served = func() bool { return svc.reg.Known(sessionID) }
+	case ownerModelRelay:
+		// A run's model relay session (Task 20435): restored with the run's
+		// lease, so a harness's call during a restart waits for the adoption
+		// like its git does. The relay reads the token from either header.
+		svc := activeModelRelay()
+		if svc == nil {
+			return false
+		}
+		token = ciPresentedToken(r)
+		kind, db, local = statedb.ProxySessionModel, svc.auditDB, svc
+		served = func() bool { return svc.reg.Known(sessionID) }
 	default:
 		return false
 	}

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 201 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 210 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 179 |
+| `control-plane` | the hub's own state.db | 188 |
 | `project` | the project's .cloop/state.db | 18 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-201 actions in 46 families. Every action is listed: this section is the whole
+210 actions in 48 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (4) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (8) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -516,6 +516,43 @@ Payload keys, on every action above: `rule_id`, `rule_name`, `repository`, `ref`
 | `ci.config.updated` | `ci_rule` | control-plane | beta | The CI relay's own settings change — whether it is enabled, its issuer, its session ceiling. |
 
 Payload keys, on every action above: `rule_id`, `rule_name`, `repository`, `ref`, `condition`, `models`, `detail`, `error`
+
+### model_relay.session.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `model_relay.session.closed` | `model_relay_session` | control-plane | beta | A run's relay session ends: its run ended or did not start, its lease was released, revoked or lapsed, its grant was revoked, or it expired. |
+| `model_relay.session.minted` | `model_relay_session` | control-plane | beta | A run on an isolating executor is dispatched with a model relay session in place of its Claude credential. |
+| `model_relay.session.restored` | `model_relay_session` | control-plane | beta | The hub process adopting a run takes its relay session over with the run's lease, re-deriving the credential from the grant and holding the session to today's model allowlist. |
+| `model_relay.session.suspended` | `model_relay_session` | control-plane | beta | A hub process stops serving a recorded relay session without ending it: it is stopping gracefully, or another process took the session's record over with the run's lease. |
+
+Payload keys, on every action above: `kind`, `session_id`, `project`, `run_id`, `lease_id`, `grant_id`, `executor_id`, `payer`, `upstream_kind`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
+
+- `model_relay.session.closed` — `input_tokens` and `output_tokens` are what the session spent in all, as the API counted it; `input_tokens` includes cache reads and writes.
+
+### model_relay.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `model_relay.denied` | `model_relay_session` | control-plane | beta | A relayed model call is refused before it reaches the API: its model is not allowed, the identity paying for the run has spent a daily budget, or the request is not one a run may make. |
+| `model_relay.models_set` | `project` | control-plane | beta | A project's maintainer narrows, or clears, the models its relayed runs may use. |
+| `model_relay.not_relayed` | `project` | control-plane | beta | The model relay is on, and a run on an isolating executor is dispatched with its Claude credential delivered to the sandbox as before. |
+| `model_relay.rejected` | `model_relay_session` | control-plane | beta | A model call presents the token of a relay session that has ended, and is refused with the reason it ended. |
+| `model_relay.usage_gap` | `project` | control-plane | beta | A relayed run ends and the usage it reported to its project's ledger differs from what the relay counted from the API's own responses. |
+
+Payload keys:
+
+- `model_relay.denied` — `kind`, `session_id`, `project`, `run_id`, `lease_id`, `grant_id`, `executor_id`, `payer`, `upstream_kind`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
+- `model_relay.models_set` — `project`, `models`
+- `model_relay.not_relayed` — `project`, `run_id`, `executor_id`, `credential_kind`, `reason`
+- `model_relay.rejected` — `kind`, `session_id`, `project`, `run_id`, `lease_id`, `grant_id`, `executor_id`, `payer`, `upstream_kind`, `method`, `path`, `model`, `status`, `reason`, `input_tokens`, `output_tokens`, `detail`, `at`
+- `model_relay.usage_gap` — `project`, `run_id`, `session_ids`, `payer`, `relay_tokens`, `relay_usd`, `reported_tokens`, `reported_usd`, `gap_tokens`, `gap_usd`
+
+- `model_relay.denied` — `reason` is the relay's refusal code: `budget_exhausted`, `model_not_allowed`, `path_not_allowed`, `method_not_allowed`, `body_too_large` or `body_malformed`.
+- `model_relay.models_set` — An empty `models` clears the project's list, and the hub's allowlist applies to its runs again.
+- `model_relay.not_relayed` — `reason` says why: the credential's kind has not been proven through the relay against the real API, or the device's agent predates handing the hub's CA to the harness.
+- `model_relay.rejected` — A call with no usable token at all is counted in `cloop_model_relay_requests_total` and not written here.
+- `model_relay.usage_gap` — The relay's count is what the payer was charged; the run's ledger gains a row bringing its total to it. A claudecode run reports no tokens at all, so its whole relayed spend shows as the gap.
 
 ### authz.*
 

@@ -367,6 +367,8 @@ func suspendLeaseSessions(leaseID, reason string) {
 	if svc := activeKubeGuard(); svc != nil && svc.reg != nil {
 		releaseSuspendedSessions(ownerKubeGuard, svc.reg.SuspendForLease(leaseID, reason))
 	}
+	// And the run's model relay session (Task 20435).
+	suspendModelRelaySessions(leaseID, reason)
 }
 
 // Enforcement modes reported on a grant. See grantView.Enforcement.

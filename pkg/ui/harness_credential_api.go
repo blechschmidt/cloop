@@ -122,6 +122,10 @@ type harnessCredentialView struct {
 	BrokerUnavailable string `json:"broker_unavailable,omitempty"`
 	// Granted is set on a POST's response: what was just created.
 	Granted *harnessGrantedView `json:"granted,omitempty"`
+	// Relay describes the hub's model relay for this project's runs, when the
+	// hub runs one (Task 20435): whether the credential is kept on the hub
+	// and spent there, with which models, and why not when it is not.
+	Relay *modelRelaySummary `json:"relay,omitempty"`
 }
 
 // harnessGrantedView describes a grant the POST created.
@@ -200,6 +204,7 @@ func (s *Server) harnessCredentialView(r *http.Request, entry projectEntry) harn
 	if rep.Applies && rep.State != "ok" {
 		view.Reason, view.Remedy = rep.explain()
 	}
+	view.Relay = modelRelaySummaryFor(entry.Path, rep)
 	// Nothing to offer where nothing is checked — a host executor, a provider
 	// that reads no Claude credential. The card is hidden there and the dialog
 	// never opens, and listing candidates would open every env secret the

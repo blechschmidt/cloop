@@ -55,6 +55,7 @@ value that ends that way (`GITHUB_TOKEN=ghp_xxxx…`) or is a template
 | `cloop-glasses-link` | cloop display-glasses link token | `cloop_glasses_…`. No build has minted this prefix — glasses links are `cloop_pat_` tokens — but the telemetry scrubber matched it from the start, and keeping it costs nothing. |
 | `cloop-scim-credential` | cloop SCIM provisioning credential | `cloop_scim_<id>_<secret>`, the bearer an identity provider presents to `/scim/v2` (Task 20415). |
 | `cloop-ci-token` | cloop CI relay session token | `cloop_ci_<id>.<secret>`, the session token a CI job presents to the Claude relay. |
+| `cloop-relay-token` | cloop model relay session token | `cloop_relay_<id>.<secret>`, the session token a sandboxed run presents to the hub's model relay in place of its Claude credential (Task 20435). |
 | `cloop-enrollment-token` | cloop executor enrollment token | `clet1.<id>.<secret>.<mac>`, the single-use token an edge device enrolls with. |
 | `cloop-enrollment-bundle` | cloop executor enrollment bundle | `cloopenroll1.<base64url>`, the copy-paste bundle that carries an enrollment token. |
 | `cloop-agent-credential` | cloop executor agent credential | `clac1.<agent>.<secret>.<mac>`, the long-lived credential an enrolled agent reconnects with. |

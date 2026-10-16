@@ -93,18 +93,18 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-299 endpoints, by the permission each one requires:
+302 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 60 |
+| `public` (no permission) | 62 |
 | `audit.read` | 5 |
 | `config.write` | 16 |
 | `executor.manage` | 35 |
 | `executor.read` | 6 |
 | `project.read` | 54 |
 | `project.share` | 3 |
-| `project.write` | 12 |
+| `project.write` | 13 |
 | `run.start` | 4 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
@@ -121,6 +121,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | Method | Path | Permission | Scope |
 |--------|------|------------|-------|
 | GET | `/` | `public` | global |
+| GET | `/_anthropic/` *(subtree)* | `public` | global |
+| POST | `/_anthropic/` *(subtree)* | `public` | global |
 | GET | `/api/analytics` | `project.read` | project |
 | GET | `/api/approvals` | `public` | global |
 | GET | `/api/approvals/count` | `public` | global |
@@ -292,6 +294,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | PATCH | `/api/projects/{idx}/members` | `project.share` | project-index |
 | DELETE | `/api/projects/{idx}/members` | `project.share` | project-index |
 | DELETE | `/api/projects/{idx}/members/self` | `view.prefs` | project-index |
+| PUT | `/api/projects/{idx}/model-relay` | `project.write` | project-index |
 | GET | `/api/projects/{idx}/repositories` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/repositories` | `secret.grant` | project-index |
 | DELETE | `/api/projects/{idx}/repositories` | `secret.revoke` | project-index |

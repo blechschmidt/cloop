@@ -1229,6 +1229,79 @@ $ unset CLAUDE_TOKEN
 $ cloop secret grant claude-code --to project:/srv/app --env-keys CLAUDE_CODE_OAUTH_TOKEN --ttl 720h
 ```
 
+### With the model relay on, the Claude credential stays on the hub
+
+On a hub with [`executors.model_relay`](../reference/configuration.md#the-model-relay-for-sandboxed-runs)
+on, the grant above is still what decides whether a run may start and whose
+credential it spends — the preflight is unchanged — but a Claude OAuth token it
+names never enters the sandbox. The run's sandbox gets a relay session instead:
+
+| Variable | Value |
+| --- | --- |
+| `ANTHROPIC_BASE_URL` | the relay, e.g. `https://hub.internal:8443/_anthropic` on the git proxy's listener |
+| `ANTHROPIC_AUTH_TOKEN` | a `cloop_relay_…` session token, worth this run's model calls and nothing else |
+| `CLOOP_MODEL_RELAY` | the session's id, as the run's history and the audit trail name it |
+| `NODE_EXTRA_CA_CERTS` | under `tls: auto`, a file holding the hub's CA and nothing else |
+
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_BASE_URL` from the lease are taken out of the environment first, and
+the session token is declared sensitive, so the run's output is scrubbed of it
+and the stored dispatch never carries it. Claude Code sends its calls to the
+relay, which spends the credential against the API and streams the answer back.
+
+The session stands on the run's lease. It ends when the run does, and at once
+when the lease or its grant is revoked: the run's next model call is refused
+with `403` and the reason — `this run's model relay session has ended: grant
+grant_… revoked by alice@corp.example` — which Claude Code reports and stops
+on, rather than retrying it the way it retries a `401` for three minutes. A hub
+restart does not end it: the process that adopts the run restores the session
+with the lease, re-deriving the credential from the grant, and a call the
+sandbox makes meanwhile waits for it.
+
+**What it costs is counted at the relay.** Each response's usage — input,
+output, cache reads and cache writes, as the API reports them — is priced and
+charged to whoever started the run, in their `daily_token_budget` and
+`daily_cost_usd`, as the call completes. A call made once a budget is spent is
+refused before it reaches the API:
+
+```text
+API Error: 403 the daily token budget (daily_token_budget) of 100000 tokens for
+alice@corp.example is spent: 132396 tokens used today. The model relay refuses
+this run's calls until it resets at 00:00 UTC or an administrator raises it
+```
+
+When the run ends, the hub compares what the run reported to its project's
+ledger with what the relay counted. The difference is booked to the ledger as
+*Model relay: usage measured beyond what the run reported*, written to the run's
+history, audited as `model_relay.usage_gap` and counted in
+`cloop_model_relay_usage_gap_tokens_total` — `claudecode` runs report no tokens
+of their own, so for them the relay's count is the whole bill.
+
+**The card says which.** The project's *Claude credential* card reads *through
+the hub relay* under the credential's expiry, and its dialog lists the models
+the project's runs may call: the hub's allowlist, which a maintainer can narrow
+for the project and never widen. A call for any other model is refused before
+the API (`model_not_allowed`). A credential the relay does not carry yet — an
+Anthropic API key, until it has been proven through the relay against the real
+API — reads *not relayed*, with the reason: such a run gets its credential as
+before the relay existed, and its history and the `model_relay.not_relayed`
+audit row say so. So does a run on a device whose agent is older than protocol
+v23 when the relay needs it to hand the harness the hub's CA; upgrade it to
+relay its runs.
+
+From the run's history on the project's Overview:
+
+```text
+Model calls go through the hub's relay (session 3f2a…): the Claude OAuth token
+stays on the hub, and what the API reports spending is charged to the identity
+"alice@corp.example". Models: claude-haiku-*.
+…
+The model relay counted 65,056 tokens ($0.05) for this run from the API's
+responses; the run reported 0 tokens ($0.00). The identity
+"alice@corp.example" was charged the relay's count, and the project's ledger now
+carries the difference.
+```
+
 ---
 
 ## Local git repositories

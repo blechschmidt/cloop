@@ -915,6 +915,10 @@ func (s *Server) routeTable() []routeSpec {
 		// owner alone. See harness_credential_api.go.
 		{Pattern: "GET /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredential, Perm: read, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredentialGrant, Perm: secOwn, Scope: scopeProjectIdx},
+		// The models the project's relayed runs may use (Task 20435): a
+		// narrowing of the hub's allowlist, which is the project's to choose
+		// and so project.write, as its other settings are.
+		{Pattern: "PUT /api/projects/{idx}/model-relay", Handler: s.handleProjectModelRelay, Perm: write, Scope: scopeProjectIdx},
 
 		// ── Executor fleet ───────────────────────────────────────────
 		// Registered without a method prefix so the handler's own method
@@ -1154,6 +1158,12 @@ func (s *Server) routeTable() []routeSpec {
 		// anything else is refused by the mux before the handler runs, which
 		// is one fewer place the API surface is decided.
 		{Pattern: "/api/ci/anthropic/", Handler: s.handleCIRelay, Methods: []string{"GET", "POST"}, Perm: public, Scope: scopeGlobal},
+		// The model relay for sandboxed runs (Task 20435), when
+		// executors.model_relay.listener is dashboard: public for the reason
+		// the CI relay is — the sandbox presents a session token this hub
+		// minted for its run, and holds no hub session by design — and
+		// answering 404 on any other configuration.
+		{Pattern: modelRelayMount + "/", Handler: s.handleModelRelay, Methods: []string{"GET", "POST"}, Perm: public, Scope: scopeGlobal},
 		{Pattern: "GET /api/ci/config", Handler: s.handleCISettings, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "PUT /api/ci/config", Handler: s.handleCISettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
 		{Pattern: "GET /api/ci/rules", Handler: s.handleCIRulesList, Perm: secGrant, Scope: scopeGlobal},

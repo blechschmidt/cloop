@@ -245,6 +245,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 	if err := ValidateGitProxyConfig(e.GitProxy); err != nil {
 		return err
 	}
+	if err := ValidateModelRelayConfig(e.ModelRelay); err != nil {
+		return err
+	}
 	return ValidateKubeGuardConfig(e.KubeGuard)
 }
 
@@ -360,7 +363,7 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 			"executors.egress is disabled, so sandboxed workloads have no route out at all. "+
 			"Enable executors.egress and grant hosts with `cloop egress grant` if they need one.")
 	}
-	return out
+	return append(out, modelRelayWarnings(e)...)
 }
 
 // containerEgressRefusal is executor.ContainerEgressRoute's verdict on the

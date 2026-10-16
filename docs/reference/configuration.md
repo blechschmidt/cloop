@@ -1369,6 +1369,95 @@ project's `config.yaml` is written by whoever can push to the project — and an
 entry that is empty or contains whitespace is refused when the configuration is
 loaded.
 
+### The model relay for sandboxed runs
+
+A `claudecode` or `anthropic` run on an executor that isolates from the hub — a
+container, a Pod, an enrolled device, a virtual executor — is handed its Claude
+credential as a leased environment variable. The workload then holds the
+plaintext for the whole run: it can print it, commit it or send it anywhere, a
+revocation cannot take it out of a running device task, and what the hub
+charges the run's budgets is whatever the run reports it spent.
+`executors.model_relay` keeps the credential on the hub instead (Task 20435):
+
+```yaml
+executors:
+  git_proxy:
+    enabled: true
+    tls: auto                     # the relay rides this listener by default
+  model_relay:
+    enabled: true
+    # listener: git_proxy         # the default; or dashboard
+    # models: ["claude-sonnet-*", "claude-haiku-*"]   # default: every Claude model
+    # max_output_tokens: 32000    # 0 means 32000
+    # upstream_base_url: https://api.anthropic.com
+    # hub_credential: ["project:/srv/app", "executor:build-box"]
+```
+
+With it on, each such dispatch mints a relay session bound to the run's secret
+lease. The sandbox gets `ANTHROPIC_BASE_URL` pointing at the relay and a
+`cloop_relay_…` session token in `ANTHROPIC_AUTH_TOKEN` (`ANTHROPIC_API_KEY`,
+with the URL ending `/v1`, for the `anthropic` provider); every Claude
+credential the lease delivered is taken out of its environment, and the hub
+spends it upstream. The session lives exactly as long as the lease: recorded
+for the hub process that adopts the run after a restart, renewed by the lease's
+keepalive, and ended at once when the lease is released or revoked or its grant
+is taken back — the run's next model call is refused with the reason. Any hub
+member serves it. Each response's usage is read from the API's own counts as it
+streams past and charged to the identity that started the run, in the same
+`daily_token_budget` and `daily_cost_usd` counters [quotas](../security/model.md#quotas-how-much-not-whether)
+enforce, and a call that would pass one is refused before it reaches the API.
+See [the Claude credential of a sandboxed
+run](../guides/secrets.md#with-the-model-relay-on-the-claude-credential-stays-on-the-hub)
+for what a run and its card show.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Route the model calls of every `claudecode` and `anthropic` run on an isolating executor through the relay. Off by default: it changes the endpoint every sandboxed harness talks to, and whether a hub turns it on is its operator's decision. |
+| `listener` | `git_proxy` | Where sandboxes reach it. `git_proxy` serves it on the git interception proxy's listener at `<advertise_url>/_anthropic`, so it needs `executors.git_proxy` on; under `tls: auto` the harness is handed the hub's CA in a file of its own through `NODE_EXTRA_CA_CERTS`. `dashboard` serves it on the hub's own listener at `<ui.external_url>/_anthropic`, which must be `https` with a certificate the sandbox already trusts; nothing is added to its trust. |
+| `models` | every Claude model (`claude-*`) | The hub's model allowlist for relayed runs, as globs. A project's maintainers may narrow it for their project from its Claude credential card (`PUT /api/projects/{idx}/model-relay`), never widen it; a call for any other model is refused before the API. |
+| `max_output_tokens` | `32000` | Clamps `max_tokens` on every relayed call, as the CI relay does — and with it an extended-thinking budget it would leave at or above `max_tokens`, which the API refuses. |
+| `upstream_base_url` | `https://api.anthropic.com` | A gateway of your own in front of the API: an `https` origin, or loopback, with no path. |
+| `hub_credential` | none | Where the hub's own `anthropic.api_key` may be spent for a run that has no Claude credential granted: `project:<path>` (a feature through its parent) or `executor:<id>`. Never a fallback: unlisted, the hub's key is spent nowhere. Inert until API keys are relayed (below). |
+
+**Only proven credential kinds are relayed.** A Claude OAuth token (`claude
+setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`) is relayed: proven on 2026-10-16 with
+real Claude Code through a hub and an enrolled device, and by
+`TestLiveModelRelay`, which relays real calls with a credential of a given
+kind. An API key is not relayed yet. A run whose credential is one keeps
+today's delivery, its journal and the `model_relay.not_relayed` audit row say
+so, and the project's Claude credential card says *not relayed* and why. So
+does a run on a device whose agent predates protocol v23, when the relay needs
+the harness's Node to trust the hub's CA (the `git_proxy` listener under `tls:
+auto`): that agent cannot hand it over, so the hub journals it and delivers as
+before.
+
+**It fails closed.** A relay that should serve a run and cannot — not running,
+its listener absent, its session not minted — refuses the dispatch, naming the
+reason, rather than hand the run its credential. So does a section that does not
+load: a `listener`, `models` or `upstream_base_url` it cannot run with is kept
+as written and marked, not reset to a default that would be wider; the hub
+starts no relay, `cloop hub doctor` fails `config.repaired`, and every run it
+would relay is refused until the section loads. The same holds for a section
+edited into one that does not load while the hub runs.
+
+**Reachability.** On the `git_proxy` listener the relay is the same host and
+port as the git proxy, so a firewall — a device's, a virtual executor's or a
+project's egress rules — that lets a sandbox reach the git proxy lets it reach
+the relay, and nothing else needs allowing. On `dashboard` the sandbox needs the
+dashboard's address allowed instead.
+
+**What Node trusts.** `NODE_EXTRA_CA_CERTS` is process-wide: Node adds the hub's
+CA to its trust for every TLS connection the harness makes, not for the relay's
+URL alone, as git's per-URL setting is scoped. The file holds the hub's CA and
+nothing else, and its key never leaves the hub; `listener: dashboard` with a
+publicly trusted certificate adds nothing at all.
+
+`enabled`, `listener` and `upstream_base_url` are read at startup.
+`models`, `max_output_tokens` and `hub_credential` are read on each dispatch
+while the hub's configuration keeps the relay on; switched off in the file, a
+running relay keeps the section it started with until the restart that stops
+it. A project's own `config.yaml` cannot set any of them.
+
 ### Automatic harness installation
 
 A project driven by the `claudecode` provider needs the `claude` CLI on whatever
@@ -2700,6 +2789,7 @@ ui:
 | `executors.remote` | The memory remote executors' returned work may occupy on this hub: one executor's budget and every executor's ceiling. Read at startup. |
 | `executors.write_back` | Whether a run on an executor that does not share this hub's filesystem pushes its work back to the project's origin. Read on each dispatch. |
 | `executors.harness_credential_exempt` | Executors whose harness brings its own Claude credential, so a dispatch to them is not refused for want of a granted one. Read on each dispatch. |
+| `executors.model_relay` | The model relay for sandboxed runs. Started at startup with `enabled`, `listener` and `upstream_base_url`; `models`, `max_output_tokens` and `hub_credential` read on each dispatch. |
 | `sandbox.image_policy` | The image trust policy. The hub checks a project's image against it before dispatch, and each driver takes its own copy at startup. |
 | `ui.*` | Where it listens (`listen`, `allow_unauthenticated_network`, read at startup), sign-in, TLS, origins, WebSocket caps, quotas, clustering, CI federation, telemetry, resuming capped runs. |
 | `stt` | Dictation settings and key. A project's own `stt` section still overrides them for requests about that project. |

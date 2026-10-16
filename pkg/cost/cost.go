@@ -327,6 +327,41 @@ func Estimate(model string, inputTokens, outputTokens int) (usd float64, ok bool
 		(float64(outputTokens)/1_000_000)*p.OutputPerM, true
 }
 
+// CachedUsage is a Messages API response's token counts with prompt caching
+// broken out: Input is the uncached input, CacheWrite5m and CacheWrite1h the
+// input written to the five-minute and the one-hour cache, CacheRead the input
+// served from it.
+type CachedUsage struct {
+	Input, Output, CacheRead, CacheWrite5m, CacheWrite1h int64
+}
+
+// Prompt-caching prices, as multiples of a model's input price: a cache read
+// costs a tenth of an uncached input token, a five-minute cache write a
+// quarter more, a one-hour write twice as much.
+const (
+	cacheReadPriceFactor    = 0.1
+	cacheWrite5mPriceFactor = 1.25
+	cacheWrite1hPriceFactor = 2.0
+)
+
+// EstimateCached prices a response's usage with its cache reads and writes at
+// their own rates (Task 20435). Estimate has no cache tokens to price; the
+// hub's model relay meters them from the API's own responses, and an agent
+// harness's input is mostly cache reads, so pricing them as uncached input
+// would bill a run several times over. Unrecognised models return (0, false).
+func EstimateCached(model string, u CachedUsage) (usd float64, ok bool) {
+	p, ok := lookup(strings.ToLower(strings.TrimSpace(model)))
+	if !ok {
+		return 0, false
+	}
+	perIn := p.InputPerM / 1_000_000
+	return float64(u.Input)*perIn +
+		float64(u.Output)*(p.OutputPerM/1_000_000) +
+		float64(u.CacheRead)*perIn*cacheReadPriceFactor +
+		float64(u.CacheWrite5m)*perIn*cacheWrite5mPriceFactor +
+		float64(u.CacheWrite1h)*perIn*cacheWrite1hPriceFactor, true
+}
+
 // EstimateSessionCost returns the estimated cost in USD for the session.
 // provider is used as a hint: "ollama" always returns 0 (local). For unknown
 // models the function returns 0. Returns 0 when cost cannot be determined.

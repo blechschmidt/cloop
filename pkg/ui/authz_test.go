@@ -168,6 +168,14 @@ var publicRouteAllowlist = map[string]string{
 		"unknown, expired or revoked token is refused identically so probing learns nothing. The " +
 		"session's policy bounds which models, how many requests and how large a body, and the " +
 		"hub's own Anthropic credential is attached only after that policy has returned nil",
+	"/_anthropic/": "the model relay for sandboxed runs (Task 20435). The caller is a sandboxed harness, " +
+		"which holds no cloop credential — only the cloop_relay_ token minted for its run, compared in " +
+		"constant time against a hash the hub holds (pkg/claudeproxy/session.go); an unknown or expired " +
+		"token is refused identically, and only an ended session's own token is told why. The session " +
+		"stands on the run's secret lease and ends with it or its grant, its policy bounds the models and " +
+		"the output, the payer's daily budgets are checked before a call is relayed, and the run's Claude " +
+		"credential is attached only after both. Answers 404 unless executors.model_relay serves on the " +
+		"dashboard's listener",
 
 	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
 	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,

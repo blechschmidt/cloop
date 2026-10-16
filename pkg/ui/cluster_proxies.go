@@ -169,6 +169,13 @@ func (s *Server) serveForwardedProxy(w http.ResponseWriter, r *http.Request) boo
 		if svc := activeKubeGuard(); svc != nil && svc.proxy != nil {
 			handler = svc.proxy
 		}
+	case strings.HasPrefix(r.URL.Path, clusterAPIProxyModel+"/"):
+		// A run's model relay call (Task 20435), whichever listener it
+		// reached the other member on: the relay decides it here.
+		prefix = clusterAPIProxyModel
+		if svc := activeModelRelay(); svc != nil {
+			handler = svc
+		}
 	default:
 		return false
 	}

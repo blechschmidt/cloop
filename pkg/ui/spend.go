@@ -210,6 +210,13 @@ func (s *Server) drainSpend(workDir string) (identity string, denial error) {
 	}
 	defer func() { _ = pdb.Close() }()
 
+	// A run behind the model relay (Task 20435) was charged as its calls were
+	// answered, from the API's own counts: its rows here are its own claim of
+	// the same spend, and booking them too would charge it twice. They are
+	// claimed and moved past, so the cursor still advances, and nothing is
+	// booked.
+	relayed := relayedRunSession(cdb, workDir) != ""
+
 	at := cursor.LastCostRowID
 	for {
 		rows, err := pdb.ReadCostsAfterID(at, spendDrainBatch)
@@ -257,7 +264,9 @@ func (s *Server) drainSpend(workDir string) (identity string, denial error) {
 			// have already charged.
 			break
 		}
-		e.Spend(cursor.Identity, tokens, usd)
+		if !relayed {
+			e.Spend(cursor.Identity, tokens, usd)
+		}
 		at = next
 		if len(rows) < spendDrainBatch {
 			break

@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/forgehost"
@@ -113,6 +114,8 @@ func restoreKindLabel(kind string) string {
 		return hubmetrics.RestoreKindGit
 	case statedb.ProxySessionKube:
 		return hubmetrics.RestoreKindKube
+	case statedb.ProxySessionModel:
+		return hubmetrics.RestoreKindModel
 	default:
 		return hubmetrics.RestoreKindEgress
 	}
@@ -135,10 +138,10 @@ func restoreLeaseSessions(sl *secretLease) {
 		return
 	}
 	for _, row := range rows {
-		if row.Kind != statedb.ProxySessionGit && row.Kind != statedb.ProxySessionKube {
-			continue
+		switch row.Kind {
+		case statedb.ProxySessionGit, statedb.ProxySessionKube, statedb.ProxySessionModel:
+			sl.restoreSession(row, "")
 		}
-		sl.restoreSession(row, "")
 	}
 	// The App tokens the lease carries as files resume refreshing on the
 	// keepalive's tick: their slots came with the lease (Broker.Restore,
@@ -231,6 +234,8 @@ func (sl *secretLease) tryRestoreSession(row statedb.ProxySessionRow, origin str
 		err = sl.restoreGitSession(ctx, row, origin)
 	case statedb.ProxySessionKube:
 		err = sl.restoreKubeSession(row, origin)
+	case statedb.ProxySessionModel:
+		err = sl.restoreModelSession(row, origin)
 	default:
 		err = refusedf("a %s session is not restored with a lease", row.Kind)
 	}
@@ -705,6 +710,15 @@ func auditSessionEnd(db *statedb.DB, row statedb.ProxySessionRow, reason string)
 			ProjectID: row.ProjectID, TaskID: row.TaskID, RunID: row.RunID,
 			BytesUp: c.BytesUp, BytesDown: c.BytesDown, Reason: reason,
 		}))
+	case statedb.ProxySessionModel:
+		// The payload the relay's own close rows carry (model_relay.go).
+		c, _ := sessionrecord.ModelCountersOf(row)
+		appendSessionEndRow(db, row, auditaction.ActionModelRelaySessionClosed, "model_relay_session", map[string]any{
+			"kind": string(claudeproxy.EventSessionClosed), "session_id": row.SessionID, "project": row.ProjectID,
+			"run_id": row.RunID, "lease_id": row.LeaseID, "grant_id": row.GrantID, "executor_id": row.ExecutorID,
+			"payer": row.Actor, "input_tokens": c.Usage.InputTokens + c.Usage.CacheRead + c.Usage.CacheWrite,
+			"output_tokens": c.Usage.OutputTokens, "detail": reason,
+		})
 	}
 }
 
