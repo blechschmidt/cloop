@@ -6,7 +6,9 @@ package statedb
 // solely responsible for, where a Go-side check would be a race or a lie.
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -207,5 +209,53 @@ func TestSealedCompareAndSwapComparesBytes(t *testing.T) {
 	}
 	if row.KeyID != "kek_new" || string(row.WrappedDEK) != "w2" {
 		t.Errorf("row after swap = %+v", row)
+	}
+}
+
+// TestRetirementLeavesNothingOfTheKeyInTheFile. Blanking a column leaves the
+// bytes it held in the page's free space unless secure_delete zeroes them, and
+// a copy of the file would still give up a retired key's salt — and, with
+// CLOOP_SECRET_KEY, the key (Task 20433). After retiring, and the last handle
+// closing (which checkpoints and removes the log), neither the salt nor the
+// check value is anywhere in the file; a live key's salt, which retirement
+// does not touch, still is — the positive control.
+func TestRetirementLeavesNothingOfTheKeyInTheFile(t *testing.T) {
+	path := freshPath(t)
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		retiredSalt = "5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17"
+		liveSalt    = "11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae"
+	)
+	for _, row := range []KEKRow{
+		{ID: "kek_retired", Salt: retiredSalt, State: "active", CheckValue: []byte("check-of-the-retired-key"),
+			CreatedAt: "2026-01-01T00:00:00Z"},
+		{ID: "kek_live", Salt: liveSalt, State: "primary", CheckValue: []byte("check-of-the-live-key"),
+			CreatedAt: "2026-01-02T00:00:00Z"},
+	} {
+		if err := db.PutKEK(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.RetireKEK("kek_retired", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for what, b := range map[string][]byte{"the retired salt": []byte(retiredSalt),
+		"the retired check value": []byte("check-of-the-retired-key")} {
+		if bytes.Contains(data, b) {
+			t.Errorf("%s is still in the file after retirement", what)
+		}
+	}
+	if !bytes.Contains(data, []byte(liveSalt)) {
+		t.Error("the live key's salt is not in the file: the scan is not reading what it should")
 	}
 }

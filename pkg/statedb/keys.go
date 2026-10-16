@@ -15,6 +15,7 @@
 package statedb
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -333,10 +334,11 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	tx, err := d.conn.Begin()
+	tx, done, err := d.shreddingTx()
 	if err != nil {
 		return fmt.Errorf("statedb: retire sealing key: %w", classifyDriverErr(err))
 	}
+	defer done()
 	defer tx.Rollback()
 
 	if err := takeWriteLock(tx, id); err != nil {
@@ -376,6 +378,45 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 	return nil
 }
 
+// shreddingTx begins a transaction on a connection of its own with
+// secure_delete on, for the writes that destroy key material (Task 20433).
+//
+// Blanking a column does not, by itself, remove the bytes it held from the
+// file: SQLite rewrites the record and leaves the old one in the page's free
+// space, where a copy of the file still finds a retired key's salt. With
+// secure_delete the freed space is overwritten with zeros. It is a
+// per-connection setting, and the pool's other connections keep the default,
+// so the cost is paid by retirements alone; done puts the connection's setting
+// back and returns it to the pool. What the write-ahead log still holds of the
+// old page lasts until the log is reused, and a backup taken before the
+// retirement keeps everything — docs/security says so.
+func (d *DB) shreddingTx() (*sql.Tx, func(), error) {
+	ctx := context.Background()
+	conn, err := d.conn.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var prev int
+	if err := conn.QueryRowContext(ctx, `PRAGMA secure_delete`).Scan(&prev); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA secure_delete = 1`); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	done := func() {
+		_, _ = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA secure_delete = %d`, prev))
+		_ = conn.Close()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		done()
+		return nil, nil, err
+	}
+	return tx, done, nil
+}
+
 // AbandonKEKs retires the given keys although sealed rows still reference
 // them, and returns the ids it retired (Task 20410).
 //
@@ -392,10 +433,11 @@ func (d *DB) AbandonKEKs(ids []string, at time.Time) ([]string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	tx, err := d.conn.Begin()
+	tx, release, err := d.shreddingTx()
 	if err != nil {
 		return nil, fmt.Errorf("statedb: abandon sealing keys: %w", classifyDriverErr(err))
 	}
+	defer release()
 	defer tx.Rollback()
 
 	var done []string

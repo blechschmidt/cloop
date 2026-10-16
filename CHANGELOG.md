@@ -31,6 +31,15 @@ schema and the hub's HTTP API may change in any release.
   upgrading, list the grants whose subject begins `label:` (`cloop secret
   grants`, `cloop egress list`) and revoke any you did not mean to keep — after
   it, the Secrets panel shows which executors each one reaches (Task 20432).
+- **Retiring a sealing key now erases it from the database file, not just from
+  its row.** Retirement blanked a key-encryption key's salt and check value, but
+  SQLite left the old bytes in the page's free space, so a copy of the file
+  taken afterwards still held a retired key's salt — and with
+  `CLOOP_SECRET_KEY`, the key. `cloop hub key retire`, `--retire-previous` and
+  `cloop db restore --accept-secret-loss` now write with secure delete on, which
+  zeroes what they blank; what the write-ahead log holds of the old page lasts
+  until the log is reused, and a backup taken before the retirement keeps
+  everything (Task 20433).
 
 ### Added
 
