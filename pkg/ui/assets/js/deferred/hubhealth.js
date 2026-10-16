@@ -147,11 +147,17 @@
 
     // reveal is what the header's indicator does: Settings is on its way to
     // the screen, so wait for its markup, read the report and bring the
-    // section into view.
+    // section into view. Not with scrollIntoView: the header is sticky and
+    // stays over the top of the page, so the section has to land below it,
+    // or its heading and the member line are under the tabs.
     function reveal() {
       return h.panel('settings').then(() => load()).then(() => {
         const s = document.getElementById('hubHealthSection');
-        if (s && s.scrollIntoView) s.scrollIntoView({block: 'start'});
+        if (!s || !s.getBoundingClientRect) return;
+        const head = document.querySelector('header');
+        const pos = head ? getComputedStyle(head).position : '';
+        const cover = pos === 'sticky' || pos === 'fixed' ? Math.max(0, head.getBoundingClientRect().bottom) : 0;
+        window.scrollTo(0, Math.max(0, (window.scrollY || 0) + s.getBoundingClientRect().top - cover - 8));
       });
     }
 

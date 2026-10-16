@@ -252,9 +252,14 @@ const secretsIn = `(() => {
     out.admin_before = await cdp.eval(READ);
     await click(cdp, '#hubHealthBadge', false);
     await waitFor(cdp, `document.querySelectorAll('#hubHealthBody .hh-finding').length > 0`, 'the findings');
-    // reveal scrolls the section into view once the report is drawn.
-    await waitFor(cdp, `(() => { const r = document.getElementById('hubHealthSection').getBoundingClientRect();
-      return r.top >= -2 && r.top < window.innerHeight / 2; })()`, 'the section to come into view');
+    // reveal scrolls the section into view once the report is drawn, and
+    // below the sticky header: a heading under the tabs is in the viewport
+    // and still off screen, so what is at the heading's place has to be it.
+    await waitFor(cdp, `(() => { const t = document.querySelector('#hubHealthSection h3');
+      const r = t.getBoundingClientRect(), head = document.querySelector('header').getBoundingClientRect();
+      const at = document.elementFromPoint(r.left + 10, r.top + r.height / 2);
+      return r.top >= head.bottom - 1 && r.top < window.innerHeight / 2 && !!at && t.contains(at); })()`,
+      'the section to come into view below the header');
     out.admin = await cdp.eval(READ);
     out.admin_secrets = await cdp.eval(secretsIn);
 
