@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,7 @@ type xssCrawlScenario struct {
 	Pressed  int              `json:"pressed"`
 	Links    int              `json:"links"`
 	Reboots  int              `json:"reboots"`
+	Why      []string         `json:"why"` // what each reboot waited on
 	Skipped  []string         `json:"skipped"`
 	CSP      []map[string]any `json:"csp"`
 	Opened   []string         `json:"opened"`
@@ -175,7 +177,8 @@ func runXSSCrawl(t *testing.T, node, chrome, base string, cfg map[string]any) xs
 		if ee, ok := err.(*exec.ExitError); ok {
 			stderr = string(ee.Stderr)
 		}
-		t.Fatalf("driving the browser failed: %v / %v\nstdout:\n%.4000s\nstderr:\n%s", err, jerr, out, stderr)
+		t.Fatalf("driving the browser failed: %v / %v\nstdout:\n%.4000s\nstderr:\n%s\n%s", err, jerr, out, stderr,
+			blockedGoroutines())
 	}
 	if got.Error != "" {
 		if a := got.AtError; a != nil && (a.XSS != nil || len(a.CSP) > 0) {
@@ -185,6 +188,32 @@ func runXSSCrawl(t *testing.T, node, chrome, base string, cfg map[string]any) xs
 		t.Fatalf("the driver failed: %s", got.Error)
 	}
 	return got
+}
+
+// blockedGoroutines is the stacks of this process's goroutines in cloop code
+// that have been blocked for a minute or more. The hub the crawl drives runs
+// in this process, so when the crawl stalls because a request never returns,
+// the breadcrumbs say where the page was and these say what the handler is
+// waiting on: run 38879936287 stalled from the Secrets tab on and said no
+// more.
+func blockedGoroutines() string {
+	buf := make([]byte, 16<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	var b strings.Builder
+	b.WriteString("goroutines blocked for a minute or more:\n")
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		header, _, _ := strings.Cut(g, "\n")
+		if !strings.Contains(header, " minutes]") || !strings.Contains(g, "github.com/blechschmidt/cloop/") {
+			continue
+		}
+		if b.Len()+len(g) > 64<<10 {
+			b.WriteString("… more, cut\n")
+			break
+		}
+		b.WriteString(g)
+		b.WriteString("\n\n")
+	}
+	return b.String()
 }
 
 // cspReported sums cloop_csp_violations_total over every label.
@@ -363,6 +392,9 @@ func TestHostileStrings_EveryControlInBrowser(t *testing.T) {
 		for _, s := range got.Scenarios {
 			t.Logf("%s: pressed %d of %d in %dms, %d reboots, %d skipped %v", s.Name, s.Pressed, s.Controls,
 				s.MS, s.Reboots, len(s.Skipped), s.Skipped)
+			for _, why := range s.Why {
+				t.Logf("%s: rebooted: %s", s.Name, why)
+			}
 		}
 	}
 }

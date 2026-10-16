@@ -1091,12 +1091,17 @@ async function drain(rec) {
   if (d.xss !== null) rec.xss.push(d.xss);
 }
 
+// brief is an error's message, cut to a breadcrumb's length.
+function brief(e) {
+  return String(e && e.message || e).replace(/\s+/g, ' ').slice(0, 600);
+}
+
 // crawlScenario opens a scenario and presses every control in scope. A press
 // that leaves the scenario — closes the dialog, switches the tab, navigates
 // away — is undone by opening it again before the next one; a control that is
 // not there once it is open again is reported as skipped.
 async function crawlScenario(out, name, scope, open) {
-  const rec = {name, controls: 0, pressed: 0, links: 0, reboots: 0, skipped: [], csp: [], opened: [], xss: [], findings: []};
+  const rec = {name, controls: 0, pressed: 0, links: 0, reboots: 0, why: [], skipped: [], csp: [], opened: [], xss: [], findings: []};
   out.scenarios.push(rec);
   current = name;
   const t0 = Date.now();
@@ -1113,6 +1118,11 @@ async function crawlScenario(out, name, scope, open) {
       await within(6000, async () => { await open(); await idle('opening ' + name); });
     } catch (e) {
       rec.reboots++;
+      // Why, in the record and on the breadcrumb trail: idle names the
+      // requests that had not returned, which is the thing to know when a
+      // stall follows.
+      rec.why.push(brief(e));
+      if (XSS) process.stderr.write('crawl: ' + name + ' reboots: ' + brief(e) + '\n');
       await boot();
       await open();
       await idle('opening ' + name);
@@ -1142,6 +1152,7 @@ async function crawlScenario(out, name, scope, open) {
     await drain(rec);
   } catch (e) {
     rec.error = String(e && e.stack || e);
+    if (XSS) process.stderr.write('crawl: ' + name + ' failed: ' + brief(e) + '\n');
   }
   blocking = false;
   rec.ms = Date.now() - t0;
